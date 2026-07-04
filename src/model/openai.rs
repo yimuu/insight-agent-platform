@@ -1,3 +1,4 @@
+use std::fmt;
 use std::collections::VecDeque;
 
 use async_trait::async_trait;
@@ -11,12 +12,23 @@ use crate::{
     model::types::{ChatMessage, ChatRequest, ChatStream, ModelClient},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiModelClient {
     client: Client,
     api_key: String,
     base_url: String,
     default_model: String,
+}
+
+impl fmt::Debug for OpenAiModelClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenAiModelClient")
+            .field("base_url", &self.base_url)
+            .field("default_model", &self.default_model)
+            .field("api_key", &"REDACTED")
+            .field("client", &"REDACTED")
+            .finish()
+    }
 }
 
 impl OpenAiModelClient {
@@ -205,6 +217,22 @@ mod tests {
 
     use super::{OpenAiModelClient, SseDecoder};
     use crate::model::types::{ChatMessage, ChatRequest, ModelClient};
+
+    #[test]
+    fn openai_model_client_debug_does_not_leak_api_key() {
+        let api_key = "secret-key-12345".to_string();
+        let client = OpenAiModelClient::new(
+            api_key.clone(),
+            "https://api.openai.com".to_string(),
+            "gpt-4o-mini".to_string(),
+        );
+
+        let debug_output = format!("{client:?}");
+
+        assert!(!debug_output.contains(&api_key));
+        assert!(debug_output.contains("api_key"));
+        assert!(debug_output.contains("REDACTED"));
+    }
 
     #[test]
     fn sse_decoder_handles_split_multibyte_utf8_across_chunks() {
