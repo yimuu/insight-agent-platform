@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use jsonschema::JSONSchema;
+
 use crate::{
     agent::config::{AgentConfig, StepKind},
     error::AppError,
@@ -68,6 +70,13 @@ fn load_agent_dir(agent_root: &Path) -> Result<LoadedAgent, AppError> {
 }
 
 fn validate_agent_config(agent_root: &Path, config: &AgentConfig) -> Result<(), AppError> {
+    JSONSchema::compile(&config.input.schema).map_err(|err| {
+        AppError::Config(format!(
+            "invalid input schema for agent '{}': {err}",
+            config.id
+        ))
+    })?;
+
     let mut step_ids = HashSet::new();
 
     for step in &config.steps {

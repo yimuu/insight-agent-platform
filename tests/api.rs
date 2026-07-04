@@ -272,6 +272,55 @@ async fn invalid_input_returns_400_before_sse() {
 }
 
 #[tokio::test]
+async fn missing_input_field_returns_400_before_sse() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/test/runs/stream")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"question":"Ada"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_ne!(
+        response.headers().get("content-type").unwrap(),
+        "text/event-stream"
+    );
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "input_error");
+}
+
+#[tokio::test]
+async fn missing_content_type_returns_400_before_sse() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/test/runs/stream")
+                .body(Body::from(r#"{"input":{"name":"Ada"}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_ne!(
+        response.headers().get("content-type").unwrap(),
+        "text/event-stream"
+    );
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "input_error");
+}
+
+#[tokio::test]
 async fn streams_runtime_error_as_sse_error_without_run_completed() {
     let response = app()
         .oneshot(

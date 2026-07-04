@@ -1,7 +1,7 @@
 use std::{convert::Infallible, sync::Arc};
 
 use axum::{
-    extract::{Path, State},
+    extract::{rejection::JsonRejection, Path, State},
     response::{
         sse::{Event, Sse},
         IntoResponse,
@@ -72,8 +72,9 @@ struct RunRequest {
 async fn run_agent_stream<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
     Path(agent_id): Path<String>,
-    Json(request): Json<RunRequest>,
+    request: Result<Json<RunRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
+    let Json(request) = request.map_err(map_run_request_rejection)?;
     let agent = state
         .registry
         .get(&agent_id)
@@ -114,6 +115,15 @@ async fn run_agent_stream<M: ModelClient>(
         });
 
     Ok(Sse::new(stream))
+}
+
+fn map_run_request_rejection(rejection: JsonRejection) -> AppError {
+    AppError::Input(match rejection {
+        JsonRejection::MissingJsonContentType(_) => {
+            "request body must be application/json".to_string()
+        }
+        other => format!("invalid request body: {}", other.body_text()),
+    })
 }
 
 #[derive(Debug, Serialize)]

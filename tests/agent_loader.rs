@@ -225,3 +225,28 @@ steps:
     let err = load_agents(dir.path()).unwrap_err().to_string();
     assert!(err.contains("must stay inside agent directory"));
 }
+
+#[test]
+fn rejects_invalid_input_schema_during_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("bad");
+    write_file(
+        &agent.join("agent.yaml"),
+        r#"
+id: bad
+name: Bad
+model:
+  provider: openai_compatible
+input:
+  schema:
+    type: 42
+steps:
+  - id: answer
+    type: prompt
+    prompt: hello
+"#,
+    );
+
+    let err = load_agents(dir.path()).unwrap_err().to_string();
+    assert!(err.contains("invalid input schema"));
+}

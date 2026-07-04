@@ -60,7 +60,7 @@ impl HttpGetTool {
 
     fn is_allowed_host(&self, parsed: &reqwest::Url) -> bool {
         match (&self.allowlist, parsed.host_str()) {
-            (None, Some(_)) => true,
+            (None, Some(_)) => false,
             (Some(allowlist), Some(host)) => allowlist.contains(&host.to_ascii_lowercase()),
             (_, None) => false,
         }
@@ -158,6 +158,51 @@ mod tests {
     use crate::tools::registry::{Tool, ToolContext};
 
     #[tokio::test]
+    async fn default_rejects_https_host_without_allowlist() {
+        let tool = HttpGetTool::default();
+
+        let error = tool
+            .call(
+                json!({"url":"https://example.com"}),
+                ToolContext {
+                    run_id: "run_test".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "run error: http_get host is not in the allowlist"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_non_https_urls_even_when_host_is_allowlisted() {
+        let tool = HttpGetTool::new_with_allowlist(
+            Duration::from_secs(1),
+            1024,
+            vec!["example.com".to_string()],
+        )
+        .unwrap();
+
+        let error = tool
+            .call(
+                json!({"url":"http://example.com"}),
+                ToolContext {
+                    run_id: "run_test".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "run error: http_get only allows https URLs"
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_non_https_urls() {
         let tool = HttpGetTool::default();
 
@@ -228,7 +273,12 @@ mod tests {
 
     #[tokio::test]
     async fn request_failure_error_is_sanitized() {
-        let tool = HttpGetTool::default();
+        let tool = HttpGetTool::new_with_allowlist(
+            Duration::from_secs(1),
+            1024,
+            vec!["127.0.0.1".to_string()],
+        )
+        .unwrap();
         let secret_url = "https://user:pass@127.0.0.1:1/private?token=secret-token";
 
         let error = tool
