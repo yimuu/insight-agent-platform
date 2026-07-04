@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::model::providers::ModelType;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentConfig {
     pub id: String,
@@ -19,6 +21,8 @@ pub struct AgentConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelConfig {
     pub provider: String,
+    #[serde(default, rename = "type")]
+    pub model_type: ModelType,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]

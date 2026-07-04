@@ -42,6 +42,7 @@ fn prompt_agent() -> LoadedAgent {
             description: "Test agent".to_string(),
             model: ModelConfig {
                 provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
                 model: Some("fake".to_string()),
                 temperature: None,
                 max_tokens: None,
@@ -77,6 +78,7 @@ fn failing_tool_agent() -> LoadedAgent {
             description: "Broken agent".to_string(),
             model: ModelConfig {
                 provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
                 model: Some("fake".to_string()),
                 temperature: None,
                 max_tokens: None,

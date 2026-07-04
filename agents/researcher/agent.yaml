@@ -3,7 +3,8 @@ name: Research Assistant
 description: Research and answer questions with a plan-first flow.
 
 model:
-  provider: openai_compatible
+  provider: dashscope
+  type: llm
   model: qwen3.6-flash
   temperature: 0.3
 

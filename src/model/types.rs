@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::{stream, Stream};
 use serde::{Deserialize, Serialize};
 
-use crate::error::AppError;
+use crate::{error::AppError, model::providers::ModelType};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -61,6 +61,8 @@ pub struct ImageUrl {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
+    pub provider: String,
+    pub model_type: ModelType,
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub temperature: Option<f32>,

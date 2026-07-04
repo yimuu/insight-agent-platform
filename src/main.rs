@@ -7,7 +7,7 @@ use insight_agent_platform::{
     config::PlatformConfig,
     engine::runner::RunEngine,
     error::AppError,
-    model::openai::OpenAiModelClient,
+    model::providers::{validate_agent_models, ModelProviderCatalog, ModelRouter},
     tools::registry::default_tool_registry,
 };
 
@@ -19,12 +19,10 @@ async fn main() -> Result<(), AppError> {
 
     let config = PlatformConfig::from_env()?;
     let agents = load_agents(&config.agents_dir)?;
+    let model_catalog = ModelProviderCatalog::new(config.model_providers.clone())?;
+    validate_agent_models(&agents, &model_catalog)?;
     let registry = AgentRegistry::new(agents)?;
-    let model = OpenAiModelClient::new(
-        config.openai_api_key,
-        config.openai_base_url,
-        config.openai_default_model,
-    );
+    let model = ModelRouter::from_openai_compatible_config(&config.model_providers)?;
     let engine = RunEngine::new(model, default_tool_registry());
     let app = build_router(AppState {
         registry,

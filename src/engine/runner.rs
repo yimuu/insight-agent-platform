@@ -187,6 +187,8 @@ impl<M: ModelClient> RunEngine<M> {
         )?);
 
         let request = ChatRequest {
+            provider: model_config.provider.clone(),
+            model_type: model_config.model_type,
             model: model_config.model.clone().unwrap_or_default(),
             messages,
             temperature: model_config.temperature,

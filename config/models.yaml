@@ -1,0 +1,18 @@
+default_provider: dashscope
+
+providers:
+  dashscope:
+    kind: openai_compatible
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: OPENAI_API_KEY
+    defaults:
+      llm: qwen3.6-flash
+    models:
+      llm:
+        qwen3.6-flash: {}
+        qwen-vl-plus:
+          features: [vision]
+      text_embedding:
+        text-embedding-v4: {}
+      speech2text:
+        paraformer-realtime-v2: {}

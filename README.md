@@ -8,13 +8,44 @@ Set environment variables:
 
 ```text
 OPENAI_API_KEY=...
-OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-OPENAI_DEFAULT_MODEL=qwen3.6-flash
+MODEL_PROVIDERS_CONFIG=config/models.yaml
 AGENTS_DIR=agents
 BIND_ADDR=127.0.0.1:3000
 ```
 
 Do not commit real API keys.
+
+Model providers are configured in `config/models.yaml`. Provider entries define connection details, authentication environment variables, model type groups, per-type defaults, and LLM features such as `vision`.
+
+```yaml
+default_provider: dashscope
+providers:
+  dashscope:
+    kind: openai_compatible
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: OPENAI_API_KEY
+    defaults:
+      llm: qwen3.6-flash
+    models:
+      llm:
+        qwen3.6-flash: {}
+        qwen-vl-plus:
+          features: [vision]
+      text_embedding:
+        text-embedding-v4: {}
+      speech2text:
+        paraformer-realtime-v2: {}
+```
+
+Agents reference provider IDs:
+
+```yaml
+model:
+  provider: dashscope
+  type: llm
+  model: qwen-vl-plus
+  temperature: 0.2
+```
 
 ## Run
 

@@ -3,7 +3,8 @@ name: Medical Report Interpreter
 description: Interpret medical report text and images with abnormal indicator analysis, synthesis, and health advice.
 
 model:
-  provider: openai_compatible
+  provider: dashscope
+  type: llm
   model: qwen-vl-plus
   temperature: 0.2
 

@@ -37,6 +37,7 @@ async fn prompt_step_renders_and_completes_run() {
             description: String::new(),
             model: ModelConfig {
                 provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
                 model: Some("fake".to_string()),
                 temperature: None,
                 max_tokens: None,
@@ -91,6 +92,7 @@ async fn tool_step_emits_tool_events_and_stores_output() {
             description: String::new(),
             model: ModelConfig {
                 provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
                 model: Some("fake".to_string()),
                 temperature: None,
                 max_tokens: None,
@@ -170,6 +172,7 @@ async fn tool_step_error_emits_error_event_and_stops_run() {
             description: String::new(),
             model: ModelConfig {
                 provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
                 model: Some("fake".to_string()),
                 temperature: None,
                 max_tokens: None,
@@ -362,6 +365,7 @@ async fn llm_step_attaches_input_images_to_user_message_when_configured() {
             description: String::new(),
             model: ModelConfig {
                 provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
                 model: Some("fake".to_string()),
                 temperature: None,
                 max_tokens: None,
@@ -429,6 +433,7 @@ async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
             description: String::new(),
             model: ModelConfig {
                 provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
                 model: Some("fake".to_string()),
                 temperature: None,
                 max_tokens: None,
@@ -532,6 +537,7 @@ async fn llm_step_passes_empty_model_when_agent_model_is_absent() {
             description: String::new(),
             model: ModelConfig {
                 provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
                 model: None,
                 temperature: None,
                 max_tokens: None,
@@ -579,6 +585,7 @@ async fn llm_step_streams_token_delta_events_and_final_output() {
             description: String::new(),
             model: ModelConfig {
                 provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
                 model: Some("fake".to_string()),
                 temperature: Some(0.2),
                 max_tokens: None,
@@ -634,6 +641,7 @@ async fn dropping_stream_stops_run_before_llm_work_starts() {
             description: String::new(),
             model: ModelConfig {
                 provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
                 model: Some("fake".to_string()),
                 temperature: None,
                 max_tokens: None,
@@ -679,6 +687,7 @@ async fn dropping_stream_cancels_in_flight_model_request() {
             description: String::new(),
             model: ModelConfig {
                 provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
                 model: Some("fake".to_string()),
                 temperature: None,
                 max_tokens: None,

@@ -15,7 +15,7 @@ use crate::{
 #[derive(Clone)]
 pub struct OpenAiModelClient {
     client: Client,
-    api_key: String,
+    api_key: Option<String>,
     base_url: String,
     default_model: String,
 }
@@ -33,6 +33,14 @@ impl fmt::Debug for OpenAiModelClient {
 
 impl OpenAiModelClient {
     pub fn new(api_key: String, base_url: String, default_model: String) -> Self {
+        Self::new_with_optional_api_key(Some(api_key), base_url, default_model)
+    }
+
+    pub fn new_with_optional_api_key(
+        api_key: Option<String>,
+        base_url: String,
+        default_model: String,
+    ) -> Self {
         Self {
             client: Client::new(),
             api_key,
@@ -57,11 +65,17 @@ impl ModelClient for OpenAiModelClient {
             stream: true,
         };
 
-        let response = self
+        let request = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(&body)
+            .json(&body);
+        let request = if let Some(api_key) = &self.api_key {
+            request.bearer_auth(api_key)
+        } else {
+            request
+        };
+
+        let response = request
             .send()
             .await
             .map_err(|err| AppError::Upstream(format!("model request failed: {err}")))?;
@@ -347,6 +361,8 @@ mod tests {
             "fallback-model".to_string(),
         );
         let request = ChatRequest {
+            provider: String::new(),
+            model_type: Default::default(),
             model: String::new(),
             messages: vec![ChatMessage::text("user", "Hi")],
             temperature: Some(0.1),
@@ -398,6 +414,8 @@ mod tests {
             "fallback-model".to_string(),
         );
         let request = ChatRequest {
+            provider: String::new(),
+            model_type: Default::default(),
             model: String::new(),
             messages: vec![ChatMessage::text("user", "Hi")],
             temperature: None,
@@ -451,6 +469,8 @@ mod tests {
             "fallback-model".to_string(),
         );
         let request = ChatRequest {
+            provider: String::new(),
+            model_type: Default::default(),
             model: "gpt-test".to_string(),
             messages: vec![ChatMessage::text("user", "Hi")],
             temperature: None,
