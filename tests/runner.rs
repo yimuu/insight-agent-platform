@@ -1,4 +1,11 @@
-use std::{pin::Pin, sync::Arc, time::Duration};
+use std::{
+    pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use futures::{stream, Stream, StreamExt};
@@ -85,6 +92,39 @@ impl BlockingModelClient {
 
     fn release(&self) {
         self.ready.notify_waiters();
+    }
+}
+
+#[derive(Clone)]
+struct RecordingModelClient {
+    requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl RecordingModelClient {
+    fn new() -> Self {
+        Self {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn take_requests(&self) -> Vec<ChatRequest> {
+        let mut requests = self.requests.lock().unwrap();
+        std::mem::take(&mut *requests)
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ModelClient for RecordingModelClient {
+    async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, AppError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.requests.lock().unwrap().push(request);
+        Ok(Box::pin(stream::iter(vec![Ok(String::from("ok"))])))
     }
 }
 
@@ -198,4 +238,94 @@ async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
     assert!(rest
         .iter()
         .any(|event| event.kind == RunEventKind::RunCompleted));
+}
+
+#[tokio::test]
+async fn llm_step_passes_empty_model_when_agent_model_is_absent() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model: None,
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![StepConfig {
+                id: "answer".to_string(),
+                kind: StepKind::Llm,
+                prompt_ref: None,
+                prompt: Some("Hello {{ input.name }}".to_string()),
+                system_prompt_ref: None,
+                system_prompt: None,
+                stream: true,
+                tool: None,
+                args: serde_json::Value::Null,
+            }],
+        },
+    };
+
+    let model = RecordingModelClient::new();
+    let engine = RunEngine::new(model.clone(), ToolRegistry::default());
+    let events: Vec<_> = engine.run(agent, json!({"name":"Ada"})).collect().await;
+
+    assert!(events
+        .iter()
+        .any(|event| event.kind == RunEventKind::RunCompleted));
+    let requests = model.take_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].model, "");
+}
+
+#[tokio::test]
+async fn dropping_stream_stops_run_before_llm_work_starts() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![StepConfig {
+                id: "answer".to_string(),
+                kind: StepKind::Llm,
+                prompt_ref: None,
+                prompt: Some("Hello {{ input.name }}".to_string()),
+                system_prompt_ref: None,
+                system_prompt: None,
+                stream: true,
+                tool: None,
+                args: serde_json::Value::Null,
+            }],
+        },
+    };
+
+    let model = RecordingModelClient::new();
+    let engine = RunEngine::new(model.clone(), ToolRegistry::default());
+    let events = engine.run(agent, json!({"name":"Ada"}));
+    drop(events);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(model.call_count(), 0);
 }

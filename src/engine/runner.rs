@@ -59,30 +59,37 @@ impl<M: ModelClient> RunEngine<M> {
             step_outputs: BTreeMap::new(),
         };
         let store = PromptStore::new(agent.prompts.clone());
-        events.emit(&ctx, None, RunEventKind::RunStarted, json!({}));
+        if !events.emit(&ctx, None, RunEventKind::RunStarted, json!({})) {
+            return;
+        }
 
         for step in &agent.config.steps {
-            events.emit(
+            if !events.emit(
                 &ctx,
                 Some(&step.id),
                 RunEventKind::StepStarted,
                 json!({ "step_type": step.kind }),
-            );
+            ) {
+                return;
+            }
             match self
                 .execute_step(step, &agent.config.model, &store, &mut ctx, &events)
                 .await
             {
-                Ok(output) => {
+                Ok(Some(output)) => {
                     ctx.set_step_output(&step.id, output.clone());
-                    events.emit(
+                    if !events.emit(
                         &ctx,
                         Some(&step.id),
                         RunEventKind::StepCompleted,
                         json!({ "output": output }),
-                    );
+                    ) {
+                        return;
+                    }
                 }
+                Ok(None) => return,
                 Err(err) => {
-                    events.emit(
+                    let _ = events.emit(
                         &ctx,
                         Some(&step.id),
                         RunEventKind::Error,
@@ -100,7 +107,7 @@ impl<M: ModelClient> RunEngine<M> {
             .and_then(|step| ctx.step_outputs.get(&step.id))
             .cloned()
             .unwrap_or(Value::Null);
-        events.emit(
+        let _ = events.emit(
             &ctx,
             None,
             RunEventKind::RunCompleted,
@@ -115,13 +122,17 @@ impl<M: ModelClient> RunEngine<M> {
         store: &PromptStore,
         ctx: &mut RunContext,
         events: &EventSender,
-    ) -> Result<Value, AppError> {
+    ) -> Result<Option<Value>, AppError> {
+        if events.is_closed() {
+            return Ok(None);
+        }
+
         match step.kind {
             StepKind::Prompt => {
                 let template =
                     resolve_prompt(step.prompt.as_deref(), step.prompt_ref.as_deref(), store)?;
                 let rendered = self.renderer.render(template, &ctx.template_data())?;
-                Ok(Value::String(rendered))
+                Ok(Some(Value::String(rendered)))
             }
             StepKind::Llm => {
                 self.execute_llm_step(step, model_config, store, ctx, events)
@@ -138,7 +149,11 @@ impl<M: ModelClient> RunEngine<M> {
         store: &PromptStore,
         ctx: &RunContext,
         events: &EventSender,
-    ) -> Result<Value, AppError> {
+    ) -> Result<Option<Value>, AppError> {
+        if events.is_closed() {
+            return Ok(None);
+        }
+
         let mut messages = Vec::new();
 
         if let Some(system_template) = resolve_optional_prompt(
@@ -166,33 +181,39 @@ impl<M: ModelClient> RunEngine<M> {
         });
 
         let request = ChatRequest {
-            model: model_config
-                .model
-                .clone()
-                .unwrap_or_else(|| model_config.provider.clone()),
+            model: model_config.model.clone().unwrap_or_default(),
             messages,
             temperature: model_config.temperature,
             max_tokens: model_config.max_tokens,
         };
 
+        if events.is_closed() {
+            return Ok(None);
+        }
+
         let mut stream = self.model.stream_chat(request).await?;
         let mut output = String::new();
 
         while let Some(chunk) = stream.next().await {
+            if events.is_closed() {
+                return Ok(None);
+            }
             let delta = chunk?;
             if delta.is_empty() {
                 continue;
             }
             output.push_str(&delta);
-            events.emit(
+            if !events.emit(
                 ctx,
                 Some(&step.id),
                 RunEventKind::TokenDelta,
                 json!({ "delta": delta }),
-            );
+            ) {
+                return Ok(None);
+            }
         }
 
-        Ok(Value::String(output))
+        Ok(Some(Value::String(output)))
     }
 
     async fn execute_tool_step(
@@ -200,7 +221,11 @@ impl<M: ModelClient> RunEngine<M> {
         step: &StepConfig,
         ctx: &RunContext,
         events: &EventSender,
-    ) -> Result<Value, AppError> {
+    ) -> Result<Option<Value>, AppError> {
+        if events.is_closed() {
+            return Ok(None);
+        }
+
         let tool_name = step.tool.as_deref().ok_or_else(|| {
             AppError::Config(format!("step '{}' type 'tool' requires tool", step.id))
         })?;
@@ -209,12 +234,19 @@ impl<M: ModelClient> RunEngine<M> {
             .get(tool_name)
             .ok_or_else(|| AppError::Run(format!("tool '{}' is not registered", tool_name)))?;
 
-        events.emit(
+        if !events.emit(
             ctx,
             Some(&step.id),
             RunEventKind::ToolCallStarted,
             json!({ "tool": tool_name }),
-        );
+        ) {
+            return Ok(None);
+        }
+
+        if events.is_closed() {
+            return Ok(None);
+        }
+
         let output = tool
             .call(
                 step.args.clone(),
@@ -223,13 +255,16 @@ impl<M: ModelClient> RunEngine<M> {
                 },
             )
             .await?;
-        events.emit(
+
+        if !events.emit(
             ctx,
             Some(&step.id),
             RunEventKind::ToolCallCompleted,
             json!({ "tool": tool_name, "output": output.clone() }),
-        );
-        Ok(output)
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(output))
     }
 }
 
@@ -243,15 +278,27 @@ impl EventSender {
         Self { tx }
     }
 
-    fn emit(&self, ctx: &RunContext, step_id: Option<&str>, kind: RunEventKind, payload: Value) {
-        let _ = self.tx.send(RunEvent {
-            kind,
-            run_id: ctx.run_id.clone(),
-            agent_id: ctx.agent_id.clone(),
-            step_id: step_id.map(str::to_string),
-            timestamp: Utc::now(),
-            payload,
-        });
+    fn emit(
+        &self,
+        ctx: &RunContext,
+        step_id: Option<&str>,
+        kind: RunEventKind,
+        payload: Value,
+    ) -> bool {
+        self.tx
+            .send(RunEvent {
+                kind,
+                run_id: ctx.run_id.clone(),
+                agent_id: ctx.agent_id.clone(),
+                step_id: step_id.map(str::to_string),
+                timestamp: Utc::now(),
+                payload,
+            })
+            .is_ok()
+    }
+
+    fn is_closed(&self) -> bool {
+        self.tx.is_closed()
     }
 }
 
