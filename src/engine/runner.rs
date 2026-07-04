@@ -172,10 +172,7 @@ impl<M: ModelClient> RunEngine<M> {
             let system_prompt = self
                 .renderer
                 .render(&system_template, &ctx.template_data())?;
-            messages.push(ChatMessage {
-                role: "system".to_string(),
-                content: system_prompt,
-            });
+            messages.push(ChatMessage::text("system", system_prompt));
         }
 
         let prompt_template =
@@ -183,10 +180,7 @@ impl<M: ModelClient> RunEngine<M> {
         let user_prompt = self
             .renderer
             .render(prompt_template, &ctx.template_data())?;
-        messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: user_prompt,
-        });
+        messages.push(ChatMessage::text("user", user_prompt));
 
         let request = ChatRequest {
             model: model_config.model.clone().unwrap_or_default(),

@@ -216,7 +216,7 @@ mod tests {
     };
 
     use super::{OpenAiModelClient, SseDecoder};
-    use crate::model::types::{ChatMessage, ChatRequest, ModelClient};
+    use crate::model::types::{ChatContentPart, ChatMessage, ChatRequest, ModelClient};
 
     #[test]
     fn openai_model_client_debug_does_not_leak_api_key() {
@@ -251,6 +251,51 @@ mod tests {
             .unwrap();
 
         assert_eq!(third, vec!["H\u{e9}llo".to_string()]);
+    }
+
+    #[test]
+    fn text_message_serializes_as_plain_string_content() {
+        let body = serde_json::to_value(super::OpenAiRequest {
+            model: "model".to_string(),
+            messages: vec![ChatMessage::text("user", "Hi")],
+            temperature: None,
+            max_tokens: None,
+            stream: true,
+        })
+        .unwrap();
+
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "Hi");
+    }
+
+    #[test]
+    fn multimodal_message_serializes_as_openai_content_parts() {
+        let body = serde_json::to_value(super::OpenAiRequest {
+            model: "model".to_string(),
+            messages: vec![ChatMessage::multimodal(
+                "user",
+                vec![
+                    ChatContentPart::text("Interpret this report."),
+                    ChatContentPart::image_url("data:image/png;base64,abc123"),
+                ],
+            )],
+            temperature: None,
+            max_tokens: None,
+            stream: true,
+        })
+        .unwrap();
+
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(
+            body["messages"][0]["content"][0]["text"],
+            "Interpret this report."
+        );
+        assert_eq!(body["messages"][0]["content"][1]["type"], "image_url");
+        assert_eq!(
+            body["messages"][0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,abc123"
+        );
     }
 
     #[tokio::test]
@@ -303,10 +348,7 @@ mod tests {
         );
         let request = ChatRequest {
             model: String::new(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: "Hi".to_string(),
-            }],
+            messages: vec![ChatMessage::text("user", "Hi")],
             temperature: Some(0.1),
             max_tokens: Some(32),
         };
@@ -357,10 +399,7 @@ mod tests {
         );
         let request = ChatRequest {
             model: String::new(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: "Hi".to_string(),
-            }],
+            messages: vec![ChatMessage::text("user", "Hi")],
             temperature: None,
             max_tokens: None,
         };
@@ -413,10 +452,7 @@ mod tests {
         );
         let request = ChatRequest {
             model: "gpt-test".to_string(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: "Hi".to_string(),
-            }],
+            messages: vec![ChatMessage::text("user", "Hi")],
             temperature: None,
             max_tokens: None,
         };

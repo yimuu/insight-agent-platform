@@ -9,7 +9,54 @@ use crate::error::AppError;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    pub content: ChatContent,
+}
+
+impl ChatMessage {
+    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: ChatContent::Text(content.into()),
+        }
+    }
+
+    pub fn multimodal(role: impl Into<String>, parts: Vec<ChatContentPart>) -> Self {
+        Self {
+            role: role.into(),
+            content: ChatContent::Parts(parts),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChatContent {
+    Text(String),
+    Parts(Vec<ChatContentPart>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+impl ChatContentPart {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    pub fn image_url(url: impl Into<String>) -> Self {
+        Self::ImageUrl {
+            image_url: ImageUrl { url: url.into() },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
