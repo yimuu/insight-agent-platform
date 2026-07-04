@@ -1,5 +1,5 @@
-use std::fmt;
 use std::collections::VecDeque;
+use std::fmt;
 
 use async_trait::async_trait;
 use bytes::Bytes;
