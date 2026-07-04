@@ -1,9 +1,16 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use chrono::Utc;
 use futures::{Stream, StreamExt};
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinHandle,
+};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
@@ -40,13 +47,14 @@ impl<M: ModelClient> RunEngine<M> {
 
     pub fn run(&self, agent: LoadedAgent, input: Value) -> impl Stream<Item = RunEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
         let engine = self.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             engine
-                .run_streaming(agent, input, EventSender::new(tx))
+                .run_streaming(agent, input, EventSender::new(tx, cancel_rx))
                 .await;
         });
-        UnboundedReceiverStream::new(rx)
+        RunEventStream::new(UnboundedReceiverStream::new(rx), cancel_tx, task)
     }
 
     async fn run_streaming(&self, agent: LoadedAgent, input: Value, events: EventSender) {
@@ -191,13 +199,22 @@ impl<M: ModelClient> RunEngine<M> {
             return Ok(None);
         }
 
-        let mut stream = self.model.stream_chat(request).await?;
+        let mut stream = tokio::select! {
+            _ = events.closed() => return Ok(None),
+            result = self.model.stream_chat(request) => result?,
+        };
         let mut output = String::new();
 
-        while let Some(chunk) = stream.next().await {
-            if events.is_closed() {
-                return Ok(None);
-            }
+        loop {
+            let next_chunk = tokio::select! {
+                _ = events.closed() => return Ok(None),
+                chunk = stream.next() => chunk,
+            };
+
+            let Some(chunk) = next_chunk else {
+                break;
+            };
+
             let delta = chunk?;
             if delta.is_empty() {
                 continue;
@@ -247,14 +264,15 @@ impl<M: ModelClient> RunEngine<M> {
             return Ok(None);
         }
 
-        let output = tool
-            .call(
+        let output = tokio::select! {
+            _ = events.closed() => return Ok(None),
+            result = tool.call(
                 step.args.clone(),
                 ToolContext {
                     run_id: ctx.run_id.clone(),
                 },
-            )
-            .await?;
+            ) => result?,
+        };
 
         if !events.emit(
             ctx,
@@ -271,11 +289,12 @@ impl<M: ModelClient> RunEngine<M> {
 #[derive(Clone)]
 struct EventSender {
     tx: mpsc::UnboundedSender<RunEvent>,
+    cancel_rx: watch::Receiver<bool>,
 }
 
 impl EventSender {
-    fn new(tx: mpsc::UnboundedSender<RunEvent>) -> Self {
-        Self { tx }
+    fn new(tx: mpsc::UnboundedSender<RunEvent>, cancel_rx: watch::Receiver<bool>) -> Self {
+        Self { tx, cancel_rx }
     }
 
     fn emit(
@@ -298,7 +317,60 @@ impl EventSender {
     }
 
     fn is_closed(&self) -> bool {
-        self.tx.is_closed()
+        self.tx.is_closed() || *self.cancel_rx.borrow()
+    }
+
+    async fn closed(&self) {
+        if self.is_closed() {
+            return;
+        }
+
+        let mut cancel_rx = self.cancel_rx.clone();
+        tokio::select! {
+            _ = self.tx.closed() => {}
+            changed = cancel_rx.changed() => {
+                let _ = changed;
+            }
+        }
+    }
+}
+
+struct RunEventStream {
+    inner: UnboundedReceiverStream<RunEvent>,
+    cancel_tx: Option<watch::Sender<bool>>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl RunEventStream {
+    fn new(
+        inner: UnboundedReceiverStream<RunEvent>,
+        cancel_tx: watch::Sender<bool>,
+        task: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            inner,
+            cancel_tx: Some(cancel_tx),
+            task: Some(task),
+        }
+    }
+}
+
+impl Stream for RunEventStream {
+    type Item = RunEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl Drop for RunEventStream {
+    fn drop(&mut self) {
+        if let Some(cancel_tx) = self.cancel_tx.take() {
+            let _ = cancel_tx.send(true);
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 

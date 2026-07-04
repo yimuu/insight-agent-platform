@@ -101,6 +101,61 @@ struct RecordingModelClient {
     calls: Arc<AtomicUsize>,
 }
 
+#[derive(Clone)]
+struct CancellableBlockingModelClient {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+    cancelled: Arc<Notify>,
+    started_count: Arc<AtomicUsize>,
+    cancelled_count: Arc<AtomicUsize>,
+}
+
+impl CancellableBlockingModelClient {
+    fn new() -> Self {
+        Self {
+            started: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            cancelled: Arc::new(Notify::new()),
+            started_count: Arc::new(AtomicUsize::new(0)),
+            cancelled_count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    async fn wait_until_started(&self) {
+        loop {
+            if self.started_count.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            self.started.notified().await;
+        }
+    }
+
+    fn cancelled_count(&self) -> usize {
+        self.cancelled_count.load(Ordering::SeqCst)
+    }
+
+    async fn wait_until_cancelled(&self) {
+        loop {
+            if self.cancelled_count() > 0 {
+                return;
+            }
+            self.cancelled.notified().await;
+        }
+    }
+}
+
+struct CancelGuard {
+    notify: Arc<Notify>,
+    cancelled_count: Arc<AtomicUsize>,
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.cancelled_count.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+}
+
 impl RecordingModelClient {
     fn new() -> Self {
         Self {
@@ -124,6 +179,20 @@ impl ModelClient for RecordingModelClient {
     async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, AppError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.requests.lock().unwrap().push(request);
+        Ok(Box::pin(stream::iter(vec![Ok(String::from("ok"))])))
+    }
+}
+
+#[async_trait]
+impl ModelClient for CancellableBlockingModelClient {
+    async fn stream_chat(&self, _request: ChatRequest) -> Result<ChatStream, AppError> {
+        self.started_count.fetch_add(1, Ordering::SeqCst);
+        self.started.notify_waiters();
+        let _guard = CancelGuard {
+            notify: self.cancelled.clone(),
+            cancelled_count: self.cancelled_count.clone(),
+        };
+        self.release.notified().await;
         Ok(Box::pin(stream::iter(vec![Ok(String::from("ok"))])))
     }
 }
@@ -328,4 +397,68 @@ async fn dropping_stream_stops_run_before_llm_work_starts() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     assert_eq!(model.call_count(), 0);
+}
+
+#[tokio::test]
+async fn dropping_stream_cancels_in_flight_model_request() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![StepConfig {
+                id: "answer".to_string(),
+                kind: StepKind::Llm,
+                prompt_ref: None,
+                prompt: Some("Hello {{ input.name }}".to_string()),
+                system_prompt_ref: None,
+                system_prompt: None,
+                stream: true,
+                tool: None,
+                args: serde_json::Value::Null,
+            }],
+        },
+    };
+
+    let model = CancellableBlockingModelClient::new();
+    let engine = RunEngine::new(model.clone(), ToolRegistry::default());
+    let mut events = Box::pin(engine.run(agent, json!({"name":"Ada"})));
+
+    assert_eq!(
+        timeout(Duration::from_millis(100), events.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .kind,
+        RunEventKind::RunStarted
+    );
+    let step_started = timeout(Duration::from_millis(100), events.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(step_started.kind, RunEventKind::StepStarted);
+
+    timeout(Duration::from_millis(100), model.wait_until_started())
+        .await
+        .unwrap();
+
+    drop(events);
+
+    timeout(Duration::from_millis(100), model.wait_until_cancelled())
+        .await
+        .unwrap();
+    assert_eq!(model.cancelled_count(), 1);
 }
