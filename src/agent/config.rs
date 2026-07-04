@@ -55,6 +55,30 @@ pub struct StepConfig {
     pub args: Value,
 }
 
+impl StepConfig {
+    pub fn prompt_source(&self) -> Option<PromptSource<'_>> {
+        match (&self.prompt_ref, &self.prompt) {
+            (Some(prompt_ref), None) => Some(PromptSource::Ref(prompt_ref)),
+            (None, Some(prompt)) => Some(PromptSource::Inline(prompt)),
+            _ => None,
+        }
+    }
+
+    pub fn system_prompt_source(&self) -> Option<PromptSource<'_>> {
+        match (&self.system_prompt_ref, &self.system_prompt) {
+            (Some(prompt_ref), None) => Some(PromptSource::Ref(prompt_ref)),
+            (None, Some(prompt)) => Some(PromptSource::Inline(prompt)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptSource<'a> {
+    Ref(&'a str),
+    Inline(&'a str),
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StepKind {

@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{agent::config::AgentConfig, error::AppError};
+use crate::{
+    agent::config::{AgentConfig, StepKind},
+    error::AppError,
+};
 
 #[derive(Debug, Clone)]
 pub struct LoadedAgent {
@@ -84,6 +87,33 @@ fn validate_agent_config(agent_root: &Path, config: &AgentConfig) -> Result<(), 
                 "step '{}' system_prompt_ref and system_prompt are mutually exclusive",
                 step.id
             )));
+        }
+
+        match step.kind {
+            StepKind::Prompt => {
+                if step.prompt_source().is_none() {
+                    return Err(AppError::Config(format!(
+                        "step '{}' type 'prompt' requires prompt or prompt_ref",
+                        step.id
+                    )));
+                }
+            }
+            StepKind::Llm => {
+                if step.prompt_source().is_none() {
+                    return Err(AppError::Config(format!(
+                        "step '{}' type 'llm' requires prompt or prompt_ref",
+                        step.id
+                    )));
+                }
+            }
+            StepKind::Tool => {
+                if step.tool.is_none() {
+                    return Err(AppError::Config(format!(
+                        "step '{}' type 'tool' requires tool",
+                        step.id
+                    )));
+                }
+            }
         }
 
         if let Some(prompt_ref) = &step.prompt_ref {

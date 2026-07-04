@@ -127,6 +127,78 @@ steps:
 }
 
 #[test]
+fn rejects_prompt_step_without_prompt_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("bad");
+    write_file(
+        &agent.join("agent.yaml"),
+        r#"
+id: bad
+name: Bad
+model:
+  provider: openai_compatible
+input:
+  schema:
+    type: object
+steps:
+  - id: answer
+    type: prompt
+"#,
+    );
+
+    let err = load_agents(dir.path()).unwrap_err().to_string();
+    assert!(err.contains("type 'prompt' requires prompt or prompt_ref"));
+}
+
+#[test]
+fn rejects_llm_step_without_prompt_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("bad");
+    write_file(
+        &agent.join("agent.yaml"),
+        r#"
+id: bad
+name: Bad
+model:
+  provider: openai_compatible
+input:
+  schema:
+    type: object
+steps:
+  - id: answer
+    type: llm
+"#,
+    );
+
+    let err = load_agents(dir.path()).unwrap_err().to_string();
+    assert!(err.contains("type 'llm' requires prompt or prompt_ref"));
+}
+
+#[test]
+fn rejects_tool_step_without_tool_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("bad");
+    write_file(
+        &agent.join("agent.yaml"),
+        r#"
+id: bad
+name: Bad
+model:
+  provider: openai_compatible
+input:
+  schema:
+    type: object
+steps:
+  - id: answer
+    type: tool
+"#,
+    );
+
+    let err = load_agents(dir.path()).unwrap_err().to_string();
+    assert!(err.contains("type 'tool' requires tool"));
+}
+
+#[test]
 fn rejects_prompt_path_outside_agent_directory() {
     let dir = tempfile::tempdir().unwrap();
     write_file(&dir.path().join("secret.md"), "secret");
