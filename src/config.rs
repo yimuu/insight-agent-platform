@@ -19,8 +19,12 @@ impl PlatformConfig {
             .map_err(|err| AppError::Config(format!("invalid BIND_ADDR: {err}")))?;
 
         let agents_dir = env::var("AGENTS_DIR").unwrap_or_else(|_| "agents".to_string());
-        let openai_api_key = env::var("OPENAI_API_KEY")
-            .map_err(|_| AppError::Config("OPENAI_API_KEY is required".to_string()))?;
+        let openai_api_key = env::var("OPENAI_API_KEY").map_err(|_| AppError::Config("OPENAI_API_KEY is required".to_string()))?;
+        let openai_api_key = if openai_api_key.trim().is_empty() {
+            return Err(AppError::Config("OPENAI_API_KEY is required".to_string()));
+        } else {
+            openai_api_key
+        };
         let openai_base_url = env::var("OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string());
         let openai_default_model =
