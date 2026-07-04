@@ -30,3 +30,10 @@ impl ToolRegistry {
         self.tools.get(name).cloned()
     }
 }
+
+pub fn default_tool_registry() -> ToolRegistry {
+    let mut registry = ToolRegistry::default();
+    registry.register(crate::tools::current_time::CurrentTimeTool);
+    registry.register(crate::tools::http_get::HttpGetTool::default());
+    registry
+}

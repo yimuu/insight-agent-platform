@@ -1,1 +1,107 @@
 //! Restricted HTTP GET tool.
+
+use std::time::Duration;
+
+use async_trait::async_trait;
+use futures::StreamExt;
+use serde_json::{json, Value};
+
+use crate::{
+    error::AppError,
+    tools::registry::{Tool, ToolContext},
+};
+
+#[derive(Debug, Clone)]
+pub struct HttpGetTool {
+    client: reqwest::Client,
+    max_bytes: usize,
+}
+
+impl HttpGetTool {
+    pub fn new(timeout: Duration, max_bytes: usize) -> Result<Self, AppError> {
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|err| AppError::Run(format!("failed to build http_get client: {err}")))?;
+
+        Ok(Self { client, max_bytes })
+    }
+}
+
+impl Default for HttpGetTool {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(10), 256 * 1024).expect("http_get client should build")
+    }
+}
+
+#[async_trait]
+impl Tool for HttpGetTool {
+    fn name(&self) -> &'static str {
+        "http_get"
+    }
+
+    async fn call(&self, args: Value, _ctx: ToolContext) -> Result<Value, AppError> {
+        let url = args
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::Run("http_get requires string arg 'url'".to_string()))?;
+        let parsed =
+            reqwest::Url::parse(url).map_err(|err| AppError::Run(format!("invalid url: {err}")))?;
+
+        if parsed.scheme() != "https" {
+            return Err(AppError::Run("http_get only allows https URLs".to_string()));
+        }
+
+        let response = self
+            .client
+            .get(parsed.clone())
+            .send()
+            .await
+            .map_err(|err| AppError::Run(format!("http_get failed for '{}': {err}", parsed)))?;
+        let status = response.status().as_u16();
+
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(|err| AppError::Run(format!("http_get read failed: {err}")))?;
+            if body.len() + chunk.len() > self.max_bytes {
+                return Err(AppError::Run("http_get response too large".to_string()));
+            }
+            body.extend_from_slice(&chunk);
+        }
+
+        Ok(json!({
+            "status": status,
+            "body": String::from_utf8_lossy(&body),
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::HttpGetTool;
+    use crate::tools::registry::{Tool, ToolContext};
+
+    #[tokio::test]
+    async fn rejects_non_https_urls() {
+        let tool = HttpGetTool::default();
+
+        let error = tool
+            .call(
+                json!({"url":"http://example.com"}),
+                ToolContext {
+                    run_id: "run_test".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "run error: http_get only allows https URLs"
+        );
+    }
+}

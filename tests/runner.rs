@@ -20,7 +20,10 @@ use insight_agent_platform::{
     engine::{event::RunEventKind, runner::RunEngine},
     error::AppError,
     model::types::{ChatRequest, ChatStream, FakeModelClient, ModelClient},
-    tools::registry::ToolRegistry,
+    tools::{
+        current_time::CurrentTimeTool,
+        registry::{default_tool_registry, ToolRegistry},
+    },
 };
 
 #[tokio::test]
@@ -74,6 +77,70 @@ async fn prompt_step_renders_and_completes_run() {
         .find(|event| event.kind == RunEventKind::RunCompleted)
         .unwrap();
     assert_eq!(completed.payload["output"], "Hello Ada");
+}
+
+#[tokio::test]
+async fn tool_step_emits_tool_events_and_stores_output() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![StepConfig {
+                id: "now".to_string(),
+                kind: StepKind::Tool,
+                prompt_ref: None,
+                prompt: None,
+                system_prompt_ref: None,
+                system_prompt: None,
+                stream: false,
+                tool: Some("current_time".to_string()),
+                args: json!({"timezone":"Asia/Shanghai"}),
+            }],
+        },
+    };
+
+    let mut tools = ToolRegistry::default();
+    tools.register(CurrentTimeTool);
+    let engine = RunEngine::new(FakeModelClient::new(vec![]), tools);
+    let events: Vec<_> = engine.run(agent, json!({})).collect().await;
+
+    assert!(events
+        .iter()
+        .any(|event| event.kind == RunEventKind::ToolCallStarted));
+    assert!(events
+        .iter()
+        .any(|event| event.kind == RunEventKind::ToolCallCompleted));
+    let completed = events
+        .iter()
+        .find(|event| event.kind == RunEventKind::RunCompleted)
+        .unwrap();
+    assert_eq!(completed.payload["output"]["timezone"], "Asia/Shanghai");
+    assert!(completed.payload["output"]["iso8601"]
+        .as_str()
+        .unwrap()
+        .contains('+'));
+}
+
+#[test]
+fn default_tool_registry_registers_built_in_tools() {
+    let registry = default_tool_registry();
+
+    assert!(registry.get("current_time").is_some());
+    assert!(registry.get("http_get").is_some());
 }
 
 #[derive(Clone)]
@@ -389,7 +456,10 @@ async fn llm_step_streams_token_delta_events_and_final_output() {
         },
     };
 
-    let engine = RunEngine::new(FakeModelClient::new(vec!["Hel", "lo"]), ToolRegistry::default());
+    let engine = RunEngine::new(
+        FakeModelClient::new(vec!["Hel", "lo"]),
+        ToolRegistry::default(),
+    );
     let events: Vec<_> = engine.run(agent, json!({"question":"Q"})).collect().await;
 
     let deltas: Vec<_> = events
