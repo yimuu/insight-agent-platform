@@ -1,0 +1,1 @@
+//! Restricted HTTP GET tool.
