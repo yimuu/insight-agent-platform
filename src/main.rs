@@ -1,6 +1,9 @@
 use insight_agent_platform::{
     agent::{loader::load_agents, registry::AgentRegistry},
-    api::routes::{build_router, AppState},
+    api::{
+        routes::{build_router, AppState},
+        sse::encode_event,
+    },
     config::PlatformConfig,
     engine::runner::RunEngine,
     error::AppError,
@@ -23,7 +26,11 @@ async fn main() -> Result<(), AppError> {
         config.openai_default_model,
     );
     let engine = RunEngine::new(model, default_tool_registry());
-    let app = build_router(AppState { registry, engine });
+    let app = build_router(AppState {
+        registry,
+        engine,
+        event_encoder: encode_event,
+    });
 
     let listener = tokio::net::TcpListener::bind(config.bind_addr)
         .await

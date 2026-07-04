@@ -9,22 +9,25 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use futures::StreamExt;
+use futures::{future, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
     agent::{loader::LoadedAgent, registry::AgentRegistry},
-    api::sse::encode_event,
+    api::sse::encode_event_or_sanitized_error,
     engine::runner::RunEngine,
     error::AppError,
     model::types::ModelClient,
 };
 
+pub type EventEncoder = fn(crate::engine::event::RunEvent) -> Result<Event, AppError>;
+
 #[derive(Clone)]
 pub struct AppState<M: ModelClient> {
     pub registry: AgentRegistry,
     pub engine: RunEngine<M>,
+    pub event_encoder: EventEncoder,
 }
 
 pub fn build_router<M: ModelClient>(state: AppState<M>) -> Router {
@@ -76,9 +79,24 @@ async fn run_agent_stream<M: ModelClient>(
         .ok_or_else(|| AppError::NotFound(format!("agent '{agent_id}' not found")))?
         .clone();
 
-    let stream = state.engine.run(agent, request.input).map(|event| {
-        Ok::<Event, Infallible>(encode_event(event).expect("run events must serialize to JSON"))
-    });
+    let event_encoder = state.event_encoder;
+    let stream = state
+        .engine
+        .run(agent, request.input)
+        .scan(false, move |failed, event| {
+            let next = if *failed {
+                None
+            } else {
+                let encoded = event_encoder(event.clone());
+                if encoded.is_err() {
+                    *failed = true;
+                }
+                Some(Ok::<Event, Infallible>(encode_event_or_sanitized_error(
+                    event, encoded,
+                )))
+            };
+            future::ready(next)
+        });
 
     Ok(Sse::new(stream))
 }
