@@ -127,3 +127,43 @@ Planned commit message:
 ```bash
 feat: add built-in tools and default registry
 ```
+
+## Follow-up: openai.rs formatting commit
+
+Requested follow-up checked the remaining worktree diff in `src/model/openai.rs`.
+
+### Diff inspection
+
+Command:
+
+```bash
+git diff -- src/model/openai.rs
+```
+
+Result:
+
+- formatting-only changes from `cargo fmt`
+- line wrapping only
+- no logic, literal, branch, or behavior changes
+
+### Fresh verification before style commit
+
+Commands:
+
+```bash
+cargo test --test runner
+cargo check
+```
+
+Observed output summary:
+
+- `cargo test --test runner`: 8 passed, 0 failed
+- `cargo check`: passed
+
+### Follow-up commit
+
+Committed the formatting-only change separately as:
+
+```bash
+style: format openai client
+```
