@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use reqwest::{redirect::Policy, StatusCode};
 use serde_json::{json, Value};
 
 use crate::{
@@ -38,6 +39,7 @@ impl HttpGetTool {
         allowlist: Option<Vec<String>>,
     ) -> Result<Self, AppError> {
         let client = reqwest::Client::builder()
+            .redirect(Policy::none())
             .timeout(timeout)
             .build()
             .map_err(|err| AppError::Run(format!("failed to build http_get client: {err}")))?;
@@ -74,6 +76,14 @@ impl HttpGetTool {
         } else {
             "transport error"
         }
+    }
+
+    fn validate_response_status(status: StatusCode) -> Result<(), AppError> {
+        if status.is_redirection() {
+            return Err(AppError::Run("http_get redirect blocked".to_string()));
+        }
+
+        Ok(())
     }
 }
 
@@ -112,6 +122,7 @@ impl Tool for HttpGetTool {
                 Self::classify_request_error(&err)
             ))
         })?;
+        Self::validate_response_status(response.status())?;
         let status = response.status().as_u16();
 
         let mut body = Vec::new();
@@ -136,6 +147,7 @@ impl Tool for HttpGetTool {
 mod tests {
     use std::time::Duration;
 
+    use reqwest::StatusCode;
     use serde_json::json;
 
     use super::HttpGetTool;
@@ -231,5 +243,14 @@ mod tests {
         assert!(!message.contains("user:pass"));
         assert!(!message.contains("127.0.0.1:1"));
         assert!(!message.contains("/private"));
+    }
+
+    #[test]
+    fn redirect_status_is_rejected_with_sanitized_error() {
+        let error = HttpGetTool::validate_response_status(StatusCode::FOUND)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(error, "run error: http_get redirect blocked");
     }
 }
