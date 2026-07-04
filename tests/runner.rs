@@ -9,7 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures::{stream, Stream, StreamExt};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::{sync::Notify, time::timeout};
 
 use insight_agent_platform::{
@@ -22,7 +22,7 @@ use insight_agent_platform::{
     model::types::{ChatRequest, ChatStream, FakeModelClient, ModelClient},
     tools::{
         current_time::CurrentTimeTool,
-        registry::{default_tool_registry, ToolRegistry},
+        registry::{default_tool_registry, Tool, ToolContext, ToolRegistry},
     },
 };
 
@@ -141,6 +141,78 @@ fn default_tool_registry_registers_built_in_tools() {
 
     assert!(registry.get("current_time").is_some());
     assert!(registry.get("http_get").is_some());
+}
+
+#[derive(Clone, Copy)]
+struct FailingTool;
+
+#[async_trait]
+impl Tool for FailingTool {
+    fn name(&self) -> &'static str {
+        "failing_tool"
+    }
+
+    async fn call(&self, _args: Value, _ctx: ToolContext) -> Result<Value, AppError> {
+        Err(AppError::Run("tool failed deliberately".to_string()))
+    }
+}
+
+#[tokio::test]
+async fn tool_step_error_emits_error_event_and_stops_run() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![StepConfig {
+                id: "broken".to_string(),
+                kind: StepKind::Tool,
+                prompt_ref: None,
+                prompt: None,
+                system_prompt_ref: None,
+                system_prompt: None,
+                stream: false,
+                tool: Some("failing_tool".to_string()),
+                args: json!({}),
+            }],
+        },
+    };
+
+    let mut tools = ToolRegistry::default();
+    tools.register(FailingTool);
+    let engine = RunEngine::new(FakeModelClient::new(vec![]), tools);
+    let events: Vec<_> = engine.run(agent, json!({})).collect().await;
+
+    assert!(events
+        .iter()
+        .any(|event| event.kind == RunEventKind::ToolCallStarted));
+    assert!(!events
+        .iter()
+        .any(|event| event.kind == RunEventKind::ToolCallCompleted));
+    let error_event = events
+        .iter()
+        .find(|event| event.kind == RunEventKind::Error)
+        .unwrap();
+    assert_eq!(
+        error_event.payload["message"],
+        "run error: tool failed deliberately"
+    );
+    assert!(!events
+        .iter()
+        .any(|event| event.kind == RunEventKind::RunCompleted));
 }
 
 #[derive(Clone)]
