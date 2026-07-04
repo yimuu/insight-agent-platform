@@ -64,7 +64,7 @@ impl ModelClient for OpenAiModelClient {
         let stream = stream::try_unfold(
             StreamState {
                 bytes: Box::pin(response.bytes_stream()),
-                buffer: String::new(),
+                decoder: SseDecoder::default(),
                 pending: VecDeque::new(),
             },
             |mut state| async move {
@@ -75,8 +75,8 @@ impl ModelClient for OpenAiModelClient {
 
                     match state.bytes.next().await {
                         Some(Ok(bytes)) => {
-                            state.buffer.push_str(&String::from_utf8_lossy(&bytes));
-                            drain_sse_buffer(&mut state.buffer, &mut state.pending);
+                            let deltas = state.decoder.push(&bytes)?;
+                            state.pending.extend(deltas);
                         }
                         Some(Err(err)) => {
                             return Err(AppError::Upstream(format!(
@@ -84,7 +84,8 @@ impl ModelClient for OpenAiModelClient {
                             )));
                         }
                         None => {
-                            drain_sse_tail(&mut state.buffer, &mut state.pending);
+                            let deltas = state.decoder.finish()?;
+                            state.pending.extend(deltas);
                             if let Some(delta) = state.pending.pop_front() {
                                 return Ok(Some((delta, state)));
                             }
@@ -101,7 +102,7 @@ impl ModelClient for OpenAiModelClient {
 
 struct StreamState {
     bytes: ChatByteStream,
-    buffer: String,
+    decoder: SseDecoder,
     pending: VecDeque<String>,
 }
 
@@ -132,45 +133,70 @@ struct OpenAiDelta {
     content: Option<String>,
 }
 
-fn drain_sse_buffer(buffer: &mut String, pending: &mut VecDeque<String>) {
-    while let Some(newline_index) = buffer.find('\n') {
-        let mut line: String = buffer.drain(..=newline_index).collect();
-        if line.ends_with('\n') {
-            line.pop();
+#[derive(Default)]
+struct SseDecoder {
+    buffer: Vec<u8>,
+}
+
+impl SseDecoder {
+    fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, AppError> {
+        self.buffer.extend_from_slice(bytes);
+        self.drain_complete_lines()
+    }
+
+    fn finish(&mut self) -> Result<Vec<String>, AppError> {
+        let mut deltas = self.drain_complete_lines()?;
+        if self.buffer.is_empty() {
+            return Ok(deltas);
         }
-        if line.ends_with('\r') {
-            line.pop();
+
+        let line = std::mem::take(&mut self.buffer);
+        if !line.is_empty() {
+            deltas.extend(parse_sse_line_bytes(trim_trailing_carriage_return(&line))?);
         }
-        parse_sse_line(&line, pending);
+        Ok(deltas)
+    }
+
+    fn drain_complete_lines(&mut self) -> Result<Vec<String>, AppError> {
+        let mut deltas = Vec::new();
+        while let Some(newline_index) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            let mut line = self.buffer.drain(..=newline_index).collect::<Vec<_>>();
+            line.pop();
+            deltas.extend(parse_sse_line_bytes(trim_trailing_carriage_return(&line))?);
+        }
+        Ok(deltas)
     }
 }
 
-fn drain_sse_tail(buffer: &mut String, pending: &mut VecDeque<String>) {
-    if buffer.is_empty() {
-        return;
-    }
-
-    let line = std::mem::take(buffer);
-    parse_sse_line(line.trim_end_matches('\r'), pending);
+fn trim_trailing_carriage_return(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\r").unwrap_or(line)
 }
 
-fn parse_sse_line(line: &str, pending: &mut VecDeque<String>) {
-    let Some(payload) = line.strip_prefix("data: ") else {
-        return;
+fn parse_sse_line_bytes(line: &[u8]) -> Result<Vec<String>, AppError> {
+    if line.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let line = String::from_utf8(line.to_vec())
+        .map_err(|_| AppError::Upstream("invalid utf-8 in model stream".to_string()))?;
+    let Some(payload) = line.strip_prefix("data:") else {
+        return Ok(Vec::new());
     };
+    let payload = payload.trim_start();
     if payload == "[DONE]" {
-        return;
+        return Ok(Vec::new());
     }
-    let Ok(chunk) = serde_json::from_str::<OpenAiChunk>(payload) else {
-        return;
-    };
-    pending.extend(
+    let chunk = serde_json::from_str::<OpenAiChunk>(payload).map_err(|_| {
+        AppError::Upstream("invalid model stream payload".to_string())
+    })?;
+    Ok(
         chunk
             .choices
             .into_iter()
             .filter_map(|choice| choice.delta.content)
-            .filter(|content| !content.is_empty()),
-    );
+            .filter(|content| !content.is_empty())
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -182,8 +208,27 @@ mod tests {
         net::TcpListener,
     };
 
-    use super::OpenAiModelClient;
+    use super::{OpenAiModelClient, SseDecoder};
     use crate::model::types::{ChatMessage, ChatRequest, ModelClient};
+
+    #[test]
+    fn sse_decoder_handles_split_multibyte_utf8_across_chunks() {
+        let mut decoder = SseDecoder::default();
+
+        let first = decoder.push(&b"data: {\"choices\":[{\"delta\":{\"content\":\"H"[..]);
+        assert!(first.unwrap().is_empty());
+
+        let second = decoder.push(&[0xC3]);
+        assert!(second.unwrap().is_empty());
+
+        let third = decoder
+            .push(&[
+                0xA9, b'l', b'l', b'o', b'"', b'}', b'}', b']', b'}', b'\n', b'\n',
+            ])
+            .unwrap();
+
+        assert_eq!(third, vec!["H\u{e9}llo".to_string()]);
+    }
 
     #[tokio::test]
     async fn stream_chat_uses_default_model_for_empty_request_and_streams_content() {
@@ -219,11 +264,23 @@ mod tests {
                 .await
                 .unwrap();
             socket
-                .write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n")
+                .write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"H")
                 .await
                 .unwrap();
             socket
-                .write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\ndata: [DONE]\n\n")
+                .write_all(&[0xC3])
+                .await
+                .unwrap();
+            socket
+                .write_all(&[0xA9])
+                .await
+                .unwrap();
+            socket
+                .write_all(b"llo\"}}]}\n\n")
+                .await
+                .unwrap();
+            socket
+                .write_all(b"data: [DONE]\n\n")
                 .await
                 .unwrap();
         });
@@ -249,7 +306,70 @@ mod tests {
             chunks.push(chunk.unwrap());
         }
 
-        assert_eq!(chunks, vec!["Hel".to_string(), "lo".to_string()]);
+        assert_eq!(chunks, vec!["H\u{e9}llo".to_string()]);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_chat_returns_error_for_malformed_data_json() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0_u8; 2048];
+            let _ = socket.read(&mut buffer).await.unwrap();
+
+            socket
+                .write_all(
+                    concat!(
+                        "HTTP/1.1 200 OK\r\n",
+                        "content-type: text/event-stream\r\n",
+                        "connection: close\r\n",
+                        "\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            socket
+                .write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+                .await
+                .unwrap();
+            socket.write_all(b"data: {not json}\n\n").await.unwrap();
+        });
+
+        let client = OpenAiModelClient::new(
+            "secret-key".to_string(),
+            format!("http://{address}"),
+            "fallback-model".to_string(),
+        );
+        let request = ChatRequest {
+            model: String::new(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "Hi".to_string(),
+            }],
+            temperature: None,
+            max_tokens: None,
+        };
+
+        let mut stream = client.stream_chat(request).await.unwrap();
+        let first = stream.next().await.unwrap();
+        let error = match first {
+            Ok(token) => {
+                assert_eq!(token, "ok");
+                match stream.next().await.unwrap() {
+                    Ok(_) => panic!("expected malformed JSON error"),
+                    Err(error) => error,
+                }
+            }
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("invalid model stream payload"));
+        assert!(!message.contains("secret-key"));
+
         server.await.unwrap();
     }
 
