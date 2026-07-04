@@ -24,7 +24,7 @@ use crate::{
         event::{RunEvent, RunEventKind},
     },
     error::AppError,
-    model::types::{ChatMessage, ChatRequest, ModelClient},
+    model::types::{ChatContentPart, ChatMessage, ChatRequest, ModelClient},
     prompt::{renderer::PromptRenderer, store::PromptStore},
     tools::registry::{ToolContext, ToolRegistry},
 };
@@ -180,7 +180,11 @@ impl<M: ModelClient> RunEngine<M> {
         let user_prompt = self
             .renderer
             .render(prompt_template, &ctx.template_data())?;
-        messages.push(ChatMessage::text("user", user_prompt));
+        messages.push(build_user_message(
+            user_prompt,
+            step.image_input.as_deref(),
+            ctx,
+        )?);
 
         let request = ChatRequest {
             model: model_config.model.clone().unwrap_or_default(),
@@ -399,4 +403,45 @@ fn resolve_optional_prompt(
             "system prompt requires either system_prompt or system_prompt_ref".to_string(),
         )),
     }
+}
+
+fn build_user_message(
+    prompt: String,
+    image_input: Option<&str>,
+    ctx: &RunContext,
+) -> Result<ChatMessage, AppError> {
+    let Some(path) = image_input else {
+        return Ok(ChatMessage::text("user", prompt));
+    };
+    let images = resolve_image_input(path, ctx)?;
+    if images.is_empty() {
+        return Ok(ChatMessage::text("user", prompt));
+    }
+
+    let mut parts = Vec::with_capacity(images.len() + 1);
+    parts.push(ChatContentPart::text(prompt));
+    parts.extend(images.into_iter().map(ChatContentPart::image_url));
+    Ok(ChatMessage::multimodal("user", parts))
+}
+
+fn resolve_image_input(path: &str, ctx: &RunContext) -> Result<Vec<String>, AppError> {
+    if path != "input.images" {
+        return Err(AppError::Config(format!(
+            "unsupported image_input path '{path}'"
+        )));
+    }
+
+    let Some(images) = ctx.input.get("images") else {
+        return Ok(Vec::new());
+    };
+    let Some(images) = images.as_array() else {
+        return Err(AppError::Run(
+            "image_input 'input.images' must be an array".to_string(),
+        ));
+    };
+
+    Ok(images
+        .iter()
+        .filter_map(|image| image.as_str().map(str::to_string))
+        .collect())
 }

@@ -53,6 +53,7 @@ async fn prompt_step_renders_and_completes_run() {
                 prompt: Some("Hello {{ input.name }}".to_string()),
                 system_prompt_ref: None,
                 system_prompt: None,
+                image_input: None,
                 stream: false,
                 tool: None,
                 args: serde_json::Value::Null,
@@ -106,6 +107,7 @@ async fn tool_step_emits_tool_events_and_stores_output() {
                 prompt: None,
                 system_prompt_ref: None,
                 system_prompt: None,
+                image_input: None,
                 stream: false,
                 tool: Some("current_time".to_string()),
                 args: json!({"timezone":"Asia/Shanghai"}),
@@ -184,6 +186,7 @@ async fn tool_step_error_emits_error_event_and_stops_run() {
                 prompt: None,
                 system_prompt_ref: None,
                 system_prompt: None,
+                image_input: None,
                 stream: false,
                 tool: Some("failing_tool".to_string()),
                 args: json!({}),
@@ -348,6 +351,74 @@ impl ModelClient for BlockingModelClient {
 }
 
 #[tokio::test]
+async fn llm_step_attaches_input_images_to_user_message_when_configured() {
+    let model = RecordingModelClient::new();
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![StepConfig {
+                id: "vision".to_string(),
+                kind: StepKind::Llm,
+                prompt_ref: None,
+                prompt: Some("Read {{ input.report_text }}".to_string()),
+                system_prompt_ref: None,
+                system_prompt: None,
+                image_input: Some("input.images".to_string()),
+                stream: true,
+                tool: None,
+                args: serde_json::Value::Null,
+            }],
+        },
+    };
+
+    let engine = RunEngine::new(model.clone(), ToolRegistry::default());
+    let events: Vec<_> = engine
+        .run(
+            agent,
+            json!({
+                "report_text": "hemoglobin low",
+                "images": [
+                    "https://example.com/report.png",
+                    "data:image/png;base64,abc123"
+                ]
+            }),
+        )
+        .collect()
+        .await;
+
+    assert!(events
+        .iter()
+        .any(|event| event.kind == RunEventKind::RunCompleted));
+    let requests = model.take_requests();
+    let message = &requests[0].messages[0];
+    let value = serde_json::to_value(message).unwrap();
+    assert_eq!(value["content"][0]["text"], "Read hemoglobin low");
+    assert_eq!(
+        value["content"][1]["image_url"]["url"],
+        "https://example.com/report.png"
+    );
+    assert_eq!(
+        value["content"][2]["image_url"]["url"],
+        "data:image/png;base64,abc123"
+    );
+}
+
+#[tokio::test]
 async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
     let agent = LoadedAgent {
         root: std::path::PathBuf::from("agents/test"),
@@ -375,6 +446,7 @@ async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
                     prompt: Some("Hello {{ input.name }}".to_string()),
                     system_prompt_ref: None,
                     system_prompt: None,
+                    image_input: None,
                     stream: false,
                     tool: None,
                     args: serde_json::Value::Null,
@@ -386,6 +458,7 @@ async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
                     prompt: Some("Respond to {{ steps.hello.output }}".to_string()),
                     system_prompt_ref: None,
                     system_prompt: None,
+                    image_input: None,
                     stream: true,
                     tool: None,
                     args: serde_json::Value::Null,
@@ -475,6 +548,7 @@ async fn llm_step_passes_empty_model_when_agent_model_is_absent() {
                 prompt: Some("Hello {{ input.name }}".to_string()),
                 system_prompt_ref: None,
                 system_prompt: None,
+                image_input: None,
                 stream: true,
                 tool: None,
                 args: serde_json::Value::Null,
@@ -521,6 +595,7 @@ async fn llm_step_streams_token_delta_events_and_final_output() {
                 prompt: Some("Answer {{ input.question }}".to_string()),
                 system_prompt_ref: None,
                 system_prompt: Some("You are concise.".to_string()),
+                image_input: None,
                 stream: true,
                 tool: None,
                 args: serde_json::Value::Null,
@@ -575,6 +650,7 @@ async fn dropping_stream_stops_run_before_llm_work_starts() {
                 prompt: Some("Hello {{ input.name }}".to_string()),
                 system_prompt_ref: None,
                 system_prompt: None,
+                image_input: None,
                 stream: true,
                 tool: None,
                 args: serde_json::Value::Null,
@@ -619,6 +695,7 @@ async fn dropping_stream_cancels_in_flight_model_request() {
                 prompt: Some("Hello {{ input.name }}".to_string()),
                 system_prompt_ref: None,
                 system_prompt: None,
+                image_input: None,
                 stream: true,
                 tool: None,
                 args: serde_json::Value::Null,

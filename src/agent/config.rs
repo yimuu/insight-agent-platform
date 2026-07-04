@@ -48,6 +48,8 @@ pub struct StepConfig {
     #[serde(default)]
     pub system_prompt: Option<String>,
     #[serde(default)]
+    pub image_input: Option<String>,
+    #[serde(default)]
     pub stream: bool,
     #[serde(default)]
     pub tool: Option<String>,
