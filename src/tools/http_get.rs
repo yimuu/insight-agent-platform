@@ -128,8 +128,12 @@ impl Tool for HttpGetTool {
         let mut body = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk =
-                chunk.map_err(|err| AppError::Run(format!("http_get read failed: {err}")))?;
+            let chunk = chunk.map_err(|err| {
+                AppError::Run(format!(
+                    "http_get read failed ({})",
+                    Self::classify_request_error(&err)
+                ))
+            })?;
             if body.len() + chunk.len() > self.max_bytes {
                 return Err(AppError::Run("http_get response too large".to_string()));
             }
