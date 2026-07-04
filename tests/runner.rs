@@ -356,6 +356,57 @@ async fn llm_step_passes_empty_model_when_agent_model_is_absent() {
 }
 
 #[tokio::test]
+async fn llm_step_streams_token_delta_events_and_final_output() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model: Some("fake".to_string()),
+                temperature: Some(0.2),
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![StepConfig {
+                id: "answer".to_string(),
+                kind: StepKind::Llm,
+                prompt_ref: None,
+                prompt: Some("Answer {{ input.question }}".to_string()),
+                system_prompt_ref: None,
+                system_prompt: Some("You are concise.".to_string()),
+                stream: true,
+                tool: None,
+                args: serde_json::Value::Null,
+            }],
+        },
+    };
+
+    let engine = RunEngine::new(FakeModelClient::new(vec!["Hel", "lo"]), ToolRegistry::default());
+    let events: Vec<_> = engine.run(agent, json!({"question":"Q"})).collect().await;
+
+    let deltas: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == RunEventKind::TokenDelta)
+        .map(|event| event.payload["delta"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(deltas, vec!["Hel", "lo"]);
+
+    let completed = events
+        .iter()
+        .find(|event| event.kind == RunEventKind::RunCompleted)
+        .unwrap();
+    assert_eq!(completed.payload["output"], "Hello");
+}
+
+#[tokio::test]
 async fn dropping_stream_stops_run_before_llm_work_starts() {
     let agent = LoadedAgent {
         root: std::path::PathBuf::from("agents/test"),
