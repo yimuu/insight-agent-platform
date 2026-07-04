@@ -1,0 +1,68 @@
+id: medical_report_interpreter
+name: Medical Report Interpreter
+description: Interpret medical report text and images with abnormal indicator analysis, synthesis, and health advice.
+
+model:
+  provider: openai_compatible
+  model: qwen-vl-plus
+  temperature: 0.2
+
+input:
+  schema:
+    type: object
+    required: [report_text, images, messages, question]
+    additionalProperties: false
+    properties:
+      report_text:
+        type: string
+        description: OCR text or manually entered report text. Use an empty string when only images are provided.
+      images:
+        type: array
+        description: HTTPS image URLs or base64 data URLs.
+        items:
+          type: string
+          pattern: "^(https://|data:image/)"
+      messages:
+        type: array
+        description: Prior conversation messages supplied by the caller.
+        items:
+          type: object
+          required: [role, content]
+          additionalProperties: false
+          properties:
+            role:
+              type: string
+              enum: [user, assistant]
+            content:
+              type: string
+      question:
+        type: string
+        description: Current follow-up question. Use an empty string for the initial interpretation.
+
+prompts:
+  system: prompts/system.md
+  abnormal_indicators: prompts/abnormal_indicators.md
+  comprehensive_interpretation: prompts/comprehensive_interpretation.md
+  health_advice: prompts/health_advice.md
+
+steps:
+  - id: abnormal_indicators
+    type: llm
+    system_prompt_ref: system
+    prompt_ref: abnormal_indicators
+    image_input: input.images
+    stream: true
+
+  - id: comprehensive_interpretation
+    type: llm
+    system_prompt_ref: system
+    prompt_ref: comprehensive_interpretation
+    image_input: input.images
+    stream: true
+
+  - id: health_advice
+    type: llm
+    system_prompt_ref: system
+    prompt_ref: health_advice
+    image_input: input.images
+    stream: true

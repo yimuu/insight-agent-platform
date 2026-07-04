@@ -8,6 +8,23 @@ fn write_file(path: &Path, body: &str) {
 }
 
 #[test]
+fn loads_medical_report_interpreter_agent() {
+    let agents = load_agents(Path::new("agents")).unwrap();
+    let agent = agents
+        .iter()
+        .find(|agent| agent.config.id == "medical_report_interpreter")
+        .unwrap();
+
+    assert_eq!(agent.config.steps.len(), 3);
+    assert_eq!(agent.config.steps[0].id, "abnormal_indicators");
+    assert_eq!(
+        agent.config.steps[0].image_input.as_deref(),
+        Some("input.images")
+    );
+    assert!(agent.prompts.contains_key("health_advice"));
+}
+
+#[test]
 fn loads_agent_with_multiple_prompt_files() {
     let dir = tempfile::tempdir().unwrap();
     let agent = dir.path().join("researcher");
