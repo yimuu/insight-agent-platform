@@ -1,0 +1,103 @@
+use std::{convert::Infallible, sync::Arc};
+
+use axum::{
+    extract::{Path, State},
+    response::{
+        sse::{Event, Sse},
+        IntoResponse,
+    },
+    routing::{get, post},
+    Json, Router,
+};
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::{
+    agent::{loader::LoadedAgent, registry::AgentRegistry},
+    api::sse::encode_event,
+    engine::runner::RunEngine,
+    error::AppError,
+    model::types::ModelClient,
+};
+
+#[derive(Clone)]
+pub struct AppState<M: ModelClient> {
+    pub registry: AgentRegistry,
+    pub engine: RunEngine<M>,
+}
+
+pub fn build_router<M: ModelClient>(state: AppState<M>) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/v1/agents", get(list_agents::<M>))
+        .route("/v1/agents/:agent_id", get(get_agent::<M>))
+        .route(
+            "/v1/agents/:agent_id/runs/stream",
+            post(run_agent_stream::<M>),
+        )
+        .with_state(Arc::new(state))
+}
+
+async fn health() -> Json<Value> {
+    Json(json!({ "status": "ok" }))
+}
+
+async fn list_agents<M: ModelClient>(
+    State(state): State<Arc<AppState<M>>>,
+) -> Json<Vec<AgentSummary>> {
+    Json(state.registry.list().map(AgentSummary::from).collect())
+}
+
+async fn get_agent<M: ModelClient>(
+    State(state): State<Arc<AppState<M>>>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AgentSummary>, AppError> {
+    let agent = state
+        .registry
+        .get(&agent_id)
+        .ok_or_else(|| AppError::NotFound(format!("agent '{agent_id}' not found")))?;
+    Ok(Json(AgentSummary::from(agent)))
+}
+
+#[derive(Debug, Deserialize)]
+struct RunRequest {
+    input: Value,
+}
+
+async fn run_agent_stream<M: ModelClient>(
+    State(state): State<Arc<AppState<M>>>,
+    Path(agent_id): Path<String>,
+    Json(request): Json<RunRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let agent = state
+        .registry
+        .get(&agent_id)
+        .ok_or_else(|| AppError::NotFound(format!("agent '{agent_id}' not found")))?
+        .clone();
+
+    let stream = state.engine.run(agent, request.input).map(|event| {
+        Ok::<Event, Infallible>(encode_event(event).expect("run events must serialize to JSON"))
+    });
+
+    Ok(Sse::new(stream))
+}
+
+#[derive(Debug, Serialize)]
+struct AgentSummary {
+    id: String,
+    name: String,
+    description: String,
+    input_schema: Value,
+}
+
+impl From<&LoadedAgent> for AgentSummary {
+    fn from(agent: &LoadedAgent) -> Self {
+        Self {
+            id: agent.config.id.clone(),
+            name: agent.config.name.clone(),
+            description: agent.config.description.clone(),
+            input_schema: agent.config.input.schema.clone(),
+        }
+    }
+}
