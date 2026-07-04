@@ -216,6 +216,58 @@ steps:
 }
 
 #[test]
+fn rejects_unsupported_image_input_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("bad");
+    write_file(
+        &agent.join("agent.yaml"),
+        r#"
+id: bad
+name: Bad
+model:
+  provider: openai_compatible
+input:
+  schema:
+    type: object
+steps:
+  - id: answer
+    type: llm
+    prompt: hello
+    image_input: input.report_images
+"#,
+    );
+
+    let err = load_agents(dir.path()).unwrap_err().to_string();
+    assert!(err.contains("unsupported image_input"));
+}
+
+#[test]
+fn rejects_image_input_on_non_llm_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("bad");
+    write_file(
+        &agent.join("agent.yaml"),
+        r#"
+id: bad
+name: Bad
+model:
+  provider: openai_compatible
+input:
+  schema:
+    type: object
+steps:
+  - id: render
+    type: prompt
+    prompt: hello
+    image_input: input.images
+"#,
+    );
+
+    let err = load_agents(dir.path()).unwrap_err().to_string();
+    assert!(err.contains("image_input is only supported on llm steps"));
+}
+
+#[test]
 fn rejects_prompt_path_outside_agent_directory() {
     let dir = tempfile::tempdir().unwrap();
     write_file(&dir.path().join("secret.md"), "secret");

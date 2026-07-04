@@ -98,6 +98,21 @@ fn validate_agent_config(agent_root: &Path, config: &AgentConfig) -> Result<(), 
             )));
         }
 
+        if let Some(image_input) = &step.image_input {
+            if step.kind != StepKind::Llm {
+                return Err(AppError::Config(format!(
+                    "step '{}' image_input is only supported on llm steps",
+                    step.id
+                )));
+            }
+            if image_input != "input.images" {
+                return Err(AppError::Config(format!(
+                    "step '{}' unsupported image_input '{}'",
+                    step.id, image_input
+                )));
+            }
+        }
+
         match step.kind {
             StepKind::Prompt => {
                 if step.prompt_source().is_none() {
