@@ -10,6 +10,7 @@ use axum::{
     Json, Router,
 };
 use futures::{future, StreamExt};
+use jsonschema::JSONSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -78,6 +79,20 @@ async fn run_agent_stream<M: ModelClient>(
         .get(&agent_id)
         .ok_or_else(|| AppError::NotFound(format!("agent '{agent_id}' not found")))?
         .clone();
+
+    let compiled_schema = JSONSchema::compile(&agent.config.input.schema).map_err(|err| {
+        AppError::Config(format!(
+            "invalid input schema for agent '{agent_id}': {err}"
+        ))
+    })?;
+
+    if let Err(errors) = compiled_schema.validate(&request.input) {
+        let messages = errors.map(|err| err.to_string()).collect::<Vec<_>>();
+        return Err(AppError::Input(format!(
+            "input validation failed: {}",
+            messages.join("; ")
+        )));
+    }
 
     let event_encoder = state.event_encoder;
     let stream = state

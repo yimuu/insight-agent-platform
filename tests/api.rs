@@ -22,6 +22,16 @@ use insight_agent_platform::{
     tools::registry::ToolRegistry,
 };
 
+fn prompt_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": { "type": "string" }
+        }
+    })
+}
+
 fn prompt_agent() -> LoadedAgent {
     LoadedAgent {
         root: std::path::PathBuf::from("agents/test"),
@@ -38,7 +48,7 @@ fn prompt_agent() -> LoadedAgent {
                 options: serde_json::Value::Null,
             },
             input: InputConfig {
-                schema: json!({"type":"object"}),
+                schema: prompt_input_schema(),
             },
             prompts: Default::default(),
             steps: vec![StepConfig {
@@ -162,7 +172,7 @@ async fn lists_agents_without_prompt_contents() {
         .expect("expected test agent in list");
     assert_eq!(test_agent["name"], "Test");
     assert_eq!(test_agent["description"], "Test agent");
-    assert_eq!(test_agent["input_schema"], json!({"type":"object"}));
+    assert_eq!(test_agent["input_schema"], prompt_input_schema());
     assert!(test_agent.get("steps").is_none());
     assert!(test_agent.get("prompts").is_none());
     assert!(!String::from_utf8_lossy(&body).contains("Hello {{ input.name }}"));
@@ -185,7 +195,7 @@ async fn gets_agent_without_prompt_contents() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let agent: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(agent["id"], "test");
-    assert_eq!(agent["input_schema"], json!({"type":"object"}));
+    assert_eq!(agent["input_schema"], prompt_input_schema());
     assert!(agent.get("steps").is_none());
     assert!(agent.get("prompts").is_none());
     assert!(!String::from_utf8_lossy(&body).contains("Hello {{ input.name }}"));
@@ -234,6 +244,31 @@ async fn streams_agent_run_as_sse() {
         .expect("expected run_completed frame");
     assert_eq!(run_completed.data["kind"], "run_completed");
     assert_eq!(run_completed.data["payload"]["output"], "Hello Ada");
+}
+
+#[tokio::test]
+async fn invalid_input_returns_400_before_sse() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/test/runs/stream")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"input":"not-object"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_ne!(
+        response.headers().get("content-type").unwrap(),
+        "text/event-stream"
+    );
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "input_error");
 }
 
 #[tokio::test]

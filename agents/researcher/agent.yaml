@@ -1,0 +1,40 @@
+id: researcher
+name: Research Assistant
+description: Research and answer questions with a plan-first flow.
+
+model:
+  provider: openai_compatible
+  model: qwen3.6-flash
+  temperature: 0.3
+
+input:
+  schema:
+    type: object
+    required: [question]
+    properties:
+      question:
+        type: string
+
+prompts:
+  system: prompts/system.md
+  planner: prompts/planner.md
+  final: prompts/final.md
+
+steps:
+  - id: plan
+    type: llm
+    system_prompt_ref: system
+    prompt_ref: planner
+    stream: true
+
+  - id: now
+    type: tool
+    tool: current_time
+    args:
+      timezone: Asia/Shanghai
+
+  - id: answer
+    type: llm
+    system_prompt_ref: system
+    prompt_ref: final
+    stream: true
