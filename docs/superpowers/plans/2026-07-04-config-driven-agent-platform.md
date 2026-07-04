@@ -259,7 +259,7 @@ Run:
 cargo check
 ```
 
-Expected: success with all modules missing errors at first because module files are not present.
+Expected: FAIL with missing module file errors because module files are not present yet.
 
 - [ ] **Step 4: Add initial module files to satisfy exports**
 
