@@ -79,9 +79,7 @@ impl ModelClient for OpenAiModelClient {
                             state.pending.extend(deltas);
                         }
                         Some(Err(err)) => {
-                            return Err(AppError::Upstream(format!(
-                                "model stream failed: {err}"
-                            )));
+                            return Err(AppError::Upstream(format!("model stream failed: {err}")));
                         }
                         None => {
                             let deltas = state.decoder.finish()?;
@@ -186,17 +184,14 @@ fn parse_sse_line_bytes(line: &[u8]) -> Result<Vec<String>, AppError> {
     if payload == "[DONE]" {
         return Ok(Vec::new());
     }
-    let chunk = serde_json::from_str::<OpenAiChunk>(payload).map_err(|_| {
-        AppError::Upstream("invalid model stream payload".to_string())
-    })?;
-    Ok(
-        chunk
-            .choices
-            .into_iter()
-            .filter_map(|choice| choice.delta.content)
-            .filter(|content| !content.is_empty())
-            .collect(),
-    )
+    let chunk = serde_json::from_str::<OpenAiChunk>(payload)
+        .map_err(|_| AppError::Upstream("invalid model stream payload".to_string()))?;
+    Ok(chunk
+        .choices
+        .into_iter()
+        .filter_map(|choice| choice.delta.content)
+        .filter(|content| !content.is_empty())
+        .collect())
 }
 
 #[cfg(test)]
@@ -267,22 +262,10 @@ mod tests {
                 .write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"H")
                 .await
                 .unwrap();
-            socket
-                .write_all(&[0xC3])
-                .await
-                .unwrap();
-            socket
-                .write_all(&[0xA9])
-                .await
-                .unwrap();
-            socket
-                .write_all(b"llo\"}}]}\n\n")
-                .await
-                .unwrap();
-            socket
-                .write_all(b"data: [DONE]\n\n")
-                .await
-                .unwrap();
+            socket.write_all(&[0xC3]).await.unwrap();
+            socket.write_all(&[0xA9]).await.unwrap();
+            socket.write_all(b"llo\"}}]}\n\n").await.unwrap();
+            socket.write_all(b"data: [DONE]\n\n").await.unwrap();
         });
 
         let client = OpenAiModelClient::new(
