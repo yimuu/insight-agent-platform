@@ -67,18 +67,19 @@ async fn prompt_step_renders_and_completes_run() {
 
     assert!(events
         .iter()
-        .any(|event| event.kind == RunEventKind::RunStarted));
+        .any(|event| event.event == RunEventKind::RunStarted));
     assert!(events
         .iter()
-        .any(|event| event.kind == RunEventKind::StepStarted));
+        .any(|event| event.event == RunEventKind::StepStarted));
     assert!(events
         .iter()
-        .any(|event| event.kind == RunEventKind::StepCompleted));
+        .any(|event| event.event == RunEventKind::StepCompleted));
     let completed = events
         .iter()
-        .find(|event| event.kind == RunEventKind::RunCompleted)
+        .find(|event| event.event == RunEventKind::RunCompleted)
         .unwrap();
-    assert_eq!(completed.payload["output"], "Hello Ada");
+    assert_eq!(completed.content, "");
+    assert!(completed.result.is_null());
 }
 
 #[tokio::test]
@@ -124,19 +125,16 @@ async fn tool_step_emits_tool_events_and_stores_output() {
 
     assert!(events
         .iter()
-        .any(|event| event.kind == RunEventKind::ToolCallStarted));
+        .any(|event| event.event == RunEventKind::ToolCallStarted));
     assert!(events
         .iter()
-        .any(|event| event.kind == RunEventKind::ToolCallCompleted));
+        .any(|event| event.event == RunEventKind::ToolCallCompleted));
     let completed = events
         .iter()
-        .find(|event| event.kind == RunEventKind::RunCompleted)
+        .find(|event| event.event == RunEventKind::RunCompleted)
         .unwrap();
-    assert_eq!(completed.payload["output"]["timezone"], "Asia/Shanghai");
-    assert!(completed.payload["output"]["iso8601"]
-        .as_str()
-        .unwrap()
-        .contains('+'));
+    assert_eq!(completed.content, "");
+    assert!(completed.result.is_null());
 }
 
 #[test]
@@ -204,21 +202,20 @@ async fn tool_step_error_emits_error_event_and_stops_run() {
 
     assert!(events
         .iter()
-        .any(|event| event.kind == RunEventKind::ToolCallStarted));
+        .any(|event| event.event == RunEventKind::ToolCallStarted));
     assert!(!events
         .iter()
-        .any(|event| event.kind == RunEventKind::ToolCallCompleted));
+        .any(|event| event.event == RunEventKind::ToolCallCompleted));
     let error_event = events
         .iter()
-        .find(|event| event.kind == RunEventKind::Error)
+        .find(|event| event.event == RunEventKind::Error)
         .unwrap();
-    assert_eq!(
-        error_event.payload["message"],
-        "run error: tool failed deliberately"
-    );
+    assert_eq!(error_event.message, "run error: tool failed deliberately");
+    assert_eq!(error_event.content, "");
+    assert!(error_event.result.is_null());
     assert!(!events
         .iter()
-        .any(|event| event.kind == RunEventKind::RunCompleted));
+        .any(|event| event.event == RunEventKind::RunCompleted));
 }
 
 #[derive(Clone)]
@@ -407,7 +404,7 @@ async fn llm_step_attaches_input_images_to_user_message_when_configured() {
 
     assert!(events
         .iter()
-        .any(|event| event.kind == RunEventKind::RunCompleted));
+        .any(|event| event.event == RunEventKind::RunCompleted));
     let requests = model.take_requests();
     let message = &requests[0].messages[0];
     let value = serde_json::to_value(message).unwrap();
@@ -481,7 +478,7 @@ async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
             .await
             .unwrap()
             .unwrap()
-            .kind,
+            .event,
         RunEventKind::RunStarted
     );
     assert_eq!(
@@ -489,7 +486,7 @@ async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
             .await
             .unwrap()
             .unwrap()
-            .kind,
+            .event,
         RunEventKind::StepStarted
     );
     assert_eq!(
@@ -497,14 +494,14 @@ async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
             .await
             .unwrap()
             .unwrap()
-            .kind,
+            .event,
         RunEventKind::StepCompleted
     );
     let llm_started = timeout(Duration::from_millis(100), events.next())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(llm_started.kind, RunEventKind::StepStarted);
+    assert_eq!(llm_started.event, RunEventKind::StepStarted);
     assert_eq!(llm_started.step_id.as_deref(), Some("answer"));
 
     assert!(timeout(Duration::from_millis(50), events.next())
@@ -517,13 +514,14 @@ async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(token.kind, RunEventKind::TokenDelta);
-    assert_eq!(token.payload["delta"], "chunk-1");
+    assert_eq!(token.event, RunEventKind::TokenDelta);
+    assert_eq!(token.content, "chunk-1");
+    assert!(token.result.is_null());
 
     let rest: Vec<_> = events.collect().await;
     assert!(rest
         .iter()
-        .any(|event| event.kind == RunEventKind::RunCompleted));
+        .any(|event| event.event == RunEventKind::RunCompleted));
 }
 
 #[tokio::test]
@@ -568,7 +566,7 @@ async fn llm_step_passes_empty_model_when_agent_model_is_absent() {
 
     assert!(events
         .iter()
-        .any(|event| event.kind == RunEventKind::RunCompleted));
+        .any(|event| event.event == RunEventKind::RunCompleted));
     let requests = model.take_requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].model, "");
@@ -618,16 +616,17 @@ async fn llm_step_streams_token_delta_events_and_final_output() {
 
     let deltas: Vec<_> = events
         .iter()
-        .filter(|event| event.kind == RunEventKind::TokenDelta)
-        .map(|event| event.payload["delta"].as_str().unwrap().to_string())
+        .filter(|event| event.event == RunEventKind::TokenDelta)
+        .map(|event| event.content.clone())
         .collect();
     assert_eq!(deltas, vec!["Hel", "lo"]);
 
     let completed = events
         .iter()
-        .find(|event| event.kind == RunEventKind::RunCompleted)
+        .find(|event| event.event == RunEventKind::RunCompleted)
         .unwrap();
-    assert_eq!(completed.payload["output"], "Hello");
+    assert_eq!(completed.content, "");
+    assert!(completed.result.is_null());
 }
 
 #[tokio::test]
@@ -721,14 +720,14 @@ async fn dropping_stream_cancels_in_flight_model_request() {
             .await
             .unwrap()
             .unwrap()
-            .kind,
+            .event,
         RunEventKind::RunStarted
     );
     let step_started = timeout(Duration::from_millis(100), events.next())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(step_started.kind, RunEventKind::StepStarted);
+    assert_eq!(step_started.event, RunEventKind::StepStarted);
 
     timeout(Duration::from_millis(100), model.wait_until_started())
         .await

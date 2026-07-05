@@ -20,6 +20,7 @@ use crate::{
     engine::runner::RunEngine,
     error::AppError,
     model::types::ModelClient,
+    response::ApiResponse,
 };
 
 pub type EventEncoder = fn(crate::engine::event::RunEvent) -> Result<Event, AppError>;
@@ -43,25 +44,27 @@ pub fn build_router<M: ModelClient>(state: AppState<M>) -> Router {
         .with_state(Arc::new(state))
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({ "status": "ok" }))
+async fn health() -> Json<ApiResponse<Value>> {
+    Json(ApiResponse::ok(json!({ "status": "ok" })))
 }
 
 async fn list_agents<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
-) -> Json<Vec<AgentSummary>> {
-    Json(state.registry.list().map(AgentSummary::from).collect())
+) -> Json<ApiResponse<Vec<AgentSummary>>> {
+    Json(ApiResponse::ok(
+        state.registry.list().map(AgentSummary::from).collect(),
+    ))
 }
 
 async fn get_agent<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
     Path(agent_id): Path<String>,
-) -> Result<Json<AgentSummary>, AppError> {
+) -> Result<Json<ApiResponse<AgentSummary>>, AppError> {
     let agent = state
         .registry
         .get(&agent_id)
         .ok_or_else(|| AppError::NotFound(format!("agent '{agent_id}' not found")))?;
-    Ok(Json(AgentSummary::from(agent)))
+    Ok(Json(ApiResponse::ok(AgentSummary::from(agent))))
 }
 
 #[derive(Debug, Deserialize)]

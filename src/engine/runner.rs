@@ -7,7 +7,7 @@ use std::{
 
 use chrono::Utc;
 use futures::{Stream, StreamExt};
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -78,7 +78,7 @@ impl<M: ModelClient> RunEngine<M> {
             model = ?agent.config.model.model,
             "agent run started"
         );
-        if !events.emit(&ctx, None, RunEventKind::RunStarted, json!({})) {
+        if !events.emit(&ctx, None, RunEventKind::RunStarted) {
             return;
         }
 
@@ -91,12 +91,7 @@ impl<M: ModelClient> RunEngine<M> {
                 step_type = ?step.kind,
                 "agent step started"
             );
-            if !events.emit(
-                &ctx,
-                Some(&step.id),
-                RunEventKind::StepStarted,
-                json!({ "step_type": step.kind }),
-            ) {
+            if !events.emit(&ctx, Some(&step.id), RunEventKind::StepStarted) {
                 return;
             }
             match self
@@ -113,31 +108,23 @@ impl<M: ModelClient> RunEngine<M> {
                         output = %summarize_value(&output),
                         "agent step completed"
                     );
-                    if !events.emit(
-                        &ctx,
-                        Some(&step.id),
-                        RunEventKind::StepCompleted,
-                        json!({ "output": output }),
-                    ) {
+                    if !events.emit(&ctx, Some(&step.id), RunEventKind::StepCompleted) {
                         return;
                     }
                 }
                 Ok(None) => return,
                 Err(err) => {
+                    let code = err.api_code();
+                    let message = err.to_string();
                     tracing::error!(
                         run_id = %ctx.run_id,
                         agent_id = %ctx.agent_id,
                         step_id = %step.id,
                         elapsed_ms = step_started.elapsed().as_millis(),
-                        error = %err,
+                        error = %message,
                         "agent step failed"
                     );
-                    let _ = events.emit(
-                        &ctx,
-                        Some(&step.id),
-                        RunEventKind::Error,
-                        json!({ "message": err.to_string() }),
-                    );
+                    let _ = events.emit_error(&ctx, Some(&step.id), code, message);
                     return;
                 }
             }
@@ -150,12 +137,7 @@ impl<M: ModelClient> RunEngine<M> {
             .and_then(|step| ctx.step_outputs.get(&step.id))
             .cloned()
             .unwrap_or(Value::Null);
-        let _ = events.emit(
-            &ctx,
-            None,
-            RunEventKind::RunCompleted,
-            json!({ "output": output }),
-        );
+        let _ = events.emit(&ctx, None, RunEventKind::RunCompleted);
         tracing::info!(
             run_id = %ctx.run_id,
             agent_id = %ctx.agent_id,
@@ -281,12 +263,7 @@ impl<M: ModelClient> RunEngine<M> {
             }
             chunks_count += 1;
             output.push_str(&delta);
-            if !events.emit(
-                ctx,
-                Some(&step.id),
-                RunEventKind::TokenDelta,
-                json!({ "delta": delta }),
-            ) {
+            if !events.emit_content(ctx, Some(&step.id), RunEventKind::TokenDelta, delta) {
                 return Ok(None);
             }
         }
@@ -328,12 +305,7 @@ impl<M: ModelClient> RunEngine<M> {
             tool = %tool_name,
             "tool call started"
         );
-        if !events.emit(
-            ctx,
-            Some(&step.id),
-            RunEventKind::ToolCallStarted,
-            json!({ "tool": tool_name }),
-        ) {
+        if !events.emit(ctx, Some(&step.id), RunEventKind::ToolCallStarted) {
             return Ok(None);
         }
 
@@ -359,12 +331,7 @@ impl<M: ModelClient> RunEngine<M> {
             output = %summarize_value(&output),
             "tool call completed"
         );
-        if !events.emit(
-            ctx,
-            Some(&step.id),
-            RunEventKind::ToolCallCompleted,
-            json!({ "tool": tool_name, "output": output.clone() }),
-        ) {
+        if !events.emit(ctx, Some(&step.id), RunEventKind::ToolCallCompleted) {
             return Ok(None);
         }
         Ok(Some(output))
@@ -424,22 +391,44 @@ impl EventSender {
         Self { tx, cancel_rx }
     }
 
-    fn emit(
+    fn emit(&self, ctx: &RunContext, step_id: Option<&str>, event: RunEventKind) -> bool {
+        self.emit_content(ctx, step_id, event, String::new())
+    }
+
+    fn emit_content(
         &self,
         ctx: &RunContext,
         step_id: Option<&str>,
-        kind: RunEventKind,
-        payload: Value,
+        event: RunEventKind,
+        content: impl Into<String>,
     ) -> bool {
         self.tx
-            .send(RunEvent {
-                kind,
-                run_id: ctx.run_id.clone(),
-                agent_id: ctx.agent_id.clone(),
-                step_id: step_id.map(str::to_string),
-                timestamp: Utc::now(),
-                payload,
-            })
+            .send(RunEvent::ok(
+                event,
+                ctx.run_id.clone(),
+                ctx.agent_id.clone(),
+                step_id.map(str::to_string),
+                content,
+                Value::Null,
+            ))
+            .is_ok()
+    }
+
+    fn emit_error(
+        &self,
+        ctx: &RunContext,
+        step_id: Option<&str>,
+        code: i32,
+        message: impl Into<String>,
+    ) -> bool {
+        self.tx
+            .send(RunEvent::error(
+                ctx.run_id.clone(),
+                ctx.agent_id.clone(),
+                step_id.map(str::to_string),
+                code,
+                message,
+            ))
             .is_ok()
     }
 

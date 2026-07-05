@@ -5,4 +5,5 @@ pub mod engine;
 pub mod error;
 pub mod model;
 pub mod prompt;
+pub mod response;
 pub mod tools;

@@ -3,8 +3,13 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde_json::Value;
 use thiserror::Error;
+
+use crate::response::{
+    ApiResponse, CODE_CONFIG_ERROR, CODE_INPUT_ERROR, CODE_NOT_FOUND, CODE_RUN_ERROR,
+    CODE_UPSTREAM_ERROR,
+};
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -20,26 +25,36 @@ pub enum AppError {
     Upstream(String),
 }
 
+impl AppError {
+    pub fn api_code(&self) -> i32 {
+        match self {
+            AppError::Config(_) => CODE_CONFIG_ERROR,
+            AppError::Input(_) => CODE_INPUT_ERROR,
+            AppError::Run(_) => CODE_RUN_ERROR,
+            AppError::NotFound(_) => CODE_NOT_FOUND,
+            AppError::Upstream(_) => CODE_UPSTREAM_ERROR,
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
-            AppError::Config(message) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "config_error", message)
-            }
-            AppError::Input(message) => (StatusCode::BAD_REQUEST, "input_error", message),
-            AppError::Run(message) => (StatusCode::INTERNAL_SERVER_ERROR, "run_error", message),
-            AppError::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message),
-            AppError::Upstream(message) => (StatusCode::BAD_GATEWAY, "upstream_error", message),
+            AppError::Config(message) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                CODE_CONFIG_ERROR,
+                message,
+            ),
+            AppError::Input(message) => (StatusCode::BAD_REQUEST, CODE_INPUT_ERROR, message),
+            AppError::Run(message) => (StatusCode::INTERNAL_SERVER_ERROR, CODE_RUN_ERROR, message),
+            AppError::NotFound(message) => (StatusCode::NOT_FOUND, CODE_NOT_FOUND, message),
+            AppError::Upstream(message) => (StatusCode::BAD_GATEWAY, CODE_UPSTREAM_ERROR, message),
         };
         if status.is_server_error() {
             tracing::error!(status = %status, code, error_message = %message, "request failed");
         } else {
             tracing::warn!(status = %status, code, error_message = %message, "request rejected");
         }
-        (
-            status,
-            Json(json!({ "error": { "code": code, "message": message } })),
-        )
-            .into_response()
+        (status, Json(ApiResponse::new(code, message, Value::Null))).into_response()
     }
 }

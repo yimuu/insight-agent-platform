@@ -104,6 +104,42 @@ fn failing_tool_agent() -> LoadedAgent {
     }
 }
 
+fn llm_agent() -> LoadedAgent {
+    LoadedAgent {
+        root: std::path::PathBuf::from("agents/llm"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "llm".to_string(),
+            name: "LLM".to_string(),
+            description: "LLM agent".to_string(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![StepConfig {
+                id: "answer".to_string(),
+                kind: StepKind::Llm,
+                prompt_ref: None,
+                prompt: Some("Answer".to_string()),
+                system_prompt_ref: None,
+                system_prompt: None,
+                image_input: None,
+                stream: true,
+                tool: None,
+                args: serde_json::Value::Null,
+            }],
+        },
+    }
+}
+
 fn app() -> axum::Router {
     app_with_encoder(encode_event)
 }
@@ -111,8 +147,12 @@ fn app() -> axum::Router {
 fn app_with_encoder(
     event_encoder: fn(RunEvent) -> Result<axum::response::sse::Event, AppError>,
 ) -> axum::Router {
-    let registry = AgentRegistry::new(vec![prompt_agent(), failing_tool_agent()]).unwrap();
-    let engine = RunEngine::new(FakeModelClient::new(vec![]), ToolRegistry::default());
+    let registry =
+        AgentRegistry::new(vec![prompt_agent(), failing_tool_agent(), llm_agent()]).unwrap();
+    let engine = RunEngine::new(
+        FakeModelClient::new(vec!["Hel", "lo"]),
+        ToolRegistry::default(),
+    );
     build_router(AppState {
         registry,
         engine,
@@ -167,7 +207,10 @@ async fn lists_agents_without_prompt_contents() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let agents: Value = serde_json::from_slice(&body).unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["code"], 0);
+    assert_eq!(payload["message"], "ok");
+    let agents = &payload["data"];
     let test_agent = agents
         .as_array()
         .unwrap()
@@ -197,7 +240,10 @@ async fn gets_agent_without_prompt_contents() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let agent: Value = serde_json::from_slice(&body).unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["code"], 0);
+    assert_eq!(payload["message"], "ok");
+    let agent = &payload["data"];
     assert_eq!(agent["id"], "test");
     assert_eq!(agent["input_schema"], prompt_input_schema());
     assert!(agent.get("steps").is_none());
@@ -231,23 +277,59 @@ async fn streams_agent_run_as_sse() {
 
     assert!(frames.len() >= 4);
     assert_eq!(frames[0].event, "run_started");
-    assert_eq!(frames[0].data["kind"], "run_started");
-    assert_eq!(frames[0].data["agent_id"], "test");
+    assert_eq!(frames[0].data["code"], 0);
+    assert_eq!(frames[0].data["message"], "ok");
+    assert_eq!(frames[0].data["data"]["event"], "run_started");
+    assert_eq!(frames[0].data["data"]["agent_id"], "test");
+    assert_eq!(frames[0].data["data"]["content"], "");
+    assert!(frames[0].data["data"]["result"].is_null());
 
     let completed = frames
         .iter()
         .find(|frame| frame.event == "step_completed")
         .expect("expected step_completed frame");
-    assert_eq!(completed.data["kind"], "step_completed");
-    assert_eq!(completed.data["step_id"], "hello");
-    assert_eq!(completed.data["payload"]["output"], "Hello Ada");
+    assert_eq!(completed.data["code"], 0);
+    assert_eq!(completed.data["data"]["event"], "step_completed");
+    assert_eq!(completed.data["data"]["step_id"], "hello");
+    assert_eq!(completed.data["data"]["content"], "");
+    assert!(completed.data["data"]["result"].is_null());
 
     let run_completed = frames
         .iter()
         .find(|frame| frame.event == "run_completed")
         .expect("expected run_completed frame");
-    assert_eq!(run_completed.data["kind"], "run_completed");
-    assert_eq!(run_completed.data["payload"]["output"], "Hello Ada");
+    assert_eq!(run_completed.data["code"], 0);
+    assert_eq!(run_completed.data["data"]["event"], "run_completed");
+    assert_eq!(run_completed.data["data"]["content"], "");
+    assert!(run_completed.data["data"]["result"].is_null());
+}
+
+#[tokio::test]
+async fn streams_token_delta_content_as_direct_text() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/llm/runs/stream")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"input":{}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let frames = parse_sse_frames(&text);
+    let deltas = frames
+        .iter()
+        .filter(|frame| frame.event == "token_delta")
+        .map(|frame| frame.data["data"]["content"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(deltas, vec!["Hel", "lo"]);
 }
 
 #[tokio::test]
@@ -272,7 +354,12 @@ async fn invalid_input_returns_400_before_sse() {
 
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["error"]["code"], "input_error");
+    assert_eq!(payload["code"], 10000);
+    assert!(payload["message"]
+        .as_str()
+        .unwrap()
+        .contains("input validation failed"));
+    assert!(payload["data"].is_null());
 }
 
 #[tokio::test]
@@ -297,7 +384,12 @@ async fn missing_input_field_returns_400_before_sse() {
 
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["error"]["code"], "input_error");
+    assert_eq!(payload["code"], 10000);
+    assert!(payload["message"]
+        .as_str()
+        .unwrap()
+        .contains("missing field `input`"));
+    assert!(payload["data"].is_null());
 }
 
 #[tokio::test]
@@ -321,7 +413,12 @@ async fn missing_content_type_returns_400_before_sse() {
 
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["error"]["code"], "input_error");
+    assert_eq!(payload["code"], 10000);
+    assert!(payload["message"]
+        .as_str()
+        .unwrap()
+        .contains("request body must be application/json"));
+    assert!(payload["data"].is_null());
 }
 
 #[tokio::test]
@@ -355,13 +452,16 @@ async fn streams_runtime_error_as_sse_error_without_run_completed() {
         .iter()
         .find(|frame| frame.event == "error")
         .expect("expected error frame");
-    assert_eq!(error_frame.data["kind"], "error");
-    assert_eq!(error_frame.data["agent_id"], "broken");
-    assert_eq!(error_frame.data["step_id"], "missing_tool");
+    assert_eq!(error_frame.data["code"], 20000);
     assert_eq!(
-        error_frame.data["payload"]["message"],
+        error_frame.data["message"],
         "run error: tool 'not_registered' is not registered"
     );
+    assert_eq!(error_frame.data["data"]["event"], "error");
+    assert_eq!(error_frame.data["data"]["agent_id"], "broken");
+    assert_eq!(error_frame.data["data"]["step_id"], "missing_tool");
+    assert_eq!(error_frame.data["data"]["content"], "");
+    assert!(error_frame.data["data"]["result"].is_null());
 
     assert!(!frames.iter().any(|frame| frame.event == "run_completed"));
 }
@@ -398,10 +498,10 @@ async fn sanitizes_sse_encoding_failures_without_panicking() {
 
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].event, "error");
-    assert_eq!(frames[0].data["kind"], "error");
-    assert_eq!(
-        frames[0].data["payload"]["message"],
-        "stream encoding failed"
-    );
+    assert_eq!(frames[0].data["code"], 20000);
+    assert_eq!(frames[0].data["message"], "stream encoding failed");
+    assert_eq!(frames[0].data["data"]["event"], "error");
+    assert_eq!(frames[0].data["data"]["content"], "");
+    assert!(frames[0].data["data"]["result"].is_null());
     assert!(!frames.iter().any(|frame| frame.event == "run_completed"));
 }
