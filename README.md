@@ -13,6 +13,8 @@ AGENTS_DIR=agents
 BIND_ADDR=127.0.0.1:3000
 ```
 
+The service loads `.env` automatically when started with `cargo run`.
+
 Do not commit real API keys.
 
 Model providers are configured in `config/models.yaml`. Provider entries define connection details, authentication environment variables, model type groups, per-type defaults, and LLM features such as `vision`.
