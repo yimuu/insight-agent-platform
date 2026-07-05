@@ -2,7 +2,7 @@ Question:
 {{ input.question }}
 
 Plan:
-{{ steps.plan.output }}
+{{ steps.plan.output.text }}
 
 Current time:
 {{ steps.now.output.iso8601 }}

@@ -120,7 +120,7 @@ async fn text_step_renders_template_and_emits_content() {
                     id: "summary".to_string(),
                     kind: StepKind::Text,
                     prompt_ref: None,
-                    prompt: Some("Summary: {{ steps.hello.output }}".to_string()),
+                    prompt: Some("Summary: {{ steps.hello.output.text }}".to_string()),
                     system_prompt_ref: None,
                     system_prompt: None,
                     image_input: None,
@@ -196,6 +196,68 @@ async fn tool_step_emits_tool_events_and_stores_output() {
         .unwrap();
     assert_eq!(completed.content, "");
     assert!(completed.result.is_null());
+}
+
+#[tokio::test]
+async fn text_step_can_reference_object_step_output_fields() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![
+                StepConfig {
+                    id: "now".to_string(),
+                    kind: StepKind::Tool,
+                    prompt_ref: None,
+                    prompt: None,
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: Some("current_time".to_string()),
+                    args: json!({"timezone":"Asia/Shanghai"}),
+                },
+                StepConfig {
+                    id: "render".to_string(),
+                    kind: StepKind::Text,
+                    prompt_ref: None,
+                    prompt: Some("Timezone: {{ steps.now.output.timezone }}".to_string()),
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: None,
+                    args: serde_json::Value::Null,
+                },
+            ],
+        },
+    };
+
+    let mut tools = ToolRegistry::default();
+    tools.register(CurrentTimeTool);
+    let engine = RunEngine::new(FakeModelClient::new(vec![]), tools);
+    let events: Vec<_> = engine.run(agent, json!({})).collect().await;
+    let rendered = events
+        .iter()
+        .find(|event| event.event == RunEventKind::TokenDelta)
+        .unwrap();
+
+    assert_eq!(rendered.content, "Timezone: Asia/Shanghai");
 }
 
 #[test]
@@ -518,7 +580,7 @@ async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
                     id: "answer".to_string(),
                     kind: StepKind::Llm,
                     prompt_ref: None,
-                    prompt: Some("Respond to {{ steps.hello.output }}".to_string()),
+                    prompt: Some("Respond to {{ steps.hello.output.text }}".to_string()),
                     system_prompt_ref: None,
                     system_prompt: None,
                     image_input: None,

@@ -7,10 +7,10 @@ fn renders_input_and_step_values() {
     let renderer = PromptRenderer::new();
     let out = renderer
         .render(
-            "Question: {{ input.question }} Plan: {{ steps.plan.output }}",
+            "Question: {{ input.question }} Plan: {{ steps.plan.output.text }}",
             &json!({
                 "input": { "question": "What is Rust?" },
-                "steps": { "plan": { "output": "Explain ownership." } }
+                "steps": { "plan": { "output": { "text": "Explain ownership." } } }
             }),
         )
         .unwrap();

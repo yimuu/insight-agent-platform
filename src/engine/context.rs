@@ -32,6 +32,15 @@ impl RunContext {
     }
 
     pub fn set_step_output(&mut self, step_id: &str, output: Value) {
-        self.step_outputs.insert(step_id.to_string(), output);
+        self.step_outputs
+            .insert(step_id.to_string(), normalize_step_output(output));
+    }
+}
+
+fn normalize_step_output(output: Value) -> Value {
+    match output {
+        Value::String(text) => json!({ "text": text }),
+        Value::Object(object) => Value::Object(object),
+        other => json!({ "value": other }),
     }
 }
