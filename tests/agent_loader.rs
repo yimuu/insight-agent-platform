@@ -24,6 +24,19 @@ fn loads_medical_report_interpreter_agent() {
         Some("input.images")
     );
     assert!(agent.prompts.contains_key("health_advice"));
+    let abnormal_prompt = agent.prompts.get("abnormal_indicators").unwrap();
+    assert!(abnormal_prompt.contains("### 异常指标解读"));
+    assert!(abnormal_prompt.contains("1. 指标名称"));
+    assert!(abnormal_prompt.contains("必须使用有序列表输出所有异常指标"));
+
+    let comprehensive_prompt = agent.prompts.get("comprehensive_interpretation").unwrap();
+    assert!(comprehensive_prompt.contains("### 综合解读"));
+    assert!(comprehensive_prompt.contains("只输出一段话"));
+
+    let health_advice_prompt = agent.prompts.get("health_advice").unwrap();
+    assert!(health_advice_prompt.contains("### 健康建议"));
+    assert!(health_advice_prompt.contains("不要输出“关键异常”"));
+    assert!(health_advice_prompt.contains("额外标题"));
 }
 
 #[test]
