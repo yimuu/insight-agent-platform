@@ -97,6 +97,31 @@ steps:
 }
 
 #[test]
+fn loads_text_step_with_template_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("text_agent");
+    write_file(
+        &agent.join("agent.yaml"),
+        r#"
+id: text_agent
+name: Text Agent
+model:
+  provider: openai_compatible
+input:
+  schema:
+    type: object
+steps:
+  - id: intro
+    type: text
+    prompt: "你好 {{ input.name }}"
+"#,
+    );
+
+    let agents = load_agents(dir.path()).unwrap();
+    assert_eq!(agents[0].config.steps[0].id, "intro");
+}
+
+#[test]
 fn rejects_duplicate_step_ids() {
     let dir = tempfile::tempdir().unwrap();
     let agent = dir.path().join("bad");
@@ -122,6 +147,30 @@ steps:
 
     let err = load_agents(dir.path()).unwrap_err().to_string();
     assert!(err.contains("duplicate step id"));
+}
+
+#[test]
+fn rejects_text_step_without_template_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("bad");
+    write_file(
+        &agent.join("agent.yaml"),
+        r#"
+id: bad
+name: Bad
+model:
+  provider: openai_compatible
+input:
+  schema:
+    type: object
+steps:
+  - id: intro
+    type: text
+"#,
+    );
+
+    let err = load_agents(dir.path()).unwrap_err().to_string();
+    assert!(err.contains("type 'text' requires prompt or prompt_ref"));
 }
 
 #[test]

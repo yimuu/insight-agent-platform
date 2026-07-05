@@ -178,6 +178,7 @@ impl<M: ModelClient> RunEngine<M> {
                 let rendered = self.renderer.render(template, &ctx.template_data())?;
                 Ok(Some(Value::String(rendered)))
             }
+            StepKind::Text => self.execute_text_step(step, store, ctx, events),
             StepKind::Llm => {
                 self.execute_llm_step(step, model_config, store, ctx, events)
                     .await
@@ -299,6 +300,28 @@ impl<M: ModelClient> RunEngine<M> {
         );
 
         Ok(Some(Value::String(output)))
+    }
+
+    fn execute_text_step(
+        &self,
+        step: &StepConfig,
+        store: &PromptStore,
+        ctx: &RunContext,
+        events: &EventSender,
+    ) -> Result<Option<Value>, AppError> {
+        if events.is_closed() {
+            return Ok(None);
+        }
+
+        let template = resolve_prompt(step.prompt.as_deref(), step.prompt_ref.as_deref(), store)?;
+        let rendered = self.renderer.render(template, &ctx.template_data())?;
+        let outbound = format_outbound_delta(&rendered, false, events.has_emitted_content());
+        if !rendered.is_empty()
+            && !events.emit_content(ctx, Some(&step.id), RunEventKind::TokenDelta, outbound)
+        {
+            return Ok(None);
+        }
+        Ok(Some(Value::String(rendered)))
     }
 
     async fn execute_tool_step(

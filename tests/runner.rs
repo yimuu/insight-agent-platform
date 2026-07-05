@@ -83,6 +83,67 @@ async fn prompt_step_renders_and_completes_run() {
 }
 
 #[tokio::test]
+async fn text_step_renders_template_and_emits_content() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![
+                StepConfig {
+                    id: "hello".to_string(),
+                    kind: StepKind::Prompt,
+                    prompt_ref: None,
+                    prompt: Some("Hello {{ input.name }}".to_string()),
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: None,
+                    args: serde_json::Value::Null,
+                },
+                StepConfig {
+                    id: "summary".to_string(),
+                    kind: StepKind::Text,
+                    prompt_ref: None,
+                    prompt: Some("Summary: {{ steps.hello.output }}".to_string()),
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: None,
+                    args: serde_json::Value::Null,
+                },
+            ],
+        },
+    };
+
+    let engine = RunEngine::new(FakeModelClient::new(vec![]), ToolRegistry::default());
+    let events: Vec<_> = engine.run(agent, json!({"name":"Ada"})).collect().await;
+    let deltas: Vec<_> = events
+        .iter()
+        .filter(|event| event.event == RunEventKind::TokenDelta)
+        .map(|event| (event.step_id.as_deref().unwrap(), event.content.as_str()))
+        .collect();
+
+    assert_eq!(deltas, vec![("summary", "Summary: Hello Ada")]);
+}
+
+#[tokio::test]
 async fn tool_step_emits_tool_events_and_stores_output() {
     let agent = LoadedAgent {
         root: std::path::PathBuf::from("agents/test"),

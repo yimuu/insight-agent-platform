@@ -114,11 +114,16 @@ fn validate_agent_config(agent_root: &Path, config: &AgentConfig) -> Result<(), 
         }
 
         match step.kind {
-            StepKind::Prompt => {
+            StepKind::Prompt | StepKind::Text => {
                 if step.prompt_source().is_none() {
+                    let kind = match step.kind {
+                        StepKind::Prompt => "prompt",
+                        StepKind::Text => "text",
+                        _ => unreachable!(),
+                    };
                     return Err(AppError::Config(format!(
-                        "step '{}' type 'prompt' requires prompt or prompt_ref",
-                        step.id
+                        "step '{}' type '{kind}' requires prompt or prompt_ref",
+                        step.id,
                     )));
                 }
             }

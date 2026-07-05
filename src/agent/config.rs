@@ -89,6 +89,7 @@ pub enum PromptSource<'a> {
 #[serde(rename_all = "snake_case")]
 pub enum StepKind {
     Prompt,
+    Text,
     Llm,
     Tool,
 }
