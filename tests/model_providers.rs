@@ -184,6 +184,9 @@ fn validates_agents_against_provider_model_whitelist_and_vision_capability() {
                 stream: true,
                 tool: None,
                 args: serde_json::Value::Null,
+                cases: Vec::new(),
+                default: None,
+                end: false,
             }],
         },
     }];

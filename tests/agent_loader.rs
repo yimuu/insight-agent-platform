@@ -122,6 +122,40 @@ steps:
 }
 
 #[test]
+fn loads_condition_step_with_cases_and_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("branch_agent");
+    write_file(
+        &agent.join("agent.yaml"),
+        r#"
+id: branch_agent
+name: Branch Agent
+model:
+  provider: openai_compatible
+input:
+  schema:
+    type: object
+steps:
+  - id: branch
+    type: condition
+    cases:
+      - when: "input.kind == 'a'"
+        goto: a
+    default: b
+  - id: a
+    type: text
+    prompt: A
+  - id: b
+    type: text
+    prompt: B
+"#,
+    );
+
+    let agents = load_agents(dir.path()).unwrap();
+    assert_eq!(agents[0].config.steps[0].id, "branch");
+}
+
+#[test]
 fn rejects_duplicate_step_ids() {
     let dir = tempfile::tempdir().unwrap();
     let agent = dir.path().join("bad");
@@ -147,6 +181,33 @@ steps:
 
     let err = load_agents(dir.path()).unwrap_err().to_string();
     assert!(err.contains("duplicate step id"));
+}
+
+#[test]
+fn rejects_condition_step_with_unknown_goto() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("bad");
+    write_file(
+        &agent.join("agent.yaml"),
+        r#"
+id: bad
+name: Bad
+model:
+  provider: openai_compatible
+input:
+  schema:
+    type: object
+steps:
+  - id: branch
+    type: condition
+    cases:
+      - when: "input.kind == 'a'"
+        goto: missing
+"#,
+    );
+
+    let err = load_agents(dir.path()).unwrap_err().to_string();
+    assert!(err.contains("unknown goto"));
 }
 
 #[test]

@@ -143,6 +143,38 @@ fn validate_agent_config(agent_root: &Path, config: &AgentConfig) -> Result<(), 
                     )));
                 }
             }
+            StepKind::Condition => {
+                if step.cases.is_empty() && step.default.is_none() {
+                    return Err(AppError::Config(format!(
+                        "step '{}' type 'condition' requires cases or default",
+                        step.id
+                    )));
+                }
+            }
+        }
+
+        for case in &step.cases {
+            if case.when.trim().is_empty() {
+                return Err(AppError::Config(format!(
+                    "step '{}' condition case requires when",
+                    step.id
+                )));
+            }
+            if !step_ids.contains(&case.goto) && !config.steps.iter().any(|s| s.id == case.goto) {
+                return Err(AppError::Config(format!(
+                    "step '{}' condition case has unknown goto '{}'",
+                    step.id, case.goto
+                )));
+            }
+        }
+
+        if let Some(default) = &step.default {
+            if !step_ids.contains(default) && !config.steps.iter().any(|s| s.id == *default) {
+                return Err(AppError::Config(format!(
+                    "step '{}' condition has unknown default '{}'",
+                    step.id, default
+                )));
+            }
         }
 
         if let Some(prompt_ref) = &step.prompt_ref {

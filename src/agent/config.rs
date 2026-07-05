@@ -59,6 +59,12 @@ pub struct StepConfig {
     pub tool: Option<String>,
     #[serde(default)]
     pub args: Value,
+    #[serde(default)]
+    pub cases: Vec<ConditionCase>,
+    #[serde(default)]
+    pub default: Option<String>,
+    #[serde(default)]
+    pub end: bool,
 }
 
 impl StepConfig {
@@ -92,4 +98,11 @@ pub enum StepKind {
     Text,
     Llm,
     Tool,
+    Condition,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ConditionCase {
+    pub when: String,
+    pub goto: String,
 }

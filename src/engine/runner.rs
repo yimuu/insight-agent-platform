@@ -11,7 +11,7 @@ use std::{
 
 use chrono::Utc;
 use futures::{Stream, StreamExt};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -86,7 +86,35 @@ impl<M: ModelClient> RunEngine<M> {
             return;
         }
 
-        for step in &agent.config.steps {
+        let step_index_by_id = agent
+            .config
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| (step.id.as_str(), index))
+            .collect::<BTreeMap<_, _>>();
+        let max_step_executions = agent.config.steps.len().saturating_mul(3).max(1);
+        let mut step_index = 0_usize;
+        let mut step_executions = 0_usize;
+
+        while step_index < agent.config.steps.len() {
+            step_executions += 1;
+            if step_executions > max_step_executions {
+                let err =
+                    AppError::Run("condition routing exceeded maximum step executions".to_string());
+                let code = err.api_code();
+                let message = err.to_string();
+                tracing::error!(
+                    run_id = %ctx.run_id,
+                    agent_id = %ctx.agent_id,
+                    error = %message,
+                    "agent run failed"
+                );
+                let _ = events.emit_error(&ctx, None, code, message);
+                return;
+            }
+
+            let step = &agent.config.steps[step_index];
             let step_started = Instant::now();
             tracing::info!(
                 run_id = %ctx.run_id,
@@ -102,29 +130,61 @@ impl<M: ModelClient> RunEngine<M> {
                 .execute_step(step, &agent.config.model, &store, &mut ctx, &events)
                 .await
             {
-                Ok(Some(output)) => {
-                    ctx.set_step_output(&step.id, output.clone());
+                Ok(StepExecution::Completed { output, next }) => {
+                    if let Some(output) = output.clone() {
+                        ctx.set_step_output(&step.id, output.clone());
+                    }
                     tracing::info!(
                         run_id = %ctx.run_id,
                         agent_id = %ctx.agent_id,
                         step_id = %step.id,
                         elapsed_ms = step_started.elapsed().as_millis(),
-                        output = %summarize_value(&output),
-                        output_preview = %format_value_for_log(&output, 1200),
+                        output = %output.as_ref().map(summarize_value).unwrap_or_else(|| "null".to_string()),
+                        output_preview = %output.as_ref().map(|value| format_value_for_log(value, 1200)).unwrap_or_default(),
                         "agent step completed"
                     );
-                    tracing::debug!(
-                        run_id = %ctx.run_id,
-                        agent_id = %ctx.agent_id,
-                        step_id = %step.id,
-                        output_text = %format_value_for_log(&output, 8000),
-                        "agent step output"
-                    );
+                    if let Some(output) = &output {
+                        tracing::debug!(
+                            run_id = %ctx.run_id,
+                            agent_id = %ctx.agent_id,
+                            step_id = %step.id,
+                            output_text = %format_value_for_log(output, 8000),
+                            "agent step output"
+                        );
+                    }
                     if !events.emit(&ctx, Some(&step.id), RunEventKind::StepCompleted) {
                         return;
                     }
+
+                    match next {
+                        NextStep::Continue => {
+                            if step.end {
+                                break;
+                            }
+                            step_index += 1;
+                        }
+                        NextStep::Goto(step_id) => {
+                            let Some(next_index) = step_index_by_id.get(step_id.as_str()) else {
+                                let err = AppError::Run(format!(
+                                    "condition routed to unknown step '{step_id}'"
+                                ));
+                                let code = err.api_code();
+                                let message = err.to_string();
+                                let _ = events.emit_error(&ctx, Some(&step.id), code, message);
+                                return;
+                            };
+                            tracing::info!(
+                                run_id = %ctx.run_id,
+                                agent_id = %ctx.agent_id,
+                                step_id = %step.id,
+                                next_step_id = %step_id,
+                                "agent step routed"
+                            );
+                            step_index = *next_index;
+                        }
+                    }
                 }
-                Ok(None) => return,
+                Ok(StepExecution::Cancelled) => return,
                 Err(err) => {
                     let code = err.api_code();
                     let message = err.to_string();
@@ -166,9 +226,9 @@ impl<M: ModelClient> RunEngine<M> {
         store: &PromptStore,
         ctx: &mut RunContext,
         events: &EventSender,
-    ) -> Result<Option<Value>, AppError> {
+    ) -> Result<StepExecution, AppError> {
         if events.is_closed() {
-            return Ok(None);
+            return Ok(StepExecution::Cancelled);
         }
 
         match step.kind {
@@ -176,7 +236,7 @@ impl<M: ModelClient> RunEngine<M> {
                 let template =
                     resolve_prompt(step.prompt.as_deref(), step.prompt_ref.as_deref(), store)?;
                 let rendered = self.renderer.render(template, &ctx.template_data())?;
-                Ok(Some(Value::String(rendered)))
+                Ok(StepExecution::output(Value::String(rendered)))
             }
             StepKind::Text => self.execute_text_step(step, store, ctx, events),
             StepKind::Llm => {
@@ -184,6 +244,7 @@ impl<M: ModelClient> RunEngine<M> {
                     .await
             }
             StepKind::Tool => self.execute_tool_step(step, ctx, events).await,
+            StepKind::Condition => self.execute_condition_step(step, ctx),
         }
     }
 
@@ -194,9 +255,9 @@ impl<M: ModelClient> RunEngine<M> {
         store: &PromptStore,
         ctx: &RunContext,
         events: &EventSender,
-    ) -> Result<Option<Value>, AppError> {
+    ) -> Result<StepExecution, AppError> {
         if events.is_closed() {
-            return Ok(None);
+            return Ok(StepExecution::Cancelled);
         }
 
         let mut messages = Vec::new();
@@ -235,7 +296,7 @@ impl<M: ModelClient> RunEngine<M> {
         };
 
         if events.is_closed() {
-            return Ok(None);
+            return Ok(StepExecution::Cancelled);
         }
 
         tracing::debug!(
@@ -254,7 +315,7 @@ impl<M: ModelClient> RunEngine<M> {
         );
 
         let mut stream = tokio::select! {
-            _ = events.closed() => return Ok(None),
+            _ = events.closed() => return Ok(StepExecution::Cancelled),
             result = self.model.stream_chat(request) => result?,
         };
         let mut output = String::new();
@@ -263,7 +324,7 @@ impl<M: ModelClient> RunEngine<M> {
 
         loop {
             let next_chunk = tokio::select! {
-                _ = events.closed() => return Ok(None),
+                _ = events.closed() => return Ok(StepExecution::Cancelled),
                 chunk = stream.next() => chunk,
             };
 
@@ -286,7 +347,7 @@ impl<M: ModelClient> RunEngine<M> {
                 RunEventKind::TokenDelta,
                 outbound_delta,
             ) {
-                return Ok(None);
+                return Ok(StepExecution::Cancelled);
             }
         }
 
@@ -299,7 +360,7 @@ impl<M: ModelClient> RunEngine<M> {
             "llm step stream consumed"
         );
 
-        Ok(Some(Value::String(output)))
+        Ok(StepExecution::output(Value::String(output)))
     }
 
     fn execute_text_step(
@@ -308,9 +369,9 @@ impl<M: ModelClient> RunEngine<M> {
         store: &PromptStore,
         ctx: &RunContext,
         events: &EventSender,
-    ) -> Result<Option<Value>, AppError> {
+    ) -> Result<StepExecution, AppError> {
         if events.is_closed() {
-            return Ok(None);
+            return Ok(StepExecution::Cancelled);
         }
 
         let template = resolve_prompt(step.prompt.as_deref(), step.prompt_ref.as_deref(), store)?;
@@ -319,9 +380,44 @@ impl<M: ModelClient> RunEngine<M> {
         if !rendered.is_empty()
             && !events.emit_content(ctx, Some(&step.id), RunEventKind::TokenDelta, outbound)
         {
-            return Ok(None);
+            return Ok(StepExecution::Cancelled);
         }
-        Ok(Some(Value::String(rendered)))
+        Ok(StepExecution::output(Value::String(rendered)))
+    }
+
+    fn execute_condition_step(
+        &self,
+        step: &StepConfig,
+        ctx: &RunContext,
+    ) -> Result<StepExecution, AppError> {
+        let data = ctx.template_data();
+        for (index, case) in step.cases.iter().enumerate() {
+            if evaluate_condition(&case.when, &data)? {
+                return Ok(StepExecution::goto(
+                    json_object(vec![
+                        ("matched", Value::Bool(true)),
+                        ("matched_case", Value::from(index)),
+                        ("goto", Value::String(case.goto.clone())),
+                    ]),
+                    case.goto.clone(),
+                ));
+            }
+        }
+
+        if let Some(default) = &step.default {
+            return Ok(StepExecution::goto(
+                json_object(vec![
+                    ("matched", Value::Bool(false)),
+                    ("goto", Value::String(default.clone())),
+                ]),
+                default.clone(),
+            ));
+        }
+
+        Ok(StepExecution::output(json_object(vec![(
+            "matched",
+            Value::Bool(false),
+        )])))
     }
 
     async fn execute_tool_step(
@@ -329,9 +425,9 @@ impl<M: ModelClient> RunEngine<M> {
         step: &StepConfig,
         ctx: &RunContext,
         events: &EventSender,
-    ) -> Result<Option<Value>, AppError> {
+    ) -> Result<StepExecution, AppError> {
         if events.is_closed() {
-            return Ok(None);
+            return Ok(StepExecution::Cancelled);
         }
 
         let tool_name = step.tool.as_deref().ok_or_else(|| {
@@ -350,15 +446,15 @@ impl<M: ModelClient> RunEngine<M> {
             "tool call started"
         );
         if !events.emit(ctx, Some(&step.id), RunEventKind::ToolCallStarted) {
-            return Ok(None);
+            return Ok(StepExecution::Cancelled);
         }
 
         if events.is_closed() {
-            return Ok(None);
+            return Ok(StepExecution::Cancelled);
         }
 
         let output = tokio::select! {
-            _ = events.closed() => return Ok(None),
+            _ = events.closed() => return Ok(StepExecution::Cancelled),
             result = tool.call(
                 step.args.clone(),
                 ToolContext {
@@ -377,10 +473,41 @@ impl<M: ModelClient> RunEngine<M> {
             "tool call completed"
         );
         if !events.emit(ctx, Some(&step.id), RunEventKind::ToolCallCompleted) {
-            return Ok(None);
+            return Ok(StepExecution::Cancelled);
         }
-        Ok(Some(output))
+        Ok(StepExecution::output(output))
     }
+}
+
+#[derive(Debug)]
+enum StepExecution {
+    Completed {
+        output: Option<Value>,
+        next: NextStep,
+    },
+    Cancelled,
+}
+
+impl StepExecution {
+    fn output(output: Value) -> Self {
+        Self::Completed {
+            output: Some(output),
+            next: NextStep::Continue,
+        }
+    }
+
+    fn goto(output: Value, step_id: String) -> Self {
+        Self::Completed {
+            output: Some(output),
+            next: NextStep::Goto(step_id),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum NextStep {
+    Continue,
+    Goto(String),
 }
 
 fn summarize_value(value: &Value) -> String {
@@ -420,6 +547,90 @@ fn format_outbound_delta(
     } else {
         format!("\n\n{delta}")
     }
+}
+
+fn evaluate_condition(expression: &str, data: &Value) -> Result<bool, AppError> {
+    let expression = expression.trim();
+    if let Some(path) = expression.strip_prefix("exists ") {
+        return Ok(resolve_path(data, path.trim()).is_some());
+    }
+
+    if let Some((path, literal)) = expression.split_once(" contains ") {
+        let value = resolve_path(data, path.trim()).ok_or_else(|| {
+            AppError::Run(format!("condition path '{}' was not found", path.trim()))
+        })?;
+        let expected = parse_condition_literal(literal.trim())?;
+        return Ok(match (value, expected) {
+            (Value::String(actual), Value::String(expected)) => actual.contains(&expected),
+            (Value::Array(items), expected) => {
+                items.iter().any(|item| values_equal(item, &expected))
+            }
+            _ => false,
+        });
+    }
+
+    for operator in ["==", "!="] {
+        if let Some((path, literal)) = expression.split_once(operator) {
+            let value = resolve_path(data, path.trim()).ok_or_else(|| {
+                AppError::Run(format!("condition path '{}' was not found", path.trim()))
+            })?;
+            let expected = parse_condition_literal(literal.trim())?;
+            let equal = values_equal(value, &expected);
+            return Ok(if operator == "==" { equal } else { !equal });
+        }
+    }
+
+    Err(AppError::Run(format!(
+        "unsupported condition expression '{expression}'"
+    )))
+}
+
+fn resolve_path<'a>(data: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut current = data;
+    for segment in path.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        current = match current {
+            Value::Object(object) => object.get(segment)?,
+            Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+fn parse_condition_literal(raw: &str) -> Result<Value, AppError> {
+    let raw = raw.trim();
+    if raw.len() >= 2
+        && ((raw.starts_with('\'') && raw.ends_with('\''))
+            || (raw.starts_with('"') && raw.ends_with('"')))
+    {
+        return Ok(Value::String(raw[1..raw.len() - 1].to_string()));
+    }
+    match raw {
+        "true" => Ok(Value::Bool(true)),
+        "false" => Ok(Value::Bool(false)),
+        "null" => Ok(Value::Null),
+        _ => serde_json::from_str::<Value>(raw)
+            .map_err(|_| AppError::Run(format!("unsupported condition literal '{raw}'"))),
+    }
+}
+
+fn values_equal(actual: &Value, expected: &Value) -> bool {
+    match (actual, expected) {
+        (Value::Number(actual), Value::Number(expected)) => actual.as_f64() == expected.as_f64(),
+        _ => actual == expected,
+    }
+}
+
+fn json_object(fields: Vec<(&str, Value)>) -> Value {
+    Value::Object(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect::<Map<_, _>>(),
+    )
 }
 
 fn count_message_images(messages: &[ChatMessage]) -> usize {

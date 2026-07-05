@@ -63,6 +63,9 @@ fn prompt_agent() -> LoadedAgent {
                 stream: false,
                 tool: None,
                 args: serde_json::Value::Null,
+                cases: Vec::new(),
+                default: None,
+                end: false,
             }],
         },
     }
@@ -99,6 +102,9 @@ fn failing_tool_agent() -> LoadedAgent {
                 stream: false,
                 tool: Some("not_registered".to_string()),
                 args: json!({}),
+                cases: Vec::new(),
+                default: None,
+                end: false,
             }],
         },
     }
@@ -135,6 +141,9 @@ fn llm_agent() -> LoadedAgent {
                 stream: true,
                 tool: None,
                 args: serde_json::Value::Null,
+                cases: Vec::new(),
+                default: None,
+                end: false,
             }],
         },
     }
