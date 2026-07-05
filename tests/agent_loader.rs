@@ -1,6 +1,8 @@
 use std::{fs, path::Path};
 
 use insight_agent_platform::agent::loader::load_agents;
+use jsonschema::JSONSchema;
+use serde_json::json;
 
 fn write_file(path: &Path, body: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -22,6 +24,25 @@ fn loads_medical_report_interpreter_agent() {
         Some("input.images")
     );
     assert!(agent.prompts.contains_key("health_advice"));
+}
+
+#[test]
+fn medical_report_interpreter_allows_http_image_urls_for_local_testing() {
+    let agents = load_agents(Path::new("agents")).unwrap();
+    let agent = agents
+        .iter()
+        .find(|agent| agent.config.id == "medical_report_interpreter")
+        .unwrap();
+    let schema = JSONSchema::compile(&agent.config.input.schema).unwrap();
+
+    let input = json!({
+        "report_text": "",
+        "images": ["http://127.0.0.1:8080/report.png"],
+        "messages": [],
+        "question": "请解读这张报告"
+    });
+
+    assert!(schema.validate(&input).is_ok());
 }
 
 #[test]

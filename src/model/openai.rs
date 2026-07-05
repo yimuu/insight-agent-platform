@@ -82,8 +82,10 @@ impl ModelClient for OpenAiModelClient {
 
         let status = response.status();
         if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
             return Err(AppError::Upstream(format!(
-                "model returned status {status}"
+                "model returned status {status}; body={}",
+                truncate_for_log(&body, 512)
             )));
         }
 
@@ -210,14 +212,26 @@ fn parse_sse_line_bytes(line: &[u8]) -> Result<Vec<String>, AppError> {
     if payload == "[DONE]" {
         return Ok(Vec::new());
     }
-    let chunk = serde_json::from_str::<OpenAiChunk>(payload)
-        .map_err(|_| AppError::Upstream("invalid model stream payload".to_string()))?;
+    let chunk = serde_json::from_str::<OpenAiChunk>(payload).map_err(|err| {
+        AppError::Upstream(format!(
+            "invalid model stream payload: {err}; payload={}",
+            truncate_for_log(payload, 512)
+        ))
+    })?;
     Ok(chunk
         .choices
         .into_iter()
         .filter_map(|choice| choice.delta.content)
         .filter(|content| !content.is_empty())
         .collect())
+}
+
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    let mut truncated = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        truncated.push_str("...");
+    }
+    truncated
 }
 
 #[cfg(test)]
@@ -436,6 +450,7 @@ mod tests {
         };
         let message = error.to_string();
         assert!(message.contains("invalid model stream payload"));
+        assert!(message.contains("{not json}"));
         assert!(!message.contains("secret-key"));
 
         server.await.unwrap();

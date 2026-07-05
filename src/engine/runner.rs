@@ -67,11 +67,23 @@ impl<M: ModelClient> RunEngine<M> {
             step_outputs: BTreeMap::new(),
         };
         let store = PromptStore::new(agent.prompts.clone());
+        tracing::info!(
+            run_id = %ctx.run_id,
+            agent_id = %ctx.agent_id,
+            "agent run started"
+        );
         if !events.emit(&ctx, None, RunEventKind::RunStarted, json!({})) {
             return;
         }
 
         for step in &agent.config.steps {
+            tracing::info!(
+                run_id = %ctx.run_id,
+                agent_id = %ctx.agent_id,
+                step_id = %step.id,
+                step_type = ?step.kind,
+                "agent step started"
+            );
             if !events.emit(
                 &ctx,
                 Some(&step.id),
@@ -86,6 +98,12 @@ impl<M: ModelClient> RunEngine<M> {
             {
                 Ok(Some(output)) => {
                     ctx.set_step_output(&step.id, output.clone());
+                    tracing::info!(
+                        run_id = %ctx.run_id,
+                        agent_id = %ctx.agent_id,
+                        step_id = %step.id,
+                        "agent step completed"
+                    );
                     if !events.emit(
                         &ctx,
                         Some(&step.id),
@@ -97,6 +115,13 @@ impl<M: ModelClient> RunEngine<M> {
                 }
                 Ok(None) => return,
                 Err(err) => {
+                    tracing::error!(
+                        run_id = %ctx.run_id,
+                        agent_id = %ctx.agent_id,
+                        step_id = %step.id,
+                        error = %err,
+                        "agent step failed"
+                    );
                     let _ = events.emit(
                         &ctx,
                         Some(&step.id),
@@ -120,6 +145,11 @@ impl<M: ModelClient> RunEngine<M> {
             None,
             RunEventKind::RunCompleted,
             json!({ "output": output }),
+        );
+        tracing::info!(
+            run_id = %ctx.run_id,
+            agent_id = %ctx.agent_id,
+            "agent run completed"
         );
     }
 

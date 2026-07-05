@@ -22,7 +22,7 @@ input:
         description: HTTPS image URLs or base64 data URLs.
         items:
           type: string
-          pattern: "^(https://|data:image/)"
+          pattern: "^(https?://|data:image/)"
       messages:
         type: array
         description: Prior conversation messages supplied by the caller.
