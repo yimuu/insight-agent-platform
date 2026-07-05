@@ -463,6 +463,107 @@ async fn condition_step_can_read_previous_step_output_text() {
     assert_eq!(deltas, vec!["Medical"]);
 }
 
+#[tokio::test]
+async fn condition_step_supports_cel_boolean_expression() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![
+                StepConfig {
+                    id: "classify".to_string(),
+                    kind: StepKind::Prompt,
+                    prompt_ref: None,
+                    prompt: Some("medical".to_string()),
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: None,
+                    args: serde_json::Value::Null,
+                    cases: Vec::new(),
+                    default: None,
+                    end: false,
+                },
+                StepConfig {
+                    id: "branch".to_string(),
+                    kind: StepKind::Condition,
+                    prompt_ref: None,
+                    prompt: None,
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: None,
+                    args: serde_json::Value::Null,
+                    cases: vec![insight_agent_platform::agent::config::ConditionCase {
+                        when: "steps.classify.output.text == 'medical' && input.age >= 18"
+                            .to_string(),
+                        goto: "adult_medical".to_string(),
+                    }],
+                    default: Some("reject".to_string()),
+                    end: false,
+                },
+                StepConfig {
+                    id: "adult_medical".to_string(),
+                    kind: StepKind::Text,
+                    prompt_ref: None,
+                    prompt: Some("Adult medical".to_string()),
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: None,
+                    args: serde_json::Value::Null,
+                    cases: Vec::new(),
+                    default: None,
+                    end: true,
+                },
+                StepConfig {
+                    id: "reject".to_string(),
+                    kind: StepKind::Text,
+                    prompt_ref: None,
+                    prompt: Some("Reject".to_string()),
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: None,
+                    args: serde_json::Value::Null,
+                    cases: Vec::new(),
+                    default: None,
+                    end: true,
+                },
+            ],
+        },
+    };
+
+    let engine = RunEngine::new(FakeModelClient::new(vec![]), ToolRegistry::default());
+    let events: Vec<_> = engine.run(agent, json!({"age": 85})).collect().await;
+    let deltas: Vec<_> = events
+        .iter()
+        .filter(|event| event.event == RunEventKind::TokenDelta)
+        .map(|event| event.content.as_str())
+        .collect();
+
+    assert_eq!(deltas, vec!["Adult medical"]);
+}
+
 #[test]
 fn default_tool_registry_registers_built_in_tools() {
     let registry = default_tool_registry();

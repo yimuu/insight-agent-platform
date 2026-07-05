@@ -9,6 +9,7 @@ use std::{
     time::Instant,
 };
 
+use cel_interpreter::{Context as CelContext, Program as CelProgram, Value as CelValue};
 use chrono::Utc;
 use futures::{Stream, StreamExt};
 use serde_json::{Map, Value};
@@ -551,76 +552,37 @@ fn format_outbound_delta(
 
 fn evaluate_condition(expression: &str, data: &Value) -> Result<bool, AppError> {
     let expression = expression.trim();
-    if let Some(path) = expression.strip_prefix("exists ") {
-        return Ok(resolve_path(data, path.trim()).is_some());
-    }
+    let program = CelProgram::compile(expression).map_err(|err| {
+        AppError::Run(format!(
+            "invalid condition expression '{expression}': {err}"
+        ))
+    })?;
+    let mut context = CelContext::default();
 
-    if let Some((path, literal)) = expression.split_once(" contains ") {
-        let value = resolve_path(data, path.trim()).ok_or_else(|| {
-            AppError::Run(format!("condition path '{}' was not found", path.trim()))
+    let Value::Object(object) = data else {
+        return Err(AppError::Run(
+            "condition context data must be a JSON object".to_string(),
+        ));
+    };
+
+    for (name, value) in object {
+        context.add_variable(name, value.clone()).map_err(|err| {
+            AppError::Run(format!(
+                "failed to prepare condition variable '{name}' for expression '{expression}': {err}"
+            ))
         })?;
-        let expected = parse_condition_literal(literal.trim())?;
-        return Ok(match (value, expected) {
-            (Value::String(actual), Value::String(expected)) => actual.contains(&expected),
-            (Value::Array(items), expected) => {
-                items.iter().any(|item| values_equal(item, &expected))
-            }
-            _ => false,
-        });
     }
 
-    for operator in ["==", "!="] {
-        if let Some((path, literal)) = expression.split_once(operator) {
-            let value = resolve_path(data, path.trim()).ok_or_else(|| {
-                AppError::Run(format!("condition path '{}' was not found", path.trim()))
-            })?;
-            let expected = parse_condition_literal(literal.trim())?;
-            let equal = values_equal(value, &expected);
-            return Ok(if operator == "==" { equal } else { !equal });
-        }
-    }
-
-    Err(AppError::Run(format!(
-        "unsupported condition expression '{expression}'"
-    )))
-}
-
-fn resolve_path<'a>(data: &'a Value, path: &str) -> Option<&'a Value> {
-    let mut current = data;
-    for segment in path.split('.') {
-        if segment.is_empty() {
-            return None;
-        }
-        current = match current {
-            Value::Object(object) => object.get(segment)?,
-            Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
-            _ => return None,
-        };
-    }
-    Some(current)
-}
-
-fn parse_condition_literal(raw: &str) -> Result<Value, AppError> {
-    let raw = raw.trim();
-    if raw.len() >= 2
-        && ((raw.starts_with('\'') && raw.ends_with('\''))
-            || (raw.starts_with('"') && raw.ends_with('"')))
-    {
-        return Ok(Value::String(raw[1..raw.len() - 1].to_string()));
-    }
-    match raw {
-        "true" => Ok(Value::Bool(true)),
-        "false" => Ok(Value::Bool(false)),
-        "null" => Ok(Value::Null),
-        _ => serde_json::from_str::<Value>(raw)
-            .map_err(|_| AppError::Run(format!("unsupported condition literal '{raw}'"))),
-    }
-}
-
-fn values_equal(actual: &Value, expected: &Value) -> bool {
-    match (actual, expected) {
-        (Value::Number(actual), Value::Number(expected)) => actual.as_f64() == expected.as_f64(),
-        _ => actual == expected,
+    match program.execute(&context).map_err(|err| {
+        AppError::Run(format!(
+            "failed to evaluate condition expression '{expression}': {err}"
+        ))
+    })? {
+        CelValue::Bool(value) => Ok(value),
+        value => Err(AppError::Run(format!(
+            "condition expression '{expression}' returned {}, expected bool",
+            value.type_of()
+        ))),
     }
 }
 

@@ -49,6 +49,18 @@ model:
   temperature: 0.2
 ```
 
+Condition steps use CEL expressions in `cases[].when`. The expression context exposes `input`, `run`, and `steps`; text outputs are available as `steps.<step_id>.output.text`.
+
+```yaml
+steps:
+  - id: branch
+    type: condition
+    cases:
+      - when: "steps.classify.output.text == 'medical' && input.age >= 18"
+        goto: medical_adult
+    default: reject
+```
+
 ## Run
 
 ```bash
