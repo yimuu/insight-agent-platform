@@ -53,36 +53,71 @@ impl OpenAiModelClient {
 #[async_trait]
 impl ModelClient for OpenAiModelClient {
     async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, AppError> {
+        let effective_model = if request.model.is_empty() {
+            self.default_model.clone()
+        } else {
+            request.model.clone()
+        };
+        let messages_count = request.messages.len();
+        let image_parts_count = count_image_parts(&request.messages);
+        let text_chars_count = count_text_chars(&request.messages);
         let body = OpenAiRequest {
-            model: if request.model.is_empty() {
-                self.default_model.clone()
-            } else {
-                request.model
-            },
+            model: effective_model.clone(),
             messages: request.messages,
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: true,
         };
 
-        let request = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .json(&body);
+        let endpoint = format!("{}/chat/completions", self.base_url);
+        tracing::info!(
+            endpoint = %endpoint,
+            model = %effective_model,
+            messages_count,
+            image_parts_count,
+            "sending model stream request"
+        );
+        tracing::debug!(
+            model = %effective_model,
+            text_chars_count,
+            temperature = ?body.temperature,
+            max_tokens = ?body.max_tokens,
+            "model stream request metadata"
+        );
+
+        let request = self.client.post(&endpoint).json(&body);
         let request = if let Some(api_key) = &self.api_key {
             request.bearer_auth(api_key)
         } else {
             request
         };
 
-        let response = request
-            .send()
-            .await
-            .map_err(|err| AppError::Upstream(format!("model request failed: {err}")))?;
+        let response = request.send().await.map_err(|err| {
+            tracing::error!(
+                endpoint = %endpoint,
+                model = %effective_model,
+                error = %err,
+                "model request failed before response"
+            );
+            AppError::Upstream(format!("model request failed: {err}"))
+        })?;
 
         let status = response.status();
+        tracing::info!(
+            endpoint = %endpoint,
+            model = %effective_model,
+            status = %status,
+            "model stream response received"
+        );
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            tracing::error!(
+                endpoint = %endpoint,
+                model = %effective_model,
+                status = %status,
+                body = %truncate_for_log(&body, 512),
+                "model stream response returned error status"
+            );
             return Err(AppError::Upstream(format!(
                 "model returned status {status}; body={}",
                 truncate_for_log(&body, 512)
@@ -115,6 +150,7 @@ impl ModelClient for OpenAiModelClient {
                             if let Some(delta) = state.pending.pop_front() {
                                 return Ok(Some((delta, state)));
                             }
+                            tracing::debug!("model stream completed");
                             return Ok(None);
                         }
                     }
@@ -124,6 +160,37 @@ impl ModelClient for OpenAiModelClient {
 
         Ok(Box::pin(stream))
     }
+}
+
+fn count_image_parts(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .map(|message| match &message.content {
+            crate::model::types::ChatContent::Text(_) => 0,
+            crate::model::types::ChatContent::Parts(parts) => parts
+                .iter()
+                .filter(|part| {
+                    matches!(part, crate::model::types::ChatContentPart::ImageUrl { .. })
+                })
+                .count(),
+        })
+        .sum()
+}
+
+fn count_text_chars(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .map(|message| match &message.content {
+            crate::model::types::ChatContent::Text(text) => text.chars().count(),
+            crate::model::types::ChatContent::Parts(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    crate::model::types::ChatContentPart::Text { text } => text.chars().count(),
+                    crate::model::types::ChatContentPart::ImageUrl { .. } => 0,
+                })
+                .sum(),
+        })
+        .sum()
 }
 
 struct StreamState {

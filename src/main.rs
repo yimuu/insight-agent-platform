@@ -23,9 +23,26 @@ async fn main() -> Result<(), AppError> {
         .init();
 
     let config = PlatformConfig::from_env()?;
+    tracing::info!(
+        bind_addr = %config.bind_addr,
+        agents_dir = %config.agents_dir.display(),
+        providers_count = config.model_providers.providers.len(),
+        default_provider = ?config.model_providers.default_provider,
+        "platform configuration loaded"
+    );
     let agents = load_agents(&config.agents_dir)?;
+    let agent_ids = agents
+        .iter()
+        .map(|agent| agent.config.id.as_str())
+        .collect::<Vec<_>>();
+    tracing::info!(
+        agents_count = agents.len(),
+        agents = ?agent_ids,
+        "agents loaded"
+    );
     let model_catalog = ModelProviderCatalog::new(config.model_providers.clone())?;
     validate_agent_models(&agents, &model_catalog)?;
+    tracing::info!("agent model configuration validated");
     let registry = AgentRegistry::new(agents)?;
     let model = ModelRouter::from_openai_compatible_config(&config.model_providers)?;
     let engine = RunEngine::new(model, default_tool_registry());

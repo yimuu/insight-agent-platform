@@ -31,6 +31,11 @@ impl IntoResponse for AppError {
             AppError::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message),
             AppError::Upstream(message) => (StatusCode::BAD_GATEWAY, "upstream_error", message),
         };
+        if status.is_server_error() {
+            tracing::error!(status = %status, code, error_message = %message, "request failed");
+        } else {
+            tracing::warn!(status = %status, code, error_message = %message, "request rejected");
+        }
         (
             status,
             Json(json!({ "error": { "code": code, "message": message } })),

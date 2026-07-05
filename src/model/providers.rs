@@ -223,7 +223,15 @@ impl<M: ModelClient> ModelClient for ModelRouter<M> {
         } else {
             &request.provider
         };
+        tracing::debug!(
+            provider = %provider_id,
+            model_type = ?request.model_type,
+            model = %request.model,
+            messages_count = request.messages.len(),
+            "routing model request"
+        );
         let provider = self.providers.get(provider_id).ok_or_else(|| {
+            tracing::error!(provider = %provider_id, "model provider route missing");
             AppError::Config(format!("model provider '{provider_id}' is not configured"))
         })?;
         provider.stream_chat(request).await
@@ -242,6 +250,20 @@ impl ModelRouter<OpenAiModelClient> {
         for (provider_id, provider) in &config.providers {
             match provider.kind {
                 ModelProviderKind::OpenAiCompatible => {
+                    let model_groups = provider
+                        .models
+                        .keys()
+                        .map(|model_type| format!("{model_type:?}"))
+                        .collect::<Vec<_>>();
+                    tracing::info!(
+                        provider = %provider_id,
+                        kind = ?provider.kind,
+                        base_url = %provider.base_url,
+                        auth = ?provider.auth,
+                        api_key_env = ?provider.api_key_env,
+                        model_groups = ?model_groups,
+                        "registering model provider"
+                    );
                     let api_key = match provider.auth {
                         Some(ModelProviderAuth::None) => None,
                         None => {

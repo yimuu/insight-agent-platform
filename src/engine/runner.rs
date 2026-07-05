@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     pin::Pin,
     task::{Context, Poll},
+    time::Instant,
 };
 
 use chrono::Utc;
@@ -58,6 +59,7 @@ impl<M: ModelClient> RunEngine<M> {
     }
 
     async fn run_streaming(&self, agent: LoadedAgent, input: Value, events: EventSender) {
+        let run_started = Instant::now();
         let run_id = format!("run_{}", Uuid::new_v4());
         let mut ctx = RunContext {
             run_id,
@@ -70,6 +72,10 @@ impl<M: ModelClient> RunEngine<M> {
         tracing::info!(
             run_id = %ctx.run_id,
             agent_id = %ctx.agent_id,
+            steps_count = agent.config.steps.len(),
+            provider = %agent.config.model.provider,
+            model_type = ?agent.config.model.model_type,
+            model = ?agent.config.model.model,
             "agent run started"
         );
         if !events.emit(&ctx, None, RunEventKind::RunStarted, json!({})) {
@@ -77,6 +83,7 @@ impl<M: ModelClient> RunEngine<M> {
         }
 
         for step in &agent.config.steps {
+            let step_started = Instant::now();
             tracing::info!(
                 run_id = %ctx.run_id,
                 agent_id = %ctx.agent_id,
@@ -102,6 +109,8 @@ impl<M: ModelClient> RunEngine<M> {
                         run_id = %ctx.run_id,
                         agent_id = %ctx.agent_id,
                         step_id = %step.id,
+                        elapsed_ms = step_started.elapsed().as_millis(),
+                        output = %summarize_value(&output),
                         "agent step completed"
                     );
                     if !events.emit(
@@ -119,6 +128,7 @@ impl<M: ModelClient> RunEngine<M> {
                         run_id = %ctx.run_id,
                         agent_id = %ctx.agent_id,
                         step_id = %step.id,
+                        elapsed_ms = step_started.elapsed().as_millis(),
                         error = %err,
                         "agent step failed"
                     );
@@ -149,6 +159,8 @@ impl<M: ModelClient> RunEngine<M> {
         tracing::info!(
             run_id = %ctx.run_id,
             agent_id = %ctx.agent_id,
+            elapsed_ms = run_started.elapsed().as_millis(),
+            output = %summarize_value(&output),
             "agent run completed"
         );
     }
@@ -215,6 +227,8 @@ impl<M: ModelClient> RunEngine<M> {
             step.image_input.as_deref(),
             ctx,
         )?);
+        let image_parts_count = count_message_images(&messages);
+        let text_chars_count = count_message_text_chars(&messages);
 
         let request = ChatRequest {
             provider: model_config.provider.clone(),
@@ -229,11 +243,27 @@ impl<M: ModelClient> RunEngine<M> {
             return Ok(None);
         }
 
+        tracing::debug!(
+            run_id = %ctx.run_id,
+            agent_id = %ctx.agent_id,
+            step_id = %step.id,
+            provider = %request.provider,
+            model_type = ?request.model_type,
+            model = %request.model,
+            messages_count = request.messages.len(),
+            image_parts_count,
+            text_chars_count,
+            temperature = ?request.temperature,
+            max_tokens = ?request.max_tokens,
+            "llm step request prepared"
+        );
+
         let mut stream = tokio::select! {
             _ = events.closed() => return Ok(None),
             result = self.model.stream_chat(request) => result?,
         };
         let mut output = String::new();
+        let mut chunks_count = 0_usize;
 
         loop {
             let next_chunk = tokio::select! {
@@ -249,6 +279,7 @@ impl<M: ModelClient> RunEngine<M> {
             if delta.is_empty() {
                 continue;
             }
+            chunks_count += 1;
             output.push_str(&delta);
             if !events.emit(
                 ctx,
@@ -259,6 +290,15 @@ impl<M: ModelClient> RunEngine<M> {
                 return Ok(None);
             }
         }
+
+        tracing::debug!(
+            run_id = %ctx.run_id,
+            agent_id = %ctx.agent_id,
+            step_id = %step.id,
+            chunks_count,
+            output_chars = output.chars().count(),
+            "llm step stream consumed"
+        );
 
         Ok(Some(Value::String(output)))
     }
@@ -281,6 +321,13 @@ impl<M: ModelClient> RunEngine<M> {
             .get(tool_name)
             .ok_or_else(|| AppError::Run(format!("tool '{}' is not registered", tool_name)))?;
 
+        tracing::info!(
+            run_id = %ctx.run_id,
+            agent_id = %ctx.agent_id,
+            step_id = %step.id,
+            tool = %tool_name,
+            "tool call started"
+        );
         if !events.emit(
             ctx,
             Some(&step.id),
@@ -304,6 +351,14 @@ impl<M: ModelClient> RunEngine<M> {
             ) => result?,
         };
 
+        tracing::info!(
+            run_id = %ctx.run_id,
+            agent_id = %ctx.agent_id,
+            step_id = %step.id,
+            tool = %tool_name,
+            output = %summarize_value(&output),
+            "tool call completed"
+        );
         if !events.emit(
             ctx,
             Some(&step.id),
@@ -314,6 +369,48 @@ impl<M: ModelClient> RunEngine<M> {
         }
         Ok(Some(output))
     }
+}
+
+fn summarize_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(_) => "bool".to_string(),
+        Value::Number(_) => "number".to_string(),
+        Value::String(value) => format!("string chars={}", value.chars().count()),
+        Value::Array(value) => format!("array items={}", value.len()),
+        Value::Object(value) => format!("object keys={}", value.len()),
+    }
+}
+
+fn count_message_images(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .map(|message| match &message.content {
+            crate::model::types::ChatContent::Text(_) => 0,
+            crate::model::types::ChatContent::Parts(parts) => parts
+                .iter()
+                .filter(|part| {
+                    matches!(part, crate::model::types::ChatContentPart::ImageUrl { .. })
+                })
+                .count(),
+        })
+        .sum()
+}
+
+fn count_message_text_chars(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .map(|message| match &message.content {
+            crate::model::types::ChatContent::Text(text) => text.chars().count(),
+            crate::model::types::ChatContent::Parts(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    crate::model::types::ChatContentPart::Text { text } => text.chars().count(),
+                    crate::model::types::ChatContentPart::ImageUrl { .. } => 0,
+                })
+                .sum(),
+        })
+        .sum()
 }
 
 #[derive(Clone)]
