@@ -122,6 +122,61 @@ steps:
 }
 
 #[test]
+fn loads_code_step_with_handler_and_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("code_agent");
+    write_file(
+        &agent.join("agent.yaml"),
+        r#"
+id: code_agent
+name: Code Agent
+model:
+  provider: openai_compatible
+input:
+  schema:
+    type: object
+steps:
+  - id: normalize
+    type: code
+    handler: medical.normalize_report
+    inputs:
+      report_text: "{{ input.report_text }}"
+"#,
+    );
+
+    let agents = load_agents(dir.path()).unwrap();
+    assert_eq!(agents[0].config.steps[0].id, "normalize");
+    assert_eq!(
+        agents[0].config.steps[0].handler.as_deref(),
+        Some("medical.normalize_report")
+    );
+}
+
+#[test]
+fn rejects_code_step_without_handler() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("bad");
+    write_file(
+        &agent.join("agent.yaml"),
+        r#"
+id: bad
+name: Bad
+model:
+  provider: openai_compatible
+input:
+  schema:
+    type: object
+steps:
+  - id: normalize
+    type: code
+"#,
+    );
+
+    let err = load_agents(dir.path()).unwrap_err().to_string();
+    assert!(err.contains("type 'code' requires handler"));
+}
+
+#[test]
 fn loads_condition_step_with_cases_and_default() {
     let dir = tempfile::tempdir().unwrap();
     let agent = dir.path().join("branch_agent");

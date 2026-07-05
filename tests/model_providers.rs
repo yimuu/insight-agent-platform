@@ -183,6 +183,8 @@ fn validates_agents_against_provider_model_whitelist_and_vision_capability() {
                 image_input: Some("input.images".to_string()),
                 stream: true,
                 tool: None,
+                handler: None,
+                inputs: serde_json::Value::Null,
                 args: serde_json::Value::Null,
                 cases: Vec::new(),
                 default: None,

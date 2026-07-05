@@ -17,6 +17,7 @@ use insight_agent_platform::{
         config::{AgentConfig, InputConfig, ModelConfig, StepConfig, StepKind},
         loader::LoadedAgent,
     },
+    code::registry::{CodeContext, CodeHandler, CodeRegistry},
     engine::{event::RunEventKind, runner::RunEngine},
     error::AppError,
     model::types::{ChatRequest, ChatStream, FakeModelClient, ModelClient},
@@ -25,6 +26,24 @@ use insight_agent_platform::{
         registry::{default_tool_registry, Tool, ToolContext, ToolRegistry},
     },
 };
+
+#[derive(Clone, Copy)]
+struct GreetingCodeHandler;
+
+#[async_trait]
+impl CodeHandler for GreetingCodeHandler {
+    fn name(&self) -> &'static str {
+        "test.greeting"
+    }
+
+    async fn call(&self, input: Value, ctx: CodeContext) -> Result<Value, AppError> {
+        ctx.emit_text("preparing greeting")?;
+        Ok(json!({
+            "message": format!("Hello {}", input["name"].as_str().unwrap_or("unknown")),
+            "run_id": ctx.run_id(),
+        }))
+    }
+}
 
 #[tokio::test]
 async fn prompt_step_renders_and_completes_run() {
@@ -57,6 +76,8 @@ async fn prompt_step_renders_and_completes_run() {
                 image_input: None,
                 stream: false,
                 tool: None,
+                handler: None,
+                inputs: serde_json::Value::Null,
                 args: serde_json::Value::Null,
                 cases: Vec::new(),
                 default: None,
@@ -83,6 +104,80 @@ async fn prompt_step_renders_and_completes_run() {
         .unwrap();
     assert_eq!(completed.content, "");
     assert!(completed.result.is_null());
+}
+
+#[tokio::test]
+async fn code_step_emits_text_and_saves_json_output() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![
+                StepConfig {
+                    id: "greeting".to_string(),
+                    kind: StepKind::Code,
+                    prompt_ref: None,
+                    prompt: None,
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: None,
+                    handler: Some("test.greeting".to_string()),
+                    args: serde_json::Value::Null,
+                    inputs: json!({"name": "{{ input.name }}"}),
+                    cases: Vec::new(),
+                    default: None,
+                    end: false,
+                },
+                StepConfig {
+                    id: "render".to_string(),
+                    kind: StepKind::Text,
+                    prompt_ref: None,
+                    prompt: Some("{{ steps.greeting.output.message }}".to_string()),
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: None,
+                    handler: None,
+                    args: serde_json::Value::Null,
+                    inputs: serde_json::Value::Null,
+                    cases: Vec::new(),
+                    default: None,
+                    end: true,
+                },
+            ],
+        },
+    };
+
+    let mut code = CodeRegistry::default();
+    code.register(GreetingCodeHandler);
+    let engine = RunEngine::new(FakeModelClient::new(vec![]), ToolRegistry::default())
+        .with_code_handlers(code);
+    let events: Vec<_> = engine.run(agent, json!({"name":"Ada"})).collect().await;
+    let deltas: Vec<_> = events
+        .iter()
+        .filter(|event| event.event == RunEventKind::TokenDelta)
+        .map(|event| event.content.as_str())
+        .collect();
+
+    assert_eq!(deltas, vec!["preparing greeting", "\n\nHello Ada"]);
 }
 
 #[tokio::test]
@@ -117,6 +212,8 @@ async fn text_step_renders_template_and_emits_content() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -132,6 +229,8 @@ async fn text_step_renders_template_and_emits_content() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -183,6 +282,8 @@ async fn tool_step_emits_tool_events_and_stores_output() {
                 image_input: None,
                 stream: false,
                 tool: Some("current_time".to_string()),
+                handler: None,
+                inputs: serde_json::Value::Null,
                 args: json!({"timezone":"Asia/Shanghai"}),
                 cases: Vec::new(),
                 default: None,
@@ -242,6 +343,8 @@ async fn text_step_can_reference_object_step_output_fields() {
                     image_input: None,
                     stream: false,
                     tool: Some("current_time".to_string()),
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: json!({"timezone":"Asia/Shanghai"}),
                     cases: Vec::new(),
                     default: None,
@@ -257,6 +360,8 @@ async fn text_step_can_reference_object_step_output_fields() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -310,6 +415,8 @@ async fn condition_step_jumps_to_matching_case() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: vec![insight_agent_platform::agent::config::ConditionCase {
                         when: "input.kind == 'a'".to_string(),
@@ -328,6 +435,8 @@ async fn condition_step_jumps_to_matching_case() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -343,6 +452,8 @@ async fn condition_step_jumps_to_matching_case() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -395,6 +506,8 @@ async fn condition_step_can_read_previous_step_output_text() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -410,6 +523,8 @@ async fn condition_step_can_read_previous_step_output_text() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: vec![insight_agent_platform::agent::config::ConditionCase {
                         when: "steps.classify.output.text == 'medical'".to_string(),
@@ -428,6 +543,8 @@ async fn condition_step_can_read_previous_step_output_text() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -443,6 +560,8 @@ async fn condition_step_can_read_previous_step_output_text() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -495,6 +614,8 @@ async fn condition_step_supports_cel_boolean_expression() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -510,6 +631,8 @@ async fn condition_step_supports_cel_boolean_expression() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: vec![insight_agent_platform::agent::config::ConditionCase {
                         when: "steps.classify.output.text == 'medical' && input.age >= 18"
@@ -529,6 +652,8 @@ async fn condition_step_supports_cel_boolean_expression() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -544,6 +669,8 @@ async fn condition_step_supports_cel_boolean_expression() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -617,6 +744,8 @@ async fn tool_step_error_emits_error_event_and_stops_run() {
                 image_input: None,
                 stream: false,
                 tool: Some("failing_tool".to_string()),
+                handler: None,
+                inputs: serde_json::Value::Null,
                 args: json!({}),
                 cases: Vec::new(),
                 default: None,
@@ -812,6 +941,8 @@ async fn llm_step_attaches_input_images_to_user_message_when_configured() {
                 image_input: Some("input.images".to_string()),
                 stream: true,
                 tool: None,
+                handler: None,
+                inputs: serde_json::Value::Null,
                 args: serde_json::Value::Null,
                 cases: Vec::new(),
                 default: None,
@@ -884,6 +1015,8 @@ async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
                     image_input: None,
                     stream: false,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -899,6 +1032,8 @@ async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
                     image_input: None,
                     stream: true,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -994,6 +1129,8 @@ async fn llm_step_passes_empty_model_when_agent_model_is_absent() {
                 image_input: None,
                 stream: true,
                 tool: None,
+                handler: None,
+                inputs: serde_json::Value::Null,
                 args: serde_json::Value::Null,
                 cases: Vec::new(),
                 default: None,
@@ -1045,6 +1182,8 @@ async fn llm_step_streams_token_delta_events_and_final_output() {
                 image_input: None,
                 stream: true,
                 tool: None,
+                handler: None,
+                inputs: serde_json::Value::Null,
                 args: serde_json::Value::Null,
                 cases: Vec::new(),
                 default: None,
@@ -1106,6 +1245,8 @@ async fn llm_steps_insert_blank_line_before_later_step_content() {
                     image_input: None,
                     stream: true,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -1121,6 +1262,8 @@ async fn llm_steps_insert_blank_line_before_later_step_content() {
                     image_input: None,
                     stream: true,
                     tool: None,
+                    handler: None,
+                    inputs: serde_json::Value::Null,
                     args: serde_json::Value::Null,
                     cases: Vec::new(),
                     default: None,
@@ -1178,6 +1321,8 @@ async fn dropping_stream_stops_run_before_llm_work_starts() {
                 image_input: None,
                 stream: true,
                 tool: None,
+                handler: None,
+                inputs: serde_json::Value::Null,
                 args: serde_json::Value::Null,
                 cases: Vec::new(),
                 default: None,
@@ -1227,6 +1372,8 @@ async fn dropping_stream_cancels_in_flight_model_request() {
                 image_input: None,
                 stream: true,
                 tool: None,
+                handler: None,
+                inputs: serde_json::Value::Null,
                 args: serde_json::Value::Null,
                 cases: Vec::new(),
                 default: None,

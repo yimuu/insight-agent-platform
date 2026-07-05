@@ -25,6 +25,7 @@ use crate::{
         config::{ModelConfig, StepConfig, StepKind},
         loader::LoadedAgent,
     },
+    code::registry::{CodeContext, CodeRegistry},
     engine::{
         context::RunContext,
         event::{RunEvent, RunEventKind},
@@ -39,6 +40,7 @@ use crate::{
 pub struct RunEngine<M: ModelClient> {
     model: M,
     tools: ToolRegistry,
+    code_handlers: CodeRegistry,
     renderer: PromptRenderer,
 }
 
@@ -47,8 +49,14 @@ impl<M: ModelClient> RunEngine<M> {
         Self {
             model,
             tools,
+            code_handlers: CodeRegistry::default(),
             renderer: PromptRenderer::new(),
         }
+    }
+
+    pub fn with_code_handlers(mut self, code_handlers: CodeRegistry) -> Self {
+        self.code_handlers = code_handlers;
+        self
     }
 
     pub fn run(&self, agent: LoadedAgent, input: Value) -> impl Stream<Item = RunEvent> {
@@ -245,6 +253,7 @@ impl<M: ModelClient> RunEngine<M> {
                     .await
             }
             StepKind::Tool => self.execute_tool_step(step, ctx, events).await,
+            StepKind::Code => self.execute_code_step(step, ctx, events).await,
             StepKind::Condition => self.execute_condition_step(step, ctx),
         }
     }
@@ -476,6 +485,79 @@ impl<M: ModelClient> RunEngine<M> {
         if !events.emit(ctx, Some(&step.id), RunEventKind::ToolCallCompleted) {
             return Ok(StepExecution::Cancelled);
         }
+        Ok(StepExecution::output(output))
+    }
+
+    async fn execute_code_step(
+        &self,
+        step: &StepConfig,
+        ctx: &RunContext,
+        events: &EventSender,
+    ) -> Result<StepExecution, AppError> {
+        if events.is_closed() {
+            return Ok(StepExecution::Cancelled);
+        }
+
+        let handler_name = step.handler.as_deref().ok_or_else(|| {
+            AppError::Config(format!("step '{}' type 'code' requires handler", step.id))
+        })?;
+        let handler = self.code_handlers.get(handler_name).ok_or_else(|| {
+            AppError::Run(format!("code handler '{}' is not registered", handler_name))
+        })?;
+        let inputs = render_template_value(&self.renderer, &step.inputs, &ctx.template_data())?;
+        let emit_ctx = ctx.clone();
+        let emit_events = events.clone();
+        let emit_step_id = step.id.clone();
+        let step_emitted_content = Arc::new(AtomicBool::new(false));
+        let emit_step_state = step_emitted_content.clone();
+        let code_ctx = CodeContext::new(
+            ctx.run_id.clone(),
+            Arc::new(move |content| {
+                let step_has_emitted = emit_step_state.swap(true, Ordering::SeqCst);
+                let outbound = format_outbound_delta(
+                    &content,
+                    step_has_emitted,
+                    emit_events.has_emitted_content(),
+                );
+                if emit_events.emit_content(
+                    &emit_ctx,
+                    Some(&emit_step_id),
+                    RunEventKind::TokenDelta,
+                    outbound,
+                ) {
+                    Ok(())
+                } else {
+                    Err(AppError::Run(
+                        "run stream closed while emitting code output".to_string(),
+                    ))
+                }
+            }),
+        );
+
+        tracing::info!(
+            run_id = %ctx.run_id,
+            agent_id = %ctx.agent_id,
+            step_id = %step.id,
+            handler = %handler_name,
+            input = %summarize_value(&inputs),
+            input_preview = %format_value_for_log(&inputs, 1200),
+            "code handler started"
+        );
+
+        let output = tokio::select! {
+            _ = events.closed() => return Ok(StepExecution::Cancelled),
+            result = handler.call(inputs, code_ctx) => result?,
+        };
+
+        tracing::info!(
+            run_id = %ctx.run_id,
+            agent_id = %ctx.agent_id,
+            step_id = %step.id,
+            handler = %handler_name,
+            output = %summarize_value(&output),
+            output_preview = %format_value_for_log(&output, 1200),
+            "code handler completed"
+        );
         Ok(StepExecution::output(output))
     }
 }
@@ -782,6 +864,29 @@ fn resolve_optional_prompt(
         (Some(_), Some(_)) => Err(AppError::Config(
             "system prompt requires either system_prompt or system_prompt_ref".to_string(),
         )),
+    }
+}
+
+fn render_template_value(
+    renderer: &PromptRenderer,
+    value: &Value,
+    data: &Value,
+) -> Result<Value, AppError> {
+    match value {
+        Value::String(template) => renderer.render(template, data).map(Value::String),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| render_template_value(renderer, item, data))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        Value::Object(object) => object
+            .iter()
+            .map(|(key, value)| {
+                render_template_value(renderer, value, data).map(|rendered| (key.clone(), rendered))
+            })
+            .collect::<Result<Map<_, _>, _>>()
+            .map(Value::Object),
+        other => Ok(other.clone()),
     }
 }
 

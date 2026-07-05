@@ -143,6 +143,14 @@ fn validate_agent_config(agent_root: &Path, config: &AgentConfig) -> Result<(), 
                     )));
                 }
             }
+            StepKind::Code => {
+                if step.handler.is_none() {
+                    return Err(AppError::Config(format!(
+                        "step '{}' type 'code' requires handler",
+                        step.id
+                    )));
+                }
+            }
             StepKind::Condition => {
                 if step.cases.is_empty() && step.default.is_none() {
                     return Err(AppError::Config(format!(

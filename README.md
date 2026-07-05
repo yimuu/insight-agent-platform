@@ -61,6 +61,17 @@ steps:
     default: reject
 ```
 
+Code steps call native Rust handlers registered in the host application. YAML references the handler and maps templated inputs; the handler returns JSON, which is saved as `steps.<step_id>.output`. Handlers may also emit text while running, and that text is streamed to clients as normal `token_delta` events.
+
+```yaml
+steps:
+  - id: normalize_report
+    type: code
+    handler: medical.normalize_report
+    inputs:
+      report_text: "{{ input.report_text }}"
+```
+
 ## Run
 
 ```bash

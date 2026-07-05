@@ -58,7 +58,11 @@ pub struct StepConfig {
     #[serde(default)]
     pub tool: Option<String>,
     #[serde(default)]
+    pub handler: Option<String>,
+    #[serde(default)]
     pub args: Value,
+    #[serde(default)]
+    pub inputs: Value,
     #[serde(default)]
     pub cases: Vec<ConditionCase>,
     #[serde(default)]
@@ -98,6 +102,7 @@ pub enum StepKind {
     Text,
     Llm,
     Tool,
+    Code,
     Condition,
 }
 
