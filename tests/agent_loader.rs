@@ -28,6 +28,7 @@ fn loads_medical_report_interpreter_agent() {
     assert!(abnormal_prompt.contains("### 异常指标解读"));
     assert!(abnormal_prompt.contains("1. 指标名称"));
     assert!(abnormal_prompt.contains("必须使用有序列表输出所有异常指标"));
+    assert!(abnormal_prompt.contains("列表结束后不要输出总结"));
 
     let comprehensive_prompt = agent.prompts.get("comprehensive_interpretation").unwrap();
     assert!(comprehensive_prompt.contains("### 综合解读"));

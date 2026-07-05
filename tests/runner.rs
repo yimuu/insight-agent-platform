@@ -630,6 +630,73 @@ async fn llm_step_streams_token_delta_events_and_final_output() {
 }
 
 #[tokio::test]
+async fn llm_steps_insert_blank_line_before_later_step_content() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![
+                StepConfig {
+                    id: "first".to_string(),
+                    kind: StepKind::Llm,
+                    prompt_ref: None,
+                    prompt: Some("First".to_string()),
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: true,
+                    tool: None,
+                    args: serde_json::Value::Null,
+                },
+                StepConfig {
+                    id: "second".to_string(),
+                    kind: StepKind::Llm,
+                    prompt_ref: None,
+                    prompt: Some("Second".to_string()),
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: true,
+                    tool: None,
+                    args: serde_json::Value::Null,
+                },
+            ],
+        },
+    };
+
+    let engine = RunEngine::new(
+        FakeModelClient::new(vec!["### 标题"]),
+        ToolRegistry::default(),
+    );
+    let events: Vec<_> = engine.run(agent, json!({})).collect().await;
+    let deltas: Vec<_> = events
+        .iter()
+        .filter(|event| event.event == RunEventKind::TokenDelta)
+        .map(|event| (event.step_id.as_deref().unwrap(), event.content.as_str()))
+        .collect();
+
+    assert_eq!(
+        deltas,
+        vec![("first", "### 标题"), ("second", "\n\n### 标题")]
+    );
+}
+
+#[tokio::test]
 async fn dropping_stream_stops_run_before_llm_work_starts() {
     let agent = LoadedAgent {
         root: std::path::PathBuf::from("agents/test"),

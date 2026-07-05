@@ -1,6 +1,10 @@
 use std::{
     collections::BTreeMap,
     pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
     time::Instant,
 };
@@ -106,7 +110,15 @@ impl<M: ModelClient> RunEngine<M> {
                         step_id = %step.id,
                         elapsed_ms = step_started.elapsed().as_millis(),
                         output = %summarize_value(&output),
+                        output_preview = %format_value_for_log(&output, 1200),
                         "agent step completed"
+                    );
+                    tracing::debug!(
+                        run_id = %ctx.run_id,
+                        agent_id = %ctx.agent_id,
+                        step_id = %step.id,
+                        output_text = %format_value_for_log(&output, 8000),
+                        "agent step output"
                     );
                     if !events.emit(&ctx, Some(&step.id), RunEventKind::StepCompleted) {
                         return;
@@ -246,6 +258,7 @@ impl<M: ModelClient> RunEngine<M> {
         };
         let mut output = String::new();
         let mut chunks_count = 0_usize;
+        let mut step_emitted_content = false;
 
         loop {
             let next_chunk = tokio::select! {
@@ -262,8 +275,16 @@ impl<M: ModelClient> RunEngine<M> {
                 continue;
             }
             chunks_count += 1;
+            let outbound_delta =
+                format_outbound_delta(&delta, step_emitted_content, events.has_emitted_content());
+            step_emitted_content = true;
             output.push_str(&delta);
-            if !events.emit_content(ctx, Some(&step.id), RunEventKind::TokenDelta, delta) {
+            if !events.emit_content(
+                ctx,
+                Some(&step.id),
+                RunEventKind::TokenDelta,
+                outbound_delta,
+            ) {
                 return Ok(None);
             }
         }
@@ -329,6 +350,7 @@ impl<M: ModelClient> RunEngine<M> {
             step_id = %step.id,
             tool = %tool_name,
             output = %summarize_value(&output),
+            output_preview = %format_value_for_log(&output, 1200),
             "tool call completed"
         );
         if !events.emit(ctx, Some(&step.id), RunEventKind::ToolCallCompleted) {
@@ -346,6 +368,34 @@ fn summarize_value(value: &Value) -> String {
         Value::String(value) => format!("string chars={}", value.chars().count()),
         Value::Array(value) => format!("array items={}", value.len()),
         Value::Object(value) => format!("object keys={}", value.len()),
+    }
+}
+
+fn format_value_for_log(value: &Value, max_chars: usize) -> String {
+    let text = match value {
+        Value::String(value) => value.clone(),
+        other => other.to_string(),
+    };
+    truncate_for_log(&text, max_chars)
+}
+
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    let mut truncated = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        truncated.push_str("...");
+    }
+    truncated
+}
+
+fn format_outbound_delta(
+    delta: &str,
+    step_emitted_content: bool,
+    run_emitted_content: bool,
+) -> String {
+    if step_emitted_content || !run_emitted_content || delta.starts_with('\n') {
+        delta.to_string()
+    } else {
+        format!("\n\n{delta}")
     }
 }
 
@@ -384,11 +434,16 @@ fn count_message_text_chars(messages: &[ChatMessage]) -> usize {
 struct EventSender {
     tx: mpsc::UnboundedSender<RunEvent>,
     cancel_rx: watch::Receiver<bool>,
+    emitted_content: Arc<AtomicBool>,
 }
 
 impl EventSender {
     fn new(tx: mpsc::UnboundedSender<RunEvent>, cancel_rx: watch::Receiver<bool>) -> Self {
-        Self { tx, cancel_rx }
+        Self {
+            tx,
+            cancel_rx,
+            emitted_content: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     fn emit(&self, ctx: &RunContext, step_id: Option<&str>, event: RunEventKind) -> bool {
@@ -402,7 +457,10 @@ impl EventSender {
         event: RunEventKind,
         content: impl Into<String>,
     ) -> bool {
-        self.tx
+        let content = content.into();
+        let has_content = !content.is_empty();
+        let emitted = self
+            .tx
             .send(RunEvent::ok(
                 event,
                 ctx.run_id.clone(),
@@ -411,7 +469,15 @@ impl EventSender {
                 content,
                 Value::Null,
             ))
-            .is_ok()
+            .is_ok();
+        if emitted && event == RunEventKind::TokenDelta && has_content {
+            self.emitted_content.store(true, Ordering::SeqCst);
+        }
+        emitted
+    }
+
+    fn has_emitted_content(&self) -> bool {
+        self.emitted_content.load(Ordering::SeqCst)
     }
 
     fn emit_error(
