@@ -1,11 +1,12 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::AppError;
 
-type EmitText = Arc<dyn Fn(String) -> Result<(), AppError> + Send + Sync>;
+type EmitText =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct CodeContext {
@@ -22,8 +23,8 @@ impl CodeContext {
         &self.run_id
     }
 
-    pub fn emit_text(&self, content: impl Into<String>) -> Result<(), AppError> {
-        (self.emit_text)(content.into())
+    pub async fn emit_text(&self, content: impl Into<String>) -> Result<(), AppError> {
+        (self.emit_text)(content.into()).await
     }
 }
 

@@ -4,10 +4,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
+use tokio::task;
 
 use crate::{engine::event::RunEvent, error::AppError};
 
@@ -99,7 +101,7 @@ impl RunHistoryStore {
         })
     }
 
-    pub fn create_run(
+    pub async fn create_run(
         &self,
         run_id: &str,
         agent_id: &str,
@@ -109,39 +111,40 @@ impl RunHistoryStore {
         if let Err(err) = self
             .inner
             .create_run(run_id, agent_id, started_at, input_summary)
+            .await
         {
             tracing::warn!(run_id, agent_id, error = %err, "failed to record run start");
         }
     }
 
-    pub fn record_event(&self, event: &RunEvent) {
-        if let Err(err) = self.inner.record_event(event) {
+    pub async fn record_event(&self, event: &RunEvent) {
+        if let Err(err) = self.inner.record_event(event).await {
             tracing::warn!(run_id = %event.run_id, error = %err, "failed to record run event");
         }
     }
 
-    pub fn record_step_output(&self, run_id: &str, step_id: &str, output: Value) {
-        if let Err(err) = self.inner.record_step_output(run_id, step_id, output) {
+    pub async fn record_step_output(&self, run_id: &str, step_id: &str, output: Value) {
+        if let Err(err) = self.inner.record_step_output(run_id, step_id, output).await {
             tracing::warn!(run_id, step_id, error = %err, "failed to record step output");
         }
     }
 
-    pub fn finish_run(&self, run_id: &str, status: RunStatus, error_message: Option<String>) {
-        if let Err(err) = self.inner.finish_run(run_id, status, error_message) {
+    pub async fn finish_run(&self, run_id: &str, status: RunStatus, error_message: Option<String>) {
+        if let Err(err) = self.inner.finish_run(run_id, status, error_message).await {
             tracing::warn!(run_id, error = %err, "failed to record run finish");
         }
     }
 
-    pub fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, AppError> {
-        self.inner.get_run(run_id)
+    pub async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, AppError> {
+        self.inner.get_run(run_id).await
     }
 
-    pub fn list_agent_runs(
+    pub async fn list_agent_runs(
         &self,
         agent_id: &str,
         limit: usize,
     ) -> Result<Vec<RunSummary>, AppError> {
-        self.inner.list_agent_runs(agent_id, limit)
+        self.inner.list_agent_runs(agent_id, limit).await
     }
 }
 
@@ -151,35 +154,41 @@ impl Default for RunHistoryStore {
     }
 }
 
+#[async_trait]
 trait RunHistoryRepository: Send + Sync {
-    fn create_run(
+    async fn create_run(
         &self,
         run_id: &str,
         agent_id: &str,
         started_at: DateTime<Utc>,
         input_summary: Value,
     ) -> Result<(), AppError>;
-    fn record_event(&self, event: &RunEvent) -> Result<(), AppError>;
-    fn record_step_output(
+    async fn record_event(&self, event: &RunEvent) -> Result<(), AppError>;
+    async fn record_step_output(
         &self,
         run_id: &str,
         step_id: &str,
         output: Value,
     ) -> Result<(), AppError>;
-    fn finish_run(
+    async fn finish_run(
         &self,
         run_id: &str,
         status: RunStatus,
         error_message: Option<String>,
     ) -> Result<(), AppError>;
-    fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, AppError>;
-    fn list_agent_runs(&self, agent_id: &str, limit: usize) -> Result<Vec<RunSummary>, AppError>;
+    async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, AppError>;
+    async fn list_agent_runs(
+        &self,
+        agent_id: &str,
+        limit: usize,
+    ) -> Result<Vec<RunSummary>, AppError>;
 }
 
 struct NoopRunHistoryRepository;
 
+#[async_trait]
 impl RunHistoryRepository for NoopRunHistoryRepository {
-    fn create_run(
+    async fn create_run(
         &self,
         _run_id: &str,
         _agent_id: &str,
@@ -189,11 +198,11 @@ impl RunHistoryRepository for NoopRunHistoryRepository {
         Ok(())
     }
 
-    fn record_event(&self, _event: &RunEvent) -> Result<(), AppError> {
+    async fn record_event(&self, _event: &RunEvent) -> Result<(), AppError> {
         Ok(())
     }
 
-    fn record_step_output(
+    async fn record_step_output(
         &self,
         _run_id: &str,
         _step_id: &str,
@@ -202,7 +211,7 @@ impl RunHistoryRepository for NoopRunHistoryRepository {
         Ok(())
     }
 
-    fn finish_run(
+    async fn finish_run(
         &self,
         _run_id: &str,
         _status: RunStatus,
@@ -211,17 +220,22 @@ impl RunHistoryRepository for NoopRunHistoryRepository {
         Ok(())
     }
 
-    fn get_run(&self, _run_id: &str) -> Result<Option<RunRecord>, AppError> {
+    async fn get_run(&self, _run_id: &str) -> Result<Option<RunRecord>, AppError> {
         Ok(None)
     }
 
-    fn list_agent_runs(&self, _agent_id: &str, _limit: usize) -> Result<Vec<RunSummary>, AppError> {
+    async fn list_agent_runs(
+        &self,
+        _agent_id: &str,
+        _limit: usize,
+    ) -> Result<Vec<RunSummary>, AppError> {
         Ok(Vec::new())
     }
 }
 
+#[derive(Clone)]
 struct SqliteRunHistoryRepository {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl SqliteRunHistoryRepository {
@@ -236,7 +250,7 @@ impl SqliteRunHistoryRepository {
         }
         let conn = Connection::open(path).map_err(map_sqlite_error)?;
         let repository = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         repository.init()?;
         Ok(repository)
@@ -245,7 +259,7 @@ impl SqliteRunHistoryRepository {
     fn open_in_memory() -> Result<Self, AppError> {
         let conn = Connection::open_in_memory().map_err(map_sqlite_error)?;
         let repository = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         repository.init()?;
         Ok(repository)
@@ -292,158 +306,205 @@ CREATE TABLE IF NOT EXISTS step_outputs (
         )
         .map_err(map_sqlite_error)
     }
+
+    async fn with_conn<T, F>(&self, f: F) -> Result<T, AppError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Connection) -> Result<T, AppError> + Send + 'static,
+    {
+        let conn = self.conn.clone();
+        task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(map_mutex_error)?;
+            f(&conn)
+        })
+        .await
+        .map_err(|err| AppError::Run(format!("run history task join error: {err}")))?
+    }
 }
 
+#[async_trait]
 impl RunHistoryRepository for SqliteRunHistoryRepository {
-    fn create_run(
+    async fn create_run(
         &self,
         run_id: &str,
         agent_id: &str,
         started_at: DateTime<Utc>,
         input_summary: Value,
     ) -> Result<(), AppError> {
-        let conn = self.conn.lock().map_err(map_mutex_error)?;
-        conn.execute(
-            "INSERT OR REPLACE INTO runs (run_id, agent_id, status, started_at, ended_at, input_summary, error_message)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL)",
-            params![
-                run_id,
-                agent_id,
-                RunStatus::Running.as_str(),
-                started_at.to_rfc3339(),
-                input_summary.to_string()
-            ],
-        )
-        .map_err(map_sqlite_error)?;
-        Ok(())
+        let run_id = run_id.to_string();
+        let agent_id = agent_id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO runs (run_id, agent_id, status, started_at, ended_at, input_summary, error_message)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL)",
+                params![
+                    run_id,
+                    agent_id,
+                    RunStatus::Running.as_str(),
+                    started_at.to_rfc3339(),
+                    input_summary.to_string()
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+            Ok(())
+        })
+        .await
     }
 
-    fn record_event(&self, event: &RunEvent) -> Result<(), AppError> {
-        let conn = self.conn.lock().map_err(map_mutex_error)?;
-        conn.execute(
-            "INSERT INTO run_events (run_id, event, step_id, timestamp, content, result, code, message)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                event.run_id,
-                event.event.as_sse_name(),
-                event.step_id,
-                event.timestamp.to_rfc3339(),
-                event.content,
-                event.result.to_string(),
-                event.code,
-                event.message,
-            ],
-        )
-        .map_err(map_sqlite_error)?;
-        Ok(())
+    async fn record_event(&self, event: &RunEvent) -> Result<(), AppError> {
+        let run_id = event.run_id.clone();
+        let event_name = event.event.as_sse_name().to_string();
+        let step_id = event.step_id.clone();
+        let timestamp = event.timestamp;
+        let content = event.content.clone();
+        let result = event.result.clone();
+        let code = event.code;
+        let message = event.message.clone();
+
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO run_events (run_id, event, step_id, timestamp, content, result, code, message)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    run_id,
+                    event_name,
+                    step_id,
+                    timestamp.to_rfc3339(),
+                    content,
+                    result.to_string(),
+                    code,
+                    message,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+            Ok(())
+        })
+        .await
     }
 
-    fn record_step_output(
+    async fn record_step_output(
         &self,
         run_id: &str,
         step_id: &str,
         output: Value,
     ) -> Result<(), AppError> {
-        let conn = self.conn.lock().map_err(map_mutex_error)?;
-        conn.execute(
-            "INSERT OR REPLACE INTO step_outputs (run_id, step_id, output, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![run_id, step_id, output.to_string(), Utc::now().to_rfc3339()],
-        )
-        .map_err(map_sqlite_error)?;
-        Ok(())
+        let run_id = run_id.to_string();
+        let step_id = step_id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO step_outputs (run_id, step_id, output, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![run_id, step_id, output.to_string(), Utc::now().to_rfc3339()],
+            )
+            .map_err(map_sqlite_error)?;
+            Ok(())
+        })
+        .await
     }
 
-    fn finish_run(
+    async fn finish_run(
         &self,
         run_id: &str,
         status: RunStatus,
         error_message: Option<String>,
     ) -> Result<(), AppError> {
-        let conn = self.conn.lock().map_err(map_mutex_error)?;
-        conn.execute(
-            "UPDATE runs SET status = ?2, ended_at = ?3, error_message = ?4 WHERE run_id = ?1",
-            params![
-                run_id,
-                status.as_str(),
-                Utc::now().to_rfc3339(),
-                error_message
-            ],
-        )
-        .map_err(map_sqlite_error)?;
-        Ok(())
+        let run_id = run_id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE runs SET status = ?2, ended_at = ?3, error_message = ?4 WHERE run_id = ?1",
+                params![
+                    run_id,
+                    status.as_str(),
+                    Utc::now().to_rfc3339(),
+                    error_message
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+            Ok(())
+        })
+        .await
     }
 
-    fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, AppError> {
-        let conn = self.conn.lock().map_err(map_mutex_error)?;
-        let summary = conn
-            .query_row(
-                "SELECT run_id, agent_id, status, started_at, ended_at, input_summary, error_message
-                 FROM runs WHERE run_id = ?1",
-                params![run_id],
-                read_run_summary,
-            )
-            .optional()
-            .map_err(map_sqlite_error)?;
+    async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, AppError> {
+        let run_id = run_id.to_string();
+        self.with_conn(move |conn| {
+            let summary = conn
+                .query_row(
+                    "SELECT run_id, agent_id, status, started_at, ended_at, input_summary, error_message
+                     FROM runs WHERE run_id = ?1",
+                    params![run_id],
+                    read_run_summary,
+                )
+                .optional()
+                .map_err(map_sqlite_error)?;
 
-        let Some(summary) = summary else {
-            return Ok(None);
-        };
+            let Some(summary) = summary else {
+                return Ok(None);
+            };
 
-        let mut event_stmt = conn
-            .prepare(
-                "SELECT event, step_id, timestamp, content, result, code, message
-                 FROM run_events WHERE run_id = ?1 ORDER BY id ASC",
-            )
-            .map_err(map_sqlite_error)?;
-        let events = event_stmt
-            .query_map(params![run_id], read_run_event)
-            .map_err(map_sqlite_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(map_sqlite_error)?;
+            let mut event_stmt = conn
+                .prepare(
+                    "SELECT event, step_id, timestamp, content, result, code, message
+                     FROM run_events WHERE run_id = ?1 ORDER BY id ASC",
+                )
+                .map_err(map_sqlite_error)?;
+            let events = event_stmt
+                .query_map(params![run_id], read_run_event)
+                .map_err(map_sqlite_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(map_sqlite_error)?;
 
-        let mut output_stmt = conn
-            .prepare(
-                "SELECT step_id, output FROM step_outputs WHERE run_id = ?1 ORDER BY step_id ASC",
-            )
-            .map_err(map_sqlite_error)?;
-        let step_outputs = output_stmt
-            .query_map(params![run_id], |row| {
-                let step_id: String = row.get(0)?;
-                let output: String = row.get(1)?;
-                Ok((step_id, parse_json_or_null(&output)))
-            })
-            .map_err(map_sqlite_error)?
-            .collect::<Result<BTreeMap<_, _>, _>>()
-            .map_err(map_sqlite_error)?;
+            let mut output_stmt = conn
+                .prepare(
+                    "SELECT step_id, output FROM step_outputs WHERE run_id = ?1 ORDER BY step_id ASC",
+                )
+                .map_err(map_sqlite_error)?;
+            let step_outputs = output_stmt
+                .query_map(params![run_id], |row| {
+                    let step_id: String = row.get(0)?;
+                    let output: String = row.get(1)?;
+                    Ok((step_id, parse_json_or_null(&output)))
+                })
+                .map_err(map_sqlite_error)?
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map_err(map_sqlite_error)?;
 
-        Ok(Some(RunRecord {
-            run_id: summary.run_id,
-            agent_id: summary.agent_id,
-            status: summary.status,
-            started_at: summary.started_at,
-            ended_at: summary.ended_at,
-            input_summary: summary.input_summary,
-            error_message: summary.error_message,
-            events,
-            step_outputs,
-        }))
+            Ok(Some(RunRecord {
+                run_id: summary.run_id,
+                agent_id: summary.agent_id,
+                status: summary.status,
+                started_at: summary.started_at,
+                ended_at: summary.ended_at,
+                input_summary: summary.input_summary,
+                error_message: summary.error_message,
+                events,
+                step_outputs,
+            }))
+        })
+        .await
     }
 
-    fn list_agent_runs(&self, agent_id: &str, limit: usize) -> Result<Vec<RunSummary>, AppError> {
-        let conn = self.conn.lock().map_err(map_mutex_error)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT run_id, agent_id, status, started_at, ended_at, input_summary, error_message
-                 FROM runs WHERE agent_id = ?1 ORDER BY started_at DESC LIMIT ?2",
-            )
-            .map_err(map_sqlite_error)?;
-        let runs = stmt
-            .query_map(params![agent_id, limit as i64], read_run_summary)
-            .map_err(map_sqlite_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(map_sqlite_error)?;
-        Ok(runs)
+    async fn list_agent_runs(
+        &self,
+        agent_id: &str,
+        limit: usize,
+    ) -> Result<Vec<RunSummary>, AppError> {
+        let agent_id = agent_id.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT run_id, agent_id, status, started_at, ended_at, input_summary, error_message
+                     FROM runs WHERE agent_id = ?1 ORDER BY started_at DESC LIMIT ?2",
+                )
+                .map_err(map_sqlite_error)?;
+            let runs = stmt
+                .query_map(params![agent_id, limit as i64], read_run_summary)
+                .map_err(map_sqlite_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(map_sqlite_error)?;
+            Ok(runs)
+        })
+        .await
     }
 }
 

@@ -79,7 +79,8 @@ async fn list_agent_runs<M: ModelClient>(
     let runs = state
         .engine
         .history_store()
-        .list_agent_runs(&agent_id, 50)?;
+        .list_agent_runs(&agent_id, 50)
+        .await?;
     Ok(Json(ApiResponse::ok(runs)))
 }
 
@@ -90,7 +91,8 @@ async fn get_run<M: ModelClient>(
     let run = state
         .engine
         .history_store()
-        .get_run(&run_id)?
+        .get_run(&run_id)
+        .await?
         .ok_or_else(|| AppError::NotFound(format!("run '{run_id}' not found")))?;
     Ok(Json(ApiResponse::ok(run)))
 }

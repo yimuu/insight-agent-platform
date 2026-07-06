@@ -37,7 +37,7 @@ impl CodeHandler for GreetingCodeHandler {
     }
 
     async fn call(&self, input: Value, ctx: CodeContext) -> Result<Value, AppError> {
-        ctx.emit_text("preparing greeting")?;
+        ctx.emit_text("preparing greeting").await?;
         Ok(json!({
             "message": format!("Hello {}", input["name"].as_str().unwrap_or("unknown")),
             "run_id": ctx.run_id(),

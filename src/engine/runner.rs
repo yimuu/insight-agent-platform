@@ -94,12 +94,14 @@ impl<M: ModelClient> RunEngine<M> {
             input,
             step_outputs: BTreeMap::new(),
         };
-        self.history_store.create_run(
-            &ctx.run_id,
-            &ctx.agent_id,
-            ctx.started_at,
-            input_summary(&ctx.input),
-        );
+        self.history_store
+            .create_run(
+                &ctx.run_id,
+                &ctx.agent_id,
+                ctx.started_at,
+                input_summary(&ctx.input),
+            )
+            .await;
         let store = PromptStore::new(agent.prompts.clone());
         tracing::info!(
             run_id = %ctx.run_id,
@@ -110,7 +112,7 @@ impl<M: ModelClient> RunEngine<M> {
             model = ?agent.config.model.model,
             "agent run started"
         );
-        if !events.emit(&ctx, None, RunEventKind::RunStarted) {
+        if !events.emit(&ctx, None, RunEventKind::RunStarted).await {
             return;
         }
 
@@ -138,7 +140,7 @@ impl<M: ModelClient> RunEngine<M> {
                     error = %message,
                     "agent run failed"
                 );
-                let _ = events.emit_error(&ctx, None, code, message);
+                let _ = events.emit_error(&ctx, None, code, message).await;
                 return;
             }
 
@@ -151,7 +153,10 @@ impl<M: ModelClient> RunEngine<M> {
                 step_type = ?step.kind,
                 "agent step started"
             );
-            if !events.emit(&ctx, Some(&step.id), RunEventKind::StepStarted) {
+            if !events
+                .emit(&ctx, Some(&step.id), RunEventKind::StepStarted)
+                .await
+            {
                 return;
             }
             match self
@@ -162,11 +167,9 @@ impl<M: ModelClient> RunEngine<M> {
                     if let Some(output) = output.clone() {
                         ctx.set_step_output(&step.id, output.clone());
                         if let Some(stored_output) = ctx.step_outputs.get(&step.id) {
-                            self.history_store.record_step_output(
-                                &ctx.run_id,
-                                &step.id,
-                                stored_output.clone(),
-                            );
+                            self.history_store
+                                .record_step_output(&ctx.run_id, &step.id, stored_output.clone())
+                                .await;
                         }
                     }
                     tracing::info!(
@@ -187,7 +190,10 @@ impl<M: ModelClient> RunEngine<M> {
                             "agent step output"
                         );
                     }
-                    if !events.emit(&ctx, Some(&step.id), RunEventKind::StepCompleted) {
+                    if !events
+                        .emit(&ctx, Some(&step.id), RunEventKind::StepCompleted)
+                        .await
+                    {
                         return;
                     }
 
@@ -205,7 +211,8 @@ impl<M: ModelClient> RunEngine<M> {
                                 ));
                                 let code = err.api_code();
                                 let message = err.to_string();
-                                let _ = events.emit_error(&ctx, Some(&step.id), code, message);
+                                let _ =
+                                    events.emit_error(&ctx, Some(&step.id), code, message).await;
                                 return;
                             };
                             tracing::info!(
@@ -231,7 +238,7 @@ impl<M: ModelClient> RunEngine<M> {
                         error = %message,
                         "agent step failed"
                     );
-                    let _ = events.emit_error(&ctx, Some(&step.id), code, message);
+                    let _ = events.emit_error(&ctx, Some(&step.id), code, message).await;
                     return;
                 }
             }
@@ -244,9 +251,10 @@ impl<M: ModelClient> RunEngine<M> {
             .and_then(|step| ctx.step_outputs.get(&step.id))
             .cloned()
             .unwrap_or(Value::Null);
-        let _ = events.emit(&ctx, None, RunEventKind::RunCompleted);
+        let _ = events.emit(&ctx, None, RunEventKind::RunCompleted).await;
         self.history_store
-            .finish_run(&ctx.run_id, RunStatus::Completed, None);
+            .finish_run(&ctx.run_id, RunStatus::Completed, None)
+            .await;
         tracing::info!(
             run_id = %ctx.run_id,
             agent_id = %ctx.agent_id,
@@ -275,7 +283,7 @@ impl<M: ModelClient> RunEngine<M> {
                 let rendered = self.renderer.render(template, &ctx.template_data())?;
                 Ok(StepExecution::output(Value::String(rendered)))
             }
-            StepKind::Text => self.execute_text_step(step, store, ctx, events),
+            StepKind::Text => self.execute_text_step(step, store, ctx, events).await,
             StepKind::Llm => {
                 self.execute_llm_step(step, model_config, store, ctx, events)
                     .await
@@ -379,12 +387,15 @@ impl<M: ModelClient> RunEngine<M> {
                 format_outbound_delta(&delta, step_emitted_content, events.has_emitted_content());
             step_emitted_content = true;
             output.push_str(&delta);
-            if !events.emit_content(
-                ctx,
-                Some(&step.id),
-                RunEventKind::TokenDelta,
-                outbound_delta,
-            ) {
+            if !events
+                .emit_content(
+                    ctx,
+                    Some(&step.id),
+                    RunEventKind::TokenDelta,
+                    outbound_delta,
+                )
+                .await
+            {
                 return Ok(StepExecution::Cancelled);
             }
         }
@@ -401,7 +412,7 @@ impl<M: ModelClient> RunEngine<M> {
         Ok(StepExecution::output(Value::String(output)))
     }
 
-    fn execute_text_step(
+    async fn execute_text_step(
         &self,
         step: &StepConfig,
         store: &PromptStore,
@@ -416,7 +427,9 @@ impl<M: ModelClient> RunEngine<M> {
         let rendered = self.renderer.render(template, &ctx.template_data())?;
         let outbound = format_outbound_delta(&rendered, false, events.has_emitted_content());
         if !rendered.is_empty()
-            && !events.emit_content(ctx, Some(&step.id), RunEventKind::TokenDelta, outbound)
+            && !events
+                .emit_content(ctx, Some(&step.id), RunEventKind::TokenDelta, outbound)
+                .await
         {
             return Ok(StepExecution::Cancelled);
         }
@@ -483,7 +496,10 @@ impl<M: ModelClient> RunEngine<M> {
             tool = %tool_name,
             "tool call started"
         );
-        if !events.emit(ctx, Some(&step.id), RunEventKind::ToolCallStarted) {
+        if !events
+            .emit(ctx, Some(&step.id), RunEventKind::ToolCallStarted)
+            .await
+        {
             return Ok(StepExecution::Cancelled);
         }
 
@@ -510,7 +526,10 @@ impl<M: ModelClient> RunEngine<M> {
             output_preview = %format_value_for_log(&output, 1200),
             "tool call completed"
         );
-        if !events.emit(ctx, Some(&step.id), RunEventKind::ToolCallCompleted) {
+        if !events
+            .emit(ctx, Some(&step.id), RunEventKind::ToolCallCompleted)
+            .await
+        {
             return Ok(StepExecution::Cancelled);
         }
         Ok(StepExecution::output(output))
@@ -537,28 +556,36 @@ impl<M: ModelClient> RunEngine<M> {
         let emit_events = events.clone();
         let emit_step_id = step.id.clone();
         let step_emitted_content = Arc::new(AtomicBool::new(false));
-        let emit_step_state = step_emitted_content.clone();
         let code_ctx = CodeContext::new(
             ctx.run_id.clone(),
             Arc::new(move |content| {
-                let step_has_emitted = emit_step_state.swap(true, Ordering::SeqCst);
-                let outbound = format_outbound_delta(
-                    &content,
-                    step_has_emitted,
-                    emit_events.has_emitted_content(),
-                );
-                if emit_events.emit_content(
-                    &emit_ctx,
-                    Some(&emit_step_id),
-                    RunEventKind::TokenDelta,
-                    outbound,
-                ) {
-                    Ok(())
-                } else {
-                    Err(AppError::Run(
-                        "run stream closed while emitting code output".to_string(),
-                    ))
-                }
+                let emit_ctx = emit_ctx.clone();
+                let emit_events = emit_events.clone();
+                let emit_step_id = emit_step_id.clone();
+                let emit_step_state = step_emitted_content.clone();
+                Box::pin(async move {
+                    let step_has_emitted = emit_step_state.swap(true, Ordering::SeqCst);
+                    let outbound = format_outbound_delta(
+                        &content,
+                        step_has_emitted,
+                        emit_events.has_emitted_content(),
+                    );
+                    if emit_events
+                        .emit_content(
+                            &emit_ctx,
+                            Some(&emit_step_id),
+                            RunEventKind::TokenDelta,
+                            outbound,
+                        )
+                        .await
+                    {
+                        Ok(())
+                    } else {
+                        Err(AppError::Run(
+                            "run stream closed while emitting code output".to_string(),
+                        ))
+                    }
+                })
             }),
         );
 
@@ -758,11 +785,11 @@ impl EventSender {
         }
     }
 
-    fn emit(&self, ctx: &RunContext, step_id: Option<&str>, event: RunEventKind) -> bool {
-        self.emit_content(ctx, step_id, event, String::new())
+    async fn emit(&self, ctx: &RunContext, step_id: Option<&str>, event: RunEventKind) -> bool {
+        self.emit_content(ctx, step_id, event, String::new()).await
     }
 
-    fn emit_content(
+    async fn emit_content(
         &self,
         ctx: &RunContext,
         step_id: Option<&str>,
@@ -781,7 +808,7 @@ impl EventSender {
         );
         let emitted = self.tx.send(run_event.clone()).is_ok();
         if emitted {
-            self.history_store.record_event(&run_event);
+            self.history_store.record_event(&run_event).await;
         }
         if emitted && event == RunEventKind::TokenDelta && has_content {
             self.emitted_content.store(true, Ordering::SeqCst);
@@ -793,7 +820,7 @@ impl EventSender {
         self.emitted_content.load(Ordering::SeqCst)
     }
 
-    fn emit_error(
+    async fn emit_error(
         &self,
         ctx: &RunContext,
         step_id: Option<&str>,
@@ -810,10 +837,11 @@ impl EventSender {
         );
         let emitted = self.tx.send(run_event.clone()).is_ok();
         if emitted {
-            self.history_store.record_event(&run_event);
+            self.history_store.record_event(&run_event).await;
         }
         self.history_store
-            .finish_run(&ctx.run_id, RunStatus::Failed, Some(message));
+            .finish_run(&ctx.run_id, RunStatus::Failed, Some(message))
+            .await;
         emitted
     }
 
