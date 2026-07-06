@@ -4,6 +4,7 @@ pub mod code;
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod history;
 pub mod model;
 pub mod prompt;
 pub mod response;

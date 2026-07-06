@@ -12,6 +12,7 @@ use crate::{
 pub struct PlatformConfig {
     pub bind_addr: SocketAddr,
     pub agents_dir: PathBuf,
+    pub run_history_db: PathBuf,
     pub model_providers: ModelProvidersConfig,
 }
 
@@ -23,11 +24,14 @@ impl PlatformConfig {
             .map_err(|err| AppError::Config(format!("invalid BIND_ADDR: {err}")))?;
 
         let agents_dir = env::var("AGENTS_DIR").unwrap_or_else(|_| "agents".to_string());
+        let run_history_db =
+            env::var("RUN_HISTORY_DB").unwrap_or_else(|_| "data/run_history.sqlite3".to_string());
         let model_providers = load_model_providers_config()?;
 
         Ok(Self {
             bind_addr,
             agents_dir: PathBuf::from(agents_dir),
+            run_history_db: PathBuf::from(run_history_db),
             model_providers,
         })
     }

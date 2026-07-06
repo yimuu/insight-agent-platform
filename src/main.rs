@@ -7,6 +7,7 @@ use insight_agent_platform::{
     config::PlatformConfig,
     engine::runner::RunEngine,
     error::AppError,
+    history::store::RunHistoryStore,
     model::providers::{validate_agent_models, ModelProviderCatalog, ModelRouter},
     tools::registry::default_tool_registry,
 };
@@ -26,6 +27,7 @@ async fn main() -> Result<(), AppError> {
     tracing::info!(
         bind_addr = %config.bind_addr,
         agents_dir = %config.agents_dir.display(),
+        run_history_db = %config.run_history_db.display(),
         providers_count = config.model_providers.providers.len(),
         default_provider = ?config.model_providers.default_provider,
         "platform configuration loaded"
@@ -45,7 +47,8 @@ async fn main() -> Result<(), AppError> {
     tracing::info!("agent model configuration validated");
     let registry = AgentRegistry::new(agents)?;
     let model = ModelRouter::from_openai_compatible_config(&config.model_providers)?;
-    let engine = RunEngine::new(model, default_tool_registry());
+    let history_store = RunHistoryStore::sqlite(&config.run_history_db)?;
+    let engine = RunEngine::new(model, default_tool_registry()).with_history_store(history_store);
     let app = build_router(AppState {
         registry,
         engine,

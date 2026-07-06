@@ -18,6 +18,7 @@ use insight_agent_platform::{
     engine::event::RunEvent,
     engine::runner::RunEngine,
     error::AppError,
+    history::store::RunHistoryStore,
     model::types::FakeModelClient,
     tools::registry::ToolRegistry,
 };
@@ -167,7 +168,8 @@ fn app_with_encoder(
     let engine = RunEngine::new(
         FakeModelClient::new(vec!["Hel", "lo"]),
         ToolRegistry::default(),
-    );
+    )
+    .with_history_store(RunHistoryStore::sqlite_in_memory().unwrap());
     build_router(AppState {
         registry,
         engine,
@@ -317,6 +319,120 @@ async fn streams_agent_run_as_sse() {
     assert_eq!(run_completed.data["data"]["event"], "run_completed");
     assert_eq!(run_completed.data["data"]["content"], "");
     assert!(run_completed.data["data"]["result"].is_null());
+}
+
+#[tokio::test]
+async fn records_run_history_and_step_outputs() {
+    let app = app();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/test/runs/stream")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"input":{"name":"Ada"}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let frames = parse_sse_frames(&text);
+    let run_id = frames[0].data["data"]["run_id"].as_str().unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/runs/{run_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["code"], 0);
+    assert_eq!(payload["data"]["run_id"], run_id);
+    assert_eq!(payload["data"]["agent_id"], "test");
+    assert_eq!(payload["data"]["status"], "completed");
+    assert_eq!(payload["data"]["input_summary"]["keys"], json!(["name"]));
+    assert_eq!(
+        payload["data"]["step_outputs"]["hello"]["text"],
+        "Hello Ada"
+    );
+    assert!(payload["data"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["event"] == "step_completed" && event["step_id"] == "hello"));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/agents/test/runs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["code"], 0);
+    assert_eq!(payload["data"][0]["run_id"], run_id);
+    assert_eq!(payload["data"][0]["status"], "completed");
+}
+
+#[tokio::test]
+async fn records_failed_run_history() {
+    let app = app();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/broken/runs/stream")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"input":{}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let frames = parse_sse_frames(&text);
+    let run_id = frames[0].data["data"]["run_id"].as_str().unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/runs/{run_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(payload["data"]["status"], "failed");
+    assert_eq!(
+        payload["data"]["error_message"],
+        "run error: tool 'not_registered' is not registered"
+    );
+    assert!(payload["data"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["event"] == "error" && event["step_id"] == "missing_tool"));
 }
 
 #[tokio::test]

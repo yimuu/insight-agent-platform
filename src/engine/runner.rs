@@ -31,6 +31,7 @@ use crate::{
         event::{RunEvent, RunEventKind},
     },
     error::AppError,
+    history::store::{input_summary, RunHistoryStore, RunStatus},
     model::types::{ChatContentPart, ChatMessage, ChatRequest, ModelClient},
     prompt::{renderer::PromptRenderer, store::PromptStore},
     tools::registry::{ToolContext, ToolRegistry},
@@ -41,6 +42,7 @@ pub struct RunEngine<M: ModelClient> {
     model: M,
     tools: ToolRegistry,
     code_handlers: CodeRegistry,
+    history_store: RunHistoryStore,
     renderer: PromptRenderer,
 }
 
@@ -50,6 +52,7 @@ impl<M: ModelClient> RunEngine<M> {
             model,
             tools,
             code_handlers: CodeRegistry::default(),
+            history_store: RunHistoryStore::default(),
             renderer: PromptRenderer::new(),
         }
     }
@@ -59,13 +62,23 @@ impl<M: ModelClient> RunEngine<M> {
         self
     }
 
+    pub fn with_history_store(mut self, history_store: RunHistoryStore) -> Self {
+        self.history_store = history_store;
+        self
+    }
+
+    pub fn history_store(&self) -> RunHistoryStore {
+        self.history_store.clone()
+    }
+
     pub fn run(&self, agent: LoadedAgent, input: Value) -> impl Stream<Item = RunEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let engine = self.clone();
         let task = tokio::spawn(async move {
+            let history_store = engine.history_store.clone();
             engine
-                .run_streaming(agent, input, EventSender::new(tx, cancel_rx))
+                .run_streaming(agent, input, EventSender::new(tx, cancel_rx, history_store))
                 .await;
         });
         RunEventStream::new(UnboundedReceiverStream::new(rx), cancel_tx, task)
@@ -81,6 +94,12 @@ impl<M: ModelClient> RunEngine<M> {
             input,
             step_outputs: BTreeMap::new(),
         };
+        self.history_store.create_run(
+            &ctx.run_id,
+            &ctx.agent_id,
+            ctx.started_at,
+            input_summary(&ctx.input),
+        );
         let store = PromptStore::new(agent.prompts.clone());
         tracing::info!(
             run_id = %ctx.run_id,
@@ -142,6 +161,13 @@ impl<M: ModelClient> RunEngine<M> {
                 Ok(StepExecution::Completed { output, next }) => {
                     if let Some(output) = output.clone() {
                         ctx.set_step_output(&step.id, output.clone());
+                        if let Some(stored_output) = ctx.step_outputs.get(&step.id) {
+                            self.history_store.record_step_output(
+                                &ctx.run_id,
+                                &step.id,
+                                stored_output.clone(),
+                            );
+                        }
                     }
                     tracing::info!(
                         run_id = %ctx.run_id,
@@ -219,6 +245,8 @@ impl<M: ModelClient> RunEngine<M> {
             .cloned()
             .unwrap_or(Value::Null);
         let _ = events.emit(&ctx, None, RunEventKind::RunCompleted);
+        self.history_store
+            .finish_run(&ctx.run_id, RunStatus::Completed, None);
         tracing::info!(
             run_id = %ctx.run_id,
             agent_id = %ctx.agent_id,
@@ -713,14 +741,20 @@ struct EventSender {
     tx: mpsc::UnboundedSender<RunEvent>,
     cancel_rx: watch::Receiver<bool>,
     emitted_content: Arc<AtomicBool>,
+    history_store: RunHistoryStore,
 }
 
 impl EventSender {
-    fn new(tx: mpsc::UnboundedSender<RunEvent>, cancel_rx: watch::Receiver<bool>) -> Self {
+    fn new(
+        tx: mpsc::UnboundedSender<RunEvent>,
+        cancel_rx: watch::Receiver<bool>,
+        history_store: RunHistoryStore,
+    ) -> Self {
         Self {
             tx,
             cancel_rx,
             emitted_content: Arc::new(AtomicBool::new(false)),
+            history_store,
         }
     }
 
@@ -737,17 +771,18 @@ impl EventSender {
     ) -> bool {
         let content = content.into();
         let has_content = !content.is_empty();
-        let emitted = self
-            .tx
-            .send(RunEvent::ok(
-                event,
-                ctx.run_id.clone(),
-                ctx.agent_id.clone(),
-                step_id.map(str::to_string),
-                content,
-                Value::Null,
-            ))
-            .is_ok();
+        let run_event = RunEvent::ok(
+            event,
+            ctx.run_id.clone(),
+            ctx.agent_id.clone(),
+            step_id.map(str::to_string),
+            content,
+            Value::Null,
+        );
+        let emitted = self.tx.send(run_event.clone()).is_ok();
+        if emitted {
+            self.history_store.record_event(&run_event);
+        }
         if emitted && event == RunEventKind::TokenDelta && has_content {
             self.emitted_content.store(true, Ordering::SeqCst);
         }
@@ -765,15 +800,21 @@ impl EventSender {
         code: i32,
         message: impl Into<String>,
     ) -> bool {
-        self.tx
-            .send(RunEvent::error(
-                ctx.run_id.clone(),
-                ctx.agent_id.clone(),
-                step_id.map(str::to_string),
-                code,
-                message,
-            ))
-            .is_ok()
+        let message = message.into();
+        let run_event = RunEvent::error(
+            ctx.run_id.clone(),
+            ctx.agent_id.clone(),
+            step_id.map(str::to_string),
+            code,
+            message.clone(),
+        );
+        let emitted = self.tx.send(run_event.clone()).is_ok();
+        if emitted {
+            self.history_store.record_event(&run_event);
+        }
+        self.history_store
+            .finish_run(&ctx.run_id, RunStatus::Failed, Some(message));
+        emitted
     }
 
     fn is_closed(&self) -> bool {

@@ -37,6 +37,8 @@ pub fn build_router<M: ModelClient>(state: AppState<M>) -> Router {
         .route("/health", get(health))
         .route("/v1/agents", get(list_agents::<M>))
         .route("/v1/agents/:agent_id", get(get_agent::<M>))
+        .route("/v1/agents/:agent_id/runs", get(list_agent_runs::<M>))
+        .route("/v1/runs/:run_id", get(get_run::<M>))
         .route(
             "/v1/agents/:agent_id/runs/stream",
             post(run_agent_stream::<M>),
@@ -65,6 +67,32 @@ async fn get_agent<M: ModelClient>(
         .get(&agent_id)
         .ok_or_else(|| AppError::NotFound(format!("agent '{agent_id}' not found")))?;
     Ok(Json(ApiResponse::ok(AgentSummary::from(agent))))
+}
+
+async fn list_agent_runs<M: ModelClient>(
+    State(state): State<Arc<AppState<M>>>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<ApiResponse<Vec<crate::history::store::RunSummary>>>, AppError> {
+    if state.registry.get(&agent_id).is_none() {
+        return Err(AppError::NotFound(format!("agent '{agent_id}' not found")));
+    }
+    let runs = state
+        .engine
+        .history_store()
+        .list_agent_runs(&agent_id, 50)?;
+    Ok(Json(ApiResponse::ok(runs)))
+}
+
+async fn get_run<M: ModelClient>(
+    State(state): State<Arc<AppState<M>>>,
+    Path(run_id): Path<String>,
+) -> Result<Json<ApiResponse<crate::history::store::RunRecord>>, AppError> {
+    let run = state
+        .engine
+        .history_store()
+        .get_run(&run_id)?
+        .ok_or_else(|| AppError::NotFound(format!("run '{run_id}' not found")))?;
+    Ok(Json(ApiResponse::ok(run)))
 }
 
 #[derive(Debug, Deserialize)]

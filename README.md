@@ -10,6 +10,7 @@ Set environment variables:
 OPENAI_API_KEY=...
 MODEL_PROVIDERS_CONFIG=config/models.yaml
 AGENTS_DIR=agents
+RUN_HISTORY_DB=data/run_history.sqlite3
 BIND_ADDR=127.0.0.1:3000
 ```
 
@@ -92,6 +93,15 @@ curl -N \
   -H 'accept: text/event-stream' \
   -d '{"input":{"question":"用中文解释这个平台的架构"}}' \
   http://127.0.0.1:3000/v1/agents/researcher/runs/stream
+```
+
+## Run History
+
+Runs are recorded to SQLite. `RUN_HISTORY_DB` controls the database path and defaults to `data/run_history.sqlite3`.
+
+```bash
+curl http://127.0.0.1:3000/v1/agents/medical_report_interpreter/runs
+curl http://127.0.0.1:3000/v1/runs/run_xxx
 ```
 
 ## Stream a Medical Report Interpretation
