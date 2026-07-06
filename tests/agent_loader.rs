@@ -60,6 +60,26 @@ fn medical_report_interpreter_allows_http_image_urls_for_local_testing() {
 }
 
 #[test]
+fn loads_code_node_demo_agent() {
+    let agents = load_agents(Path::new("agents")).unwrap();
+    let agent = agents
+        .iter()
+        .find(|agent| agent.config.id == "code_node_demo")
+        .unwrap();
+
+    assert_eq!(agent.config.steps.len(), 2);
+    assert_eq!(agent.config.steps[0].id, "analyze_text");
+    assert_eq!(
+        agent.config.steps[0].kind,
+        insight_agent_platform::agent::config::StepKind::Code
+    );
+    assert_eq!(
+        agent.config.steps[0].handler.as_deref(),
+        Some("example.text_metrics")
+    );
+}
+
+#[test]
 fn loads_agent_with_multiple_prompt_files() {
     let dir = tempfile::tempdir().unwrap();
     let agent = dir.path().join("researcher");

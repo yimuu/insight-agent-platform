@@ -4,6 +4,7 @@ use insight_agent_platform::{
         routes::{build_router, AppState},
         sse::encode_event,
     },
+    code::examples::default_code_registry,
     config::PlatformConfig,
     engine::runner::RunEngine,
     error::AppError,
@@ -48,7 +49,9 @@ async fn main() -> Result<(), AppError> {
     let registry = AgentRegistry::new(agents)?;
     let model = ModelRouter::from_openai_compatible_config(&config.model_providers)?;
     let history_store = RunHistoryStore::sqlite(&config.run_history_db)?;
-    let engine = RunEngine::new(model, default_tool_registry()).with_history_store(history_store);
+    let engine = RunEngine::new(model, default_tool_registry())
+        .with_code_handlers(default_code_registry())
+        .with_history_store(history_store);
     let app = build_router(AppState {
         registry,
         engine,

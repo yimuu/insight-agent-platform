@@ -73,6 +73,16 @@ steps:
       report_text: "{{ input.report_text }}"
 ```
 
+The repository includes a runnable code-node example: `agents/code_node_demo`.
+
+```bash
+curl -N \
+  -H 'content-type: application/json' \
+  -H 'accept: text/event-stream' \
+  -d '{"input":{"text":"hello rust world"}}' \
+  http://127.0.0.1:3000/v1/agents/code_node_demo/runs/stream
+```
+
 ## Run
 
 ```bash

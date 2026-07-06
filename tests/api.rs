@@ -15,6 +15,7 @@ use insight_agent_platform::{
         routes::{build_router, AppState},
         sse::encode_event,
     },
+    code::examples::default_code_registry,
     engine::event::RunEvent,
     engine::runner::RunEngine,
     error::AppError,
@@ -169,11 +170,32 @@ fn app_with_encoder(
         FakeModelClient::new(vec!["Hel", "lo"]),
         ToolRegistry::default(),
     )
+    .with_code_handlers(default_code_registry())
     .with_history_store(RunHistoryStore::sqlite_in_memory().unwrap());
     build_router(AppState {
         registry,
         engine,
         event_encoder,
+    })
+}
+
+fn code_node_demo_agent() -> LoadedAgent {
+    insight_agent_platform::agent::loader::load_agents("agents")
+        .unwrap()
+        .into_iter()
+        .find(|agent| agent.config.id == "code_node_demo")
+        .unwrap()
+}
+
+fn app_with_code_node_demo() -> axum::Router {
+    let registry = AgentRegistry::new(vec![code_node_demo_agent()]).unwrap();
+    let engine = RunEngine::new(FakeModelClient::new(vec![]), ToolRegistry::default())
+        .with_code_handlers(default_code_registry())
+        .with_history_store(RunHistoryStore::sqlite_in_memory().unwrap());
+    build_router(AppState {
+        registry,
+        engine,
+        event_encoder: encode_event,
     })
 }
 
@@ -386,6 +408,39 @@ async fn records_run_history_and_step_outputs() {
     assert_eq!(payload["code"], 0);
     assert_eq!(payload["data"][0]["run_id"], run_id);
     assert_eq!(payload["data"][0]["status"], "completed");
+}
+
+#[tokio::test]
+async fn streams_code_node_demo_agent() {
+    let response = app_with_code_node_demo()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/code_node_demo/runs/stream")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"input":{"text":"hello rust world"}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let frames = parse_sse_frames(&text);
+    let deltas = frames
+        .iter()
+        .filter(|frame| frame.event == "token_delta")
+        .map(|frame| frame.data["data"]["content"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        deltas,
+        vec![
+            "Analyzing text metrics".to_string(),
+            "\n\nText metrics:\n- characters: 16\n- words: 3\n- empty: false\n".to_string(),
+        ]
+    );
 }
 
 #[tokio::test]

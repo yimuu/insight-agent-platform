@@ -1,0 +1,32 @@
+id: code_node_demo
+name: Code Node Demo
+description: Demonstrates a native Rust code node that returns JSON for later steps.
+
+model:
+  provider: dashscope
+  type: llm
+  model: qwen3.6-flash
+
+input:
+  schema:
+    type: object
+    required: [text]
+    additionalProperties: false
+    properties:
+      text:
+        type: string
+
+steps:
+  - id: analyze_text
+    type: code
+    handler: example.text_metrics
+    inputs:
+      text: "{{ input.text }}"
+
+  - id: render
+    type: text
+    prompt: |
+      Text metrics:
+      - characters: {{ steps.analyze_text.output.characters }}
+      - words: {{ steps.analyze_text.output.words }}
+      - empty: {{ steps.analyze_text.output.empty }}
