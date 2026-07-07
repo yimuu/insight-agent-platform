@@ -33,7 +33,7 @@ async fn main() -> Result<(), AppError> {
         default_provider = ?config.model_providers.default_provider,
         "platform configuration loaded"
     );
-    let agents = load_agents(&config.agents_dir)?;
+    let agents = config.filter_enabled_agents(load_agents(&config.agents_dir)?)?;
     let agent_ids = agents
         .iter()
         .map(|agent| agent.config.id.as_str())

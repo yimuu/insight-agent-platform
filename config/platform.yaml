@@ -1,0 +1,20 @@
+bind_addr: 127.0.0.1:3000
+model_providers_config: config/models.yaml
+
+agents:
+  directory: agents
+  default_enabled: false
+  default_public: false
+  exposure:
+    medical_report_interpreter:
+      enabled: true
+      public: true
+    researcher:
+      enabled: true
+      public: true
+    code_node_demo:
+      enabled: false
+      public: false
+
+history:
+  db: data/run_history.sqlite3

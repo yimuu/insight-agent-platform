@@ -8,15 +8,37 @@ Set environment variables:
 
 ```text
 OPENAI_API_KEY=...
-MODEL_PROVIDERS_CONFIG=config/models.yaml
-AGENTS_DIR=agents
-RUN_HISTORY_DB=data/run_history.sqlite3
-BIND_ADDR=127.0.0.1:3000
+PLATFORM_CONFIG=config/platform.yaml
 ```
 
 The service loads `.env` automatically when started with `cargo run`.
 
 Do not commit real API keys.
+
+Platform runtime settings are configured in `config/platform.yaml`. Agent exposure controls which agent directories are loaded and exposed by the service.
+
+```yaml
+bind_addr: 127.0.0.1:3000
+model_providers_config: config/models.yaml
+
+agents:
+  directory: agents
+  default_enabled: false
+  default_public: false
+  exposure:
+    medical_report_interpreter:
+      enabled: true
+      public: true
+    researcher:
+      enabled: true
+      public: true
+    code_node_demo:
+      enabled: false
+      public: false
+
+history:
+  db: data/run_history.sqlite3
+```
 
 Model providers are configured in `config/models.yaml`. Provider entries define connection details, authentication environment variables, model type groups, per-type defaults, and LLM features such as `vision`.
 
@@ -73,7 +95,7 @@ steps:
       report_text: "{{ input.report_text }}"
 ```
 
-The repository includes a runnable code-node example: `agents/code_node_demo`.
+The repository includes a code-node example: `agents/code_node_demo`. It is disabled in `config/platform.yaml` by default; set `agents.exposure.code_node_demo.enabled` to `true` before calling it.
 
 ```bash
 curl -N \
@@ -107,7 +129,7 @@ curl -N \
 
 ## Run History
 
-Runs are recorded to SQLite. `RUN_HISTORY_DB` controls the database path and defaults to `data/run_history.sqlite3`.
+Runs are recorded to SQLite. `history.db` in `config/platform.yaml` controls the database path and defaults to `data/run_history.sqlite3` when no platform config exists.
 
 ```bash
 curl http://127.0.0.1:3000/v1/agents/medical_report_interpreter/runs
