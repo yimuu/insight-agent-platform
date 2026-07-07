@@ -29,8 +29,6 @@ impl CodeHandler for TextMetricsHandler {
     }
 }
 
-pub fn default_code_registry() -> CodeRegistry {
-    let mut registry = CodeRegistry::default();
+pub fn register(registry: &mut CodeRegistry) {
     registry.register(TextMetricsHandler);
-    registry
 }

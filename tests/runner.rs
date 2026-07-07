@@ -17,7 +17,10 @@ use insight_agent_platform::{
         config::{AgentConfig, InputConfig, ModelConfig, StepConfig, StepKind},
         loader::LoadedAgent,
     },
-    code::registry::{CodeContext, CodeHandler, CodeRegistry},
+    code::{
+        default_code_registry,
+        registry::{CodeContext, CodeHandler, CodeRegistry},
+    },
     engine::{event::RunEventKind, runner::RunEngine},
     error::AppError,
     model::types::{ChatRequest, ChatStream, FakeModelClient, ModelClient},
@@ -26,6 +29,13 @@ use insight_agent_platform::{
         registry::{default_tool_registry, Tool, ToolContext, ToolRegistry},
     },
 };
+
+#[test]
+fn default_code_registry_registers_built_in_handlers() {
+    let registry = default_code_registry();
+
+    assert!(registry.get("example.text_metrics").is_some());
+}
 
 #[derive(Clone, Copy)]
 struct GreetingCodeHandler;

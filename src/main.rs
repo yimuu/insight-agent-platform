@@ -4,7 +4,7 @@ use insight_agent_platform::{
         routes::{build_router, AppState},
         sse::encode_event,
     },
-    code::examples::default_code_registry,
+    code::default_code_registry,
     config::PlatformConfig,
     engine::runner::RunEngine,
     error::AppError,
