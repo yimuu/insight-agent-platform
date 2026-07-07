@@ -17,12 +17,10 @@ use insight_agent_platform::{
         config::{AgentConfig, InputConfig, ModelConfig, StepConfig, StepKind},
         loader::LoadedAgent,
     },
-    code::{
-        default_code_registry,
-        registry::{CodeContext, CodeHandler, CodeRegistry},
-    },
+    code::registry::{CodeContext, CodeHandler, CodeRegistry},
     engine::{event::RunEventKind, runner::RunEngine},
     error::AppError,
+    handlers::default_code_registry,
     model::types::{ChatRequest, ChatStream, FakeModelClient, ModelClient},
     tools::{
         current_time::CurrentTimeTool,

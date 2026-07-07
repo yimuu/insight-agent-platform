@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::{
-    code::registry::{CodeContext, CodeHandler, CodeRegistry},
+    code::registry::{CodeContext, CodeHandler},
     error::AppError,
 };
 
@@ -27,8 +27,4 @@ impl CodeHandler for TextMetricsHandler {
             "empty": text.trim().is_empty(),
         }))
     }
-}
-
-pub fn register(registry: &mut CodeRegistry) {
-    registry.register(TextMetricsHandler);
 }
