@@ -1,7 +1,9 @@
 mod text_metrics;
 
-use crate::code::registry::CodeRegistry;
+use crate::handlers::CodeHandlerCatalog;
 
-pub fn register(registry: &mut CodeRegistry) {
-    registry.register(text_metrics::TextMetricsHandler);
+pub fn register(catalog: &mut CodeHandlerCatalog) {
+    catalog.register("example.text_metrics", |registry| {
+        registry.register(text_metrics::TextMetricsHandler);
+    });
 }

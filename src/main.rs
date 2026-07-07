@@ -7,7 +7,7 @@ use insight_agent_platform::{
     config::PlatformConfig,
     engine::runner::RunEngine,
     error::AppError,
-    handlers::default_code_registry,
+    handlers::code_registry_for_agents,
     history::store::RunHistoryStore,
     model::providers::{validate_agent_models, ModelProviderCatalog, ModelRouter},
     tools::registry::default_tool_registry,
@@ -46,11 +46,18 @@ async fn main() -> Result<(), AppError> {
     let model_catalog = ModelProviderCatalog::new(config.model_providers.clone())?;
     validate_agent_models(&agents, &model_catalog)?;
     tracing::info!("agent model configuration validated");
+    let code_handlers = code_registry_for_agents(&agents)?;
+    let code_handler_names = code_handlers.names().collect::<Vec<_>>();
+    tracing::info!(
+        code_handlers_count = code_handlers.len(),
+        code_handlers = ?code_handler_names,
+        "code handlers registered for enabled agents"
+    );
     let registry = AgentRegistry::new(agents)?;
     let model = ModelRouter::from_openai_compatible_config(&config.model_providers)?;
     let history_store = RunHistoryStore::sqlite(&config.run_history_db)?;
     let engine = RunEngine::new(model, default_tool_registry())
-        .with_code_handlers(default_code_registry())
+        .with_code_handlers(code_handlers)
         .with_history_store(history_store);
     let app = build_router(AppState {
         registry,

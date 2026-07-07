@@ -20,7 +20,7 @@ use insight_agent_platform::{
     code::registry::{CodeContext, CodeHandler, CodeRegistry},
     engine::{event::RunEventKind, runner::RunEngine},
     error::AppError,
-    handlers::default_code_registry,
+    handlers::{code_registry_for_agents, default_code_registry},
     model::types::{ChatRequest, ChatStream, FakeModelClient, ModelClient},
     tools::{
         current_time::CurrentTimeTool,
@@ -33,6 +33,53 @@ fn default_code_registry_registers_built_in_handlers() {
     let registry = default_code_registry();
 
     assert!(registry.get("example.text_metrics").is_some());
+}
+
+#[test]
+fn code_registry_for_agents_registers_only_used_handlers() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/code_node_demo"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "code_node_demo".to_string(),
+            name: "Code Node Demo".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![StepConfig {
+                id: "analyze".to_string(),
+                kind: StepKind::Code,
+                prompt_ref: None,
+                prompt: None,
+                system_prompt_ref: None,
+                system_prompt: None,
+                image_input: None,
+                stream: false,
+                tool: None,
+                handler: Some("example.text_metrics".to_string()),
+                args: serde_json::Value::Null,
+                inputs: serde_json::Value::Null,
+                cases: Vec::new(),
+                default: None,
+                end: false,
+            }],
+        },
+    };
+
+    let registry = code_registry_for_agents(&[agent]).unwrap();
+
+    assert!(registry.get("example.text_metrics").is_some());
+    assert!(registry.get("test.greeting").is_none());
 }
 
 #[derive(Clone, Copy)]

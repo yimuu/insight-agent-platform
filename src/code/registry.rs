@@ -48,4 +48,12 @@ impl CodeRegistry {
     pub fn get(&self, name: &str) -> Option<Arc<dyn CodeHandler>> {
         self.handlers.get(name).cloned()
     }
+
+    pub fn len(&self) -> usize {
+        self.handlers.len()
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.handlers.keys().map(String::as_str)
+    }
 }

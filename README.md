@@ -86,6 +86,8 @@ steps:
 
 Code steps call native Rust handlers registered in the host application. YAML references the handler and maps templated inputs; the handler returns JSON, which is saved as `steps.<step_id>.output`. Handlers may also emit text while running, and that text is streamed to clients as normal `token_delta` events.
 
+At startup, the platform only registers code handlers referenced by enabled agents. If an agent is disabled in `config/platform.yaml`, its code-step handlers are not added to the runtime registry.
+
 ```yaml
 steps:
   - id: normalize_report
