@@ -2,6 +2,7 @@ use serde::Serialize;
 
 pub const CODE_OK: i32 = 0;
 pub const CODE_INPUT_ERROR: i32 = 10000;
+pub const CODE_UNAUTHORIZED: i32 = 14001;
 pub const CODE_NOT_FOUND: i32 = 14004;
 pub const CODE_RUN_ERROR: i32 = 20000;
 pub const CODE_UPSTREAM_ERROR: i32 = 30000;

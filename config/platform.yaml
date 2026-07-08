@@ -1,6 +1,9 @@
 bind_addr: 127.0.0.1:3000
 model_providers_config: config/models.yaml
 
+# auth:
+#   internal_token_env: AGENT_RUNTIME_TOKEN
+
 agents:
   directory: agents
   default_enabled: false

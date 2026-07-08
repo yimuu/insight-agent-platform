@@ -1,7 +1,7 @@
 use insight_agent_platform::{
     agent::{loader::load_agents, registry::AgentRegistry},
     api::{
-        routes::{build_router, AppState},
+        routes::{build_router, AppState, RuntimeAuth},
         sse::encode_event,
     },
     config::PlatformConfig,
@@ -29,6 +29,7 @@ async fn main() -> Result<(), AppError> {
         bind_addr = %config.bind_addr,
         agents_dir = %config.agents_dir.display(),
         run_history_db = %config.run_history_db.display(),
+        internal_auth_enabled = config.internal_auth_token.is_some(),
         providers_count = config.model_providers.providers.len(),
         default_provider = ?config.model_providers.default_provider,
         "platform configuration loaded"
@@ -63,6 +64,10 @@ async fn main() -> Result<(), AppError> {
         registry,
         engine,
         event_encoder: encode_event,
+        auth: config
+            .internal_auth_token
+            .map(RuntimeAuth::bearer_token)
+            .unwrap_or_else(RuntimeAuth::disabled),
     });
 
     let listener = tokio::net::TcpListener::bind(config.bind_addr)

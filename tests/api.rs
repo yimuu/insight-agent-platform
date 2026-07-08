@@ -12,7 +12,7 @@ use insight_agent_platform::{
         registry::AgentRegistry,
     },
     api::{
-        routes::{build_router, AppState},
+        routes::{build_router, AppState, RuntimeAuth},
         sse::encode_event,
     },
     engine::event::RunEvent,
@@ -161,8 +161,19 @@ fn app() -> axum::Router {
     app_with_encoder(encode_event)
 }
 
+fn app_with_auth(auth: RuntimeAuth) -> axum::Router {
+    app_with_encoder_and_auth(encode_event, auth)
+}
+
 fn app_with_encoder(
     event_encoder: fn(RunEvent) -> Result<axum::response::sse::Event, AppError>,
+) -> axum::Router {
+    app_with_encoder_and_auth(event_encoder, RuntimeAuth::disabled())
+}
+
+fn app_with_encoder_and_auth(
+    event_encoder: fn(RunEvent) -> Result<axum::response::sse::Event, AppError>,
+    auth: RuntimeAuth,
 ) -> axum::Router {
     let registry =
         AgentRegistry::new(vec![prompt_agent(), failing_tool_agent(), llm_agent()]).unwrap();
@@ -176,6 +187,7 @@ fn app_with_encoder(
         registry,
         engine,
         event_encoder,
+        auth,
     })
 }
 
@@ -196,6 +208,7 @@ fn app_with_code_node_demo() -> axum::Router {
         registry,
         engine,
         event_encoder: encode_event,
+        auth: RuntimeAuth::disabled(),
     })
 }
 
@@ -262,6 +275,58 @@ async fn lists_agents_without_prompt_contents() {
     assert!(test_agent.get("steps").is_none());
     assert!(test_agent.get("prompts").is_none());
     assert!(!String::from_utf8_lossy(&body).contains("Hello {{ input.name }}"));
+}
+
+#[tokio::test]
+async fn health_does_not_require_internal_auth() {
+    let response = app_with_auth(RuntimeAuth::bearer_token("secret"))
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn v1_routes_reject_missing_internal_auth() {
+    let response = app_with_auth(RuntimeAuth::bearer_token("secret"))
+        .oneshot(
+            Request::builder()
+                .uri("/v1/agents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["message"],
+        "missing or invalid internal authorization"
+    );
+}
+
+#[tokio::test]
+async fn v1_routes_accept_internal_bearer_token() {
+    let response = app_with_auth(RuntimeAuth::bearer_token("secret"))
+        .oneshot(
+            Request::builder()
+                .uri("/v1/agents")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]

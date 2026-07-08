@@ -21,6 +21,7 @@ pub struct PlatformConfig {
     pub bind_addr: SocketAddr,
     pub agents_dir: PathBuf,
     pub run_history_db: PathBuf,
+    pub internal_auth_token: Option<String>,
     pub agent_exposure: AgentExposureConfig,
     pub model_providers: ModelProvidersConfig,
 }
@@ -48,11 +49,19 @@ struct PlatformYaml {
     #[serde(default)]
     bind_addr: Option<String>,
     #[serde(default)]
+    auth: PlatformAuthYaml,
+    #[serde(default)]
     agents: PlatformAgentsYaml,
     #[serde(default)]
     history: PlatformHistoryYaml,
     #[serde(default)]
     model_providers_config: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PlatformAuthYaml {
+    #[serde(default)]
+    internal_token_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -96,12 +105,14 @@ impl PlatformConfig {
             .map(PathBuf::from)
             .or(yaml.history.db)
             .unwrap_or_else(|| PathBuf::from("data/run_history.sqlite3"));
+        let internal_auth_token = load_internal_auth_token(yaml.auth.internal_token_env)?;
         let model_providers = load_model_providers_config(yaml.model_providers_config)?;
 
         Ok(Self {
             bind_addr,
             agents_dir,
             run_history_db,
+            internal_auth_token,
             agent_exposure: AgentExposureConfig {
                 default_enabled: yaml.agents.default_enabled,
                 default_public: yaml.agents.default_public,
@@ -117,6 +128,23 @@ impl PlatformConfig {
     ) -> Result<Vec<LoadedAgent>, AppError> {
         filter_enabled_agents(agents, &self.agent_exposure)
     }
+}
+
+fn load_internal_auth_token(token_env: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(token_env) = token_env else {
+        return Ok(None);
+    };
+    let token = env::var(&token_env).map_err(|_| {
+        AppError::Config(format!(
+            "environment variable '{token_env}' is required for internal runtime auth"
+        ))
+    })?;
+    if token.trim().is_empty() {
+        return Err(AppError::Config(format!(
+            "environment variable '{token_env}' for internal runtime auth must not be empty"
+        )));
+    }
+    Ok(Some(token))
 }
 
 fn load_platform_yaml(path: &Path) -> Result<PlatformYaml, AppError> {
@@ -227,7 +255,9 @@ mod tests {
         loader::LoadedAgent,
     };
 
-    use super::{filter_enabled_agents, AgentExposure, AgentExposureConfig};
+    use super::{
+        filter_enabled_agents, load_internal_auth_token, AgentExposure, AgentExposureConfig,
+    };
 
     fn loaded_agent(id: &str) -> LoadedAgent {
         LoadedAgent {
@@ -303,5 +333,15 @@ mod tests {
         .to_string();
 
         assert!(err.contains("enabled agent 'missing' was not found"));
+    }
+
+    #[test]
+    fn loads_internal_auth_token_from_environment() {
+        std::env::set_var("INSIGHT_TEST_INTERNAL_AUTH_TOKEN", "secret");
+
+        let token =
+            load_internal_auth_token(Some("INSIGHT_TEST_INTERNAL_AUTH_TOKEN".to_string())).unwrap();
+
+        assert_eq!(token.as_deref(), Some("secret"));
     }
 }

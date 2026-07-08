@@ -2,7 +2,10 @@ use std::{convert::Infallible, sync::Arc};
 
 use axum::{
     extract::{rejection::JsonRejection, Path, State},
-    http::{header::HeaderName, HeaderMap, HeaderValue},
+    http::{
+        header::{HeaderName, AUTHORIZATION},
+        HeaderMap, HeaderValue,
+    },
     response::{
         sse::{Event, Sse},
         IntoResponse,
@@ -27,12 +30,35 @@ use crate::{
 
 pub type EventEncoder = fn(crate::engine::event::RunEvent) -> Result<Event, AppError>;
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
+const X_CALLER_SERVICE: HeaderName = HeaderName::from_static("x-caller-service");
+const X_TENANT_ID: HeaderName = HeaderName::from_static("x-tenant-id");
+const X_USER_ID: HeaderName = HeaderName::from_static("x-user-id");
+
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeAuth {
+    internal_bearer_token: Option<String>,
+}
+
+impl RuntimeAuth {
+    pub fn disabled() -> Self {
+        Self {
+            internal_bearer_token: None,
+        }
+    }
+
+    pub fn bearer_token(token: impl Into<String>) -> Self {
+        Self {
+            internal_bearer_token: Some(token.into()),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState<M: ModelClient> {
     pub registry: AgentRegistry,
     pub engine: RunEngine<M>,
     pub event_encoder: EventEncoder,
+    pub auth: RuntimeAuth,
 }
 
 pub fn build_router<M: ModelClient>(state: AppState<M>) -> Router {
@@ -55,16 +81,20 @@ async fn health() -> Json<ApiResponse<Value>> {
 
 async fn list_agents<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
-) -> Json<ApiResponse<Vec<AgentSummary>>> {
-    Json(ApiResponse::ok(
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<Vec<AgentSummary>>>, AppError> {
+    ensure_internal_auth(&state.auth, &headers)?;
+    Ok(Json(ApiResponse::ok(
         state.registry.list().map(AgentSummary::from).collect(),
-    ))
+    )))
 }
 
 async fn get_agent<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
+    headers: HeaderMap,
     Path(agent_id): Path<String>,
 ) -> Result<Json<ApiResponse<AgentSummary>>, AppError> {
+    ensure_internal_auth(&state.auth, &headers)?;
     let agent = state
         .registry
         .get(&agent_id)
@@ -74,8 +104,10 @@ async fn get_agent<M: ModelClient>(
 
 async fn list_agent_runs<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
+    headers: HeaderMap,
     Path(agent_id): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<crate::history::store::RunSummary>>>, AppError> {
+    ensure_internal_auth(&state.auth, &headers)?;
     if state.registry.get(&agent_id).is_none() {
         return Err(AppError::NotFound(format!("agent '{agent_id}' not found")));
     }
@@ -89,8 +121,10 @@ async fn list_agent_runs<M: ModelClient>(
 
 async fn get_run<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
+    headers: HeaderMap,
     Path(run_id): Path<String>,
 ) -> Result<Json<ApiResponse<crate::history::store::RunRecord>>, AppError> {
+    ensure_internal_auth(&state.auth, &headers)?;
     let run = state
         .engine
         .history_store()
@@ -107,7 +141,9 @@ async fn run_agent_stream<M: ModelClient>(
     request: Result<Json<Value>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
     let request_id = request_id_from_headers(&headers);
+    ensure_internal_auth(&state.auth, &headers)?;
     let Json(input) = request.map_err(map_run_request_rejection)?;
+    let caller_context = caller_context_from_headers(&headers);
     let agent = state
         .registry
         .get(&agent_id)
@@ -116,6 +152,9 @@ async fn run_agent_stream<M: ModelClient>(
     let input_summary = summarize_run_input(&input);
     tracing::info!(
         request_id = %request_id,
+        caller_service = ?caller_context.caller_service,
+        tenant_id = ?caller_context.tenant_id,
+        user_id = ?caller_context.user_id,
         agent_id = %agent_id,
         input_keys = ?input_summary.keys,
         "agent stream request received"
@@ -180,14 +219,49 @@ async fn run_agent_stream<M: ModelClient>(
     Ok(response)
 }
 
+fn ensure_internal_auth(auth: &RuntimeAuth, headers: &HeaderMap) -> Result<(), AppError> {
+    let Some(token) = auth.internal_bearer_token.as_deref() else {
+        return Ok(());
+    };
+    let expected = format!("Bearer {token}");
+    if headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == expected)
+    {
+        return Ok(());
+    }
+    Err(AppError::Unauthorized(
+        "missing or invalid internal authorization".to_string(),
+    ))
+}
+
+#[derive(Debug, Clone, Default)]
+struct CallerContext {
+    caller_service: Option<String>,
+    tenant_id: Option<String>,
+    user_id: Option<String>,
+}
+
+fn caller_context_from_headers(headers: &HeaderMap) -> CallerContext {
+    CallerContext {
+        caller_service: optional_header(headers, &X_CALLER_SERVICE),
+        tenant_id: optional_header(headers, &X_TENANT_ID),
+        user_id: optional_header(headers, &X_USER_ID),
+    }
+}
+
 fn request_id_from_headers(headers: &HeaderMap) -> String {
+    optional_header(headers, &X_REQUEST_ID).unwrap_or_else(|| format!("req_{}", Uuid::new_v4()))
+}
+
+fn optional_header(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
     headers
-        .get(&X_REQUEST_ID)
+        .get(name)
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| format!("req_{}", Uuid::new_v4()))
 }
 
 #[derive(Debug, PartialEq, Eq)]

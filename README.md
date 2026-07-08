@@ -40,6 +40,22 @@ history:
   db: data/run_history.sqlite3
 ```
 
+To protect runtime APIs behind a backend or gateway, configure an internal bearer token environment variable. `/health` remains public; `/v1/...` requires `Authorization: Bearer <token>` when this is set.
+
+```yaml
+auth:
+  internal_token_env: AGENT_RUNTIME_TOKEN
+```
+
+The runtime also accepts caller context headers for logs:
+
+```text
+X-Request-Id
+X-Caller-Service
+X-Tenant-Id
+X-User-Id
+```
+
 Model providers are configured in `config/models.yaml`. Provider entries define connection details, authentication environment variables, model type groups, per-type defaults, and LLM features such as `vision`.
 
 ```yaml
@@ -128,6 +144,7 @@ Clients may pass `X-Request-Id` for request tracing. When omitted, the service g
 ```bash
 curl -N \
   -H 'x-request-id: req_demo_001' \
+  -H 'authorization: Bearer <internal-token>' \
   -H 'content-type: application/json' \
   -H 'accept: text/event-stream' \
   -d '{"question":"用中文解释这个平台的架构"}' \

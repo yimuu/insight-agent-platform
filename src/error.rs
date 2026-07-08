@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::response::{
     ApiResponse, CODE_CONFIG_ERROR, CODE_INPUT_ERROR, CODE_NOT_FOUND, CODE_RUN_ERROR,
-    CODE_UPSTREAM_ERROR,
+    CODE_UNAUTHORIZED, CODE_UPSTREAM_ERROR,
 };
 
 #[derive(Debug, Error)]
@@ -19,6 +19,8 @@ pub enum AppError {
     Input(String),
     #[error("run error: {0}")]
     Run(String),
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
     #[error("not found: {0}")]
     NotFound(String),
     #[error("upstream error: {0}")]
@@ -31,6 +33,7 @@ impl AppError {
             AppError::Config(_) => CODE_CONFIG_ERROR,
             AppError::Input(_) => CODE_INPUT_ERROR,
             AppError::Run(_) => CODE_RUN_ERROR,
+            AppError::Unauthorized(_) => CODE_UNAUTHORIZED,
             AppError::NotFound(_) => CODE_NOT_FOUND,
             AppError::Upstream(_) => CODE_UPSTREAM_ERROR,
         }
@@ -47,6 +50,9 @@ impl IntoResponse for AppError {
             ),
             AppError::Input(message) => (StatusCode::BAD_REQUEST, CODE_INPUT_ERROR, message),
             AppError::Run(message) => (StatusCode::INTERNAL_SERVER_ERROR, CODE_RUN_ERROR, message),
+            AppError::Unauthorized(message) => {
+                (StatusCode::UNAUTHORIZED, CODE_UNAUTHORIZED, message)
+            }
             AppError::NotFound(message) => (StatusCode::NOT_FOUND, CODE_NOT_FOUND, message),
             AppError::Upstream(message) => (StatusCode::BAD_GATEWAY, CODE_UPSTREAM_ERROR, message),
         };
