@@ -154,6 +154,7 @@ curl -N \
 ## Run History
 
 Runs are recorded to SQLite. `history.db` in `config/platform.yaml` controls the database path and defaults to `data/run_history.sqlite3` when no platform config exists.
+Run records include request and caller context fields when provided: `request_id`, `caller_service`, `tenant_id`, and `user_id`.
 
 ```bash
 curl http://127.0.0.1:3000/v1/agents/medical_report_interpreter/runs

@@ -484,6 +484,10 @@ async fn records_run_history_and_step_outputs() {
                 .method("POST")
                 .uri("/v1/agents/test/runs/stream")
                 .header("content-type", "application/json")
+                .header("x-request-id", "req_history_001")
+                .header("x-caller-service", "web-backend")
+                .header("x-tenant-id", "tenant_123")
+                .header("x-user-id", "user_456")
                 .body(Body::from(r#"{"name":"Ada"}"#))
                 .unwrap(),
         )
@@ -511,7 +515,11 @@ async fn records_run_history_and_step_outputs() {
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["code"], 0);
     assert_eq!(payload["data"]["run_id"], run_id);
+    assert_eq!(payload["data"]["request_id"], "req_history_001");
     assert_eq!(payload["data"]["agent_id"], "test");
+    assert_eq!(payload["data"]["caller_service"], "web-backend");
+    assert_eq!(payload["data"]["tenant_id"], "tenant_123");
+    assert_eq!(payload["data"]["user_id"], "user_456");
     assert_eq!(payload["data"]["status"], "completed");
     assert_eq!(payload["data"]["input_summary"]["keys"], json!(["name"]));
     assert_eq!(
@@ -538,6 +546,10 @@ async fn records_run_history_and_step_outputs() {
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["code"], 0);
     assert_eq!(payload["data"][0]["run_id"], run_id);
+    assert_eq!(payload["data"][0]["request_id"], "req_history_001");
+    assert_eq!(payload["data"][0]["caller_service"], "web-backend");
+    assert_eq!(payload["data"][0]["tenant_id"], "tenant_123");
+    assert_eq!(payload["data"][0]["user_id"], "user_456");
     assert_eq!(payload["data"][0]["status"], "completed");
 }
 

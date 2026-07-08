@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::task;
 
-use crate::{engine::event::RunEvent, error::AppError};
+use crate::{engine::event::RunEvent, error::AppError, request_context::RequestContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,7 +45,11 @@ impl RunStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct RunSummary {
     pub run_id: String,
+    pub request_id: String,
     pub agent_id: String,
+    pub caller_service: Option<String>,
+    pub tenant_id: Option<String>,
+    pub user_id: Option<String>,
     pub status: RunStatus,
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
@@ -67,7 +71,11 @@ pub struct RunEventRecord {
 #[derive(Debug, Clone, Serialize)]
 pub struct RunRecord {
     pub run_id: String,
+    pub request_id: String,
     pub agent_id: String,
+    pub caller_service: Option<String>,
+    pub tenant_id: Option<String>,
+    pub user_id: Option<String>,
     pub status: RunStatus,
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
@@ -105,12 +113,13 @@ impl RunHistoryStore {
         &self,
         run_id: &str,
         agent_id: &str,
+        request: &RequestContext,
         started_at: DateTime<Utc>,
         input_summary: Value,
     ) {
         if let Err(err) = self
             .inner
-            .create_run(run_id, agent_id, started_at, input_summary)
+            .create_run(run_id, agent_id, request, started_at, input_summary)
             .await
         {
             tracing::warn!(run_id, agent_id, error = %err, "failed to record run start");
@@ -160,6 +169,7 @@ trait RunHistoryRepository: Send + Sync {
         &self,
         run_id: &str,
         agent_id: &str,
+        request: &RequestContext,
         started_at: DateTime<Utc>,
         input_summary: Value,
     ) -> Result<(), AppError>;
@@ -192,6 +202,7 @@ impl RunHistoryRepository for NoopRunHistoryRepository {
         &self,
         _run_id: &str,
         _agent_id: &str,
+        _request: &RequestContext,
         _started_at: DateTime<Utc>,
         _input_summary: Value,
     ) -> Result<(), AppError> {
@@ -271,7 +282,11 @@ impl SqliteRunHistoryRepository {
             r#"
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL DEFAULT '',
     agent_id TEXT NOT NULL,
+    caller_service TEXT,
+    tenant_id TEXT,
+    user_id TEXT,
     status TEXT NOT NULL,
     started_at TEXT NOT NULL,
     ended_at TEXT,
@@ -304,7 +319,12 @@ CREATE TABLE IF NOT EXISTS step_outputs (
 );
 "#,
         )
-        .map_err(map_sqlite_error)
+        .map_err(map_sqlite_error)?;
+        add_column_if_missing(&conn, "runs", "request_id", "TEXT NOT NULL DEFAULT ''")?;
+        add_column_if_missing(&conn, "runs", "caller_service", "TEXT")?;
+        add_column_if_missing(&conn, "runs", "tenant_id", "TEXT")?;
+        add_column_if_missing(&conn, "runs", "user_id", "TEXT")?;
+        Ok(())
     }
 
     async fn with_conn<T, F>(&self, f: F) -> Result<T, AppError>
@@ -328,18 +348,24 @@ impl RunHistoryRepository for SqliteRunHistoryRepository {
         &self,
         run_id: &str,
         agent_id: &str,
+        request: &RequestContext,
         started_at: DateTime<Utc>,
         input_summary: Value,
     ) -> Result<(), AppError> {
         let run_id = run_id.to_string();
         let agent_id = agent_id.to_string();
+        let request = request.clone();
         self.with_conn(move |conn| {
             conn.execute(
-                "INSERT OR REPLACE INTO runs (run_id, agent_id, status, started_at, ended_at, input_summary, error_message)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL)",
+                "INSERT OR REPLACE INTO runs (run_id, request_id, agent_id, caller_service, tenant_id, user_id, status, started_at, ended_at, input_summary, error_message)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, NULL)",
                 params![
                     run_id,
+                    request.request_id,
                     agent_id,
+                    request.caller_service,
+                    request.tenant_id,
+                    request.user_id,
                     RunStatus::Running.as_str(),
                     started_at.to_rfc3339(),
                     input_summary.to_string()
@@ -430,7 +456,7 @@ impl RunHistoryRepository for SqliteRunHistoryRepository {
         self.with_conn(move |conn| {
             let summary = conn
                 .query_row(
-                    "SELECT run_id, agent_id, status, started_at, ended_at, input_summary, error_message
+                    "SELECT run_id, request_id, agent_id, caller_service, tenant_id, user_id, status, started_at, ended_at, input_summary, error_message
                      FROM runs WHERE run_id = ?1",
                     params![run_id],
                     read_run_summary,
@@ -471,7 +497,11 @@ impl RunHistoryRepository for SqliteRunHistoryRepository {
 
             Ok(Some(RunRecord {
                 run_id: summary.run_id,
+                request_id: summary.request_id,
                 agent_id: summary.agent_id,
+                caller_service: summary.caller_service,
+                tenant_id: summary.tenant_id,
+                user_id: summary.user_id,
                 status: summary.status,
                 started_at: summary.started_at,
                 ended_at: summary.ended_at,
@@ -493,7 +523,7 @@ impl RunHistoryRepository for SqliteRunHistoryRepository {
         self.with_conn(move |conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT run_id, agent_id, status, started_at, ended_at, input_summary, error_message
+                    "SELECT run_id, request_id, agent_id, caller_service, tenant_id, user_id, status, started_at, ended_at, input_summary, error_message
                      FROM runs WHERE agent_id = ?1 ORDER BY started_at DESC LIMIT ?2",
                 )
                 .map_err(map_sqlite_error)?;
@@ -509,19 +539,48 @@ impl RunHistoryRepository for SqliteRunHistoryRepository {
 }
 
 fn read_run_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary> {
-    let status: String = row.get(2)?;
-    let started_at: String = row.get(3)?;
-    let ended_at: Option<String> = row.get(4)?;
-    let input_summary: String = row.get(5)?;
+    let status: String = row.get(6)?;
+    let started_at: String = row.get(7)?;
+    let ended_at: Option<String> = row.get(8)?;
+    let input_summary: String = row.get(9)?;
     Ok(RunSummary {
         run_id: row.get(0)?,
-        agent_id: row.get(1)?,
+        request_id: row.get(1)?,
+        agent_id: row.get(2)?,
+        caller_service: row.get(3)?,
+        tenant_id: row.get(4)?,
+        user_id: row.get(5)?,
         status: RunStatus::from_str(&status),
         started_at: parse_datetime_or_now(&started_at),
         ended_at: ended_at.as_deref().map(parse_datetime_or_now),
         input_summary: parse_json_or_null(&input_summary),
-        error_message: row.get(6)?,
+        error_message: row.get(10)?,
     })
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), AppError> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(map_sqlite_error)?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(map_sqlite_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_sqlite_error)?;
+    if columns.iter().any(|name| name == column) {
+        return Ok(());
+    }
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    )
+    .map_err(map_sqlite_error)?;
+    Ok(())
 }
 
 fn read_run_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunEventRecord> {

@@ -3,9 +3,11 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
+use crate::request_context::RequestContext;
+
 #[derive(Debug, Clone)]
 pub struct RunContext {
-    pub request_id: String,
+    pub request: RequestContext,
     pub run_id: String,
     pub agent_id: String,
     pub started_at: DateTime<Utc>,
@@ -23,11 +25,12 @@ impl RunContext {
 
         json!({
             "run": {
-                "request_id": self.request_id,
+                "request_id": self.request.request_id,
                 "id": self.run_id,
                 "agent_id": self.agent_id,
                 "started_at": self.started_at,
             },
+            "request": self.request,
             "input": self.input,
             "steps": steps,
         })

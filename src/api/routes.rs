@@ -25,6 +25,7 @@ use crate::{
     engine::runner::RunEngine,
     error::AppError,
     model::types::ModelClient,
+    request_context::RequestContext,
     response::ApiResponse,
 };
 
@@ -140,10 +141,9 @@ async fn run_agent_stream<M: ModelClient>(
     headers: HeaderMap,
     request: Result<Json<Value>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
-    let request_id = request_id_from_headers(&headers);
+    let request_context = request_context_from_headers(&headers);
     ensure_internal_auth(&state.auth, &headers)?;
     let Json(input) = request.map_err(map_run_request_rejection)?;
-    let caller_context = caller_context_from_headers(&headers);
     let agent = state
         .registry
         .get(&agent_id)
@@ -151,16 +151,16 @@ async fn run_agent_stream<M: ModelClient>(
         .clone();
     let input_summary = summarize_run_input(&input);
     tracing::info!(
-        request_id = %request_id,
-        caller_service = ?caller_context.caller_service,
-        tenant_id = ?caller_context.tenant_id,
-        user_id = ?caller_context.user_id,
+        request_id = %request_context.request_id,
+        caller_service = ?request_context.caller_service,
+        tenant_id = ?request_context.tenant_id,
+        user_id = ?request_context.user_id,
         agent_id = %agent_id,
         input_keys = ?input_summary.keys,
         "agent stream request received"
     );
     tracing::debug!(
-        request_id = %request_id,
+        request_id = %request_context.request_id,
         agent_id = %agent_id,
         report_text_chars = input_summary.report_text_chars,
         images_count = input_summary.images_count,
@@ -180,7 +180,7 @@ async fn run_agent_stream<M: ModelClient>(
         let messages = errors.map(|err| err.to_string()).collect::<Vec<_>>();
         tracing::warn!(
             agent_id = %agent_id,
-            request_id = %request_id,
+            request_id = %request_context.request_id,
             errors = ?messages,
             "agent run input validation failed"
         );
@@ -189,12 +189,13 @@ async fn run_agent_stream<M: ModelClient>(
             messages.join("; ")
         )));
     }
-    tracing::debug!(agent_id = %agent_id, request_id = %request_id, "agent run input validation passed");
+    tracing::debug!(agent_id = %agent_id, request_id = %request_context.request_id, "agent run input validation passed");
 
     let event_encoder = state.event_encoder;
+    let request_id = request_context.request_id.clone();
     let stream = state
         .engine
-        .run_with_request_id(agent, input, request_id.clone())
+        .run_with_request_context(agent, input, request_context)
         .scan(false, move |failed, event| {
             let next = if *failed {
                 None
@@ -236,15 +237,9 @@ fn ensure_internal_auth(auth: &RuntimeAuth, headers: &HeaderMap) -> Result<(), A
     ))
 }
 
-#[derive(Debug, Clone, Default)]
-struct CallerContext {
-    caller_service: Option<String>,
-    tenant_id: Option<String>,
-    user_id: Option<String>,
-}
-
-fn caller_context_from_headers(headers: &HeaderMap) -> CallerContext {
-    CallerContext {
+fn request_context_from_headers(headers: &HeaderMap) -> RequestContext {
+    RequestContext {
+        request_id: request_id_from_headers(headers),
         caller_service: optional_header(headers, &X_CALLER_SERVICE),
         tenant_id: optional_header(headers, &X_TENANT_ID),
         user_id: optional_header(headers, &X_USER_ID),

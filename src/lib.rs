@@ -8,5 +8,6 @@ pub mod handlers;
 pub mod history;
 pub mod model;
 pub mod prompt;
+pub mod request_context;
 pub mod response;
 pub mod tools;
