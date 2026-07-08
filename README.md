@@ -103,7 +103,7 @@ The repository includes a code-node example: `agents/code_node_demo`. It is disa
 curl -N \
   -H 'content-type: application/json' \
   -H 'accept: text/event-stream' \
-  -d '{"input":{"text":"hello rust world"}}' \
+  -d '{"text":"hello rust world"}' \
   http://127.0.0.1:3000/v1/agents/code_node_demo/runs/stream
 ```
 
@@ -121,11 +121,13 @@ curl http://127.0.0.1:3000/v1/agents
 
 ## Stream a Run
 
+Run endpoints accept the agent input object directly as the JSON request body. The `input.schema` in the agent YAML validates this body; clients do not wrap it in an extra `input` field.
+
 ```bash
 curl -N \
   -H 'content-type: application/json' \
   -H 'accept: text/event-stream' \
-  -d '{"input":{"question":"用中文解释这个平台的架构"}}' \
+  -d '{"question":"用中文解释这个平台的架构"}' \
   http://127.0.0.1:3000/v1/agents/researcher/runs/stream
 ```
 
@@ -147,15 +149,13 @@ curl -N \
   -H 'content-type: application/json' \
   -H 'accept: text/event-stream' \
   -d '{
-    "input": {
-      "report_text": "血红蛋白 105 g/L，参考范围 130-175 g/L",
-      "images": ["https://example.com/report.png"],
-      "messages": [
-        {"role": "user", "content": "这是我的体检报告，请先整体看看。"},
-        {"role": "assistant", "content": "我会结合报告内容解释异常指标和后续建议。"}
-      ],
-      "question": "这个结果严重吗？"
-    }
+    "report_text": "血红蛋白 105 g/L，参考范围 130-175 g/L",
+    "images": ["https://example.com/report.png"],
+    "messages": [
+      {"role": "user", "content": "这是我的体检报告，请先整体看看。"},
+      {"role": "assistant", "content": "我会结合报告内容解释异常指标和后续建议。"}
+    ],
+    "question": "这个结果严重吗？"
   }' \
   http://127.0.0.1:3000/v1/agents/medical_report_interpreter/runs/stream
 ```

@@ -11,7 +11,7 @@ use axum::{
 };
 use futures::{future, StreamExt};
 use jsonschema::JSONSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::{
@@ -97,23 +97,18 @@ async fn get_run<M: ModelClient>(
     Ok(Json(ApiResponse::ok(run)))
 }
 
-#[derive(Debug, Deserialize)]
-struct RunRequest {
-    input: Value,
-}
-
 async fn run_agent_stream<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
     Path(agent_id): Path<String>,
-    request: Result<Json<RunRequest>, JsonRejection>,
+    request: Result<Json<Value>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
-    let Json(request) = request.map_err(map_run_request_rejection)?;
+    let Json(input) = request.map_err(map_run_request_rejection)?;
     let agent = state
         .registry
         .get(&agent_id)
         .ok_or_else(|| AppError::NotFound(format!("agent '{agent_id}' not found")))?
         .clone();
-    let input_summary = summarize_run_input(&request.input);
+    let input_summary = summarize_run_input(&input);
     tracing::info!(
         agent_id = %agent_id,
         input_keys = ?input_summary.keys,
@@ -135,7 +130,7 @@ async fn run_agent_stream<M: ModelClient>(
         ))
     })?;
 
-    if let Err(errors) = compiled_schema.validate(&request.input) {
+    if let Err(errors) = compiled_schema.validate(&input) {
         let messages = errors.map(|err| err.to_string()).collect::<Vec<_>>();
         tracing::warn!(
             agent_id = %agent_id,
@@ -152,7 +147,7 @@ async fn run_agent_stream<M: ModelClient>(
     let event_encoder = state.event_encoder;
     let stream = state
         .engine
-        .run(agent, request.input)
+        .run(agent, input)
         .scan(false, move |failed, event| {
             let next = if *failed {
                 None

@@ -298,7 +298,7 @@ async fn streams_agent_run_as_sse() {
                 .method("POST")
                 .uri("/v1/agents/test/runs/stream")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"input":{"name":"Ada"}}"#))
+                .body(Body::from(r#"{"name":"Ada"}"#))
                 .unwrap(),
         )
         .await
@@ -353,7 +353,7 @@ async fn records_run_history_and_step_outputs() {
                 .method("POST")
                 .uri("/v1/agents/test/runs/stream")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"input":{"name":"Ada"}}"#))
+                .body(Body::from(r#"{"name":"Ada"}"#))
                 .unwrap(),
         )
         .await
@@ -418,7 +418,7 @@ async fn streams_code_node_demo_agent() {
                 .method("POST")
                 .uri("/v1/agents/code_node_demo/runs/stream")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"input":{"text":"hello rust world"}}"#))
+                .body(Body::from(r#"{"text":"hello rust world"}"#))
                 .unwrap(),
         )
         .await
@@ -453,7 +453,7 @@ async fn records_failed_run_history() {
                 .method("POST")
                 .uri("/v1/agents/broken/runs/stream")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"input":{}}"#))
+                .body(Body::from(r#"{}"#))
                 .unwrap(),
         )
         .await
@@ -498,7 +498,7 @@ async fn streams_token_delta_content_as_direct_text() {
                 .method("POST")
                 .uri("/v1/agents/llm/runs/stream")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"input":{}}"#))
+                .body(Body::from(r#"{}"#))
                 .unwrap(),
         )
         .await
@@ -526,7 +526,7 @@ async fn invalid_input_returns_400_before_sse() {
                 .method("POST")
                 .uri("/v1/agents/test/runs/stream")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"input":"not-object"}"#))
+                .body(Body::from(r#""not-object""#))
                 .unwrap(),
         )
         .await
@@ -549,14 +549,14 @@ async fn invalid_input_returns_400_before_sse() {
 }
 
 #[tokio::test]
-async fn missing_input_field_returns_400_before_sse() {
+async fn wrapped_input_body_returns_400_before_sse() {
     let response = app()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/v1/agents/test/runs/stream")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"question":"Ada"}"#))
+                .body(Body::from(r#"{"input":{"name":"Ada"}}"#))
                 .unwrap(),
         )
         .await
@@ -574,7 +574,7 @@ async fn missing_input_field_returns_400_before_sse() {
     assert!(payload["message"]
         .as_str()
         .unwrap()
-        .contains("missing field `input`"));
+        .contains("input validation failed"));
     assert!(payload["data"].is_null());
 }
 
@@ -585,7 +585,7 @@ async fn missing_content_type_returns_400_before_sse() {
             Request::builder()
                 .method("POST")
                 .uri("/v1/agents/test/runs/stream")
-                .body(Body::from(r#"{"input":{"name":"Ada"}}"#))
+                .body(Body::from(r#"{"name":"Ada"}"#))
                 .unwrap(),
         )
         .await
@@ -615,7 +615,7 @@ async fn streams_runtime_error_as_sse_error_without_run_completed() {
                 .method("POST")
                 .uri("/v1/agents/broken/runs/stream")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"input":{}}"#))
+                .body(Body::from(r#"{}"#))
                 .unwrap(),
         )
         .await
@@ -666,7 +666,7 @@ async fn sanitizes_sse_encoding_failures_without_panicking() {
                 .method("POST")
                 .uri("/v1/agents/test/runs/stream")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"input":{"name":"Ada"}}"#))
+                .body(Body::from(r#"{"name":"Ada"}"#))
                 .unwrap(),
         )
         .await
