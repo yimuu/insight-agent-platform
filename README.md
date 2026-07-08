@@ -123,8 +123,11 @@ curl http://127.0.0.1:3000/v1/agents
 
 Run endpoints accept the agent input object directly as the JSON request body. The `input.schema` in the agent YAML validates this body; clients do not wrap it in an extra `input` field.
 
+Clients may pass `X-Request-Id` for request tracing. When omitted, the service generates one. Stream responses include the same `X-Request-Id` header, and every SSE event includes both `request_id` and `run_id`.
+
 ```bash
 curl -N \
+  -H 'x-request-id: req_demo_001' \
   -H 'content-type: application/json' \
   -H 'accept: text/event-stream' \
   -d '{"question":"用中文解释这个平台的架构"}' \

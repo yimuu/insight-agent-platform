@@ -2,6 +2,7 @@ use std::{convert::Infallible, sync::Arc};
 
 use axum::{
     extract::{rejection::JsonRejection, Path, State},
+    http::{header::HeaderName, HeaderMap, HeaderValue},
     response::{
         sse::{Event, Sse},
         IntoResponse,
@@ -13,6 +14,7 @@ use futures::{future, StreamExt};
 use jsonschema::JSONSchema;
 use serde::Serialize;
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use crate::{
     agent::{loader::LoadedAgent, registry::AgentRegistry},
@@ -24,6 +26,7 @@ use crate::{
 };
 
 pub type EventEncoder = fn(crate::engine::event::RunEvent) -> Result<Event, AppError>;
+const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
 #[derive(Clone)]
 pub struct AppState<M: ModelClient> {
@@ -100,8 +103,10 @@ async fn get_run<M: ModelClient>(
 async fn run_agent_stream<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
     Path(agent_id): Path<String>,
+    headers: HeaderMap,
     request: Result<Json<Value>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
+    let request_id = request_id_from_headers(&headers);
     let Json(input) = request.map_err(map_run_request_rejection)?;
     let agent = state
         .registry
@@ -110,11 +115,13 @@ async fn run_agent_stream<M: ModelClient>(
         .clone();
     let input_summary = summarize_run_input(&input);
     tracing::info!(
+        request_id = %request_id,
         agent_id = %agent_id,
         input_keys = ?input_summary.keys,
         "agent stream request received"
     );
     tracing::debug!(
+        request_id = %request_id,
         agent_id = %agent_id,
         report_text_chars = input_summary.report_text_chars,
         images_count = input_summary.images_count,
@@ -134,6 +141,7 @@ async fn run_agent_stream<M: ModelClient>(
         let messages = errors.map(|err| err.to_string()).collect::<Vec<_>>();
         tracing::warn!(
             agent_id = %agent_id,
+            request_id = %request_id,
             errors = ?messages,
             "agent run input validation failed"
         );
@@ -142,12 +150,12 @@ async fn run_agent_stream<M: ModelClient>(
             messages.join("; ")
         )));
     }
-    tracing::debug!(agent_id = %agent_id, "agent run input validation passed");
+    tracing::debug!(agent_id = %agent_id, request_id = %request_id, "agent run input validation passed");
 
     let event_encoder = state.event_encoder;
     let stream = state
         .engine
-        .run(agent, input)
+        .run_with_request_id(agent, input, request_id.clone())
         .scan(false, move |failed, event| {
             let next = if *failed {
                 None
@@ -163,7 +171,23 @@ async fn run_agent_stream<M: ModelClient>(
             future::ready(next)
         });
 
-    Ok(Sse::new(stream))
+    let mut response = Sse::new(stream).into_response();
+    let request_id_header = HeaderValue::from_str(&request_id)
+        .map_err(|err| AppError::Run(format!("failed to encode request id header: {err}")))?;
+    response
+        .headers_mut()
+        .insert(X_REQUEST_ID, request_id_header);
+    Ok(response)
+}
+
+fn request_id_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get(&X_REQUEST_ID)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("req_{}", Uuid::new_v4()))
 }
 
 #[derive(Debug, PartialEq, Eq)]

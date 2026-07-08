@@ -36,6 +36,7 @@ impl RunEventKind {
 pub struct RunEvent {
     #[serde(rename = "event")]
     pub event: RunEventKind,
+    pub request_id: String,
     pub run_id: String,
     pub agent_id: String,
     pub step_id: Option<String>,
@@ -51,6 +52,7 @@ pub struct RunEvent {
 impl RunEvent {
     pub fn ok(
         event: RunEventKind,
+        request_id: String,
         run_id: String,
         agent_id: String,
         step_id: Option<String>,
@@ -59,6 +61,7 @@ impl RunEvent {
     ) -> Self {
         Self {
             event,
+            request_id,
             run_id,
             agent_id,
             step_id,
@@ -71,6 +74,7 @@ impl RunEvent {
     }
 
     pub fn error(
+        request_id: String,
         run_id: String,
         agent_id: String,
         step_id: Option<String>,
@@ -79,6 +83,7 @@ impl RunEvent {
     ) -> Self {
         Self {
             event: RunEventKind::Error,
+            request_id,
             run_id,
             agent_id,
             step_id,

@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 #[derive(Debug, Clone)]
 pub struct RunContext {
+    pub request_id: String,
     pub run_id: String,
     pub agent_id: String,
     pub started_at: DateTime<Utc>,
@@ -22,6 +23,7 @@ impl RunContext {
 
         json!({
             "run": {
+                "request_id": self.request_id,
                 "id": self.run_id,
                 "agent_id": self.agent_id,
                 "started_at": self.started_at,

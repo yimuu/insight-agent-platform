@@ -72,22 +72,43 @@ impl<M: ModelClient> RunEngine<M> {
     }
 
     pub fn run(&self, agent: LoadedAgent, input: Value) -> impl Stream<Item = RunEvent> {
+        self.run_with_request_id(agent, input, format!("req_{}", Uuid::new_v4()))
+    }
+
+    pub fn run_with_request_id(
+        &self,
+        agent: LoadedAgent,
+        input: Value,
+        request_id: String,
+    ) -> impl Stream<Item = RunEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let engine = self.clone();
         let task = tokio::spawn(async move {
             let history_store = engine.history_store.clone();
             engine
-                .run_streaming(agent, input, EventSender::new(tx, cancel_rx, history_store))
+                .run_streaming(
+                    agent,
+                    input,
+                    request_id,
+                    EventSender::new(tx, cancel_rx, history_store),
+                )
                 .await;
         });
         RunEventStream::new(UnboundedReceiverStream::new(rx), cancel_tx, task)
     }
 
-    async fn run_streaming(&self, agent: LoadedAgent, input: Value, events: EventSender) {
+    async fn run_streaming(
+        &self,
+        agent: LoadedAgent,
+        input: Value,
+        request_id: String,
+        events: EventSender,
+    ) {
         let run_started = Instant::now();
         let run_id = format!("run_{}", Uuid::new_v4());
         let mut ctx = RunContext {
+            request_id,
             run_id,
             agent_id: agent.config.id.clone(),
             started_at: Utc::now(),
@@ -104,6 +125,7 @@ impl<M: ModelClient> RunEngine<M> {
             .await;
         let store = PromptStore::new(agent.prompts.clone());
         tracing::info!(
+            request_id = %ctx.request_id,
             run_id = %ctx.run_id,
             agent_id = %ctx.agent_id,
             steps_count = agent.config.steps.len(),
@@ -800,6 +822,7 @@ impl EventSender {
         let has_content = !content.is_empty();
         let run_event = RunEvent::ok(
             event,
+            ctx.request_id.clone(),
             ctx.run_id.clone(),
             ctx.agent_id.clone(),
             step_id.map(str::to_string),
@@ -829,6 +852,7 @@ impl EventSender {
     ) -> bool {
         let message = message.into();
         let run_event = RunEvent::error(
+            ctx.request_id.clone(),
             ctx.run_id.clone(),
             ctx.agent_id.clone(),
             step_id.map(str::to_string),

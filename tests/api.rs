@@ -1,6 +1,6 @@
 use axum::{
     body::{to_bytes, Body},
-    http::{Request, StatusCode},
+    http::{header::HeaderName, Request, StatusCode},
 };
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -341,6 +341,72 @@ async fn streams_agent_run_as_sse() {
     assert_eq!(run_completed.data["data"]["event"], "run_completed");
     assert_eq!(run_completed.data["data"]["content"], "");
     assert!(run_completed.data["data"]["result"].is_null());
+}
+
+#[tokio::test]
+async fn streams_agent_run_with_request_id() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/test/runs/stream")
+                .header("content-type", "application/json")
+                .header("x-request-id", "req_test_123")
+                .body(Body::from(r#"{"name":"Ada"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(HeaderName::from_static("x-request-id"))
+            .unwrap(),
+        "req_test_123"
+    );
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let frames = parse_sse_frames(&text);
+
+    assert!(frames
+        .iter()
+        .all(|frame| frame.data["data"]["request_id"] == "req_test_123"));
+}
+
+#[tokio::test]
+async fn streams_agent_run_generates_request_id() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/test/runs/stream")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"Ada"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let request_id = response
+        .headers()
+        .get(HeaderName::from_static("x-request-id"))
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(request_id.starts_with("req_"));
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let frames = parse_sse_frames(&text);
+
+    assert!(frames
+        .iter()
+        .all(|frame| frame.data["data"]["request_id"] == request_id));
 }
 
 #[tokio::test]

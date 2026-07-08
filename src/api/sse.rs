@@ -18,6 +18,7 @@ pub fn encode_event_or_sanitized_error(event: RunEvent, result: Result<Event, Ap
         Ok(encoded) => encoded,
         Err(_) => {
             let fallback = RunEvent::error(
+                event.request_id,
                 event.run_id,
                 event.agent_id,
                 event.step_id,
