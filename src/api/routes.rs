@@ -2,7 +2,7 @@ use std::{convert::Infallible, sync::Arc};
 
 use axum::{
     body::Body,
-    extract::{rejection::JsonRejection, Path, State},
+    extract::{rejection::JsonRejection, Path, Query, State},
     http::{
         header::{HeaderName, AUTHORIZATION},
         HeaderMap, HeaderValue, Request,
@@ -17,7 +17,7 @@ use axum::{
 };
 use futures::{future, StreamExt};
 use jsonschema::JSONSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -26,6 +26,7 @@ use crate::{
     api::sse::encode_event_or_sanitized_error,
     engine::runner::RunEngine,
     error::AppError,
+    history::store::RunHistoryQuery,
     model::types::ModelClient,
     request_context::RequestContext,
     response::ApiResponse,
@@ -71,6 +72,7 @@ pub fn build_router<M: ModelClient>(state: AppState<M>) -> Router {
         .route("/v1/agents", get(list_agents::<M>))
         .route("/v1/agents/:agent_id", get(get_agent::<M>))
         .route("/v1/agents/:agent_id/runs", get(list_agent_runs::<M>))
+        .route("/v1/runs", get(list_runs::<M>))
         .route("/v1/runs/:run_id", get(get_run::<M>))
         .route(
             "/v1/agents/:agent_id/runs/stream",
@@ -116,6 +118,7 @@ async fn get_agent<M: ModelClient>(
 async fn list_agent_runs<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
     Path(agent_id): Path<String>,
+    Query(query): Query<RunHistoryQueryParams>,
 ) -> Result<Json<ApiResponse<Vec<crate::history::store::RunSummary>>>, AppError> {
     if state.registry.get(&agent_id).is_none() {
         return Err(AppError::NotFound(format!("agent '{agent_id}' not found")));
@@ -123,9 +126,25 @@ async fn list_agent_runs<M: ModelClient>(
     let runs = state
         .engine
         .history_store()
-        .list_agent_runs(&agent_id, 50)
+        .list_runs(query.into_history_query(Some(agent_id)))
         .await?;
     Ok(Json(ApiResponse::ok(runs)))
+}
+
+async fn list_runs<M: ModelClient>(
+    State(state): State<Arc<AppState<M>>>,
+    Query(query): Query<RunHistoryQueryParams>,
+) -> Result<Json<ApiResponse<Vec<crate::history::store::RunSummary>>>, AppError> {
+    let runs = state
+        .engine
+        .history_store()
+        .list_runs(query.into_history_query(None))
+        .await?;
+    Ok(Json(ApiResponse::ok(
+        runs.into_iter()
+            .filter(|run| state.registry.get(&run.agent_id).is_some())
+            .collect::<Vec<_>>(),
+    )))
 }
 
 async fn get_run<M: ModelClient>(
@@ -312,6 +331,39 @@ struct AgentSummary {
     name: String,
     description: String,
     input_schema: Value,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RunHistoryQueryParams {
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    caller_service: Option<String>,
+    #[serde(default)]
+    tenant_id: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+impl RunHistoryQueryParams {
+    fn into_history_query(self, agent_id: Option<String>) -> RunHistoryQuery {
+        RunHistoryQuery {
+            agent_id,
+            request_id: normalize_query_value(self.request_id),
+            caller_service: normalize_query_value(self.caller_service),
+            tenant_id: normalize_query_value(self.tenant_id),
+            user_id: normalize_query_value(self.user_id),
+            limit: self.limit.unwrap_or(50),
+        }
+    }
+}
+
+fn normalize_query_value(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 impl From<&LoadedAgent> for AgentSummary {

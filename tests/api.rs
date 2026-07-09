@@ -636,6 +636,120 @@ async fn records_run_history_and_step_outputs() {
 }
 
 #[tokio::test]
+async fn filters_run_history_by_request_context() {
+    let app = app();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/test/runs/stream")
+                .header("content-type", "application/json")
+                .header("x-request-id", "req_filter_001")
+                .header("x-caller-service", "web-backend")
+                .header("x-tenant-id", "tenant_123")
+                .header("x-user-id", "user_a")
+                .body(Body::from(r#"{"name":"Ada"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let first_frames = parse_sse_frames(&String::from_utf8(body.to_vec()).unwrap());
+    let first_run_id = first_frames[0].data["data"]["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/test/runs/stream")
+                .header("content-type", "application/json")
+                .header("x-request-id", "req_filter_002")
+                .header("x-caller-service", "batch-worker")
+                .header("x-tenant-id", "tenant_999")
+                .header("x-user-id", "user_b")
+                .body(Body::from(r#"{"name":"Grace"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let second_frames = parse_sse_frames(&String::from_utf8(body.to_vec()).unwrap());
+    let second_run_id = second_frames[0].data["data"]["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/agents/test/runs?request_id=req_filter_001")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["data"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["data"][0]["run_id"], first_run_id);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/agents/test/runs?user_id=user_b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["data"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["data"][0]["run_id"], second_run_id);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runs?tenant_id=tenant_123&caller_service=web-backend")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["data"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["data"][0]["run_id"], first_run_id);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runs?request_id=missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert!(payload["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn streams_code_node_demo_agent() {
     let response = app_with_code_node_demo()
         .oneshot(

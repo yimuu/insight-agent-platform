@@ -6,7 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::task;
@@ -85,6 +85,16 @@ pub struct RunRecord {
     pub step_outputs: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RunHistoryQuery {
+    pub agent_id: Option<String>,
+    pub request_id: Option<String>,
+    pub caller_service: Option<String>,
+    pub tenant_id: Option<String>,
+    pub user_id: Option<String>,
+    pub limit: usize,
+}
+
 #[derive(Clone)]
 pub struct RunHistoryStore {
     inner: Arc<dyn RunHistoryRepository>,
@@ -153,7 +163,16 @@ impl RunHistoryStore {
         agent_id: &str,
         limit: usize,
     ) -> Result<Vec<RunSummary>, AppError> {
-        self.inner.list_agent_runs(agent_id, limit).await
+        self.list_runs(RunHistoryQuery {
+            agent_id: Some(agent_id.to_string()),
+            limit,
+            ..Default::default()
+        })
+        .await
+    }
+
+    pub async fn list_runs(&self, query: RunHistoryQuery) -> Result<Vec<RunSummary>, AppError> {
+        self.inner.list_runs(query).await
     }
 }
 
@@ -187,11 +206,7 @@ trait RunHistoryRepository: Send + Sync {
         error_message: Option<String>,
     ) -> Result<(), AppError>;
     async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, AppError>;
-    async fn list_agent_runs(
-        &self,
-        agent_id: &str,
-        limit: usize,
-    ) -> Result<Vec<RunSummary>, AppError>;
+    async fn list_runs(&self, query: RunHistoryQuery) -> Result<Vec<RunSummary>, AppError>;
 }
 
 struct NoopRunHistoryRepository;
@@ -235,11 +250,7 @@ impl RunHistoryRepository for NoopRunHistoryRepository {
         Ok(None)
     }
 
-    async fn list_agent_runs(
-        &self,
-        _agent_id: &str,
-        _limit: usize,
-    ) -> Result<Vec<RunSummary>, AppError> {
+    async fn list_runs(&self, _query: RunHistoryQuery) -> Result<Vec<RunSummary>, AppError> {
         Ok(Vec::new())
     }
 }
@@ -295,6 +306,10 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_agent_started_at ON runs(agent_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_request_id ON runs(request_id);
+CREATE INDEX IF NOT EXISTS idx_runs_caller_started_at ON runs(caller_service, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_tenant_started_at ON runs(tenant_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_user_started_at ON runs(user_id, started_at DESC);
 
 CREATE TABLE IF NOT EXISTS run_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -514,21 +529,12 @@ impl RunHistoryRepository for SqliteRunHistoryRepository {
         .await
     }
 
-    async fn list_agent_runs(
-        &self,
-        agent_id: &str,
-        limit: usize,
-    ) -> Result<Vec<RunSummary>, AppError> {
-        let agent_id = agent_id.to_string();
+    async fn list_runs(&self, query: RunHistoryQuery) -> Result<Vec<RunSummary>, AppError> {
         self.with_conn(move |conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT run_id, request_id, agent_id, caller_service, tenant_id, user_id, status, started_at, ended_at, input_summary, error_message
-                     FROM runs WHERE agent_id = ?1 ORDER BY started_at DESC LIMIT ?2",
-                )
-                .map_err(map_sqlite_error)?;
+            let (sql, params) = build_list_runs_query(query);
+            let mut stmt = conn.prepare(&sql).map_err(map_sqlite_error)?;
             let runs = stmt
-                .query_map(params![agent_id, limit as i64], read_run_summary)
+                .query_map(params_from_iter(params), read_run_summary)
                 .map_err(map_sqlite_error)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(map_sqlite_error)?;
@@ -556,6 +562,64 @@ fn read_run_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary> {
         input_summary: parse_json_or_null(&input_summary),
         error_message: row.get(10)?,
     })
+}
+
+fn build_list_runs_query(query: RunHistoryQuery) -> (String, Vec<SqlValue>) {
+    let mut sql = "SELECT run_id, request_id, agent_id, caller_service, tenant_id, user_id, status, started_at, ended_at, input_summary, error_message FROM runs".to_string();
+    let mut conditions = Vec::new();
+    let mut params = Vec::new();
+
+    push_text_filter(&mut conditions, &mut params, "agent_id", query.agent_id);
+    push_text_filter(&mut conditions, &mut params, "request_id", query.request_id);
+    push_text_filter(
+        &mut conditions,
+        &mut params,
+        "caller_service",
+        query.caller_service,
+    );
+    push_text_filter(&mut conditions, &mut params, "tenant_id", query.tenant_id);
+    push_text_filter(&mut conditions, &mut params, "user_id", query.user_id);
+
+    if !conditions.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" AND "));
+    }
+
+    sql.push_str(" ORDER BY started_at DESC LIMIT ?");
+    params.push(SqlValue::Integer(effective_limit(query.limit) as i64));
+    (sql, params)
+}
+
+fn push_text_filter(
+    conditions: &mut Vec<&'static str>,
+    params: &mut Vec<SqlValue>,
+    column: &'static str,
+    value: Option<String>,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    conditions.push(match column {
+        "agent_id" => "agent_id = ?",
+        "request_id" => "request_id = ?",
+        "caller_service" => "caller_service = ?",
+        "tenant_id" => "tenant_id = ?",
+        "user_id" => "user_id = ?",
+        _ => unreachable!("unsupported run history filter column"),
+    });
+    params.push(SqlValue::Text(value.to_string()));
+}
+
+fn effective_limit(limit: usize) -> usize {
+    if limit == 0 {
+        50
+    } else {
+        limit.min(200)
+    }
 }
 
 fn add_column_if_missing(

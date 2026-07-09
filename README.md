@@ -155,9 +155,12 @@ curl -N \
 
 Runs are recorded to SQLite. `history.db` in `config/platform.yaml` controls the database path and defaults to `data/run_history.sqlite3` when no platform config exists.
 Run records include request and caller context fields when provided: `request_id`, `caller_service`, `tenant_id`, and `user_id`.
+Run list endpoints can filter by those fields with query parameters. Supported query parameters are `request_id`, `caller_service`, `tenant_id`, `user_id`, and `limit`.
 
 ```bash
 curl http://127.0.0.1:3000/v1/agents/medical_report_interpreter/runs
+curl 'http://127.0.0.1:3000/v1/agents/medical_report_interpreter/runs?user_id=user_456'
+curl 'http://127.0.0.1:3000/v1/runs?request_id=req_demo_001'
 curl http://127.0.0.1:3000/v1/runs/run_xxx
 ```
 
