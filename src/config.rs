@@ -20,10 +20,23 @@ use crate::{
 pub struct PlatformConfig {
     pub bind_addr: SocketAddr,
     pub agents_dir: PathBuf,
-    pub run_history_db: PathBuf,
+    pub history: HistoryConfig,
     pub internal_auth_token: Option<String>,
     pub agent_exposure: AgentExposureConfig,
     pub model_providers: ModelProvidersConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct HistoryConfig {
+    pub provider: HistoryProvider,
+    pub database_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryProvider {
+    Sqlite,
+    Postgres,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -79,6 +92,12 @@ struct PlatformAgentsYaml {
 #[derive(Debug, Clone, Default, Deserialize)]
 struct PlatformHistoryYaml {
     #[serde(default)]
+    provider: Option<HistoryProvider>,
+    #[serde(default)]
+    database_url: Option<String>,
+    #[serde(default)]
+    database_url_env: Option<String>,
+    #[serde(default)]
     db: Option<PathBuf>,
 }
 
@@ -100,18 +119,14 @@ impl PlatformConfig {
             .map(PathBuf::from)
             .or(yaml.agents.directory)
             .unwrap_or_else(|| PathBuf::from("agents"));
-        let run_history_db = env::var("RUN_HISTORY_DB")
-            .ok()
-            .map(PathBuf::from)
-            .or(yaml.history.db)
-            .unwrap_or_else(|| PathBuf::from("data/run_history.sqlite3"));
+        let history = resolve_history_config(yaml.history, |name| env::var(name).ok())?;
         let internal_auth_token = load_internal_auth_token(yaml.auth.internal_token_env)?;
         let model_providers = load_model_providers_config(yaml.model_providers_config)?;
 
         Ok(Self {
             bind_addr,
             agents_dir,
-            run_history_db,
+            history,
             internal_auth_token,
             agent_exposure: AgentExposureConfig {
                 default_enabled: yaml.agents.default_enabled,
@@ -170,6 +185,118 @@ fn load_platform_yaml(path: &Path) -> Result<PlatformYaml, AppError> {
         },
         ..Default::default()
     })
+}
+
+fn resolve_history_config(
+    yaml: PlatformHistoryYaml,
+    get_env: impl Fn(&str) -> Option<String>,
+) -> Result<HistoryConfig, AppError> {
+    if let Some(database_url) = get_env("RUN_HISTORY_DATABASE_URL") {
+        return history_config_from_url(yaml.provider, database_url, "RUN_HISTORY_DATABASE_URL");
+    }
+
+    if let Some(database_url_env) = yaml.database_url_env {
+        let database_url = get_env(&database_url_env).ok_or_else(|| {
+            AppError::Config(format!(
+                "environment variable '{database_url_env}' is required for run history"
+            ))
+        })?;
+        return history_config_from_url(yaml.provider, database_url, &database_url_env);
+    }
+
+    if let Some(database_url) = yaml.database_url {
+        return history_config_from_url(yaml.provider, database_url, "history.database_url");
+    }
+
+    let db_path = get_env("RUN_HISTORY_DB").map(PathBuf::from).or(yaml.db);
+    if let Some(db_path) = db_path {
+        if yaml.provider == Some(HistoryProvider::Postgres) {
+            return Err(AppError::Config(
+                "history.db and RUN_HISTORY_DB can only be used with sqlite history".to_string(),
+            ));
+        }
+        return Ok(HistoryConfig {
+            provider: HistoryProvider::Sqlite,
+            database_url: sqlite_database_url_from_path(&db_path),
+        });
+    }
+
+    if yaml.provider == Some(HistoryProvider::Postgres) {
+        return Err(AppError::Config(
+            "postgres run history requires history.database_url or history.database_url_env"
+                .to_string(),
+        ));
+    }
+
+    Ok(HistoryConfig {
+        provider: HistoryProvider::Sqlite,
+        database_url: sqlite_database_url_from_path(Path::new("data/run_history.sqlite3")),
+    })
+}
+
+fn history_config_from_url(
+    provider: Option<HistoryProvider>,
+    database_url: String,
+    source: &str,
+) -> Result<HistoryConfig, AppError> {
+    let database_url = non_empty_history_url(database_url, source)?;
+    let provider = provider.unwrap_or_else(|| infer_history_provider(&database_url));
+    let database_url = normalize_history_database_url(provider, &database_url)?;
+    Ok(HistoryConfig {
+        provider,
+        database_url,
+    })
+}
+
+fn non_empty_history_url(database_url: String, source: &str) -> Result<String, AppError> {
+    let database_url = database_url.trim().to_string();
+    if database_url.is_empty() {
+        return Err(AppError::Config(format!(
+            "{source} for run history must not be empty"
+        )));
+    }
+    Ok(database_url)
+}
+
+fn infer_history_provider(database_url: &str) -> HistoryProvider {
+    if is_postgres_url(database_url) {
+        HistoryProvider::Postgres
+    } else {
+        HistoryProvider::Sqlite
+    }
+}
+
+fn normalize_history_database_url(
+    provider: HistoryProvider,
+    database_url: &str,
+) -> Result<String, AppError> {
+    match provider {
+        HistoryProvider::Sqlite => {
+            if database_url.starts_with("sqlite:") {
+                Ok(database_url.to_string())
+            } else {
+                Ok(sqlite_database_url_from_path(Path::new(database_url)))
+            }
+        }
+        HistoryProvider::Postgres => {
+            if is_postgres_url(database_url) {
+                Ok(database_url.to_string())
+            } else {
+                Err(AppError::Config(
+                    "postgres run history requires a postgres:// or postgresql:// database_url"
+                        .to_string(),
+                ))
+            }
+        }
+    }
+}
+
+fn is_postgres_url(database_url: &str) -> bool {
+    database_url.starts_with("postgres://") || database_url.starts_with("postgresql://")
+}
+
+fn sqlite_database_url_from_path(path: &Path) -> String {
+    format!("sqlite://{}", path.display())
 }
 
 fn load_model_providers_config(
@@ -256,7 +383,8 @@ mod tests {
     };
 
     use super::{
-        filter_enabled_agents, load_internal_auth_token, AgentExposure, AgentExposureConfig,
+        filter_enabled_agents, load_internal_auth_token, resolve_history_config, AgentExposure,
+        AgentExposureConfig, HistoryProvider, PlatformHistoryYaml,
     };
 
     fn loaded_agent(id: &str) -> LoadedAgent {
@@ -343,5 +471,54 @@ mod tests {
             load_internal_auth_token(Some("INSIGHT_TEST_INTERNAL_AUTH_TOKEN".to_string())).unwrap();
 
         assert_eq!(token.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn resolves_legacy_history_db_as_sqlite_url() {
+        let history = resolve_history_config(
+            PlatformHistoryYaml {
+                db: Some(PathBuf::from("data/custom.sqlite3")),
+                ..Default::default()
+            },
+            |_| None,
+        )
+        .unwrap();
+
+        assert_eq!(history.provider, HistoryProvider::Sqlite);
+        assert_eq!(history.database_url, "sqlite://data/custom.sqlite3");
+    }
+
+    #[test]
+    fn resolves_history_database_url_and_infers_postgres_provider() {
+        let history = resolve_history_config(
+            PlatformHistoryYaml {
+                database_url: Some("postgres://user:pass@localhost/insight".to_string()),
+                ..Default::default()
+            },
+            |_| None,
+        )
+        .unwrap();
+
+        assert_eq!(history.provider, HistoryProvider::Postgres);
+        assert_eq!(
+            history.database_url,
+            "postgres://user:pass@localhost/insight"
+        );
+    }
+
+    #[test]
+    fn resolves_history_database_url_from_named_environment() {
+        let history = resolve_history_config(
+            PlatformHistoryYaml {
+                provider: Some(HistoryProvider::Sqlite),
+                database_url_env: Some("INSIGHT_HISTORY_URL".to_string()),
+                ..Default::default()
+            },
+            |name| (name == "INSIGHT_HISTORY_URL").then(|| "sqlite::memory:".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(history.provider, HistoryProvider::Sqlite);
+        assert_eq!(history.database_url, "sqlite::memory:");
     }
 }

@@ -37,7 +37,8 @@ agents:
       public: false
 
 history:
-  db: data/run_history.sqlite3
+  provider: sqlite
+  database_url: sqlite://data/run_history.sqlite3
 ```
 
 To protect runtime APIs behind a backend or gateway, configure an internal bearer token environment variable. `/health` remains public; `/v1/...` requires `Authorization: Bearer <token>` when this is set.
@@ -153,7 +154,23 @@ curl -N \
 
 ## Run History
 
-Runs are recorded to SQLite. `history.db` in `config/platform.yaml` controls the database path and defaults to `data/run_history.sqlite3` when no platform config exists.
+Runs are recorded through sqlx. `history` in `config/platform.yaml` selects the backend and defaults to SQLite at `sqlite://data/run_history.sqlite3` when no platform config exists.
+
+```yaml
+history:
+  provider: sqlite
+  database_url: sqlite://data/run_history.sqlite3
+```
+
+PostgreSQL can be enabled by using a PostgreSQL URL directly or by reading it from an environment variable:
+
+```yaml
+history:
+  provider: postgres
+  database_url_env: RUN_HISTORY_DATABASE_URL
+```
+
+The old `history.db` and `RUN_HISTORY_DB` SQLite path settings are still accepted for compatibility.
 Run records include request and caller context fields when provided: `request_id`, `caller_service`, `tenant_id`, and `user_id`.
 Run list endpoints can filter by those fields with query parameters. Supported query parameters are `request_id`, `caller_service`, `tenant_id`, `user_id`, and `limit`.
 

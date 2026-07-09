@@ -28,7 +28,7 @@ async fn main() -> Result<(), AppError> {
     tracing::info!(
         bind_addr = %config.bind_addr,
         agents_dir = %config.agents_dir.display(),
-        run_history_db = %config.run_history_db.display(),
+        history_provider = ?config.history.provider,
         internal_auth_enabled = config.internal_auth_token.is_some(),
         providers_count = config.model_providers.providers.len(),
         default_provider = ?config.model_providers.default_provider,
@@ -56,7 +56,7 @@ async fn main() -> Result<(), AppError> {
     );
     let registry = AgentRegistry::new(agents)?;
     let model = ModelRouter::from_openai_compatible_config(&config.model_providers)?;
-    let history_store = RunHistoryStore::sqlite(&config.run_history_db)?;
+    let history_store = RunHistoryStore::from_config(&config.history).await?;
     let engine = RunEngine::new(model, default_tool_registry())
         .with_code_handlers(code_handlers)
         .with_history_store(history_store);

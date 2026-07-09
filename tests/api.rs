@@ -157,21 +157,21 @@ fn llm_agent() -> LoadedAgent {
     }
 }
 
-fn app() -> axum::Router {
-    app_with_encoder(encode_event)
+async fn app() -> axum::Router {
+    app_with_encoder(encode_event).await
 }
 
-fn app_with_auth(auth: RuntimeAuth) -> axum::Router {
-    app_with_encoder_and_auth(encode_event, auth)
+async fn app_with_auth(auth: RuntimeAuth) -> axum::Router {
+    app_with_encoder_and_auth(encode_event, auth).await
 }
 
-fn app_with_encoder(
+async fn app_with_encoder(
     event_encoder: fn(RunEvent) -> Result<axum::response::sse::Event, AppError>,
 ) -> axum::Router {
-    app_with_encoder_and_auth(event_encoder, RuntimeAuth::disabled())
+    app_with_encoder_and_auth(event_encoder, RuntimeAuth::disabled()).await
 }
 
-fn app_with_encoder_and_auth(
+async fn app_with_encoder_and_auth(
     event_encoder: fn(RunEvent) -> Result<axum::response::sse::Event, AppError>,
     auth: RuntimeAuth,
 ) -> axum::Router {
@@ -182,7 +182,7 @@ fn app_with_encoder_and_auth(
         ToolRegistry::default(),
     )
     .with_code_handlers(default_code_registry())
-    .with_history_store(RunHistoryStore::sqlite_in_memory().unwrap());
+    .with_history_store(RunHistoryStore::sqlite_in_memory().await.unwrap());
     build_router(AppState {
         registry,
         engine,
@@ -199,11 +199,11 @@ fn code_node_demo_agent() -> LoadedAgent {
         .unwrap()
 }
 
-fn app_with_code_node_demo() -> axum::Router {
+async fn app_with_code_node_demo() -> axum::Router {
     let registry = AgentRegistry::new(vec![code_node_demo_agent()]).unwrap();
     let engine = RunEngine::new(FakeModelClient::new(vec![]), ToolRegistry::default())
         .with_code_handlers(default_code_registry())
-        .with_history_store(RunHistoryStore::sqlite_in_memory().unwrap());
+        .with_history_store(RunHistoryStore::sqlite_in_memory().await.unwrap());
     build_router(AppState {
         registry,
         engine,
@@ -247,6 +247,7 @@ fn parse_sse_frames(body: &str) -> Vec<SseFrame> {
 #[tokio::test]
 async fn lists_agents_without_prompt_contents() {
     let response = app()
+        .await
         .oneshot(
             Request::builder()
                 .uri("/v1/agents")
@@ -280,6 +281,7 @@ async fn lists_agents_without_prompt_contents() {
 #[tokio::test]
 async fn health_does_not_require_internal_auth() {
     let response = app_with_auth(RuntimeAuth::bearer_token("secret"))
+        .await
         .oneshot(
             Request::builder()
                 .uri("/health")
@@ -295,6 +297,7 @@ async fn health_does_not_require_internal_auth() {
 #[tokio::test]
 async fn v1_routes_reject_missing_internal_auth() {
     let response = app_with_auth(RuntimeAuth::bearer_token("secret"))
+        .await
         .oneshot(
             Request::builder()
                 .uri("/v1/agents")
@@ -316,6 +319,7 @@ async fn v1_routes_reject_missing_internal_auth() {
 #[tokio::test]
 async fn v1_routes_accept_internal_bearer_token() {
     let response = app_with_auth(RuntimeAuth::bearer_token("secret"))
+        .await
         .oneshot(
             Request::builder()
                 .uri("/v1/agents")
@@ -332,6 +336,7 @@ async fn v1_routes_accept_internal_bearer_token() {
 #[tokio::test]
 async fn v1_stream_route_rejects_missing_internal_auth() {
     let response = app_with_auth(RuntimeAuth::bearer_token("secret"))
+        .await
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -353,6 +358,7 @@ async fn v1_stream_route_rejects_missing_internal_auth() {
 #[tokio::test]
 async fn gets_agent_without_prompt_contents() {
     let response = app()
+        .await
         .oneshot(
             Request::builder()
                 .uri("/v1/agents/test")
@@ -378,7 +384,7 @@ async fn gets_agent_without_prompt_contents() {
 
 #[tokio::test]
 async fn disabled_agent_is_not_visible_or_callable() {
-    let app = app();
+    let app = app().await;
 
     let response = app
         .clone()
@@ -440,6 +446,7 @@ async fn disabled_agent_is_not_visible_or_callable() {
 #[tokio::test]
 async fn streams_agent_run_as_sse() {
     let response = app()
+        .await
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -493,6 +500,7 @@ async fn streams_agent_run_as_sse() {
 #[tokio::test]
 async fn streams_agent_run_with_request_id() {
     let response = app()
+        .await
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -526,6 +534,7 @@ async fn streams_agent_run_with_request_id() {
 #[tokio::test]
 async fn streams_agent_run_generates_request_id() {
     let response = app()
+        .await
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -558,7 +567,7 @@ async fn streams_agent_run_generates_request_id() {
 
 #[tokio::test]
 async fn records_run_history_and_step_outputs() {
-    let app = app();
+    let app = app().await;
     let response = app
         .clone()
         .oneshot(
@@ -637,7 +646,7 @@ async fn records_run_history_and_step_outputs() {
 
 #[tokio::test]
 async fn filters_run_history_by_request_context() {
-    let app = app();
+    let app = app().await;
     let response = app
         .clone()
         .oneshot(
@@ -752,6 +761,7 @@ async fn filters_run_history_by_request_context() {
 #[tokio::test]
 async fn streams_code_node_demo_agent() {
     let response = app_with_code_node_demo()
+        .await
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -784,7 +794,7 @@ async fn streams_code_node_demo_agent() {
 
 #[tokio::test]
 async fn records_failed_run_history() {
-    let app = app();
+    let app = app().await;
     let response = app
         .clone()
         .oneshot(
@@ -832,6 +842,7 @@ async fn records_failed_run_history() {
 #[tokio::test]
 async fn streams_token_delta_content_as_direct_text() {
     let response = app()
+        .await
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -860,6 +871,7 @@ async fn streams_token_delta_content_as_direct_text() {
 #[tokio::test]
 async fn invalid_input_returns_400_before_sse() {
     let response = app()
+        .await
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -890,6 +902,7 @@ async fn invalid_input_returns_400_before_sse() {
 #[tokio::test]
 async fn wrapped_input_body_returns_400_before_sse() {
     let response = app()
+        .await
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -920,6 +933,7 @@ async fn wrapped_input_body_returns_400_before_sse() {
 #[tokio::test]
 async fn missing_content_type_returns_400_before_sse() {
     let response = app()
+        .await
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -949,6 +963,7 @@ async fn missing_content_type_returns_400_before_sse() {
 #[tokio::test]
 async fn streams_runtime_error_as_sse_error_without_run_completed() {
     let response = app()
+        .await
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -1000,6 +1015,7 @@ fn always_fail_encoding(_event: RunEvent) -> Result<axum::response::sse::Event, 
 #[tokio::test]
 async fn sanitizes_sse_encoding_failures_without_panicking() {
     let response = app_with_encoder(always_fail_encoding)
+        .await
         .oneshot(
             Request::builder()
                 .method("POST")

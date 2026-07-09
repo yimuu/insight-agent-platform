@@ -1,17 +1,30 @@
 use std::{
-    collections::BTreeMap,
-    path::Path,
-    sync::{Arc, Mutex},
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::Arc,
 };
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::task;
+use sqlx::{
+    migrate::{MigrateError, Migrator},
+    postgres::PgPoolOptions,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    AssertSqlSafe, PgPool, Row, SqlitePool,
+};
 
-use crate::{engine::event::RunEvent, error::AppError, request_context::RequestContext};
+use crate::{
+    config::{HistoryConfig, HistoryProvider},
+    engine::event::RunEvent,
+    error::AppError,
+    request_context::RequestContext,
+};
+
+static SQLITE_MIGRATOR: Migrator = sqlx::migrate!("migrations/sqlite");
+static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("migrations/postgres");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -107,15 +120,35 @@ impl RunHistoryStore {
         }
     }
 
-    pub fn sqlite(path: impl AsRef<Path>) -> Result<Self, AppError> {
+    pub async fn from_config(config: &HistoryConfig) -> Result<Self, AppError> {
+        match config.provider {
+            HistoryProvider::Sqlite => Self::sqlite_url(&config.database_url).await,
+            HistoryProvider::Postgres => Self::postgres(&config.database_url).await,
+        }
+    }
+
+    pub async fn sqlite(path: impl AsRef<Path>) -> Result<Self, AppError> {
+        let path = path.as_ref().to_path_buf();
         Ok(Self {
-            inner: Arc::new(SqliteRunHistoryRepository::open(path.as_ref())?),
+            inner: Arc::new(SqlxRunHistoryRepository::sqlite_path(&path).await?),
         })
     }
 
-    pub fn sqlite_in_memory() -> Result<Self, AppError> {
+    pub async fn sqlite_url(database_url: &str) -> Result<Self, AppError> {
         Ok(Self {
-            inner: Arc::new(SqliteRunHistoryRepository::open_in_memory()?),
+            inner: Arc::new(SqlxRunHistoryRepository::sqlite_url(database_url).await?),
+        })
+    }
+
+    pub async fn sqlite_in_memory() -> Result<Self, AppError> {
+        Ok(Self {
+            inner: Arc::new(SqlxRunHistoryRepository::sqlite_in_memory().await?),
+        })
+    }
+
+    pub async fn postgres(database_url: &str) -> Result<Self, AppError> {
+        Ok(Self {
+            inner: Arc::new(SqlxRunHistoryRepository::postgres(database_url).await?),
         })
     }
 
@@ -255,110 +288,103 @@ impl RunHistoryRepository for NoopRunHistoryRepository {
     }
 }
 
-#[derive(Clone)]
-struct SqliteRunHistoryRepository {
-    conn: Arc<Mutex<Connection>>,
+struct SqlxRunHistoryRepository {
+    backend: SqlxRunHistoryBackend,
 }
 
-impl SqliteRunHistoryRepository {
-    fn open(path: &Path) -> Result<Self, AppError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                AppError::Config(format!(
-                    "failed to create run history directory '{}': {err}",
-                    parent.display()
-                ))
-            })?;
+enum SqlxRunHistoryBackend {
+    Sqlite(SqlitePool),
+    Postgres(PgPool),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SqlDialect {
+    Sqlite,
+    Postgres,
+}
+
+impl SqlDialect {
+    fn placeholder(self, index: usize) -> String {
+        match self {
+            Self::Sqlite => "?".to_string(),
+            Self::Postgres => format!("${index}"),
         }
-        let conn = Connection::open(path).map_err(map_sqlite_error)?;
-        let repository = Self {
-            conn: Arc::new(Mutex::new(conn)),
-        };
-        repository.init()?;
-        Ok(repository)
+    }
+}
+
+impl SqlxRunHistoryBackend {
+    fn dialect(&self) -> SqlDialect {
+        match self {
+            Self::Sqlite(_) => SqlDialect::Sqlite,
+            Self::Postgres(_) => SqlDialect::Postgres,
+        }
+    }
+}
+
+impl SqlxRunHistoryRepository {
+    async fn sqlite_path(path: &Path) -> Result<Self, AppError> {
+        create_parent_dir(path)?;
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true);
+        Self::connect_sqlite(options, 5).await
     }
 
-    fn open_in_memory() -> Result<Self, AppError> {
-        let conn = Connection::open_in_memory().map_err(map_sqlite_error)?;
-        let repository = Self {
-            conn: Arc::new(Mutex::new(conn)),
-        };
-        repository.init()?;
-        Ok(repository)
+    async fn sqlite_url(database_url: &str) -> Result<Self, AppError> {
+        create_sqlite_parent_dir_from_url(database_url)?;
+        let options = SqliteConnectOptions::from_str(database_url)
+            .map_err(|err| AppError::Config(format!("invalid sqlite history database_url: {err}")))?
+            .create_if_missing(true);
+        let max_connections = sqlite_max_connections(database_url);
+        Self::connect_sqlite(options, max_connections).await
     }
 
-    fn init(&self) -> Result<(), AppError> {
-        let conn = self.conn.lock().map_err(map_mutex_error)?;
-        conn.execute_batch(
-            r#"
-CREATE TABLE IF NOT EXISTS runs (
-    run_id TEXT PRIMARY KEY,
-    request_id TEXT NOT NULL DEFAULT '',
-    agent_id TEXT NOT NULL,
-    caller_service TEXT,
-    tenant_id TEXT,
-    user_id TEXT,
-    status TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    ended_at TEXT,
-    input_summary TEXT NOT NULL,
-    error_message TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_runs_agent_started_at ON runs(agent_id, started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_runs_request_id ON runs(request_id);
-CREATE INDEX IF NOT EXISTS idx_runs_caller_started_at ON runs(caller_service, started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_runs_tenant_started_at ON runs(tenant_id, started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_runs_user_started_at ON runs(user_id, started_at DESC);
-
-CREATE TABLE IF NOT EXISTS run_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id TEXT NOT NULL,
-    event TEXT NOT NULL,
-    step_id TEXT,
-    timestamp TEXT NOT NULL,
-    content TEXT NOT NULL,
-    result TEXT NOT NULL,
-    code INTEGER NOT NULL,
-    message TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id, id);
-
-CREATE TABLE IF NOT EXISTS step_outputs (
-    run_id TEXT NOT NULL,
-    step_id TEXT NOT NULL,
-    output TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY (run_id, step_id)
-);
-"#,
-        )
-        .map_err(map_sqlite_error)?;
-        add_column_if_missing(&conn, "runs", "request_id", "TEXT NOT NULL DEFAULT ''")?;
-        add_column_if_missing(&conn, "runs", "caller_service", "TEXT")?;
-        add_column_if_missing(&conn, "runs", "tenant_id", "TEXT")?;
-        add_column_if_missing(&conn, "runs", "user_id", "TEXT")?;
-        Ok(())
+    async fn sqlite_in_memory() -> Result<Self, AppError> {
+        let options = SqliteConnectOptions::new().in_memory(true);
+        Self::connect_sqlite(options, 1).await
     }
 
-    async fn with_conn<T, F>(&self, f: F) -> Result<T, AppError>
-    where
-        T: Send + 'static,
-        F: FnOnce(&Connection) -> Result<T, AppError> + Send + 'static,
-    {
-        let conn = self.conn.clone();
-        task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(map_mutex_error)?;
-            f(&conn)
+    async fn connect_sqlite(
+        options: SqliteConnectOptions,
+        max_connections: u32,
+    ) -> Result<Self, AppError> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(max_connections)
+            .connect_with(options)
+            .await
+            .map_err(map_sqlx_error)?;
+        prepare_sqlite_schema_for_migration(&pool).await?;
+        SQLITE_MIGRATOR
+            .run(&pool)
+            .await
+            .map_err(map_migrate_error)?;
+        ensure_sqlite_legacy_columns(&pool).await?;
+        tracing::info!("run history sqlite backend initialized");
+        Ok(Self {
+            backend: SqlxRunHistoryBackend::Sqlite(pool),
         })
-        .await
-        .map_err(|err| AppError::Run(format!("run history task join error: {err}")))?
+    }
+
+    async fn postgres(database_url: &str) -> Result<Self, AppError> {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(database_url)
+            .await
+            .map_err(map_sqlx_error)?;
+        POSTGRES_MIGRATOR
+            .run(&pool)
+            .await
+            .map_err(map_migrate_error)?;
+        ensure_postgres_legacy_columns(&pool).await?;
+        tracing::info!("run history postgres backend initialized");
+        Ok(Self {
+            backend: SqlxRunHistoryBackend::Postgres(pool),
+        })
     }
 }
 
 #[async_trait]
-impl RunHistoryRepository for SqliteRunHistoryRepository {
+impl RunHistoryRepository for SqlxRunHistoryRepository {
     async fn create_run(
         &self,
         run_id: &str,
@@ -367,60 +393,110 @@ impl RunHistoryRepository for SqliteRunHistoryRepository {
         started_at: DateTime<Utc>,
         input_summary: Value,
     ) -> Result<(), AppError> {
-        let run_id = run_id.to_string();
-        let agent_id = agent_id.to_string();
-        let request = request.clone();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO runs (run_id, request_id, agent_id, caller_service, tenant_id, user_id, status, started_at, ended_at, input_summary, error_message)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, NULL)",
-                params![
-                    run_id,
-                    request.request_id,
-                    agent_id,
-                    request.caller_service,
-                    request.tenant_id,
-                    request.user_id,
-                    RunStatus::Running.as_str(),
-                    started_at.to_rfc3339(),
-                    input_summary.to_string()
-                ],
-            )
-            .map_err(map_sqlite_error)?;
-            Ok(())
-        })
-        .await
+        match &self.backend {
+            SqlxRunHistoryBackend::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO runs (run_id, request_id, agent_id, caller_service, tenant_id, user_id, status, started_at, ended_at, input_summary, error_message)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)
+                     ON CONFLICT(run_id) DO UPDATE SET
+                        request_id = excluded.request_id,
+                        agent_id = excluded.agent_id,
+                        caller_service = excluded.caller_service,
+                        tenant_id = excluded.tenant_id,
+                        user_id = excluded.user_id,
+                        status = excluded.status,
+                        started_at = excluded.started_at,
+                        ended_at = NULL,
+                        input_summary = excluded.input_summary,
+                        error_message = NULL",
+                )
+                .bind(run_id)
+                .bind(&request.request_id)
+                .bind(agent_id)
+                .bind(&request.caller_service)
+                .bind(&request.tenant_id)
+                .bind(&request.user_id)
+                .bind(RunStatus::Running.as_str())
+                .bind(started_at.to_rfc3339())
+                .bind(input_summary.to_string())
+                .execute(pool)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+            SqlxRunHistoryBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO runs (run_id, request_id, agent_id, caller_service, tenant_id, user_id, status, started_at, ended_at, input_summary, error_message)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, NULL)
+                     ON CONFLICT(run_id) DO UPDATE SET
+                        request_id = excluded.request_id,
+                        agent_id = excluded.agent_id,
+                        caller_service = excluded.caller_service,
+                        tenant_id = excluded.tenant_id,
+                        user_id = excluded.user_id,
+                        status = excluded.status,
+                        started_at = excluded.started_at,
+                        ended_at = NULL,
+                        input_summary = excluded.input_summary,
+                        error_message = NULL",
+                )
+                .bind(run_id)
+                .bind(&request.request_id)
+                .bind(agent_id)
+                .bind(&request.caller_service)
+                .bind(&request.tenant_id)
+                .bind(&request.user_id)
+                .bind(RunStatus::Running.as_str())
+                .bind(started_at.to_rfc3339())
+                .bind(input_summary.to_string())
+                .execute(pool)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+        }
+        Ok(())
     }
 
     async fn record_event(&self, event: &RunEvent) -> Result<(), AppError> {
-        let run_id = event.run_id.clone();
-        let event_name = event.event.as_sse_name().to_string();
-        let step_id = event.step_id.clone();
-        let timestamp = event.timestamp;
-        let content = event.content.clone();
-        let result = event.result.clone();
-        let code = event.code;
-        let message = event.message.clone();
-
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT INTO run_events (run_id, event, step_id, timestamp, content, result, code, message)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    run_id,
-                    event_name,
-                    step_id,
-                    timestamp.to_rfc3339(),
-                    content,
-                    result.to_string(),
-                    code,
-                    message,
-                ],
-            )
-            .map_err(map_sqlite_error)?;
-            Ok(())
-        })
-        .await
+        let event_name = event.event.as_sse_name();
+        let timestamp = event.timestamp.to_rfc3339();
+        let result = event.result.to_string();
+        match &self.backend {
+            SqlxRunHistoryBackend::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO run_events (run_id, event, step_id, timestamp, content, result, code, message)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(&event.run_id)
+                .bind(event_name)
+                .bind(&event.step_id)
+                .bind(timestamp)
+                .bind(&event.content)
+                .bind(result)
+                .bind(event.code)
+                .bind(&event.message)
+                .execute(pool)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+            SqlxRunHistoryBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO run_events (run_id, event, step_id, timestamp, content, result, code, message)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                )
+                .bind(&event.run_id)
+                .bind(event_name)
+                .bind(&event.step_id)
+                .bind(timestamp)
+                .bind(&event.content)
+                .bind(result)
+                .bind(event.code)
+                .bind(&event.message)
+                .execute(pool)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+        }
+        Ok(())
     }
 
     async fn record_step_output(
@@ -429,18 +505,43 @@ impl RunHistoryRepository for SqliteRunHistoryRepository {
         step_id: &str,
         output: Value,
     ) -> Result<(), AppError> {
-        let run_id = run_id.to_string();
-        let step_id = step_id.to_string();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO step_outputs (run_id, step_id, output, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![run_id, step_id, output.to_string(), Utc::now().to_rfc3339()],
-            )
-            .map_err(map_sqlite_error)?;
-            Ok(())
-        })
-        .await
+        let output = output.to_string();
+        let created_at = Utc::now().to_rfc3339();
+        match &self.backend {
+            SqlxRunHistoryBackend::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO step_outputs (run_id, step_id, output, created_at)
+                     VALUES (?, ?, ?, ?)
+                     ON CONFLICT(run_id, step_id) DO UPDATE SET
+                        output = excluded.output,
+                        created_at = excluded.created_at",
+                )
+                .bind(run_id)
+                .bind(step_id)
+                .bind(output)
+                .bind(created_at)
+                .execute(pool)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+            SqlxRunHistoryBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO step_outputs (run_id, step_id, output, created_at)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT(run_id, step_id) DO UPDATE SET
+                        output = excluded.output,
+                        created_at = excluded.created_at",
+                )
+                .bind(run_id)
+                .bind(step_id)
+                .bind(output)
+                .bind(created_at)
+                .execute(pool)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+        }
+        Ok(())
     }
 
     async fn finish_run(
@@ -449,150 +550,283 @@ impl RunHistoryRepository for SqliteRunHistoryRepository {
         status: RunStatus,
         error_message: Option<String>,
     ) -> Result<(), AppError> {
-        let run_id = run_id.to_string();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "UPDATE runs SET status = ?2, ended_at = ?3, error_message = ?4 WHERE run_id = ?1",
-                params![
-                    run_id,
-                    status.as_str(),
-                    Utc::now().to_rfc3339(),
-                    error_message
-                ],
-            )
-            .map_err(map_sqlite_error)?;
-            Ok(())
-        })
-        .await
+        let ended_at = Utc::now().to_rfc3339();
+        match &self.backend {
+            SqlxRunHistoryBackend::Sqlite(pool) => {
+                sqlx::query(
+                    "UPDATE runs SET status = ?, ended_at = ?, error_message = ? WHERE run_id = ?",
+                )
+                .bind(status.as_str())
+                .bind(&ended_at)
+                .bind(&error_message)
+                .bind(run_id)
+                .execute(pool)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+            SqlxRunHistoryBackend::Postgres(pool) => {
+                sqlx::query("UPDATE runs SET status = $2, ended_at = $3, error_message = $4 WHERE run_id = $1")
+                    .bind(run_id)
+                    .bind(status.as_str())
+                    .bind(&ended_at)
+                    .bind(&error_message)
+                    .execute(pool)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            }
+        }
+        Ok(())
     }
 
     async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, AppError> {
-        let run_id = run_id.to_string();
-        self.with_conn(move |conn| {
-            let summary = conn
-                .query_row(
+        let summary = match &self.backend {
+            SqlxRunHistoryBackend::Sqlite(pool) => {
+                sqlx::query_as::<_, RunSummaryRow>(
                     "SELECT run_id, request_id, agent_id, caller_service, tenant_id, user_id, status, started_at, ended_at, input_summary, error_message
-                     FROM runs WHERE run_id = ?1",
-                    params![run_id],
-                    read_run_summary,
+                     FROM runs WHERE run_id = ?",
                 )
-                .optional()
-                .map_err(map_sqlite_error)?;
-
-            let Some(summary) = summary else {
-                return Ok(None);
-            };
-
-            let mut event_stmt = conn
-                .prepare(
-                    "SELECT event, step_id, timestamp, content, result, code, message
-                     FROM run_events WHERE run_id = ?1 ORDER BY id ASC",
+                .bind(run_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(map_sqlx_error)?
+            }
+            SqlxRunHistoryBackend::Postgres(pool) => {
+                sqlx::query_as::<_, RunSummaryRow>(
+                    "SELECT run_id, request_id, agent_id, caller_service, tenant_id, user_id, status, started_at, ended_at, input_summary, error_message
+                     FROM runs WHERE run_id = $1",
                 )
-                .map_err(map_sqlite_error)?;
-            let events = event_stmt
-                .query_map(params![run_id], read_run_event)
-                .map_err(map_sqlite_error)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(map_sqlite_error)?;
+                .bind(run_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(map_sqlx_error)?
+            }
+        };
 
-            let mut output_stmt = conn
-                .prepare(
-                    "SELECT step_id, output FROM step_outputs WHERE run_id = ?1 ORDER BY step_id ASC",
-                )
-                .map_err(map_sqlite_error)?;
-            let step_outputs = output_stmt
-                .query_map(params![run_id], |row| {
-                    let step_id: String = row.get(0)?;
-                    let output: String = row.get(1)?;
-                    Ok((step_id, parse_json_or_null(&output)))
-                })
-                .map_err(map_sqlite_error)?
-                .collect::<Result<BTreeMap<_, _>, _>>()
-                .map_err(map_sqlite_error)?;
+        let Some(summary) = summary else {
+            return Ok(None);
+        };
 
-            Ok(Some(RunRecord {
-                run_id: summary.run_id,
-                request_id: summary.request_id,
-                agent_id: summary.agent_id,
-                caller_service: summary.caller_service,
-                tenant_id: summary.tenant_id,
-                user_id: summary.user_id,
-                status: summary.status,
-                started_at: summary.started_at,
-                ended_at: summary.ended_at,
-                input_summary: summary.input_summary,
-                error_message: summary.error_message,
-                events,
-                step_outputs,
-            }))
-        })
-        .await
+        let events = match &self.backend {
+            SqlxRunHistoryBackend::Sqlite(pool) => sqlx::query_as::<_, RunEventRow>(
+                "SELECT event, step_id, timestamp, content, result, code, message
+                     FROM run_events WHERE run_id = ? ORDER BY id ASC",
+            )
+            .bind(run_id)
+            .fetch_all(pool)
+            .await
+            .map_err(map_sqlx_error)?,
+            SqlxRunHistoryBackend::Postgres(pool) => sqlx::query_as::<_, RunEventRow>(
+                "SELECT event, step_id, timestamp, content, result, code, message
+                     FROM run_events WHERE run_id = $1 ORDER BY id ASC",
+            )
+            .bind(run_id)
+            .fetch_all(pool)
+            .await
+            .map_err(map_sqlx_error)?,
+        }
+        .into_iter()
+        .map(RunEventRecord::from)
+        .collect::<Vec<_>>();
+
+        let step_outputs = match &self.backend {
+            SqlxRunHistoryBackend::Sqlite(pool) => sqlx::query_as::<_, StepOutputRow>(
+                "SELECT step_id, output FROM step_outputs WHERE run_id = ? ORDER BY step_id ASC",
+            )
+            .bind(run_id)
+            .fetch_all(pool)
+            .await
+            .map_err(map_sqlx_error)?,
+            SqlxRunHistoryBackend::Postgres(pool) => sqlx::query_as::<_, StepOutputRow>(
+                "SELECT step_id, output FROM step_outputs WHERE run_id = $1 ORDER BY step_id ASC",
+            )
+            .bind(run_id)
+            .fetch_all(pool)
+            .await
+            .map_err(map_sqlx_error)?,
+        }
+        .into_iter()
+        .map(|row| (row.step_id, parse_json_or_null(&row.output)))
+        .collect::<BTreeMap<_, _>>();
+
+        Ok(Some(RunRecord {
+            run_id: summary.run_id,
+            request_id: summary.request_id,
+            agent_id: summary.agent_id,
+            caller_service: summary.caller_service,
+            tenant_id: summary.tenant_id,
+            user_id: summary.user_id,
+            status: RunStatus::from_str(&summary.status),
+            started_at: parse_datetime_or_now(&summary.started_at),
+            ended_at: summary.ended_at.as_deref().map(parse_datetime_or_now),
+            input_summary: parse_json_or_null(&summary.input_summary),
+            error_message: summary.error_message,
+            events,
+            step_outputs,
+        }))
     }
 
     async fn list_runs(&self, query: RunHistoryQuery) -> Result<Vec<RunSummary>, AppError> {
-        self.with_conn(move |conn| {
-            let (sql, params) = build_list_runs_query(query);
-            let mut stmt = conn.prepare(&sql).map_err(map_sqlite_error)?;
-            let runs = stmt
-                .query_map(params_from_iter(params), read_run_summary)
-                .map_err(map_sqlite_error)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(map_sqlite_error)?;
-            Ok(runs)
-        })
-        .await
+        let query = build_list_runs_query(query, self.backend.dialect());
+        match &self.backend {
+            SqlxRunHistoryBackend::Sqlite(pool) => {
+                let mut db_query = sqlx::query_as::<_, RunSummaryRow>(AssertSqlSafe(query.sql));
+                for param in query.text_params {
+                    db_query = db_query.bind(param);
+                }
+                db_query = db_query.bind(query.limit);
+                db_query
+                    .fetch_all(pool)
+                    .await
+                    .map_err(map_sqlx_error)
+                    .map(run_summary_rows)
+            }
+            SqlxRunHistoryBackend::Postgres(pool) => {
+                let mut db_query = sqlx::query_as::<_, RunSummaryRow>(AssertSqlSafe(query.sql));
+                for param in query.text_params {
+                    db_query = db_query.bind(param);
+                }
+                db_query = db_query.bind(query.limit);
+                db_query
+                    .fetch_all(pool)
+                    .await
+                    .map_err(map_sqlx_error)
+                    .map(run_summary_rows)
+            }
+        }
     }
 }
 
-fn read_run_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary> {
-    let status: String = row.get(6)?;
-    let started_at: String = row.get(7)?;
-    let ended_at: Option<String> = row.get(8)?;
-    let input_summary: String = row.get(9)?;
-    Ok(RunSummary {
-        run_id: row.get(0)?,
-        request_id: row.get(1)?,
-        agent_id: row.get(2)?,
-        caller_service: row.get(3)?,
-        tenant_id: row.get(4)?,
-        user_id: row.get(5)?,
-        status: RunStatus::from_str(&status),
-        started_at: parse_datetime_or_now(&started_at),
-        ended_at: ended_at.as_deref().map(parse_datetime_or_now),
-        input_summary: parse_json_or_null(&input_summary),
-        error_message: row.get(10)?,
-    })
+#[derive(Debug, sqlx::FromRow)]
+struct RunSummaryRow {
+    run_id: String,
+    request_id: String,
+    agent_id: String,
+    caller_service: Option<String>,
+    tenant_id: Option<String>,
+    user_id: Option<String>,
+    status: String,
+    started_at: String,
+    ended_at: Option<String>,
+    input_summary: String,
+    error_message: Option<String>,
 }
 
-fn build_list_runs_query(query: RunHistoryQuery) -> (String, Vec<SqlValue>) {
+#[derive(Debug, sqlx::FromRow)]
+struct RunEventRow {
+    event: String,
+    step_id: Option<String>,
+    timestamp: String,
+    content: String,
+    result: String,
+    code: i32,
+    message: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct StepOutputRow {
+    step_id: String,
+    output: String,
+}
+
+impl From<RunSummaryRow> for RunSummary {
+    fn from(row: RunSummaryRow) -> Self {
+        Self {
+            run_id: row.run_id,
+            request_id: row.request_id,
+            agent_id: row.agent_id,
+            caller_service: row.caller_service,
+            tenant_id: row.tenant_id,
+            user_id: row.user_id,
+            status: RunStatus::from_str(&row.status),
+            started_at: parse_datetime_or_now(&row.started_at),
+            ended_at: row.ended_at.as_deref().map(parse_datetime_or_now),
+            input_summary: parse_json_or_null(&row.input_summary),
+            error_message: row.error_message,
+        }
+    }
+}
+
+impl From<RunEventRow> for RunEventRecord {
+    fn from(row: RunEventRow) -> Self {
+        Self {
+            event: row.event,
+            step_id: row.step_id,
+            timestamp: parse_datetime_or_now(&row.timestamp),
+            content: row.content,
+            result: parse_json_or_null(&row.result),
+            code: row.code,
+            message: row.message,
+        }
+    }
+}
+
+struct ListRunsSql {
+    sql: String,
+    text_params: Vec<String>,
+    limit: i64,
+}
+
+fn build_list_runs_query(query: RunHistoryQuery, dialect: SqlDialect) -> ListRunsSql {
     let mut sql = "SELECT run_id, request_id, agent_id, caller_service, tenant_id, user_id, status, started_at, ended_at, input_summary, error_message FROM runs".to_string();
     let mut conditions = Vec::new();
     let mut params = Vec::new();
 
-    push_text_filter(&mut conditions, &mut params, "agent_id", query.agent_id);
-    push_text_filter(&mut conditions, &mut params, "request_id", query.request_id);
     push_text_filter(
         &mut conditions,
         &mut params,
+        dialect,
+        "agent_id",
+        query.agent_id,
+    );
+    push_text_filter(
+        &mut conditions,
+        &mut params,
+        dialect,
+        "request_id",
+        query.request_id,
+    );
+    push_text_filter(
+        &mut conditions,
+        &mut params,
+        dialect,
         "caller_service",
         query.caller_service,
     );
-    push_text_filter(&mut conditions, &mut params, "tenant_id", query.tenant_id);
-    push_text_filter(&mut conditions, &mut params, "user_id", query.user_id);
+    push_text_filter(
+        &mut conditions,
+        &mut params,
+        dialect,
+        "tenant_id",
+        query.tenant_id,
+    );
+    push_text_filter(
+        &mut conditions,
+        &mut params,
+        dialect,
+        "user_id",
+        query.user_id,
+    );
 
     if !conditions.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&conditions.join(" AND "));
     }
 
-    sql.push_str(" ORDER BY started_at DESC LIMIT ?");
-    params.push(SqlValue::Integer(effective_limit(query.limit) as i64));
-    (sql, params)
+    let limit_placeholder = dialect.placeholder(params.len() + 1);
+    sql.push_str(" ORDER BY started_at DESC LIMIT ");
+    sql.push_str(&limit_placeholder);
+
+    ListRunsSql {
+        sql,
+        text_params: params,
+        limit: effective_limit(query.limit) as i64,
+    }
 }
 
 fn push_text_filter(
-    conditions: &mut Vec<&'static str>,
-    params: &mut Vec<SqlValue>,
+    conditions: &mut Vec<String>,
+    params: &mut Vec<String>,
+    dialect: SqlDialect,
     column: &'static str,
     value: Option<String>,
 ) {
@@ -603,15 +837,18 @@ fn push_text_filter(
     if value.is_empty() {
         return;
     }
-    conditions.push(match column {
-        "agent_id" => "agent_id = ?",
-        "request_id" => "request_id = ?",
-        "caller_service" => "caller_service = ?",
-        "tenant_id" => "tenant_id = ?",
-        "user_id" => "user_id = ?",
+    match column {
+        "agent_id" | "request_id" | "caller_service" | "tenant_id" | "user_id" => {
+            let placeholder = dialect.placeholder(params.len() + 1);
+            conditions.push(format!("{column} = {placeholder}"));
+            params.push(value.to_string());
+        }
         _ => unreachable!("unsupported run history filter column"),
-    });
-    params.push(SqlValue::Text(value.to_string()));
+    }
+}
+
+fn run_summary_rows(rows: Vec<RunSummaryRow>) -> Vec<RunSummary> {
+    rows.into_iter().map(RunSummary::from).collect()
 }
 
 fn effective_limit(limit: usize) -> usize {
@@ -622,43 +859,146 @@ fn effective_limit(limit: usize) -> usize {
     }
 }
 
-fn add_column_if_missing(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    definition: &str,
-) -> Result<(), AppError> {
-    let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info({table})"))
-        .map_err(map_sqlite_error)?;
-    let columns = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(map_sqlite_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(map_sqlite_error)?;
-    if columns.iter().any(|name| name == column) {
-        return Ok(());
-    }
-    conn.execute(
-        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
-        [],
+async fn prepare_sqlite_schema_for_migration(pool: &SqlitePool) -> Result<(), AppError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS runs (
+            run_id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL DEFAULT '',
+            agent_id TEXT NOT NULL,
+            caller_service TEXT,
+            tenant_id TEXT,
+            user_id TEXT,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            input_summary TEXT NOT NULL,
+            error_message TEXT
+        )",
     )
-    .map_err(map_sqlite_error)?;
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_error)?;
+    ensure_sqlite_legacy_columns(pool).await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS run_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            event TEXT NOT NULL,
+            step_id TEXT,
+            timestamp TEXT NOT NULL,
+            content TEXT NOT NULL,
+            result TEXT NOT NULL,
+            code INTEGER NOT NULL,
+            message TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_error)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS step_outputs (
+            run_id TEXT NOT NULL,
+            step_id TEXT NOT NULL,
+            output TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (run_id, step_id)
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_error)?;
     Ok(())
 }
 
-fn read_run_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunEventRecord> {
-    let timestamp: String = row.get(2)?;
-    let result: String = row.get(4)?;
-    Ok(RunEventRecord {
-        event: row.get(0)?,
-        step_id: row.get(1)?,
-        timestamp: parse_datetime_or_now(&timestamp),
-        content: row.get(3)?,
-        result: parse_json_or_null(&result),
-        code: row.get(5)?,
-        message: row.get(6)?,
-    })
+async fn ensure_sqlite_legacy_columns(pool: &SqlitePool) -> Result<(), AppError> {
+    let columns = sqlx::query("PRAGMA table_info(runs)")
+        .fetch_all(pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .into_iter()
+        .filter_map(|row| row.try_get::<String, _>("name").ok())
+        .collect::<BTreeSet<_>>();
+    add_sqlite_column_if_missing(pool, &columns, "request_id", "TEXT NOT NULL DEFAULT ''").await?;
+    add_sqlite_column_if_missing(pool, &columns, "caller_service", "TEXT").await?;
+    add_sqlite_column_if_missing(pool, &columns, "tenant_id", "TEXT").await?;
+    add_sqlite_column_if_missing(pool, &columns, "user_id", "TEXT").await?;
+    Ok(())
+}
+
+async fn add_sqlite_column_if_missing(
+    pool: &SqlitePool,
+    columns: &BTreeSet<String>,
+    column: &str,
+    definition: &str,
+) -> Result<(), AppError> {
+    if columns.contains(column) {
+        return Ok(());
+    }
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE runs ADD COLUMN {column} {definition}"
+    )))
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
+async fn ensure_postgres_legacy_columns(pool: &PgPool) -> Result<(), AppError> {
+    let statements = [
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS request_id TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS caller_service TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS tenant_id TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS user_id TEXT",
+    ];
+    for statement in statements {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .map_err(map_sqlx_error)?;
+    }
+    Ok(())
+}
+
+fn create_parent_dir(path: &Path) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() {
+        if parent.as_os_str().is_empty() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(parent).map_err(|err| {
+            AppError::Config(format!(
+                "failed to create run history directory '{}': {err}",
+                parent.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn create_sqlite_parent_dir_from_url(database_url: &str) -> Result<(), AppError> {
+    let Some(path) = sqlite_file_path_from_url(database_url) else {
+        return Ok(());
+    };
+    create_parent_dir(&path)
+}
+
+fn sqlite_file_path_from_url(database_url: &str) -> Option<PathBuf> {
+    let database_url = database_url.split('?').next().unwrap_or(database_url);
+    let path = database_url
+        .strip_prefix("sqlite://")
+        .or_else(|| database_url.strip_prefix("sqlite:"))
+        .unwrap_or(database_url);
+    if path.is_empty() || path == ":memory:" || path.starts_with("file:") {
+        return None;
+    }
+    Some(PathBuf::from(path))
+}
+
+fn sqlite_max_connections(database_url: &str) -> u32 {
+    if sqlite_file_path_from_url(database_url).is_some() {
+        5
+    } else {
+        1
+    }
 }
 
 fn summarize_input(input: &Value) -> Value {
@@ -690,10 +1030,88 @@ fn parse_datetime_or_now(value: &str) -> DateTime<Utc> {
         .unwrap_or_else(|_| Utc::now())
 }
 
-fn map_sqlite_error(err: rusqlite::Error) -> AppError {
-    AppError::Run(format!("run history sqlite error: {err}"))
+fn map_sqlx_error(err: sqlx::Error) -> AppError {
+    AppError::Run(format!("run history sqlx error: {err}"))
 }
 
-fn map_mutex_error<T>(err: std::sync::PoisonError<T>) -> AppError {
-    AppError::Run(format!("run history lock error: {err}"))
+fn map_migrate_error(err: MigrateError) -> AppError {
+    AppError::Run(format!("run history migration error: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::{
+        engine::event::{RunEvent, RunEventKind},
+        request_context::RequestContext,
+    };
+
+    #[tokio::test]
+    async fn sqlite_in_memory_store_records_runs_events_and_step_outputs() {
+        let store = RunHistoryStore::sqlite_in_memory().await.unwrap();
+        let request = RequestContext {
+            request_id: "req_history_store".to_string(),
+            caller_service: Some("api-test".to_string()),
+            tenant_id: Some("tenant-a".to_string()),
+            user_id: Some("user-a".to_string()),
+        };
+
+        store
+            .create_run(
+                "run_history_store",
+                "agent-a",
+                &request,
+                Utc::now(),
+                json!({"keys": ["text"]}),
+            )
+            .await;
+        store
+            .record_event(&RunEvent::ok(
+                RunEventKind::StepCompleted,
+                request.request_id.clone(),
+                "run_history_store".to_string(),
+                "agent-a".to_string(),
+                Some("step-a".to_string()),
+                "",
+                json!({"text": "done"}),
+            ))
+            .await;
+        store
+            .record_step_output("run_history_store", "step-a", json!({"text": "done"}))
+            .await;
+        store
+            .finish_run("run_history_store", RunStatus::Completed, None)
+            .await;
+
+        let run = store
+            .get_run("run_history_store")
+            .await
+            .unwrap()
+            .expect("run should be recorded");
+        assert_eq!(run.request_id, "req_history_store");
+        assert_eq!(run.agent_id, "agent-a");
+        assert_eq!(run.caller_service.as_deref(), Some("api-test"));
+        assert_eq!(run.tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(run.user_id.as_deref(), Some("user-a"));
+        assert_eq!(run.status, RunStatus::Completed);
+        assert_eq!(run.events.len(), 1);
+        assert_eq!(run.events[0].event, "step_completed");
+        assert_eq!(run.step_outputs["step-a"]["text"], "done");
+
+        let runs = store
+            .list_runs(RunHistoryQuery {
+                request_id: Some("req_history_store".to_string()),
+                caller_service: Some("api-test".to_string()),
+                tenant_id: Some("tenant-a".to_string()),
+                user_id: Some("user-a".to_string()),
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "run_history_store");
+    }
 }

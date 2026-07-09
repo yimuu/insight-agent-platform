@@ -20,4 +20,9 @@ agents:
       public: false
 
 history:
-  db: data/run_history.sqlite3
+  provider: sqlite
+  database_url: sqlite://data/run_history.sqlite3
+
+  # PostgreSQL example:
+  # provider: postgres
+  # database_url_env: RUN_HISTORY_DATABASE_URL
