@@ -1,14 +1,16 @@
 use std::{convert::Infallible, sync::Arc};
 
 use axum::{
+    body::Body,
     extract::{rejection::JsonRejection, Path, State},
     http::{
         header::{HeaderName, AUTHORIZATION},
-        HeaderMap, HeaderValue,
+        HeaderMap, HeaderValue, Request,
     },
+    middleware::{self, Next},
     response::{
         sse::{Event, Sse},
-        IntoResponse,
+        IntoResponse, Response,
     },
     routing::{get, post},
     Json, Router,
@@ -63,8 +65,9 @@ pub struct AppState<M: ModelClient> {
 }
 
 pub fn build_router<M: ModelClient>(state: AppState<M>) -> Router {
-    Router::new()
-        .route("/health", get(health))
+    let state = Arc::new(state);
+    let auth = state.auth.clone();
+    let v1_routes = Router::new()
         .route("/v1/agents", get(list_agents::<M>))
         .route("/v1/agents/:agent_id", get(get_agent::<M>))
         .route("/v1/agents/:agent_id/runs", get(list_agent_runs::<M>))
@@ -73,7 +76,18 @@ pub fn build_router<M: ModelClient>(state: AppState<M>) -> Router {
             "/v1/agents/:agent_id/runs/stream",
             post(run_agent_stream::<M>),
         )
-        .with_state(Arc::new(state))
+        .route_layer(middleware::from_fn(
+            move |headers: HeaderMap, request: Request<Body>, next: Next| {
+                let auth = auth.clone();
+                async move {
+                    ensure_internal_auth(&auth, &headers)?;
+                    Ok::<Response, AppError>(next.run(request).await)
+                }
+            },
+        ))
+        .with_state(state);
+
+    Router::new().route("/health", get(health)).merge(v1_routes)
 }
 
 async fn health() -> Json<ApiResponse<Value>> {
@@ -82,9 +96,7 @@ async fn health() -> Json<ApiResponse<Value>> {
 
 async fn list_agents<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
-    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<AgentSummary>>>, AppError> {
-    ensure_internal_auth(&state.auth, &headers)?;
     Ok(Json(ApiResponse::ok(
         state.registry.list().map(AgentSummary::from).collect(),
     )))
@@ -92,10 +104,8 @@ async fn list_agents<M: ModelClient>(
 
 async fn get_agent<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
-    headers: HeaderMap,
     Path(agent_id): Path<String>,
 ) -> Result<Json<ApiResponse<AgentSummary>>, AppError> {
-    ensure_internal_auth(&state.auth, &headers)?;
     let agent = state
         .registry
         .get(&agent_id)
@@ -105,10 +115,8 @@ async fn get_agent<M: ModelClient>(
 
 async fn list_agent_runs<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
-    headers: HeaderMap,
     Path(agent_id): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<crate::history::store::RunSummary>>>, AppError> {
-    ensure_internal_auth(&state.auth, &headers)?;
     if state.registry.get(&agent_id).is_none() {
         return Err(AppError::NotFound(format!("agent '{agent_id}' not found")));
     }
@@ -122,10 +130,8 @@ async fn list_agent_runs<M: ModelClient>(
 
 async fn get_run<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
-    headers: HeaderMap,
     Path(run_id): Path<String>,
 ) -> Result<Json<ApiResponse<crate::history::store::RunRecord>>, AppError> {
-    ensure_internal_auth(&state.auth, &headers)?;
     let run = state
         .engine
         .history_store()
@@ -142,7 +148,6 @@ async fn run_agent_stream<M: ModelClient>(
     request: Result<Json<Value>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
     let request_context = request_context_from_headers(&headers);
-    ensure_internal_auth(&state.auth, &headers)?;
     let Json(input) = request.map_err(map_run_request_rejection)?;
     let agent = state
         .registry

@@ -330,6 +330,27 @@ async fn v1_routes_accept_internal_bearer_token() {
 }
 
 #[tokio::test]
+async fn v1_stream_route_rejects_missing_internal_auth() {
+    let response = app_with_auth(RuntimeAuth::bearer_token("secret"))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/test/runs/stream")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"Ada"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_ne!(
+        response.headers().get("content-type").unwrap(),
+        "text/event-stream"
+    );
+}
+
+#[tokio::test]
 async fn gets_agent_without_prompt_contents() {
     let response = app()
         .oneshot(
@@ -353,6 +374,67 @@ async fn gets_agent_without_prompt_contents() {
     assert!(agent.get("steps").is_none());
     assert!(agent.get("prompts").is_none());
     assert!(!String::from_utf8_lossy(&body).contains("Hello {{ input.name }}"));
+}
+
+#[tokio::test]
+async fn disabled_agent_is_not_visible_or_callable() {
+    let app = app();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/agents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert!(!payload["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|agent| agent["id"] == "disabled"));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/agents/disabled")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/agents/disabled/runs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/disabled/runs/stream")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"Ada"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
