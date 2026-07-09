@@ -172,13 +172,37 @@ history:
 
 The old `history.db` and `RUN_HISTORY_DB` SQLite path settings are still accepted for compatibility.
 Run records include request and caller context fields when provided: `request_id`, `caller_service`, `tenant_id`, and `user_id`.
-Run list endpoints can filter by those fields with query parameters. Supported query parameters are `request_id`, `caller_service`, `tenant_id`, `user_id`, and `limit`.
+Run list endpoints return paginated data and support filters. Supported query parameters are `agent_id`, `request_id`, `caller_service`, `tenant_id`, `user_id`, `status`, `started_after`, `started_before`, `after`, and `limit`.
+
+List responses use this shape:
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "items": [],
+    "next_cursor": null
+  }
+}
+```
+
+Use `data.next_cursor` as the next request's `after` parameter.
 
 ```bash
 curl http://127.0.0.1:3000/v1/agents/medical_report_interpreter/runs
 curl 'http://127.0.0.1:3000/v1/agents/medical_report_interpreter/runs?user_id=user_456'
-curl 'http://127.0.0.1:3000/v1/runs?request_id=req_demo_001'
+curl 'http://127.0.0.1:3000/v1/runs?agent_id=medical_report_interpreter&status=completed&limit=20'
+curl 'http://127.0.0.1:3000/v1/runs?request_id=req_demo_001&after=<next_cursor>'
 curl http://127.0.0.1:3000/v1/runs/run_xxx
+```
+
+To run PostgreSQL history integration tests locally:
+
+```bash
+docker compose -f docker-compose.postgres.yml up -d
+RUN_HISTORY_POSTGRES_URL='postgres://insight:insight@127.0.0.1:5433/insight_agent_platform' \
+  cargo test postgres_history_store_records_and_filters_runs_when_configured
 ```
 
 ## Stream a Medical Report Interpretation

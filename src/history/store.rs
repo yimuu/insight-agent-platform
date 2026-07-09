@@ -53,6 +53,16 @@ impl RunStatus {
             _ => Self::Running,
         }
     }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "running" => Some(Self::Running),
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,6 +108,12 @@ pub struct RunRecord {
     pub step_outputs: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RunHistoryPage {
+    pub items: Vec<RunSummary>,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunHistoryQuery {
     pub agent_id: Option<String>,
@@ -105,6 +121,10 @@ pub struct RunHistoryQuery {
     pub caller_service: Option<String>,
     pub tenant_id: Option<String>,
     pub user_id: Option<String>,
+    pub status: Option<RunStatus>,
+    pub started_after: Option<DateTime<Utc>>,
+    pub started_before: Option<DateTime<Utc>>,
+    pub after: Option<String>,
     pub limit: usize,
 }
 
@@ -205,7 +225,11 @@ impl RunHistoryStore {
     }
 
     pub async fn list_runs(&self, query: RunHistoryQuery) -> Result<Vec<RunSummary>, AppError> {
-        self.inner.list_runs(query).await
+        Ok(self.list_runs_page(query).await?.items)
+    }
+
+    pub async fn list_runs_page(&self, query: RunHistoryQuery) -> Result<RunHistoryPage, AppError> {
+        self.inner.list_runs_page(query).await
     }
 }
 
@@ -239,7 +263,7 @@ trait RunHistoryRepository: Send + Sync {
         error_message: Option<String>,
     ) -> Result<(), AppError>;
     async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, AppError>;
-    async fn list_runs(&self, query: RunHistoryQuery) -> Result<Vec<RunSummary>, AppError>;
+    async fn list_runs_page(&self, query: RunHistoryQuery) -> Result<RunHistoryPage, AppError>;
 }
 
 struct NoopRunHistoryRepository;
@@ -283,8 +307,11 @@ impl RunHistoryRepository for NoopRunHistoryRepository {
         Ok(None)
     }
 
-    async fn list_runs(&self, _query: RunHistoryQuery) -> Result<Vec<RunSummary>, AppError> {
-        Ok(Vec::new())
+    async fn list_runs_page(&self, _query: RunHistoryQuery) -> Result<RunHistoryPage, AppError> {
+        Ok(RunHistoryPage {
+            items: Vec::new(),
+            next_cursor: None,
+        })
     }
 }
 
@@ -665,8 +692,8 @@ impl RunHistoryRepository for SqlxRunHistoryRepository {
         }))
     }
 
-    async fn list_runs(&self, query: RunHistoryQuery) -> Result<Vec<RunSummary>, AppError> {
-        let query = build_list_runs_query(query, self.backend.dialect());
+    async fn list_runs_page(&self, query: RunHistoryQuery) -> Result<RunHistoryPage, AppError> {
+        let query = build_list_runs_query(query, self.backend.dialect())?;
         match &self.backend {
             SqlxRunHistoryBackend::Sqlite(pool) => {
                 let mut db_query = sqlx::query_as::<_, RunSummaryRow>(AssertSqlSafe(query.sql));
@@ -678,7 +705,7 @@ impl RunHistoryRepository for SqlxRunHistoryRepository {
                     .fetch_all(pool)
                     .await
                     .map_err(map_sqlx_error)
-                    .map(run_summary_rows)
+                    .map(|rows| run_summary_page(rows, query.returned_limit))
             }
             SqlxRunHistoryBackend::Postgres(pool) => {
                 let mut db_query = sqlx::query_as::<_, RunSummaryRow>(AssertSqlSafe(query.sql));
@@ -690,7 +717,7 @@ impl RunHistoryRepository for SqlxRunHistoryRepository {
                     .fetch_all(pool)
                     .await
                     .map_err(map_sqlx_error)
-                    .map(run_summary_rows)
+                    .map(|rows| run_summary_page(rows, query.returned_limit))
             }
         }
     }
@@ -764,9 +791,13 @@ struct ListRunsSql {
     sql: String,
     text_params: Vec<String>,
     limit: i64,
+    returned_limit: usize,
 }
 
-fn build_list_runs_query(query: RunHistoryQuery, dialect: SqlDialect) -> ListRunsSql {
+fn build_list_runs_query(
+    query: RunHistoryQuery,
+    dialect: SqlDialect,
+) -> Result<ListRunsSql, AppError> {
     let mut sql = "SELECT run_id, request_id, agent_id, caller_service, tenant_id, user_id, status, started_at, ended_at, input_summary, error_message FROM runs".to_string();
     let mut conditions = Vec::new();
     let mut params = Vec::new();
@@ -806,21 +837,57 @@ fn build_list_runs_query(query: RunHistoryQuery, dialect: SqlDialect) -> ListRun
         "user_id",
         query.user_id,
     );
+    if let Some(status) = query.status {
+        push_filter(
+            &mut conditions,
+            &mut params,
+            dialect,
+            "status",
+            "=",
+            status.as_str().to_string(),
+        );
+    }
+    if let Some(started_after) = query.started_after {
+        push_filter(
+            &mut conditions,
+            &mut params,
+            dialect,
+            "started_at",
+            ">=",
+            started_after.to_rfc3339(),
+        );
+    }
+    if let Some(started_before) = query.started_before {
+        push_filter(
+            &mut conditions,
+            &mut params,
+            dialect,
+            "started_at",
+            "<=",
+            started_before.to_rfc3339(),
+        );
+    }
+    if let Some(after) = query.after {
+        push_cursor_filter(&mut conditions, &mut params, dialect, &after)?;
+    }
 
     if !conditions.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&conditions.join(" AND "));
     }
 
+    sql.push_str(" ORDER BY started_at DESC, run_id DESC");
+    let returned_limit = effective_limit(query.limit);
     let limit_placeholder = dialect.placeholder(params.len() + 1);
-    sql.push_str(" ORDER BY started_at DESC LIMIT ");
+    sql.push_str(" LIMIT ");
     sql.push_str(&limit_placeholder);
 
-    ListRunsSql {
+    Ok(ListRunsSql {
         sql,
         text_params: params,
-        limit: effective_limit(query.limit) as i64,
-    }
+        limit: (returned_limit + 1) as i64,
+        returned_limit,
+    })
 }
 
 fn push_text_filter(
@@ -839,16 +906,94 @@ fn push_text_filter(
     }
     match column {
         "agent_id" | "request_id" | "caller_service" | "tenant_id" | "user_id" => {
-            let placeholder = dialect.placeholder(params.len() + 1);
-            conditions.push(format!("{column} = {placeholder}"));
-            params.push(value.to_string());
+            push_filter(conditions, params, dialect, column, "=", value.to_string());
         }
         _ => unreachable!("unsupported run history filter column"),
     }
 }
 
-fn run_summary_rows(rows: Vec<RunSummaryRow>) -> Vec<RunSummary> {
-    rows.into_iter().map(RunSummary::from).collect()
+fn push_filter(
+    conditions: &mut Vec<String>,
+    params: &mut Vec<String>,
+    dialect: SqlDialect,
+    column: &'static str,
+    operator: &'static str,
+    value: String,
+) {
+    match (column, operator) {
+        (
+            "agent_id" | "request_id" | "caller_service" | "tenant_id" | "user_id" | "status",
+            "=",
+        )
+        | ("started_at", ">=" | "<=") => {
+            let placeholder = dialect.placeholder(params.len() + 1);
+            conditions.push(format!("{column} {operator} {placeholder}"));
+            params.push(value);
+        }
+        _ => unreachable!("unsupported run history filter"),
+    }
+}
+
+fn push_cursor_filter(
+    conditions: &mut Vec<String>,
+    params: &mut Vec<String>,
+    dialect: SqlDialect,
+    cursor: &str,
+) -> Result<(), AppError> {
+    let cursor = decode_run_history_cursor(cursor)?;
+    let started_at = cursor.started_at.to_rfc3339();
+    let started_at_less = dialect.placeholder(params.len() + 1);
+    params.push(started_at.clone());
+    let started_at_equal = dialect.placeholder(params.len() + 1);
+    params.push(started_at);
+    let run_id_less = dialect.placeholder(params.len() + 1);
+    params.push(cursor.run_id);
+    conditions.push(format!(
+        "(started_at < {started_at_less} OR (started_at = {started_at_equal} AND run_id < {run_id_less}))"
+    ));
+    Ok(())
+}
+
+fn run_summary_page(rows: Vec<RunSummaryRow>, returned_limit: usize) -> RunHistoryPage {
+    let has_more = rows.len() > returned_limit;
+    let items = rows
+        .into_iter()
+        .take(returned_limit)
+        .map(RunSummary::from)
+        .collect::<Vec<_>>();
+    let next_cursor = has_more
+        .then(|| items.last().map(encode_run_history_cursor))
+        .flatten();
+    RunHistoryPage { items, next_cursor }
+}
+
+#[derive(Debug)]
+struct DecodedRunHistoryCursor {
+    started_at: DateTime<Utc>,
+    run_id: String,
+}
+
+fn encode_run_history_cursor(run: &RunSummary) -> String {
+    format!("{}:{}", run.started_at.timestamp_micros(), run.run_id)
+}
+
+fn decode_run_history_cursor(cursor: &str) -> Result<DecodedRunHistoryCursor, AppError> {
+    let (micros, run_id) = cursor
+        .split_once(':')
+        .ok_or_else(|| AppError::Input("invalid run history cursor".to_string()))?;
+    let micros = micros
+        .parse::<i64>()
+        .map_err(|_| AppError::Input("invalid run history cursor".to_string()))?;
+    let started_at = DateTime::<Utc>::from_timestamp_micros(micros)
+        .ok_or_else(|| AppError::Input("invalid run history cursor".to_string()))?;
+    let run_id = run_id.trim();
+    if run_id.is_empty() {
+        return Err(AppError::Input("invalid run history cursor".to_string()));
+    }
+    Ok(DecodedRunHistoryCursor {
+        started_at,
+        run_id: run_id.to_string(),
+    })
 }
 
 fn effective_limit(limit: usize) -> usize {
@@ -1113,5 +1258,90 @@ mod tests {
             .unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].run_id, "run_history_store");
+    }
+
+    #[tokio::test]
+    async fn sqlite_store_filters_by_status_time_range_and_cursor() {
+        let store = RunHistoryStore::sqlite_in_memory().await.unwrap();
+        let request = RequestContext {
+            request_id: "req_history_filter".to_string(),
+            caller_service: Some("api-test".to_string()),
+            tenant_id: Some("tenant-a".to_string()),
+            user_id: Some("user-a".to_string()),
+        };
+        let base = Utc::now();
+
+        for (index, status) in [
+            (1, RunStatus::Completed),
+            (2, RunStatus::Failed),
+            (3, RunStatus::Completed),
+        ] {
+            let run_id = format!("run_history_filter_{index}");
+            store
+                .create_run(
+                    &run_id,
+                    "agent-a",
+                    &request,
+                    base + chrono::Duration::seconds(index),
+                    json!({"index": index}),
+                )
+                .await;
+            store.finish_run(&run_id, status, None).await;
+        }
+
+        let filtered = store
+            .list_runs_page(RunHistoryQuery {
+                agent_id: Some("agent-a".to_string()),
+                status: Some(RunStatus::Completed),
+                started_after: Some(base + chrono::Duration::seconds(1)),
+                started_before: Some(base + chrono::Duration::seconds(3)),
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered.items.len(), 2);
+        assert_eq!(filtered.items[0].run_id, "run_history_filter_3");
+        assert_eq!(filtered.items[1].run_id, "run_history_filter_1");
+        assert!(filtered.next_cursor.is_none());
+
+        let first_page = store
+            .list_runs_page(RunHistoryQuery {
+                agent_id: Some("agent-a".to_string()),
+                limit: 2,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            first_page
+                .items
+                .iter()
+                .map(|run| run.run_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["run_history_filter_3", "run_history_filter_2"]
+        );
+        let next_cursor = first_page
+            .next_cursor
+            .expect("first page should include next cursor");
+
+        let second_page = store
+            .list_runs_page(RunHistoryQuery {
+                agent_id: Some("agent-a".to_string()),
+                after: Some(next_cursor),
+                limit: 2,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            second_page
+                .items
+                .iter()
+                .map(|run| run.run_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["run_history_filter_1"]
+        );
+        assert!(second_page.next_cursor.is_none());
     }
 }

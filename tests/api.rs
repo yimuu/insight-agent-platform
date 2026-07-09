@@ -244,6 +244,10 @@ fn parse_sse_frames(body: &str) -> Vec<SseFrame> {
         .collect()
 }
 
+fn history_items(payload: &Value) -> &[Value] {
+    payload["data"]["items"].as_array().unwrap().as_slice()
+}
+
 #[tokio::test]
 async fn lists_agents_without_prompt_contents() {
     let response = app()
@@ -636,12 +640,14 @@ async fn records_run_history_and_step_outputs() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["code"], 0);
-    assert_eq!(payload["data"][0]["run_id"], run_id);
-    assert_eq!(payload["data"][0]["request_id"], "req_history_001");
-    assert_eq!(payload["data"][0]["caller_service"], "web-backend");
-    assert_eq!(payload["data"][0]["tenant_id"], "tenant_123");
-    assert_eq!(payload["data"][0]["user_id"], "user_456");
-    assert_eq!(payload["data"][0]["status"], "completed");
+    let items = history_items(&payload);
+    assert_eq!(items[0]["run_id"], run_id);
+    assert_eq!(items[0]["request_id"], "req_history_001");
+    assert_eq!(items[0]["caller_service"], "web-backend");
+    assert_eq!(items[0]["tenant_id"], "tenant_123");
+    assert_eq!(items[0]["user_id"], "user_456");
+    assert_eq!(items[0]["status"], "completed");
+    assert!(payload["data"]["next_cursor"].is_null());
 }
 
 #[tokio::test]
@@ -708,8 +714,9 @@ async fn filters_run_history_by_request_context() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["data"].as_array().unwrap().len(), 1);
-    assert_eq!(payload["data"][0]["run_id"], first_run_id);
+    let items = history_items(&payload);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["run_id"], first_run_id);
 
     let response = app
         .clone()
@@ -724,8 +731,9 @@ async fn filters_run_history_by_request_context() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["data"].as_array().unwrap().len(), 1);
-    assert_eq!(payload["data"][0]["run_id"], second_run_id);
+    let items = history_items(&payload);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["run_id"], second_run_id);
 
     let response = app
         .clone()
@@ -740,8 +748,9 @@ async fn filters_run_history_by_request_context() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["data"].as_array().unwrap().len(), 1);
-    assert_eq!(payload["data"][0]["run_id"], first_run_id);
+    let items = history_items(&payload);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["run_id"], first_run_id);
 
     let response = app
         .oneshot(
@@ -755,7 +764,132 @@ async fn filters_run_history_by_request_context() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert!(payload["data"].as_array().unwrap().is_empty());
+    assert!(history_items(&payload).is_empty());
+}
+
+#[tokio::test]
+async fn filters_run_history_by_agent_status_and_cursor() {
+    let app = app().await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/test/runs/stream")
+                .header("content-type", "application/json")
+                .header("x-request-id", "req_status_ok_001")
+                .body(Body::from(r#"{"name":"Ada"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let ok_frames = parse_sse_frames(&String::from_utf8(body.to_vec()).unwrap());
+    let first_completed_run_id = ok_frames[0].data["data"]["run_id"].as_str().unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/test/runs/stream")
+                .header("content-type", "application/json")
+                .header("x-request-id", "req_status_ok_002")
+                .body(Body::from(r#"{"name":"Grace"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let ok_frames = parse_sse_frames(&String::from_utf8(body.to_vec()).unwrap());
+    let second_completed_run_id = ok_frames[0].data["data"]["run_id"].as_str().unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/broken/runs/stream")
+                .header("content-type", "application/json")
+                .header("x-request-id", "req_status_failed_001")
+                .body(Body::from(r#"{}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let failed_frames = parse_sse_frames(&String::from_utf8(body.to_vec()).unwrap());
+    let failed_run_id = failed_frames[0].data["data"]["run_id"].as_str().unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runs?agent_id=broken&status=failed")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let items = history_items(&payload);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["run_id"], failed_run_id);
+    assert_eq!(items[0]["status"], "failed");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/agents/test/runs?status=completed&limit=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let items = history_items(&payload);
+    assert_eq!(items.len(), 1);
+    assert!(
+        items[0]["run_id"] == first_completed_run_id
+            || items[0]["run_id"] == second_completed_run_id
+    );
+    let first_page_run_id = items[0]["run_id"].as_str().unwrap().to_string();
+    let next_cursor = payload["data"]["next_cursor"]
+        .as_str()
+        .expect("first page should include cursor")
+        .to_string();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/agents/test/runs?status=completed&limit=1&after={next_cursor}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let items = history_items(&payload);
+    assert_eq!(items.len(), 1);
+    assert_ne!(items[0]["run_id"], first_page_run_id);
+    assert!(
+        items[0]["run_id"] == first_completed_run_id
+            || items[0]["run_id"] == second_completed_run_id
+    );
+    assert!(payload["data"]["next_cursor"].is_null());
 }
 
 #[tokio::test]

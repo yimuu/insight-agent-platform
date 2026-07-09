@@ -15,6 +15,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use chrono::{DateTime, Utc};
 use futures::{future, StreamExt};
 use jsonschema::JSONSchema;
 use serde::{Deserialize, Serialize};
@@ -26,7 +27,7 @@ use crate::{
     api::sse::encode_event_or_sanitized_error,
     engine::runner::RunEngine,
     error::AppError,
-    history::store::RunHistoryQuery,
+    history::store::{RunHistoryPage, RunHistoryQuery, RunStatus},
     model::types::ModelClient,
     request_context::RequestContext,
     response::ApiResponse,
@@ -119,14 +120,14 @@ async fn list_agent_runs<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
     Path(agent_id): Path<String>,
     Query(query): Query<RunHistoryQueryParams>,
-) -> Result<Json<ApiResponse<Vec<crate::history::store::RunSummary>>>, AppError> {
+) -> Result<Json<ApiResponse<RunHistoryPage>>, AppError> {
     if state.registry.get(&agent_id).is_none() {
         return Err(AppError::NotFound(format!("agent '{agent_id}' not found")));
     }
     let runs = state
         .engine
         .history_store()
-        .list_runs(query.into_history_query(Some(agent_id)))
+        .list_runs_page(query.into_history_query(Some(agent_id))?)
         .await?;
     Ok(Json(ApiResponse::ok(runs)))
 }
@@ -134,17 +135,15 @@ async fn list_agent_runs<M: ModelClient>(
 async fn list_runs<M: ModelClient>(
     State(state): State<Arc<AppState<M>>>,
     Query(query): Query<RunHistoryQueryParams>,
-) -> Result<Json<ApiResponse<Vec<crate::history::store::RunSummary>>>, AppError> {
-    let runs = state
+) -> Result<Json<ApiResponse<RunHistoryPage>>, AppError> {
+    let mut page = state
         .engine
         .history_store()
-        .list_runs(query.into_history_query(None))
+        .list_runs_page(query.into_history_query(None)?)
         .await?;
-    Ok(Json(ApiResponse::ok(
-        runs.into_iter()
-            .filter(|run| state.registry.get(&run.agent_id).is_some())
-            .collect::<Vec<_>>(),
-    )))
+    page.items
+        .retain(|run| state.registry.get(&run.agent_id).is_some());
+    Ok(Json(ApiResponse::ok(page)))
 }
 
 async fn get_run<M: ModelClient>(
@@ -336,6 +335,8 @@ struct AgentSummary {
 #[derive(Debug, Default, Deserialize)]
 struct RunHistoryQueryParams {
     #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
     caller_service: Option<String>,
@@ -344,20 +345,57 @@ struct RunHistoryQueryParams {
     #[serde(default)]
     user_id: Option<String>,
     #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    started_after: Option<String>,
+    #[serde(default)]
+    started_before: Option<String>,
+    #[serde(default)]
+    after: Option<String>,
+    #[serde(default)]
     limit: Option<usize>,
 }
 
 impl RunHistoryQueryParams {
-    fn into_history_query(self, agent_id: Option<String>) -> RunHistoryQuery {
-        RunHistoryQuery {
+    fn into_history_query(
+        self,
+        path_agent_id: Option<String>,
+    ) -> Result<RunHistoryQuery, AppError> {
+        let agent_id = path_agent_id.or_else(|| normalize_query_value(self.agent_id));
+        let status = normalize_query_value(self.status)
+            .map(|value| {
+                RunStatus::parse(&value).ok_or_else(|| {
+                    AppError::Input(format!(
+                        "invalid run history status '{value}', expected one of: running, completed, failed, cancelled"
+                    ))
+                })
+            })
+            .transpose()?;
+        Ok(RunHistoryQuery {
             agent_id,
             request_id: normalize_query_value(self.request_id),
             caller_service: normalize_query_value(self.caller_service),
             tenant_id: normalize_query_value(self.tenant_id),
             user_id: normalize_query_value(self.user_id),
+            status,
+            started_after: parse_optional_datetime("started_after", self.started_after)?,
+            started_before: parse_optional_datetime("started_before", self.started_before)?,
+            after: normalize_query_value(self.after),
             limit: self.limit.unwrap_or(50),
-        }
+        })
     }
+}
+
+fn parse_optional_datetime(
+    name: &str,
+    value: Option<String>,
+) -> Result<Option<DateTime<Utc>>, AppError> {
+    let Some(value) = normalize_query_value(value) else {
+        return Ok(None);
+    };
+    DateTime::parse_from_rfc3339(&value)
+        .map(|value| Some(value.with_timezone(&Utc)))
+        .map_err(|err| AppError::Input(format!("invalid run history {name}: {err}")))
 }
 
 fn normalize_query_value(value: Option<String>) -> Option<String> {
