@@ -5,6 +5,7 @@ pub mod config;
 pub mod dsl;
 pub mod engine;
 pub mod error;
+pub mod events;
 pub mod handlers;
 pub mod history;
 pub mod model;
