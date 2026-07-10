@@ -1,13 +1,19 @@
+pub mod attachment;
 pub mod context;
 pub mod control;
 pub mod coordinator;
+pub mod service;
 pub mod state;
 
 use std::{error::Error, fmt};
 
+pub use attachment::{AttachedRun, RunSubscription};
 pub use context::{RunContext, RunMetadata};
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
 pub use coordinator::RunCoordinator;
+pub use service::{
+    CompiledAgentRegistry, RequestMetadata, RunService, RunServiceConfig, ServiceError,
+};
 pub use state::RunState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +42,7 @@ impl RunError {
         match reason {
             StopReason::Cancelled => Self::new("RUN_CANCELLED", "run cancelled"),
             StopReason::Interrupted => Self::new("RUN_INTERRUPTED", "run interrupted"),
+            StopReason::TimedOut => Self::new("RUN_TIMEOUT", "run timed out"),
         }
     }
 

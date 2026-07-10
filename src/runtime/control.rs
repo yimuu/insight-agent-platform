@@ -21,6 +21,7 @@ pub type ContentEmitter =
 pub enum StopReason {
     Cancelled = 1,
     Interrupted = 2,
+    TimedOut = 3,
 }
 
 struct StopInner {
@@ -71,6 +72,7 @@ impl StopSignal {
         match self.inner.reason.load(Ordering::Acquire) {
             1 => Some(StopReason::Cancelled),
             2 => Some(StopReason::Interrupted),
+            3 => Some(StopReason::TimedOut),
             _ => None,
         }
     }

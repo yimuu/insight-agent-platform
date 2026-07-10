@@ -47,12 +47,35 @@ impl RunCoordinator {
         input: Value,
         stop: StopSignal,
     ) -> Result<RunStatus, RunError> {
-        self.validate_run(&new_run, &input)?;
-        let state = RunState::new();
-        self.repository
-            .create_run(new_run.clone())
+        self.execute_inner(new_run, input, stop, Arc::new(RunState::new()), true)
             .await
-            .map_err(history_error)?;
+    }
+
+    pub(crate) async fn execute_existing(
+        &self,
+        new_run: NewRun,
+        input: Value,
+        stop: StopSignal,
+        state: Arc<RunState>,
+    ) -> Result<RunStatus, RunError> {
+        self.execute_inner(new_run, input, stop, state, false).await
+    }
+
+    async fn execute_inner(
+        &self,
+        new_run: NewRun,
+        input: Value,
+        stop: StopSignal,
+        state: Arc<RunState>,
+        create_run: bool,
+    ) -> Result<RunStatus, RunError> {
+        self.validate_run(&new_run, &input)?;
+        if create_run {
+            self.repository
+                .create_run(new_run.clone())
+                .await
+                .map_err(history_error)?;
+        }
         self.events
             .publish(
                 run_scope(&new_run),
