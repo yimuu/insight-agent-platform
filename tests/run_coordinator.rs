@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -127,6 +130,7 @@ struct MemoryRepository {
     outputs: Mutex<Vec<NodeOutputRecord>>,
     terminal_updates: Mutex<Vec<TerminalUpdate>>,
     operations: Mutex<Vec<String>>,
+    fail_next_append: AtomicBool,
 }
 
 #[async_trait]
@@ -148,6 +152,12 @@ impl RunRepository for MemoryRepository {
     }
 
     async fn append_events(&self, events: &[RunEvent]) -> Result<(), HistoryError> {
+        if self.fail_next_append.swap(false, Ordering::SeqCst) {
+            return Err(HistoryError::new(
+                "SYNTHETIC_APPEND_FAILURE",
+                "synthetic append failure",
+            ));
+        }
         let mut stored = self.events.lock().await;
         let mut operations = self.operations.lock().await;
         for event in events {
@@ -187,6 +197,21 @@ impl RunRepository for MemoryRepository {
             .push(format!("event:{}:-", event.event_type.as_str()));
         self.events.lock().await.push(event);
         Ok(true)
+    }
+
+    async fn recover_run(
+        &self,
+        update: TerminalUpdate,
+        mut terminal: RunEvent,
+    ) -> Result<RunEvent, HistoryError> {
+        terminal.seq = self
+            .events
+            .lock()
+            .await
+            .last()
+            .map_or(1, |event| event.seq + 1);
+        self.finish_run(update, terminal.clone()).await?;
+        Ok(terminal)
     }
 
     async fn get_run(&self, _run_id: &str) -> Result<Option<RunRecord>, HistoryError> {
@@ -274,6 +299,7 @@ fn coordinator(
             subscriber_capacity: 8,
             journal_capacity: 32,
             journal_batch_size: 8,
+            operation_timeout: Duration::from_secs(1),
         },
     );
     RunCoordinator::new(agent, executors, events, repository_trait)
@@ -527,4 +553,46 @@ async fn missing_executor_is_an_infrastructure_run_failure() {
     let events = repository.events.lock().await;
     assert_eq!(events[3].code, "NODE_EXECUTOR_NOT_FOUND");
     assert_eq!(events[4].event_type, RunEventType::RunFailed);
+}
+
+#[tokio::test]
+async fn journal_worker_failure_recovers_one_durable_failed_terminal() {
+    let repository = Arc::new(MemoryRepository::default());
+    repository.fail_next_append.store(true, Ordering::SeqCst);
+    let final_output = RunOutput {
+        content: Some("must not complete".to_string()),
+        format: Some("text".to_string()),
+        data: json!({}),
+    };
+    let coordinator = coordinator(
+        agent(
+            vec![node(
+                "result",
+                None,
+                Duration::from_secs(1),
+                Behavior::Complete(final_output),
+            )],
+            "result",
+        ),
+        Arc::clone(&repository),
+        true,
+    );
+    let (_, stop) = stop_pair();
+
+    assert_eq!(
+        coordinator
+            .execute(new_run(), json!({}), stop)
+            .await
+            .unwrap(),
+        RunStatus::Failed
+    );
+    assert_eq!(*repository.status.lock().await, Some(RunStatus::Failed));
+    let events = repository.events.lock().await;
+    assert_eq!(events.last().unwrap().event_type, RunEventType::RunFailed);
+    assert_eq!(events.last().unwrap().code, "INFRASTRUCTURE_FAILURE");
+    assert_eq!(
+        events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        (1..=events.len() as u64).collect::<Vec<_>>()
+    );
+    assert_eq!(repository.terminal_updates.lock().await.len(), 1);
 }

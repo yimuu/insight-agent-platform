@@ -89,6 +89,7 @@ pub struct RuntimeConfig {
     pub replay_ring_capacity: usize,
     pub journal_capacity: usize,
     pub journal_batch_size: usize,
+    pub journal_operation_timeout: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +277,7 @@ struct RuntimeYaml {
     replay_ring_capacity: usize,
     journal_capacity: usize,
     journal_batch_size: usize,
+    journal_operation_timeout: String,
 }
 
 fn resolve_auth(
@@ -377,6 +379,10 @@ fn resolve_runtime(raw: RuntimeYaml) -> Result<RuntimeConfig, PlatformConfigErro
         replay_ring_capacity: raw.replay_ring_capacity,
         journal_capacity: raw.journal_capacity,
         journal_batch_size: raw.journal_batch_size,
+        journal_operation_timeout: positive_duration(
+            &raw.journal_operation_timeout,
+            "runtime.journal_operation_timeout",
+        )?,
     })
 }
 

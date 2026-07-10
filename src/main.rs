@@ -1,4 +1,4 @@
-use std::{error::Error, sync::Arc, time::Duration};
+use std::{error::Error, future::IntoFuture, sync::Arc, time::Duration};
 
 use insight_agent_platform::{
     api::formal::{build_router, ApiAuth, FormalApiState},
@@ -58,6 +58,7 @@ async fn main() -> MainResult<()> {
             subscriber_capacity: config.runtime.subscriber_capacity,
             journal_capacity: config.runtime.journal_capacity,
             journal_batch_size: config.runtime.journal_batch_size,
+            operation_timeout: config.runtime.journal_operation_timeout,
         },
     );
     let service = RunService::new(
@@ -89,9 +90,47 @@ async fn main() -> MainResult<()> {
         agents = service.agents().list().count(),
         "formal V1 runtime listening"
     );
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(service))
-        .await?;
+    let (http_shutdown, wait_http_shutdown) = tokio::sync::oneshot::channel::<()>();
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = wait_http_shutdown.await;
+        })
+        .into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => {
+            tracing::warn!("HTTP server stopped before a shutdown signal");
+            tokio::time::timeout(
+                Duration::from_secs(35),
+                service.shutdown(Duration::from_secs(30)),
+            )
+            .await
+            .map_err(|_| std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "runtime shutdown exceeded its hard deadline",
+            ))??;
+            result?;
+        },
+        _ = wait_for_shutdown_signal() => {
+            tracing::info!("shutdown signal received");
+            let _ = http_shutdown.send(());
+            let drain = async {
+                let (runtime, http) = tokio::join!(
+                    service.shutdown(Duration::from_secs(30)),
+                    &mut server,
+                );
+                runtime?;
+                http?;
+                MainResult::Ok(())
+            };
+            tokio::time::timeout(Duration::from_secs(35), drain)
+                .await
+                .map_err(|_| std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "server shutdown exceeded its hard deadline",
+                ))??;
+        }
+    }
     Ok(())
 }
 
@@ -115,14 +154,6 @@ async fn initialize_repository(config: &HistoryConfig) -> MainResult<Arc<dyn Run
         HistoryConfig::Postgres { database_url } => Ok(Arc::new(
             PostgresRunRepository::connect(database_url.expose()).await?,
         )),
-    }
-}
-
-async fn shutdown_signal(service: RunService) {
-    wait_for_shutdown_signal().await;
-    tracing::info!("shutdown signal received");
-    if let Err(error) = service.shutdown(Duration::from_secs(30)).await {
-        tracing::error!(code = error.code(), "runtime shutdown failed");
     }
 }
 

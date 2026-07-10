@@ -12,7 +12,7 @@ use sqlx::{
 use crate::{
     events::protocol::{RunEvent, RunEventType, EVENT_SCHEMA_VERSION},
     history::{
-        repository::{HistoryError, RunRepository},
+        repository::{validate_recovery_event, HistoryError, RunRepository},
         types::{NewRun, NodeOutputRecord, RunAttachment, RunRecord, RunStatus, TerminalUpdate},
     },
 };
@@ -198,6 +198,23 @@ impl RunRepository for SqliteRunRepository {
         Ok(true)
     }
 
+    async fn recover_run(
+        &self,
+        update: TerminalUpdate,
+        terminal: RunEvent,
+    ) -> Result<RunEvent, HistoryError> {
+        validate_recovery_event(&update, &terminal)?;
+        match recover_sqlite_once(&self.pool, update.clone(), terminal.clone()).await {
+            Ok(event) => Ok(event),
+            Err(error)
+                if matches!(error.code(), "HISTORY_WRITE_FAILED" | "HISTORY_READ_FAILED") =>
+            {
+                recover_sqlite_once(&self.pool, update, terminal).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, HistoryError> {
         let row = sqlx::query_as::<_, RunRow>(
             "SELECT run_id, request_id, agent_id, agent_version, attachment, status,
@@ -303,6 +320,135 @@ impl RunRepository for SqliteRunRepository {
         transaction.commit().await.map_err(write_error)?;
         Ok(interrupted)
     }
+}
+
+async fn recover_sqlite_once(
+    pool: &SqlitePool,
+    update: TerminalUpdate,
+    mut terminal: RunEvent,
+) -> Result<RunEvent, HistoryError> {
+    let output = update
+        .output
+        .as_ref()
+        .map(|output| serialize_json(output, "run output"))
+        .transpose()?;
+    let mut transaction = pool.begin().await.map_err(write_error)?;
+    let locked = sqlx::query("UPDATE runs SET updated_at = updated_at WHERE run_id = ?")
+        .bind(&update.run_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(write_error)?;
+    if locked.rows_affected() != 1 {
+        return Err(HistoryError::new("RUN_NOT_FOUND", "run not found"));
+    }
+    let status_value: String = sqlx::query_scalar("SELECT status FROM runs WHERE run_id = ?")
+        .bind(&update.run_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(read_error)?;
+    let status = RunStatus::parse(&status_value)
+        .ok_or_else(|| invalid_data(format!("invalid stored run status '{status_value}'")))?;
+    if status.is_terminal() {
+        ensure_contiguous_events_sqlite(&mut transaction, &update.run_id).await?;
+        let existing = load_last_event_sqlite(&mut transaction, &update.run_id).await?;
+        ensure_terminal_matches_status(status, &existing)?;
+        transaction.rollback().await.map_err(write_error)?;
+        return Ok(existing);
+    }
+    if !matches!(status, RunStatus::Created | RunStatus::Running) {
+        return Err(HistoryError::new(
+            "HISTORY_CONFLICT",
+            "run cannot be recovered from its current state",
+        ));
+    }
+    let maximum: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE run_id = ?")
+            .bind(&update.run_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(read_error)?;
+    let next = maximum
+        .checked_add(1)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| HistoryError::new("HISTORY_DATA_INVALID", "event sequence overflowed"))?;
+    terminal.seq = next;
+    sqlx::query(
+        "UPDATE runs
+         SET status = ?, ended_at = ?, updated_at = ?, output = ?,
+             error_code = ?, error_message = ?
+         WHERE run_id = ?",
+    )
+    .bind(update.status.as_str())
+    .bind(format_timestamp(update.ended_at))
+    .bind(format_timestamp(update.ended_at))
+    .bind(output)
+    .bind(&update.error_code)
+    .bind(&update.error_message)
+    .bind(&update.run_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(write_error)?;
+    insert_event(&mut transaction, &terminal).await?;
+    ensure_contiguous_events_sqlite(&mut transaction, &update.run_id).await?;
+    transaction.commit().await.map_err(write_error)?;
+    Ok(terminal)
+}
+
+async fn load_last_event_sqlite(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &str,
+) -> Result<RunEvent, HistoryError> {
+    let row = sqlx::query_as::<_, EventRow>(
+        "SELECT e.seq, e.event_type, e.node_id, e.timestamp, e.code, e.message, e.data,
+                r.request_id, r.run_id, r.agent_id, r.agent_version
+         FROM run_events e
+         JOIN runs r ON r.run_id = e.run_id
+         WHERE e.run_id = ?
+         ORDER BY e.seq DESC
+         LIMIT 1",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(read_error)?
+    .ok_or_else(|| {
+        HistoryError::new(
+            "HISTORY_TERMINAL_EVENT_MISSING",
+            "terminal run has no terminal event",
+        )
+    })?;
+    run_event_from_row(row)
+}
+
+fn ensure_terminal_matches_status(status: RunStatus, event: &RunEvent) -> Result<(), HistoryError> {
+    if terminal_event_type(status) != Some(event.event_type) || event.node_id.is_some() {
+        return Err(HistoryError::new(
+            "HISTORY_TERMINAL_EVENT_MISMATCH",
+            "stored terminal event does not match run status",
+        ));
+    }
+    Ok(())
+}
+
+async fn ensure_contiguous_events_sqlite(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &str,
+) -> Result<(), HistoryError> {
+    let (count, minimum, maximum) = sqlx::query_as::<_, (i64, i64, i64)>(
+        "SELECT COUNT(*), COALESCE(MIN(seq), 0), COALESCE(MAX(seq), 0)
+         FROM run_events WHERE run_id = ?",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(read_error)?;
+    if count == 0 || minimum != 1 || count != maximum {
+        return Err(HistoryError::new(
+            "HISTORY_RECOVERY_GAP",
+            "cannot recover a run with an event sequence gap",
+        ));
+    }
+    Ok(())
 }
 
 async fn insert_event(

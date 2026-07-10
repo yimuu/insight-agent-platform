@@ -494,7 +494,7 @@ Graceful shutdown stops accepting new runs, requests cooperative cancellation of
 
 `EventHub` is the only sequence allocator. It keeps a bounded per-run ring buffer and gives each subscriber a bounded queue. A lagging subscriber receives a terminal transport error instructing it to reconnect with its last observed `seq`; the run is not blocked by a slow subscriber.
 
-`EventJournal` consumes an ordered bounded queue and persists events in batches. Queue exhaustion is an infrastructure error and fails the run rather than dropping history silently. Before a terminal event is broadcast, the journal flushes prior events and atomically persists the terminal status and terminal event.
+`EventJournal` consumes an ordered bounded queue and persists concurrent events in batches. An event is broadcast only after the repository acknowledges its durable write. Queue exhaustion or a bounded repository-operation timeout is an infrastructure error and fails the run rather than dropping history silently. The worker is stopped before direct recovery. Recovery locks the durable Run, derives the next sequence from stored history, and atomically persists and returns the authoritative terminal event; a permanently stopped journal makes the runtime unhealthy and prevents new Runs.
 
 Active-run replay merges the durable journal with the in-memory ring buffer by sequence and removes duplicates. Completed-run replay uses the journal. Requests with an `after_seq` older than retained active memory still read durable events.
 

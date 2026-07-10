@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{
@@ -8,7 +10,7 @@ use crate::{
     dsl::compiled::RunOutput,
     events::protocol::{RunEvent, RunEventType, EVENT_SCHEMA_VERSION},
     history::{
-        repository::{HistoryError, RunRepository},
+        repository::{validate_recovery_event, HistoryError, RunRepository},
         types::{NewRun, NodeOutputRecord, RunAttachment, RunRecord, RunStatus, TerminalUpdate},
     },
 };
@@ -89,6 +91,21 @@ impl RunRepository for PostgresRunRepository {
             return Ok(());
         }
         let mut transaction = self.pool.begin().await.map_err(write_error)?;
+        let run_ids = events
+            .iter()
+            .map(|event| event.run_id.as_str())
+            .collect::<BTreeSet<_>>();
+        for run_id in run_ids {
+            let locked: Option<String> =
+                sqlx::query_scalar("SELECT run_id FROM runs WHERE run_id = $1 FOR UPDATE")
+                    .bind(run_id)
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(read_error)?;
+            if locked.is_none() {
+                return Err(HistoryError::new("RUN_NOT_FOUND", "run not found"));
+            }
+        }
         for event in events {
             insert_event(&mut transaction, event).await?;
         }
@@ -159,6 +176,23 @@ impl RunRepository for PostgresRunRepository {
         insert_event(&mut transaction, &event).await?;
         transaction.commit().await.map_err(write_error)?;
         Ok(true)
+    }
+
+    async fn recover_run(
+        &self,
+        update: TerminalUpdate,
+        terminal: RunEvent,
+    ) -> Result<RunEvent, HistoryError> {
+        validate_recovery_event(&update, &terminal)?;
+        match recover_postgres_once(&self.pool, update.clone(), terminal.clone()).await {
+            Ok(event) => Ok(event),
+            Err(error)
+                if matches!(error.code(), "HISTORY_WRITE_FAILED" | "HISTORY_READ_FAILED") =>
+            {
+                recover_postgres_once(&self.pool, update, terminal).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, HistoryError> {
@@ -263,6 +297,124 @@ impl RunRepository for PostgresRunRepository {
         transaction.commit().await.map_err(write_error)?;
         Ok(interrupted)
     }
+}
+
+async fn recover_postgres_once(
+    pool: &PgPool,
+    update: TerminalUpdate,
+    mut terminal: RunEvent,
+) -> Result<RunEvent, HistoryError> {
+    let output = update.output.as_ref().map(Json);
+    let mut transaction = pool.begin().await.map_err(write_error)?;
+    let status_value: String =
+        sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
+            .bind(&update.run_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(read_error)?
+            .ok_or_else(|| HistoryError::new("RUN_NOT_FOUND", "run not found"))?;
+    let status = RunStatus::parse(&status_value)
+        .ok_or_else(|| invalid_data(format!("invalid stored run status '{status_value}'")))?;
+    if status.is_terminal() {
+        ensure_contiguous_events_postgres(&mut transaction, &update.run_id).await?;
+        let existing = load_last_event_postgres(&mut transaction, &update.run_id).await?;
+        ensure_terminal_matches_status(status, &existing)?;
+        transaction.rollback().await.map_err(write_error)?;
+        return Ok(existing);
+    }
+    if !matches!(status, RunStatus::Created | RunStatus::Running) {
+        return Err(HistoryError::new(
+            "HISTORY_CONFLICT",
+            "run cannot be recovered from its current state",
+        ));
+    }
+    let maximum: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE run_id = $1")
+            .bind(&update.run_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(read_error)?;
+    let next = maximum
+        .checked_add(1)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| HistoryError::new("HISTORY_DATA_INVALID", "event sequence overflowed"))?;
+    terminal.seq = next;
+    sqlx::query(
+        "UPDATE runs
+         SET status = $1, ended_at = $2, updated_at = $2, output = $3,
+             error_code = $4, error_message = $5
+         WHERE run_id = $6",
+    )
+    .bind(update.status.as_str())
+    .bind(update.ended_at)
+    .bind(output)
+    .bind(&update.error_code)
+    .bind(&update.error_message)
+    .bind(&update.run_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(write_error)?;
+    insert_event(&mut transaction, &terminal).await?;
+    ensure_contiguous_events_postgres(&mut transaction, &update.run_id).await?;
+    transaction.commit().await.map_err(write_error)?;
+    Ok(terminal)
+}
+
+async fn load_last_event_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+) -> Result<RunEvent, HistoryError> {
+    let row = sqlx::query_as::<_, EventRow>(
+        "SELECT e.seq, e.event_type, e.node_id, e.timestamp, e.code, e.message, e.data,
+                r.request_id, r.run_id, r.agent_id, r.agent_version
+         FROM run_events e
+         JOIN runs r ON r.run_id = e.run_id
+         WHERE e.run_id = $1
+         ORDER BY e.seq DESC
+         LIMIT 1",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(read_error)?
+    .ok_or_else(|| {
+        HistoryError::new(
+            "HISTORY_TERMINAL_EVENT_MISSING",
+            "terminal run has no terminal event",
+        )
+    })?;
+    run_event_from_row(row)
+}
+
+fn ensure_terminal_matches_status(status: RunStatus, event: &RunEvent) -> Result<(), HistoryError> {
+    if terminal_event_type(status) != Some(event.event_type) || event.node_id.is_some() {
+        return Err(HistoryError::new(
+            "HISTORY_TERMINAL_EVENT_MISMATCH",
+            "stored terminal event does not match run status",
+        ));
+    }
+    Ok(())
+}
+
+async fn ensure_contiguous_events_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+) -> Result<(), HistoryError> {
+    let (count, minimum, maximum) = sqlx::query_as::<_, (i64, i64, i64)>(
+        "SELECT COUNT(*), COALESCE(MIN(seq), 0), COALESCE(MAX(seq), 0)
+         FROM run_events WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(read_error)?;
+    if count == 0 || minimum != 1 || count != maximum {
+        return Err(HistoryError::new(
+            "HISTORY_RECOVERY_GAP",
+            "cannot recover a run with an event sequence gap",
+        ));
+    }
+    Ok(())
 }
 
 async fn insert_event(

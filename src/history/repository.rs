@@ -3,7 +3,7 @@ use std::{error::Error, fmt};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::events::protocol::RunEvent;
+use crate::events::protocol::{RunEvent, RunEventType};
 
 use super::types::{NewRun, NodeOutputRecord, RunRecord, TerminalUpdate};
 
@@ -82,6 +82,15 @@ pub trait RunRepository: Send + Sync {
         event: RunEvent,
     ) -> Result<bool, HistoryError>;
 
+    /// Atomically locks the run, derives the next sequence from durable state,
+    /// inserts the terminal event, and transitions the run. If the run is
+    /// already terminal, returns its authoritative stored terminal event.
+    async fn recover_run(
+        &self,
+        update: TerminalUpdate,
+        terminal: RunEvent,
+    ) -> Result<RunEvent, HistoryError>;
+
     async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, HistoryError>;
 
     async fn list_events_after(
@@ -92,4 +101,32 @@ pub trait RunRepository: Send + Sync {
     ) -> Result<Vec<RunEvent>, HistoryError>;
 
     async fn mark_incomplete_interrupted(&self, at: DateTime<Utc>) -> Result<u64, HistoryError>;
+}
+
+pub(crate) fn validate_recovery_event(
+    update: &TerminalUpdate,
+    terminal: &RunEvent,
+) -> Result<(), HistoryError> {
+    let expected_type = match update.status {
+        super::types::RunStatus::Completed => RunEventType::RunCompleted,
+        super::types::RunStatus::Failed => RunEventType::RunFailed,
+        super::types::RunStatus::Cancelled => RunEventType::RunCancelled,
+        super::types::RunStatus::Interrupted => RunEventType::RunInterrupted,
+        _ => {
+            return Err(HistoryError::new(
+                "HISTORY_RECOVERY_INVALID",
+                "recovery update must be terminal",
+            ));
+        }
+    };
+    if terminal.event_type != expected_type
+        || terminal.node_id.is_some()
+        || terminal.run_id != update.run_id
+    {
+        return Err(HistoryError::new(
+            "HISTORY_RECOVERY_INVALID",
+            "recovery terminal event does not match its update",
+        ));
+    }
+    Ok(())
 }

@@ -66,6 +66,18 @@ fn completed_update(run_id: &str) -> TerminalUpdate {
     .unwrap()
 }
 
+fn failed_update(run_id: &str) -> TerminalUpdate {
+    TerminalUpdate::new(
+        run_id,
+        RunStatus::Failed,
+        at(10),
+        None,
+        Some("INFRASTRUCTURE_FAILURE".to_string()),
+        Some("runtime infrastructure failed".to_string()),
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn postgres_repository_matches_the_formal_v1_contract() {
     let database_url = std::env::var("RUN_HISTORY_POSTGRES_URL")
@@ -172,6 +184,76 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
         .await
         .unwrap_err();
     assert_eq!(duplicate_error.code(), "HISTORY_WRITE_FAILED");
+
+    let recovery_id = format!("recovery_pg_{suffix}");
+    repo.create_run(new_run(&recovery_id)).await.unwrap();
+    repo.mark_running(&recovery_id, at(1)).await.unwrap();
+    let created = event(&recovery_id, RunEventType::RunCreated, 1, None);
+    repo.append_events(std::slice::from_ref(&created))
+        .await
+        .unwrap();
+    let failed = RunEvent::error_at(
+        RunEventType::RunFailed,
+        2,
+        scope(&recovery_id, None),
+        at(10),
+        "INFRASTRUCTURE_FAILURE",
+        "runtime infrastructure failed",
+        json!({}),
+    );
+    let recovered = repo
+        .recover_run(failed_update(&recovery_id), failed)
+        .await
+        .unwrap();
+    assert_eq!(recovered.seq, 2);
+    assert_eq!(
+        repo.get_run(&recovery_id).await.unwrap().unwrap().status,
+        RunStatus::Failed
+    );
+    assert_eq!(
+        repo.list_events_after(&recovery_id, 0, 100)
+            .await
+            .unwrap()
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+
+    let conflict_id = format!("recovery_conflict_pg_{suffix}");
+    repo.create_run(new_run(&conflict_id)).await.unwrap();
+    repo.mark_running(&conflict_id, at(1)).await.unwrap();
+    repo.append_events(&[event(&conflict_id, RunEventType::RunCreated, 1, None)])
+        .await
+        .unwrap();
+    repo.append_events(&[event(&conflict_id, RunEventType::RunStarted, 2, None)])
+        .await
+        .unwrap();
+    let proposal = RunEvent::error_at(
+        RunEventType::RunFailed,
+        1,
+        scope(&conflict_id, None),
+        at(10),
+        "INFRASTRUCTURE_FAILURE",
+        "runtime infrastructure failed",
+        json!({}),
+    );
+    let terminal = repo
+        .recover_run(failed_update(&conflict_id), proposal)
+        .await
+        .unwrap();
+    assert_eq!(terminal.seq, 3);
+    assert_eq!(
+        repo.get_run(&conflict_id).await.unwrap().unwrap().status,
+        RunStatus::Failed
+    );
+    assert_eq!(
+        repo.list_events_after(&conflict_id, 0, 100)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
 
     for active_id in ["created_pg", "running_pg"] {
         repo.create_run(new_run(active_id)).await.unwrap();

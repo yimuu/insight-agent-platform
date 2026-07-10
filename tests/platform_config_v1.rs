@@ -30,6 +30,7 @@ runtime:
   replay_ring_capacity: 256
   journal_capacity: 512
   journal_batch_size: 32
+  journal_operation_timeout: 5s
 "#,
     )
 }
@@ -165,6 +166,10 @@ fn zero_capacities_and_durations_are_rejected() {
         ("run_timeout: 5m", "run_timeout: 0s"),
         ("subscriber_capacity: 64", "subscriber_capacity: 0"),
         ("journal_batch_size: 32", "journal_batch_size: 0"),
+        (
+            "journal_operation_timeout: 5s",
+            "journal_operation_timeout: 0s",
+        ),
     ] {
         let yaml = base_yaml("  mode: disabled").replace(from, to);
         let (_directory, path) = write_config(&yaml);
@@ -173,6 +178,17 @@ fn zero_capacities_and_durations_are_rejected() {
             "PLATFORM_RUNTIME_INVALID"
         );
     }
+}
+
+#[test]
+fn journal_batch_must_fit_the_queue() {
+    let yaml =
+        base_yaml("  mode: disabled").replace("journal_capacity: 512", "journal_capacity: 16");
+    let (_directory, path) = write_config(&yaml);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_RUNTIME_INVALID"
+    );
 }
 
 #[test]

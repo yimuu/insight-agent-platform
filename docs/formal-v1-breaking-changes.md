@@ -80,6 +80,8 @@ GET    /v1/runs/{run_id}/events?after_seq=<u64>
 DELETE /v1/runs/{run_id}
 ```
 
+`/health` 在运行时可接受新 Run 时返回 `200/OK`；journal 永久失败或服务进入关停后返回 `503/RUNTIME_UNHEALTHY`。原因是存活但无法可靠记录事件的进程不能继续被负载均衡器视为健康实例。
+
 原型的 Run 列表/过滤端点和 `X-Caller-Service/X-Tenant-Id/X-User-Id` 元数据不属于正式 V1。原因是执行合同不应提前绑定多租户管理面；后续查询/管理 API 可以在独立授权与分页合同下增加。`X-Request-Id` 保留用于关联请求。
 
 请求体仍是 Agent 输入对象本身，不使用 `{input: ...}` 包装。attached POST 在构造 SSE 前完成 JSON 与 Schema 校验，并返回 `X-Run-Id`；detached POST 返回 202。`DELETE` 是唯一显式取消接口且幂等。

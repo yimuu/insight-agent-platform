@@ -73,6 +73,18 @@ fn completed_update(run_id: &str) -> TerminalUpdate {
     .unwrap()
 }
 
+fn failed_update(run_id: &str) -> TerminalUpdate {
+    TerminalUpdate::new(
+        run_id,
+        RunStatus::Failed,
+        at(10),
+        None,
+        Some("INFRASTRUCTURE_FAILURE".to_string()),
+        Some("runtime infrastructure failed".to_string()),
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn sqlite_repository_persists_lifecycle_events_outputs_and_replay() {
     let repo = SqliteRunRepository::in_memory().await.unwrap();
@@ -173,6 +185,86 @@ async fn duplicate_event_sequence_is_rejected_without_partial_batch_insertion() 
     assert_eq!(
         repo.list_events_after(RUN_ID, 0, 100).await.unwrap().len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn recovery_atomically_fills_missing_events_and_terminal_state() {
+    let repo = SqliteRunRepository::in_memory().await.unwrap();
+    repo.create_run(new_run(RUN_ID, RunAttachment::Detached))
+        .await
+        .unwrap();
+    repo.mark_running(RUN_ID, at(1)).await.unwrap();
+    let created = event(RUN_ID, RunEventType::RunCreated, 1, None);
+    repo.append_events(std::slice::from_ref(&created))
+        .await
+        .unwrap();
+    let failed = RunEvent::error_at(
+        RunEventType::RunFailed,
+        2,
+        scope(RUN_ID, None),
+        at(10),
+        "INFRASTRUCTURE_FAILURE",
+        "runtime infrastructure failed",
+        json!({}),
+    );
+
+    let recovered = repo
+        .recover_run(failed_update(RUN_ID), failed)
+        .await
+        .unwrap();
+    assert_eq!(recovered.seq, 2);
+    assert_eq!(
+        repo.get_run(RUN_ID).await.unwrap().unwrap().status,
+        RunStatus::Failed
+    );
+    assert_eq!(
+        repo.list_events_after(RUN_ID, 0, 100)
+            .await
+            .unwrap()
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+}
+
+#[tokio::test]
+async fn recovery_derives_terminal_sequence_from_locked_durable_state() {
+    let repo = SqliteRunRepository::in_memory().await.unwrap();
+    repo.create_run(new_run(RUN_ID, RunAttachment::Detached))
+        .await
+        .unwrap();
+    repo.mark_running(RUN_ID, at(1)).await.unwrap();
+    repo.append_events(&[event(RUN_ID, RunEventType::RunCreated, 1, None)])
+        .await
+        .unwrap();
+    repo.append_events(&[event(RUN_ID, RunEventType::RunStarted, 2, None)])
+        .await
+        .unwrap();
+    let proposal = RunEvent::error_at(
+        RunEventType::RunFailed,
+        1,
+        scope(RUN_ID, None),
+        at(10),
+        "INFRASTRUCTURE_FAILURE",
+        "runtime infrastructure failed",
+        json!({}),
+    );
+
+    let terminal = repo
+        .recover_run(failed_update(RUN_ID), proposal)
+        .await
+        .unwrap();
+    assert_eq!(terminal.seq, 3);
+    assert_eq!(terminal.event_type, RunEventType::RunFailed);
+    assert_eq!(
+        repo.get_run(RUN_ID).await.unwrap().unwrap().status,
+        RunStatus::Failed
+    );
+    assert_eq!(
+        repo.list_events_after(RUN_ID, 0, 100).await.unwrap().len(),
+        3
     );
 }
 

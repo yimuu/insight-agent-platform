@@ -47,7 +47,12 @@ impl RunCoordinator {
         input: Value,
         stop: StopSignal,
     ) -> Result<RunStatus, RunError> {
-        self.execute_inner(new_run, input, stop, Arc::new(RunState::new()), true)
+        self.validate_run(&new_run, &input)?;
+        self.repository
+            .create_run(new_run.clone())
+            .await
+            .map_err(history_error)?;
+        self.execute_managed(new_run, input, stop, Arc::new(RunState::new()))
             .await
     }
 
@@ -58,27 +63,43 @@ impl RunCoordinator {
         stop: StopSignal,
         state: Arc<RunState>,
     ) -> Result<RunStatus, RunError> {
-        self.execute_inner(new_run, input, stop, state, false).await
+        self.validate_run(&new_run, &input)?;
+        self.execute_managed(new_run, input, stop, state).await
     }
 
-    async fn execute_inner(
+    async fn execute_managed(
         &self,
         new_run: NewRun,
         input: Value,
         stop: StopSignal,
         state: Arc<RunState>,
-        create_run: bool,
     ) -> Result<RunStatus, RunError> {
-        self.validate_run(&new_run, &input)?;
-        if create_run {
-            self.repository
-                .create_run(new_run.clone())
-                .await
-                .map_err(history_error)?;
+        match self
+            .execute_inner(&new_run, input, stop, Arc::clone(&state))
+            .await
+        {
+            Ok(status) => Ok(status),
+            Err(error) => {
+                tracing::error!(
+                    run_id = new_run.run_id,
+                    code = error.code(),
+                    "run infrastructure failed; recovering durable terminal state"
+                );
+                self.recover_infrastructure_failure(&state, &new_run).await
+            }
         }
+    }
+
+    async fn execute_inner(
+        &self,
+        new_run: &NewRun,
+        input: Value,
+        stop: StopSignal,
+        state: Arc<RunState>,
+    ) -> Result<RunStatus, RunError> {
         self.events
             .publish(
-                run_scope(&new_run),
+                run_scope(new_run),
                 RunEventType::RunCreated,
                 json!({
                     "status": RunStatus::Created,
@@ -96,7 +117,7 @@ impl RunCoordinator {
         state.start().await?;
         self.events
             .publish(
-                run_scope(&new_run),
+                run_scope(new_run),
                 RunEventType::RunStarted,
                 json!({"status":RunStatus::Running}),
             )
@@ -119,7 +140,7 @@ impl RunCoordinator {
         loop {
             if let Some(reason) = stop.reason() {
                 return self
-                    .finish_error(&state, &new_run, None, RunError::stopped(reason))
+                    .finish_error(&state, new_run, None, RunError::stopped(reason))
                     .await;
             }
             let node = self.agent.nodes.get(&current).ok_or_else(|| {
@@ -128,7 +149,7 @@ impl RunCoordinator {
                     format!("compiled node '{current}' was not found"),
                 )
             })?;
-            let node_scope = run_scope(&new_run).for_node(&node.id);
+            let node_scope = run_scope(new_run).for_node(&node.id);
             self.events
                 .publish(
                     node_scope.clone(),
@@ -142,7 +163,7 @@ impl RunCoordinator {
                 Ok(executor) => executor,
                 Err(error) => {
                     return self
-                        .finish_error(&state, &new_run, Some(&node.id), error)
+                        .finish_error(&state, new_run, Some(&node.id), error)
                         .await;
                 }
             };
@@ -177,13 +198,13 @@ impl RunCoordinator {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     return self
-                        .finish_error(&state, &new_run, Some(&node.id), error)
+                        .finish_error(&state, new_run, Some(&node.id), error)
                         .await;
                 }
             };
             if let Some(reason) = stop.reason() {
                 return self
-                    .finish_error(&state, &new_run, Some(&node.id), RunError::stopped(reason))
+                    .finish_error(&state, new_run, Some(&node.id), RunError::stopped(reason))
                     .await;
             }
 
@@ -204,7 +225,6 @@ impl RunCoordinator {
                 )
                 .await
                 .map_err(event_error)?;
-            self.events.flush().await.map_err(event_error)?;
             context.set_node_output(&node.id, outcome.output);
 
             match outcome.transition {
@@ -218,7 +238,7 @@ impl RunCoordinator {
                 }
                 NodeTransition::Goto(target) => current = target,
                 NodeTransition::Complete(output) => {
-                    return self.complete(&state, &new_run, output).await;
+                    return self.complete(&state, new_run, output).await;
                 }
             }
         }
@@ -246,9 +266,6 @@ impl RunCoordinator {
         run: &NewRun,
         output: RunOutput,
     ) -> Result<RunStatus, RunError> {
-        if !state.try_terminal(RunStatus::Completed).await? {
-            return Ok(state.status().await);
-        }
         let update = TerminalUpdate::new(
             &run.run_id,
             RunStatus::Completed,
@@ -260,7 +277,8 @@ impl RunCoordinator {
         .map_err(|error| RunError::new(error.code(), error.to_string()))?;
         let data = serde_json::to_value(&output)
             .map_err(|_| RunError::new("RUN_OUTPUT_INVALID", "failed to serialize run output"))?;
-        self.events
+        let published = self
+            .events
             .publish_terminal(
                 run_scope(run),
                 RunEventType::RunCompleted,
@@ -271,7 +289,8 @@ impl RunCoordinator {
             )
             .await
             .map_err(event_error)?;
-        Ok(RunStatus::Completed)
+        self.commit_terminal_state(state, run, published, RunStatus::Completed)
+            .await
     }
 
     async fn finish_error(
@@ -298,9 +317,6 @@ impl RunCoordinator {
             "RUN_INTERRUPTED" => (RunStatus::Interrupted, RunEventType::RunInterrupted),
             _ => (RunStatus::Failed, RunEventType::RunFailed),
         };
-        if !state.try_terminal(status).await? {
-            return Ok(state.status().await);
-        }
         let update = TerminalUpdate::new(
             &run.run_id,
             status,
@@ -310,7 +326,8 @@ impl RunCoordinator {
             Some(error.message().to_string()),
         )
         .map_err(|type_error| RunError::new(type_error.code(), type_error.to_string()))?;
-        self.events
+        let published = self
+            .events
             .publish_terminal(
                 run_scope(run),
                 event_type,
@@ -321,7 +338,60 @@ impl RunCoordinator {
             )
             .await
             .map_err(event_error)?;
-        Ok(status)
+        self.commit_terminal_state(state, run, published, status)
+            .await
+    }
+
+    async fn recover_infrastructure_failure(
+        &self,
+        state: &RunState,
+        run: &NewRun,
+    ) -> Result<RunStatus, RunError> {
+        let message = "runtime infrastructure failed";
+        let update = TerminalUpdate::new(
+            &run.run_id,
+            RunStatus::Failed,
+            Utc::now(),
+            None,
+            Some("INFRASTRUCTURE_FAILURE".to_string()),
+            Some(message.to_string()),
+        )
+        .map_err(|error| RunError::new(error.code(), error.to_string()))?;
+        let published = self
+            .events
+            .recover_terminal(
+                run_scope(run),
+                RunEventType::RunFailed,
+                update,
+                "INFRASTRUCTURE_FAILURE",
+                message,
+                json!({}),
+            )
+            .await
+            .map_err(event_error)?;
+        self.commit_terminal_state(state, run, published, RunStatus::Failed)
+            .await
+    }
+
+    async fn commit_terminal_state(
+        &self,
+        state: &RunState,
+        run: &NewRun,
+        published: Option<crate::events::protocol::RunEvent>,
+        expected: RunStatus,
+    ) -> Result<RunStatus, RunError> {
+        let durable_status = if published.is_some() {
+            expected
+        } else {
+            self.repository
+                .get_run(&run.run_id)
+                .await
+                .map_err(history_error)?
+                .ok_or_else(|| RunError::new("RUN_NOT_FOUND", "run not found after terminal race"))?
+                .status
+        };
+        state.try_terminal(durable_status).await?;
+        Ok(durable_status)
     }
 }
 

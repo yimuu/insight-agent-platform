@@ -12,7 +12,7 @@ use std::{
 use chrono::Utc;
 use serde_json::Value;
 use tokio::{
-    sync::{oneshot, Notify, OwnedSemaphorePermit, Semaphore},
+    sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore},
     task::JoinHandle,
     time::{sleep, sleep_until, timeout, Instant},
 };
@@ -108,7 +108,6 @@ struct ActiveRun {
     subscribers: usize,
     grace_generation: u64,
     task: JoinHandle<()>,
-    done: Arc<Notify>,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -120,7 +119,7 @@ struct RunServiceInner {
     capacity: Arc<Semaphore>,
     config: RunServiceConfig,
     active: Mutex<BTreeMap<String, ActiveRun>>,
-    active_changed: Notify,
+    active_changed: watch::Sender<u64>,
     accepting: AtomicBool,
 }
 
@@ -178,7 +177,7 @@ impl RunService {
                 capacity: Arc::new(Semaphore::new(config.max_concurrent_runs)),
                 config,
                 active: Mutex::new(BTreeMap::new()),
-                active_changed: Notify::new(),
+                active_changed: watch::channel(0).0,
                 accepting: AtomicBool::new(true),
             }),
         })
@@ -186,6 +185,10 @@ impl RunService {
 
     pub fn agents(&self) -> &CompiledAgentRegistry {
         &self.inner.agents
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.inner.accepting.load(Ordering::Acquire) && self.inner.events.is_healthy()
     }
 
     pub async fn create_attached(
@@ -202,11 +205,19 @@ impl RunService {
         let live = self.inner.events.subscribe(&run_id).await;
         self.launch(prepared, 1);
         let owner: Arc<dyn LeaseOwner> = self.inner.clone();
-        let lease = Arc::new(SubscriptionLease::new(owner, &run_id));
+        let lease = Arc::new(SubscriptionLease::new(owner, &run_id, true));
         Ok(AttachedRun {
             run_id: run_id.clone(),
             request_id,
-            subscription: RunSubscription::new(run_id, Vec::new(), live, true, 0, lease),
+            subscription: RunSubscription::new(
+                run_id,
+                Vec::new(),
+                Some(live),
+                true,
+                false,
+                0,
+                lease,
+            ),
         })
     }
 
@@ -229,11 +240,11 @@ impl RunService {
         run_id: &str,
         after_seq: u64,
     ) -> Result<RunSubscription, ServiceError> {
-        self.get_run(run_id).await?;
-        let live = self.inner.events.subscribe(run_id).await;
+        let record = self.get_run(run_id).await?;
+        let terminal = record.status.is_terminal();
         let counted = {
             let mut active = lock_active(&self.inner);
-            match active.get_mut(run_id) {
+            match active.get_mut(run_id).filter(|_| !terminal) {
                 Some(run) => {
                     run.subscribers = run.subscribers.saturating_add(1);
                     run.grace_generation = run.grace_generation.wrapping_add(1);
@@ -242,19 +253,34 @@ impl RunService {
                 None => false,
             }
         };
-        let replay = match self.inner.events.replay_after(run_id, after_seq).await {
+        let live = if counted {
+            self.inner.events.subscribe_existing(run_id).await
+        } else {
+            None
+        };
+        let live_counted = counted && live.is_some();
+        if counted && !live_counted {
+            Arc::clone(&self.inner).release_subscription(run_id);
+        }
+        let replay = match self.inner.events.replay_page_after(run_id, after_seq).await {
             Ok(replay) => replay,
             Err(error) => {
-                if counted {
+                if live_counted {
                     Arc::clone(&self.inner).release_subscription(run_id);
                 }
                 return Err(service_event_error(error));
             }
         };
         let owner: Arc<dyn LeaseOwner> = self.inner.clone();
-        let lease = Arc::new(SubscriptionLease::new(owner, run_id));
+        let lease = Arc::new(SubscriptionLease::new(owner, run_id, live_counted));
         Ok(RunSubscription::new(
-            run_id, replay, live, counted, after_seq, lease,
+            run_id,
+            replay.events,
+            live,
+            live_counted && !replay.has_more,
+            replay.has_more,
+            after_seq,
+            lease,
         ))
     }
 
@@ -272,21 +298,30 @@ impl RunService {
         if record.status.is_terminal() {
             return Ok(record);
         }
-        let (stop, done) = {
+        let (stop, mut active_changed) = {
             let active = lock_active(&self.inner);
             let run = active.get(run_id).ok_or_else(|| {
                 ServiceError::new("RUN_CONFLICT", "run is not active in this process")
             })?;
-            (run.stop.clone(), Arc::clone(&run.done))
+            (run.stop.clone(), self.inner.active_changed.subscribe())
         };
-        let notified = done.notified();
         stop.request(StopReason::Cancelled);
-        let current = self.get_run(run_id).await?;
-        if current.status.is_terminal() {
-            return Ok(current);
+        loop {
+            let current = self.get_run(run_id).await?;
+            if current.status.is_terminal() {
+                return Ok(current);
+            }
+            if !lock_active(&self.inner).contains_key(run_id) {
+                return Err(ServiceError::new(
+                    "RUN_CONFLICT",
+                    "run execution ended without a durable terminal state",
+                ));
+            }
+            active_changed
+                .changed()
+                .await
+                .map_err(|_| ServiceError::new("RUN_CONFLICT", "run completion channel closed"))?;
         }
-        notified.await;
-        self.get_run(run_id).await
     }
 
     pub async fn reconcile_startup(&self) -> Result<u64, ServiceError> {
@@ -299,6 +334,7 @@ impl RunService {
 
     pub async fn shutdown(&self, deadline: Duration) -> Result<(), ServiceError> {
         self.inner.accepting.store(false, Ordering::Release);
+        let mut active_changed = self.inner.active_changed.subscribe();
         let stops = {
             let active = lock_active(&self.inner);
             active
@@ -318,16 +354,18 @@ impl RunService {
         }
         let wait_for_empty = async {
             loop {
-                let changed = self.inner.active_changed.notified();
                 if lock_active(&self.inner).is_empty() {
                     break;
                 }
-                changed.await;
+                active_changed.changed().await.map_err(|_| {
+                    ServiceError::new("SHUTDOWN_FAILED", "run completion channel closed")
+                })?;
             }
+            Ok::<(), ServiceError>(())
         };
         timeout(deadline, wait_for_empty)
             .await
-            .map_err(|_| ServiceError::new("SHUTDOWN_TIMEOUT", "run shutdown timed out"))?;
+            .map_err(|_| ServiceError::new("SHUTDOWN_TIMEOUT", "run shutdown timed out"))??;
         Ok(())
     }
 
@@ -338,6 +376,13 @@ impl RunService {
         request: RequestMetadata,
         attachment: RunAttachment,
     ) -> Result<PreparedRun, ServiceError> {
+        if !self.inner.events.is_healthy() {
+            self.inner.accepting.store(false, Ordering::Release);
+            return Err(ServiceError::new(
+                "RUN_SERVICE_UNAVAILABLE",
+                "event journal is unavailable",
+            ));
+        }
         if !self.inner.accepting.load(Ordering::Acquire) {
             return Err(ServiceError::new(
                 "RUN_SERVICE_STOPPING",
@@ -377,6 +422,7 @@ impl RunService {
             .create_run(new_run.clone())
             .await
             .map_err(service_history_error)?;
+        self.inner.events.open_run(&new_run.run_id).await;
         let (stop, signal) = stop_pair();
         Ok(PreparedRun {
             agent,
@@ -401,8 +447,6 @@ impl RunService {
         } = prepared;
         let run_id = new_run.run_id.clone();
         let attachment = new_run.attachment;
-        let done = Arc::new(Notify::new());
-        let task_done = Arc::clone(&done);
         let task_stop = stop.clone();
         let task_state = Arc::clone(&state);
         let inner = Arc::clone(&self.inner);
@@ -429,16 +473,21 @@ impl RunService {
                 }
             };
             if let Err(error) = result {
+                inner.accepting.store(false, Ordering::Release);
                 tracing::error!(
                     run_id = task_run_id,
                     code = error.code(),
                     "run coordinator failed"
                 );
             }
+            if !inner.events.is_healthy() {
+                inner.accepting.store(false, Ordering::Release);
+            }
             let removed = lock_active(&inner).remove(&task_run_id);
             drop(removed);
-            task_done.notify_waiters();
-            inner.active_changed.notify_waiters();
+            inner
+                .active_changed
+                .send_modify(|revision| *revision = revision.wrapping_add(1));
         });
         lock_active(&self.inner).insert(
             run_id,
@@ -449,7 +498,6 @@ impl RunService {
                 subscribers,
                 grace_generation: 0,
                 task,
-                done,
                 _permit: permit,
             },
         );

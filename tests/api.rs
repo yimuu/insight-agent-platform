@@ -121,10 +121,11 @@ async fn fixture(auth: ApiAuth, capacity: usize) -> (Router, RunService) {
     let events = EventHub::new(
         Arc::clone(&repository_trait),
         EventHubConfig {
-            ring_capacity: 32,
+            ring_capacity: 4,
             subscriber_capacity: 16,
             journal_capacity: 32,
-            journal_batch_size: 8,
+            journal_batch_size: 4,
+            operation_timeout: Duration::from_secs(1),
         },
     );
     let agents = CompiledAgentRegistry::new(vec![
@@ -192,7 +193,7 @@ fn sse_data(body: &[u8]) -> Vec<Value> {
 async fn health_is_public_while_v1_honors_explicit_bearer_auth() {
     let auth = ApiAuth::bearer_token("super-secret-token");
     assert!(!format!("{auth:?}").contains("super-secret-token"));
-    let (app, _) = fixture(auth, 4).await;
+    let (app, service) = fixture(auth, 4).await;
 
     let health = app
         .clone()
@@ -216,9 +217,16 @@ async fn health_is_public_while_v1_honors_explicit_bearer_auth() {
         "Bearer super-secret-token".parse().unwrap(),
     );
     assert_eq!(
-        app.oneshot(authorized).await.unwrap().status(),
+        app.clone().oneshot(authorized).await.unwrap().status(),
         StatusCode::OK
     );
+    service.shutdown(Duration::from_secs(1)).await.unwrap();
+    let degraded = app
+        .oneshot(request(Method::GET, "/health", None))
+        .await
+        .unwrap();
+    assert_eq!(degraded.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json_body(degraded).await["code"], "RUNTIME_UNHEALTHY");
 }
 
 #[tokio::test]
@@ -358,6 +366,22 @@ async fn completed_events_replay_after_seq_and_invalid_cursors_use_json_errors()
     let created = json_body(created).await;
     let run_id = created["data"]["run_id"].as_str().unwrap();
     wait_for_status(&service, run_id, RunStatus::Completed).await;
+
+    let first_page = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/v1/runs/{run_id}/events?after_seq=0"),
+            None,
+        ))
+        .await
+        .unwrap();
+    let first_page = to_bytes(first_page.into_body(), usize::MAX).await.unwrap();
+    let first_page = sse_data(&first_page);
+    assert_eq!(first_page.len(), 5);
+    assert_eq!(first_page[3]["seq"], 4);
+    assert_eq!(first_page[4]["code"], "REPLAY_TRUNCATED");
+    assert_eq!(first_page[4]["data"]["after_seq"], 4);
 
     let replay = app
         .clone()

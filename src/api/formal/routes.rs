@@ -55,14 +55,32 @@ pub fn build_router(state: FormalApiState) -> Router {
                     Ok::<Response, ApiError>(next.run(request).await)
                 }
             },
-        ))
-        .with_state(state);
+        ));
 
-    Router::new().route("/health", get(health)).merge(v1)
+    Router::new()
+        .route("/health", get(health))
+        .merge(v1)
+        .with_state(state)
 }
 
-async fn health() -> Json<ApiResponse<Value>> {
-    Json(ApiResponse::ok(json!({"status":"ok"})))
+async fn health(State(state): State<Arc<FormalApiState>>) -> Response {
+    if state.service.is_healthy() {
+        (
+            StatusCode::OK,
+            Json(ApiResponse::ok(json!({"status":"ok"}))),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiResponse {
+                code: "RUNTIME_UNHEALTHY",
+                message: "runtime is unhealthy",
+                data: json!({"status":"degraded"}),
+            }),
+        )
+            .into_response()
+    }
 }
 
 #[derive(Debug, Serialize)]

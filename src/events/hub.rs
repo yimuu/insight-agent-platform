@@ -3,10 +3,14 @@ use std::{
     error::Error,
     fmt,
     sync::Arc,
+    time::Duration,
 };
 
 use serde_json::Value;
-use tokio::sync::{broadcast, Mutex};
+use tokio::{
+    sync::{broadcast, Mutex},
+    time::timeout,
+};
 
 use crate::history::{
     repository::{HistoryError, RunRepository},
@@ -24,13 +28,18 @@ pub struct EventHubConfig {
     pub subscriber_capacity: usize,
     pub journal_capacity: usize,
     pub journal_batch_size: usize,
+    pub operation_timeout: Duration,
 }
 
 #[derive(Debug)]
 pub enum EventError {
     SubscriberLagged { last_seq: u64 },
+    ReplayTruncated { last_seq: u64 },
+    ReplayFinished,
     SubscriptionClosed,
     JournalClosed,
+    JournalCapacityExceeded,
+    JournalOperationTimeout,
     SequenceExhausted,
     History(HistoryError),
 }
@@ -39,8 +48,12 @@ impl EventError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::SubscriberLagged { .. } => "SUBSCRIBER_LAGGED",
+            Self::ReplayTruncated { .. } => "REPLAY_TRUNCATED",
+            Self::ReplayFinished => "REPLAY_FINISHED",
             Self::SubscriptionClosed => "SUBSCRIPTION_CLOSED",
             Self::JournalClosed => "JOURNAL_CLOSED",
+            Self::JournalCapacityExceeded => "JOURNAL_CAPACITY_EXCEEDED",
+            Self::JournalOperationTimeout => "JOURNAL_OPERATION_TIMEOUT",
             Self::SequenceExhausted => "EVENT_SEQUENCE_EXHAUSTED",
             Self::History(error) => error.code(),
         }
@@ -54,8 +67,17 @@ impl fmt::Display for EventError {
                 formatter,
                 "subscriber lagged; reconnect after sequence {last_seq}"
             ),
+            Self::ReplayTruncated { last_seq } => write!(
+                formatter,
+                "replay page is full; reconnect after sequence {last_seq}"
+            ),
+            Self::ReplayFinished => formatter.write_str("event replay finished"),
             Self::SubscriptionClosed => formatter.write_str("event subscription closed"),
             Self::JournalClosed => formatter.write_str("event journal closed"),
+            Self::JournalCapacityExceeded => formatter.write_str("event journal queue is full"),
+            Self::JournalOperationTimeout => {
+                formatter.write_str("event journal operation timed out")
+            }
             Self::SequenceExhausted => formatter.write_str("event sequence exhausted"),
             Self::History(error) => error.fmt(formatter),
         }
@@ -89,6 +111,7 @@ struct EventHubInner {
     states: Mutex<HashMap<String, Arc<Mutex<EventRunState>>>>,
     ring_capacity: usize,
     subscriber_capacity: usize,
+    operation_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -98,18 +121,21 @@ pub struct EventHub {
 
 impl EventHub {
     pub fn new(repository: Arc<dyn RunRepository>, config: EventHubConfig) -> Self {
+        let ring_capacity = config.ring_capacity.max(1);
         let journal = EventJournal::new(
             Arc::clone(&repository),
             config.journal_capacity,
             config.journal_batch_size,
+            config.operation_timeout,
         );
         Self {
             inner: Arc::new(EventHubInner {
                 repository,
                 journal,
                 states: Mutex::new(HashMap::new()),
-                ring_capacity: config.ring_capacity.max(1),
+                ring_capacity,
                 subscriber_capacity: config.subscriber_capacity.max(1),
+                operation_timeout: config.operation_timeout,
             }),
         }
     }
@@ -162,14 +188,39 @@ impl EventHub {
         message: impl Into<String>,
         data: Value,
     ) -> Result<Option<RunEvent>, EventError> {
-        let state = self.run_state(&scope.run_id).await;
-        let mut state = state.lock().await;
+        let run_id = scope.run_id.clone();
+        let state_handle = self.run_state(&run_id).await;
+        let mut state = state_handle.lock().await;
         ensure_sequence_available(&state)?;
         let event = RunEvent::error(event_type, state.next_seq, scope, code, message, data);
         if !self.inner.journal.finish(update, event.clone()).await? {
-            return Ok(None);
+            let expected_seq = state.next_seq;
+            let existing = timeout(
+                self.inner.operation_timeout,
+                self.inner
+                    .repository
+                    .list_events_after(&run_id, expected_seq.saturating_sub(1), 1),
+            )
+            .await
+            .map_err(|_| EventError::JournalOperationTimeout)??;
+            if let Some(existing) = existing
+                .into_iter()
+                .next()
+                .filter(|existing| existing.seq == expected_seq && is_terminal(existing.event_type))
+            {
+                commit_live_event(&mut state, existing, self.inner.ring_capacity);
+                drop(state);
+                self.remove_run_state(&run_id, &state_handle).await;
+                return Ok(None);
+            }
+            return Err(EventError::History(HistoryError::new(
+                "HISTORY_TERMINAL_EVENT_MISSING",
+                "run is terminal but its authoritative terminal event is missing",
+            )));
         }
         commit_live_event(&mut state, event.clone(), self.inner.ring_capacity);
+        drop(state);
+        self.remove_run_state(&run_id, &state_handle).await;
         Ok(Some(event))
     }
 
@@ -179,6 +230,48 @@ impl EventHub {
 
     pub async fn flush(&self) -> Result<(), EventError> {
         self.inner.journal.flush().await
+    }
+
+    pub async fn recover_terminal(
+        &self,
+        scope: RunEventScope,
+        event_type: RunEventType,
+        update: TerminalUpdate,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        data: Value,
+    ) -> Result<Option<RunEvent>, EventError> {
+        let code = code.into();
+        let message = message.into();
+        match self
+            .publish_terminal(
+                scope.clone(),
+                event_type,
+                update.clone(),
+                code.clone(),
+                message.clone(),
+                data.clone(),
+            )
+            .await
+        {
+            Ok(event) => return Ok(event),
+            Err(EventError::SequenceExhausted) => return Err(EventError::SequenceExhausted),
+            Err(_) => {}
+        }
+
+        self.inner.journal.close_and_wait().await?;
+
+        let run_id = scope.run_id.clone();
+        let state_handle = self.run_state(&run_id).await;
+        let mut state = state_handle.lock().await;
+        ensure_sequence_available(&state)?;
+        let event = RunEvent::error(event_type, state.next_seq, scope, code, message, data);
+        let authoritative = self.inner.repository.recover_run(update, event).await?;
+        self.reconcile_durable_through(&run_id, &mut state, &authoritative)
+            .await?;
+        drop(state);
+        self.remove_run_state(&run_id, &state_handle).await;
+        Ok((authoritative.event_type == event_type).then_some(authoritative))
     }
 
     pub async fn subscribe(&self, run_id: &str) -> EventSubscription {
@@ -191,16 +284,46 @@ impl EventHub {
         }
     }
 
+    pub async fn open_run(&self, run_id: &str) {
+        self.run_state(run_id).await;
+    }
+
+    pub async fn subscribe_existing(&self, run_id: &str) -> Option<EventSubscription> {
+        let state = self.inner.states.lock().await.get(run_id).cloned()?;
+        let receiver = state.lock().await.live.subscribe();
+        Some(EventSubscription {
+            receiver,
+            last_seq: 0,
+            closed: false,
+        })
+    }
+
+    pub async fn retained_run_count(&self) -> usize {
+        self.inner.states.lock().await.len()
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.inner.journal.is_healthy()
+    }
+
     pub async fn replay_after(
         &self,
         run_id: &str,
         after_seq: u64,
     ) -> Result<Vec<RunEvent>, EventError> {
-        self.inner.journal.flush().await?;
+        Ok(self.replay_page_after(run_id, after_seq).await?.events)
+    }
+
+    pub async fn replay_page_after(
+        &self,
+        run_id: &str,
+        after_seq: u64,
+    ) -> Result<ReplayPage, EventError> {
+        let limit = self.inner.ring_capacity.saturating_add(1);
         let durable = self
             .inner
             .repository
-            .list_events_after(run_id, after_seq, usize::MAX)
+            .list_events_after(run_id, after_seq, limit)
             .await?;
         let active_state = self.inner.states.lock().await.get(run_id).cloned();
         let in_memory = match active_state {
@@ -218,7 +341,12 @@ impl EventHub {
         for event in durable.into_iter().chain(in_memory) {
             merged.insert(event.seq, event);
         }
-        Ok(merged.into_values().collect())
+        let has_more = merged.len() > self.inner.ring_capacity;
+        let events = merged
+            .into_values()
+            .take(self.inner.ring_capacity)
+            .collect();
+        Ok(ReplayPage { events, has_more })
     }
 
     async fn run_state(&self, run_id: &str) -> Arc<Mutex<EventRunState>> {
@@ -232,6 +360,81 @@ impl EventHub {
             }))
         }))
     }
+
+    async fn remove_run_state(&self, run_id: &str, expected: &Arc<Mutex<EventRunState>>) {
+        let mut states = self.inner.states.lock().await;
+        if states
+            .get(run_id)
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+        {
+            states.remove(run_id);
+        }
+    }
+
+    async fn reconcile_durable_through(
+        &self,
+        run_id: &str,
+        state: &mut EventRunState,
+        terminal: &RunEvent,
+    ) -> Result<(), EventError> {
+        let missing = terminal
+            .seq
+            .checked_sub(state.next_seq)
+            .and_then(|difference| difference.checked_add(1))
+            .ok_or_else(|| {
+                EventError::History(HistoryError::new(
+                    "HISTORY_RECOVERY_DIVERGED",
+                    "authoritative terminal sequence precedes live state",
+                ))
+            })?;
+        if missing > 2 {
+            return Err(EventError::History(HistoryError::new(
+                "HISTORY_RECOVERY_DIVERGED",
+                "too many durable events were missing from live state",
+            )));
+        }
+        let durable = timeout(
+            self.inner.operation_timeout,
+            self.inner.repository.list_events_after(
+                run_id,
+                state.next_seq.saturating_sub(1),
+                usize::try_from(missing).unwrap_or(2),
+            ),
+        )
+        .await
+        .map_err(|_| EventError::JournalOperationTimeout)??;
+        let mut expected_seq = state.next_seq;
+        for event in &durable {
+            if event.seq != expected_seq {
+                return Err(EventError::History(HistoryError::new(
+                    "HISTORY_RECOVERY_GAP",
+                    "durable event sequence diverged during recovery",
+                )));
+            }
+            expected_seq = expected_seq.checked_add(1).ok_or_else(|| {
+                EventError::History(HistoryError::new(
+                    "HISTORY_DATA_INVALID",
+                    "durable event sequence overflowed",
+                ))
+            })?;
+        }
+        if durable.last() != Some(terminal) {
+            return Err(EventError::History(HistoryError::new(
+                "HISTORY_TERMINAL_EVENT_MISMATCH",
+                "persisted final event does not match authoritative terminal event",
+            )));
+        }
+        for event in durable {
+            commit_live_event(state, event, self.inner.ring_capacity);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplayPage {
+    pub events: Vec<RunEvent>,
+    pub has_more: bool,
 }
 
 fn commit_live_event(state: &mut EventRunState, event: RunEvent, ring_capacity: usize) {
@@ -249,6 +452,16 @@ fn ensure_sequence_available(state: &EventRunState) -> Result<(), EventError> {
     } else {
         Ok(())
     }
+}
+
+fn is_terminal(event_type: RunEventType) -> bool {
+    matches!(
+        event_type,
+        RunEventType::RunCompleted
+            | RunEventType::RunFailed
+            | RunEventType::RunCancelled
+            | RunEventType::RunInterrupted
+    )
 }
 
 pub struct EventSubscription {

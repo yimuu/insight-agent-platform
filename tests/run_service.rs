@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -117,6 +117,7 @@ struct CountingRepository {
     events: Mutex<BTreeMap<String, Vec<RunEvent>>>,
     outputs: Mutex<Vec<NodeOutputRecord>>,
     creates: AtomicUsize,
+    fail_appends: AtomicBool,
 }
 
 #[async_trait]
@@ -160,6 +161,12 @@ impl RunRepository for CountingRepository {
     }
 
     async fn append_events(&self, events: &[RunEvent]) -> Result<(), HistoryError> {
+        if self.fail_appends.load(Ordering::SeqCst) {
+            return Err(HistoryError::new(
+                "SYNTHETIC_APPEND_FAILURE",
+                "synthetic append failure",
+            ));
+        }
         let mut stored = self.events.lock().await;
         for event in events {
             stored
@@ -201,6 +208,22 @@ impl RunRepository for CountingRepository {
             .or_default()
             .push(event);
         Ok(true)
+    }
+
+    async fn recover_run(
+        &self,
+        update: TerminalUpdate,
+        mut terminal: RunEvent,
+    ) -> Result<RunEvent, HistoryError> {
+        terminal.seq = self
+            .events
+            .lock()
+            .await
+            .get(&update.run_id)
+            .and_then(|events| events.last())
+            .map_or(1, |event| event.seq + 1);
+        self.finish_run(update, terminal.clone()).await?;
+        Ok(terminal)
     }
 
     async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, HistoryError> {
@@ -270,6 +293,7 @@ async fn service(max_concurrent_runs: usize) -> (RunService, Arc<CountingReposit
         events: Mutex::new(BTreeMap::new()),
         outputs: Mutex::new(Vec::new()),
         creates: AtomicUsize::new(0),
+        fail_appends: AtomicBool::new(false),
     });
     let repository_trait: Arc<dyn RunRepository> = repository.clone();
     let events = EventHub::new(
@@ -279,6 +303,7 @@ async fn service(max_concurrent_runs: usize) -> (RunService, Arc<CountingReposit
             subscriber_capacity: 8,
             journal_capacity: 32,
             journal_batch_size: 8,
+            operation_timeout: Duration::from_secs(1),
         },
     );
     let agents = CompiledAgentRegistry::new(vec![
@@ -363,6 +388,25 @@ async fn detached_run_completes_without_any_subscriber() {
 }
 
 #[tokio::test]
+async fn permanent_journal_failure_rejects_later_runs_and_marks_service_unhealthy() {
+    let (service, repository) = service(2).await;
+    repository.fail_appends.store(true, Ordering::SeqCst);
+    let first = service
+        .create_detached("fast", json!({}), RequestMetadata::default())
+        .await
+        .unwrap();
+    wait_for_status(&service, &first.run_id, RunStatus::Failed).await;
+    assert!(!service.is_healthy());
+
+    let error = service
+        .create_detached("fast", json!({}), RequestMetadata::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "RUN_SERVICE_UNAVAILABLE");
+    assert_eq!(repository.creates.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn cancellation_is_idempotent_and_does_not_rewrite_completed_runs() {
     let (service, _) = service(3).await;
     let running = service
@@ -372,7 +416,11 @@ async fn cancellation_is_idempotent_and_does_not_rewrite_completed_runs() {
     wait_for_status(&service, &running.run_id, RunStatus::Running).await;
 
     assert_eq!(
-        service.cancel(&running.run_id).await.unwrap().status,
+        tokio::time::timeout(Duration::from_secs(1), service.cancel(&running.run_id))
+            .await
+            .expect("cancellation completion notification must not be lost")
+            .unwrap()
+            .status,
         RunStatus::Cancelled
     );
     assert_eq!(
@@ -446,7 +494,13 @@ async fn startup_reconciliation_and_shutdown_use_distinct_terminal_reasons() {
     wait_for_status(&service, &attached_id, RunStatus::Running).await;
     wait_for_status(&service, &detached.run_id, RunStatus::Running).await;
 
-    service.shutdown(Duration::from_secs(1)).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        service.shutdown(Duration::from_secs(1)),
+    )
+    .await
+    .expect("shutdown completion notification must not be lost")
+    .unwrap();
 
     assert_eq!(
         service.get_run(&attached_id).await.unwrap().status,

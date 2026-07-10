@@ -29,6 +29,7 @@ pub(crate) fn response_stream(
                     }
                 }
             }
+            Err(crate::events::hub::EventError::ReplayFinished) => None,
             Err(error) => {
                 tracing::debug!(
                     run_id = subscription.run_id,
@@ -36,7 +37,18 @@ pub(crate) fn response_stream(
                     last_seq = subscription.last_seq(),
                     "formal SSE subscription closed"
                 );
-                None
+                match transport_error(error.code(), subscription.last_seq()) {
+                    Ok(event) => Some((Ok(event), None)),
+                    Err(encoding_error) => {
+                        tracing::error!(
+                            run_id = subscription.run_id,
+                            code = "SSE_ENCODE_FAILED",
+                            error = %encoding_error,
+                            "formal SSE transport error encoding failed"
+                        );
+                        None
+                    }
+                }
             }
         }
     });
@@ -45,6 +57,16 @@ pub(crate) fn response_stream(
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     )
+}
+
+fn transport_error(code: &'static str, after_seq: u64) -> Result<Event, axum::Error> {
+    Event::default()
+        .event("transport.error")
+        .json_data(serde_json::json!({
+            "code": code,
+            "message": "event stream closed; reconnect with after_seq",
+            "data": {"after_seq": after_seq},
+        }))
 }
 
 fn encode_event(event: &RunEvent) -> Result<Event, axum::Error> {

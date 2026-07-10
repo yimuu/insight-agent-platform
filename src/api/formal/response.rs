@@ -85,6 +85,11 @@ impl From<ServiceError> for ApiError {
                 "RUN_CONFLICT",
                 "run request conflicts with current runtime state",
             ),
+            "RUN_SERVICE_UNAVAILABLE" => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "RUN_SERVICE_UNAVAILABLE",
+                "run service is unavailable",
+            ),
             "UPSTREAM_FAILURE" => Self::new(
                 StatusCode::BAD_GATEWAY,
                 "UPSTREAM_FAILURE",

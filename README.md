@@ -68,7 +68,7 @@ cp .env.example .env
 cargo run
 ```
 
-默认配置只监听 `127.0.0.1:3000`，并显式关闭鉴权。`/health` 始终公开；`/v1` 可切换到从环境变量读取的 Bearer token：
+默认配置只监听 `127.0.0.1:3000`，并显式关闭鉴权。`/health` 始终公开；运行时可接受请求时返回 `200/OK`，journal 永久失败或服务关停后返回 `503/RUNTIME_UNHEALTHY`。`/v1` 可切换到从环境变量读取的 Bearer token：
 
 ```yaml
 version: 1
@@ -95,6 +95,7 @@ runtime:
   replay_ring_capacity: 512
   journal_capacity: 1024
   journal_batch_size: 32
+  journal_operation_timeout: 30s
 ```
 
 `agents.enabled` 默认是空集合，不会意外暴露目录中的 Agent。相对路径从平台配置文件所在目录解析。未知字段、零容量、零超时、缺失文件和缺失/空密钥都会阻止启动。
@@ -206,7 +207,7 @@ curl --no-buffer 'http://127.0.0.1:3000/v1/runs/run_xxx/events?after_seq=3'
 curl --silent --request DELETE http://127.0.0.1:3000/v1/runs/run_xxx
 ```
 
-`DELETE` 幂等：活动 Run 返回取消后的记录，已终止 Run 原样返回。客户端应保存最后处理成功的 `seq`，重连时把它作为 `after_seq`；服务先补发持久事件，再接入活动事件，不产生重复序号。
+`DELETE` 幂等：活动 Run 返回取消后的记录，已终止 Run 原样返回。客户端应保存最后处理成功的 `seq`，重连时把它作为 `after_seq`；服务分批补发有界数量的持久事件，再接入活动事件，不产生重复序号。若单批尚未追平或订阅落后，服务发送不带 `id/seq` 的 `transport.error`，其中 `data.after_seq` 是下一次重连游标。
 
 以下命令可在默认开发配置下完整验证确定性 action-only 路径（需要 `jq`）：
 
@@ -243,7 +244,7 @@ RUN_HISTORY_POSTGRES_URL='postgres://insight:insight@127.0.0.1:5433/insight_agen
   cargo test --test history_postgres -- --nocapture
 ```
 
-正式 V1 不存储原始输入，只保存顶层键和序列化字节数摘要。事件与终态通过 journal 持久化屏障保证顺序；进程启动时遗留的 `created/running` 记录会被标记为 `interrupted`，V1 不恢复工作。
+正式 V1 不存储原始输入，只保存顶层键和序列化字节数摘要。journal 只有在数据库确认事件持久化后才向订阅者广播；单次数据库操作受 `journal_operation_timeout` 限制。失败时先停止 journal worker，恢复事务锁定 Run，并基于持久化的 `MAX(seq)` 原子派生终态序号；这也能判定超时发生在 `COMMIT` 附近时的实际结果。journal 永久关闭后拒绝新 Run。进程启动时遗留的 `created/running` 记录会被标记为 `interrupted`，V1 不恢复工作。
 
 ## 示例
 
