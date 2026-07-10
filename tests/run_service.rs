@@ -13,8 +13,8 @@ use handlebars::Handlebars;
 use insight_agent_platform::{
     dsl::{
         compiled::{
-            CompiledAgent, CompiledNode, NodeCompilation, NodeControl, NodeOutcome, NodeTransition,
-            RunOutput,
+            CompiledAgent, CompiledNode, ExecutionPlan, NodeCompilation, NodeControl, NodeOutcome,
+            NodeTransition, RunOutput,
         },
         compiler::CompileContext,
         CompileError, EmitPolicy,
@@ -102,6 +102,7 @@ fn agent(id: &str, behavior: ServiceBehavior) -> Arc<CompiledAgent> {
         terminal: true,
         control: NodeControl::Ordinary,
     };
+    let nodes = BTreeMap::from([("work".to_string(), node)]);
     Arc::new(CompiledAgent {
         id: id.to_string(),
         name: id.to_string(),
@@ -109,7 +110,8 @@ fn agent(id: &str, behavior: ServiceBehavior) -> Arc<CompiledAgent> {
         version_hash: format!("sha256:{id}"),
         input_schema: Arc::new(JSONSchema::compile(&json!({"type":"object"})).unwrap()),
         entry: "work".to_string(),
-        nodes: BTreeMap::from([("work".to_string(), node)]),
+        execution_plan: ExecutionPlan::sequential("work", nodes.keys().cloned()),
+        nodes,
         templates: Arc::new(Handlebars::new()),
     })
 }

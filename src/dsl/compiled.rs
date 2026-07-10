@@ -47,6 +47,51 @@ pub enum NodeControl {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeRegion {
+    Linear,
+    Branch { fork_id: String, branch_id: String },
+    Join { fork_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchPlan {
+    pub branch_id: String,
+    pub entry: String,
+    pub nodes: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkPlan {
+    pub fork_id: String,
+    pub join_id: String,
+    pub branches: BTreeMap<String, BranchPlan>,
+    pub policy: JoinPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionPlan {
+    pub entry: String,
+    pub forks: BTreeMap<String, ForkPlan>,
+    pub node_regions: BTreeMap<String, NodeRegion>,
+}
+
+impl ExecutionPlan {
+    pub fn sequential(
+        entry: impl Into<String>,
+        node_ids: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            entry: entry.into(),
+            forks: BTreeMap::new(),
+            node_regions: node_ids
+                .into_iter()
+                .map(|node_id| (node_id, NodeRegion::Linear))
+                .collect(),
+        }
+    }
+}
+
 pub struct NodeCompilation {
     pub body: CompiledBody,
     pub edges: Vec<String>,
@@ -93,6 +138,7 @@ pub struct CompiledAgent {
     pub input_schema: Arc<JSONSchema>,
     pub entry: String,
     pub nodes: BTreeMap<String, CompiledNode>,
+    pub execution_plan: ExecutionPlan,
     pub templates: Arc<Handlebars<'static>>,
 }
 
@@ -106,6 +152,10 @@ impl fmt::Debug for CompiledAgent {
             .field("version_hash", &self.version_hash)
             .field("entry", &self.entry)
             .field("node_ids", &self.nodes.keys().collect::<Vec<_>>())
+            .field(
+                "fork_ids",
+                &self.execution_plan.forks.keys().collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }

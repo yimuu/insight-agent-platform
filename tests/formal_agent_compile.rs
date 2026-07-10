@@ -3,7 +3,10 @@ use std::{collections::BTreeSet, fmt, time::Duration};
 use async_trait::async_trait;
 use futures::stream;
 use insight_agent_platform::{
-    dsl::compiler::{AgentCompiler, CompileLimits},
+    dsl::{
+        compiled::NodeRegion,
+        compiler::{AgentCompiler, CompileLimits},
+    },
     nodes::default_node_registries,
     resources::{
         actions::{Action, ActionContext, ActionDescriptor, ActionRegistry},
@@ -179,5 +182,11 @@ nodes:
     assert!(agent.nodes.contains_key("medical"));
     assert!(agent.nodes.contains_key("general"));
     assert!(agent.nodes.contains_key("result"));
+    assert!(agent.execution_plan.forks.is_empty());
+    assert!(agent
+        .execution_plan
+        .node_regions
+        .values()
+        .all(|region| region == &NodeRegion::Linear));
     assert!(agent.version_hash.starts_with("sha256:"));
 }

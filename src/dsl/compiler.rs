@@ -18,8 +18,10 @@ use crate::{
 
 use super::{
     compiled::{CompiledAgent, CompiledNode, NextPolicy},
-    graph::validate_graph,
-    parse_raw_agent, CompileError, EmitPolicy,
+    graph::{validate_graph_structure, validate_references},
+    parse_raw_agent,
+    plan::compile_execution_plan,
+    CompileError, EmitPolicy,
 };
 
 #[derive(Debug, Clone)]
@@ -262,7 +264,9 @@ impl AgentCompiler {
             );
         }
 
-        validate_graph(&raw.entry, &nodes)?;
+        validate_graph_structure(&raw.entry, &nodes)?;
+        let execution_plan = compile_execution_plan(&raw.entry, &nodes, self.limits)?;
+        validate_references(&raw.entry, &nodes)?;
         let version_hash = agent_hash(&raw, context.resolved_prompts())?;
         Ok(CompiledAgent {
             id: raw.id,
@@ -272,6 +276,7 @@ impl AgentCompiler {
             input_schema,
             entry: raw.entry,
             nodes,
+            execution_plan,
             templates: Arc::new(context.into_templates()),
         })
     }

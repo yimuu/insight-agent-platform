@@ -17,8 +17,8 @@ use insight_agent_platform::{
     api::formal::{build_router, ApiAuth, FormalApiState},
     dsl::{
         compiled::{
-            CompiledAgent, CompiledNode, NodeCompilation, NodeControl, NodeOutcome, NodeTransition,
-            RunOutput,
+            CompiledAgent, CompiledNode, ExecutionPlan, NodeCompilation, NodeControl, NodeOutcome,
+            NodeTransition, RunOutput,
         },
         compiler::CompileContext,
         CompileError, EmitPolicy,
@@ -97,6 +97,7 @@ fn agent(id: &str, behavior: ApiBehavior) -> Arc<CompiledAgent> {
         terminal: true,
         control: NodeControl::Ordinary,
     };
+    let nodes = BTreeMap::from([("work".to_string(), node)]);
     Arc::new(CompiledAgent {
         id: id.to_string(),
         name: format!("{id} agent"),
@@ -112,7 +113,8 @@ fn agent(id: &str, behavior: ApiBehavior) -> Arc<CompiledAgent> {
             .unwrap(),
         ),
         entry: "work".to_string(),
-        nodes: BTreeMap::from([("work".to_string(), node)]),
+        execution_plan: ExecutionPlan::sequential("work", nodes.keys().cloned()),
+        nodes,
         templates: Arc::new(Handlebars::new()),
     })
 }

@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, fs, path::Path, sync::Arc, time::Duration};
 
 use insight_agent_platform::{
     dsl::{
-        compiled::{NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules},
+        compiled::{NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules, NodeRegion},
         compiler::{AgentCompiler, CompileContext, CompileLimits},
         CompileError,
     },
@@ -214,6 +214,12 @@ fn compiles_valid_graph_and_hashes_prompt_contents() {
     assert_eq!(first.version_hash, second.version_hash);
     assert!(first.version_hash.starts_with("sha256:"));
     assert_eq!(first.nodes["first"].edges, vec!["result"]);
+    assert!(first.execution_plan.forks.is_empty());
+    assert!(first
+        .execution_plan
+        .node_regions
+        .values()
+        .all(|region| region == &NodeRegion::Linear));
 
     fs::write(
         root.join("prompts/system.md"),

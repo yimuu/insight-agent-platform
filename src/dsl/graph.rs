@@ -6,6 +6,14 @@ pub fn validate_graph(
     entry: &str,
     nodes: &BTreeMap<String, CompiledNode>,
 ) -> Result<(), CompileError> {
+    validate_graph_structure(entry, nodes)?;
+    validate_references(entry, nodes)
+}
+
+pub fn validate_graph_structure(
+    entry: &str,
+    nodes: &BTreeMap<String, CompiledNode>,
+) -> Result<(), CompileError> {
     if !nodes.contains_key(entry) {
         return Err(CompileError::new(
             "ENTRY_NOT_FOUND",
@@ -54,7 +62,7 @@ pub fn validate_graph(
         }
     }
 
-    validate_references(entry, nodes)
+    Ok(())
 }
 
 fn reject_cycles(entry: &str, nodes: &BTreeMap<String, CompiledNode>) -> Result<(), CompileError> {
@@ -101,7 +109,7 @@ fn reachable_from(entry: &str, nodes: &BTreeMap<String, CompiledNode>) -> BTreeS
     reachable
 }
 
-fn validate_references(
+pub fn validate_references(
     entry: &str,
     nodes: &BTreeMap<String, CompiledNode>,
 ) -> Result<(), CompileError> {

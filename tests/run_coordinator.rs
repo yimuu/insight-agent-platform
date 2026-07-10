@@ -13,8 +13,8 @@ use handlebars::Handlebars;
 use insight_agent_platform::{
     dsl::{
         compiled::{
-            CompiledAgent, CompiledNode, NodeCompilation, NodeControl, NodeOutcome, NodeTransition,
-            RunOutput,
+            CompiledAgent, CompiledNode, ExecutionPlan, NodeCompilation, NodeControl, NodeOutcome,
+            NodeTransition, RunOutput,
         },
         compiler::CompileContext,
         CompileError, EmitPolicy,
@@ -257,6 +257,10 @@ fn node(id: &str, next: Option<&str>, timeout: Duration, behavior: Behavior) -> 
 }
 
 fn agent(nodes: Vec<CompiledNode>, entry: &str) -> Arc<CompiledAgent> {
+    let nodes = nodes
+        .into_iter()
+        .map(|node| (node.id.clone(), node))
+        .collect::<BTreeMap<_, _>>();
     Arc::new(CompiledAgent {
         id: "coordinator-agent".to_string(),
         name: "Coordinator Agent".to_string(),
@@ -264,10 +268,8 @@ fn agent(nodes: Vec<CompiledNode>, entry: &str) -> Arc<CompiledAgent> {
         version_hash: "sha256:coordinator".to_string(),
         input_schema: Arc::new(JSONSchema::compile(&json!({"type":"object"})).unwrap()),
         entry: entry.to_string(),
-        nodes: nodes
-            .into_iter()
-            .map(|node| (node.id.clone(), node))
-            .collect::<BTreeMap<_, _>>(),
+        execution_plan: ExecutionPlan::sequential(entry, nodes.keys().cloned()),
+        nodes,
         templates: Arc::new(Handlebars::new()),
     })
 }
