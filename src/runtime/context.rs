@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::{DateTime, Utc};
+use handlebars::Handlebars;
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone)]
@@ -17,6 +18,7 @@ pub struct RunContext {
     metadata: RunMetadata,
     input: Value,
     node_outputs: BTreeMap<String, Value>,
+    templates: Arc<Handlebars<'static>>,
 }
 
 impl RunContext {
@@ -25,7 +27,13 @@ impl RunContext {
             metadata,
             input,
             node_outputs: BTreeMap::new(),
+            templates: Arc::new(Handlebars::new()),
         }
+    }
+
+    pub fn with_templates(mut self, templates: Arc<Handlebars<'static>>) -> Self {
+        self.templates = templates;
+        self
     }
 
     pub fn metadata(&self) -> &RunMetadata {
@@ -38,6 +46,10 @@ impl RunContext {
 
     pub fn node_output(&self, node_id: &str) -> Option<&Value> {
         self.node_outputs.get(node_id)
+    }
+
+    pub fn templates(&self) -> &Handlebars<'static> {
+        &self.templates
     }
 
     pub fn set_node_output(&mut self, node_id: impl Into<String>, output: Value) {

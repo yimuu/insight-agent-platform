@@ -1,0 +1,315 @@
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use chrono::Utc;
+use insight_agent_platform::{
+    dsl::{
+        compiled::{
+            CompiledNode, NextPolicy, NodeCompilation, NodeEnvelopeRules, NodeOutcome,
+            NodeTransition,
+        },
+        compiler::{AgentCompiler, CompileContext},
+        EmitPolicy,
+    },
+    nodes::{
+        condition::ConditionNode,
+        registry::{NodeExecutor, NodeType, NodeTypeRegistry},
+        template::TemplateNode,
+    },
+    resources::{actions::ActionRegistry, models::ModelRegistry},
+    runtime::{stop_pair, ExecutionControl, RunContext, RunMetadata},
+};
+use serde_json::{json, Value};
+use tempfile::tempdir;
+
+#[derive(Debug, Clone, Copy)]
+struct TestOutput;
+
+impl NodeType for TestOutput {
+    fn kind(&self) -> &'static str {
+        "core.output"
+    }
+
+    fn compile(
+        &self,
+        _node_id: &str,
+        _config: Value,
+        _context: &mut CompileContext<'_>,
+    ) -> Result<NodeCompilation, insight_agent_platform::dsl::CompileError> {
+        Ok(NodeCompilation {
+            body: Arc::new(()),
+            edges: Vec::new(),
+            references: BTreeSet::new(),
+            terminal: true,
+            envelope: NodeEnvelopeRules {
+                next: NextPolicy::Forbidden,
+                allows_content_emit: false,
+            },
+        })
+    }
+}
+
+fn run_context(input: Value) -> RunContext {
+    RunContext::new(
+        RunMetadata {
+            run_id: "run_test".to_string(),
+            request_id: "req_test".to_string(),
+            agent_id: "agent_test".to_string(),
+            agent_version: "sha256:test".to_string(),
+            started_at: Utc::now(),
+        },
+        input,
+    )
+}
+
+fn compiled_node(
+    id: &str,
+    kind: &str,
+    emit: EmitPolicy,
+    compilation: NodeCompilation,
+) -> CompiledNode {
+    CompiledNode {
+        id: id.to_string(),
+        kind: kind.to_string(),
+        next: Some("done".to_string()),
+        emit,
+        timeout: Duration::from_secs(1),
+        body: compilation.body,
+        edges: compilation.edges,
+        references: compilation.references,
+        terminal: compilation.terminal,
+    }
+}
+
+#[tokio::test]
+async fn template_recursively_renders_json_without_html_escaping() {
+    let models = ModelRegistry::default();
+    let actions = ActionRegistry::default();
+    let mut compile_context = CompileContext::new(&models, &actions);
+    let compilation = TemplateNode
+        .compile(
+            "prepare",
+            json!({
+                "value": {
+                    "text": "{{ input.text }}",
+                    "nested": ["prefix {{ input.text }}", 2, true]
+                }
+            }),
+            &mut compile_context,
+        )
+        .unwrap();
+    let node = compiled_node("prepare", "core.template", EmitPolicy::None, compilation);
+    let context = run_context(json!({"text":"A&B"}))
+        .with_templates(Arc::new(compile_context.into_templates()));
+    let (_, signal) = stop_pair();
+    let control = ExecutionControl::new(signal, Duration::from_secs(1), |_| async { Ok(()) });
+
+    let outcome = TemplateNode
+        .execute(&node, &context, &control)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        NodeOutcome {
+            output: json!({
+                "text": "A&B",
+                "nested": ["prefix A&B", 2, true]
+            }),
+            transition: NodeTransition::Next,
+        }
+    );
+}
+
+#[tokio::test]
+async fn string_template_emits_its_complete_rendered_content() {
+    let models = ModelRegistry::default();
+    let actions = ActionRegistry::default();
+    let mut compile_context = CompileContext::new(&models, &actions);
+    let compilation = TemplateNode
+        .compile(
+            "answer",
+            json!({"value":"{{ input.text }}"}),
+            &mut compile_context,
+        )
+        .unwrap();
+    let node = compiled_node("answer", "core.template", EmitPolicy::Content, compilation);
+    let context = run_context(json!({"text":"A&B"}))
+        .with_templates(Arc::new(compile_context.into_templates()));
+    let emitted = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&emitted);
+    let (_, signal) = stop_pair();
+    let control = ExecutionControl::new(signal, Duration::from_secs(1), move |content| {
+        let captured = Arc::clone(&captured);
+        async move {
+            captured.lock().unwrap().push(content);
+            Ok(())
+        }
+    });
+
+    let outcome = TemplateNode
+        .execute(&node, &context, &control)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.output, json!("A&B"));
+    assert_eq!(*emitted.lock().unwrap(), vec!["A&B"]);
+}
+
+#[tokio::test]
+async fn condition_selects_the_first_matching_case_then_falls_back_to_default() {
+    let models = ModelRegistry::default();
+    let actions = ActionRegistry::default();
+    let mut compile_context = CompileContext::new(&models, &actions);
+    let compilation = ConditionNode
+        .compile(
+            "route",
+            json!({
+                "cases": [
+                    {"when":"input.kind == \"medical\"", "next":"medical_answer"},
+                    {"when":"true", "next":"fallback_case"}
+                ],
+                "default": "general_answer"
+            }),
+            &mut compile_context,
+        )
+        .unwrap();
+    let node = compiled_node("route", "core.condition", EmitPolicy::None, compilation);
+    let (_, signal) = stop_pair();
+    let control = ExecutionControl::new(signal, Duration::from_secs(1), |_| async { Ok(()) });
+
+    let matched = ConditionNode
+        .execute(&node, &run_context(json!({"kind":"medical"})), &control)
+        .await
+        .unwrap();
+    let second = ConditionNode
+        .execute(&node, &run_context(json!({"kind":"unknown"})), &control)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        matched,
+        NodeOutcome {
+            output: json!({"matched_case":0, "next":"medical_answer"}),
+            transition: NodeTransition::Goto("medical_answer".to_string()),
+        }
+    );
+    assert_eq!(
+        second,
+        NodeOutcome {
+            output: json!({"matched_case":1, "next":"fallback_case"}),
+            transition: NodeTransition::Goto("fallback_case".to_string()),
+        }
+    );
+}
+
+#[tokio::test]
+async fn condition_uses_default_when_no_case_matches() {
+    let models = ModelRegistry::default();
+    let actions = ActionRegistry::default();
+    let mut compile_context = CompileContext::new(&models, &actions);
+    let compilation = ConditionNode
+        .compile(
+            "route",
+            json!({
+                "cases": [{"when":"input.kind == \"medical\"", "next":"medical_answer"}],
+                "default": "general_answer"
+            }),
+            &mut compile_context,
+        )
+        .unwrap();
+    let node = compiled_node("route", "core.condition", EmitPolicy::None, compilation);
+    let (_, signal) = stop_pair();
+    let control = ExecutionControl::new(signal, Duration::from_secs(1), |_| async { Ok(()) });
+
+    let outcome = ConditionNode
+        .execute(&node, &run_context(json!({"kind":"unknown"})), &control)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome.output,
+        json!({"matched_case":null, "next":"general_answer"})
+    );
+    assert_eq!(
+        outcome.transition,
+        NodeTransition::Goto("general_answer".to_string())
+    );
+}
+
+#[test]
+fn condition_rejects_invalid_or_incomplete_configuration_at_compile_time() {
+    let models = ModelRegistry::default();
+    let actions = ActionRegistry::default();
+    let mut context = CompileContext::new(&models, &actions);
+
+    let invalid_expression = ConditionNode
+        .compile(
+            "route",
+            json!({"cases":[{"when":"input.", "next":"done"}], "default":"done"}),
+            &mut context,
+        )
+        .err()
+        .expect("invalid CEL must fail compilation");
+    assert_eq!(invalid_expression.code(), "CONDITION_EXPRESSION_INVALID");
+
+    let no_cases = ConditionNode
+        .compile("route", json!({"cases":[], "default":"done"}), &mut context)
+        .err()
+        .expect("an empty case list must fail compilation");
+    assert_eq!(no_cases.code(), "CONDITION_CASES_REQUIRED");
+
+    let no_default = ConditionNode
+        .compile(
+            "route",
+            json!({"cases":[{"when":"true", "next":"done"}]}),
+            &mut context,
+        )
+        .err()
+        .expect("a missing default must fail compilation");
+    assert_eq!(no_default.code(), "NODE_CONFIG_INVALID");
+}
+
+#[test]
+fn compiler_enforces_condition_and_template_envelope_rules() {
+    let common = r#"
+version: 1
+id: envelope-test
+name: Envelope Test
+input:
+  schema: {type: object}
+entry: start
+nodes:
+"#;
+
+    let condition_with_next = format!(
+        "{common}  start:\n    type: core.condition\n    next: done\n    config:\n      cases:\n        - when: 'true'\n          next: done\n      default: done\n  done:\n    type: core.output\n    config: {{}}\n"
+    );
+    assert_compile_error(&condition_with_next, "NODE_NEXT_FORBIDDEN");
+
+    let object_content = format!(
+        "{common}  start:\n    type: core.template\n    next: done\n    emit: content\n    config:\n      value:\n        answer: '{{{{ input.answer }}}}'\n  done:\n    type: core.output\n    config: {{}}\n"
+    );
+    assert_compile_error(&object_content, "NODE_EMIT_UNSUPPORTED");
+}
+
+fn assert_compile_error(yaml: &str, expected_code: &str) {
+    let directory = tempdir().unwrap();
+    std::fs::write(directory.path().join("agent.yaml"), yaml).unwrap();
+    let mut types = NodeTypeRegistry::default();
+    types.register(TemplateNode).unwrap();
+    types.register(ConditionNode).unwrap();
+    types.register(TestOutput).unwrap();
+    let compiler = AgentCompiler::new(
+        types,
+        ModelRegistry::default(),
+        ActionRegistry::default(),
+        Duration::from_secs(1),
+    );
+
+    let error = compiler.compile_dir(directory.path()).unwrap_err();
+    assert_eq!(error.code(), expected_code, "{error}");
+}

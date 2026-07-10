@@ -124,7 +124,7 @@ impl<'a> CompileContext<'a> {
             })?;
         Ok(TemplateProgram {
             name,
-            references: template_references(source),
+            references: node_references(source),
         })
     }
 
@@ -152,7 +152,7 @@ impl<'a> CompileContext<'a> {
     }
 }
 
-fn template_references(source: &str) -> BTreeSet<String> {
+pub(crate) fn node_references(source: &str) -> BTreeSet<String> {
     static NODE_REFERENCE: OnceLock<Regex> = OnceLock::new();
     NODE_REFERENCE
         .get_or_init(|| Regex::new(r"nodes\.([A-Za-z_][A-Za-z0-9_-]*)\.output").unwrap())
