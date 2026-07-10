@@ -1,10 +1,14 @@
 pub mod context;
 pub mod control;
+pub mod coordinator;
+pub mod state;
 
 use std::{error::Error, fmt};
 
 pub use context::{RunContext, RunMetadata};
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
+pub use coordinator::RunCoordinator;
+pub use state::RunState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunError {
@@ -22,6 +26,10 @@ impl RunError {
 
     pub fn code(&self) -> &'static str {
         self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
     }
 
     pub fn stopped(reason: StopReason) -> Self {
