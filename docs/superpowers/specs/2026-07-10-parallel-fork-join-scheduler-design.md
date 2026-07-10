@@ -1,7 +1,7 @@
 # Explicit Fork/Join Parallel Scheduler Design
 
 **Date:** 2026-07-10  
-**Status:** Pending written-spec review  
+**Status:** Approved for implementation planning
 **Scope:** Fixed parallel subgraphs with `all_settled` join semantics
 
 ## 1. Context
