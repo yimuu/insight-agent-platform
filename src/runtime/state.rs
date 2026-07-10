@@ -1,8 +1,29 @@
+use serde::Serialize;
+use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::history::types::RunStatus;
 
 use super::RunError;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BranchError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum BranchResult {
+    Succeeded {
+        terminal_node_id: String,
+        output: Value,
+    },
+    Failed {
+        terminal_node_id: String,
+        error: BranchError,
+    },
+}
 
 pub struct RunState {
     status: Mutex<RunStatus>,

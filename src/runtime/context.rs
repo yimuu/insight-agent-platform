@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use handlebars::Handlebars;
 use serde_json::{json, Value};
 
+use super::BranchResult;
+
 #[derive(Debug, Clone)]
 pub struct RunMetadata {
     pub run_id: String,
@@ -17,7 +19,9 @@ pub struct RunMetadata {
 pub struct RunContext {
     metadata: RunMetadata,
     input: Value,
-    node_outputs: BTreeMap<String, Value>,
+    base_node_outputs: Arc<BTreeMap<String, Value>>,
+    local_node_outputs: BTreeMap<String, Value>,
+    join_results: Option<Arc<BTreeMap<String, BranchResult>>>,
     templates: Arc<Handlebars<'static>>,
 }
 
@@ -26,7 +30,9 @@ impl RunContext {
         Self {
             metadata,
             input,
-            node_outputs: BTreeMap::new(),
+            base_node_outputs: Arc::new(BTreeMap::new()),
+            local_node_outputs: BTreeMap::new(),
+            join_results: None,
             templates: Arc::new(Handlebars::new()),
         }
     }
@@ -45,7 +51,9 @@ impl RunContext {
     }
 
     pub fn node_output(&self, node_id: &str) -> Option<&Value> {
-        self.node_outputs.get(node_id)
+        self.local_node_outputs
+            .get(node_id)
+            .or_else(|| self.base_node_outputs.get(node_id))
     }
 
     pub fn templates(&self) -> &Handlebars<'static> {
@@ -53,12 +61,38 @@ impl RunContext {
     }
 
     pub fn set_node_output(&mut self, node_id: impl Into<String>, output: Value) {
-        self.node_outputs.insert(node_id.into(), output);
+        self.local_node_outputs.insert(node_id.into(), output);
+    }
+
+    pub fn fork_branch(&self) -> Self {
+        Self {
+            metadata: self.metadata.clone(),
+            input: self.input.clone(),
+            base_node_outputs: Arc::new(self.visible_node_outputs()),
+            local_node_outputs: BTreeMap::new(),
+            join_results: None,
+            templates: Arc::clone(&self.templates),
+        }
+    }
+
+    pub fn with_join_results(&self, results: BTreeMap<String, BranchResult>) -> Self {
+        Self {
+            metadata: self.metadata.clone(),
+            input: self.input.clone(),
+            base_node_outputs: Arc::new(self.visible_node_outputs()),
+            local_node_outputs: BTreeMap::new(),
+            join_results: Some(Arc::new(results)),
+            templates: Arc::clone(&self.templates),
+        }
+    }
+
+    pub fn branch_results(&self) -> Option<&BTreeMap<String, BranchResult>> {
+        self.join_results.as_deref()
     }
 
     pub fn template_data(&self) -> Value {
         let nodes = self
-            .node_outputs
+            .visible_node_outputs()
             .iter()
             .map(|(node_id, output)| (node_id.clone(), json!({"output": output})))
             .collect::<serde_json::Map<_, _>>();
@@ -74,5 +108,11 @@ impl RunContext {
             },
             "nodes": nodes,
         })
+    }
+
+    fn visible_node_outputs(&self) -> BTreeMap<String, Value> {
+        let mut outputs = self.base_node_outputs.as_ref().clone();
+        outputs.extend(self.local_node_outputs.clone());
+        outputs
     }
 }

@@ -14,7 +14,7 @@ pub use coordinator::RunCoordinator;
 pub use service::{
     CompiledAgentRegistry, RequestMetadata, RunService, RunServiceConfig, ServiceError,
 };
-pub use state::RunState;
+pub use state::{BranchError, BranchResult, RunState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunError {

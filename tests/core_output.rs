@@ -181,12 +181,14 @@ fn assert_agent_compile_error(yaml: &str, expected_code: &str) {
 }
 
 #[test]
-fn default_registries_contain_exactly_the_five_formal_core_nodes() {
+fn default_registries_contain_all_formal_core_nodes() {
     let (types, executors) = default_node_registries().unwrap();
     let expected = vec![
         "core.action",
         "core.chat",
         "core.condition",
+        "core.fork",
+        "core.join",
         "core.output",
         "core.template",
     ];
