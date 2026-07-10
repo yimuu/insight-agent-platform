@@ -8,6 +8,7 @@ pub mod error;
 pub mod handlers;
 pub mod history;
 pub mod model;
+pub mod nodes;
 pub mod prompt;
 pub mod request_context;
 pub mod resources;

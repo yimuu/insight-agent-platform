@@ -1,7 +1,9 @@
+pub mod context;
 pub mod control;
 
 use std::{error::Error, fmt};
 
+pub use context::{RunContext, RunMetadata};
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
