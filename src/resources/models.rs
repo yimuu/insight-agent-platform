@@ -46,7 +46,7 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
-    pub fn text(role: ChatRole, content: impl Into<String>) -> Self {
+    pub fn from_text(role: ChatRole, content: impl Into<String>) -> Self {
         Self {
             role,
             content: ChatContent::Text(content.into()),
@@ -54,9 +54,29 @@ impl ChatMessage {
     }
 
     pub fn text_content(&self) -> Option<&str> {
+        self.text()
+    }
+
+    pub fn text(&self) -> Option<&str> {
         match &self.content {
             ChatContent::Text(text) => Some(text),
-            ChatContent::Parts(_) => None,
+            ChatContent::Parts(parts) => parts.iter().find_map(|part| match part {
+                ChatContentPart::Text { text } => Some(text.as_str()),
+                ChatContentPart::ImageUrl { .. } => None,
+            }),
+        }
+    }
+
+    pub fn image_urls(&self) -> Vec<&str> {
+        match &self.content {
+            ChatContent::Text(_) => Vec::new(),
+            ChatContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    ChatContentPart::Text { .. } => None,
+                    ChatContentPart::ImageUrl { image_url } => Some(image_url.url.as_str()),
+                })
+                .collect(),
         }
     }
 }

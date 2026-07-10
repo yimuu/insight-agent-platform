@@ -87,6 +87,7 @@ pub struct ExecutionControl {
     stop: StopSignal,
     deadline: Instant,
     emit_content: ContentEmitter,
+    content_enabled: bool,
 }
 
 impl ExecutionControl {
@@ -99,7 +100,13 @@ impl ExecutionControl {
             stop,
             deadline: Instant::now() + timeout,
             emit_content: Arc::new(move |content| Box::pin(emit_content(content))),
+            content_enabled: true,
         }
+    }
+
+    pub fn with_content_enabled(mut self, enabled: bool) -> Self {
+        self.content_enabled = enabled;
+        self
     }
 
     pub fn stop_reason(&self) -> Option<StopReason> {
@@ -115,6 +122,12 @@ impl ExecutionControl {
     }
 
     pub async fn emit_content(&self, content: impl Into<String>) -> Result<(), RunError> {
+        if !self.content_enabled {
+            return Err(RunError::new(
+                "CONTENT_EMIT_DISABLED",
+                "content emission is disabled for this node",
+            ));
+        }
         if let Some(reason) = self.stop_reason() {
             return Err(RunError::stopped(reason));
         }

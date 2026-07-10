@@ -32,7 +32,7 @@ pub enum CompiledTemplateValue {
 }
 
 impl CompiledTemplateValue {
-    fn compile(
+    pub(crate) fn compile(
         value: Value,
         node_id: &str,
         path: &str,
@@ -63,7 +63,7 @@ impl CompiledTemplateValue {
         }
     }
 
-    fn render(&self, context: &RunContext, data: &Value) -> Result<Value, RunError> {
+    pub(crate) fn render(&self, context: &RunContext, data: &Value) -> Result<Value, RunError> {
         match self {
             Self::String(program) => context
                 .templates()
@@ -89,7 +89,7 @@ impl CompiledTemplateValue {
         }
     }
 
-    fn references(&self) -> std::collections::BTreeSet<String> {
+    pub(crate) fn references(&self) -> std::collections::BTreeSet<String> {
         match self {
             Self::String(program) => program.references.clone(),
             Self::Array(values) => values
