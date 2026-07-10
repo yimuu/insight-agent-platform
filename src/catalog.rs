@@ -1,7 +1,10 @@
 use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
 
 use crate::{
-    dsl::{compiler::AgentCompiler, CompileError},
+    dsl::{
+        compiler::{AgentCompiler, CompileLimits},
+        CompileError,
+    },
     nodes::registry::NodeTypeRegistry,
     resources::{actions::ActionRegistry, models::ModelRegistry},
     runtime::CompiledAgentRegistry,
@@ -14,6 +17,7 @@ pub fn compile_enabled_agents(
     models: ModelRegistry,
     actions: ActionRegistry,
     default_node_timeout: Duration,
+    limits: CompileLimits,
 ) -> Result<CompiledAgentRegistry, CompileError> {
     if !directory.is_dir() {
         return Err(CompileError::new(
@@ -21,7 +25,7 @@ pub fn compile_enabled_agents(
             format!("agents directory '{}' does not exist", directory.display()),
         ));
     }
-    let compiler = AgentCompiler::new(node_types, models, actions, default_node_timeout);
+    let compiler = AgentCompiler::new(node_types, models, actions, default_node_timeout, limits);
     let mut agents = Vec::with_capacity(enabled.len());
     for agent_id in enabled {
         validate_agent_directory_name(agent_id)?;

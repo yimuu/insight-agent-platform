@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, fmt, time::Duration};
 use async_trait::async_trait;
 use futures::stream;
 use insight_agent_platform::{
-    dsl::compiler::AgentCompiler,
+    dsl::compiler::{AgentCompiler, CompileLimits},
     nodes::default_node_registries,
     resources::{
         actions::{Action, ActionContext, ActionDescriptor, ActionRegistry},
@@ -159,7 +159,15 @@ nodes:
     let mut actions = ActionRegistry::default();
     actions.register(ClassifyAction).unwrap();
     let (types, _) = default_node_registries().unwrap();
-    let compiler = AgentCompiler::new(types, models, actions, Duration::from_secs(30));
+    let compiler = AgentCompiler::new(
+        types,
+        models,
+        actions,
+        Duration::from_secs(30),
+        CompileLimits {
+            max_fork_branches: 32,
+        },
+    );
 
     let agent = compiler.compile_dir(directory.path()).unwrap();
 

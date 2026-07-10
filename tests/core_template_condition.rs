@@ -11,7 +11,7 @@ use insight_agent_platform::{
             CompiledNode, NextPolicy, NodeCompilation, NodeEnvelopeRules, NodeOutcome,
             NodeTransition,
         },
-        compiler::{AgentCompiler, CompileContext},
+        compiler::{AgentCompiler, CompileContext, CompileLimits},
         EmitPolicy,
     },
     nodes::{
@@ -308,6 +308,9 @@ fn assert_compile_error(yaml: &str, expected_code: &str) {
         ModelRegistry::default(),
         ActionRegistry::default(),
         Duration::from_secs(1),
+        CompileLimits {
+            max_fork_branches: 32,
+        },
     );
 
     let error = compiler.compile_dir(directory.path()).unwrap_err();

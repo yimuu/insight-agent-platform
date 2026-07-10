@@ -3,6 +3,7 @@ use std::path::Path;
 use insight_agent_platform::{
     catalog::compile_enabled_agents,
     config::PlatformConfig,
+    dsl::compiler::CompileLimits,
     nodes::default_node_registries,
     resources::{
         builtin_actions::{builtin_action_registry, RestrictedHttpGetAction},
@@ -43,6 +44,9 @@ fn enabled_repository_agents_compile_through_production_registries() {
         models,
         actions,
         config.runtime.default_node_timeout,
+        CompileLimits {
+            max_fork_branches: 32,
+        },
     )
     .unwrap();
 

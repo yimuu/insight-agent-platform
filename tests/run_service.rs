@@ -29,7 +29,7 @@ use insight_agent_platform::{
     nodes::registry::{NodeExecutor, NodeExecutorRegistry, NodeType},
     runtime::{
         CompiledAgentRegistry, ExecutionControl, RequestMetadata, RunContext, RunError, RunService,
-        RunServiceConfig,
+        RunServiceConfig, ServiceError,
     },
 };
 use jsonschema::JSONSchema;
@@ -287,7 +287,9 @@ impl RunRepository for CountingRepository {
     }
 }
 
-async fn service(max_concurrent_runs: usize) -> (RunService, Arc<CountingRepository>) {
+async fn service_with_config(
+    config: RunServiceConfig,
+) -> Result<(RunService, Arc<CountingRepository>), ServiceError> {
     let repository = Arc::new(CountingRepository {
         records: Mutex::new(BTreeMap::new()),
         events: Mutex::new(BTreeMap::new()),
@@ -313,19 +315,20 @@ async fn service(max_concurrent_runs: usize) -> (RunService, Arc<CountingReposit
     .unwrap();
     let mut executors = NodeExecutorRegistry::default();
     executors.register(ServiceNode).unwrap();
-    let service = RunService::new(
-        agents,
-        executors,
-        repository_trait,
-        events,
-        RunServiceConfig {
-            max_concurrent_runs,
-            run_timeout: Duration::from_secs(3600),
-            attached_reconnect_grace: GRACE,
-        },
-    )
-    .unwrap();
-    (service, repository)
+    let service = RunService::new(agents, executors, repository_trait, events, config)?;
+    Ok((service, repository))
+}
+
+async fn service(max_concurrent_runs: usize) -> (RunService, Arc<CountingRepository>) {
+    service_with_config(RunServiceConfig {
+        max_concurrent_runs,
+        max_parallel_node_executions: 32,
+        max_parallel_branches_per_run: 8,
+        run_timeout: Duration::from_secs(3600),
+        attached_reconnect_grace: GRACE,
+    })
+    .await
+    .unwrap()
 }
 
 async fn wait_for_status(service: &RunService, run_id: &str, expected: RunStatus) -> RunRecord {
@@ -339,6 +342,29 @@ async fn wait_for_status(service: &RunService, run_id: &str, expected: RunStatus
         tokio::task::yield_now().await;
     }
     panic!("run {run_id} did not reach {expected:?}; last status: {last_status:?}")
+}
+
+#[tokio::test]
+async fn zero_parallel_capacities_are_rejected() {
+    for config in [
+        RunServiceConfig {
+            max_concurrent_runs: 1,
+            max_parallel_node_executions: 0,
+            max_parallel_branches_per_run: 8,
+            run_timeout: Duration::from_secs(1),
+            attached_reconnect_grace: Duration::from_secs(1),
+        },
+        RunServiceConfig {
+            max_concurrent_runs: 1,
+            max_parallel_node_executions: 32,
+            max_parallel_branches_per_run: 0,
+            run_timeout: Duration::from_secs(1),
+            attached_reconnect_grace: Duration::from_secs(1),
+        },
+    ] {
+        let error = service_with_config(config).await.err().unwrap();
+        assert_eq!(error.code(), "RUN_SERVICE_CONFIG_INVALID");
+    }
 }
 
 #[tokio::test]

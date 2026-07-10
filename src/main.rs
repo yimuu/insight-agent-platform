@@ -4,6 +4,7 @@ use insight_agent_platform::{
     api::formal::{build_router, ApiAuth, FormalApiState},
     catalog::compile_enabled_agents,
     config::{HistoryConfig, PlatformConfig},
+    dsl::compiler::CompileLimits,
     events::hub::{EventHub, EventHubConfig},
     history::{
         postgres::PostgresRunRepository, repository::RunRepository, sqlite::SqliteRunRepository,
@@ -49,6 +50,9 @@ async fn main() -> MainResult<()> {
         models,
         actions,
         config.runtime.default_node_timeout,
+        CompileLimits {
+            max_fork_branches: config.runtime.max_fork_branches,
+        },
     )?;
     let repository = initialize_repository(&config.history).await?;
     let events = EventHub::new(
@@ -68,6 +72,8 @@ async fn main() -> MainResult<()> {
         events,
         RunServiceConfig {
             max_concurrent_runs: config.runtime.max_concurrent_runs,
+            max_parallel_node_executions: config.runtime.max_parallel_node_executions,
+            max_parallel_branches_per_run: config.runtime.max_parallel_branches_per_run,
             run_timeout: config.runtime.run_timeout,
             attached_reconnect_grace: config.runtime.attached_reconnect_grace,
         },

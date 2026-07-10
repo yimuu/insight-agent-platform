@@ -161,11 +161,17 @@ pub(crate) fn node_references(source: &str) -> BTreeSet<String> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompileLimits {
+    pub max_fork_branches: usize,
+}
+
 pub struct AgentCompiler {
     node_types: NodeTypeRegistry,
     models: ModelRegistry,
     actions: ActionRegistry,
     default_node_timeout: Duration,
+    limits: CompileLimits,
 }
 
 impl AgentCompiler {
@@ -174,13 +180,19 @@ impl AgentCompiler {
         models: ModelRegistry,
         actions: ActionRegistry,
         default_node_timeout: Duration,
+        limits: CompileLimits,
     ) -> Self {
         Self {
             node_types,
             models,
             actions,
             default_node_timeout,
+            limits,
         }
+    }
+
+    pub fn limits(&self) -> CompileLimits {
+        self.limits
     }
 
     pub fn compile_dir(&self, root: &Path) -> Result<CompiledAgent, CompileError> {

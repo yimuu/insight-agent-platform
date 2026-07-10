@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, fs, path::Path, sync::Arc, time::Duration};
 use insight_agent_platform::{
     dsl::{
         compiled::{NextPolicy, NodeCompilation, NodeEnvelopeRules},
-        compiler::{AgentCompiler, CompileContext},
+        compiler::{AgentCompiler, CompileContext, CompileLimits},
         CompileError,
     },
     nodes::registry::{NodeType, NodeTypeRegistry},
@@ -148,7 +148,20 @@ fn compiler() -> AgentCompiler {
         ModelRegistry::default(),
         ActionRegistry::default(),
         Duration::from_secs(30),
+        CompileLimits {
+            max_fork_branches: 32,
+        },
     )
+}
+
+#[test]
+fn compiler_exposes_configured_limits() {
+    assert_eq!(
+        compiler().limits(),
+        CompileLimits {
+            max_fork_branches: 32,
+        }
+    );
 }
 
 fn write_agent(yaml: &str, prompt: &str) -> (TempDir, std::path::PathBuf) {

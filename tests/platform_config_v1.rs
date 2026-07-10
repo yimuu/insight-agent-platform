@@ -23,6 +23,9 @@ history:
   path: ../data/history.sqlite3
 runtime:
   max_concurrent_runs: 8
+  max_fork_branches: 32
+  max_parallel_node_executions: 32
+  max_parallel_branches_per_run: 8
   default_node_timeout: 30s
   run_timeout: 5m
   attached_reconnect_grace: 10s
@@ -84,6 +87,9 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
     let (directory, path) = write_config(&base_yaml("  mode: disabled"));
     let config = load(&path, BTreeMap::new()).unwrap();
 
+    assert_eq!(config.runtime.max_fork_branches, 32);
+    assert_eq!(config.runtime.max_parallel_node_executions, 32);
+    assert_eq!(config.runtime.max_parallel_branches_per_run, 8);
     assert_eq!(config.agents.directory, directory.path().join("agents"));
     assert_eq!(
         config.models.config,
@@ -162,6 +168,15 @@ fn postgres_history_secret_is_resolved_and_redacted() {
 fn zero_capacities_and_durations_are_rejected() {
     for (from, to) in [
         ("max_concurrent_runs: 8", "max_concurrent_runs: 0"),
+        ("max_fork_branches: 32", "max_fork_branches: 0"),
+        (
+            "max_parallel_node_executions: 32",
+            "max_parallel_node_executions: 0",
+        ),
+        (
+            "max_parallel_branches_per_run: 8",
+            "max_parallel_branches_per_run: 0",
+        ),
         ("default_node_timeout: 30s", "default_node_timeout: 0s"),
         ("run_timeout: 5m", "run_timeout: 0s"),
         ("subscriber_capacity: 64", "subscriber_capacity: 0"),

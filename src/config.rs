@@ -82,6 +82,9 @@ impl HistoryConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub max_concurrent_runs: usize,
+    pub max_fork_branches: usize,
+    pub max_parallel_node_executions: usize,
+    pub max_parallel_branches_per_run: usize,
     pub default_node_timeout: Duration,
     pub run_timeout: Duration,
     pub attached_reconnect_grace: Duration,
@@ -270,6 +273,9 @@ enum HistoryYaml {
 #[serde(deny_unknown_fields)]
 struct RuntimeYaml {
     max_concurrent_runs: usize,
+    max_fork_branches: usize,
+    max_parallel_node_executions: usize,
+    max_parallel_branches_per_run: usize,
     default_node_timeout: String,
     run_timeout: String,
     attached_reconnect_grace: String,
@@ -354,6 +360,9 @@ fn resolve_history(
 fn resolve_runtime(raw: RuntimeYaml) -> Result<RuntimeConfig, PlatformConfigError> {
     let capacities = [
         raw.max_concurrent_runs,
+        raw.max_fork_branches,
+        raw.max_parallel_node_executions,
+        raw.max_parallel_branches_per_run,
         raw.subscriber_capacity,
         raw.replay_ring_capacity,
         raw.journal_capacity,
@@ -366,6 +375,9 @@ fn resolve_runtime(raw: RuntimeYaml) -> Result<RuntimeConfig, PlatformConfigErro
     }
     Ok(RuntimeConfig {
         max_concurrent_runs: raw.max_concurrent_runs,
+        max_fork_branches: raw.max_fork_branches,
+        max_parallel_node_executions: raw.max_parallel_node_executions,
+        max_parallel_branches_per_run: raw.max_parallel_branches_per_run,
         default_node_timeout: positive_duration(
             &raw.default_node_timeout,
             "runtime.default_node_timeout",

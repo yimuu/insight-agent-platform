@@ -70,6 +70,8 @@ pub struct RequestMetadata {
 #[derive(Debug, Clone, Copy)]
 pub struct RunServiceConfig {
     pub max_concurrent_runs: usize,
+    pub max_parallel_node_executions: usize,
+    pub max_parallel_branches_per_run: usize,
     pub run_timeout: Duration,
     pub attached_reconnect_grace: Duration,
 }
@@ -160,6 +162,8 @@ impl RunService {
         config: RunServiceConfig,
     ) -> Result<Self, ServiceError> {
         if config.max_concurrent_runs == 0
+            || config.max_parallel_node_executions == 0
+            || config.max_parallel_branches_per_run == 0
             || config.run_timeout.is_zero()
             || config.attached_reconnect_grace.is_zero()
         {

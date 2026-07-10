@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use insight_agent_platform::{
     dsl::{
         compiled::{CompiledNode, NodeOutcome, NodeTransition, RunOutput},
-        compiler::{AgentCompiler, CompileContext},
+        compiler::{AgentCompiler, CompileContext, CompileLimits},
         EmitPolicy,
     },
     nodes::{
@@ -170,6 +170,9 @@ fn assert_agent_compile_error(yaml: &str, expected_code: &str) {
         ModelRegistry::default(),
         ActionRegistry::default(),
         Duration::from_secs(1),
+        CompileLimits {
+            max_fork_branches: 32,
+        },
     );
 
     let error = compiler.compile_dir(directory.path()).unwrap_err();

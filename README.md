@@ -88,6 +88,9 @@ history:
   path: ../data/formal_v1.sqlite3
 runtime:
   max_concurrent_runs: 32
+  max_fork_branches: 32
+  max_parallel_node_executions: 32
+  max_parallel_branches_per_run: 8
   default_node_timeout: 60s
   run_timeout: 5m
   attached_reconnect_grace: 10s
