@@ -47,13 +47,27 @@ struct MessageConfig {
 #[serde(untagged)]
 enum MessageContentConfig {
     Text(String),
+    TemplateRef(TemplateRefConfig),
     Parts(Vec<MessagePartConfig>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TemplateRefConfig {
+    template_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TextSourceConfig {
+    Text(String),
+    TemplateRef(TemplateRefConfig),
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum MessagePartConfig {
-    Text { text: String },
+    Text { text: TextSourceConfig },
     ImageUrl { image_url: ImageUrlConfig },
 }
 
@@ -128,10 +142,21 @@ impl NodeType for ChatNode {
         for (message_index, message) in config.messages.into_iter().enumerate() {
             let content = match message.content {
                 MessageContentConfig::Text(source) => {
-                    let template = context.compile_inline_template(
+                    let template = compile_text_source(
+                        TextSourceConfig::Text(source),
+                        context,
                         node_id,
                         &format!("messages[{message_index}].content"),
-                        &source,
+                    )?;
+                    references.extend(template.references.iter().cloned());
+                    CompiledMessageContent::Text(template)
+                }
+                MessageContentConfig::TemplateRef(source) => {
+                    let template = compile_text_source(
+                        TextSourceConfig::TemplateRef(source),
+                        context,
+                        node_id,
+                        &format!("messages[{message_index}].content"),
                     )?;
                     references.extend(template.references.iter().cloned());
                     CompiledMessageContent::Text(template)
@@ -150,13 +175,14 @@ impl NodeType for ChatNode {
                         let (field, source, image) = match part {
                             MessagePartConfig::Text { text } => ("text", text, false),
                             MessagePartConfig::ImageUrl { image_url } => {
-                                ("image_url.url", image_url.url, true)
+                                ("image_url.url", TextSourceConfig::Text(image_url.url), true)
                             }
                         };
-                        let template = context.compile_inline_template(
+                        let template = compile_text_source(
+                            source,
+                            context,
                             node_id,
                             &format!("messages[{message_index}].parts[{part_index}].{field}"),
-                            &source,
                         )?;
                         references.extend(template.references.iter().cloned());
                         if image {
@@ -199,6 +225,20 @@ impl NodeType for ChatNode {
                 allows_content_emit: true,
             },
         })
+    }
+}
+
+fn compile_text_source(
+    source: TextSourceConfig,
+    context: &mut CompileContext<'_>,
+    node_id: &str,
+    field: &str,
+) -> Result<TemplateProgram, CompileError> {
+    match source {
+        TextSourceConfig::Text(source) => context.compile_inline_template(node_id, field, &source),
+        TextSourceConfig::TemplateRef(source) => {
+            context.compile_prompt_ref(node_id, field, &source.template_ref)
+        }
     }
 }
 

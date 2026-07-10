@@ -1,31 +1,21 @@
+version: 1
 id: medical_report_interpreter
 name: Medical Report Interpreter
-description: Interpret medical report text and images with abnormal indicator analysis, synthesis, and health advice.
-
-model:
-  provider: dashscope
-  type: llm
-  model: qwen-vl-plus
-  temperature: 0.2
+description: One multimodal example built on the general chat-node contract.
 
 input:
   schema:
     type: object
-    required: [report_text, images, messages, question]
+    required: [report_text, image_url, messages, question]
     additionalProperties: false
     properties:
       report_text:
         type: string
-        description: OCR text or manually entered report text. Use an empty string when only images are provided.
-      images:
-        type: array
-        description: HTTPS image URLs or base64 data URLs.
-        items:
-          type: string
-          pattern: "^(https?://|data:image/)"
+      image_url:
+        type: string
+        pattern: "^(https://|data:image/)"
       messages:
         type: array
-        description: Prior conversation messages supplied by the caller.
         items:
           type: object
           required: [role, content]
@@ -38,7 +28,6 @@ input:
               type: string
       question:
         type: string
-        description: Current follow-up question. Use an empty string for the initial interpretation.
 
 prompts:
   system: prompts/system.md
@@ -46,24 +35,84 @@ prompts:
   comprehensive_interpretation: prompts/comprehensive_interpretation.md
   health_advice: prompts/health_advice.md
 
-steps:
-  - id: abnormal_indicators
-    type: llm
-    system_prompt_ref: system
-    prompt_ref: abnormal_indicators
-    image_input: input.images
-    stream: true
+entry: abnormal_indicators
 
-  - id: comprehensive_interpretation
-    type: llm
-    system_prompt_ref: system
-    prompt_ref: comprehensive_interpretation
-    image_input: input.images
-    stream: true
+nodes:
+  abnormal_indicators:
+    type: core.chat
+    next: comprehensive_interpretation
+    emit: content
+    config:
+      model: vision_chat
+      messages:
+        - role: system
+          content:
+            template_ref: system
+        - role: user
+          content:
+            - type: text
+              text:
+                template_ref: abnormal_indicators
+            - type: image_url
+              image_url:
+                url: "{{ input.image_url }}"
+      parameters:
+        temperature: 0.2
 
-  - id: health_advice
-    type: llm
-    system_prompt_ref: system
-    prompt_ref: health_advice
-    image_input: input.images
-    stream: true
+  comprehensive_interpretation:
+    type: core.chat
+    next: health_advice
+    emit: content
+    config:
+      model: vision_chat
+      messages:
+        - role: system
+          content:
+            template_ref: system
+        - role: user
+          content:
+            - type: text
+              text:
+                template_ref: comprehensive_interpretation
+            - type: image_url
+              image_url:
+                url: "{{ input.image_url }}"
+      parameters:
+        temperature: 0.2
+
+  health_advice:
+    type: core.chat
+    next: result
+    emit: content
+    config:
+      model: vision_chat
+      messages:
+        - role: system
+          content:
+            template_ref: system
+        - role: user
+          content:
+            - type: text
+              text:
+                template_ref: health_advice
+            - type: image_url
+              image_url:
+                url: "{{ input.image_url }}"
+      parameters:
+        temperature: 0.2
+
+  result:
+    type: core.output
+    config:
+      content:
+        template: |-
+          {{ nodes.abnormal_indicators.output.text }}
+
+          {{ nodes.comprehensive_interpretation.output.text }}
+
+          {{ nodes.health_advice.output.text }}
+      format: markdown
+      data:
+        abnormal_indicators: "{{ nodes.abnormal_indicators.output.text }}"
+        comprehensive_interpretation: "{{ nodes.comprehensive_interpretation.output.text }}"
+        health_advice: "{{ nodes.health_advice.output.text }}"

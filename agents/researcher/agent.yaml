@@ -1,41 +1,70 @@
+version: 1
 id: researcher
 name: Research Assistant
-description: Research and answer questions with a plan-first flow.
-
-model:
-  provider: dashscope
-  type: llm
-  model: qwen3.6-flash
-  temperature: 0.3
+description: Research and answer questions with a private plan-first flow.
 
 input:
   schema:
     type: object
     required: [question]
+    additionalProperties: false
     properties:
       question:
         type: string
+        minLength: 1
 
 prompts:
   system: prompts/system.md
   planner: prompts/planner.md
   final: prompts/final.md
 
-steps:
-  - id: plan
-    type: llm
-    system_prompt_ref: system
-    prompt_ref: planner
-    stream: true
+entry: plan
 
-  - id: now
-    type: tool
-    tool: current_time
-    args:
-      timezone: Asia/Shanghai
+nodes:
+  plan:
+    type: core.chat
+    next: now
+    config:
+      model: general_chat
+      messages:
+        - role: system
+          content:
+            template_ref: system
+        - role: user
+          content:
+            template_ref: planner
+      parameters:
+        temperature: 0.3
 
-  - id: answer
-    type: llm
-    system_prompt_ref: system
-    prompt_ref: final
-    stream: true
+  now:
+    type: core.action
+    next: answer
+    config:
+      action: current_time
+      input:
+        timezone: Asia/Shanghai
+
+  answer:
+    type: core.chat
+    next: result
+    emit: content
+    config:
+      model: general_chat
+      messages:
+        - role: system
+          content:
+            template_ref: system
+        - role: user
+          content:
+            template_ref: final
+      parameters:
+        temperature: 0.3
+
+  result:
+    type: core.output
+    config:
+      content:
+        template: "{{ nodes.answer.output.text }}"
+      format: markdown
+      data:
+        answer: "{{ nodes.answer.output.text }}"

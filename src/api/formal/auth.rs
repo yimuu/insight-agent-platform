@@ -2,7 +2,7 @@ use std::fmt;
 
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 
-use crate::platform_config::AuthConfig;
+use crate::config::AuthConfig;
 
 #[derive(Clone)]
 pub enum ApiAuth {

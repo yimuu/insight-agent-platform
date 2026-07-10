@@ -1,524 +1,471 @@
+//! Strict formal V1 platform configuration.
+
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     env, fs,
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
+    time::Duration,
 };
 
 use serde::Deserialize;
 
-use crate::agent::loader::LoadedAgent;
-use crate::{
-    error::AppError,
-    model::providers::{
-        ModelProviderConfig, ModelProviderKind, ModelProviderModelConfig, ModelProvidersConfig,
-        ModelType,
-    },
-};
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretString(String);
 
-#[derive(Debug, Clone)]
+impl SecretString {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretString {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("REDACTED")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthConfig {
+    Disabled,
+    Bearer { token: SecretString },
+}
+
+impl AuthConfig {
+    pub fn bearer_token(&self) -> Option<&str> {
+        match self {
+            Self::Disabled => None,
+            Self::Bearer { token } => Some(token.expose()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsConfig {
+    pub directory: PathBuf,
+    pub enabled: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelsConfig {
+    pub config: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpGetResourceConfig {
+    pub timeout: Duration,
+    pub max_bytes: usize,
+    pub allowlist: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionsConfig {
+    pub enabled: BTreeSet<String>,
+    pub http_get: Option<HttpGetResourceConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistoryConfig {
+    Sqlite { path: PathBuf },
+    Postgres { database_url: SecretString },
+}
+
+impl HistoryConfig {
+    pub fn database_url(&self) -> Option<&str> {
+        match self {
+            Self::Sqlite { .. } => None,
+            Self::Postgres { database_url } => Some(database_url.expose()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeConfig {
+    pub max_concurrent_runs: usize,
+    pub default_node_timeout: Duration,
+    pub run_timeout: Duration,
+    pub attached_reconnect_grace: Duration,
+    pub subscriber_capacity: usize,
+    pub replay_ring_capacity: usize,
+    pub journal_capacity: usize,
+    pub journal_batch_size: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformConfig {
     pub bind_addr: SocketAddr,
-    pub agents_dir: PathBuf,
+    pub auth: AuthConfig,
+    pub agents: AgentsConfig,
+    pub models: ModelsConfig,
+    pub actions: ActionsConfig,
     pub history: HistoryConfig,
-    pub internal_auth_token: Option<String>,
-    pub agent_exposure: AgentExposureConfig,
-    pub model_providers: ModelProvidersConfig,
-}
-
-#[derive(Debug, Clone)]
-pub struct HistoryConfig {
-    pub provider: HistoryProvider,
-    pub database_url: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HistoryProvider {
-    Sqlite,
-    Postgres,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct AgentExposureConfig {
-    #[serde(default)]
-    pub default_enabled: bool,
-    #[serde(default)]
-    pub default_public: bool,
-    #[serde(default)]
-    pub exposure: BTreeMap<String, AgentExposure>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct AgentExposure {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub public: bool,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct PlatformYaml {
-    #[serde(default)]
-    bind_addr: Option<String>,
-    #[serde(default)]
-    auth: PlatformAuthYaml,
-    #[serde(default)]
-    agents: PlatformAgentsYaml,
-    #[serde(default)]
-    history: PlatformHistoryYaml,
-    #[serde(default)]
-    model_providers_config: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct PlatformAuthYaml {
-    #[serde(default)]
-    internal_token_env: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct PlatformAgentsYaml {
-    #[serde(default)]
-    directory: Option<PathBuf>,
-    #[serde(default)]
-    default_enabled: bool,
-    #[serde(default)]
-    default_public: bool,
-    #[serde(default)]
-    exposure: BTreeMap<String, AgentExposure>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct PlatformHistoryYaml {
-    #[serde(default)]
-    provider: Option<HistoryProvider>,
-    #[serde(default)]
-    database_url: Option<String>,
-    #[serde(default)]
-    database_url_env: Option<String>,
-    #[serde(default)]
-    db: Option<PathBuf>,
+    pub runtime: RuntimeConfig,
 }
 
 impl PlatformConfig {
-    pub fn from_env() -> Result<Self, AppError> {
-        let platform_config_path =
-            env::var("PLATFORM_CONFIG").unwrap_or_else(|_| "config/platform.yaml".to_string());
-        let yaml = load_platform_yaml(Path::new(&platform_config_path))?;
-
-        let bind_addr = env::var("BIND_ADDR")
-            .ok()
-            .or(yaml.bind_addr)
-            .unwrap_or_else(|| "127.0.0.1:3000".to_string())
-            .parse()
-            .map_err(|err| AppError::Config(format!("invalid BIND_ADDR: {err}")))?;
-
-        let agents_dir = env::var("AGENTS_DIR")
-            .ok()
+    pub fn from_env() -> Result<Self, PlatformConfigError> {
+        let path = env::var("PLATFORM_CONFIG")
             .map(PathBuf::from)
-            .or(yaml.agents.directory)
-            .unwrap_or_else(|| PathBuf::from("agents"));
-        let history = resolve_history_config(yaml.history, |name| env::var(name).ok())?;
-        let internal_auth_token = load_internal_auth_token(yaml.auth.internal_token_env)?;
-        let model_providers = load_model_providers_config(yaml.model_providers_config)?;
-
-        Ok(Self {
-            bind_addr,
-            agents_dir,
-            history,
-            internal_auth_token,
-            agent_exposure: AgentExposureConfig {
-                default_enabled: yaml.agents.default_enabled,
-                default_public: yaml.agents.default_public,
-                exposure: yaml.agents.exposure,
-            },
-            model_providers,
-        })
+            .unwrap_or_else(|_| PathBuf::from("config/platform.yaml"));
+        Self::load_with_env(&path, |name| env::var(name).ok())
     }
 
-    pub fn filter_enabled_agents(
-        &self,
-        agents: Vec<LoadedAgent>,
-    ) -> Result<Vec<LoadedAgent>, AppError> {
-        filter_enabled_agents(agents, &self.agent_exposure)
-    }
-}
-
-fn load_internal_auth_token(token_env: Option<String>) -> Result<Option<String>, AppError> {
-    let Some(token_env) = token_env else {
-        return Ok(None);
-    };
-    let token = env::var(&token_env).map_err(|_| {
-        AppError::Config(format!(
-            "environment variable '{token_env}' is required for internal runtime auth"
-        ))
-    })?;
-    if token.trim().is_empty() {
-        return Err(AppError::Config(format!(
-            "environment variable '{token_env}' for internal runtime auth must not be empty"
-        )));
-    }
-    Ok(Some(token))
-}
-
-fn load_platform_yaml(path: &Path) -> Result<PlatformYaml, AppError> {
-    if path.exists() {
-        let yaml = fs::read_to_string(path).map_err(|err| {
-            AppError::Config(format!(
-                "failed to read platform config '{}': {err}",
-                path.display()
-            ))
-        })?;
-        return serde_yaml::from_str(&yaml).map_err(|err| {
-            AppError::Config(format!(
-                "invalid platform config '{}': {err}",
-                path.display()
-            ))
-        });
-    }
-    Ok(PlatformYaml {
-        agents: PlatformAgentsYaml {
-            default_enabled: true,
-            default_public: true,
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-}
-
-fn resolve_history_config(
-    yaml: PlatformHistoryYaml,
-    get_env: impl Fn(&str) -> Option<String>,
-) -> Result<HistoryConfig, AppError> {
-    if let Some(database_url) = get_env("RUN_HISTORY_DATABASE_URL") {
-        return history_config_from_url(yaml.provider, database_url, "RUN_HISTORY_DATABASE_URL");
+    pub fn load(path: &Path) -> Result<Self, PlatformConfigError> {
+        Self::load_with_env(path, |name| env::var(name).ok())
     }
 
-    if let Some(database_url_env) = yaml.database_url_env {
-        let database_url = get_env(&database_url_env).ok_or_else(|| {
-            AppError::Config(format!(
-                "environment variable '{database_url_env}' is required for run history"
-            ))
-        })?;
-        return history_config_from_url(yaml.provider, database_url, &database_url_env);
-    }
-
-    if let Some(database_url) = yaml.database_url {
-        return history_config_from_url(yaml.provider, database_url, "history.database_url");
-    }
-
-    let db_path = get_env("RUN_HISTORY_DB").map(PathBuf::from).or(yaml.db);
-    if let Some(db_path) = db_path {
-        if yaml.provider == Some(HistoryProvider::Postgres) {
-            return Err(AppError::Config(
-                "history.db and RUN_HISTORY_DB can only be used with sqlite history".to_string(),
+    pub fn load_with_env(
+        path: &Path,
+        get_env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, PlatformConfigError> {
+        let path = absolute_path(path)?;
+        if !path.is_file() {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_CONFIG_NOT_FOUND",
+                format!("platform config '{}' was not found", path.display()),
             ));
         }
-        return Ok(HistoryConfig {
-            provider: HistoryProvider::Sqlite,
-            database_url: sqlite_database_url_from_path(&db_path),
-        });
+        let yaml = fs::read_to_string(&path).map_err(|_| {
+            PlatformConfigError::new(
+                "PLATFORM_CONFIG_READ_FAILED",
+                format!("failed to read platform config '{}'", path.display()),
+            )
+        })?;
+        let raw: PlatformYaml = serde_yaml::from_str(&yaml).map_err(|error| {
+            PlatformConfigError::new(
+                "PLATFORM_CONFIG_INVALID",
+                format!("invalid platform config: {error}"),
+            )
+        })?;
+        if raw.version != 1 {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_VERSION_UNSUPPORTED",
+                format!(
+                    "unsupported platform config version {}; expected 1",
+                    raw.version
+                ),
+            ));
+        }
+        let parent = path.parent().ok_or_else(|| {
+            PlatformConfigError::new(
+                "PLATFORM_CONFIG_INVALID",
+                "platform config has no parent directory",
+            )
+        })?;
+        let bind_addr = raw.bind_addr.parse().map_err(|_| {
+            PlatformConfigError::new(
+                "PLATFORM_CONFIG_INVALID",
+                "bind_addr must be a valid socket address",
+            )
+        })?;
+        let auth = resolve_auth(raw.auth, &get_env)?;
+        let agents = AgentsConfig {
+            directory: resolve_path(parent, &raw.agents.directory),
+            enabled: unique_names(raw.agents.enabled, "agents.enabled")?,
+        };
+        let models = ModelsConfig {
+            config: resolve_path(parent, &raw.models.config),
+        };
+        let actions = resolve_actions(raw.actions)?;
+        let history = resolve_history(parent, raw.history, &get_env)?;
+        let runtime = resolve_runtime(raw.runtime)?;
+        Ok(Self {
+            bind_addr,
+            auth,
+            agents,
+            models,
+            actions,
+            history,
+            runtime,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformConfigError {
+    code: &'static str,
+    message: String,
+}
+
+impl PlatformConfigError {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 
-    if yaml.provider == Some(HistoryProvider::Postgres) {
-        return Err(AppError::Config(
-            "postgres run history requires history.database_url or history.database_url_env"
-                .to_string(),
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl std::fmt::Display for PlatformConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PlatformConfigError {}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlatformYaml {
+    version: u32,
+    bind_addr: String,
+    auth: AuthYaml,
+    agents: AgentsYaml,
+    models: ModelsYaml,
+    actions: ActionsYaml,
+    history: HistoryYaml,
+    runtime: RuntimeYaml,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum AuthYaml {
+    Disabled,
+    BearerEnv { token_env: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentsYaml {
+    directory: PathBuf,
+    #[serde(default)]
+    enabled: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelsYaml {
+    config: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActionsYaml {
+    #[serde(default)]
+    enabled: Vec<String>,
+    http_get: Option<HttpGetYaml>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpGetYaml {
+    timeout: String,
+    max_bytes: usize,
+    allowlist: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
+enum HistoryYaml {
+    Sqlite { path: PathBuf },
+    Postgres { database_url_env: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeYaml {
+    max_concurrent_runs: usize,
+    default_node_timeout: String,
+    run_timeout: String,
+    attached_reconnect_grace: String,
+    subscriber_capacity: usize,
+    replay_ring_capacity: usize,
+    journal_capacity: usize,
+    journal_batch_size: usize,
+}
+
+fn resolve_auth(
+    auth: AuthYaml,
+    get_env: &impl Fn(&str) -> Option<String>,
+) -> Result<AuthConfig, PlatformConfigError> {
+    match auth {
+        AuthYaml::Disabled => Ok(AuthConfig::Disabled),
+        AuthYaml::BearerEnv { token_env } => {
+            let token = required_secret(&token_env, get_env)?;
+            Ok(AuthConfig::Bearer { token })
+        }
+    }
+}
+
+fn resolve_actions(raw: ActionsYaml) -> Result<ActionsConfig, PlatformConfigError> {
+    let enabled = unique_names(raw.enabled, "actions.enabled")?;
+    let http_get = raw
+        .http_get
+        .map(|http| {
+            let timeout = positive_duration(&http.timeout, "actions.http_get.timeout")?;
+            if http.max_bytes == 0 {
+                return Err(runtime_error(
+                    "actions.http_get.max_bytes must be greater than zero",
+                ));
+            }
+            let allowlist = unique_names(http.allowlist, "actions.http_get.allowlist")?;
+            if allowlist.is_empty() {
+                return Err(PlatformConfigError::new(
+                    "PLATFORM_CONFIG_INVALID",
+                    "actions.http_get.allowlist must not be empty",
+                ));
+            }
+            Ok(HttpGetResourceConfig {
+                timeout,
+                max_bytes: http.max_bytes,
+                allowlist,
+            })
+        })
+        .transpose()?;
+    if enabled.contains("http_get") && http_get.is_none() {
+        return Err(PlatformConfigError::new(
+            "PLATFORM_CONFIG_INVALID",
+            "http_get is enabled but actions.http_get is missing",
         ));
     }
-
-    Ok(HistoryConfig {
-        provider: HistoryProvider::Sqlite,
-        database_url: sqlite_database_url_from_path(Path::new("data/run_history.sqlite3")),
-    })
+    Ok(ActionsConfig { enabled, http_get })
 }
 
-fn history_config_from_url(
-    provider: Option<HistoryProvider>,
-    database_url: String,
-    source: &str,
-) -> Result<HistoryConfig, AppError> {
-    let database_url = non_empty_history_url(database_url, source)?;
-    let provider = provider.unwrap_or_else(|| infer_history_provider(&database_url));
-    let database_url = normalize_history_database_url(provider, &database_url)?;
-    Ok(HistoryConfig {
-        provider,
-        database_url,
-    })
-}
-
-fn non_empty_history_url(database_url: String, source: &str) -> Result<String, AppError> {
-    let database_url = database_url.trim().to_string();
-    if database_url.is_empty() {
-        return Err(AppError::Config(format!(
-            "{source} for run history must not be empty"
-        )));
+fn resolve_history(
+    parent: &Path,
+    history: HistoryYaml,
+    get_env: &impl Fn(&str) -> Option<String>,
+) -> Result<HistoryConfig, PlatformConfigError> {
+    match history {
+        HistoryYaml::Sqlite { path } => Ok(HistoryConfig::Sqlite {
+            path: resolve_path(parent, &path),
+        }),
+        HistoryYaml::Postgres { database_url_env } => {
+            let database_url = required_secret(&database_url_env, get_env)?;
+            if !database_url.expose().starts_with("postgres://")
+                && !database_url.expose().starts_with("postgresql://")
+            {
+                return Err(PlatformConfigError::new(
+                    "PLATFORM_CONFIG_INVALID",
+                    "PostgreSQL history URL must use postgres:// or postgresql://",
+                ));
+            }
+            Ok(HistoryConfig::Postgres { database_url })
+        }
     }
-    Ok(database_url)
 }
 
-fn infer_history_provider(database_url: &str) -> HistoryProvider {
-    if is_postgres_url(database_url) {
-        HistoryProvider::Postgres
+fn resolve_runtime(raw: RuntimeYaml) -> Result<RuntimeConfig, PlatformConfigError> {
+    let capacities = [
+        raw.max_concurrent_runs,
+        raw.subscriber_capacity,
+        raw.replay_ring_capacity,
+        raw.journal_capacity,
+        raw.journal_batch_size,
+    ];
+    if capacities.contains(&0) || raw.journal_batch_size > raw.journal_capacity {
+        return Err(runtime_error(
+            "runtime capacities must be positive and batch size must not exceed journal capacity",
+        ));
+    }
+    Ok(RuntimeConfig {
+        max_concurrent_runs: raw.max_concurrent_runs,
+        default_node_timeout: positive_duration(
+            &raw.default_node_timeout,
+            "runtime.default_node_timeout",
+        )?,
+        run_timeout: positive_duration(&raw.run_timeout, "runtime.run_timeout")?,
+        attached_reconnect_grace: positive_duration(
+            &raw.attached_reconnect_grace,
+            "runtime.attached_reconnect_grace",
+        )?,
+        subscriber_capacity: raw.subscriber_capacity,
+        replay_ring_capacity: raw.replay_ring_capacity,
+        journal_capacity: raw.journal_capacity,
+        journal_batch_size: raw.journal_batch_size,
+    })
+}
+
+fn positive_duration(value: &str, field: &str) -> Result<Duration, PlatformConfigError> {
+    let duration = humantime::parse_duration(value)
+        .map_err(|_| runtime_error(format!("{field} must be a valid positive duration")))?;
+    if duration.is_zero() {
+        return Err(runtime_error(format!("{field} must be greater than zero")));
+    }
+    Ok(duration)
+}
+
+fn unique_names(values: Vec<String>, field: &str) -> Result<BTreeSet<String>, PlatformConfigError> {
+    let mut names = BTreeSet::new();
+    for value in values {
+        let value = value.trim().to_string();
+        if value.is_empty() || !names.insert(value.clone()) {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_CONFIG_INVALID",
+                format!("{field} contains an empty or duplicate value"),
+            ));
+        }
+    }
+    Ok(names)
+}
+
+fn required_secret(
+    name: &str,
+    get_env: &impl Fn(&str) -> Option<String>,
+) -> Result<SecretString, PlatformConfigError> {
+    if name.trim().is_empty() {
+        return Err(PlatformConfigError::new(
+            "PLATFORM_CONFIG_INVALID",
+            "secret environment variable name must not be empty",
+        ));
+    }
+    let value = get_env(name).ok_or_else(|| {
+        PlatformConfigError::new(
+            "PLATFORM_SECRET_MISSING",
+            format!("required environment variable '{name}' is missing"),
+        )
+    })?;
+    if value.trim().is_empty() {
+        return Err(PlatformConfigError::new(
+            "PLATFORM_SECRET_EMPTY",
+            format!("required environment variable '{name}' is empty"),
+        ));
+    }
+    Ok(SecretString(value))
+}
+
+fn runtime_error(message: impl Into<String>) -> PlatformConfigError {
+    PlatformConfigError::new("PLATFORM_RUNTIME_INVALID", message)
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, PlatformConfigError> {
+    if path.is_absolute() {
+        Ok(normalize_path(path))
     } else {
-        HistoryProvider::Sqlite
-    }
-}
-
-fn normalize_history_database_url(
-    provider: HistoryProvider,
-    database_url: &str,
-) -> Result<String, AppError> {
-    match provider {
-        HistoryProvider::Sqlite => {
-            if database_url.starts_with("sqlite:") {
-                Ok(database_url.to_string())
-            } else {
-                Ok(sqlite_database_url_from_path(Path::new(database_url)))
-            }
-        }
-        HistoryProvider::Postgres => {
-            if is_postgres_url(database_url) {
-                Ok(database_url.to_string())
-            } else {
-                Err(AppError::Config(
-                    "postgres run history requires a postgres:// or postgresql:// database_url"
-                        .to_string(),
-                ))
-            }
-        }
-    }
-}
-
-fn is_postgres_url(database_url: &str) -> bool {
-    database_url.starts_with("postgres://") || database_url.starts_with("postgresql://")
-}
-
-fn sqlite_database_url_from_path(path: &Path) -> String {
-    format!("sqlite://{}", path.display())
-}
-
-fn load_model_providers_config(
-    config_path: Option<PathBuf>,
-) -> Result<ModelProvidersConfig, AppError> {
-    let path = env::var("MODEL_PROVIDERS_CONFIG")
-        .ok()
-        .map(PathBuf::from)
-        .or(config_path)
-        .unwrap_or_else(|| PathBuf::from("config/models.yaml"));
-    if path.exists() {
-        let yaml = fs::read_to_string(&path).map_err(|err| {
-            AppError::Config(format!(
-                "failed to read model providers config '{}': {err}",
-                path.display()
-            ))
+        let current = env::current_dir().map_err(|_| {
+            PlatformConfigError::new(
+                "PLATFORM_CONFIG_READ_FAILED",
+                "failed to resolve current directory",
+            )
         })?;
-        return serde_yaml::from_str(&yaml).map_err(|err| {
-            AppError::Config(format!(
-                "invalid model providers config '{}': {err}",
-                path.display()
-            ))
-        });
+        Ok(normalize_path(&current.join(path)))
     }
-
-    let base_url = env::var("OPENAI_BASE_URL")
-        .unwrap_or_else(|_| "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string());
-    let default_model =
-        env::var("OPENAI_DEFAULT_MODEL").unwrap_or_else(|_| "qwen3.6-flash".to_string());
-    Ok(ModelProvidersConfig {
-        default_provider: Some("openai_compatible".to_string()),
-        providers: BTreeMap::from([(
-            "openai_compatible".to_string(),
-            ModelProviderConfig {
-                kind: ModelProviderKind::OpenAiCompatible,
-                base_url,
-                api_key_env: Some("OPENAI_API_KEY".to_string()),
-                auth: None,
-                defaults: BTreeMap::from([(ModelType::Llm, default_model.clone())]),
-                models: BTreeMap::from([(
-                    ModelType::Llm,
-                    BTreeMap::from([(default_model, ModelProviderModelConfig::default())]),
-                )]),
-            },
-        )]),
-    })
 }
 
-fn filter_enabled_agents(
-    agents: Vec<LoadedAgent>,
-    exposure: &AgentExposureConfig,
-) -> Result<Vec<LoadedAgent>, AppError> {
-    let loaded_ids = agents
-        .iter()
-        .map(|agent| agent.config.id.clone())
-        .collect::<BTreeSet<_>>();
-    for (agent_id, policy) in &exposure.exposure {
-        if policy.enabled && !loaded_ids.contains(agent_id) {
-            return Err(AppError::Config(format!(
-                "enabled agent '{agent_id}' was not found"
-            )));
-        }
+fn resolve_path(parent: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        normalize_path(path)
+    } else {
+        normalize_path(&parent.join(path))
     }
-
-    Ok(agents
-        .into_iter()
-        .filter(|agent| {
-            exposure
-                .exposure
-                .get(&agent.config.id)
-                .map(|policy| policy.enabled)
-                .unwrap_or(exposure.default_enabled)
-        })
-        .collect())
 }
 
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use crate::agent::{
-        config::{AgentConfig, InputConfig, ModelConfig},
-        loader::LoadedAgent,
-    };
-
-    use super::{
-        filter_enabled_agents, load_internal_auth_token, resolve_history_config, AgentExposure,
-        AgentExposureConfig, HistoryProvider, PlatformHistoryYaml,
-    };
-
-    fn loaded_agent(id: &str) -> LoadedAgent {
-        LoadedAgent {
-            root: PathBuf::from(format!("agents/{id}")),
-            prompts: Default::default(),
-            config: AgentConfig {
-                id: id.to_string(),
-                name: id.to_string(),
-                description: String::new(),
-                model: ModelConfig {
-                    provider: "openai_compatible".to_string(),
-                    model_type: Default::default(),
-                    model: Some("fake".to_string()),
-                    temperature: None,
-                    max_tokens: None,
-                    options: serde_json::Value::Null,
-                },
-                input: InputConfig {
-                    schema: serde_json::json!({"type":"object"}),
-                },
-                prompts: Default::default(),
-                steps: Vec::new(),
-            },
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Normal(value) => normalized.push(value),
         }
     }
-
-    #[test]
-    fn filters_agents_by_exposure_config() {
-        let filtered = filter_enabled_agents(
-            vec![
-                loaded_agent("medical_report_interpreter"),
-                loaded_agent("code_node_demo"),
-            ],
-            &AgentExposureConfig {
-                default_enabled: false,
-                default_public: false,
-                exposure: [(
-                    "medical_report_interpreter".to_string(),
-                    AgentExposure {
-                        enabled: true,
-                        public: true,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].config.id, "medical_report_interpreter");
-    }
-
-    #[test]
-    fn rejects_enabled_agent_that_was_not_loaded() {
-        let err = filter_enabled_agents(
-            vec![loaded_agent("medical_report_interpreter")],
-            &AgentExposureConfig {
-                default_enabled: false,
-                default_public: false,
-                exposure: [(
-                    "missing".to_string(),
-                    AgentExposure {
-                        enabled: true,
-                        public: true,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-            },
-        )
-        .unwrap_err()
-        .to_string();
-
-        assert!(err.contains("enabled agent 'missing' was not found"));
-    }
-
-    #[test]
-    fn loads_internal_auth_token_from_environment() {
-        std::env::set_var("INSIGHT_TEST_INTERNAL_AUTH_TOKEN", "secret");
-
-        let token =
-            load_internal_auth_token(Some("INSIGHT_TEST_INTERNAL_AUTH_TOKEN".to_string())).unwrap();
-
-        assert_eq!(token.as_deref(), Some("secret"));
-    }
-
-    #[test]
-    fn resolves_legacy_history_db_as_sqlite_url() {
-        let history = resolve_history_config(
-            PlatformHistoryYaml {
-                db: Some(PathBuf::from("data/custom.sqlite3")),
-                ..Default::default()
-            },
-            |_| None,
-        )
-        .unwrap();
-
-        assert_eq!(history.provider, HistoryProvider::Sqlite);
-        assert_eq!(history.database_url, "sqlite://data/custom.sqlite3");
-    }
-
-    #[test]
-    fn resolves_history_database_url_and_infers_postgres_provider() {
-        let history = resolve_history_config(
-            PlatformHistoryYaml {
-                database_url: Some("postgres://user:pass@localhost/insight".to_string()),
-                ..Default::default()
-            },
-            |_| None,
-        )
-        .unwrap();
-
-        assert_eq!(history.provider, HistoryProvider::Postgres);
-        assert_eq!(
-            history.database_url,
-            "postgres://user:pass@localhost/insight"
-        );
-    }
-
-    #[test]
-    fn resolves_history_database_url_from_named_environment() {
-        let history = resolve_history_config(
-            PlatformHistoryYaml {
-                provider: Some(HistoryProvider::Sqlite),
-                database_url_env: Some("INSIGHT_HISTORY_URL".to_string()),
-                ..Default::default()
-            },
-            |name| (name == "INSIGHT_HISTORY_URL").then(|| "sqlite::memory:".to_string()),
-        )
-        .unwrap();
-
-        assert_eq!(history.provider, HistoryProvider::Sqlite);
-        assert_eq!(history.database_url, "sqlite::memory:");
-    }
+    normalized
 }

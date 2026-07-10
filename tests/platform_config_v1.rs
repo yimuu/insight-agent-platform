@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
-use insight_agent_platform::platform_config::{
+use insight_agent_platform::config::{
     AuthConfig, HistoryConfig, PlatformConfig, PlatformConfigError,
 };
 use tempfile::tempdir;

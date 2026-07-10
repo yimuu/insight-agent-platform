@@ -15,10 +15,10 @@
 {{ input.question }}
 
 第 1 步异常指标解读：
-{{ steps.abnormal_indicators.output.text }}
+{{ nodes.abnormal_indicators.output.text }}
 
 第 2 步综合解读：
-{{ steps.comprehensive_interpretation.output.text }}
+{{ nodes.comprehensive_interpretation.output.text }}
 
 要求：
 - 必须以标题“### 健康建议”开头。

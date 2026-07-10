@@ -1,1256 +1,442 @@
+//! Formal V1 HTTP and SSE contract tests.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
+
+use async_trait::async_trait;
 use axum::{
     body::{to_bytes, Body},
-    http::{header::HeaderName, Request, StatusCode},
+    http::{header, Method, Request, StatusCode},
+    Router,
 };
+use handlebars::Handlebars;
+use insight_agent_platform::{
+    api::formal::{build_router, ApiAuth, FormalApiState},
+    dsl::{
+        compiled::{
+            CompiledAgent, CompiledNode, NodeCompilation, NodeOutcome, NodeTransition, RunOutput,
+        },
+        compiler::CompileContext,
+        CompileError, EmitPolicy,
+    },
+    events::hub::{EventHub, EventHubConfig},
+    history::{repository::RunRepository, sqlite::SqliteRunRepository, types::RunStatus},
+    nodes::registry::{NodeExecutor, NodeExecutorRegistry, NodeType},
+    runtime::{
+        CompiledAgentRegistry, ExecutionControl, RunContext, RunError, RunService, RunServiceConfig,
+    },
+};
+use jsonschema::JSONSchema;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use insight_agent_platform::{
-    agent::{
-        config::{AgentConfig, InputConfig, ModelConfig, StepConfig, StepKind},
-        loader::LoadedAgent,
-        registry::AgentRegistry,
-    },
-    api::{
-        routes::{build_router, AppState, RuntimeAuth},
-        sse::encode_event,
-    },
-    engine::event::RunEvent,
-    engine::runner::RunEngine,
-    error::AppError,
-    handlers::default_code_registry,
-    history::store::RunHistoryStore,
-    model::types::FakeModelClient,
-    tools::registry::ToolRegistry,
-};
+enum ApiBehavior {
+    Complete,
+    Block,
+}
 
-fn prompt_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["name"],
-        "properties": {
-            "name": { "type": "string" }
+struct ApiNode;
+
+impl NodeType for ApiNode {
+    fn kind(&self) -> &'static str {
+        "test.api"
+    }
+
+    fn compile(
+        &self,
+        _node_id: &str,
+        _config: Value,
+        _context: &mut CompileContext<'_>,
+    ) -> Result<NodeCompilation, CompileError> {
+        Err(CompileError::new(
+            "TEST_ONLY",
+            "API test nodes are constructed directly",
+        ))
+    }
+}
+
+#[async_trait]
+impl NodeExecutor for ApiNode {
+    async fn execute(
+        &self,
+        node: &CompiledNode,
+        _context: &RunContext,
+        control: &ExecutionControl,
+    ) -> Result<NodeOutcome, RunError> {
+        match node.body::<ApiBehavior>()? {
+            ApiBehavior::Complete => Ok(NodeOutcome {
+                output: json!({"answer":"done"}),
+                transition: NodeTransition::Complete(RunOutput {
+                    content: Some("done".to_string()),
+                    format: Some("text".to_string()),
+                    data: json!({"answer":"done"}),
+                }),
+            }),
+            ApiBehavior::Block => {
+                control.stopped().await;
+                Err(RunError::stopped(control.stop_reason().unwrap()))
+            }
         }
+    }
+}
+
+fn agent(id: &str, behavior: ApiBehavior) -> Arc<CompiledAgent> {
+    let node = CompiledNode {
+        id: "work".to_string(),
+        kind: "test.api".to_string(),
+        next: None,
+        emit: EmitPolicy::None,
+        timeout: Duration::from_secs(30),
+        body: Arc::new(behavior),
+        edges: Vec::new(),
+        references: BTreeSet::new(),
+        terminal: true,
+    };
+    Arc::new(CompiledAgent {
+        id: id.to_string(),
+        name: format!("{id} agent"),
+        description: "Safe public metadata".to_string(),
+        version_hash: format!("sha256:{id}"),
+        input_schema: Arc::new(
+            JSONSchema::compile(&json!({
+                "type": "object",
+                "required": ["text"],
+                "additionalProperties": false,
+                "properties": {"text": {"type": "string"}}
+            }))
+            .unwrap(),
+        ),
+        entry: "work".to_string(),
+        nodes: BTreeMap::from([("work".to_string(), node)]),
+        templates: Arc::new(Handlebars::new()),
     })
 }
 
-fn prompt_agent() -> LoadedAgent {
-    LoadedAgent {
-        root: std::path::PathBuf::from("agents/test"),
-        prompts: Default::default(),
-        config: AgentConfig {
-            id: "test".to_string(),
-            name: "Test".to_string(),
-            description: "Test agent".to_string(),
-            model: ModelConfig {
-                provider: "openai_compatible".to_string(),
-                model_type: Default::default(),
-                model: Some("fake".to_string()),
-                temperature: None,
-                max_tokens: None,
-                options: serde_json::Value::Null,
-            },
-            input: InputConfig {
-                schema: prompt_input_schema(),
-            },
-            prompts: Default::default(),
-            steps: vec![StepConfig {
-                id: "hello".to_string(),
-                kind: StepKind::Prompt,
-                prompt_ref: None,
-                prompt: Some("Hello {{ input.name }}".to_string()),
-                system_prompt_ref: None,
-                system_prompt: None,
-                image_input: None,
-                stream: false,
-                tool: None,
-                handler: None,
-                inputs: serde_json::Value::Null,
-                args: serde_json::Value::Null,
-                cases: Vec::new(),
-                default: None,
-                end: false,
-            }],
+async fn fixture(auth: ApiAuth, capacity: usize) -> (Router, RunService) {
+    let repository = Arc::new(SqliteRunRepository::in_memory().await.unwrap());
+    let repository_trait: Arc<dyn RunRepository> = repository;
+    let events = EventHub::new(
+        Arc::clone(&repository_trait),
+        EventHubConfig {
+            ring_capacity: 32,
+            subscriber_capacity: 16,
+            journal_capacity: 32,
+            journal_batch_size: 8,
         },
-    }
-}
-
-fn failing_tool_agent() -> LoadedAgent {
-    LoadedAgent {
-        root: std::path::PathBuf::from("agents/failing"),
-        prompts: Default::default(),
-        config: AgentConfig {
-            id: "broken".to_string(),
-            name: "Broken".to_string(),
-            description: "Broken agent".to_string(),
-            model: ModelConfig {
-                provider: "openai_compatible".to_string(),
-                model_type: Default::default(),
-                model: Some("fake".to_string()),
-                temperature: None,
-                max_tokens: None,
-                options: serde_json::Value::Null,
-            },
-            input: InputConfig {
-                schema: json!({"type":"object"}),
-            },
-            prompts: Default::default(),
-            steps: vec![StepConfig {
-                id: "missing_tool".to_string(),
-                kind: StepKind::Tool,
-                prompt_ref: None,
-                prompt: None,
-                system_prompt_ref: None,
-                system_prompt: None,
-                image_input: None,
-                stream: false,
-                tool: Some("not_registered".to_string()),
-                handler: None,
-                inputs: serde_json::Value::Null,
-                args: json!({}),
-                cases: Vec::new(),
-                default: None,
-                end: false,
-            }],
+    );
+    let agents = CompiledAgentRegistry::new(vec![
+        agent("fast", ApiBehavior::Complete),
+        agent("blocking", ApiBehavior::Block),
+    ])
+    .unwrap();
+    let mut executors = NodeExecutorRegistry::default();
+    executors.register(ApiNode).unwrap();
+    let service = RunService::new(
+        agents,
+        executors,
+        repository_trait,
+        events,
+        RunServiceConfig {
+            max_concurrent_runs: capacity,
+            run_timeout: Duration::from_secs(30),
+            attached_reconnect_grace: Duration::from_secs(1),
         },
-    }
-}
-
-fn llm_agent() -> LoadedAgent {
-    LoadedAgent {
-        root: std::path::PathBuf::from("agents/llm"),
-        prompts: Default::default(),
-        config: AgentConfig {
-            id: "llm".to_string(),
-            name: "LLM".to_string(),
-            description: "LLM agent".to_string(),
-            model: ModelConfig {
-                provider: "openai_compatible".to_string(),
-                model_type: Default::default(),
-                model: Some("fake".to_string()),
-                temperature: None,
-                max_tokens: None,
-                options: serde_json::Value::Null,
-            },
-            input: InputConfig {
-                schema: json!({"type":"object"}),
-            },
-            prompts: Default::default(),
-            steps: vec![StepConfig {
-                id: "answer".to_string(),
-                kind: StepKind::Llm,
-                prompt_ref: None,
-                prompt: Some("Answer".to_string()),
-                system_prompt_ref: None,
-                system_prompt: None,
-                image_input: None,
-                stream: true,
-                tool: None,
-                handler: None,
-                inputs: serde_json::Value::Null,
-                args: serde_json::Value::Null,
-                cases: Vec::new(),
-                default: None,
-                end: false,
-            }],
-        },
-    }
-}
-
-async fn app() -> axum::Router {
-    app_with_encoder(encode_event).await
-}
-
-async fn app_with_auth(auth: RuntimeAuth) -> axum::Router {
-    app_with_encoder_and_auth(encode_event, auth).await
-}
-
-async fn app_with_encoder(
-    event_encoder: fn(RunEvent) -> Result<axum::response::sse::Event, AppError>,
-) -> axum::Router {
-    app_with_encoder_and_auth(event_encoder, RuntimeAuth::disabled()).await
-}
-
-async fn app_with_encoder_and_auth(
-    event_encoder: fn(RunEvent) -> Result<axum::response::sse::Event, AppError>,
-    auth: RuntimeAuth,
-) -> axum::Router {
-    let registry =
-        AgentRegistry::new(vec![prompt_agent(), failing_tool_agent(), llm_agent()]).unwrap();
-    let engine = RunEngine::new(
-        FakeModelClient::new(vec!["Hel", "lo"]),
-        ToolRegistry::default(),
     )
-    .with_code_handlers(default_code_registry())
-    .with_history_store(RunHistoryStore::sqlite_in_memory().await.unwrap());
-    build_router(AppState {
-        registry,
-        engine,
-        event_encoder,
+    .unwrap();
+    let router = build_router(FormalApiState {
+        service: service.clone(),
         auth,
-    })
+    });
+    (router, service)
 }
 
-fn code_node_demo_agent() -> LoadedAgent {
-    insight_agent_platform::agent::loader::load_agents("agents")
-        .unwrap()
-        .into_iter()
-        .find(|agent| agent.config.id == "code_node_demo")
-        .unwrap()
+fn request(method: Method, uri: &str, body: Option<Value>) -> Request<Body> {
+    let mut builder = Request::builder().method(method).uri(uri);
+    let body = match body {
+        Some(value) => {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            Body::from(serde_json::to_vec(&value).unwrap())
+        }
+        None => Body::empty(),
+    };
+    builder.body(body).unwrap()
 }
 
-async fn app_with_code_node_demo() -> axum::Router {
-    let registry = AgentRegistry::new(vec![code_node_demo_agent()]).unwrap();
-    let engine = RunEngine::new(FakeModelClient::new(vec![]), ToolRegistry::default())
-        .with_code_handlers(default_code_registry())
-        .with_history_store(RunHistoryStore::sqlite_in_memory().await.unwrap());
-    build_router(AppState {
-        registry,
-        engine,
-        event_encoder: encode_event,
-        auth: RuntimeAuth::disabled(),
-    })
+async fn json_body(response: axum::response::Response) -> Value {
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
 }
 
-#[derive(Debug)]
-struct SseFrame {
-    event: String,
-    data: Value,
+async fn wait_for_status(service: &RunService, run_id: &str, status: RunStatus) {
+    for _ in 0..200 {
+        if service.get_run(run_id).await.unwrap().status == status {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("run {run_id} did not reach {status:?}");
 }
 
-fn parse_sse_frames(body: &str) -> Vec<SseFrame> {
-    body.split("\n\n")
-        .filter_map(|chunk| {
-            let trimmed = chunk.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-
-            let mut event = None;
-            let mut data = None;
-            for line in trimmed.lines() {
-                if let Some(value) = line.strip_prefix("event: ") {
-                    event = Some(value.to_string());
-                } else if let Some(value) = line.strip_prefix("data: ") {
-                    data = Some(serde_json::from_str::<Value>(value).unwrap());
-                }
-            }
-
-            Some(SseFrame {
-                event: event.expect("SSE frame should include event"),
-                data: data.expect("SSE frame should include data"),
-            })
-        })
+fn sse_data(body: &[u8]) -> Vec<Value> {
+    String::from_utf8_lossy(body)
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str(data).unwrap())
         .collect()
 }
 
-fn history_items(payload: &Value) -> &[Value] {
-    payload["data"]["items"].as_array().unwrap().as_slice()
-}
-
 #[tokio::test]
-async fn streams_typed_event_envelope_with_content_data() {
-    let response = app()
-        .await
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/llm/runs/stream")
-                .header("content-type", "application/json")
-                .header("x-request-id", "req_protocol_001")
-                .body(Body::from(r#"{}"#))
-                .unwrap(),
-        )
+async fn health_is_public_while_v1_honors_explicit_bearer_auth() {
+    let auth = ApiAuth::bearer_token("super-secret-token");
+    assert!(!format!("{auth:?}").contains("super-secret-token"));
+    let (app, _) = fixture(auth, 4).await;
+
+    let health = app
+        .clone()
+        .oneshot(request(Method::GET, "/health", None))
         .await
         .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    assert_eq!(json_body(health).await["code"], "OK");
 
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    let frames = parse_sse_frames(&text);
-    let run_id = frames[0].data["run_id"].as_str().unwrap();
-
-    for (index, frame) in frames.iter().enumerate() {
-        assert_eq!(frame.data["seq"], (index + 1) as u64);
-        assert_eq!(frame.data["request_id"], "req_protocol_001");
-        assert_eq!(frame.data["run_id"], run_id);
-        assert_eq!(frame.data["agent_id"], "llm");
-        assert!(frame.data["time"].as_str().is_some());
-    }
-
-    assert_eq!(frames[0].event, "run.started");
-    assert_eq!(frames[0].data["type"], "run.started");
-    assert_eq!(frames[0].data["code"], 0);
-    assert_eq!(frames[0].data["message"], "ok");
-    assert_eq!(frames[0].data["request_id"], "req_protocol_001");
-    assert_eq!(frames[0].data["agent_id"], "llm");
-    assert_eq!(frames[0].data["data"]["status"], "running");
-
-    let deltas = frames
-        .iter()
-        .filter(|frame| frame.event == "content.delta")
-        .map(|frame| frame.data["data"]["content"].as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
-    assert_eq!(deltas, vec!["Hel", "lo"]);
-
-    let completed = frames
-        .iter()
-        .find(|frame| frame.event == "run.completed")
-        .expect("expected run.completed frame");
-    assert_eq!(completed.data["type"], "run.completed");
-    assert_eq!(completed.data["data"]["status"], "completed");
-    assert_eq!(completed.data["data"]["content"], "Hello");
-    assert_eq!(completed.data["data"]["content_format"], "markdown");
-}
-
-#[tokio::test]
-async fn lists_agents_without_prompt_contents() {
-    let response = app()
-        .await
-        .oneshot(
-            Request::builder()
-                .uri("/v1/agents")
-                .body(Body::empty())
-                .unwrap(),
-        )
+    let unauthorized = app
+        .clone()
+        .oneshot(request(Method::GET, "/v1/agents", None))
         .await
         .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(json_body(unauthorized).await["code"], "UNAUTHORIZED");
 
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["code"], 0);
-    assert_eq!(payload["message"], "ok");
-    let agents = &payload["data"];
-    let test_agent = agents
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|agent| agent["id"] == "test")
-        .expect("expected test agent in list");
-    assert_eq!(test_agent["name"], "Test");
-    assert_eq!(test_agent["description"], "Test agent");
-    assert_eq!(test_agent["input_schema"], prompt_input_schema());
-    assert!(test_agent.get("steps").is_none());
-    assert!(test_agent.get("prompts").is_none());
-    assert!(!String::from_utf8_lossy(&body).contains("Hello {{ input.name }}"));
-}
-
-#[tokio::test]
-async fn health_does_not_require_internal_auth() {
-    let response = app_with_auth(RuntimeAuth::bearer_token("secret"))
-        .await
-        .oneshot(
-            Request::builder()
-                .uri("/health")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn v1_routes_reject_missing_internal_auth() {
-    let response = app_with_auth(RuntimeAuth::bearer_token("secret"))
-        .await
-        .oneshot(
-            Request::builder()
-                .uri("/v1/agents")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let mut authorized = request(Method::GET, "/v1/agents", None);
+    authorized.headers_mut().insert(
+        header::AUTHORIZATION,
+        "Bearer super-secret-token".parse().unwrap(),
+    );
     assert_eq!(
-        payload["message"],
-        "missing or invalid internal authorization"
+        app.oneshot(authorized).await.unwrap().status(),
+        StatusCode::OK
     );
 }
 
 #[tokio::test]
-async fn v1_routes_accept_internal_bearer_token() {
-    let response = app_with_auth(RuntimeAuth::bearer_token("secret"))
-        .await
-        .oneshot(
-            Request::builder()
-                .uri("/v1/agents")
-                .header("authorization", "Bearer secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
+async fn agent_metadata_omits_runtime_internals_and_unknown_agents_are_hidden() {
+    let (app, _) = fixture(ApiAuth::disabled(), 4).await;
+    let response = app
+        .clone()
+        .oneshot(request(Method::GET, "/v1/agents", None))
         .await
         .unwrap();
+    let body = json_body(response).await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body["code"], "OK");
+    assert_eq!(body["message"], "ok");
+    assert_eq!(body["data"].as_array().unwrap().len(), 2);
+    let encoded = body.to_string();
+    assert!(!encoded.contains("nodes"));
+    assert!(!encoded.contains("templates"));
+    assert!(!encoded.contains("super-secret-token"));
+
+    let missing = app
+        .oneshot(request(Method::GET, "/v1/agents/disabled", None))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_eq!(json_body(missing).await["code"], "AGENT_NOT_FOUND");
 }
 
 #[tokio::test]
-async fn v1_stream_route_rejects_missing_internal_auth() {
-    let response = app_with_auth(RuntimeAuth::bearer_token("secret"))
-        .await
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/test/runs/stream")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"name":"Ada"}"#))
-                .unwrap(),
-        )
+async fn detached_creation_uses_direct_input_returns_202_and_supports_lookup() {
+    let (app, service) = fixture(ApiAuth::disabled(), 4).await;
+    let mut create = request(
+        Method::POST,
+        "/v1/agents/fast/runs",
+        Some(json!({"text":"hello"})),
+    );
+    create
+        .headers_mut()
+        .insert("x-request-id", "req-client".parse().unwrap());
+    let response = app.clone().oneshot(create).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.headers()["x-request-id"], "req-client");
+    let created = json_body(response).await;
+    assert_eq!(created["code"], "OK");
+    assert_eq!(created["data"]["request_id"], "req-client");
+    assert_eq!(created["data"]["attachment"], "detached");
+    let run_id = created["data"]["run_id"].as_str().unwrap();
+    wait_for_status(&service, run_id, RunStatus::Completed).await;
+
+    let lookup = app
+        .oneshot(request(Method::GET, &format!("/v1/runs/{run_id}"), None))
         .await
         .unwrap();
+    let lookup = json_body(lookup).await;
+    assert_eq!(lookup["data"]["status"], "completed");
+    assert_eq!(lookup["data"]["input_summary"]["keys"], json!(["text"]));
+    assert!(!lookup.to_string().contains("hello"));
+}
 
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+#[tokio::test]
+async fn attached_creation_validates_before_sse_and_exposes_formal_event_headers() {
+    let (app, _) = fixture(ApiAuth::disabled(), 4).await;
+
+    let invalid_schema = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/v1/agents/fast/runs/stream",
+            Some(json!({"input":{"text":"wrapped"}})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(invalid_schema.status(), StatusCode::BAD_REQUEST);
     assert_ne!(
-        response.headers().get("content-type").unwrap(),
+        invalid_schema.headers().get(header::CONTENT_TYPE).unwrap(),
         "text/event-stream"
     );
-}
+    assert_eq!(json_body(invalid_schema).await["code"], "INPUT_INVALID");
 
-#[tokio::test]
-async fn gets_agent_without_prompt_contents() {
-    let response = app()
-        .await
-        .oneshot(
-            Request::builder()
-                .uri("/v1/agents/test")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
+    let malformed = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/agents/fast/runs/stream")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{"))
         .unwrap();
+    let malformed = app.clone().oneshot(malformed).await.unwrap();
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(malformed).await["code"], "INPUT_INVALID");
 
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["code"], 0);
-    assert_eq!(payload["message"], "ok");
-    let agent = &payload["data"];
-    assert_eq!(agent["id"], "test");
-    assert_eq!(agent["input_schema"], prompt_input_schema());
-    assert!(agent.get("steps").is_none());
-    assert!(agent.get("prompts").is_none());
-    assert!(!String::from_utf8_lossy(&body).contains("Hello {{ input.name }}"));
-}
-
-#[tokio::test]
-async fn disabled_agent_is_not_visible_or_callable() {
-    let app = app().await;
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/v1/agents")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert!(!payload["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|agent| agent["id"] == "disabled"));
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/v1/agents/disabled")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/v1/agents/disabled/runs")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/disabled/runs/stream")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"name":"Ada"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn streams_agent_run_as_sse() {
-    let response = app()
-        .await
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/test/runs/stream")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"name":"Ada"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get("content-type").unwrap(),
-        "text/event-stream"
+    let mut valid = request(
+        Method::POST,
+        "/v1/agents/fast/runs/stream",
+        Some(json!({"text":"hello"})),
     );
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    let frames = parse_sse_frames(&text);
-
-    assert!(frames.len() >= 4);
-    assert_eq!(frames[0].event, "run.started");
-    assert_eq!(frames[0].data["type"], "run.started");
-    assert_eq!(frames[0].data["code"], 0);
-    assert_eq!(frames[0].data["message"], "ok");
-    assert_eq!(frames[0].data["agent_id"], "test");
-    assert_eq!(frames[0].data["data"]["status"], "running");
-
-    let completed = frames
-        .iter()
-        .find(|frame| frame.event == "step.completed")
-        .expect("expected step.completed frame");
-    assert_eq!(completed.data["code"], 0);
-    assert_eq!(completed.data["type"], "step.completed");
-    assert_eq!(completed.data["data"]["step_id"], "hello");
-    assert_eq!(completed.data["data"]["status"], "completed");
-
-    let run_completed = frames
-        .iter()
-        .find(|frame| frame.event == "run.completed")
-        .expect("expected run.completed frame");
-    assert_eq!(run_completed.data["code"], 0);
-    assert_eq!(run_completed.data["type"], "run.completed");
-    assert_eq!(run_completed.data["data"]["status"], "completed");
-    assert_eq!(run_completed.data["data"]["content"], "Hello Ada");
-    assert!(run_completed.data["data"]["output"].is_null());
-}
-
-#[tokio::test]
-async fn streams_agent_run_with_request_id() {
-    let response = app()
-        .await
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/test/runs/stream")
-                .header("content-type", "application/json")
-                .header("x-request-id", "req_test_123")
-                .body(Body::from(r#"{"name":"Ada"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
+    valid
+        .headers_mut()
+        .insert("x-request-id", "req-stream".parse().unwrap());
+    let response = app.oneshot(valid).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(HeaderName::from_static("x-request-id"))
-            .unwrap(),
-        "req_test_123"
-    );
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    let frames = parse_sse_frames(&text);
-
-    assert!(frames
-        .iter()
-        .all(|frame| frame.data["request_id"] == "req_test_123"));
-}
-
-#[tokio::test]
-async fn streams_agent_run_generates_request_id() {
-    let response = app()
-        .await
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/test/runs/stream")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"name":"Ada"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let request_id = response
-        .headers()
-        .get(HeaderName::from_static("x-request-id"))
-        .unwrap()
+    assert!(response.headers().contains_key("x-run-id"));
+    assert_eq!(response.headers()["x-request-id"], "req-stream");
+    assert!(response.headers()[header::CONTENT_TYPE]
         .to_str()
         .unwrap()
-        .to_string();
-    assert!(request_id.starts_with("req_"));
+        .starts_with("text/event-stream"));
 
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    let frames = parse_sse_frames(&text);
-
-    assert!(frames
+    let events = sse_data(&body);
+    assert_eq!(events.first().unwrap()["type"], "run.created");
+    assert_eq!(events.last().unwrap()["type"], "run.completed");
+    assert!(events.iter().all(|event| event["schema_version"] == 1));
+    assert!(events
         .iter()
-        .all(|frame| frame.data["request_id"] == request_id));
-}
-
-#[tokio::test]
-async fn records_run_history_and_step_outputs() {
-    let app = app().await;
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/test/runs/stream")
-                .header("content-type", "application/json")
-                .header("x-request-id", "req_history_001")
-                .header("x-caller-service", "web-backend")
-                .header("x-tenant-id", "tenant_123")
-                .header("x-user-id", "user_456")
-                .body(Body::from(r#"{"name":"Ada"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    let frames = parse_sse_frames(&text);
-    let run_id = frames[0].data["run_id"].as_str().unwrap();
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/v1/runs/{run_id}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["code"], 0);
-    assert_eq!(payload["data"]["run_id"], run_id);
-    assert_eq!(payload["data"]["request_id"], "req_history_001");
-    assert_eq!(payload["data"]["agent_id"], "test");
-    assert_eq!(payload["data"]["caller_service"], "web-backend");
-    assert_eq!(payload["data"]["tenant_id"], "tenant_123");
-    assert_eq!(payload["data"]["user_id"], "user_456");
-    assert_eq!(payload["data"]["status"], "completed");
-    assert_eq!(payload["data"]["input_summary"]["keys"], json!(["name"]));
+        .all(|event| event["request_id"] == "req-stream"));
     assert_eq!(
-        payload["data"]["step_outputs"]["hello"]["text"],
-        "Hello Ada"
+        events
+            .iter()
+            .map(|event| event["seq"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        (1..=events.len() as u64).collect::<Vec<_>>()
     );
-    let completed_event = payload["data"]["events"]
-        .as_array()
-        .unwrap()
+}
+
+#[tokio::test]
+async fn completed_events_replay_after_seq_and_invalid_cursors_use_json_errors() {
+    let (app, service) = fixture(ApiAuth::disabled(), 4).await;
+    let created = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/v1/agents/fast/runs",
+            Some(json!({"text":"hello"})),
+        ))
+        .await
+        .unwrap();
+    let created = json_body(created).await;
+    let run_id = created["data"]["run_id"].as_str().unwrap();
+    wait_for_status(&service, run_id, RunStatus::Completed).await;
+
+    let replay = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/v1/runs/{run_id}/events?after_seq=2"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay = to_bytes(replay.into_body(), usize::MAX).await.unwrap();
+    let events = sse_data(&replay);
+    assert!(!events.is_empty());
+    assert!(events
         .iter()
-        .find(|event| event["type"] == "step.completed")
-        .unwrap();
-    assert_eq!(completed_event["request_id"], "req_history_001");
-    assert_eq!(completed_event["run_id"], run_id);
-    assert_eq!(completed_event["agent_id"], "test");
-    assert_eq!(completed_event["data"]["step_id"], "hello");
-    assert!(completed_event.get("step_id").is_none());
-    assert!(completed_event["time"].as_str().is_some());
+        .all(|event| event["seq"].as_u64().unwrap() > 2));
+    assert_eq!(events.last().unwrap()["type"], "run.completed");
+    let terminal_seq = events.last().unwrap()["seq"].as_u64().unwrap();
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/v1/agents/test/runs")
-                .body(Body::empty())
-                .unwrap(),
-        )
+    let caught_up = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/v1/runs/{run_id}/events?after_seq={terminal_seq}"),
+            None,
+        ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["code"], 0);
-    let items = history_items(&payload);
-    assert_eq!(items[0]["run_id"], run_id);
-    assert_eq!(items[0]["request_id"], "req_history_001");
-    assert_eq!(items[0]["caller_service"], "web-backend");
-    assert_eq!(items[0]["tenant_id"], "tenant_123");
-    assert_eq!(items[0]["user_id"], "user_456");
-    assert_eq!(items[0]["status"], "completed");
-    assert!(payload["data"]["next_cursor"].is_null());
+    let caught_up = to_bytes(caught_up.into_body(), usize::MAX).await.unwrap();
+    assert!(sse_data(&caught_up).is_empty());
+
+    let invalid = app
+        .oneshot(request(
+            Method::GET,
+            &format!("/v1/runs/{run_id}/events?after_seq=abc"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(invalid).await["code"], "INPUT_INVALID");
 }
 
 #[tokio::test]
-async fn filters_run_history_by_request_context() {
-    let app = app().await;
-    let response = app
+async fn cancellation_is_idempotent_and_capacity_maps_to_run_conflict() {
+    let (app, service) = fixture(ApiAuth::disabled(), 1).await;
+    let first = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/test/runs/stream")
-                .header("content-type", "application/json")
-                .header("x-request-id", "req_filter_001")
-                .header("x-caller-service", "web-backend")
-                .header("x-tenant-id", "tenant_123")
-                .header("x-user-id", "user_a")
-                .body(Body::from(r#"{"name":"Ada"}"#))
-                .unwrap(),
-        )
+        .oneshot(request(
+            Method::POST,
+            "/v1/agents/blocking/runs",
+            Some(json!({"text":"hello"})),
+        ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let first_frames = parse_sse_frames(std::str::from_utf8(&body).unwrap());
-    let first_run_id = first_frames[0].data["run_id"].as_str().unwrap().to_string();
+    let first = json_body(first).await;
+    let run_id = first["data"]["run_id"].as_str().unwrap();
+    wait_for_status(&service, run_id, RunStatus::Running).await;
 
-    let response = app
+    let conflict = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/test/runs/stream")
-                .header("content-type", "application/json")
-                .header("x-request-id", "req_filter_002")
-                .header("x-caller-service", "batch-worker")
-                .header("x-tenant-id", "tenant_999")
-                .header("x-user-id", "user_b")
-                .body(Body::from(r#"{"name":"Grace"}"#))
-                .unwrap(),
-        )
+        .oneshot(request(
+            Method::POST,
+            "/v1/agents/blocking/runs",
+            Some(json!({"text":"second"})),
+        ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let second_frames = parse_sse_frames(std::str::from_utf8(&body).unwrap());
-    let second_run_id = second_frames[0].data["run_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(conflict).await["code"], "RUN_CONFLICT");
 
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/v1/agents/test/runs?request_id=req_filter_001")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    let items = history_items(&payload);
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["run_id"], first_run_id);
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/v1/agents/test/runs?user_id=user_b")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    let items = history_items(&payload);
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["run_id"], second_run_id);
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/v1/runs?tenant_id=tenant_123&caller_service=web-backend")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    let items = history_items(&payload);
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["run_id"], first_run_id);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/v1/runs?request_id=missing")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert!(history_items(&payload).is_empty());
-}
-
-#[tokio::test]
-async fn filters_run_history_by_agent_status_and_cursor() {
-    let app = app().await;
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/test/runs/stream")
-                .header("content-type", "application/json")
-                .header("x-request-id", "req_status_ok_001")
-                .body(Body::from(r#"{"name":"Ada"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let ok_frames = parse_sse_frames(std::str::from_utf8(&body).unwrap());
-    let first_completed_run_id = ok_frames[0].data["run_id"].as_str().unwrap();
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/test/runs/stream")
-                .header("content-type", "application/json")
-                .header("x-request-id", "req_status_ok_002")
-                .body(Body::from(r#"{"name":"Grace"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let ok_frames = parse_sse_frames(std::str::from_utf8(&body).unwrap());
-    let second_completed_run_id = ok_frames[0].data["run_id"].as_str().unwrap();
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/broken/runs/stream")
-                .header("content-type", "application/json")
-                .header("x-request-id", "req_status_failed_001")
-                .body(Body::from(r#"{}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let failed_frames = parse_sse_frames(std::str::from_utf8(&body).unwrap());
-    let failed_run_id = failed_frames[0].data["run_id"].as_str().unwrap();
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/v1/runs?agent_id=broken&status=failed")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    let items = history_items(&payload);
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["run_id"], failed_run_id);
-    assert_eq!(items[0]["status"], "failed");
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/v1/agents/test/runs?status=completed&limit=1")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    let items = history_items(&payload);
-    assert_eq!(items.len(), 1);
-    assert!(
-        items[0]["run_id"] == first_completed_run_id
-            || items[0]["run_id"] == second_completed_run_id
-    );
-    let first_page_run_id = items[0]["run_id"].as_str().unwrap().to_string();
-    let next_cursor = payload["data"]["next_cursor"]
-        .as_str()
-        .expect("first page should include cursor")
-        .to_string();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/v1/agents/test/runs?status=completed&limit=1&after={next_cursor}"
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    let items = history_items(&payload);
-    assert_eq!(items.len(), 1);
-    assert_ne!(items[0]["run_id"], first_page_run_id);
-    assert!(
-        items[0]["run_id"] == first_completed_run_id
-            || items[0]["run_id"] == second_completed_run_id
-    );
-    assert!(payload["data"]["next_cursor"].is_null());
-}
-
-#[tokio::test]
-async fn streams_code_node_demo_agent() {
-    let response = app_with_code_node_demo()
-        .await
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/code_node_demo/runs/stream")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"text":"hello rust world"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    let frames = parse_sse_frames(&text);
-    let deltas = frames
-        .iter()
-        .filter(|frame| frame.event == "content.delta")
-        .map(|frame| frame.data["data"]["content"].as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        deltas,
-        vec![
-            "Analyzing text metrics".to_string(),
-            "\n\nText metrics:\n- characters: 16\n- words: 3\n- empty: false\n".to_string(),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn records_failed_run_history() {
-    let app = app().await;
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/broken/runs/stream")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    let frames = parse_sse_frames(&text);
-    let run_id = frames[0].data["run_id"].as_str().unwrap();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/v1/runs/{run_id}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-
-    assert_eq!(payload["data"]["status"], "failed");
-    assert_eq!(
-        payload["data"]["error_message"],
-        "run error: tool 'not_registered' is not registered"
-    );
-    assert!(payload["data"]["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|event| {
-            event["type"] == "run.failed"
-                && event["run_id"] == run_id
-                && event["data"]["step_id"] == "missing_tool"
-                && event.get("step_id").is_none()
-        }));
-}
-
-#[tokio::test]
-async fn streams_content_delta_content_as_direct_text() {
-    let response = app()
-        .await
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/llm/runs/stream")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    let frames = parse_sse_frames(&text);
-    let deltas = frames
-        .iter()
-        .filter(|frame| frame.event == "content.delta")
-        .map(|frame| frame.data["data"]["content"].as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
-
-    assert_eq!(deltas, vec!["Hel", "lo"]);
-}
-
-#[tokio::test]
-async fn invalid_input_returns_400_before_sse() {
-    let response = app()
-        .await
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/test/runs/stream")
-                .header("content-type", "application/json")
-                .body(Body::from(r#""not-object""#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_ne!(
-        response.headers().get("content-type").unwrap(),
-        "text/event-stream"
-    );
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["code"], 10000);
-    assert!(payload["message"]
-        .as_str()
-        .unwrap()
-        .contains("input validation failed"));
-    assert!(payload["data"].is_null());
-}
-
-#[tokio::test]
-async fn wrapped_input_body_returns_400_before_sse() {
-    let response = app()
-        .await
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/test/runs/stream")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"input":{"name":"Ada"}}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_ne!(
-        response.headers().get("content-type").unwrap(),
-        "text/event-stream"
-    );
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["code"], 10000);
-    assert!(payload["message"]
-        .as_str()
-        .unwrap()
-        .contains("input validation failed"));
-    assert!(payload["data"].is_null());
-}
-
-#[tokio::test]
-async fn missing_content_type_returns_400_before_sse() {
-    let response = app()
-        .await
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/test/runs/stream")
-                .body(Body::from(r#"{"name":"Ada"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_ne!(
-        response.headers().get("content-type").unwrap(),
-        "text/event-stream"
-    );
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["code"], 10000);
-    assert!(payload["message"]
-        .as_str()
-        .unwrap()
-        .contains("request body must be application/json"));
-    assert!(payload["data"].is_null());
-}
-
-#[tokio::test]
-async fn streams_runtime_error_as_sse_error_without_run_completed() {
-    let response = app()
-        .await
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/broken/runs/stream")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get("content-type").unwrap(),
-        "text/event-stream"
-    );
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    let frames = parse_sse_frames(&text);
-
-    assert_eq!(frames[0].event, "run.started");
-    assert_eq!(frames[1].event, "step.started");
-
-    let step_failed_index = frames
-        .iter()
-        .position(|frame| frame.event == "step.failed")
-        .expect("expected step.failed frame");
-    let run_failed_index = frames
-        .iter()
-        .position(|frame| frame.event == "run.failed")
-        .expect("expected run.failed frame");
-    assert!(step_failed_index < run_failed_index);
-
-    let step_failed = &frames[step_failed_index];
-    assert_eq!(step_failed.data["type"], "step.failed");
-    assert_eq!(step_failed.data["data"]["step_id"], "missing_tool");
-    assert_eq!(step_failed.data["data"]["status"], "failed");
-
-    let error_frame = &frames[run_failed_index];
-    assert_eq!(error_frame.data["code"], 20000);
-    assert_eq!(
-        error_frame.data["message"],
-        "run error: tool 'not_registered' is not registered"
-    );
-    assert_eq!(error_frame.data["type"], "run.failed");
-    assert_eq!(error_frame.data["agent_id"], "broken");
-    assert_eq!(error_frame.data["data"]["step_id"], "missing_tool");
-    assert_eq!(error_frame.data["data"]["status"], "failed");
-
-    assert!(!frames.iter().any(|frame| frame.event == "run.completed"));
-}
-
-fn always_fail_encoding(_event: RunEvent) -> Result<axum::response::sse::Event, AppError> {
-    Err(AppError::Run(
-        "failed to encode sse event: synthetic failure".to_string(),
-    ))
-}
-
-#[tokio::test]
-async fn sanitizes_sse_encoding_failures_without_panicking() {
-    let response = app_with_encoder(always_fail_encoding)
-        .await
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/agents/test/runs/stream")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"name":"Ada"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get("content-type").unwrap(),
-        "text/event-stream"
-    );
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    let frames = parse_sse_frames(&text);
-
-    assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].event, "run.failed");
-    assert_eq!(frames[0].data["code"], 20000);
-    assert_eq!(frames[0].data["message"], "stream encoding failed");
-    assert_eq!(frames[0].data["type"], "run.failed");
-    assert_eq!(frames[0].data["data"]["status"], "failed");
-    assert!(!frames.iter().any(|frame| frame.event == "run.completed"));
+    for _ in 0..2 {
+        let cancelled = app
+            .clone()
+            .oneshot(request(Method::DELETE, &format!("/v1/runs/{run_id}"), None))
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        assert_eq!(json_body(cancelled).await["data"]["status"], "cancelled");
+    }
 }

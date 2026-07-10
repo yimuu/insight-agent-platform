@@ -14,7 +14,7 @@
 {{ input.question }}
 
 第 1 步异常指标解读：
-{{ steps.abnormal_indicators.output.text }}
+{{ nodes.abnormal_indicators.output.text }}
 
 输出要求：
 - 必须以标题“### 综合解读”开头。

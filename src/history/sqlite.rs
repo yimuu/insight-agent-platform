@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{path::Path, str::FromStr};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -37,6 +37,14 @@ impl SqliteRunRepository {
             .filename(":memory:")
             .foreign_keys(true);
         Self::connect_options(options, 1).await
+    }
+
+    pub async fn connect_path(path: &Path) -> Result<Self, HistoryError> {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .foreign_keys(true);
+        Self::connect_options(options, 5).await
     }
 
     async fn connect_options(

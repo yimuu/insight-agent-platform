@@ -5,10 +5,10 @@ const POSTGRES_V1: &str =
     include_str!("../migrations/formal_v1/postgres/202607100001_formal_v1.sql");
 
 #[test]
-fn formal_v1_migrations_are_isolated_from_the_prototype_schema() {
+fn only_formal_v1_migration_directories_remain() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    assert!(root.join("migrations/sqlite").is_dir());
-    assert!(root.join("migrations/postgres").is_dir());
+    assert!(!root.join("migrations/sqlite").exists());
+    assert!(!root.join("migrations/postgres").exists());
     assert!(root.join("migrations/formal_v1/sqlite").is_dir());
     assert!(root.join("migrations/formal_v1/postgres").is_dir());
 }

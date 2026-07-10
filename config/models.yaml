@@ -1,18 +1,20 @@
-default_provider: dashscope
+version: 1
 
-providers:
-  dashscope:
-    kind: openai_compatible
+models:
+  general_chat:
+    type: open_ai_chat
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: OPENAI_API_KEY
-    defaults:
-      llm: qwen3.6-flash
-    models:
-      llm:
-        qwen3.6-flash: {}
-        qwen-vl-plus:
-          features: [vision]
-      text_embedding:
-        text-embedding-v4: {}
-      speech2text:
-        paraformer-realtime-v2: {}
+    model: qwen3.6-flash
+    capabilities: []
+    connect_timeout: 5s
+    request_timeout: 2m
+
+  vision_chat:
+    type: open_ai_chat
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: OPENAI_API_KEY
+    model: qwen-vl-plus
+    capabilities: [vision]
+    connect_timeout: 5s
+    request_timeout: 2m

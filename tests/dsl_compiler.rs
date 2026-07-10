@@ -15,7 +15,7 @@ use tempfile::TempDir;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StepConfig {
+struct ExtensionConfig {
     #[serde(default)]
     prompt_ref: Option<String>,
     #[serde(default)]
@@ -36,7 +36,7 @@ impl NodeType for StepNode {
         config: Value,
         context: &mut CompileContext<'_>,
     ) -> Result<NodeCompilation, CompileError> {
-        let config: StepConfig = serde_json::from_value(config)
+        let config: ExtensionConfig = serde_json::from_value(config)
             .map_err(|error| CompileError::new("NODE_CONFIG_INVALID", error.to_string()))?;
         let mut references = config.references.into_iter().collect::<BTreeSet<_>>();
         if let Some(prompt_ref) = config.prompt_ref {

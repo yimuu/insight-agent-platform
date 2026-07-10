@@ -1,28 +1,34 @@
+version: 1
 bind_addr: 127.0.0.1:3000
-model_providers_config: config/models.yaml
 
-# auth:
-#   internal_token_env: AGENT_RUNTIME_TOKEN
+auth:
+  mode: disabled
 
 agents:
-  directory: agents
-  default_enabled: false
-  default_public: false
-  exposure:
-    medical_report_interpreter:
-      enabled: true
-      public: true
-    researcher:
-      enabled: true
-      public: true
-    code_node_demo:
-      enabled: false
-      public: false
+  directory: ../agents
+  enabled:
+    - code_node_demo
+    - medical_report_interpreter
+    - researcher
+
+models:
+  config: models.yaml
+
+actions:
+  enabled:
+    - current_time
+    - example.text_metrics
 
 history:
   provider: sqlite
-  database_url: sqlite://data/run_history.sqlite3
+  path: ../data/formal_v1.sqlite3
 
-  # PostgreSQL example:
-  # provider: postgres
-  # database_url_env: RUN_HISTORY_DATABASE_URL
+runtime:
+  max_concurrent_runs: 32
+  default_node_timeout: 60s
+  run_timeout: 5m
+  attached_reconnect_grace: 10s
+  subscriber_capacity: 128
+  replay_ring_capacity: 512
+  journal_capacity: 1024
+  journal_batch_size: 32
