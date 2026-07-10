@@ -2,6 +2,7 @@ pub mod agent;
 pub mod api;
 pub mod code;
 pub mod config;
+pub mod dsl;
 pub mod engine;
 pub mod error;
 pub mod handlers;
