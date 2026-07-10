@@ -5,7 +5,7 @@ use chrono::Utc;
 use insight_agent_platform::{
     dsl::{
         compiled::{
-            CompiledNode, NextPolicy, NodeCompilation, NodeEnvelopeRules, NodeOutcome,
+            CompiledNode, NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules, NodeOutcome,
             NodeTransition,
         },
         compiler::CompileContext,
@@ -46,6 +46,7 @@ impl NodeType for ConstantNode {
             edges: Vec::new(),
             references: BTreeSet::new(),
             terminal: false,
+            control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Required,
                 allows_content_emit: false,
@@ -107,6 +108,8 @@ async fn registered_node_compiles_and_executes_without_core_changes() {
     assert_eq!(compilation.references, BTreeSet::new());
     assert!(!compilation.terminal);
     assert_eq!(compilation.envelope.next, NextPolicy::Required);
+    assert_eq!(compilation.control, NodeControl::Ordinary);
+    assert_eq!(NodeTransition::ActivateFork, NodeTransition::ActivateFork);
 
     let node = CompiledNode {
         id: "constant".to_string(),
@@ -118,6 +121,7 @@ async fn registered_node_compiles_and_executes_without_core_changes() {
         edges: vec!["result".to_string()],
         references: compilation.references,
         terminal: compilation.terminal,
+        control: NodeControl::Ordinary,
     };
     let outcome = executors
         .resolve("test.constant")
@@ -159,6 +163,7 @@ fn compiled_node_rejects_wrong_body_type() {
         edges: vec!["result".to_string()],
         references: BTreeSet::new(),
         terminal: false,
+        control: NodeControl::Ordinary,
     };
 
     assert_eq!(

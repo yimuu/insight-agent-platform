@@ -237,6 +237,12 @@ impl RunCoordinator {
                     })?;
                 }
                 NodeTransition::Goto(target) => current = target,
+                NodeTransition::ActivateFork => {
+                    return Err(RunError::new(
+                        "NODE_FORK_UNSUPPORTED",
+                        "fork activation is not supported by the sequential coordinator",
+                    ));
+                }
                 NodeTransition::Complete(output) => {
                     return self.complete(&state, new_run, output).await;
                 }

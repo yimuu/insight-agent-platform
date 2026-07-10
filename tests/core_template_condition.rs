@@ -8,7 +8,7 @@ use chrono::Utc;
 use insight_agent_platform::{
     dsl::{
         compiled::{
-            CompiledNode, NextPolicy, NodeCompilation, NodeEnvelopeRules, NodeOutcome,
+            CompiledNode, NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules, NodeOutcome,
             NodeTransition,
         },
         compiler::{AgentCompiler, CompileContext, CompileLimits},
@@ -44,6 +44,7 @@ impl NodeType for TestOutput {
             edges: Vec::new(),
             references: BTreeSet::new(),
             terminal: true,
+            control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Forbidden,
                 allows_content_emit: false,
@@ -81,6 +82,7 @@ fn compiled_node(
         edges: compilation.edges,
         references: compilation.references,
         terminal: compilation.terminal,
+        control: NodeControl::Ordinary,
     }
 }
 

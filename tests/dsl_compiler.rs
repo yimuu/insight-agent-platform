@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, fs, path::Path, sync::Arc, time::Duration};
 
 use insight_agent_platform::{
     dsl::{
-        compiled::{NextPolicy, NodeCompilation, NodeEnvelopeRules},
+        compiled::{NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules},
         compiler::{AgentCompiler, CompileContext, CompileLimits},
         CompileError,
     },
@@ -51,6 +51,7 @@ impl NodeType for StepNode {
             edges: Vec::new(),
             references,
             terminal: false,
+            control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Required,
                 allows_content_emit: false,
@@ -86,6 +87,7 @@ impl NodeType for BranchNode {
             edges: config.targets,
             references: BTreeSet::new(),
             terminal: false,
+            control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Forbidden,
                 allows_content_emit: false,
@@ -121,6 +123,7 @@ impl NodeType for TerminalNode {
             edges: Vec::new(),
             references: BTreeSet::new(),
             terminal: true,
+            control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Forbidden,
                 allows_content_emit: false,

@@ -257,6 +257,7 @@ impl AgentCompiler {
                     edges,
                     references: compilation.references,
                     terminal: compilation.terminal,
+                    control: compilation.control,
                 },
             );
         }

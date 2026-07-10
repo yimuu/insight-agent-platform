@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use crate::{
     dsl::{
         compiled::{
-            CompiledNode, NextPolicy, NodeCompilation, NodeEnvelopeRules, NodeOutcome,
+            CompiledNode, NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules, NodeOutcome,
             NodeTransition, RunOutput,
         },
         compiler::{CompileContext, TemplateProgram},
@@ -121,6 +121,7 @@ impl NodeType for OutputNode {
             edges: Vec::new(),
             references,
             terminal: true,
+            control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Forbidden,
                 allows_content_emit: false,

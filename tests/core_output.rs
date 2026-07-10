@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use insight_agent_platform::{
     dsl::{
-        compiled::{CompiledNode, NodeOutcome, NodeTransition, RunOutput},
+        compiled::{CompiledNode, NodeControl, NodeOutcome, NodeTransition, RunOutput},
         compiler::{AgentCompiler, CompileContext, CompileLimits},
         EmitPolicy,
     },
@@ -47,6 +47,7 @@ async fn execute_output(config: Value, input: Value) -> RunOutput {
         edges: compilation.edges,
         references: compilation.references,
         terminal: compilation.terminal,
+        control: NodeControl::Ordinary,
     };
     let context = context(input).with_templates(Arc::new(compile_context.into_templates()));
     let (_, signal) = stop_pair();

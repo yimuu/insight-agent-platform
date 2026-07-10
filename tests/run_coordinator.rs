@@ -13,7 +13,8 @@ use handlebars::Handlebars;
 use insight_agent_platform::{
     dsl::{
         compiled::{
-            CompiledAgent, CompiledNode, NodeCompilation, NodeOutcome, NodeTransition, RunOutput,
+            CompiledAgent, CompiledNode, NodeCompilation, NodeControl, NodeOutcome, NodeTransition,
+            RunOutput,
         },
         compiler::CompileContext,
         CompileError, EmitPolicy,
@@ -251,6 +252,7 @@ fn node(id: &str, next: Option<&str>, timeout: Duration, behavior: Behavior) -> 
         edges: next.into_iter().map(str::to_string).collect(),
         references: BTreeSet::new(),
         terminal: next.is_none(),
+        control: NodeControl::Ordinary,
     }
 }
 

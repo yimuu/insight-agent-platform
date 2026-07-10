@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use futures::stream;
 use insight_agent_platform::{
     dsl::{
-        compiled::{CompiledNode, NodeCompilation, NodeOutcome, NodeTransition},
+        compiled::{CompiledNode, NodeCompilation, NodeControl, NodeOutcome, NodeTransition},
         compiler::CompileContext,
         EmitPolicy,
     },
@@ -122,6 +122,7 @@ fn compiled_node(
         edges: compilation.edges,
         references: compilation.references,
         terminal: compilation.terminal,
+        control: NodeControl::Ordinary,
     }
 }
 

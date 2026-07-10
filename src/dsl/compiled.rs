@@ -29,11 +29,30 @@ pub struct NodeEnvelopeRules {
     pub allows_content_emit: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinPolicy {
+    AllSettled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeControl {
+    Ordinary,
+    Fork {
+        branches: BTreeMap<String, String>,
+        join: String,
+    },
+    Join {
+        policy: JoinPolicy,
+    },
+}
+
 pub struct NodeCompilation {
     pub body: CompiledBody,
     pub edges: Vec<String>,
     pub references: BTreeSet<String>,
     pub terminal: bool,
+    pub control: NodeControl,
     pub envelope: NodeEnvelopeRules,
 }
 
@@ -48,6 +67,7 @@ pub struct CompiledNode {
     pub edges: Vec<String>,
     pub references: BTreeSet<String>,
     pub terminal: bool,
+    pub control: NodeControl,
 }
 
 impl CompiledNode {
@@ -103,6 +123,7 @@ pub struct RunOutput {
 pub enum NodeTransition {
     Next,
     Goto(String),
+    ActivateFork,
     Complete(RunOutput),
 }
 

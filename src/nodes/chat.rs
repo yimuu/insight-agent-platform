@@ -9,7 +9,7 @@ use tokio::time::sleep;
 use crate::{
     dsl::{
         compiled::{
-            CompiledNode, NextPolicy, NodeCompilation, NodeEnvelopeRules, NodeOutcome,
+            CompiledNode, NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules, NodeOutcome,
             NodeTransition,
         },
         compiler::{CompileContext, TemplateProgram},
@@ -220,6 +220,7 @@ impl NodeType for ChatNode {
             edges: Vec::new(),
             references,
             terminal: false,
+            control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Required,
                 allows_content_emit: true,

@@ -13,7 +13,8 @@ use handlebars::Handlebars;
 use insight_agent_platform::{
     dsl::{
         compiled::{
-            CompiledAgent, CompiledNode, NodeCompilation, NodeOutcome, NodeTransition, RunOutput,
+            CompiledAgent, CompiledNode, NodeCompilation, NodeControl, NodeOutcome, NodeTransition,
+            RunOutput,
         },
         compiler::CompileContext,
         CompileError, EmitPolicy,
@@ -99,6 +100,7 @@ fn agent(id: &str, behavior: ServiceBehavior) -> Arc<CompiledAgent> {
         edges: Vec::new(),
         references: BTreeSet::new(),
         terminal: true,
+        control: NodeControl::Ordinary,
     };
     Arc::new(CompiledAgent {
         id: id.to_string(),

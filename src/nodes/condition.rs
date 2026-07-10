@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::{
     dsl::{
         compiled::{
-            CompiledNode, NextPolicy, NodeCompilation, NodeEnvelopeRules, NodeOutcome,
+            CompiledNode, NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules, NodeOutcome,
             NodeTransition,
         },
         compiler::{node_references, CompileContext},
@@ -117,6 +117,7 @@ impl NodeType for ConditionNode {
             edges,
             references,
             terminal: false,
+            control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Forbidden,
                 allows_content_emit: false,
