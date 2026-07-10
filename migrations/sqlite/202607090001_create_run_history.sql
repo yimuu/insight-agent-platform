@@ -21,16 +21,15 @@ CREATE INDEX IF NOT EXISTS idx_runs_user_started_at ON runs(user_id, started_at 
 CREATE TABLE IF NOT EXISTS run_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL,
-    event TEXT NOT NULL,
-    step_id TEXT,
+    type TEXT NOT NULL,
+    seq INTEGER NOT NULL,
     timestamp TEXT NOT NULL,
-    content TEXT NOT NULL,
-    result TEXT NOT NULL,
     code INTEGER NOT NULL,
-    message TEXT NOT NULL
+    message TEXT NOT NULL,
+    data TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id, seq, id);
 
 CREATE TABLE IF NOT EXISTS step_outputs (
     run_id TEXT NOT NULL,

@@ -168,6 +168,8 @@ data: {"type":"run.completed","seq":8,"request_id":"req_demo_001","run_id":"run_
 
 Runs are recorded through sqlx. `history` in `config/platform.yaml` selects the backend and defaults to SQLite at `sqlite://data/run_history.sqlite3` when no platform config exists.
 
+Run-history migrations currently target fresh development databases. After a migration schema changes, delete `data/run_history.sqlite3` or recreate the PostgreSQL development volume instead of upgrading existing history data.
+
 ```yaml
 history:
   provider: sqlite

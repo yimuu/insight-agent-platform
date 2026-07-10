@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -13,7 +13,7 @@ use sqlx::{
     migrate::{MigrateError, Migrator},
     postgres::PgPoolOptions,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    AssertSqlSafe, PgPool, Row, SqlitePool,
+    AssertSqlSafe, PgPool, SqlitePool,
 };
 
 use crate::{
@@ -384,12 +384,10 @@ impl SqlxRunHistoryRepository {
             .connect_with(options)
             .await
             .map_err(map_sqlx_error)?;
-        prepare_sqlite_schema_for_migration(&pool).await?;
         SQLITE_MIGRATOR
             .run(&pool)
             .await
             .map_err(map_migrate_error)?;
-        ensure_sqlite_legacy_columns(&pool).await?;
         tracing::info!("run history sqlite backend initialized");
         Ok(Self {
             backend: SqlxRunHistoryBackend::Sqlite(pool),
@@ -402,12 +400,10 @@ impl SqlxRunHistoryRepository {
             .connect(database_url)
             .await
             .map_err(map_sqlx_error)?;
-        prepare_postgres_schema_for_migration(&pool).await?;
         POSTGRES_MIGRATOR
             .run(&pool)
             .await
             .map_err(map_migrate_error)?;
-        ensure_postgres_legacy_columns(&pool).await?;
         tracing::info!("run history postgres backend initialized");
         Ok(Self {
             backend: SqlxRunHistoryBackend::Postgres(pool),
@@ -1009,128 +1005,6 @@ fn effective_limit(limit: usize) -> usize {
     }
 }
 
-async fn prepare_sqlite_schema_for_migration(pool: &SqlitePool) -> Result<(), AppError> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS runs (
-            run_id TEXT PRIMARY KEY,
-            request_id TEXT NOT NULL DEFAULT '',
-            agent_id TEXT NOT NULL,
-            caller_service TEXT,
-            tenant_id TEXT,
-            user_id TEXT,
-            status TEXT NOT NULL,
-            started_at TEXT NOT NULL,
-            ended_at TEXT,
-            input_summary TEXT NOT NULL,
-            error_message TEXT
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(map_sqlx_error)?;
-    ensure_sqlite_legacy_columns(pool).await?;
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS run_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_id TEXT NOT NULL,
-            event TEXT NOT NULL,
-            step_id TEXT,
-            timestamp TEXT NOT NULL,
-            content TEXT NOT NULL,
-            result TEXT NOT NULL,
-            code INTEGER NOT NULL,
-            message TEXT NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(map_sqlx_error)?;
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS step_outputs (
-            run_id TEXT NOT NULL,
-            step_id TEXT NOT NULL,
-            output TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            PRIMARY KEY (run_id, step_id)
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(map_sqlx_error)?;
-    Ok(())
-}
-
-async fn prepare_postgres_schema_for_migration(pool: &PgPool) -> Result<(), AppError> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS runs (
-            run_id TEXT PRIMARY KEY,
-            request_id TEXT NOT NULL DEFAULT '',
-            agent_id TEXT NOT NULL,
-            caller_service TEXT,
-            tenant_id TEXT,
-            user_id TEXT,
-            status TEXT NOT NULL,
-            started_at TEXT NOT NULL,
-            ended_at TEXT,
-            input_summary TEXT NOT NULL,
-            error_message TEXT
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(map_sqlx_error)?;
-    ensure_postgres_legacy_columns(pool).await
-}
-
-async fn ensure_sqlite_legacy_columns(pool: &SqlitePool) -> Result<(), AppError> {
-    let columns = sqlx::query("PRAGMA table_info(runs)")
-        .fetch_all(pool)
-        .await
-        .map_err(map_sqlx_error)?
-        .into_iter()
-        .filter_map(|row| row.try_get::<String, _>("name").ok())
-        .collect::<BTreeSet<_>>();
-    add_sqlite_column_if_missing(pool, &columns, "request_id", "TEXT NOT NULL DEFAULT ''").await?;
-    add_sqlite_column_if_missing(pool, &columns, "caller_service", "TEXT").await?;
-    add_sqlite_column_if_missing(pool, &columns, "tenant_id", "TEXT").await?;
-    add_sqlite_column_if_missing(pool, &columns, "user_id", "TEXT").await?;
-    Ok(())
-}
-
-async fn add_sqlite_column_if_missing(
-    pool: &SqlitePool,
-    columns: &BTreeSet<String>,
-    column: &str,
-    definition: &str,
-) -> Result<(), AppError> {
-    if columns.contains(column) {
-        return Ok(());
-    }
-    sqlx::query(AssertSqlSafe(format!(
-        "ALTER TABLE runs ADD COLUMN {column} {definition}"
-    )))
-    .execute(pool)
-    .await
-    .map_err(map_sqlx_error)?;
-    Ok(())
-}
-
-async fn ensure_postgres_legacy_columns(pool: &PgPool) -> Result<(), AppError> {
-    let statements = [
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS request_id TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS caller_service TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS tenant_id TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS user_id TEXT",
-    ];
-    for statement in statements {
-        sqlx::query(statement)
-            .execute(pool)
-            .await
-            .map_err(map_sqlx_error)?;
-    }
-    Ok(())
-}
-
 fn create_parent_dir(path: &Path) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
         if parent.as_os_str().is_empty() {
@@ -1292,106 +1166,6 @@ mod tests {
             .unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].run_id, "run_history_store");
-    }
-
-    #[tokio::test]
-    async fn sqlite_migration_preserves_legacy_run_events() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("history.sqlite3");
-        let options = SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-        sqlx::raw_sql(
-            "CREATE TABLE runs (
-                run_id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
-                status TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                ended_at TEXT,
-                input_summary TEXT NOT NULL,
-                error_message TEXT
-            );
-            CREATE TABLE run_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id TEXT NOT NULL,
-                event TEXT NOT NULL,
-                step_id TEXT,
-                timestamp TEXT NOT NULL,
-                content TEXT NOT NULL,
-                result TEXT NOT NULL,
-                code INTEGER NOT NULL,
-                message TEXT NOT NULL
-            );
-            CREATE TABLE step_outputs (
-                run_id TEXT NOT NULL,
-                step_id TEXT NOT NULL,
-                output TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (run_id, step_id)
-            );",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO runs (run_id, agent_id, status, started_at, input_summary)
-             VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind("run_legacy")
-        .bind("agent-a")
-        .bind("completed")
-        .bind(Utc::now().to_rfc3339())
-        .bind("{}")
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO run_events (
-                run_id, event, step_id, timestamp, content, result, code, message
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind("run_legacy")
-        .bind("token_delta")
-        .bind("generate")
-        .bind(Utc::now().to_rfc3339())
-        .bind("hello")
-        .bind("null")
-        .bind(0)
-        .bind("ok")
-        .bind("run_legacy")
-        .bind("run_completed")
-        .bind(Option::<String>::None)
-        .bind(Utc::now().to_rfc3339())
-        .bind("")
-        .bind("null")
-        .bind(0)
-        .bind("ok")
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool.close().await;
-
-        let store = RunHistoryStore::sqlite(&path).await.unwrap();
-        let run = store.get_run("run_legacy").await.unwrap().unwrap();
-
-        assert_eq!(run.request_id, "");
-        assert_eq!(run.events.len(), 2);
-        assert_eq!(run.events[0].event_type, "content.delta");
-        assert_eq!(run.events[0].seq, 1);
-        assert_eq!(run.events[0].run_id, "run_legacy");
-        assert_eq!(run.events[0].agent_id, "agent-a");
-        assert_eq!(run.events[0].data["step_id"], "generate");
-        assert_eq!(run.events[0].data["content"], "hello");
-        assert_eq!(run.events[1].event_type, "run.completed");
-        assert_eq!(run.events[1].seq, 2);
-        assert_eq!(run.events[1].data["status"], "completed");
-        assert_eq!(run.events[1].data["content"], "hello");
-        assert!(run.events[1].data["output"].is_null());
     }
 
     #[tokio::test]
