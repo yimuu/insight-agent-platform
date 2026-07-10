@@ -1,5 +1,6 @@
 pub mod compiled;
 pub mod compiler;
+pub mod graph;
 pub mod raw;
 
 use std::{error::Error, fmt};

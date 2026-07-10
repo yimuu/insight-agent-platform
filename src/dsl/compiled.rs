@@ -1,6 +1,7 @@
 use std::{
     any::Any,
     collections::{BTreeMap, BTreeSet},
+    fmt,
     sync::Arc,
     time::Duration,
 };
@@ -73,6 +74,20 @@ pub struct CompiledAgent {
     pub entry: String,
     pub nodes: BTreeMap<String, CompiledNode>,
     pub templates: Arc<Handlebars<'static>>,
+}
+
+impl fmt::Debug for CompiledAgent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CompiledAgent")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("version_hash", &self.version_hash)
+            .field("entry", &self.entry)
+            .field("node_ids", &self.nodes.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
