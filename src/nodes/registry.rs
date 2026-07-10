@@ -67,6 +67,10 @@ impl NodeTypeRegistry {
             )
         })
     }
+
+    pub fn kinds(&self) -> Vec<&str> {
+        self.types.keys().map(String::as_str).collect()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -97,5 +101,9 @@ impl NodeExecutorRegistry {
                 format!("node executor '{kind}' is not registered"),
             )
         })
+    }
+
+    pub fn kinds(&self) -> Vec<&str> {
+        self.executors.keys().map(String::as_str).collect()
     }
 }
