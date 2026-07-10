@@ -164,7 +164,7 @@ fn load_internal_auth_token(token_env: Option<String>) -> Result<Option<String>,
 
 fn load_platform_yaml(path: &Path) -> Result<PlatformYaml, AppError> {
     if path.exists() {
-        let yaml = fs::read_to_string(&path).map_err(|err| {
+        let yaml = fs::read_to_string(path).map_err(|err| {
             AppError::Config(format!(
                 "failed to read platform config '{}': {err}",
                 path.display()

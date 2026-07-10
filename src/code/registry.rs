@@ -53,6 +53,10 @@ impl CodeRegistry {
         self.handlers.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.handlers.is_empty()
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.handlers.keys().map(String::as_str)
     }

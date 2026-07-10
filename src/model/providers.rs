@@ -52,9 +52,10 @@ pub struct ModelProviderModelConfig {
     pub features: Vec<ModelFeature>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelType {
+    #[default]
     Llm,
     #[serde(rename = "text_embedding", alias = "text-embedding")]
     TextEmbedding,
@@ -63,12 +64,6 @@ pub enum ModelType {
     Speech2Text,
     Tts,
     Moderation,
-}
-
-impl Default for ModelType {
-    fn default() -> Self {
-        Self::Llm
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
