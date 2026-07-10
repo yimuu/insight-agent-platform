@@ -1,10 +1,7 @@
 use std::{
     collections::BTreeMap,
     pin::Pin,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::Arc,
     task::{Context, Poll},
     time::Instant,
 };
@@ -14,7 +11,7 @@ use chrono::Utc;
 use futures::{Stream, StreamExt};
 use serde_json::{Map, Value};
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{mpsc, watch, Mutex},
     task::JoinHandle,
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -28,7 +25,7 @@ use crate::{
     code::registry::{CodeContext, CodeRegistry},
     engine::{
         context::RunContext,
-        event::{RunEvent, RunEventKind},
+        event::{RunEvent, RunEventScope, RunEventType},
     },
     error::AppError,
     history::store::{input_summary, RunHistoryStore, RunStatus},
@@ -152,7 +149,7 @@ impl<M: ModelClient> RunEngine<M> {
             model = ?agent.config.model.model,
             "agent run started"
         );
-        if !events.emit(&ctx, None, RunEventKind::RunStarted).await {
+        if !events.emit(&ctx, None, RunEventType::RunStarted).await {
             return;
         }
 
@@ -166,6 +163,8 @@ impl<M: ModelClient> RunEngine<M> {
         let max_step_executions = agent.config.steps.len().saturating_mul(3).max(1);
         let mut step_index = 0_usize;
         let mut step_executions = 0_usize;
+        let mut final_output = Value::Null;
+        let mut final_step_id = None;
 
         while step_index < agent.config.steps.len() {
             step_executions += 1;
@@ -194,7 +193,7 @@ impl<M: ModelClient> RunEngine<M> {
                 "agent step started"
             );
             if !events
-                .emit(&ctx, Some(&step.id), RunEventKind::StepStarted)
+                .emit(&ctx, Some(&step.id), RunEventType::StepStarted)
                 .await
             {
                 return;
@@ -205,6 +204,8 @@ impl<M: ModelClient> RunEngine<M> {
             {
                 Ok(StepExecution::Completed { output, next }) => {
                     if let Some(output) = output.clone() {
+                        final_output = output.clone();
+                        final_step_id = Some(step.id.clone());
                         ctx.set_step_output(&step.id, output.clone());
                         if let Some(stored_output) = ctx.step_outputs.get(&step.id) {
                             self.history_store
@@ -231,7 +232,7 @@ impl<M: ModelClient> RunEngine<M> {
                         );
                     }
                     if !events
-                        .emit(&ctx, Some(&step.id), RunEventKind::StepCompleted)
+                        .emit(&ctx, Some(&step.id), RunEventType::StepCompleted)
                         .await
                     {
                         return;
@@ -284,14 +285,9 @@ impl<M: ModelClient> RunEngine<M> {
             }
         }
 
-        let output = agent
-            .config
-            .steps
-            .last()
-            .and_then(|step| ctx.step_outputs.get(&step.id))
-            .cloned()
-            .unwrap_or(Value::Null);
-        let _ = events.emit(&ctx, None, RunEventKind::RunCompleted).await;
+        let _ = events
+            .emit_run_completed(&ctx, final_step_id.as_deref(), final_output.clone())
+            .await;
         self.history_store
             .finish_run(&ctx.run_id, RunStatus::Completed, None)
             .await;
@@ -299,7 +295,7 @@ impl<M: ModelClient> RunEngine<M> {
             run_id = %ctx.run_id,
             agent_id = %ctx.agent_id,
             elapsed_ms = run_started.elapsed().as_millis(),
-            output = %summarize_value(&output),
+            output = %summarize_value(&final_output),
             "agent run completed"
         );
     }
@@ -406,7 +402,6 @@ impl<M: ModelClient> RunEngine<M> {
         };
         let mut output = String::new();
         let mut chunks_count = 0_usize;
-        let mut step_emitted_content = false;
 
         loop {
             let next_chunk = tokio::select! {
@@ -423,19 +418,8 @@ impl<M: ModelClient> RunEngine<M> {
                 continue;
             }
             chunks_count += 1;
-            let outbound_delta =
-                format_outbound_delta(&delta, step_emitted_content, events.has_emitted_content());
-            step_emitted_content = true;
             output.push_str(&delta);
-            if !events
-                .emit_content(
-                    ctx,
-                    Some(&step.id),
-                    RunEventKind::TokenDelta,
-                    outbound_delta,
-                )
-                .await
-            {
+            if !events.emit_content(ctx, Some(&step.id), delta).await {
                 return Ok(StepExecution::Cancelled);
             }
         }
@@ -465,10 +449,9 @@ impl<M: ModelClient> RunEngine<M> {
 
         let template = resolve_prompt(step.prompt.as_deref(), step.prompt_ref.as_deref(), store)?;
         let rendered = self.renderer.render(template, &ctx.template_data())?;
-        let outbound = format_outbound_delta(&rendered, false, events.has_emitted_content());
         if !rendered.is_empty()
             && !events
-                .emit_content(ctx, Some(&step.id), RunEventKind::TokenDelta, outbound)
+                .emit_content(ctx, Some(&step.id), rendered.clone())
                 .await
         {
             return Ok(StepExecution::Cancelled);
@@ -537,7 +520,7 @@ impl<M: ModelClient> RunEngine<M> {
             "tool call started"
         );
         if !events
-            .emit(ctx, Some(&step.id), RunEventKind::ToolCallStarted)
+            .emit(ctx, Some(&step.id), RunEventType::ToolCallStarted)
             .await
         {
             return Ok(StepExecution::Cancelled);
@@ -567,7 +550,7 @@ impl<M: ModelClient> RunEngine<M> {
             "tool call completed"
         );
         if !events
-            .emit(ctx, Some(&step.id), RunEventKind::ToolCallCompleted)
+            .emit(ctx, Some(&step.id), RunEventType::ToolCallCompleted)
             .await
         {
             return Ok(StepExecution::Cancelled);
@@ -595,28 +578,15 @@ impl<M: ModelClient> RunEngine<M> {
         let emit_ctx = ctx.clone();
         let emit_events = events.clone();
         let emit_step_id = step.id.clone();
-        let step_emitted_content = Arc::new(AtomicBool::new(false));
         let code_ctx = CodeContext::new(
             ctx.run_id.clone(),
             Arc::new(move |content| {
                 let emit_ctx = emit_ctx.clone();
                 let emit_events = emit_events.clone();
                 let emit_step_id = emit_step_id.clone();
-                let emit_step_state = step_emitted_content.clone();
                 Box::pin(async move {
-                    let step_has_emitted = emit_step_state.swap(true, Ordering::SeqCst);
-                    let outbound = format_outbound_delta(
-                        &content,
-                        step_has_emitted,
-                        emit_events.has_emitted_content(),
-                    );
                     if emit_events
-                        .emit_content(
-                            &emit_ctx,
-                            Some(&emit_step_id),
-                            RunEventKind::TokenDelta,
-                            outbound,
-                        )
+                        .emit_content(&emit_ctx, Some(&emit_step_id), content)
                         .await
                     {
                         Ok(())
@@ -772,6 +742,47 @@ fn json_object(fields: Vec<(&str, Value)>) -> Value {
     )
 }
 
+fn lifecycle_event_data(event_type: RunEventType, step_id: Option<&str>) -> Value {
+    let mut data = Map::new();
+    if let Some(step_id) = step_id {
+        data.insert("step_id".to_string(), Value::String(step_id.to_string()));
+    }
+    let status = match event_type {
+        RunEventType::RunStarted | RunEventType::StepStarted | RunEventType::ToolCallStarted => {
+            Some("running")
+        }
+        RunEventType::ToolCallCompleted | RunEventType::StepCompleted => Some("completed"),
+        RunEventType::StepFailed | RunEventType::RunFailed => Some("failed"),
+        RunEventType::RunCancelled => Some("cancelled"),
+        RunEventType::RunCompleted => Some("completed"),
+        RunEventType::ThinkingDelta | RunEventType::ContentDelta => None,
+    };
+    if let Some(status) = status {
+        data.insert("status".to_string(), Value::String(status.to_string()));
+    }
+    Value::Object(data)
+}
+
+fn display_content_from_output(output: &Value) -> String {
+    match output {
+        Value::String(value) => value.clone(),
+        Value::Object(object) => object
+            .get("text")
+            .or_else(|| object.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
+fn structured_output_from_value(output: Value) -> Value {
+    match output {
+        Value::Object(_) | Value::Array(_) => output,
+        _ => Value::Null,
+    }
+}
+
 fn count_message_images(messages: &[ChatMessage]) -> usize {
     messages
         .iter()
@@ -803,11 +814,34 @@ fn count_message_text_chars(messages: &[ChatMessage]) -> usize {
         .sum()
 }
 
+fn event_scope(ctx: &RunContext, step_id: Option<&str>) -> RunEventScope {
+    RunEventScope {
+        request_id: ctx.request.request_id.clone(),
+        run_id: ctx.run_id.clone(),
+        agent_id: ctx.agent_id.clone(),
+        step_id: step_id.map(str::to_string),
+    }
+}
+
+#[derive(Default)]
+struct EmissionState {
+    seq: u64,
+    accumulated_content: String,
+    step_content: BTreeMap<String, String>,
+}
+
+impl EmissionState {
+    fn next_seq(&mut self) -> u64 {
+        self.seq += 1;
+        self.seq
+    }
+}
+
 #[derive(Clone)]
 struct EventSender {
     tx: mpsc::UnboundedSender<RunEvent>,
     cancel_rx: watch::Receiver<bool>,
-    emitted_content: Arc<AtomicBool>,
+    state: Arc<Mutex<EmissionState>>,
     history_store: RunHistoryStore,
 }
 
@@ -820,45 +854,131 @@ impl EventSender {
         Self {
             tx,
             cancel_rx,
-            emitted_content: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(Mutex::new(EmissionState::default())),
             history_store,
         }
     }
 
-    async fn emit(&self, ctx: &RunContext, step_id: Option<&str>, event: RunEventKind) -> bool {
-        self.emit_content(ctx, step_id, event, String::new()).await
+    async fn emit(
+        &self,
+        ctx: &RunContext,
+        step_id: Option<&str>,
+        event_type: RunEventType,
+    ) -> bool {
+        let data = lifecycle_event_data(event_type, step_id);
+        self.send_event(ctx, step_id, event_type, data).await
     }
 
     async fn emit_content(
         &self,
         ctx: &RunContext,
         step_id: Option<&str>,
-        event: RunEventKind,
         content: impl Into<String>,
     ) -> bool {
-        let content = content.into();
-        let has_content = !content.is_empty();
-        let run_event = RunEvent::ok(
-            event,
-            ctx.request.request_id.clone(),
-            ctx.run_id.clone(),
-            ctx.agent_id.clone(),
-            step_id.map(str::to_string),
-            content,
-            Value::Null,
-        );
-        let emitted = self.tx.send(run_event.clone()).is_ok();
+        let raw_content = content.into();
+        let (run_event, emitted) = {
+            let mut state = self.state.lock().await;
+            let step_emitted_content = step_id
+                .and_then(|id| state.step_content.get(id))
+                .is_some_and(|content| !content.is_empty());
+            let content = format_outbound_delta(
+                &raw_content,
+                step_emitted_content,
+                !state.accumulated_content.is_empty(),
+            );
+            let mut data = Map::new();
+            if let Some(step_id) = step_id {
+                data.insert("step_id".to_string(), Value::String(step_id.to_string()));
+            }
+            data.insert("content".to_string(), Value::String(content.clone()));
+            let seq = state.next_seq();
+            let run_event = RunEvent::ok(
+                RunEventType::ContentDelta,
+                seq,
+                event_scope(ctx, step_id),
+                Value::Object(data),
+            );
+            let emitted = self.tx.send(run_event.clone()).is_ok();
+            if emitted && !raw_content.is_empty() {
+                state.accumulated_content.push_str(&content);
+                if let Some(step_id) = step_id {
+                    state
+                        .step_content
+                        .entry(step_id.to_string())
+                        .or_default()
+                        .push_str(&raw_content);
+                }
+            }
+            (run_event, emitted)
+        };
         if emitted {
             self.history_store.record_event(&run_event).await;
-        }
-        if emitted && event == RunEventKind::TokenDelta && has_content {
-            self.emitted_content.store(true, Ordering::SeqCst);
         }
         emitted
     }
 
-    fn has_emitted_content(&self) -> bool {
-        self.emitted_content.load(Ordering::SeqCst)
+    async fn emit_run_completed(
+        &self,
+        ctx: &RunContext,
+        final_step_id: Option<&str>,
+        output: Value,
+    ) -> bool {
+        let display_content = display_content_from_output(&output);
+        let structured_output = structured_output_from_value(output);
+        let (run_event, emitted) = {
+            let mut state = self.state.lock().await;
+            let final_content_was_streamed = final_step_id
+                .and_then(|step_id| state.step_content.get(step_id))
+                .is_some_and(|content| content == &display_content);
+            let mut content = state.accumulated_content.clone();
+            if !display_content.is_empty() && !final_content_was_streamed {
+                content.push_str(&format_outbound_delta(
+                    &display_content,
+                    false,
+                    !content.is_empty(),
+                ));
+            }
+            let data = json_object(vec![
+                ("status", Value::String("completed".to_string())),
+                ("content", Value::String(content)),
+                ("content_format", Value::String("markdown".to_string())),
+                ("output", structured_output),
+                ("conversation", Value::Null),
+            ]);
+            let seq = state.next_seq();
+            let run_event = RunEvent::ok(
+                RunEventType::RunCompleted,
+                seq,
+                event_scope(ctx, None),
+                data,
+            );
+            let emitted = self.tx.send(run_event.clone()).is_ok();
+            (run_event, emitted)
+        };
+        if emitted {
+            self.history_store.record_event(&run_event).await;
+        }
+        emitted
+    }
+
+    async fn send_event(
+        &self,
+        ctx: &RunContext,
+        step_id: Option<&str>,
+        event_type: RunEventType,
+        data: Value,
+    ) -> bool {
+        let (run_event, emitted) = {
+            let mut state = self.state.lock().await;
+            let seq = state.next_seq();
+            let run_event = RunEvent::ok(event_type, seq, event_scope(ctx, step_id), data);
+            let emitted = self.tx.send(run_event.clone()).is_ok();
+            (run_event, emitted)
+        };
+        if emitted {
+            self.history_store.record_event(&run_event).await;
+        }
+        emitted
     }
 
     async fn emit_error(
@@ -869,17 +989,38 @@ impl EventSender {
         message: impl Into<String>,
     ) -> bool {
         let message = message.into();
-        let run_event = RunEvent::error(
-            ctx.request.request_id.clone(),
-            ctx.run_id.clone(),
-            ctx.agent_id.clone(),
-            step_id.map(str::to_string),
-            code,
-            message.clone(),
-        );
-        let emitted = self.tx.send(run_event.clone()).is_ok();
-        if emitted {
-            self.history_store.record_event(&run_event).await;
+        let (recorded_events, emitted) = {
+            let mut state = self.state.lock().await;
+            let mut recorded_events = Vec::new();
+            if let Some(step_id) = step_id {
+                let seq = state.next_seq();
+                let step_failed = RunEvent::failed(
+                    RunEventType::StepFailed,
+                    seq,
+                    event_scope(ctx, Some(step_id)),
+                    code,
+                    message.clone(),
+                );
+                if self.tx.send(step_failed.clone()).is_ok() {
+                    recorded_events.push(step_failed);
+                }
+            }
+            let seq = state.next_seq();
+            let run_failed = RunEvent::failed(
+                RunEventType::RunFailed,
+                seq,
+                event_scope(ctx, step_id),
+                code,
+                message.clone(),
+            );
+            let emitted = self.tx.send(run_failed.clone()).is_ok();
+            if emitted {
+                recorded_events.push(run_failed);
+            }
+            (recorded_events, emitted)
+        };
+        for event in recorded_events {
+            self.history_store.record_event(&event).await;
         }
         self.history_store
             .finish_run(&ctx.run_id, RunStatus::Failed, Some(message))

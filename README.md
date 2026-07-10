@@ -101,7 +101,7 @@ steps:
     default: reject
 ```
 
-Code steps call native Rust handlers registered in the host application. YAML references the handler and maps templated inputs; the handler returns JSON, which is saved as `steps.<step_id>.output`. Handlers may also emit text while running, and that text is streamed to clients as normal `token_delta` events.
+Code steps call native Rust handlers registered in the host application. YAML references the handler and maps templated inputs; the handler returns JSON, which is saved as `steps.<step_id>.output`. Handlers may also emit text while running, and that text is streamed to clients as normal `content.delta` events.
 
 At startup, the platform only registers code handlers referenced by enabled agents. If an agent is disabled in `config/platform.yaml`, its code-step handlers are not added to the runtime registry.
 
@@ -151,6 +151,18 @@ curl -N \
   -d '{"question":"用中文解释这个平台的架构"}' \
   http://127.0.0.1:3000/v1/agents/researcher/runs/stream
 ```
+
+Each SSE `event` name matches the JSON `type`. Events use one envelope with monotonically increasing `seq` values within a run:
+
+```text
+event: content.delta
+data: {"type":"content.delta","seq":3,"request_id":"req_demo_001","run_id":"run_...","agent_id":"researcher","time":"2026-07-10T00:00:00Z","code":0,"message":"ok","data":{"step_id":"answer","content":"Rust"}}
+
+event: run.completed
+data: {"type":"run.completed","seq":8,"request_id":"req_demo_001","run_id":"run_...","agent_id":"researcher","time":"2026-07-10T00:00:01Z","code":0,"message":"ok","data":{"status":"completed","content":"Rust...","content_format":"markdown","output":null,"conversation":null}}
+```
+
+`content.delta.data.content` is display-ready incremental content. `run.completed.data.content` is the complete display content, while `run.completed.data.output` contains an optional structured object or array. Runtime failures emit `step.failed` when a step is active, followed by `run.failed`.
 
 ## Run History
 

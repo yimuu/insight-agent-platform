@@ -249,6 +249,62 @@ fn history_items(payload: &Value) -> &[Value] {
 }
 
 #[tokio::test]
+async fn streams_typed_event_envelope_with_content_data() {
+    let response = app()
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/llm/runs/stream")
+                .header("content-type", "application/json")
+                .header("x-request-id", "req_protocol_001")
+                .body(Body::from(r#"{}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let frames = parse_sse_frames(&text);
+    let run_id = frames[0].data["run_id"].as_str().unwrap();
+
+    for (index, frame) in frames.iter().enumerate() {
+        assert_eq!(frame.data["seq"], (index + 1) as u64);
+        assert_eq!(frame.data["request_id"], "req_protocol_001");
+        assert_eq!(frame.data["run_id"], run_id);
+        assert_eq!(frame.data["agent_id"], "llm");
+        assert!(frame.data["time"].as_str().is_some());
+    }
+
+    assert_eq!(frames[0].event, "run.started");
+    assert_eq!(frames[0].data["type"], "run.started");
+    assert_eq!(frames[0].data["code"], 0);
+    assert_eq!(frames[0].data["message"], "ok");
+    assert_eq!(frames[0].data["request_id"], "req_protocol_001");
+    assert_eq!(frames[0].data["agent_id"], "llm");
+    assert_eq!(frames[0].data["data"]["status"], "running");
+
+    let deltas = frames
+        .iter()
+        .filter(|frame| frame.event == "content.delta")
+        .map(|frame| frame.data["data"]["content"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(deltas, vec!["Hel", "lo"]);
+
+    let completed = frames
+        .iter()
+        .find(|frame| frame.event == "run.completed")
+        .expect("expected run.completed frame");
+    assert_eq!(completed.data["type"], "run.completed");
+    assert_eq!(completed.data["data"]["status"], "completed");
+    assert_eq!(completed.data["data"]["content"], "Hello");
+    assert_eq!(completed.data["data"]["content_format"], "markdown");
+}
+
+#[tokio::test]
 async fn lists_agents_without_prompt_contents() {
     let response = app()
         .await
@@ -473,32 +529,31 @@ async fn streams_agent_run_as_sse() {
     let frames = parse_sse_frames(&text);
 
     assert!(frames.len() >= 4);
-    assert_eq!(frames[0].event, "run_started");
+    assert_eq!(frames[0].event, "run.started");
+    assert_eq!(frames[0].data["type"], "run.started");
     assert_eq!(frames[0].data["code"], 0);
     assert_eq!(frames[0].data["message"], "ok");
-    assert_eq!(frames[0].data["data"]["event"], "run_started");
-    assert_eq!(frames[0].data["data"]["agent_id"], "test");
-    assert_eq!(frames[0].data["data"]["content"], "");
-    assert!(frames[0].data["data"]["result"].is_null());
+    assert_eq!(frames[0].data["agent_id"], "test");
+    assert_eq!(frames[0].data["data"]["status"], "running");
 
     let completed = frames
         .iter()
-        .find(|frame| frame.event == "step_completed")
-        .expect("expected step_completed frame");
+        .find(|frame| frame.event == "step.completed")
+        .expect("expected step.completed frame");
     assert_eq!(completed.data["code"], 0);
-    assert_eq!(completed.data["data"]["event"], "step_completed");
+    assert_eq!(completed.data["type"], "step.completed");
     assert_eq!(completed.data["data"]["step_id"], "hello");
-    assert_eq!(completed.data["data"]["content"], "");
-    assert!(completed.data["data"]["result"].is_null());
+    assert_eq!(completed.data["data"]["status"], "completed");
 
     let run_completed = frames
         .iter()
-        .find(|frame| frame.event == "run_completed")
-        .expect("expected run_completed frame");
+        .find(|frame| frame.event == "run.completed")
+        .expect("expected run.completed frame");
     assert_eq!(run_completed.data["code"], 0);
-    assert_eq!(run_completed.data["data"]["event"], "run_completed");
-    assert_eq!(run_completed.data["data"]["content"], "");
-    assert!(run_completed.data["data"]["result"].is_null());
+    assert_eq!(run_completed.data["type"], "run.completed");
+    assert_eq!(run_completed.data["data"]["status"], "completed");
+    assert_eq!(run_completed.data["data"]["content"], "Hello Ada");
+    assert!(run_completed.data["data"]["output"].is_null());
 }
 
 #[tokio::test]
@@ -532,7 +587,7 @@ async fn streams_agent_run_with_request_id() {
 
     assert!(frames
         .iter()
-        .all(|frame| frame.data["data"]["request_id"] == "req_test_123"));
+        .all(|frame| frame.data["request_id"] == "req_test_123"));
 }
 
 #[tokio::test]
@@ -566,7 +621,7 @@ async fn streams_agent_run_generates_request_id() {
 
     assert!(frames
         .iter()
-        .all(|frame| frame.data["data"]["request_id"] == request_id));
+        .all(|frame| frame.data["request_id"] == request_id));
 }
 
 #[tokio::test]
@@ -593,7 +648,7 @@ async fn records_run_history_and_step_outputs() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
     let frames = parse_sse_frames(&text);
-    let run_id = frames[0].data["data"]["run_id"].as_str().unwrap();
+    let run_id = frames[0].data["run_id"].as_str().unwrap();
 
     let response = app
         .clone()
@@ -621,11 +676,18 @@ async fn records_run_history_and_step_outputs() {
         payload["data"]["step_outputs"]["hello"]["text"],
         "Hello Ada"
     );
-    assert!(payload["data"]["events"]
+    let completed_event = payload["data"]["events"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|event| event["event"] == "step_completed" && event["step_id"] == "hello"));
+        .find(|event| event["type"] == "step.completed")
+        .unwrap();
+    assert_eq!(completed_event["request_id"], "req_history_001");
+    assert_eq!(completed_event["run_id"], run_id);
+    assert_eq!(completed_event["agent_id"], "test");
+    assert_eq!(completed_event["data"]["step_id"], "hello");
+    assert!(completed_event.get("step_id").is_none());
+    assert!(completed_event["time"].as_str().is_some());
 
     let response = app
         .oneshot(
@@ -671,11 +733,8 @@ async fn filters_run_history_by_request_context() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let first_frames = parse_sse_frames(&String::from_utf8(body.to_vec()).unwrap());
-    let first_run_id = first_frames[0].data["data"]["run_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let first_frames = parse_sse_frames(std::str::from_utf8(&body).unwrap());
+    let first_run_id = first_frames[0].data["run_id"].as_str().unwrap().to_string();
 
     let response = app
         .clone()
@@ -695,8 +754,8 @@ async fn filters_run_history_by_request_context() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let second_frames = parse_sse_frames(&String::from_utf8(body.to_vec()).unwrap());
-    let second_run_id = second_frames[0].data["data"]["run_id"]
+    let second_frames = parse_sse_frames(std::str::from_utf8(&body).unwrap());
+    let second_run_id = second_frames[0].data["run_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -786,8 +845,8 @@ async fn filters_run_history_by_agent_status_and_cursor() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let ok_frames = parse_sse_frames(&String::from_utf8(body.to_vec()).unwrap());
-    let first_completed_run_id = ok_frames[0].data["data"]["run_id"].as_str().unwrap();
+    let ok_frames = parse_sse_frames(std::str::from_utf8(&body).unwrap());
+    let first_completed_run_id = ok_frames[0].data["run_id"].as_str().unwrap();
 
     let response = app
         .clone()
@@ -804,8 +863,8 @@ async fn filters_run_history_by_agent_status_and_cursor() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let ok_frames = parse_sse_frames(&String::from_utf8(body.to_vec()).unwrap());
-    let second_completed_run_id = ok_frames[0].data["data"]["run_id"].as_str().unwrap();
+    let ok_frames = parse_sse_frames(std::str::from_utf8(&body).unwrap());
+    let second_completed_run_id = ok_frames[0].data["run_id"].as_str().unwrap();
 
     let response = app
         .clone()
@@ -822,8 +881,8 @@ async fn filters_run_history_by_agent_status_and_cursor() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let failed_frames = parse_sse_frames(&String::from_utf8(body.to_vec()).unwrap());
-    let failed_run_id = failed_frames[0].data["data"]["run_id"].as_str().unwrap();
+    let failed_frames = parse_sse_frames(std::str::from_utf8(&body).unwrap());
+    let failed_run_id = failed_frames[0].data["run_id"].as_str().unwrap();
 
     let response = app
         .clone()
@@ -913,7 +972,7 @@ async fn streams_code_node_demo_agent() {
     let frames = parse_sse_frames(&text);
     let deltas = frames
         .iter()
-        .filter(|frame| frame.event == "token_delta")
+        .filter(|frame| frame.event == "content.delta")
         .map(|frame| frame.data["data"]["content"].as_str().unwrap().to_string())
         .collect::<Vec<_>>();
 
@@ -946,7 +1005,7 @@ async fn records_failed_run_history() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
     let frames = parse_sse_frames(&text);
-    let run_id = frames[0].data["data"]["run_id"].as_str().unwrap();
+    let run_id = frames[0].data["run_id"].as_str().unwrap();
 
     let response = app
         .oneshot(
@@ -970,11 +1029,16 @@ async fn records_failed_run_history() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|event| event["event"] == "error" && event["step_id"] == "missing_tool"));
+        .any(|event| {
+            event["type"] == "run.failed"
+                && event["run_id"] == run_id
+                && event["data"]["step_id"] == "missing_tool"
+                && event.get("step_id").is_none()
+        }));
 }
 
 #[tokio::test]
-async fn streams_token_delta_content_as_direct_text() {
+async fn streams_content_delta_content_as_direct_text() {
     let response = app()
         .await
         .oneshot(
@@ -995,7 +1059,7 @@ async fn streams_token_delta_content_as_direct_text() {
     let frames = parse_sse_frames(&text);
     let deltas = frames
         .iter()
-        .filter(|frame| frame.event == "token_delta")
+        .filter(|frame| frame.event == "content.delta")
         .map(|frame| frame.data["data"]["content"].as_str().unwrap().to_string())
         .collect::<Vec<_>>();
 
@@ -1119,25 +1183,36 @@ async fn streams_runtime_error_as_sse_error_without_run_completed() {
     let text = String::from_utf8(body.to_vec()).unwrap();
     let frames = parse_sse_frames(&text);
 
-    assert_eq!(frames[0].event, "run_started");
-    assert_eq!(frames[1].event, "step_started");
+    assert_eq!(frames[0].event, "run.started");
+    assert_eq!(frames[1].event, "step.started");
 
-    let error_frame = frames
+    let step_failed_index = frames
         .iter()
-        .find(|frame| frame.event == "error")
-        .expect("expected error frame");
+        .position(|frame| frame.event == "step.failed")
+        .expect("expected step.failed frame");
+    let run_failed_index = frames
+        .iter()
+        .position(|frame| frame.event == "run.failed")
+        .expect("expected run.failed frame");
+    assert!(step_failed_index < run_failed_index);
+
+    let step_failed = &frames[step_failed_index];
+    assert_eq!(step_failed.data["type"], "step.failed");
+    assert_eq!(step_failed.data["data"]["step_id"], "missing_tool");
+    assert_eq!(step_failed.data["data"]["status"], "failed");
+
+    let error_frame = &frames[run_failed_index];
     assert_eq!(error_frame.data["code"], 20000);
     assert_eq!(
         error_frame.data["message"],
         "run error: tool 'not_registered' is not registered"
     );
-    assert_eq!(error_frame.data["data"]["event"], "error");
-    assert_eq!(error_frame.data["data"]["agent_id"], "broken");
+    assert_eq!(error_frame.data["type"], "run.failed");
+    assert_eq!(error_frame.data["agent_id"], "broken");
     assert_eq!(error_frame.data["data"]["step_id"], "missing_tool");
-    assert_eq!(error_frame.data["data"]["content"], "");
-    assert!(error_frame.data["data"]["result"].is_null());
+    assert_eq!(error_frame.data["data"]["status"], "failed");
 
-    assert!(!frames.iter().any(|frame| frame.event == "run_completed"));
+    assert!(!frames.iter().any(|frame| frame.event == "run.completed"));
 }
 
 fn always_fail_encoding(_event: RunEvent) -> Result<axum::response::sse::Event, AppError> {
@@ -1172,11 +1247,10 @@ async fn sanitizes_sse_encoding_failures_without_panicking() {
     let frames = parse_sse_frames(&text);
 
     assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].event, "error");
+    assert_eq!(frames[0].event, "run.failed");
     assert_eq!(frames[0].data["code"], 20000);
     assert_eq!(frames[0].data["message"], "stream encoding failed");
-    assert_eq!(frames[0].data["data"]["event"], "error");
-    assert_eq!(frames[0].data["data"]["content"], "");
-    assert!(frames[0].data["data"]["result"].is_null());
-    assert!(!frames.iter().any(|frame| frame.event == "run_completed"));
+    assert_eq!(frames[0].data["type"], "run.failed");
+    assert_eq!(frames[0].data["data"]["status"], "failed");
+    assert!(!frames.iter().any(|frame| frame.event == "run.completed"));
 }

@@ -229,40 +229,47 @@ The runner emits structured `RunEvent` values. The API layer encodes them as Ser
 
 Core event names:
 
-- `run_started`
-- `step_started`
-- `token_delta`
-- `tool_call_started`
-- `tool_call_completed`
-- `step_completed`
-- `run_completed`
-- `error`
+- `run.started`
+- `step.started`
+- `thinking.delta`
+- `content.delta`
+- `tool_call.started`
+- `tool_call.completed`
+- `step.completed`
+- `step.failed`
+- `run.completed`
+- `run.failed`
+- `run.cancelled`
 
 SSE example:
 
 ```text
-event: run_started
-data: {"run_id":"run_...","agent_id":"researcher"}
+event: run.started
+data: {"type":"run.started","seq":1,"request_id":"req_...","run_id":"run_...","agent_id":"researcher","time":"2026-07-10T00:00:00Z","code":0,"message":"ok","data":{"status":"running"}}
 
-event: step_started
-data: {"run_id":"run_...","step_id":"plan","step_type":"llm"}
+event: step.started
+data: {"type":"step.started","seq":2,"request_id":"req_...","run_id":"run_...","agent_id":"researcher","time":"2026-07-10T00:00:00Z","code":0,"message":"ok","data":{"step_id":"plan","status":"running"}}
 
-event: token_delta
-data: {"run_id":"run_...","step_id":"plan","delta":"Rust"}
+event: content.delta
+data: {"type":"content.delta","seq":3,"request_id":"req_...","run_id":"run_...","agent_id":"researcher","time":"2026-07-10T00:00:00Z","code":0,"message":"ok","data":{"step_id":"plan","content":"Rust"}}
 
-event: run_completed
-data: {"run_id":"run_...","output":{"answer":"..."}}
+event: run.completed
+data: {"type":"run.completed","seq":8,"request_id":"req_...","run_id":"run_...","agent_id":"researcher","time":"2026-07-10T00:00:01Z","code":0,"message":"ok","data":{"status":"completed","content":"Rust...","content_format":"markdown","output":null,"conversation":null}}
 ```
 
-Events should be machine-readable JSON. Event payloads should include at least:
+All events use the same top-level envelope:
 
+- `type`
+- `seq`, monotonically increasing within one run
+- `request_id`
 - `run_id`
 - `agent_id`
-- `timestamp`
-- step fields when the event is step-scoped
-- a structured `payload` for event-specific data
+- `time`
+- `code`
+- `message`
+- event-specific `data`
 
-The runner accumulates streamed model tokens into a complete step output. `run_completed` returns the final output shape for the run, normally derived from the last step output.
+The runner accumulates `content.delta.data.content` into display-ready final content. `run.completed.data.content` contains the complete Markdown response, and `run.completed.data.output` contains an optional structured object or array. Runtime failures emit `step.failed` when a step is active and then `run.failed`.
 
 ## API Surface
 
@@ -345,7 +352,7 @@ Behavior:
 
 - `ConfigError`: fail platform startup.
 - `InputError`: return HTTP `400` before opening SSE.
-- `RunError`: if SSE has started, emit `event: error` and close the stream.
+- `RunError`: if SSE has started, emit `step.failed` when applicable, emit `run.failed`, and close the stream.
 - Unknown errors should be sanitized. Never expose API keys, full upstream auth headers, or sensitive environment values.
 
 ## Validation and Testing
@@ -358,7 +365,7 @@ First version tests should cover:
 - Duplicate step ID rejection.
 - Input schema validation.
 - Prompt rendering with `input.*` and `steps.*`.
-- Mock model streaming into `token_delta` events and final step output.
+- Mock model streaming into `content.delta` events and final run content.
 - Tool registry lookup and tool execution.
 - SSE encoding for success and runtime error flows.
 
@@ -375,4 +382,4 @@ The first version is complete when:
 - Inline prompts work for short steps.
 - Invalid agent configuration fails startup with a clear error.
 - Invalid request input returns HTTP `400`.
-- Runtime failures emit an SSE `error` event without leaking secrets.
+- Runtime failures emit typed failure events without leaking secrets.

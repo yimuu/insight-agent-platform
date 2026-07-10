@@ -82,13 +82,17 @@ pub struct RunSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunEventRecord {
-    pub event: String,
-    pub step_id: Option<String>,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub seq: u64,
+    pub request_id: String,
+    pub run_id: String,
+    pub agent_id: String,
+    #[serde(rename = "time")]
     pub timestamp: DateTime<Utc>,
-    pub content: String,
-    pub result: Value,
     pub code: i32,
     pub message: String,
+    pub data: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -398,6 +402,7 @@ impl SqlxRunHistoryRepository {
             .connect(database_url)
             .await
             .map_err(map_sqlx_error)?;
+        prepare_postgres_schema_for_migration(&pool).await?;
         POSTGRES_MIGRATOR
             .run(&pool)
             .await
@@ -484,40 +489,38 @@ impl RunHistoryRepository for SqlxRunHistoryRepository {
     }
 
     async fn record_event(&self, event: &RunEvent) -> Result<(), AppError> {
-        let event_name = event.event.as_sse_name();
+        let event_type = event.event_type.as_str();
         let timestamp = event.timestamp.to_rfc3339();
-        let result = event.result.to_string();
+        let data = event.data.to_string();
         match &self.backend {
             SqlxRunHistoryBackend::Sqlite(pool) => {
                 sqlx::query(
-                    "INSERT INTO run_events (run_id, event, step_id, timestamp, content, result, code, message)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO run_events (run_id, type, seq, timestamp, code, message, data)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(&event.run_id)
-                .bind(event_name)
-                .bind(&event.step_id)
+                .bind(event_type)
+                .bind(event.seq as i64)
                 .bind(timestamp)
-                .bind(&event.content)
-                .bind(result)
                 .bind(event.code)
                 .bind(&event.message)
+                .bind(&data)
                 .execute(pool)
                 .await
                 .map_err(map_sqlx_error)?;
             }
             SqlxRunHistoryBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO run_events (run_id, event, step_id, timestamp, content, result, code, message)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                    "INSERT INTO run_events (run_id, type, seq, timestamp, code, message, data)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 )
                 .bind(&event.run_id)
-                .bind(event_name)
-                .bind(&event.step_id)
+                .bind(event_type)
+                .bind(event.seq as i64)
                 .bind(timestamp)
-                .bind(&event.content)
-                .bind(result)
                 .bind(event.code)
                 .bind(&event.message)
+                .bind(&data)
                 .execute(pool)
                 .await
                 .map_err(map_sqlx_error)?;
@@ -635,16 +638,16 @@ impl RunHistoryRepository for SqlxRunHistoryRepository {
 
         let events = match &self.backend {
             SqlxRunHistoryBackend::Sqlite(pool) => sqlx::query_as::<_, RunEventRow>(
-                "SELECT event, step_id, timestamp, content, result, code, message
-                     FROM run_events WHERE run_id = ? ORDER BY id ASC",
+                "SELECT type, seq, timestamp, code, message, data
+                     FROM run_events WHERE run_id = ? ORDER BY seq ASC, id ASC",
             )
             .bind(run_id)
             .fetch_all(pool)
             .await
             .map_err(map_sqlx_error)?,
             SqlxRunHistoryBackend::Postgres(pool) => sqlx::query_as::<_, RunEventRow>(
-                "SELECT event, step_id, timestamp, content, result, code, message
-                     FROM run_events WHERE run_id = $1 ORDER BY id ASC",
+                "SELECT type, seq, timestamp, code, message, data
+                     FROM run_events WHERE run_id = $1 ORDER BY seq ASC, id ASC",
             )
             .bind(run_id)
             .fetch_all(pool)
@@ -652,7 +655,7 @@ impl RunHistoryRepository for SqlxRunHistoryRepository {
             .map_err(map_sqlx_error)?,
         }
         .into_iter()
-        .map(RunEventRecord::from)
+        .map(|row| row.into_record(&summary))
         .collect::<Vec<_>>();
 
         let step_outputs = match &self.backend {
@@ -740,13 +743,13 @@ struct RunSummaryRow {
 
 #[derive(Debug, sqlx::FromRow)]
 struct RunEventRow {
-    event: String,
-    step_id: Option<String>,
+    #[sqlx(rename = "type")]
+    event_type: String,
+    seq: i64,
     timestamp: String,
-    content: String,
-    result: String,
     code: i32,
     message: String,
+    data: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -773,16 +776,18 @@ impl From<RunSummaryRow> for RunSummary {
     }
 }
 
-impl From<RunEventRow> for RunEventRecord {
-    fn from(row: RunEventRow) -> Self {
-        Self {
-            event: row.event,
-            step_id: row.step_id,
-            timestamp: parse_datetime_or_now(&row.timestamp),
-            content: row.content,
-            result: parse_json_or_null(&row.result),
-            code: row.code,
-            message: row.message,
+impl RunEventRow {
+    fn into_record(self, run: &RunSummaryRow) -> RunEventRecord {
+        RunEventRecord {
+            event_type: self.event_type,
+            seq: self.seq.max(0) as u64,
+            request_id: run.request_id.clone(),
+            run_id: run.run_id.clone(),
+            agent_id: run.agent_id.clone(),
+            timestamp: parse_datetime_or_now(&self.timestamp),
+            code: self.code,
+            message: self.message,
+            data: parse_json_or_null(&self.data),
         }
     }
 }
@@ -1055,6 +1060,28 @@ async fn prepare_sqlite_schema_for_migration(pool: &SqlitePool) -> Result<(), Ap
     Ok(())
 }
 
+async fn prepare_postgres_schema_for_migration(pool: &PgPool) -> Result<(), AppError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS runs (
+            run_id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL DEFAULT '',
+            agent_id TEXT NOT NULL,
+            caller_service TEXT,
+            tenant_id TEXT,
+            user_id TEXT,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            input_summary TEXT NOT NULL,
+            error_message TEXT
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_error)?;
+    ensure_postgres_legacy_columns(pool).await
+}
+
 async fn ensure_sqlite_legacy_columns(pool: &SqlitePool) -> Result<(), AppError> {
     let columns = sqlx::query("PRAGMA table_info(runs)")
         .fetch_all(pool)
@@ -1189,7 +1216,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        engine::event::{RunEvent, RunEventKind},
+        engine::event::{RunEvent, RunEventScope, RunEventType},
         request_context::RequestContext,
     };
 
@@ -1214,13 +1241,15 @@ mod tests {
             .await;
         store
             .record_event(&RunEvent::ok(
-                RunEventKind::StepCompleted,
-                request.request_id.clone(),
-                "run_history_store".to_string(),
-                "agent-a".to_string(),
-                Some("step-a".to_string()),
-                "",
-                json!({"text": "done"}),
+                RunEventType::StepCompleted,
+                1,
+                RunEventScope {
+                    request_id: request.request_id.clone(),
+                    run_id: "run_history_store".to_string(),
+                    agent_id: "agent-a".to_string(),
+                    step_id: Some("step-a".to_string()),
+                },
+                json!({"step_id": "step-a", "status": "completed"}),
             ))
             .await;
         store
@@ -1242,7 +1271,12 @@ mod tests {
         assert_eq!(run.user_id.as_deref(), Some("user-a"));
         assert_eq!(run.status, RunStatus::Completed);
         assert_eq!(run.events.len(), 1);
-        assert_eq!(run.events[0].event, "step_completed");
+        assert_eq!(run.events[0].event_type, "step.completed");
+        assert_eq!(run.events[0].seq, 1);
+        assert_eq!(run.events[0].request_id, "req_history_store");
+        assert_eq!(run.events[0].run_id, "run_history_store");
+        assert_eq!(run.events[0].agent_id, "agent-a");
+        assert_eq!(run.events[0].data["status"], "completed");
         assert_eq!(run.step_outputs["step-a"]["text"], "done");
 
         let runs = store
@@ -1258,6 +1292,106 @@ mod tests {
             .unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].run_id, "run_history_store");
+    }
+
+    #[tokio::test]
+    async fn sqlite_migration_preserves_legacy_run_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.sqlite3");
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE runs (
+                run_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                input_summary TEXT NOT NULL,
+                error_message TEXT
+            );
+            CREATE TABLE run_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                step_id TEXT,
+                timestamp TEXT NOT NULL,
+                content TEXT NOT NULL,
+                result TEXT NOT NULL,
+                code INTEGER NOT NULL,
+                message TEXT NOT NULL
+            );
+            CREATE TABLE step_outputs (
+                run_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                output TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (run_id, step_id)
+            );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO runs (run_id, agent_id, status, started_at, input_summary)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("run_legacy")
+        .bind("agent-a")
+        .bind("completed")
+        .bind(Utc::now().to_rfc3339())
+        .bind("{}")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO run_events (
+                run_id, event, step_id, timestamp, content, result, code, message
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("run_legacy")
+        .bind("token_delta")
+        .bind("generate")
+        .bind(Utc::now().to_rfc3339())
+        .bind("hello")
+        .bind("null")
+        .bind(0)
+        .bind("ok")
+        .bind("run_legacy")
+        .bind("run_completed")
+        .bind(Option::<String>::None)
+        .bind(Utc::now().to_rfc3339())
+        .bind("")
+        .bind("null")
+        .bind(0)
+        .bind("ok")
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let store = RunHistoryStore::sqlite(&path).await.unwrap();
+        let run = store.get_run("run_legacy").await.unwrap().unwrap();
+
+        assert_eq!(run.request_id, "");
+        assert_eq!(run.events.len(), 2);
+        assert_eq!(run.events[0].event_type, "content.delta");
+        assert_eq!(run.events[0].seq, 1);
+        assert_eq!(run.events[0].run_id, "run_legacy");
+        assert_eq!(run.events[0].agent_id, "agent-a");
+        assert_eq!(run.events[0].data["step_id"], "generate");
+        assert_eq!(run.events[0].data["content"], "hello");
+        assert_eq!(run.events[1].event_type, "run.completed");
+        assert_eq!(run.events[1].seq, 2);
+        assert_eq!(run.events[1].data["status"], "completed");
+        assert_eq!(run.events[1].data["content"], "hello");
+        assert!(run.events[1].data["output"].is_null());
     }
 
     #[tokio::test]

@@ -10,7 +10,10 @@ use std::{
 use async_trait::async_trait;
 use futures::{stream, Stream, StreamExt};
 use serde_json::{json, Value};
-use tokio::{sync::Notify, time::timeout};
+use tokio::{
+    sync::{Barrier, Notify},
+    time::timeout,
+};
 
 use insight_agent_platform::{
     agent::{
@@ -18,15 +21,23 @@ use insight_agent_platform::{
         loader::LoadedAgent,
     },
     code::registry::{CodeContext, CodeHandler, CodeRegistry},
-    engine::{event::RunEventKind, runner::RunEngine},
+    engine::{
+        event::{RunEvent, RunEventType},
+        runner::RunEngine,
+    },
     error::AppError,
     handlers::{code_registry_for_agents, default_code_registry},
+    history::store::RunHistoryStore,
     model::types::{ChatRequest, ChatStream, FakeModelClient, ModelClient},
     tools::{
         current_time::CurrentTimeTool,
         registry::{default_tool_registry, Tool, ToolContext, ToolRegistry},
     },
 };
+
+fn event_content(event: &RunEvent) -> &str {
+    event.data["content"].as_str().unwrap_or("")
+}
 
 #[test]
 fn default_code_registry_registers_built_in_handlers() {
@@ -100,6 +111,35 @@ impl CodeHandler for GreetingCodeHandler {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ConcurrentEmitterCodeHandler;
+
+#[async_trait]
+impl CodeHandler for ConcurrentEmitterCodeHandler {
+    fn name(&self) -> &'static str {
+        "test.concurrent_emitter"
+    }
+
+    async fn call(&self, _input: Value, ctx: CodeContext) -> Result<Value, AppError> {
+        const EMISSIONS: usize = 64;
+        let barrier = Arc::new(Barrier::new(EMISSIONS + 1));
+        let mut tasks = Vec::with_capacity(EMISSIONS);
+        for index in 0..EMISSIONS {
+            let barrier = barrier.clone();
+            let ctx = ctx.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                ctx.emit_text(format!("{index:02},")).await
+            }));
+        }
+        barrier.wait().await;
+        for task in tasks {
+            task.await.unwrap()?;
+        }
+        Ok(json!({"emissions": EMISSIONS}))
+    }
+}
+
 #[tokio::test]
 async fn prompt_step_renders_and_completes_run() {
     let agent = LoadedAgent {
@@ -146,19 +186,19 @@ async fn prompt_step_renders_and_completes_run() {
 
     assert!(events
         .iter()
-        .any(|event| event.event == RunEventKind::RunStarted));
+        .any(|event| event.event_type == RunEventType::RunStarted));
     assert!(events
         .iter()
-        .any(|event| event.event == RunEventKind::StepStarted));
+        .any(|event| event.event_type == RunEventType::StepStarted));
     assert!(events
         .iter()
-        .any(|event| event.event == RunEventKind::StepCompleted));
+        .any(|event| event.event_type == RunEventType::StepCompleted));
     let completed = events
         .iter()
-        .find(|event| event.event == RunEventKind::RunCompleted)
+        .find(|event| event.event_type == RunEventType::RunCompleted)
         .unwrap();
-    assert_eq!(completed.content, "");
-    assert!(completed.result.is_null());
+    assert_eq!(completed.data["content"], "Hello Ada");
+    assert!(completed.data["output"].is_null());
 }
 
 #[tokio::test]
@@ -228,11 +268,151 @@ async fn code_step_emits_text_and_saves_json_output() {
     let events: Vec<_> = engine.run(agent, json!({"name":"Ada"})).collect().await;
     let deltas: Vec<_> = events
         .iter()
-        .filter(|event| event.event == RunEventKind::TokenDelta)
-        .map(|event| event.content.as_str())
+        .filter(|event| event.event_type == RunEventType::ContentDelta)
+        .map(event_content)
         .collect();
 
     assert_eq!(deltas, vec!["preparing greeting", "\n\nHello Ada"]);
+}
+
+#[tokio::test]
+async fn run_completed_appends_non_streamed_final_prompt_content() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![
+                StepConfig {
+                    id: "prepare".to_string(),
+                    kind: StepKind::Code,
+                    prompt_ref: None,
+                    prompt: None,
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: None,
+                    handler: Some("test.greeting".to_string()),
+                    inputs: json!({"name":"Ada"}),
+                    args: Value::Null,
+                    cases: Vec::new(),
+                    default: None,
+                    end: false,
+                },
+                StepConfig {
+                    id: "answer".to_string(),
+                    kind: StepKind::Prompt,
+                    prompt_ref: None,
+                    prompt: Some("Final answer".to_string()),
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: None,
+                    handler: None,
+                    inputs: Value::Null,
+                    args: Value::Null,
+                    cases: Vec::new(),
+                    default: None,
+                    end: true,
+                },
+            ],
+        },
+    };
+
+    let mut code = CodeRegistry::default();
+    code.register(GreetingCodeHandler);
+    let engine = RunEngine::new(FakeModelClient::new(vec![]), ToolRegistry::default())
+        .with_code_handlers(code);
+    let events: Vec<_> = engine.run(agent, json!({})).collect().await;
+    let completed = events
+        .iter()
+        .find(|event| event.event_type == RunEventType::RunCompleted)
+        .unwrap();
+
+    assert_eq!(
+        completed.data["content"],
+        "preparing greeting\n\nFinal answer"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_code_emissions_keep_sequence_and_content_order_consistent() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![StepConfig {
+                id: "emit".to_string(),
+                kind: StepKind::Code,
+                prompt_ref: None,
+                prompt: None,
+                system_prompt_ref: None,
+                system_prompt: None,
+                image_input: None,
+                stream: false,
+                tool: None,
+                handler: Some("test.concurrent_emitter".to_string()),
+                inputs: Value::Null,
+                args: Value::Null,
+                cases: Vec::new(),
+                default: None,
+                end: true,
+            }],
+        },
+    };
+
+    let mut code = CodeRegistry::default();
+    code.register(ConcurrentEmitterCodeHandler);
+    let history = RunHistoryStore::sqlite_in_memory().await.unwrap();
+    let engine = RunEngine::new(FakeModelClient::new(vec![]), ToolRegistry::default())
+        .with_code_handlers(code)
+        .with_history_store(history);
+    let events: Vec<_> = engine.run(agent, json!({})).collect().await;
+
+    assert!(events
+        .windows(2)
+        .all(|events| events[1].seq == events[0].seq + 1));
+    let streamed_content = events
+        .iter()
+        .filter(|event| event.event_type == RunEventType::ContentDelta)
+        .map(event_content)
+        .collect::<String>();
+    let completed = events
+        .iter()
+        .find(|event| event.event_type == RunEventType::RunCompleted)
+        .unwrap();
+    assert_eq!(completed.data["content"], streamed_content);
 }
 
 #[tokio::test]
@@ -299,8 +479,8 @@ async fn text_step_renders_template_and_emits_content() {
     let events: Vec<_> = engine.run(agent, json!({"name":"Ada"})).collect().await;
     let deltas: Vec<_> = events
         .iter()
-        .filter(|event| event.event == RunEventKind::TokenDelta)
-        .map(|event| (event.step_id.as_deref().unwrap(), event.content.as_str()))
+        .filter(|event| event.event_type == RunEventType::ContentDelta)
+        .map(|event| (event.step_id.as_deref().unwrap(), event_content(event)))
         .collect();
 
     assert_eq!(deltas, vec![("summary", "Summary: Hello Ada")]);
@@ -354,16 +534,16 @@ async fn tool_step_emits_tool_events_and_stores_output() {
 
     assert!(events
         .iter()
-        .any(|event| event.event == RunEventKind::ToolCallStarted));
+        .any(|event| event.event_type == RunEventType::ToolCallStarted));
     assert!(events
         .iter()
-        .any(|event| event.event == RunEventKind::ToolCallCompleted));
+        .any(|event| event.event_type == RunEventType::ToolCallCompleted));
     let completed = events
         .iter()
-        .find(|event| event.event == RunEventKind::RunCompleted)
+        .find(|event| event.event_type == RunEventType::RunCompleted)
         .unwrap();
-    assert_eq!(completed.content, "");
-    assert!(completed.result.is_null());
+    assert_eq!(completed.data["content"], "");
+    assert_eq!(completed.data["output"]["timezone"], "Asia/Shanghai");
 }
 
 #[tokio::test]
@@ -432,10 +612,10 @@ async fn text_step_can_reference_object_step_output_fields() {
     let events: Vec<_> = engine.run(agent, json!({})).collect().await;
     let rendered = events
         .iter()
-        .find(|event| event.event == RunEventKind::TokenDelta)
+        .find(|event| event.event_type == RunEventType::ContentDelta)
         .unwrap();
 
-    assert_eq!(rendered.content, "Timezone: Asia/Shanghai");
+    assert_eq!(event_content(rendered), "Timezone: Asia/Shanghai");
 }
 
 #[tokio::test]
@@ -522,11 +702,103 @@ async fn condition_step_jumps_to_matching_case() {
     let events: Vec<_> = engine.run(agent, json!({"kind":"a"})).collect().await;
     let deltas: Vec<_> = events
         .iter()
-        .filter(|event| event.event == RunEventKind::TokenDelta)
-        .map(|event| event.content.as_str())
+        .filter(|event| event.event_type == RunEventType::ContentDelta)
+        .map(event_content)
         .collect();
 
     assert_eq!(deltas, vec!["A"]);
+}
+
+#[tokio::test]
+async fn condition_run_uses_output_from_executed_terminal_step() {
+    let agent = LoadedAgent {
+        root: std::path::PathBuf::from("agents/test"),
+        prompts: Default::default(),
+        config: AgentConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            model: ModelConfig {
+                provider: "openai_compatible".to_string(),
+                model_type: Default::default(),
+                model: Some("fake".to_string()),
+                temperature: None,
+                max_tokens: None,
+                options: Value::Null,
+            },
+            input: InputConfig {
+                schema: json!({"type":"object"}),
+            },
+            prompts: Default::default(),
+            steps: vec![
+                StepConfig {
+                    id: "branch".to_string(),
+                    kind: StepKind::Condition,
+                    prompt_ref: None,
+                    prompt: None,
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: None,
+                    handler: None,
+                    inputs: Value::Null,
+                    args: Value::Null,
+                    cases: vec![insight_agent_platform::agent::config::ConditionCase {
+                        when: "input.use_tool".to_string(),
+                        goto: "selected".to_string(),
+                    }],
+                    default: Some("fallback".to_string()),
+                    end: false,
+                },
+                StepConfig {
+                    id: "selected".to_string(),
+                    kind: StepKind::Tool,
+                    prompt_ref: None,
+                    prompt: None,
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: Some("current_time".to_string()),
+                    handler: None,
+                    inputs: Value::Null,
+                    args: json!({"timezone":"Asia/Shanghai"}),
+                    cases: Vec::new(),
+                    default: None,
+                    end: true,
+                },
+                StepConfig {
+                    id: "fallback".to_string(),
+                    kind: StepKind::Text,
+                    prompt_ref: None,
+                    prompt: Some("fallback".to_string()),
+                    system_prompt_ref: None,
+                    system_prompt: None,
+                    image_input: None,
+                    stream: false,
+                    tool: None,
+                    handler: None,
+                    inputs: Value::Null,
+                    args: Value::Null,
+                    cases: Vec::new(),
+                    default: None,
+                    end: true,
+                },
+            ],
+        },
+    };
+
+    let mut tools = ToolRegistry::default();
+    tools.register(CurrentTimeTool);
+    let engine = RunEngine::new(FakeModelClient::new(vec![]), tools);
+    let events: Vec<_> = engine.run(agent, json!({"use_tool":true})).collect().await;
+    let completed = events
+        .iter()
+        .find(|event| event.event_type == RunEventType::RunCompleted)
+        .unwrap();
+
+    assert_eq!(completed.data["output"]["timezone"], "Asia/Shanghai");
 }
 
 #[tokio::test]
@@ -630,8 +902,8 @@ async fn condition_step_can_read_previous_step_output_text() {
     let events: Vec<_> = engine.run(agent, json!({})).collect().await;
     let deltas: Vec<_> = events
         .iter()
-        .filter(|event| event.event == RunEventKind::TokenDelta)
-        .map(|event| event.content.as_str())
+        .filter(|event| event.event_type == RunEventType::ContentDelta)
+        .map(event_content)
         .collect();
 
     assert_eq!(deltas, vec!["Medical"]);
@@ -739,8 +1011,8 @@ async fn condition_step_supports_cel_boolean_expression() {
     let events: Vec<_> = engine.run(agent, json!({"age": 85})).collect().await;
     let deltas: Vec<_> = events
         .iter()
-        .filter(|event| event.event == RunEventKind::TokenDelta)
-        .map(|event| event.content.as_str())
+        .filter(|event| event.event_type == RunEventType::ContentDelta)
+        .map(event_content)
         .collect();
 
     assert_eq!(deltas, vec!["Adult medical"]);
@@ -816,20 +1088,19 @@ async fn tool_step_error_emits_error_event_and_stops_run() {
 
     assert!(events
         .iter()
-        .any(|event| event.event == RunEventKind::ToolCallStarted));
+        .any(|event| event.event_type == RunEventType::ToolCallStarted));
     assert!(!events
         .iter()
-        .any(|event| event.event == RunEventKind::ToolCallCompleted));
+        .any(|event| event.event_type == RunEventType::ToolCallCompleted));
     let error_event = events
         .iter()
-        .find(|event| event.event == RunEventKind::Error)
+        .find(|event| event.event_type == RunEventType::RunFailed)
         .unwrap();
     assert_eq!(error_event.message, "run error: tool failed deliberately");
-    assert_eq!(error_event.content, "");
-    assert!(error_event.result.is_null());
+    assert_eq!(error_event.data["status"], "failed");
     assert!(!events
         .iter()
-        .any(|event| event.event == RunEventKind::RunCompleted));
+        .any(|event| event.event_type == RunEventType::RunCompleted));
 }
 
 #[derive(Clone)]
@@ -1023,7 +1294,7 @@ async fn llm_step_attaches_input_images_to_user_message_when_configured() {
 
     assert!(events
         .iter()
-        .any(|event| event.event == RunEventKind::RunCompleted));
+        .any(|event| event.event_type == RunEventType::RunCompleted));
     let requests = model.take_requests();
     let message = &requests[0].messages[0];
     let value = serde_json::to_value(message).unwrap();
@@ -1107,30 +1378,30 @@ async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
             .await
             .unwrap()
             .unwrap()
-            .event,
-        RunEventKind::RunStarted
+            .event_type,
+        RunEventType::RunStarted
     );
     assert_eq!(
         timeout(Duration::from_millis(100), events.next())
             .await
             .unwrap()
             .unwrap()
-            .event,
-        RunEventKind::StepStarted
+            .event_type,
+        RunEventType::StepStarted
     );
     assert_eq!(
         timeout(Duration::from_millis(100), events.next())
             .await
             .unwrap()
             .unwrap()
-            .event,
-        RunEventKind::StepCompleted
+            .event_type,
+        RunEventType::StepCompleted
     );
     let llm_started = timeout(Duration::from_millis(100), events.next())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(llm_started.event, RunEventKind::StepStarted);
+    assert_eq!(llm_started.event_type, RunEventType::StepStarted);
     assert_eq!(llm_started.step_id.as_deref(), Some("answer"));
 
     assert!(timeout(Duration::from_millis(50), events.next())
@@ -1143,14 +1414,13 @@ async fn run_stream_yields_early_events_before_blocked_llm_finishes() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(token.event, RunEventKind::TokenDelta);
-    assert_eq!(token.content, "chunk-1");
-    assert!(token.result.is_null());
+    assert_eq!(token.event_type, RunEventType::ContentDelta);
+    assert_eq!(event_content(&token), "chunk-1");
 
     let rest: Vec<_> = events.collect().await;
     assert!(rest
         .iter()
-        .any(|event| event.event == RunEventKind::RunCompleted));
+        .any(|event| event.event_type == RunEventType::RunCompleted));
 }
 
 #[tokio::test]
@@ -1200,14 +1470,14 @@ async fn llm_step_passes_empty_model_when_agent_model_is_absent() {
 
     assert!(events
         .iter()
-        .any(|event| event.event == RunEventKind::RunCompleted));
+        .any(|event| event.event_type == RunEventType::RunCompleted));
     let requests = model.take_requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].model, "");
 }
 
 #[tokio::test]
-async fn llm_step_streams_token_delta_events_and_final_output() {
+async fn llm_step_streams_content_delta_events_and_final_output() {
     let agent = LoadedAgent {
         root: std::path::PathBuf::from("agents/test"),
         prompts: Default::default(),
@@ -1255,17 +1525,17 @@ async fn llm_step_streams_token_delta_events_and_final_output() {
 
     let deltas: Vec<_> = events
         .iter()
-        .filter(|event| event.event == RunEventKind::TokenDelta)
-        .map(|event| event.content.clone())
+        .filter(|event| event.event_type == RunEventType::ContentDelta)
+        .map(|event| event_content(event).to_string())
         .collect();
     assert_eq!(deltas, vec!["Hel", "lo"]);
 
     let completed = events
         .iter()
-        .find(|event| event.event == RunEventKind::RunCompleted)
+        .find(|event| event.event_type == RunEventType::RunCompleted)
         .unwrap();
-    assert_eq!(completed.content, "");
-    assert!(completed.result.is_null());
+    assert_eq!(completed.data["content"], "Hello");
+    assert!(completed.data["output"].is_null());
 }
 
 #[tokio::test]
@@ -1335,8 +1605,8 @@ async fn llm_steps_insert_blank_line_before_later_step_content() {
     let events: Vec<_> = engine.run(agent, json!({})).collect().await;
     let deltas: Vec<_> = events
         .iter()
-        .filter(|event| event.event == RunEventKind::TokenDelta)
-        .map(|event| (event.step_id.as_deref().unwrap(), event.content.as_str()))
+        .filter(|event| event.event_type == RunEventType::ContentDelta)
+        .map(|event| (event.step_id.as_deref().unwrap(), event_content(event)))
         .collect();
 
     assert_eq!(
@@ -1446,14 +1716,14 @@ async fn dropping_stream_cancels_in_flight_model_request() {
             .await
             .unwrap()
             .unwrap()
-            .event,
-        RunEventKind::RunStarted
+            .event_type,
+        RunEventType::RunStarted
     );
     let step_started = timeout(Duration::from_millis(100), events.next())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(step_started.event, RunEventKind::StepStarted);
+    assert_eq!(step_started.event_type, RunEventType::StepStarted);
 
     timeout(Duration::from_millis(100), model.wait_until_started())
         .await
