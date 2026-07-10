@@ -10,5 +10,7 @@ pub mod history;
 pub mod model;
 pub mod prompt;
 pub mod request_context;
+pub mod resources;
 pub mod response;
+pub mod runtime;
 pub mod tools;
