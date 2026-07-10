@@ -206,7 +206,7 @@ impl RunService {
         Ok(AttachedRun {
             run_id: run_id.clone(),
             request_id,
-            subscription: RunSubscription::new(run_id, Vec::new(), live, 0, lease),
+            subscription: RunSubscription::new(run_id, Vec::new(), live, true, 0, lease),
         })
     }
 
@@ -253,7 +253,9 @@ impl RunService {
         };
         let owner: Arc<dyn LeaseOwner> = self.inner.clone();
         let lease = Arc::new(SubscriptionLease::new(owner, run_id));
-        Ok(RunSubscription::new(run_id, replay, live, after_seq, lease))
+        Ok(RunSubscription::new(
+            run_id, replay, live, counted, after_seq, lease,
+        ))
     }
 
     pub async fn get_run(&self, run_id: &str) -> Result<RunRecord, ServiceError> {

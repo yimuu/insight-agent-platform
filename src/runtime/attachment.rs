@@ -33,6 +33,7 @@ pub struct RunSubscription {
     pub run_id: String,
     replay: VecDeque<RunEvent>,
     live: EventSubscription,
+    live_open: bool,
     last_seq: u64,
     _lease: Arc<SubscriptionLease>,
 }
@@ -42,6 +43,7 @@ impl RunSubscription {
         run_id: impl Into<String>,
         replay: Vec<RunEvent>,
         live: EventSubscription,
+        live_open: bool,
         after_seq: u64,
         lease: Arc<SubscriptionLease>,
     ) -> Self {
@@ -49,6 +51,7 @@ impl RunSubscription {
             run_id: run_id.into(),
             replay: replay.into(),
             live,
+            live_open,
             last_seq: after_seq,
             _lease: lease,
         }
@@ -62,7 +65,8 @@ impl RunSubscription {
         loop {
             let event = match self.replay.pop_front() {
                 Some(event) => event,
-                None => self.live.recv().await?,
+                None if self.live_open => self.live.recv().await?,
+                None => return Err(EventError::SubscriptionClosed),
             };
             if event.seq <= self.last_seq {
                 continue;
