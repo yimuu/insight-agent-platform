@@ -151,4 +151,8 @@ impl ActionRegistry {
             )
         })
     }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.actions.keys().map(String::as_str)
+    }
 }
