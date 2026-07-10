@@ -6,12 +6,13 @@ services:
       POSTGRES_USER: insight
       POSTGRES_PASSWORD: insight
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U insight -d insight_agent_platform"]
       interval: 5s
       timeout: 3s
       retries: 10
+    stop_grace_period: 10s
     volumes:
       - insight-agent-platform-postgres:/var/lib/postgresql/data
 

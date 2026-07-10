@@ -40,5 +40,3 @@ nodes:
       content:
         template: "{{ nodes.render.output }}"
       format: text
-      data:
-        metrics: "{{ nodes.analyze_text.output }}"

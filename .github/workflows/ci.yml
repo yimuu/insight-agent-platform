@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    env:
+      CI: "1"
+      RUN_HISTORY_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
+      CARGO_TERM_COLOR: always
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: insight_agent_platform
+          POSTGRES_USER: insight
+          POSTGRES_PASSWORD: insight
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U insight -d insight_agent_platform"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+          cache-on-failure: "false"
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --all-targets
+      - name: Install dependency policy tools
+        run: |
+          cargo install --locked cargo-audit
+          cargo install --locked cargo-deny
+      - name: Audit advisories
+        run: cargo audit
+      - name: Check dependency policy
+        run: cargo deny check
