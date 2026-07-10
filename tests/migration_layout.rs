@@ -1,26 +1,46 @@
 use std::path::Path;
 
-const SQLITE_001: &str = include_str!("../migrations/sqlite/202607090001_create_run_history.sql");
-const POSTGRES_001: &str =
-    include_str!("../migrations/postgres/202607090001_create_run_history.sql");
+const SQLITE_V1: &str = include_str!("../migrations/formal_v1/sqlite/202607100001_formal_v1.sql");
+const POSTGRES_V1: &str =
+    include_str!("../migrations/formal_v1/postgres/202607100001_formal_v1.sql");
 
 #[test]
-fn typed_run_events_are_part_of_the_baseline_migrations() {
-    for migration in [SQLITE_001, POSTGRES_001] {
-        assert!(migration.contains("type TEXT NOT NULL"));
-        assert!(migration.contains("data TEXT NOT NULL"));
-        assert!(!migration.contains("event TEXT NOT NULL"));
-        assert!(!migration.contains("content TEXT NOT NULL"));
-        assert!(!migration.contains("result TEXT NOT NULL"));
-    }
-    assert!(SQLITE_001.contains("seq INTEGER NOT NULL"));
-    assert!(POSTGRES_001.contains("seq BIGINT NOT NULL"));
-
+fn formal_v1_migrations_are_isolated_from_the_prototype_schema() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    assert!(!root
-        .join("migrations/sqlite/202607090003_rebuild_run_events_for_typed_events.sql")
-        .exists());
-    assert!(!root
-        .join("migrations/postgres/202607090003_rebuild_run_events_for_typed_events.sql")
-        .exists());
+    assert!(root.join("migrations/sqlite").is_dir());
+    assert!(root.join("migrations/postgres").is_dir());
+    assert!(root.join("migrations/formal_v1/sqlite").is_dir());
+    assert!(root.join("migrations/formal_v1/postgres").is_dir());
+}
+
+#[test]
+fn both_formal_backends_define_equivalent_runtime_tables_and_constraints() {
+    for migration in [SQLITE_V1, POSTGRES_V1] {
+        let normalized = migration.to_ascii_lowercase();
+        assert!(normalized.contains("create table runs"));
+        assert!(normalized.contains("create table run_events"));
+        assert!(normalized.contains("create table node_outputs"));
+        assert!(normalized.contains("agent_version"));
+        assert!(normalized.contains("attachment"));
+        assert!(normalized.contains("'attached'"));
+        assert!(normalized.contains("'detached'"));
+        for status in [
+            "'created'",
+            "'running'",
+            "'completed'",
+            "'failed'",
+            "'cancelled'",
+            "'interrupted'",
+        ] {
+            assert!(normalized.contains(status), "missing status {status}");
+        }
+        assert!(normalized.contains("unique (run_id, seq)"));
+        assert!(normalized.contains("on delete cascade"));
+        assert!(normalized.contains("error_code"));
+        assert!(normalized.contains("error_message"));
+    }
+    assert!(SQLITE_V1.contains("json_valid(input_summary)"));
+    assert!(SQLITE_V1.contains("json_valid(output)"));
+    assert!(POSTGRES_V1.contains("JSONB"));
+    assert!(POSTGRES_V1.contains("TIMESTAMPTZ"));
 }

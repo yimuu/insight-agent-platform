@@ -206,10 +206,11 @@ impl fmt::Display for HistoryTypeError {
 impl Error for HistoryTypeError {}
 
 pub fn summarize_input(input: &Value) -> Value {
-    let keys = input
+    let mut keys = input
         .as_object()
         .map(|object| object.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
+    keys.sort();
     let serialized_bytes = serde_json::to_vec(input).map_or(0, |bytes| bytes.len());
     json!({
         "keys": keys,
