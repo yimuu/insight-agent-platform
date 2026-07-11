@@ -52,6 +52,10 @@ enum Behavior {
     Fail(RunError),
     Delay(Duration),
     WaitForStop(Arc<Notify>),
+    ReturnedStopAfterRuntimeStop {
+        returned: StopReason,
+        started: Arc<Notify>,
+    },
     TrackedWait {
         active: Arc<AtomicUsize>,
         started: Arc<Notify>,
@@ -141,6 +145,11 @@ impl NodeExecutor for SyntheticNode {
                 started.notify_one();
                 control.stopped().await;
                 Err(RunError::stopped(control.stop_reason().unwrap()))
+            }
+            Behavior::ReturnedStopAfterRuntimeStop { returned, started } => {
+                started.notify_one();
+                control.stopped().await;
+                Err(RunError::stopped(*returned))
             }
             Behavior::TrackedWait {
                 active,
@@ -735,6 +744,64 @@ async fn typed_external_stop_reasons_keep_their_terminal_statuses() {
         ),
     ] {
         assert_external_stop_status(reason, status, event_type).await;
+    }
+}
+
+#[tokio::test]
+async fn coordinator_uses_shared_stop_reason_when_executor_returns_mismatched_stop() {
+    for (shared, returned, expected_status, expected_event, expected_code) in [
+        (
+            StopReason::Interrupted,
+            StopReason::Cancelled,
+            RunStatus::Interrupted,
+            RunEventType::RunInterrupted,
+            "RUN_INTERRUPTED",
+        ),
+        (
+            StopReason::Cancelled,
+            StopReason::Interrupted,
+            RunStatus::Cancelled,
+            RunEventType::RunCancelled,
+            "RUN_CANCELLED",
+        ),
+        (
+            StopReason::TimedOut,
+            StopReason::Cancelled,
+            RunStatus::Failed,
+            RunEventType::RunFailed,
+            "RUN_TIMEOUT",
+        ),
+    ] {
+        let repository = Arc::new(MemoryRepository::default());
+        let started = Arc::new(Notify::new());
+        let agent = agent(
+            vec![node(
+                "mismatch",
+                None,
+                Duration::from_secs(5),
+                Behavior::ReturnedStopAfterRuntimeStop {
+                    returned,
+                    started: Arc::clone(&started),
+                },
+            )],
+            "mismatch",
+        );
+        let coordinator = coordinator(agent, Arc::clone(&repository), true);
+        let (controller, stop) = stop_pair();
+        let execution = coordinator.execute(new_run(), json!({}), stop);
+        let request_stop = async {
+            started.notified().await;
+            controller.request(shared)
+        };
+        let (result, requested) = tokio::join!(execution, request_stop);
+
+        assert!(requested);
+        assert_eq!(result.unwrap(), expected_status);
+        let events = repository.events.lock().await;
+        assert_eq!(events[3].event_type, RunEventType::NodeFailed);
+        assert_eq!(events[3].code, expected_code);
+        assert_eq!(events[4].event_type, expected_event);
+        assert_eq!(events[4].code, expected_code);
     }
 }
 

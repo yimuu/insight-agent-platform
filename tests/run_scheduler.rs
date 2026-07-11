@@ -1761,6 +1761,63 @@ async fn global_external_stop_is_observed_by_all_branches_and_drained_before_ret
 }
 
 #[tokio::test]
+async fn shared_stop_reason_overrides_executor_returned_reason() {
+    for (shared, returned, expected) in [
+        (
+            StopReason::Interrupted,
+            StopReason::Cancelled,
+            RunError::stopped(StopReason::Interrupted),
+        ),
+        (
+            StopReason::Cancelled,
+            StopReason::Interrupted,
+            RunError::stopped(StopReason::Cancelled),
+        ),
+        (
+            StopReason::TimedOut,
+            StopReason::Cancelled,
+            RunError::stopped(StopReason::TimedOut),
+        ),
+    ] {
+        let started = Arc::new(Notify::new());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let agent = scheduler_agent(
+            vec![scheduler_node(
+                "mismatch",
+                None,
+                SchedulerBehavior::ReturnedStopAfterRuntimeStop {
+                    returned,
+                    executions: Arc::clone(&executions),
+                    started: Arc::clone(&started),
+                },
+            )],
+            "mismatch",
+        );
+        let repository = Arc::new(SchedulerRepository::default());
+        let scheduler = scheduler(agent, Arc::clone(&repository));
+        let (controller, stop) = stop_pair();
+        let execution = tokio::spawn(async move {
+            scheduler
+                .run(context("run_shared_stop_override"), stop)
+                .await
+        });
+
+        started.notified().await;
+        assert!(controller.request(shared));
+
+        assert_eq!(
+            execution.await.unwrap().unwrap(),
+            SchedulerResult::Stopped(expected.clone())
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        let events = repository.events.lock().await;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].event_type.as_str(), "node.failed");
+        assert_eq!(events[1].code, expected.code());
+    }
+}
+
+#[tokio::test]
 async fn global_external_stop_drains_journal_stage_without_private_task_abort() {
     let mut agent = compile_parallel_agent(two_branch_yaml());
     replace_behavior(
