@@ -487,16 +487,14 @@ async fn execution_content_journal_failure_remains_infrastructure_by_origin() {
 
 #[test]
 fn execution_errors_are_classified_by_source() {
-    assert!(matches!(
-        RunError::new("UPSTREAM_FAILURE", "failed").kind(),
-        RunErrorKind::Node
-    ));
+    let node = RunError::new("UPSTREAM_FAILURE", "failed");
+    assert!(matches!(node.kind(), RunErrorKind::Node));
+    assert_eq!(node.stop_reason(), None);
     assert!(matches!(
         RunError::infrastructure("EVENT_APPEND_FAILED", "failed").kind(),
         RunErrorKind::Infrastructure
     ));
-    assert!(matches!(
-        RunError::stopped(StopReason::Cancelled).kind(),
-        RunErrorKind::Stop
-    ));
+    let stop = RunError::stopped(StopReason::Cancelled);
+    assert!(matches!(stop.kind(), RunErrorKind::Stop));
+    assert_eq!(stop.stop_reason(), Some(StopReason::Cancelled));
 }

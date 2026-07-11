@@ -17,8 +17,8 @@ use crate::{
 };
 
 use super::{
-    execute_node, ExecutionLimiter, NodeExecutionFailure, RunContext, RunError, RunMetadata,
-    RunState, StopSignal,
+    execute_node, ExecutionLimiter, NodeExecutionFailure, RunContext, RunError, RunErrorKind,
+    RunMetadata, RunState, StopReason, StopSignal,
 };
 
 pub struct RunCoordinator {
@@ -169,8 +169,10 @@ impl RunCoordinator {
                     context.set_node_output(&result.node_id, result.outcome.output.clone());
                     result.outcome
                 }
-                Err(NodeExecutionFailure::Node { error, .. })
-                | Err(NodeExecutionFailure::Stop { error, .. }) => {
+                Err(NodeExecutionFailure::Node { error, .. }) => {
+                    return self.finish_error(&state, new_run, error).await;
+                }
+                Err(NodeExecutionFailure::Stop { error, .. }) => {
                     return self.finish_error(&state, new_run, error).await;
                 }
                 Err(NodeExecutionFailure::Infrastructure(error)) => return Err(error),
@@ -254,10 +256,22 @@ impl RunCoordinator {
         run: &NewRun,
         error: RunError,
     ) -> Result<RunStatus, RunError> {
-        let (status, event_type) = match error.code() {
-            "RUN_CANCELLED" => (RunStatus::Cancelled, RunEventType::RunCancelled),
-            "RUN_INTERRUPTED" => (RunStatus::Interrupted, RunEventType::RunInterrupted),
-            _ => (RunStatus::Failed, RunEventType::RunFailed),
+        let (status, event_type) = match error.kind() {
+            RunErrorKind::Node => (RunStatus::Failed, RunEventType::RunFailed),
+            RunErrorKind::Stop => match error.stop_reason() {
+                Some(StopReason::Cancelled) => (RunStatus::Cancelled, RunEventType::RunCancelled),
+                Some(StopReason::Interrupted) => {
+                    (RunStatus::Interrupted, RunEventType::RunInterrupted)
+                }
+                Some(StopReason::TimedOut) => (RunStatus::Failed, RunEventType::RunFailed),
+                None => {
+                    return Err(RunError::infrastructure(
+                        "STOP_REASON_MISSING",
+                        "stop failure is missing its typed reason",
+                    ));
+                }
+            },
+            RunErrorKind::Infrastructure => return Err(error),
         };
         let update = TerminalUpdate::new(
             &run.run_id,

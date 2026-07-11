@@ -474,6 +474,94 @@ async fn node_failure_emits_node_failed_then_run_failed() {
 }
 
 #[tokio::test]
+async fn node_failure_codes_cannot_impersonate_typed_stop_reasons() {
+    for code in ["RUN_CANCELLED", "RUN_INTERRUPTED", "RUN_TIMEOUT"] {
+        let repository = Arc::new(MemoryRepository::default());
+        let agent = agent(
+            vec![node(
+                "answer",
+                None,
+                Duration::from_secs(1),
+                Behavior::Fail(RunError::new(code, "node-local collision")),
+            )],
+            "answer",
+        );
+        let coordinator = coordinator(agent, Arc::clone(&repository), true);
+        let (_, stop) = stop_pair();
+
+        assert_eq!(
+            coordinator
+                .execute(new_run(), json!({}), stop)
+                .await
+                .unwrap(),
+            RunStatus::Failed,
+            "node error code {code} changed terminal semantics"
+        );
+        let events = repository.events.lock().await;
+        assert_eq!(events[3].event_type, RunEventType::NodeFailed);
+        assert_eq!(events[4].event_type, RunEventType::RunFailed);
+        assert_eq!(events[4].code, code);
+    }
+}
+
+async fn assert_external_stop_status(
+    reason: StopReason,
+    expected_status: RunStatus,
+    expected_event: RunEventType,
+) {
+    let repository = Arc::new(MemoryRepository::default());
+    let started = Arc::new(Notify::new());
+    let agent = agent(
+        vec![node(
+            "waiting",
+            None,
+            Duration::from_secs(5),
+            Behavior::WaitForStop(Arc::clone(&started)),
+        )],
+        "waiting",
+    );
+    let coordinator = coordinator(agent, Arc::clone(&repository), true);
+    let (controller, stop) = stop_pair();
+    let execution = coordinator.execute(new_run(), json!({}), stop);
+    let request_stop = async {
+        started.notified().await;
+        controller.request(reason)
+    };
+    let (result, requested) = tokio::join!(execution, request_stop);
+
+    assert!(requested);
+    assert_eq!(result.unwrap(), expected_status);
+    let events = repository.events.lock().await;
+    assert_eq!(events[3].event_type, RunEventType::NodeFailed);
+    assert_eq!(events[4].event_type, expected_event);
+    assert_eq!(events[3].code, RunError::stopped(reason).code());
+    assert_eq!(events[4].code, RunError::stopped(reason).code());
+}
+
+#[tokio::test]
+async fn typed_external_stop_reasons_keep_their_terminal_statuses() {
+    for (reason, status, event_type) in [
+        (
+            StopReason::Cancelled,
+            RunStatus::Cancelled,
+            RunEventType::RunCancelled,
+        ),
+        (
+            StopReason::Interrupted,
+            RunStatus::Interrupted,
+            RunEventType::RunInterrupted,
+        ),
+        (
+            StopReason::TimedOut,
+            RunStatus::Failed,
+            RunEventType::RunFailed,
+        ),
+    ] {
+        assert_external_stop_status(reason, status, event_type).await;
+    }
+}
+
+#[tokio::test]
 async fn coordinator_enforces_node_timeout_even_if_executor_ignores_control() {
     let repository = Arc::new(MemoryRepository::default());
     let agent = agent(

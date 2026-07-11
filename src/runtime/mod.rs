@@ -30,6 +30,7 @@ pub struct RunError {
     code: &'static str,
     message: String,
     kind: RunErrorKind,
+    stop_reason: Option<StopReason>,
 }
 
 impl RunError {
@@ -38,6 +39,7 @@ impl RunError {
             code,
             message: message.into(),
             kind: RunErrorKind::Node,
+            stop_reason: None,
         }
     }
 
@@ -46,6 +48,7 @@ impl RunError {
             code,
             message: message.into(),
             kind: RunErrorKind::Infrastructure,
+            stop_reason: None,
         }
     }
 
@@ -61,6 +64,10 @@ impl RunError {
         self.kind
     }
 
+    pub fn stop_reason(&self) -> Option<StopReason> {
+        self.stop_reason
+    }
+
     pub fn stopped(reason: StopReason) -> Self {
         let (code, message) = match reason {
             StopReason::Cancelled => ("RUN_CANCELLED", "run cancelled"),
@@ -71,6 +78,7 @@ impl RunError {
             code,
             message: message.to_string(),
             kind: RunErrorKind::Stop,
+            stop_reason: Some(reason),
         }
     }
 
