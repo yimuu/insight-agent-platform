@@ -115,7 +115,16 @@ models:
     capabilities: []
     connect_timeout: 5s
     request_timeout: 2m
+    limits:
+      max_upstream_bytes: 8388608
+      max_buffered_line_bytes: 1048576
+      max_event_payload_bytes: 1048576
+      max_chunk_text_bytes: 262144
+      max_usage_json_bytes: 65536
+      max_accumulated_text_bytes: 1048576
 ```
+
+`limits` 可省略；省略时使用上述默认字节上限。零值非法，会以 `MODEL_CONFIG_INVALID` 阻止启动。上游响应体、SSE 行、单个 `data:` payload、单个文本 delta、usage JSON 和最终累计文本都会在写入或继续累计前检查。超限 Run 使用稳定错误 `MODEL_RESPONSE_TOO_LARGE`，错误消息为 `chat provider response exceeded the configured size limit`，不会包含 provider body、prompt、API key、URL query、响应头、usage、响应片段或配置的具体限制值。
 
 ## Agent DSL 示例
 
