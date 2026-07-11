@@ -268,15 +268,15 @@ collect:
   config: {mode: all_settled}
 ```
 
-每个分支依次执行 `analyze_* (core.chat) -> normalize_* (core.template) -> collect`；`synthesize` 只允许引用 `nodes.collect.output`。分支就绪并进入执行队列时发布 `branch.started`，完成或失败时分别发布 `branch.completed` / `branch.failed`，payload 包含 `branch_id`、`fork_id`、`join_id` 和（失败时）错误码。`branch.started` 表示 ready-queue activation，不代表模型已开始返回内容。
+每个分支依次执行 `analyze_* (core.chat) -> normalize_* (core.template) -> collect`；`synthesize` 只允许引用 `nodes.collect.output`。分支就绪并进入执行队列时发布 `branch.started`，完成或失败时分别发布 `branch.completed` / `branch.failed`。事件 `data` 的精确形状为：`branch.started` `{fork_id, branch_id}`；`branch.completed` 在此基础上增加 `terminal_node_id`；`branch.failed` 增加 `terminal_node_id` 和已清理的 `error:{code,message}`。`branch.started` 表示 ready-queue activation，不代表模型已开始返回内容。
 
-部分成功的终态使用固定 envelope：
+`core.join` 的输出是固定聚合对象（不是 Run 终态 envelope）：
 
 ```json
-{"schema_version":1,"type":"run.completed","code":"PARTIAL_SUCCESS","message":"one or more branches failed","data":{"status":"partial_success","branches":{"perspective_a":{"status":"completed"},"perspective_b":{"status":"failed","error":{"code":"NODE_FAILED","message":"..."}}}}}
+{"branches":{"perspective_a":{"status":"succeeded","terminal_node_id":"normalize_a","output":{"text":"..."}},"perspective_b":{"status":"failed","terminal_node_id":"analyze_b","error":{"code":"UPSTREAM_FAILURE","message":"..."}}},"summary":{"total":2,"succeeded":1,"failed":1}}
 ```
 
-`max_concurrent_runs` 和 `max_parallel_node_executions` 是进程范围上限；`max_parallel_branches_per_run` 与 `max_fork_branches` 分别限制单 Run 并发分支和单 fork 分支数。取消会停止整个 Run；单个分支失败只结算该分支，`all_settled` 仍等待其余分支并可产生部分成功。V1 不支持嵌套 fork、resume、新 join 模式，也不允许 post-join 节点直接引用分支节点。
+所有分支失败时 join 仍成功并返回 `summary.failed == summary.total`；这与 Run 的 `run.completed`、`run.failed` 或 `run.cancelled` 终态事件分开。`max_concurrent_runs` 和 `max_parallel_node_executions` 是进程范围上限；`max_parallel_branches_per_run` 与 `max_fork_branches` 分别限制单 Run 并发分支和单 fork 分支数。取消会停止整个 Run；单个分支失败只结算该分支，`all_settled` 仍等待其余分支并可产生部分成功。V1 不支持嵌套 fork、resume、新 join 模式，也不允许 post-join 节点直接引用分支节点。
 
 ## 验证
 

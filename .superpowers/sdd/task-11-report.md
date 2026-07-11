@@ -9,3 +9,4 @@
 - PostgreSQL compose service already running; parity test passed with branch event round-trip and sequences.
 - Scope/secret review: diff check clean; only documentation field names (`bearer_env`, `api_key_env`, `OPENAI_API_KEY`) matched; no credentials.
 - Self-review: topology is strict V1, no nested fork or direct branch references after join; prompts contain no secrets.
+- Review fixes: replaced the incorrect invented `PARTIAL_SUCCESS` Run envelope with the implemented `core.join` aggregate (`branches` plus `summary`), documented all-failed join success, exact branch event payload fields, and distinction from Run terminal events.
