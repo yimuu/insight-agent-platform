@@ -266,7 +266,7 @@ impl AgentCompiler {
 
         validate_graph_structure(&raw.entry, &nodes)?;
         let execution_plan = compile_execution_plan(&raw.entry, &nodes, self.limits)?;
-        validate_references(&raw.entry, &nodes)?;
+        validate_references(&raw.entry, &nodes, &execution_plan)?;
         let version_hash = agent_hash(&raw, context.resolved_prompts())?;
         Ok(CompiledAgent {
             id: raw.id,

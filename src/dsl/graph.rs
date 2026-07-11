@@ -1,13 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{compiled::CompiledNode, CompileError};
+use super::{
+    compiled::{CompiledNode, ExecutionPlan, NodeRegion},
+    CompileError,
+};
 
 pub fn validate_graph(
     entry: &str,
     nodes: &BTreeMap<String, CompiledNode>,
+    plan: &ExecutionPlan,
 ) -> Result<(), CompileError> {
     validate_graph_structure(entry, nodes)?;
-    validate_references(entry, nodes)
+    validate_references(entry, nodes, plan)
 }
 
 pub fn validate_graph_structure(
@@ -112,6 +116,7 @@ fn reachable_from(entry: &str, nodes: &BTreeMap<String, CompiledNode>) -> BTreeS
 pub fn validate_references(
     entry: &str,
     nodes: &BTreeMap<String, CompiledNode>,
+    plan: &ExecutionPlan,
 ) -> Result<(), CompileError> {
     let all = nodes.keys().cloned().collect::<BTreeSet<_>>();
     let mut predecessors = nodes
@@ -163,6 +168,33 @@ pub fn validate_references(
 
     for (node_id, node) in nodes {
         for reference in &node.references {
+            if let Some(reference_region) = plan.node_regions.get(reference) {
+                match (&plan.node_regions[node_id], reference_region) {
+                    (
+                        NodeRegion::Branch { fork_id, branch_id },
+                        NodeRegion::Branch {
+                            fork_id: other_fork,
+                            branch_id: other_branch,
+                        },
+                    ) if fork_id != other_fork || branch_id != other_branch => {
+                        return Err(CompileError::new(
+                            "CROSS_BRANCH_REFERENCE",
+                            format!(
+                                "node '{node_id}' cannot reference branch node '{reference}' from another branch"
+                            ),
+                        ));
+                    }
+                    (NodeRegion::Linear | NodeRegion::Join { .. }, NodeRegion::Branch { .. }) => {
+                        return Err(CompileError::new(
+                            "POST_JOIN_BRANCH_REFERENCE",
+                            format!(
+                                "node '{node_id}' must reference joined output instead of branch node '{reference}'"
+                            ),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
             if reference == node_id
                 || !nodes.contains_key(reference)
                 || !dominators[node_id].contains(reference)

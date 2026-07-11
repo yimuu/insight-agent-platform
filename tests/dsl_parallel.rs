@@ -42,6 +42,11 @@ fn assert_compile_error(yaml: &str, expected_code: &'static str) {
     assert_eq!(error.code(), expected_code, "unexpected error: {error}");
 }
 
+fn assert_compile_ok(yaml: &str) {
+    let (_temp, root) = write_agent(yaml);
+    compiler().compile_dir(Path::new(&root)).unwrap();
+}
+
 fn parallel_yaml() -> &'static str {
     r#"
 version: 1
@@ -95,6 +100,64 @@ nodes:
     config:
       data: {ok: true}
 "#
+}
+
+fn valid_parallel_yaml_with(node_id: &str, reference: &str) -> String {
+    match node_id {
+        "summarize_a" => parallel_yaml().replace(
+            "  summarize_a:\n    type: core.template\n    next: collect\n    config:\n      value: summary-a",
+            &format!(
+                "  summarize_a:\n    type: core.template\n    next: collect\n    config:\n      value: '{reference}'"
+            ),
+        ),
+        "result" => parallel_yaml().replace(
+            "  result:\n    type: core.output\n    config:\n      data: {ok: true}",
+            &format!(
+                "  result:\n    type: core.output\n    config:\n      data:\n        value: '{reference}'"
+            ),
+        ),
+        _ => panic!("unsupported reference target '{node_id}'"),
+    }
+}
+
+#[test]
+fn reference_allows_pre_fork_dominator_inside_branch() {
+    assert_compile_ok(&valid_parallel_yaml_with(
+        "summarize_a",
+        "{{ nodes.prepare.output.query }}",
+    ));
+}
+
+#[test]
+fn reference_allows_same_branch_dominating_predecessor() {
+    assert_compile_ok(&valid_parallel_yaml_with(
+        "summarize_a",
+        "{{ nodes.search_a.output.text }}",
+    ));
+}
+
+#[test]
+fn reference_rejects_cross_branch_output() {
+    assert_compile_error(
+        &valid_parallel_yaml_with("summarize_a", "{{ nodes.search_b.output.text }}"),
+        "CROSS_BRANCH_REFERENCE",
+    );
+}
+
+#[test]
+fn reference_rejects_branch_output_after_join() {
+    assert_compile_error(
+        &valid_parallel_yaml_with("result", "{{ nodes.summarize_a.output.text }}"),
+        "POST_JOIN_BRANCH_REFERENCE",
+    );
+}
+
+#[test]
+fn reference_allows_join_aggregate_after_join() {
+    assert_compile_ok(&valid_parallel_yaml_with(
+        "result",
+        "{{ nodes.collect.output.branches.source_a.output.text }}",
+    ));
 }
 
 fn parallel_yaml_with_outside_edge(target: &str) -> String {

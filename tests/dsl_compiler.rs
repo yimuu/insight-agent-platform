@@ -287,6 +287,18 @@ nodes:
             "  second:\n    type: test.step\n    next: result\n    config: {}\n  result:\n    type: core.output",
         );
     assert_compile_error(&future_reference, "INVALID_NODE_REFERENCE");
+
+    let self_reference = valid_yaml().replace(
+        "      prompt_ref: system",
+        "      prompt_ref: system\n      references: [first]",
+    );
+    assert_compile_error(&self_reference, "INVALID_NODE_REFERENCE");
+
+    let missing_reference = valid_yaml().replace(
+        "      prompt_ref: system",
+        "      prompt_ref: system\n      references: [missing]",
+    );
+    assert_compile_error(&missing_reference, "INVALID_NODE_REFERENCE");
 }
 
 #[test]
