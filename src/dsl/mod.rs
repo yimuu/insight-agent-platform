@@ -3,6 +3,7 @@ pub mod compiler;
 pub mod graph;
 pub mod plan;
 pub mod raw;
+pub(crate) mod references;
 
 use std::{error::Error, fmt};
 
