@@ -450,6 +450,75 @@ impl Action for EchoAction {
     }
 }
 
+#[test]
+fn action_compile_validates_literal_input_against_registered_schema() {
+    const STATIC_SECRET: &str = "static-action-input-never-expose";
+
+    let mut actions = ActionRegistry::default();
+    actions
+        .register(EchoAction {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            streams_content: false,
+            invalid_output: false,
+        })
+        .unwrap();
+    let models = ModelRegistry::default();
+    let mut context = CompileContext::new(&models, &actions);
+
+    let error = ActionNode
+        .compile(
+            "echo",
+            json!({
+                "action": "echo",
+                "input": {"payload": STATIC_SECRET}
+            }),
+            &mut context,
+        )
+        .err()
+        .expect("static schema-invalid action input must fail compilation");
+
+    assert_eq!(error.code(), "ACTION_INPUT_INVALID");
+    assert_eq!(error.to_string(), "action input validation failed");
+    assert!(!format!("{error:?} {error}").contains(STATIC_SECRET));
+}
+
+#[test]
+fn action_compile_allows_valid_literal_and_dynamic_inputs() {
+    let mut actions = ActionRegistry::default();
+    actions
+        .register(EchoAction {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            streams_content: false,
+            invalid_output: false,
+        })
+        .unwrap();
+    let models = ModelRegistry::default();
+
+    let mut literal_context = CompileContext::new(&models, &actions);
+    ActionNode
+        .compile(
+            "literal",
+            json!({
+                "action": "echo",
+                "input": {"payload": {"text": "static"}}
+            }),
+            &mut literal_context,
+        )
+        .unwrap();
+
+    let mut dynamic_context = CompileContext::new(&models, &actions);
+    ActionNode
+        .compile(
+            "dynamic",
+            json!({
+                "action": "echo",
+                "input": {"payload": "{{ input.payload }}"}
+            }),
+            &mut dynamic_context,
+        )
+        .unwrap();
+}
+
 #[tokio::test]
 async fn action_renders_recursive_input_validates_and_returns_output_unchanged() {
     let calls = Arc::new(Mutex::new(Vec::new()));

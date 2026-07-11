@@ -89,6 +89,23 @@ impl CompiledTemplateValue {
         }
     }
 
+    pub(crate) fn static_value(&self) -> Option<Value> {
+        match self {
+            Self::String(program) => program.static_value.clone().map(Value::String),
+            Self::Array(values) => values
+                .iter()
+                .map(Self::static_value)
+                .collect::<Option<Vec<_>>>()
+                .map(Value::Array),
+            Self::Object(values) => values
+                .iter()
+                .map(|(key, value)| Some((key.clone(), value.static_value()?)))
+                .collect::<Option<serde_json::Map<_, _>>>()
+                .map(Value::Object),
+            Self::Literal(value) => Some(value.clone()),
+        }
+    }
+
     pub(crate) fn references(&self) -> std::collections::BTreeSet<String> {
         match self {
             Self::String(program) => program.references.clone(),
