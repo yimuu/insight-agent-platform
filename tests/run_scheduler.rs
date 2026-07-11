@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -9,9 +9,13 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use handlebars::Handlebars;
 use insight_agent_platform::{
     dsl::{
-        compiled::{CompiledNode, NodeCompilation, NodeControl, NodeOutcome, NodeTransition},
+        compiled::{
+            BranchPlan, CompiledAgent, CompiledNode, ExecutionPlan, ForkPlan, JoinPolicy,
+            NodeCompilation, NodeControl, NodeOutcome, NodeTransition, RunOutput,
+        },
         compiler::CompileContext,
         CompileError, EmitPolicy,
     },
@@ -26,9 +30,10 @@ use insight_agent_platform::{
     nodes::registry::{NodeExecutor, NodeExecutorRegistry, NodeType},
     runtime::{
         execute_node, stop_pair, ExecutionControl, ExecutionLimiter, NodeExecutionFailure,
-        RunContext, RunError, RunErrorKind, RunMetadata, StopReason,
+        RunContext, RunError, RunErrorKind, RunMetadata, Scheduler, SchedulerResult, StopReason,
     },
 };
+use jsonschema::JSONSchema;
 use serde_json::{json, Value};
 use tokio::sync::{Mutex, Notify, Semaphore};
 
@@ -40,6 +45,103 @@ struct BlockingExecutor {
 }
 
 struct ContentExecutor;
+
+enum SchedulerBehavior {
+    Next {
+        output: Value,
+        require_output: Option<(String, Value)>,
+        executions: Arc<AtomicUsize>,
+    },
+    Goto {
+        target: String,
+        output: Value,
+        executions: Arc<AtomicUsize>,
+    },
+    Complete {
+        output: RunOutput,
+        executions: Arc<AtomicUsize>,
+    },
+    ActivateFork {
+        executions: Arc<AtomicUsize>,
+    },
+}
+
+struct SchedulerExecutor;
+
+impl NodeType for SchedulerExecutor {
+    fn kind(&self) -> &'static str {
+        "test.scheduler"
+    }
+
+    fn compile(
+        &self,
+        _node_id: &str,
+        _config: Value,
+        _context: &mut CompileContext<'_>,
+    ) -> Result<NodeCompilation, CompileError> {
+        Err(CompileError::new(
+            "TEST_ONLY",
+            "scheduler test nodes are constructed directly",
+        ))
+    }
+}
+
+#[async_trait]
+impl NodeExecutor for SchedulerExecutor {
+    async fn execute(
+        &self,
+        node: &CompiledNode,
+        context: &RunContext,
+        _control: &ExecutionControl,
+    ) -> Result<NodeOutcome, RunError> {
+        match node.body::<SchedulerBehavior>()? {
+            SchedulerBehavior::Next {
+                output,
+                require_output,
+                executions,
+            } => {
+                executions.fetch_add(1, Ordering::SeqCst);
+                if let Some((predecessor, expected)) = require_output {
+                    if context.node_output(predecessor) != Some(expected) {
+                        return Err(RunError::new(
+                            "PREDECESSOR_NOT_VISIBLE",
+                            "predecessor output was not visible",
+                        ));
+                    }
+                }
+                Ok(NodeOutcome {
+                    output: output.clone(),
+                    transition: NodeTransition::Next,
+                })
+            }
+            SchedulerBehavior::Goto {
+                target,
+                output,
+                executions,
+            } => {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Ok(NodeOutcome {
+                    output: output.clone(),
+                    transition: NodeTransition::Goto(target.clone()),
+                })
+            }
+            SchedulerBehavior::Complete { output, executions } => {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Ok(NodeOutcome {
+                    output: json!({"terminal":true}),
+                    transition: NodeTransition::Complete(output.clone()),
+                })
+            }
+            SchedulerBehavior::ActivateFork { executions } => {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Ok(NodeOutcome {
+                    output: json!({"fork":true}),
+                    transition: NodeTransition::ActivateFork,
+                })
+            }
+        }
+    }
+}
 
 impl NodeType for ContentExecutor {
     fn kind(&self) -> &'static str {
@@ -255,6 +357,50 @@ fn content_node(id: &str) -> CompiledNode {
     }
 }
 
+fn scheduler_node(id: &str, next: Option<&str>, behavior: SchedulerBehavior) -> CompiledNode {
+    CompiledNode {
+        id: id.to_string(),
+        kind: "test.scheduler".to_string(),
+        next: next.map(str::to_string),
+        emit: EmitPolicy::None,
+        timeout: Duration::from_secs(1),
+        body: Arc::new(behavior),
+        edges: next.into_iter().map(str::to_string).collect(),
+        references: BTreeSet::new(),
+        terminal: next.is_none(),
+        control: NodeControl::Ordinary,
+    }
+}
+
+fn scheduler_agent(nodes: Vec<CompiledNode>, entry: &str) -> Arc<CompiledAgent> {
+    let nodes = nodes
+        .into_iter()
+        .map(|node| (node.id.clone(), node))
+        .collect::<BTreeMap<_, _>>();
+    Arc::new(CompiledAgent {
+        id: "scheduler-agent".to_string(),
+        name: "Scheduler Agent".to_string(),
+        description: String::new(),
+        version_hash: "sha256:scheduler".to_string(),
+        input_schema: Arc::new(JSONSchema::compile(&json!({"type":"object"})).unwrap()),
+        entry: entry.to_string(),
+        execution_plan: ExecutionPlan::sequential(entry, nodes.keys().cloned()),
+        nodes,
+        templates: Arc::new(Handlebars::new()),
+    })
+}
+
+fn scheduler(agent: Arc<CompiledAgent>, repository: Arc<SchedulerRepository>) -> Scheduler {
+    let mut executors = NodeExecutorRegistry::default();
+    executors.register(SchedulerExecutor).unwrap();
+    Scheduler::new(
+        agent,
+        executors,
+        event_hub(repository),
+        ExecutionLimiter::new(Arc::new(Semaphore::new(4)), Arc::new(Semaphore::new(4))),
+    )
+}
+
 fn context(run_id: &str) -> RunContext {
     RunContext::new(
         RunMetadata {
@@ -280,6 +426,269 @@ fn event_hub(repository: Arc<SchedulerRepository>) -> EventHub {
             operation_timeout: Duration::from_secs(1),
         },
     )
+}
+
+#[tokio::test]
+async fn sequential_scheduler_preserves_path_context_output_and_node_event_order() {
+    let prepare_runs = Arc::new(AtomicUsize::new(0));
+    let route_runs = Arc::new(AtomicUsize::new(0));
+    let answer_runs = Arc::new(AtomicUsize::new(0));
+    let result_runs = Arc::new(AtomicUsize::new(0));
+    let final_output = RunOutput {
+        content: Some("done".to_string()),
+        format: Some("text".to_string()),
+        data: json!({"done":true}),
+    };
+    let agent = scheduler_agent(
+        vec![
+            scheduler_node(
+                "prepare",
+                Some("route"),
+                SchedulerBehavior::Next {
+                    output: json!({"value":42}),
+                    require_output: None,
+                    executions: Arc::clone(&prepare_runs),
+                },
+            ),
+            scheduler_node(
+                "route",
+                None,
+                SchedulerBehavior::Goto {
+                    target: "answer".to_string(),
+                    output: json!({"next":"answer"}),
+                    executions: Arc::clone(&route_runs),
+                },
+            ),
+            scheduler_node(
+                "answer",
+                Some("result"),
+                SchedulerBehavior::Next {
+                    output: json!({"checked":true}),
+                    require_output: Some(("prepare".to_string(), json!({"value":42}))),
+                    executions: Arc::clone(&answer_runs),
+                },
+            ),
+            scheduler_node(
+                "result",
+                None,
+                SchedulerBehavior::Complete {
+                    output: final_output.clone(),
+                    executions: Arc::clone(&result_runs),
+                },
+            ),
+        ],
+        "prepare",
+    );
+    let repository = Arc::new(SchedulerRepository::default());
+    let scheduler = scheduler(agent, Arc::clone(&repository));
+    let (_, stop) = stop_pair();
+
+    assert_eq!(
+        scheduler
+            .run(context("run_sequential"), stop)
+            .await
+            .unwrap(),
+        SchedulerResult::Completed(final_output)
+    );
+    assert_eq!(
+        [
+            prepare_runs.load(Ordering::SeqCst),
+            route_runs.load(Ordering::SeqCst),
+            answer_runs.load(Ordering::SeqCst),
+            result_runs.load(Ordering::SeqCst),
+        ],
+        [1, 1, 1, 1]
+    );
+    assert_eq!(
+        repository
+            .events
+            .lock()
+            .await
+            .iter()
+            .map(|event| (event.event_type.as_str(), event.node_id.as_deref().unwrap()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("node.started", "prepare"),
+            ("node.completed", "prepare"),
+            ("node.started", "route"),
+            ("node.completed", "route"),
+            ("node.started", "answer"),
+            ("node.completed", "answer"),
+            ("node.started", "result"),
+            ("node.completed", "result"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn sequential_scheduler_goto_never_executes_unselected_path() {
+    let route_runs = Arc::new(AtomicUsize::new(0));
+    let selected_runs = Arc::new(AtomicUsize::new(0));
+    let unselected_runs = Arc::new(AtomicUsize::new(0));
+    let output = RunOutput {
+        content: None,
+        format: None,
+        data: json!({"selected":true}),
+    };
+    let agent = scheduler_agent(
+        vec![
+            scheduler_node(
+                "route",
+                Some("unselected"),
+                SchedulerBehavior::Goto {
+                    target: "selected".to_string(),
+                    output: json!({"choice":"selected"}),
+                    executions: Arc::clone(&route_runs),
+                },
+            ),
+            scheduler_node(
+                "unselected",
+                None,
+                SchedulerBehavior::Complete {
+                    output: RunOutput {
+                        content: None,
+                        format: None,
+                        data: json!({"selected":false}),
+                    },
+                    executions: Arc::clone(&unselected_runs),
+                },
+            ),
+            scheduler_node(
+                "selected",
+                None,
+                SchedulerBehavior::Complete {
+                    output: output.clone(),
+                    executions: Arc::clone(&selected_runs),
+                },
+            ),
+        ],
+        "route",
+    );
+    let repository = Arc::new(SchedulerRepository::default());
+    let scheduler = scheduler(agent, repository);
+    let (_, stop) = stop_pair();
+
+    assert_eq!(
+        scheduler.run(context("run_goto"), stop).await.unwrap(),
+        SchedulerResult::Completed(output)
+    );
+    assert_eq!(route_runs.load(Ordering::SeqCst), 1);
+    assert_eq!(selected_runs.load(Ordering::SeqCst), 1);
+    assert_eq!(unselected_runs.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn sequential_scheduler_rejects_duplicate_activation_as_infrastructure() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let agent = scheduler_agent(
+        vec![scheduler_node(
+            "route",
+            None,
+            SchedulerBehavior::Goto {
+                target: "route".to_string(),
+                output: json!({}),
+                executions: Arc::clone(&executions),
+            },
+        )],
+        "route",
+    );
+    let repository = Arc::new(SchedulerRepository::default());
+    let scheduler = scheduler(agent, repository);
+    let (_, stop) = stop_pair();
+
+    let error = scheduler
+        .run(context("run_duplicate"), stop)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "SCHEDULER_INVARIANT_VIOLATION");
+    assert_eq!(error.kind(), RunErrorKind::Infrastructure);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn sequential_scheduler_rejects_missing_activation_target_as_infrastructure() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let agent = scheduler_agent(
+        vec![scheduler_node(
+            "route",
+            None,
+            SchedulerBehavior::Goto {
+                target: "missing".to_string(),
+                output: json!({}),
+                executions: Arc::clone(&executions),
+            },
+        )],
+        "route",
+    );
+    let repository = Arc::new(SchedulerRepository::default());
+    let scheduler = scheduler(agent, repository);
+    let (_, stop) = stop_pair();
+
+    let error = scheduler
+        .run(context("run_missing"), stop)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "SCHEDULER_INVARIANT_VIOLATION");
+    assert_eq!(error.kind(), RunErrorKind::Infrastructure);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn sequential_scheduler_returns_typed_unsupported_error_for_valid_fork() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut fork = scheduler_node(
+        "fanout",
+        None,
+        SchedulerBehavior::ActivateFork {
+            executions: Arc::clone(&executions),
+        },
+    );
+    fork.control = NodeControl::Fork {
+        branches: BTreeMap::from([
+            ("left".to_string(), "left_entry".to_string()),
+            ("right".to_string(), "right_entry".to_string()),
+        ]),
+        join: "collect".to_string(),
+    };
+    let mut agent = scheduler_agent(vec![fork], "fanout");
+    Arc::get_mut(&mut agent)
+        .unwrap()
+        .execution_plan
+        .forks
+        .insert(
+            "fanout".to_string(),
+            ForkPlan {
+                fork_id: "fanout".to_string(),
+                join_id: "collect".to_string(),
+                branches: BTreeMap::from([
+                    (
+                        "left".to_string(),
+                        BranchPlan {
+                            branch_id: "left".to_string(),
+                            entry: "left_entry".to_string(),
+                            nodes: BTreeSet::new(),
+                        },
+                    ),
+                    (
+                        "right".to_string(),
+                        BranchPlan {
+                            branch_id: "right".to_string(),
+                            entry: "right_entry".to_string(),
+                            nodes: BTreeSet::new(),
+                        },
+                    ),
+                ]),
+                policy: JoinPolicy::AllSettled,
+            },
+        );
+    let repository = Arc::new(SchedulerRepository::default());
+    let scheduler = scheduler(agent, repository);
+    let (_, stop) = stop_pair();
+
+    let error = scheduler.run(context("run_fork"), stop).await.unwrap_err();
+    assert_eq!(error.code(), "SCHEDULER_FORK_UNSUPPORTED");
+    assert_eq!(error.kind(), RunErrorKind::Infrastructure);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
 }
 
 async fn assert_execution_limit(per_run: usize, global: usize, expected_started: usize) {

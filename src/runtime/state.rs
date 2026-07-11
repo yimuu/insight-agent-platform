@@ -6,6 +6,24 @@ use crate::history::types::RunStatus;
 
 use super::RunError;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeState {
+    Pending,
+    Ready,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchState {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BranchError {
     pub code: String,

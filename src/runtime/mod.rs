@@ -3,6 +3,7 @@ pub mod context;
 pub mod control;
 pub mod coordinator;
 pub mod execution;
+pub mod scheduler;
 pub mod service;
 pub mod state;
 
@@ -13,10 +14,11 @@ pub use context::{RunContext, RunMetadata};
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
 pub use coordinator::RunCoordinator;
 pub use execution::{execute_node, ExecutionLimiter, NodeExecutionFailure, NodeExecutionResult};
+pub use scheduler::{Scheduler, SchedulerResult};
 pub use service::{
     CompiledAgentRegistry, RequestMetadata, RunService, RunServiceConfig, ServiceError,
 };
-pub use state::{BranchError, BranchResult, RunState};
+pub use state::{BranchError, BranchResult, BranchState, NodeState, RunState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunErrorKind {

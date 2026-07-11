@@ -345,7 +345,7 @@ async fn run_state_allows_only_created_running_and_one_terminal_transition() {
 }
 
 #[tokio::test]
-async fn coordinator_executes_next_goto_and_complete_with_persistence_barriers() {
+async fn coordinator_owns_run_lifecycle_around_scheduler_execution() {
     let repository = Arc::new(MemoryRepository::default());
     let final_output = RunOutput {
         content: Some("done".to_string()),

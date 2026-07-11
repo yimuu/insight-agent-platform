@@ -4,7 +4,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 use crate::{
-    dsl::compiled::{CompiledAgent, NodeTransition, RunOutput},
+    dsl::compiled::{CompiledAgent, RunOutput},
     events::{
         hub::{EventError, EventHub},
         protocol::{RunEventScope, RunEventType},
@@ -17,8 +17,8 @@ use crate::{
 };
 
 use super::{
-    execute_node, ExecutionLimiter, NodeExecutionFailure, RunContext, RunError, RunErrorKind,
-    RunMetadata, RunState, StopReason, StopSignal,
+    ExecutionLimiter, RunContext, RunError, RunErrorKind, RunMetadata, RunState, Scheduler,
+    SchedulerResult, StopReason, StopSignal,
 };
 
 pub struct RunCoordinator {
@@ -129,7 +129,7 @@ impl RunCoordinator {
             .await
             .map_err(event_error)?;
 
-        let mut context = RunContext::new(
+        let context = RunContext::new(
             RunMetadata {
                 run_id: new_run.run_id.clone(),
                 request_id: new_run.request_id.clone(),
@@ -140,63 +140,19 @@ impl RunCoordinator {
             input,
         )
         .with_templates(Arc::clone(&self.agent.templates));
-        let mut current = self.agent.entry.clone();
+        let result = Scheduler::new(
+            Arc::clone(&self.agent),
+            self.executors.clone(),
+            self.events.clone(),
+            self.limiter.clone(),
+        )
+        .run(context, stop)
+        .await?;
 
-        loop {
-            if let Some(reason) = stop.reason() {
-                return self
-                    .finish_error(&state, new_run, RunError::stopped(reason))
-                    .await;
-            }
-            let node = self.agent.nodes.get(&current).cloned().ok_or_else(|| {
-                RunError::new(
-                    "NODE_NOT_FOUND",
-                    format!("compiled node '{current}' was not found"),
-                )
-            })?;
-            let outcome = match execute_node(
-                node.clone(),
-                context,
-                self.executors.clone(),
-                self.events.clone(),
-                stop.clone(),
-                self.limiter.clone(),
-            )
-            .await
-            {
-                Ok(result) => {
-                    context = result.context;
-                    context.set_node_output(&result.node_id, result.outcome.output.clone());
-                    result.outcome
-                }
-                Err(NodeExecutionFailure::Node { error, .. }) => {
-                    return self.finish_error(&state, new_run, error).await;
-                }
-                Err(NodeExecutionFailure::Stop { error, .. }) => {
-                    return self.finish_error(&state, new_run, error).await;
-                }
-                Err(NodeExecutionFailure::Infrastructure(error)) => return Err(error),
-            };
-
-            match outcome.transition {
-                NodeTransition::Next => {
-                    current = node.next.clone().ok_or_else(|| {
-                        RunError::new(
-                            "NODE_NEXT_MISSING",
-                            format!("node '{}' completed without a next node", node.id),
-                        )
-                    })?;
-                }
-                NodeTransition::Goto(target) => current = target,
-                NodeTransition::ActivateFork => {
-                    return Err(RunError::new(
-                        "NODE_FORK_UNSUPPORTED",
-                        "fork activation is not supported by the sequential coordinator",
-                    ));
-                }
-                NodeTransition::Complete(output) => {
-                    return self.complete(&state, new_run, output).await;
-                }
+        match result {
+            SchedulerResult::Completed(output) => self.complete(&state, new_run, output).await,
+            SchedulerResult::Failed(error) | SchedulerResult::Stopped(error) => {
+                self.finish_error(&state, new_run, error).await
             }
         }
     }
