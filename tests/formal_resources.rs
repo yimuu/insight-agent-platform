@@ -165,12 +165,14 @@ async fn openai_stream_accepts_exact_configured_response_limits() {
     let done_line = "data: [DONE]\n";
     let body = format!("{data_line}\n{done_line}\n");
     let usage = json!({"u":"xy"});
-    let mut limits = OpenAiChatLimits::default();
-    limits.max_upstream_bytes = body.as_bytes().len();
-    limits.max_buffered_line_bytes = data_line.trim_end_matches('\n').as_bytes().len();
-    limits.max_event_payload_bytes = payload.as_bytes().len();
-    limits.max_chunk_text_bytes = "abc".len();
-    limits.max_usage_json_bytes = serde_json::to_vec(&usage).unwrap().len();
+    let limits = OpenAiChatLimits {
+        max_upstream_bytes: body.len(),
+        max_buffered_line_bytes: data_line.trim_end_matches('\n').len(),
+        max_event_payload_bytes: payload.len(),
+        max_chunk_text_bytes: "abc".len(),
+        max_usage_json_bytes: serde_json::to_vec(&usage).unwrap().len(),
+        ..OpenAiChatLimits::default()
+    };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -206,8 +208,10 @@ async fn openai_stream_rejects_total_upstream_bytes_without_echoing_body() {
         write_sse_headers(&mut socket).await;
         socket.write_all(response_body.as_bytes()).await.unwrap();
     });
-    let mut limits = OpenAiChatLimits::default();
-    limits.max_upstream_bytes = body.as_bytes().len() - 1;
+    let limits = OpenAiChatLimits {
+        max_upstream_bytes: body.len() - 1,
+        ..OpenAiChatLimits::default()
+    };
 
     let model = model_with_limits(
         format!("http://{address}/v1?token=url-secret"),
@@ -233,8 +237,10 @@ async fn openai_stream_rejects_no_lf_buffer_growth() {
         write_sse_headers(&mut socket).await;
         socket.write_all(response_body.as_bytes()).await.unwrap();
     });
-    let mut limits = OpenAiChatLimits::default();
-    limits.max_buffered_line_bytes = body.as_bytes().len() - 1;
+    let limits = OpenAiChatLimits {
+        max_buffered_line_bytes: body.len() - 1,
+        ..OpenAiChatLimits::default()
+    };
 
     let model = model_with_limits(format!("http://{address}"), None, limits);
     let error = next_stream_error(model).await;
@@ -259,8 +265,10 @@ async fn openai_stream_rejects_oversized_event_payload_without_parsing_secret() 
         write_sse_headers(&mut socket).await;
         socket.write_all(response_body.as_bytes()).await.unwrap();
     });
-    let mut limits = OpenAiChatLimits::default();
-    limits.max_event_payload_bytes = payload.as_bytes().len() - 1;
+    let limits = OpenAiChatLimits {
+        max_event_payload_bytes: payload.len() - 1,
+        ..OpenAiChatLimits::default()
+    };
 
     let model = model_with_limits(format!("http://{address}"), None, limits);
     let error = next_stream_error(model).await;
@@ -284,8 +292,10 @@ async fn openai_stream_rejects_oversized_chunk_text_without_echoing_text() {
         write_sse_headers(&mut socket).await;
         socket.write_all(response_body.as_bytes()).await.unwrap();
     });
-    let mut limits = OpenAiChatLimits::default();
-    limits.max_chunk_text_bytes = text_secret.len() - 1;
+    let limits = OpenAiChatLimits {
+        max_chunk_text_bytes: text_secret.len() - 1,
+        ..OpenAiChatLimits::default()
+    };
 
     let model = model_with_limits(format!("http://{address}"), None, limits);
     let error = next_stream_error(model).await;
@@ -310,8 +320,10 @@ async fn openai_stream_rejects_oversized_usage_json_without_echoing_usage() {
         write_sse_headers(&mut socket).await;
         socket.write_all(response_body.as_bytes()).await.unwrap();
     });
-    let mut limits = OpenAiChatLimits::default();
-    limits.max_usage_json_bytes = serde_json::to_vec(&usage).unwrap().len() - 1;
+    let limits = OpenAiChatLimits {
+        max_usage_json_bytes: serde_json::to_vec(&usage).unwrap().len() - 1,
+        ..OpenAiChatLimits::default()
+    };
 
     let model = model_with_limits(format!("http://{address}"), None, limits);
     let error = next_stream_error(model).await;
@@ -339,8 +351,10 @@ async fn openai_limit_error_drops_the_in_flight_http_body() {
             server_closed.notify_one();
         }
     });
-    let mut limits = OpenAiChatLimits::default();
-    limits.max_chunk_text_bytes = "too-large".len() - 1;
+    let limits = OpenAiChatLimits {
+        max_chunk_text_bytes: "too-large".len() - 1,
+        ..OpenAiChatLimits::default()
+    };
     let model = model_with_limits(format!("http://{address}"), None, limits);
     let mut stream = model.stream_chat(default_chat_request()).await.unwrap();
     let error = stream.next().await.unwrap().unwrap_err();
