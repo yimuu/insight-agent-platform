@@ -75,6 +75,13 @@ fn enabled_repository_agents_compile_through_production_registries() {
     let code_demo = agents.get("code_node_demo").unwrap();
     assert_eq!(code_demo.nodes["analyze_text"].kind, "core.action");
     assert_eq!(code_demo.nodes["result"].kind, "core.output");
+    assert!(code_demo.nodes["render"].references.contains("analyze_text"));
+
+    assert!(parallel.nodes["synthesize"].references.contains("collect"));
+    assert!(!parallel.nodes["synthesize"].references.contains("analyze_a"));
+    assert!(!parallel.nodes["synthesize"]
+        .references
+        .contains("normalize_a"));
 
     let medical = agents.get("medical_report_interpreter").unwrap();
     for node_id in [

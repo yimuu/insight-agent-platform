@@ -143,3 +143,39 @@ SQL
 不要删除 SQLx migration metadata。应用不会自动删除历史，也不提供 reset API/CLI。删除后的历史不能通过回滚旧二进制恢复；不要把 A0 前的 Run/Event 数据重新导入运行库。
 
 部署顺序：停止服务、重置历史、部署新二进制、启动并完成 migration check、运行 `cargo test --test action_error_containment -- --nocapture --test-threads=1`、检查 `/health`，然后恢复流量。
+
+### A5 Semantic compile-time validation
+
+A5 收紧 Agent DSL 的编译期语义校验：
+
+- fully static `core.action.config.input` 会在 Agent 编译期按注册 Action input schema 校验，失败码为 `ACTION_INPUT_INVALID`，消息固定为 `action input validation failed`；
+- 节点 ID 和 fork branch ID 必须匹配 `[A-Za-z_][A-Za-z0-9_]*`；
+- 跨节点引用只能使用 `nodes.<node_id>.output`；
+- CEL 中的 `nodes["id"].output`、`nodes[id].output`、`nodes.<id>["output"]`、直接访问 `nodes` map 等形式会失败；
+- Handlebars/CEL 字符串、注释、raw 文本中的 `nodes.<id>.output` 不再被误识别为图依赖。
+
+这样做的原因是编译期图校验必须知道每个跨节点依赖的确定 node ID。computed/indexed access 依赖运行时值，无法可靠参与 predecessor、parallel branch 和 post-join 校验。静态非法 Action input 已经在部署前可知，延迟到用户请求时失败不符合 fail-before-serving 合同。
+
+迁移方式：
+
+```yaml
+# 不再支持
+route:
+  type: core.condition
+  config:
+    cases:
+      - when: 'nodes["classify"].output.kind == "medical"'
+        next: medical
+    default: general
+
+# 使用 canonical dotted reference
+route:
+  type: core.condition
+  config:
+    cases:
+      - when: 'nodes.classify.output.kind == "medical"'
+        next: medical
+    default: general
+```
+
+如果旧 Agent 使用 `some-node` 这类 ID，需要改为 `some_node` 并同步更新所有 `next`、fork branch、join output 和模板/CEL 引用。A5 不需要数据库 migration，也不需要重置 Run 历史；它只影响 Agent 启动编译。
