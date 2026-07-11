@@ -621,14 +621,26 @@ impl RunService {
 
 impl LeaseOwner for RunServiceInner {
     fn release_subscription(self: Arc<Self>, run_id: &str) {
-        let stop = {
+        let preparing_stop = {
+            let preparing = lock_preparing(&self);
+            preparing
+                .get(run_id)
+                .filter(|run| run.attachment == RunAttachment::Attached)
+                .map(|run| run.stop.clone())
+        };
+        if let Some(stop) = preparing_stop {
+            stop.request(StopReason::Cancelled);
+            return;
+        }
+
+        let active_stop = {
             let active = lock_active(&self);
             active
                 .get(run_id)
                 .filter(|run| run.attachment == RunAttachment::Attached)
                 .map(|run| run.stop.clone())
         };
-        if let Some(stop) = stop {
+        if let Some(stop) = active_stop {
             stop.request(StopReason::Cancelled);
         }
     }
@@ -731,4 +743,215 @@ async fn publish_prelaunch_terminal(
 
 fn service_history_error(error: HistoryError) -> ServiceError {
     ServiceError::new(error.code(), error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
+    use serde_json::json;
+
+    use crate::{dsl::compiled::ExecutionPlan, history::types::NodeOutputRecord};
+
+    #[derive(Default)]
+    struct UnitRepository {
+        runs: tokio::sync::Mutex<BTreeMap<String, RunRecord>>,
+        events: tokio::sync::Mutex<Vec<crate::events::protocol::RunEvent>>,
+    }
+
+    #[async_trait]
+    impl RunRepository for UnitRepository {
+        async fn create_run(&self, run: NewRun) -> Result<(), HistoryError> {
+            self.runs.lock().await.insert(
+                run.run_id.clone(),
+                RunRecord {
+                    run_id: run.run_id,
+                    request_id: run.request_id,
+                    agent_id: run.agent_id,
+                    agent_version: run.agent_version,
+                    attachment: run.attachment,
+                    status: RunStatus::Created,
+                    started_at: None,
+                    ended_at: None,
+                    updated_at: run.created_at,
+                    input_summary: run.input_summary,
+                    output: None,
+                    error_code: None,
+                    error_message: None,
+                },
+            );
+            Ok(())
+        }
+
+        async fn mark_running(
+            &self,
+            run_id: &str,
+            started_at: DateTime<Utc>,
+        ) -> Result<(), HistoryError> {
+            let mut runs = self.runs.lock().await;
+            let run = runs
+                .get_mut(run_id)
+                .ok_or_else(|| HistoryError::new("RUN_NOT_FOUND", "run not found"))?;
+            run.status = RunStatus::Running;
+            run.started_at = Some(started_at);
+            run.updated_at = started_at;
+            Ok(())
+        }
+
+        async fn append_events(
+            &self,
+            events: &[crate::events::protocol::RunEvent],
+        ) -> Result<(), HistoryError> {
+            self.events.lock().await.extend_from_slice(events);
+            Ok(())
+        }
+
+        async fn put_node_output(&self, _output: NodeOutputRecord) -> Result<(), HistoryError> {
+            Ok(())
+        }
+
+        async fn finish_run(
+            &self,
+            update: TerminalUpdate,
+            event: crate::events::protocol::RunEvent,
+        ) -> Result<bool, HistoryError> {
+            let mut runs = self.runs.lock().await;
+            let run = runs
+                .get_mut(&update.run_id)
+                .ok_or_else(|| HistoryError::new("RUN_NOT_FOUND", "run not found"))?;
+            run.status = update.status;
+            run.ended_at = Some(update.ended_at);
+            run.updated_at = update.ended_at;
+            run.error_code = update.error_code;
+            run.error_message = update.error_message;
+            drop(runs);
+            self.events.lock().await.push(event);
+            Ok(true)
+        }
+
+        async fn recover_run(
+            &self,
+            update: TerminalUpdate,
+            terminal: crate::events::protocol::RunEvent,
+        ) -> Result<crate::events::protocol::RunEvent, HistoryError> {
+            self.finish_run(update, terminal.clone()).await?;
+            Ok(terminal)
+        }
+
+        async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, HistoryError> {
+            Ok(self.runs.lock().await.get(run_id).cloned())
+        }
+
+        async fn list_events_after(
+            &self,
+            run_id: &str,
+            after_seq: u64,
+            limit: usize,
+        ) -> Result<Vec<crate::events::protocol::RunEvent>, HistoryError> {
+            Ok(self
+                .events
+                .lock()
+                .await
+                .iter()
+                .filter(|event| event.run_id == run_id && event.seq > after_seq)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        async fn mark_incomplete_interrupted(
+            &self,
+            _at: DateTime<Utc>,
+        ) -> Result<u64, HistoryError> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn attached_subscription_drop_before_launch_finalizes_cancelled() {
+        let repository = Arc::new(UnitRepository::default());
+        let repository_trait: Arc<dyn RunRepository> = repository.clone();
+        let events = EventHub::new(
+            Arc::clone(&repository_trait),
+            crate::events::hub::EventHubConfig {
+                subscriber_capacity: 8,
+                journal_capacity: 32,
+                journal_batch_size: 8,
+                operation_timeout: Duration::from_secs(1),
+            },
+        );
+        let service = RunService::new(
+            CompiledAgentRegistry::new(Vec::new()).unwrap(),
+            NodeExecutorRegistry::default(),
+            Arc::clone(&repository_trait),
+            events,
+            RunServiceConfig {
+                max_concurrent_runs: 1,
+                max_parallel_node_executions: 1,
+                max_parallel_branches_per_run: 1,
+                run_timeout: Duration::from_secs(1),
+            },
+        )
+        .unwrap();
+        let permit = Arc::clone(&service.inner.capacity)
+            .try_acquire_owned()
+            .unwrap();
+        let new_run = NewRun {
+            run_id: "run_unit_attached".to_string(),
+            request_id: "req_unit_attached".to_string(),
+            agent_id: "agent".to_string(),
+            agent_version: "sha256:agent".to_string(),
+            attachment: RunAttachment::Attached,
+            created_at: Utc::now(),
+            input_summary: json!({"keys":[], "serialized_bytes":2}),
+        };
+        repository.create_run(new_run.clone()).await.unwrap();
+        let (stop, signal) = stop_pair();
+        lock_preparing(&service.inner).insert(
+            new_run.run_id.clone(),
+            PreparingRun {
+                agent: Arc::new(CompiledAgent {
+                    id: "agent".to_string(),
+                    name: "agent".to_string(),
+                    description: String::new(),
+                    version_hash: "sha256:agent".to_string(),
+                    input_schema: Arc::new(jsonschema::JSONSchema::compile(&json!({})).unwrap()),
+                    entry: "missing".to_string(),
+                    execution_plan: ExecutionPlan::sequential("missing", Vec::<String>::new()),
+                    nodes: BTreeMap::new(),
+                    templates: Arc::new(handlebars::Handlebars::new()),
+                }),
+                new_run: new_run.clone(),
+                input: json!({}),
+                attachment: RunAttachment::Attached,
+                stop,
+                signal,
+                state: Arc::new(RunState::new()),
+                permit,
+                durable: true,
+            },
+        );
+        service.inner.notify_lifecycle();
+
+        let owner: Arc<dyn LeaseOwner> = service.inner.clone();
+        drop(SubscriptionLease::new(owner, &new_run.run_id));
+        service.launch(PreparedRun {
+            run_id: new_run.run_id.clone(),
+            request_id: new_run.request_id.clone(),
+            guard: PreparingGuard::new(Arc::clone(&service.inner), new_run.run_id.clone()),
+        });
+
+        for _ in 0..200 {
+            if let Some(record) = repository.get_run(&new_run.run_id).await.unwrap() {
+                if record.status == RunStatus::Cancelled {
+                    assert_eq!(record.error_code.as_deref(), Some("RUN_CANCELLED"));
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("attached preparing run did not become cancelled");
+    }
 }

@@ -874,6 +874,51 @@ async fn shutdown_after_durable_create_finalizes_before_detached_launch() {
 }
 
 #[tokio::test]
+async fn dropped_detached_create_future_releases_capacity_after_durable_create() {
+    let get_gate = RepositoryGate::new();
+    let (service, repository) = service_with_repository_hooks(
+        RunServiceConfig {
+            max_concurrent_runs: 1,
+            max_parallel_node_executions: 32,
+            max_parallel_branches_per_run: 8,
+            run_timeout: Duration::from_secs(3600),
+        },
+        vec![agent("fast", ServiceBehavior::Complete)],
+        RepositoryHooks {
+            create_run: None,
+            get_run: Some(Arc::clone(&get_gate)),
+        },
+    )
+    .await
+    .unwrap();
+
+    let creator_service = service.clone();
+    let create_task = tokio::spawn(async move {
+        creator_service
+            .create_detached("fast", json!({}), RequestMetadata::default())
+            .await
+    });
+    get_gate.wait_entered().await;
+    create_task.abort();
+    let _ = create_task.await;
+    get_gate.release();
+
+    let run_id = loop {
+        if let Some(run_id) = repository.records.lock().await.keys().next().cloned() {
+            break run_id;
+        }
+        tokio::task::yield_now().await;
+    };
+    wait_for_status(&service, &run_id, RunStatus::Interrupted).await;
+
+    let next = service
+        .create_detached("fast", json!({}), RequestMetadata::default())
+        .await
+        .unwrap();
+    wait_for_status(&service, &next.run_id, RunStatus::Completed).await;
+}
+
+#[tokio::test]
 async fn startup_reconciliation_and_shutdown_use_distinct_terminal_reasons() {
     let (service, repository) = service(4).await;
     let stale_created = NewRun {
