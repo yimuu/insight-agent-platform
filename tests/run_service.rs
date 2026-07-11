@@ -35,7 +35,7 @@ use insight_agent_platform::{
 };
 use jsonschema::JSONSchema;
 use serde_json::{json, Value};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex, Notify};
 
 enum ServiceBehavior {
     Complete,
@@ -237,6 +237,47 @@ fn parallel_blocking_agent(
     })
 }
 
+#[derive(Clone, Default)]
+struct RepositoryHooks {
+    create_run: Option<Arc<RepositoryGate>>,
+    get_run: Option<Arc<RepositoryGate>>,
+}
+
+struct RepositoryGate {
+    entered: watch::Sender<bool>,
+    release: Notify,
+    used: AtomicBool,
+}
+
+impl RepositoryGate {
+    fn new() -> Arc<Self> {
+        let (entered, _) = watch::channel(false);
+        Arc::new(Self {
+            entered,
+            release: Notify::new(),
+            used: AtomicBool::new(false),
+        })
+    }
+
+    async fn block_once(&self) {
+        if !self.used.swap(true, Ordering::SeqCst) {
+            let _ = self.entered.send(true);
+            self.release.notified().await;
+        }
+    }
+
+    async fn wait_entered(&self) {
+        let mut entered = self.entered.subscribe();
+        while !*entered.borrow() {
+            entered.changed().await.unwrap();
+        }
+    }
+
+    fn release(&self) {
+        self.release.notify_waiters();
+    }
+}
+
 struct CountingRepository {
     records: Mutex<BTreeMap<String, RunRecord>>,
     events: Mutex<BTreeMap<String, Vec<RunEvent>>>,
@@ -244,11 +285,15 @@ struct CountingRepository {
     creates: AtomicUsize,
     event_history_reads: AtomicUsize,
     fail_appends: AtomicBool,
+    hooks: RepositoryHooks,
 }
 
 #[async_trait]
 impl RunRepository for CountingRepository {
     async fn create_run(&self, run: NewRun) -> Result<(), HistoryError> {
+        if let Some(gate) = self.hooks.create_run.as_ref() {
+            gate.block_once().await;
+        }
         self.creates.fetch_add(1, Ordering::SeqCst);
         self.records.lock().await.insert(
             run.run_id.clone(),
@@ -353,6 +398,9 @@ impl RunRepository for CountingRepository {
     }
 
     async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, HistoryError> {
+        if let Some(gate) = self.hooks.get_run.as_ref() {
+            gate.block_once().await;
+        }
         Ok(self.records.lock().await.get(run_id).cloned())
     }
 
@@ -431,6 +479,14 @@ async fn service_with_agents(
     config: RunServiceConfig,
     agents: Vec<Arc<CompiledAgent>>,
 ) -> Result<(RunService, Arc<CountingRepository>), ServiceError> {
+    service_with_repository_hooks(config, agents, RepositoryHooks::default()).await
+}
+
+async fn service_with_repository_hooks(
+    config: RunServiceConfig,
+    agents: Vec<Arc<CompiledAgent>>,
+    hooks: RepositoryHooks,
+) -> Result<(RunService, Arc<CountingRepository>), ServiceError> {
     let repository = Arc::new(CountingRepository {
         records: Mutex::new(BTreeMap::new()),
         events: Mutex::new(BTreeMap::new()),
@@ -438,6 +494,7 @@ async fn service_with_agents(
         creates: AtomicUsize::new(0),
         event_history_reads: AtomicUsize::new(0),
         fail_appends: AtomicBool::new(false),
+        hooks,
     });
     let repository_trait: Arc<dyn RunRepository> = repository.clone();
     let events = EventHub::new(
@@ -700,6 +757,59 @@ async fn capacity_is_rejected_before_a_second_run_is_inserted() {
     assert_eq!(error.code(), "RUN_CAPACITY_EXCEEDED");
     assert_eq!(repository.creates.load(Ordering::SeqCst), 1);
     service.cancel(&first.run_id).await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_detached_run_blocked_in_create_run() {
+    let create_gate = RepositoryGate::new();
+    let (service, repository) = service_with_repository_hooks(
+        RunServiceConfig {
+            max_concurrent_runs: 1,
+            max_parallel_node_executions: 32,
+            max_parallel_branches_per_run: 8,
+            run_timeout: Duration::from_secs(3600),
+        },
+        vec![agent("fast", ServiceBehavior::Complete)],
+        RepositoryHooks {
+            create_run: Some(Arc::clone(&create_gate)),
+            get_run: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let creator_service = service.clone();
+    let create_task = tokio::spawn(async move {
+        creator_service
+            .create_detached("fast", json!({}), RequestMetadata::default())
+            .await
+    });
+    create_gate.wait_entered().await;
+
+    let shutdown_service = service.clone();
+    let mut shutdown_task =
+        tokio::spawn(async move { shutdown_service.shutdown(Duration::from_secs(1)).await });
+    let shutdown_finished_while_blocked = tokio::select! {
+        result = &mut shutdown_task => {
+            result.unwrap().unwrap();
+            true
+        }
+        _ = tokio::time::sleep(Duration::from_millis(25)) => false,
+    };
+    create_gate.release();
+    let created = create_task.await.unwrap().unwrap();
+    if !shutdown_finished_while_blocked {
+        shutdown_task.await.unwrap().unwrap();
+    }
+
+    assert!(
+        !shutdown_finished_while_blocked,
+        "shutdown completed while create_run was blocked"
+    );
+    let interrupted = service.get_run(&created.run_id).await.unwrap();
+    assert_eq!(interrupted.status, RunStatus::Interrupted);
+    assert_eq!(interrupted.error_code.as_deref(), Some("RUN_INTERRUPTED"));
+    assert_eq!(repository.creates.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
