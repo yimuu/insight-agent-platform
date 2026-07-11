@@ -13,8 +13,8 @@ use handlebars::Handlebars;
 use insight_agent_platform::{
     dsl::{
         compiled::{
-            CompiledAgent, CompiledNode, ExecutionPlan, NodeCompilation, NodeControl, NodeOutcome,
-            NodeTransition, RunOutput,
+            BranchPlan, CompiledAgent, CompiledNode, ExecutionPlan, ForkPlan, JoinPolicy,
+            NodeCompilation, NodeControl, NodeOutcome, NodeRegion, NodeTransition, RunOutput,
         },
         compiler::CompileContext,
         CompileError, EmitPolicy,
@@ -42,9 +42,23 @@ const GRACE: Duration = Duration::from_secs(10);
 enum ServiceBehavior {
     Complete,
     Block,
+    TrackedBlock {
+        active: Arc<AtomicUsize>,
+        started: Arc<tokio::sync::Notify>,
+        stopped: Arc<AtomicUsize>,
+    },
+    ActivateFork,
 }
 
 struct ServiceNode;
+
+struct ActiveExecution(Arc<AtomicUsize>);
+
+impl Drop for ActiveExecution {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 impl NodeType for ServiceNode {
     fn kind(&self) -> &'static str {
@@ -85,6 +99,22 @@ impl NodeExecutor for ServiceNode {
                 control.stopped().await;
                 Err(RunError::stopped(control.stop_reason().unwrap()))
             }
+            ServiceBehavior::TrackedBlock {
+                active,
+                started,
+                stopped,
+            } => {
+                active.fetch_add(1, Ordering::SeqCst);
+                let _active = ActiveExecution(Arc::clone(active));
+                started.notify_one();
+                control.stopped().await;
+                stopped.fetch_add(1, Ordering::SeqCst);
+                Err(RunError::stopped(control.stop_reason().unwrap()))
+            }
+            ServiceBehavior::ActivateFork => Ok(NodeOutcome {
+                output: json!({}),
+                transition: NodeTransition::ActivateFork,
+            }),
         }
     }
 }
@@ -111,6 +141,99 @@ fn agent(id: &str, behavior: ServiceBehavior) -> Arc<CompiledAgent> {
         input_schema: Arc::new(JSONSchema::compile(&json!({"type":"object"})).unwrap()),
         entry: "work".to_string(),
         execution_plan: ExecutionPlan::sequential("work", nodes.keys().cloned()),
+        nodes,
+        templates: Arc::new(Handlebars::new()),
+    })
+}
+
+fn parallel_blocking_agent(
+    active: Arc<AtomicUsize>,
+    started: Arc<tokio::sync::Notify>,
+    stopped: Arc<AtomicUsize>,
+) -> Arc<CompiledAgent> {
+    let tracked = || ServiceBehavior::TrackedBlock {
+        active: Arc::clone(&active),
+        started: Arc::clone(&started),
+        stopped: Arc::clone(&stopped),
+    };
+    let make_node = |id: &str, next: Option<&str>, behavior: ServiceBehavior| CompiledNode {
+        id: id.to_string(),
+        kind: "test.service".to_string(),
+        next: next.map(str::to_string),
+        emit: EmitPolicy::None,
+        timeout: Duration::from_secs(3600),
+        body: Arc::new(behavior),
+        edges: next.into_iter().map(str::to_string).collect(),
+        references: BTreeSet::new(),
+        terminal: next.is_none(),
+        control: NodeControl::Ordinary,
+    };
+    let nodes = vec![
+        make_node("fanout", None, ServiceBehavior::ActivateFork),
+        make_node("work_a", Some("collect"), tracked()),
+        make_node("work_b", Some("collect"), tracked()),
+        make_node("collect", None, ServiceBehavior::Complete),
+    ]
+    .into_iter()
+    .map(|node| (node.id.clone(), node))
+    .collect::<BTreeMap<_, _>>();
+    let fork = ForkPlan {
+        fork_id: "fanout".to_string(),
+        join_id: "collect".to_string(),
+        branches: BTreeMap::from([
+            (
+                "source_a".to_string(),
+                BranchPlan {
+                    branch_id: "source_a".to_string(),
+                    entry: "work_a".to_string(),
+                    nodes: BTreeSet::from(["work_a".to_string()]),
+                },
+            ),
+            (
+                "source_b".to_string(),
+                BranchPlan {
+                    branch_id: "source_b".to_string(),
+                    entry: "work_b".to_string(),
+                    nodes: BTreeSet::from(["work_b".to_string()]),
+                },
+            ),
+        ]),
+        policy: JoinPolicy::AllSettled,
+    };
+    Arc::new(CompiledAgent {
+        id: "parallel-blocking".to_string(),
+        name: "parallel-blocking".to_string(),
+        description: String::new(),
+        version_hash: "sha256:parallel-blocking".to_string(),
+        input_schema: Arc::new(JSONSchema::compile(&json!({"type":"object"})).unwrap()),
+        entry: "fanout".to_string(),
+        execution_plan: ExecutionPlan {
+            entry: "fanout".to_string(),
+            forks: BTreeMap::from([("fanout".to_string(), fork)]),
+            node_regions: BTreeMap::from([
+                ("fanout".to_string(), NodeRegion::Linear),
+                (
+                    "work_a".to_string(),
+                    NodeRegion::Branch {
+                        fork_id: "fanout".to_string(),
+                        branch_id: "source_a".to_string(),
+                    },
+                ),
+                (
+                    "work_b".to_string(),
+                    NodeRegion::Branch {
+                        fork_id: "fanout".to_string(),
+                        branch_id: "source_b".to_string(),
+                    },
+                ),
+                (
+                    "collect".to_string(),
+                    NodeRegion::Join {
+                        fork_id: "fanout".to_string(),
+                    },
+                ),
+            ]),
+        },
         nodes,
         templates: Arc::new(Handlebars::new()),
     })
@@ -294,6 +417,20 @@ impl RunRepository for CountingRepository {
 async fn service_with_config(
     config: RunServiceConfig,
 ) -> Result<(RunService, Arc<CountingRepository>), ServiceError> {
+    service_with_agents(
+        config,
+        vec![
+            agent("blocking", ServiceBehavior::Block),
+            agent("fast", ServiceBehavior::Complete),
+        ],
+    )
+    .await
+}
+
+async fn service_with_agents(
+    config: RunServiceConfig,
+    agents: Vec<Arc<CompiledAgent>>,
+) -> Result<(RunService, Arc<CountingRepository>), ServiceError> {
     let repository = Arc::new(CountingRepository {
         records: Mutex::new(BTreeMap::new()),
         events: Mutex::new(BTreeMap::new()),
@@ -312,11 +449,7 @@ async fn service_with_config(
             operation_timeout: Duration::from_secs(1),
         },
     );
-    let agents = CompiledAgentRegistry::new(vec![
-        agent("blocking", ServiceBehavior::Block),
-        agent("fast", ServiceBehavior::Complete),
-    ])
-    .unwrap();
+    let agents = CompiledAgentRegistry::new(agents).unwrap();
     let mut executors = NodeExecutorRegistry::default();
     executors.register(ServiceNode).unwrap();
     let service = RunService::new(agents, executors, repository_trait, events, config)?;
@@ -403,6 +536,65 @@ async fn attached_run_disconnect_uses_reconnect_grace_then_cancels() {
     tokio::time::advance(Duration::ZERO).await;
     tokio::time::advance(GRACE + Duration::from_millis(1)).await;
     wait_for_status(&service, &run_id, RunStatus::Cancelled).await;
+}
+
+#[tokio::test]
+async fn attached_reconnect_grace_globally_stops_and_drains_all_active_branches() {
+    let active = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let parallel = parallel_blocking_agent(
+        Arc::clone(&active),
+        Arc::clone(&started),
+        Arc::clone(&stopped),
+    );
+    let (service, repository) = service_with_agents(
+        RunServiceConfig {
+            max_concurrent_runs: 1,
+            max_parallel_node_executions: 4,
+            max_parallel_branches_per_run: 4,
+            run_timeout: Duration::from_secs(3600),
+            attached_reconnect_grace: GRACE,
+        },
+        vec![parallel],
+    )
+    .await
+    .unwrap();
+    let attached = service
+        .create_attached("parallel-blocking", json!({}), RequestMetadata::default())
+        .await
+        .unwrap();
+    let run_id = attached.run_id.clone();
+    while active.load(Ordering::SeqCst) != 2 {
+        started.notified().await;
+    }
+    tokio::time::pause();
+
+    drop(attached.subscription);
+    tokio::time::advance(Duration::ZERO).await;
+    tokio::time::advance(GRACE + Duration::from_millis(1)).await;
+
+    wait_for_status(&service, &run_id, RunStatus::Cancelled).await;
+    assert_eq!(stopped.load(Ordering::SeqCst), 2);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    let events = repository.events.lock().await;
+    let run_events = &events[&run_id];
+    assert_eq!(
+        run_events
+            .iter()
+            .filter(|event| matches!(
+                event.event_type,
+                RunEventType::RunCompleted
+                    | RunEventType::RunFailed
+                    | RunEventType::RunCancelled
+                    | RunEventType::RunInterrupted
+            ))
+            .count(),
+        1
+    );
+    assert!(!run_events
+        .iter()
+        .any(|event| event.node_id.as_deref() == Some("collect")));
 }
 
 #[tokio::test]

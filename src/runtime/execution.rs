@@ -6,6 +6,7 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
     time::sleep,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     dsl::{compiled::CompiledNode, EmitPolicy},
@@ -67,6 +68,46 @@ pub async fn execute_node(
     stop: StopSignal,
     limiter: ExecutionLimiter,
 ) -> Result<NodeExecutionResult, NodeExecutionFailure> {
+    execute_node_with_cancellation(
+        node,
+        context,
+        executors,
+        events,
+        stop,
+        CancellationToken::new(),
+        limiter,
+    )
+    .await
+}
+
+pub(crate) async fn execute_node_with_cancellation(
+    node: CompiledNode,
+    context: RunContext,
+    executors: NodeExecutorRegistry,
+    events: EventHub,
+    stop: StopSignal,
+    task_cancel: CancellationToken,
+    limiter: ExecutionLimiter,
+) -> Result<NodeExecutionResult, NodeExecutionFailure> {
+    let execution = execute_node_inner(node, context, executors, events, stop, limiter);
+    tokio::pin!(execution);
+    tokio::select! {
+        biased;
+        result = &mut execution => result,
+        _ = task_cancel.cancelled() => Err(NodeExecutionFailure::Infrastructure(
+            global_cancellation_error()
+        )),
+    }
+}
+
+async fn execute_node_inner(
+    node: CompiledNode,
+    context: RunContext,
+    executors: NodeExecutorRegistry,
+    events: EventHub,
+    stop: StopSignal,
+    limiter: ExecutionLimiter,
+) -> Result<NodeExecutionResult, NodeExecutionFailure> {
     let node_id = node.id.clone();
     let _permits = limiter
         .acquire(&stop)
@@ -110,9 +151,9 @@ pub async fn execute_node(
         tokio::pin!(execution);
         tokio::select! {
             biased;
+            result = &mut execution => result,
             _ = control.stopped() => Err(stopped_error(&control)),
             _ = sleep(control.remaining()) => Err(RunError::timeout()),
-            result = &mut execution => result,
         }
     };
     let outcome = match outcome {
@@ -215,4 +256,8 @@ fn stopped_error_from_signal(stop: &StopSignal) -> RunError {
 
 fn event_error(error: EventError) -> RunError {
     RunError::infrastructure(error.code(), error.to_string())
+}
+
+fn global_cancellation_error() -> RunError {
+    RunError::infrastructure("INFRASTRUCTURE_FAILURE", "runtime infrastructure failed")
 }

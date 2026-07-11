@@ -92,6 +92,30 @@ enum SchedulerBehavior {
     WaitForever {
         executions: Arc<AtomicUsize>,
     },
+    WaitForStop {
+        executions: Arc<AtomicUsize>,
+        active: Arc<AtomicUsize>,
+        started: Arc<Notify>,
+        stopped: Arc<AtomicUsize>,
+    },
+    NextAfter {
+        executions: Arc<AtomicUsize>,
+        sibling_started: Arc<Notify>,
+        output: Value,
+    },
+    GotoAfter {
+        executions: Arc<AtomicUsize>,
+        sibling_started: Arc<Notify>,
+        target: String,
+    },
+    InfrastructureAfter {
+        executions: Arc<AtomicUsize>,
+        sibling_started: Arc<Notify>,
+    },
+    PanicAfter {
+        executions: Arc<AtomicUsize>,
+        sibling_started: Arc<Notify>,
+    },
     CompleteAfter {
         predecessor: String,
         expected: Value,
@@ -108,6 +132,14 @@ enum SchedulerBehavior {
 }
 
 struct SchedulerExecutor;
+
+struct ActiveExecution(Arc<AtomicUsize>);
+
+impl Drop for ActiveExecution {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 impl NodeType for SchedulerExecutor {
     fn kind(&self) -> &'static str {
@@ -241,6 +273,63 @@ impl NodeExecutor for SchedulerExecutor {
                 executions.fetch_add(1, Ordering::SeqCst);
                 std::future::pending().await
             }
+            SchedulerBehavior::WaitForStop {
+                executions,
+                active,
+                started,
+                stopped,
+            } => {
+                executions.fetch_add(1, Ordering::SeqCst);
+                active.fetch_add(1, Ordering::SeqCst);
+                let _active = ActiveExecution(Arc::clone(active));
+                started.notify_one();
+                control.stopped().await;
+                stopped.fetch_add(1, Ordering::SeqCst);
+                Err(RunError::stopped(control.stop_reason().unwrap()))
+            }
+            SchedulerBehavior::NextAfter {
+                executions,
+                sibling_started,
+                output,
+            } => {
+                executions.fetch_add(1, Ordering::SeqCst);
+                sibling_started.notified().await;
+                Ok(NodeOutcome {
+                    output: output.clone(),
+                    transition: NodeTransition::Next,
+                })
+            }
+            SchedulerBehavior::GotoAfter {
+                executions,
+                sibling_started,
+                target,
+            } => {
+                executions.fetch_add(1, Ordering::SeqCst);
+                sibling_started.notified().await;
+                Ok(NodeOutcome {
+                    output: json!({}),
+                    transition: NodeTransition::Goto(target.clone()),
+                })
+            }
+            SchedulerBehavior::InfrastructureAfter {
+                executions,
+                sibling_started,
+            } => {
+                executions.fetch_add(1, Ordering::SeqCst);
+                sibling_started.notified().await;
+                Err(RunError::infrastructure(
+                    "SYNTHETIC_INFRASTRUCTURE",
+                    "synthetic infrastructure failure",
+                ))
+            }
+            SchedulerBehavior::PanicAfter {
+                executions,
+                sibling_started,
+            } => {
+                executions.fetch_add(1, Ordering::SeqCst);
+                sibling_started.notified().await;
+                panic!("synthetic executor panic")
+            }
             SchedulerBehavior::CompleteAfter {
                 predecessor,
                 expected,
@@ -338,9 +427,12 @@ struct SchedulerRepository {
     operations: Mutex<Vec<String>>,
     output_entered: Option<Arc<Notify>>,
     output_release: Option<Arc<Notify>>,
+    blocked_output_node: Option<String>,
     completed_entered: Option<Arc<Notify>>,
     completed_release: Option<Arc<Notify>>,
     fail_content_append: AtomicBool,
+    fail_append_for: Mutex<Option<(String, String)>>,
+    fail_output_for: Mutex<Option<String>>,
 }
 
 #[async_trait]
@@ -368,6 +460,17 @@ impl RunRepository for SchedulerRepository {
                 "synthetic content append failure",
             ));
         }
+        if let Some((event_type, node_id)) = self.fail_append_for.lock().await.as_ref() {
+            if events.iter().any(|event| {
+                event.event_type.as_str() == event_type
+                    && event.node_id.as_deref() == Some(node_id.as_str())
+            }) {
+                return Err(HistoryError::new(
+                    "SYNTHETIC_APPEND_FAILURE",
+                    "synthetic append failure",
+                ));
+            }
+        }
         let blocks_completion = events
             .iter()
             .any(|event| event.event_type.as_str() == "node.completed");
@@ -394,16 +497,28 @@ impl RunRepository for SchedulerRepository {
     }
 
     async fn put_node_output(&self, output: NodeOutputRecord) -> Result<(), HistoryError> {
+        if self.fail_output_for.lock().await.as_deref() == Some(output.node_id.as_str()) {
+            return Err(HistoryError::new(
+                "SYNTHETIC_OUTPUT_FAILURE",
+                "synthetic node-output failure",
+            ));
+        }
         self.operations
             .lock()
             .await
             .push(format!("output:{}", output.node_id));
+        let blocks_output = self
+            .blocked_output_node
+            .as_deref()
+            .map_or(true, |node_id| node_id == output.node_id);
         self.outputs.lock().await.push(output);
-        if let Some(entered) = &self.output_entered {
-            entered.notify_one();
-        }
-        if let Some(release) = &self.output_release {
-            release.notified().await;
+        if blocks_output {
+            if let Some(entered) = &self.output_entered {
+                entered.notify_one();
+            }
+            if let Some(release) = &self.output_release {
+                release.notified().await;
+            }
         }
         Ok(())
     }
@@ -799,7 +914,7 @@ async fn sequential_scheduler_rejects_duplicate_activation_as_infrastructure() {
         .run(context("run_duplicate"), stop)
         .await
         .unwrap_err();
-    assert_eq!(error.code(), "SCHEDULER_INVARIANT_VIOLATION");
+    assert_eq!(error.code(), "INFRASTRUCTURE_FAILURE");
     assert_eq!(error.kind(), RunErrorKind::Infrastructure);
     assert_eq!(executions.load(Ordering::SeqCst), 1);
 }
@@ -827,7 +942,7 @@ async fn sequential_scheduler_rejects_missing_activation_target_as_infrastructur
         .run(context("run_missing"), stop)
         .await
         .unwrap_err();
-    assert_eq!(error.code(), "SCHEDULER_INVARIANT_VIOLATION");
+    assert_eq!(error.code(), "INFRASTRUCTURE_FAILURE");
     assert_eq!(error.kind(), RunErrorKind::Infrastructure);
     assert_eq!(executions.load(Ordering::SeqCst), 1);
 }
@@ -1471,11 +1586,231 @@ async fn parallel_scheduler_never_captures_infrastructure_as_a_branch_result() {
         .run(context("run_parallel_infrastructure"), stop)
         .await
         .unwrap_err();
-    assert_eq!(error.code(), "SYNTHETIC_INFRASTRUCTURE");
+    assert_eq!(error.code(), "INFRASTRUCTURE_FAILURE");
     assert_eq!(error.kind(), RunErrorKind::Infrastructure);
     assert!(!repository.events.lock().await.iter().any(|event| {
         event.event_type.as_str() == "branch.failed" && event.data["branch_id"] == "source_a"
     }));
+}
+
+#[tokio::test]
+async fn global_external_stop_is_observed_by_all_branches_and_drained_before_return() {
+    for reason in [StopReason::Cancelled, StopReason::TimedOut] {
+        let mut agent = compile_parallel_agent(two_branch_yaml());
+        let active = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let successors = Arc::new(AtomicUsize::new(0));
+        for node_id in ["search_a", "search_b"] {
+            replace_behavior(
+                &mut agent,
+                node_id,
+                SchedulerBehavior::WaitForStop {
+                    executions: Arc::new(AtomicUsize::new(0)),
+                    active: Arc::clone(&active),
+                    started: Arc::clone(&started),
+                    stopped: Arc::clone(&stopped),
+                },
+            );
+        }
+        for node_id in ["summarize_a", "summarize_b"] {
+            replace_behavior(
+                &mut agent,
+                node_id,
+                SchedulerBehavior::Next {
+                    output: json!({}),
+                    require_output: None,
+                    executions: Arc::clone(&successors),
+                },
+            );
+        }
+        let repository = Arc::new(SchedulerRepository::default());
+        let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
+        let (controller, stop) = stop_pair();
+        let execution = tokio::spawn(async move {
+            scheduler
+                .run(context("run_global_external_stop"), stop)
+                .await
+        });
+
+        while active.load(Ordering::SeqCst) != 2 {
+            started.notified().await;
+        }
+        assert!(controller.request(reason));
+
+        assert_eq!(
+            execution.await.unwrap().unwrap(),
+            SchedulerResult::Stopped(RunError::stopped(reason))
+        );
+        assert_eq!(stopped.load(Ordering::SeqCst), 2);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(successors.load(Ordering::SeqCst), 0);
+        assert!(!repository.events.lock().await.iter().any(|event| {
+            matches!(
+                event.event_type.as_str(),
+                "branch.completed" | "branch.failed" | "node.started"
+            ) && matches!(
+                event.node_id.as_deref(),
+                Some("summarize_a" | "summarize_b" | "collect")
+            )
+        }));
+    }
+}
+
+#[tokio::test]
+async fn global_external_stop_drains_journal_stage_without_private_task_abort() {
+    let mut agent = compile_parallel_agent(two_branch_yaml());
+    replace_behavior(
+        &mut agent,
+        "search_a",
+        SchedulerBehavior::Next {
+            output: json!({}),
+            require_output: None,
+            executions: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    replace_behavior(
+        &mut agent,
+        "search_b",
+        SchedulerBehavior::WaitForStop {
+            executions: Arc::new(AtomicUsize::new(0)),
+            active: Arc::new(AtomicUsize::new(0)),
+            started: Arc::new(Notify::new()),
+            stopped: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    let output_entered = Arc::new(Notify::new());
+    let output_release = Arc::new(Notify::new());
+    let repository = Arc::new(SchedulerRepository {
+        output_entered: Some(Arc::clone(&output_entered)),
+        output_release: Some(Arc::clone(&output_release)),
+        blocked_output_node: Some("search_a".to_string()),
+        ..SchedulerRepository::default()
+    });
+    let scheduler = parallel_scheduler(Arc::new(agent), repository, 1);
+    let (controller, stop) = stop_pair();
+    let mut execution = tokio::spawn(async move {
+        scheduler
+            .run(context("run_global_external_journal"), stop)
+            .await
+    });
+
+    output_entered.notified().await;
+    tokio::time::pause();
+    assert!(controller.request(StopReason::Cancelled));
+    let completed_while_output_was_blocked =
+        tokio::time::timeout(Duration::from_millis(20), &mut execution)
+            .await
+            .is_ok();
+    output_release.notify_one();
+    assert!(
+        !completed_while_output_was_blocked,
+        "external stop must drain cancellation-safe journal work instead of privately aborting it"
+    );
+
+    assert_eq!(
+        execution.await.unwrap().unwrap(),
+        SchedulerResult::Stopped(RunError::stopped(StopReason::Cancelled))
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GlobalFailureCase {
+    Journal,
+    NodeOutput,
+    MissingExecutor,
+    Panic,
+    DuplicateActivation,
+    Infrastructure,
+}
+
+#[tokio::test]
+async fn global_infrastructure_failures_cancel_siblings_and_never_start_join() {
+    for failure in [
+        GlobalFailureCase::Journal,
+        GlobalFailureCase::NodeOutput,
+        GlobalFailureCase::MissingExecutor,
+        GlobalFailureCase::Panic,
+        GlobalFailureCase::DuplicateActivation,
+        GlobalFailureCase::Infrastructure,
+    ] {
+        let mut agent = compile_parallel_agent(two_branch_yaml());
+        let active = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let waiting_executions = Arc::new(AtomicUsize::new(0));
+        replace_behavior(
+            &mut agent,
+            "search_a",
+            SchedulerBehavior::WaitForStop {
+                executions: Arc::clone(&waiting_executions),
+                active: Arc::clone(&active),
+                started: Arc::clone(&started),
+                stopped: Arc::new(AtomicUsize::new(0)),
+            },
+        );
+        let failure_executions = Arc::new(AtomicUsize::new(0));
+        let behavior = match failure {
+            GlobalFailureCase::Panic => SchedulerBehavior::PanicAfter {
+                executions: Arc::clone(&failure_executions),
+                sibling_started: Arc::clone(&started),
+            },
+            GlobalFailureCase::Infrastructure => SchedulerBehavior::InfrastructureAfter {
+                executions: Arc::clone(&failure_executions),
+                sibling_started: Arc::clone(&started),
+            },
+            GlobalFailureCase::DuplicateActivation => SchedulerBehavior::GotoAfter {
+                target: "search_b".to_string(),
+                executions: Arc::clone(&failure_executions),
+                sibling_started: Arc::clone(&started),
+            },
+            _ => SchedulerBehavior::NextAfter {
+                executions: Arc::clone(&failure_executions),
+                sibling_started: Arc::clone(&started),
+                output: json!({}),
+            },
+        };
+        replace_behavior(&mut agent, "search_b", behavior);
+        if matches!(failure, GlobalFailureCase::MissingExecutor) {
+            agent.nodes.get_mut("search_b").unwrap().kind = "company.not_registered".to_string();
+        }
+        let repository = Arc::new(SchedulerRepository::default());
+        match failure {
+            GlobalFailureCase::Journal => {
+                *repository.fail_append_for.lock().await =
+                    Some(("node.completed".to_string(), "search_b".to_string()));
+            }
+            GlobalFailureCase::NodeOutput => {
+                *repository.fail_output_for.lock().await = Some("search_b".to_string());
+            }
+            _ => {}
+        }
+        let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
+        let (_, stop) = stop_pair();
+
+        let error = scheduler
+            .run(context("run_global_infrastructure"), stop)
+            .await
+            .expect_err(&format!("{failure:?} must fail the run globally"));
+
+        assert_eq!(error.code(), "INFRASTRUCTURE_FAILURE", "{failure:?}");
+        assert_eq!(error.kind(), RunErrorKind::Infrastructure, "{failure:?}");
+        assert_eq!(waiting_executions.load(Ordering::SeqCst), 1, "{failure:?}");
+        assert_eq!(active.load(Ordering::SeqCst), 0, "{failure:?}");
+        if !matches!(failure, GlobalFailureCase::MissingExecutor) {
+            assert_eq!(failure_executions.load(Ordering::SeqCst), 1, "{failure:?}");
+        }
+        let events = repository.events.lock().await;
+        assert!(
+            !events.iter().any(|event| {
+                event.node_id.as_deref() == Some("collect")
+                    || matches!(
+                        event.event_type.as_str(),
+                        "branch.completed" | "branch.failed"
+                    )
+            }),
+            "{failure:?}"
+        );
+    }
 }
 
 async fn assert_execution_limit(per_run: usize, global: usize, expected_started: usize) {

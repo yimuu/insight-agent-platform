@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -13,8 +13,8 @@ use handlebars::Handlebars;
 use insight_agent_platform::{
     dsl::{
         compiled::{
-            CompiledAgent, CompiledNode, ExecutionPlan, NodeCompilation, NodeControl, NodeOutcome,
-            NodeTransition, RunOutput,
+            BranchPlan, CompiledAgent, CompiledNode, ExecutionPlan, ForkPlan, JoinPolicy,
+            NodeCompilation, NodeControl, NodeOutcome, NodeRegion, NodeTransition, RunOutput,
         },
         compiler::CompileContext,
         CompileError, EmitPolicy,
@@ -52,9 +52,30 @@ enum Behavior {
     Fail(RunError),
     Delay(Duration),
     WaitForStop(Arc<Notify>),
+    TrackedWait {
+        active: Arc<AtomicUsize>,
+        started: Arc<Notify>,
+        observed_stop: Arc<AtomicUsize>,
+    },
+    ActivateFork,
+    NextAfter(Arc<Notify>),
+    GotoAfter {
+        started: Arc<Notify>,
+        target: String,
+    },
+    InfrastructureAfter(Arc<Notify>),
+    PanicAfter(Arc<Notify>),
 }
 
 struct SyntheticNode;
+
+struct ActiveExecution(Arc<AtomicUsize>);
+
+impl Drop for ActiveExecution {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 impl NodeType for SyntheticNode {
     fn kind(&self) -> &'static str {
@@ -121,6 +142,47 @@ impl NodeExecutor for SyntheticNode {
                 control.stopped().await;
                 Err(RunError::stopped(control.stop_reason().unwrap()))
             }
+            Behavior::TrackedWait {
+                active,
+                started,
+                observed_stop,
+            } => {
+                active.fetch_add(1, Ordering::SeqCst);
+                let _active = ActiveExecution(Arc::clone(active));
+                started.notify_one();
+                control.stopped().await;
+                observed_stop.fetch_add(1, Ordering::SeqCst);
+                Err(RunError::stopped(control.stop_reason().unwrap()))
+            }
+            Behavior::ActivateFork => Ok(NodeOutcome {
+                output: json!({}),
+                transition: NodeTransition::ActivateFork,
+            }),
+            Behavior::NextAfter(started) => {
+                started.notified().await;
+                Ok(NodeOutcome {
+                    output: json!({}),
+                    transition: NodeTransition::Next,
+                })
+            }
+            Behavior::GotoAfter { started, target } => {
+                started.notified().await;
+                Ok(NodeOutcome {
+                    output: json!({}),
+                    transition: NodeTransition::Goto(target.clone()),
+                })
+            }
+            Behavior::InfrastructureAfter(started) => {
+                started.notified().await;
+                Err(RunError::infrastructure(
+                    "SYNTHETIC_INFRASTRUCTURE",
+                    "synthetic infrastructure failure",
+                ))
+            }
+            Behavior::PanicAfter(started) => {
+                started.notified().await;
+                panic!("synthetic executor panic")
+            }
         }
     }
 }
@@ -133,6 +195,8 @@ struct MemoryRepository {
     terminal_updates: Mutex<Vec<TerminalUpdate>>,
     operations: Mutex<Vec<String>>,
     fail_next_append: AtomicBool,
+    fail_append_for: Mutex<Option<(String, String)>>,
+    fail_output_for: Mutex<Option<String>>,
 }
 
 #[async_trait]
@@ -160,6 +224,17 @@ impl RunRepository for MemoryRepository {
                 "synthetic append failure",
             ));
         }
+        if let Some((event_type, node_id)) = self.fail_append_for.lock().await.as_ref() {
+            if events.iter().any(|event| {
+                event.event_type.as_str() == event_type
+                    && event.node_id.as_deref() == Some(node_id.as_str())
+            }) {
+                return Err(HistoryError::new(
+                    "SYNTHETIC_APPEND_FAILURE",
+                    "synthetic append failure",
+                ));
+            }
+        }
         let mut stored = self.events.lock().await;
         let mut operations = self.operations.lock().await;
         for event in events {
@@ -174,6 +249,12 @@ impl RunRepository for MemoryRepository {
     }
 
     async fn put_node_output(&self, output: NodeOutputRecord) -> Result<(), HistoryError> {
+        if self.fail_output_for.lock().await.as_deref() == Some(output.node_id.as_str()) {
+            return Err(HistoryError::new(
+                "SYNTHETIC_OUTPUT_FAILURE",
+                "synthetic node-output failure",
+            ));
+        }
         self.operations
             .lock()
             .await
@@ -270,6 +351,103 @@ fn agent(nodes: Vec<CompiledNode>, entry: &str) -> Arc<CompiledAgent> {
         input_schema: Arc::new(JSONSchema::compile(&json!({"type":"object"})).unwrap()),
         entry: entry.to_string(),
         execution_plan: ExecutionPlan::sequential(entry, nodes.keys().cloned()),
+        nodes,
+        templates: Arc::new(Handlebars::new()),
+    })
+}
+
+fn parallel_agent(
+    first: Behavior,
+    second: Behavior,
+    missing_second_executor: bool,
+) -> Arc<CompiledAgent> {
+    let mut first_node = node("work_a", Some("collect"), Duration::from_secs(30), first);
+    let mut second_node = node("work_b", Some("collect"), Duration::from_secs(30), second);
+    if missing_second_executor {
+        second_node.kind = "company.not_registered".to_string();
+    }
+    first_node.terminal = false;
+    second_node.terminal = false;
+    let nodes = vec![
+        node(
+            "fanout",
+            None,
+            Duration::from_secs(30),
+            Behavior::ActivateFork,
+        ),
+        first_node,
+        second_node,
+        node(
+            "collect",
+            None,
+            Duration::from_secs(30),
+            Behavior::Complete(RunOutput {
+                content: None,
+                format: None,
+                data: json!({}),
+            }),
+        ),
+    ]
+    .into_iter()
+    .map(|node| (node.id.clone(), node))
+    .collect::<BTreeMap<_, _>>();
+    let plan = ForkPlan {
+        fork_id: "fanout".to_string(),
+        join_id: "collect".to_string(),
+        branches: BTreeMap::from([
+            (
+                "source_a".to_string(),
+                BranchPlan {
+                    branch_id: "source_a".to_string(),
+                    entry: "work_a".to_string(),
+                    nodes: BTreeSet::from(["work_a".to_string()]),
+                },
+            ),
+            (
+                "source_b".to_string(),
+                BranchPlan {
+                    branch_id: "source_b".to_string(),
+                    entry: "work_b".to_string(),
+                    nodes: BTreeSet::from(["work_b".to_string()]),
+                },
+            ),
+        ]),
+        policy: JoinPolicy::AllSettled,
+    };
+    Arc::new(CompiledAgent {
+        id: "coordinator-agent".to_string(),
+        name: "Coordinator Agent".to_string(),
+        description: String::new(),
+        version_hash: "sha256:coordinator".to_string(),
+        input_schema: Arc::new(JSONSchema::compile(&json!({"type":"object"})).unwrap()),
+        entry: "fanout".to_string(),
+        execution_plan: ExecutionPlan {
+            entry: "fanout".to_string(),
+            forks: BTreeMap::from([("fanout".to_string(), plan)]),
+            node_regions: BTreeMap::from([
+                ("fanout".to_string(), NodeRegion::Linear),
+                (
+                    "work_a".to_string(),
+                    NodeRegion::Branch {
+                        fork_id: "fanout".to_string(),
+                        branch_id: "source_a".to_string(),
+                    },
+                ),
+                (
+                    "work_b".to_string(),
+                    NodeRegion::Branch {
+                        fork_id: "fanout".to_string(),
+                        branch_id: "source_b".to_string(),
+                    },
+                ),
+                (
+                    "collect".to_string(),
+                    NodeRegion::Join {
+                        fork_id: "fanout".to_string(),
+                    },
+                ),
+            ]),
+        },
         nodes,
         templates: Arc::new(Handlebars::new()),
     })
@@ -709,4 +887,145 @@ async fn journal_worker_failure_recovers_one_durable_failed_terminal() {
         (1..=events.len() as u64).collect::<Vec<_>>()
     );
     assert_eq!(repository.terminal_updates.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn global_external_stop_preserves_reason_after_all_branches_drain() {
+    for (reason, expected_status, expected_code) in [
+        (StopReason::Cancelled, RunStatus::Cancelled, "RUN_CANCELLED"),
+        (StopReason::TimedOut, RunStatus::Failed, "RUN_TIMEOUT"),
+    ] {
+        let repository = Arc::new(MemoryRepository::default());
+        let active = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let observed_stop = Arc::new(AtomicUsize::new(0));
+        let wait = || Behavior::TrackedWait {
+            active: Arc::clone(&active),
+            started: Arc::clone(&started),
+            observed_stop: Arc::clone(&observed_stop),
+        };
+        let coordinator = coordinator(
+            parallel_agent(wait(), wait(), false),
+            Arc::clone(&repository),
+            true,
+        );
+        let (controller, stop) = stop_pair();
+        let execution = coordinator.execute(new_run(), json!({}), stop);
+        let request = async {
+            while active.load(Ordering::SeqCst) != 2 {
+                started.notified().await;
+            }
+            assert!(controller.request(reason));
+        };
+        let (result, ()) = tokio::join!(execution, request);
+
+        assert_eq!(result.unwrap(), expected_status);
+        assert_eq!(observed_stop.load(Ordering::SeqCst), 2);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        let updates = repository.terminal_updates.lock().await;
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].error_code.as_deref(), Some(expected_code));
+        drop(updates);
+        assert!(!repository.events.lock().await.iter().any(|event| {
+            event.node_id.as_deref() == Some("collect")
+                || matches!(
+                    event.event_type,
+                    RunEventType::BranchCompleted | RunEventType::BranchFailed
+                )
+        }));
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GlobalFailureCase {
+    Journal,
+    NodeOutput,
+    MissingExecutor,
+    Panic,
+    DuplicateActivation,
+    Infrastructure,
+}
+
+#[tokio::test]
+async fn global_failures_recover_exactly_one_durable_infrastructure_terminal() {
+    for failure in [
+        GlobalFailureCase::Journal,
+        GlobalFailureCase::NodeOutput,
+        GlobalFailureCase::MissingExecutor,
+        GlobalFailureCase::Panic,
+        GlobalFailureCase::DuplicateActivation,
+        GlobalFailureCase::Infrastructure,
+    ] {
+        let repository = Arc::new(MemoryRepository::default());
+        let active = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let waiting = Behavior::TrackedWait {
+            active: Arc::clone(&active),
+            started: Arc::clone(&started),
+            observed_stop: Arc::new(AtomicUsize::new(0)),
+        };
+        let failing = match failure {
+            GlobalFailureCase::Panic => Behavior::PanicAfter(Arc::clone(&started)),
+            GlobalFailureCase::DuplicateActivation => Behavior::GotoAfter {
+                started: Arc::clone(&started),
+                target: "work_b".to_string(),
+            },
+            GlobalFailureCase::Infrastructure => {
+                Behavior::InfrastructureAfter(Arc::clone(&started))
+            }
+            _ => Behavior::NextAfter(Arc::clone(&started)),
+        };
+        match failure {
+            GlobalFailureCase::Journal => {
+                *repository.fail_append_for.lock().await =
+                    Some(("node.completed".to_string(), "work_b".to_string()));
+            }
+            GlobalFailureCase::NodeOutput => {
+                *repository.fail_output_for.lock().await = Some("work_b".to_string());
+            }
+            _ => {}
+        }
+        let coordinator = coordinator(
+            parallel_agent(
+                waiting,
+                failing,
+                matches!(failure, GlobalFailureCase::MissingExecutor),
+            ),
+            Arc::clone(&repository),
+            true,
+        );
+        let (_, stop) = stop_pair();
+
+        assert_eq!(
+            coordinator
+                .execute(new_run(), json!({}), stop)
+                .await
+                .unwrap(),
+            RunStatus::Failed,
+            "{failure:?}"
+        );
+        assert_eq!(active.load(Ordering::SeqCst), 0, "{failure:?}");
+        assert_eq!(*repository.status.lock().await, Some(RunStatus::Failed));
+        let updates = repository.terminal_updates.lock().await;
+        assert_eq!(updates.len(), 1, "{failure:?}");
+        assert_eq!(
+            updates[0].error_code.as_deref(),
+            Some("INFRASTRUCTURE_FAILURE"),
+            "{failure:?}"
+        );
+        drop(updates);
+        let events = repository.events.lock().await;
+        assert_eq!(events.last().unwrap().event_type, RunEventType::RunFailed);
+        assert_eq!(events.last().unwrap().code, "INFRASTRUCTURE_FAILURE");
+        assert!(
+            !events.iter().any(|event| {
+                event.node_id.as_deref() == Some("collect")
+                    || matches!(
+                        event.event_type,
+                        RunEventType::BranchCompleted | RunEventType::BranchFailed
+                    )
+            }),
+            "{failure:?}"
+        );
+    }
 }

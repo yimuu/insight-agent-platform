@@ -4,6 +4,7 @@ use std::{
 };
 
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     dsl::compiled::{CompiledAgent, ForkPlan, NodeTransition, RunOutput},
@@ -14,8 +15,8 @@ use crate::{
 use serde_json::json;
 
 use super::{
-    execute_node, BranchError, BranchResult, BranchState, ExecutionLimiter, NodeExecutionFailure,
-    NodeExecutionResult, NodeState, RunContext, RunError, StopSignal,
+    execute_node_with_cancellation, BranchError, BranchResult, BranchState, ExecutionLimiter,
+    NodeExecutionFailure, NodeExecutionResult, NodeState, RunContext, RunError, StopSignal,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,20 +80,53 @@ impl Scheduler {
         stop: StopSignal,
     ) -> Result<SchedulerResult, RunError> {
         let mut state = SchedulerState::new(&self.agent);
+        let mut executions = JoinSet::new();
+        let task_cancel = CancellationToken::new();
+        let result = self
+            .run_inner(context, &stop, &task_cancel, &mut state, &mut executions)
+            .await;
+
+        match result {
+            Ok(SchedulerResult::Stopped(error)) => {
+                drain_external_stop(&mut state, &mut executions).await;
+                Ok(SchedulerResult::Stopped(error))
+            }
+            Err(_) => {
+                cancel_and_drain_infrastructure(&mut state, &task_cancel, &mut executions).await;
+                Err(global_failure())
+            }
+            result => result,
+        }
+    }
+
+    async fn run_inner(
+        &self,
+        context: RunContext,
+        stop: &StopSignal,
+        task_cancel: &CancellationToken,
+        state: &mut SchedulerState,
+        executions: &mut JoinSet<(
+            String,
+            WorkScope,
+            Result<NodeExecutionResult, NodeExecutionFailure>,
+        )>,
+    ) -> Result<SchedulerResult, RunError> {
         state.activate(
             &self.agent,
             Some(&self.agent.entry),
             WorkScope::Main,
             context,
         )?;
-        let mut executions = JoinSet::new();
 
         loop {
             if let Some(reason) = stop.reason() {
                 return Ok(SchedulerResult::Stopped(RunError::stopped(reason)));
             }
 
-            while let Some(ready) = state.ready.pop_front() {
+            while stop.reason().is_none() {
+                let Some(ready) = state.ready.pop_front() else {
+                    break;
+                };
                 state.start(&ready.node_id)?;
                 let node = self
                     .agent
@@ -108,13 +142,25 @@ impl Scheduler {
                 let executors = self.executors.clone();
                 let events = self.events.clone();
                 let task_stop = stop.clone();
+                let node_cancel = task_cancel.clone();
                 let limiter = self.limiter.clone();
                 executions.spawn(async move {
-                    let result =
-                        execute_node(node, ready.context, executors, events, task_stop, limiter)
-                            .await;
+                    let result = execute_node_with_cancellation(
+                        node,
+                        ready.context,
+                        executors,
+                        events,
+                        task_stop,
+                        node_cancel,
+                        limiter,
+                    )
+                    .await;
                     (ready.node_id, ready.scope, result)
                 });
+            }
+
+            if let Some(reason) = stop.reason() {
+                return Ok(SchedulerResult::Stopped(RunError::stopped(reason)));
             }
 
             let Some(joined) = executions.join_next().await else {
@@ -143,7 +189,7 @@ impl Scheduler {
                         state.settle_branch(&scope, result)?;
                         self.events
                             .publish_error(
-                                branch_scope(&state, fork_id)?,
+                                branch_scope(state, fork_id)?,
                                 RunEventType::BranchFailed,
                                 error.code(),
                                 error.message(),
@@ -289,6 +335,26 @@ impl Scheduler {
     }
 }
 
+async fn drain_external_stop<T>(state: &mut SchedulerState, executions: &mut JoinSet<T>)
+where
+    T: 'static,
+{
+    state.stop_admission();
+    while executions.join_next().await.is_some() {}
+}
+
+async fn cancel_and_drain_infrastructure<T>(
+    state: &mut SchedulerState,
+    task_cancel: &CancellationToken,
+    executions: &mut JoinSet<T>,
+) where
+    T: 'static,
+{
+    state.stop_admission();
+    task_cancel.cancel();
+    while executions.join_next().await.is_some() {}
+}
+
 impl SchedulerState {
     fn new(agent: &CompiledAgent) -> Self {
         let node_states = agent
@@ -318,6 +384,15 @@ impl SchedulerState {
             node_states,
             branch_states,
             active_fork: None,
+        }
+    }
+
+    fn stop_admission(&mut self) {
+        self.ready.clear();
+        for state in self.node_states.values_mut() {
+            if matches!(*state, NodeState::Pending | NodeState::Ready) {
+                *state = NodeState::Skipped;
+            }
         }
     }
 
@@ -532,6 +607,10 @@ impl SchedulerState {
 
 fn invariant(message: impl Into<String>) -> RunError {
     RunError::infrastructure("SCHEDULER_INVARIANT_VIOLATION", message)
+}
+
+fn global_failure() -> RunError {
+    RunError::infrastructure("INFRASTRUCTURE_FAILURE", "runtime infrastructure failed")
 }
 
 fn run_scope(context: &RunContext) -> RunEventScope {

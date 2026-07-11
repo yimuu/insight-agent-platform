@@ -13,6 +13,7 @@ pub use attachment::{AttachedRun, RunSubscription};
 pub use context::{RunContext, RunMetadata};
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
 pub use coordinator::RunCoordinator;
+pub(crate) use execution::execute_node_with_cancellation;
 pub use execution::{execute_node, ExecutionLimiter, NodeExecutionFailure, NodeExecutionResult};
 pub use scheduler::{Scheduler, SchedulerResult};
 pub use service::{
