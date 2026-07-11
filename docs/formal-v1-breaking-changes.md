@@ -6,6 +6,8 @@
 
 ## 变更总表
 
+本次内部接口变化是有意的：拓扑必须编译一次并冻结；单一 scalar cursor 无法表达 fork/join 同步；普通 node 事件无法表达分支 settlement；无界并行工作会耗尽进程资源。HTTP 路由和顺序 YAML 的既有 V1 形式没有改变。
+
 | 原型 | 正式 V1 | 为什么改 | 最小迁移示例 |
 |---|---|---|---|
 | `steps: [...]` 隐式顺序，混合 `goto/end` | `entry` + `nodes` DAG | 顺序、跳转和依赖都是图语义；启动期可统一检查缺边、环、不可达节点和前驱引用 | `steps: [{id: answer,...}]` → `entry: answer; nodes: {answer: {...}}` |

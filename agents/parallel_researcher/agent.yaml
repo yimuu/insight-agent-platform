@@ -1,0 +1,75 @@
+version: 1
+id: parallel_researcher
+name: Parallel Researcher
+description: Compare two independent perspectives and synthesize their findings.
+input:
+  schema:
+    type: object
+    required: [question]
+    additionalProperties: false
+    properties:
+      question: {type: string, minLength: 1}
+prompts:
+  system: prompts/system.md
+entry: prepare
+nodes:
+  prepare:
+    type: core.template
+    next: fanout
+    config:
+      value: {question: "{{ input.question }}"}
+  fanout:
+    type: core.fork
+    config:
+      branches: {perspective_a: analyze_a, perspective_b: analyze_b}
+      join: collect
+  analyze_a:
+    type: core.chat
+    next: normalize_a
+    config:
+      model: general_chat
+      messages:
+        - role: system
+          content: {template_ref: system}
+        - role: user
+          content: "Analyze {{ nodes.prepare.output.question }} from perspective A."
+      parameters: {temperature: 0.2}
+  normalize_a:
+    type: core.template
+    next: collect
+    config: {value: "{{ nodes.analyze_a.output.text }}"}
+  analyze_b:
+    type: core.chat
+    next: normalize_b
+    config:
+      model: general_chat
+      messages:
+        - role: system
+          content: {template_ref: system}
+        - role: user
+          content: "Analyze {{ nodes.prepare.output.question }} from perspective B."
+      parameters: {temperature: 0.2}
+  normalize_b:
+    type: core.template
+    next: collect
+    config: {value: "{{ nodes.analyze_b.output.text }}"}
+  collect:
+    type: core.join
+    next: synthesize
+    config: {mode: all_settled}
+  synthesize:
+    type: core.chat
+    next: result
+    config:
+      model: general_chat
+      messages:
+        - role: system
+          content: {template_ref: system}
+        - role: user
+          content: "Synthesize the collected perspectives: {{ nodes.collect.output }}"
+      parameters: {temperature: 0.2}
+  result:
+    type: core.output
+    config:
+      content: {template: "{{ nodes.synthesize.output.text }}"}
+      format: markdown

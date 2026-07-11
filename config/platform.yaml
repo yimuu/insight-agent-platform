@@ -9,6 +9,7 @@ agents:
   enabled:
     - code_node_demo
     - medical_report_interpreter
+    - parallel_researcher
     - researcher
 
 models:

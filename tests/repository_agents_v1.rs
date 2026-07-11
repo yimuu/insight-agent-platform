@@ -3,6 +3,7 @@ use std::path::Path;
 use insight_agent_platform::{
     catalog::compile_enabled_agents,
     config::PlatformConfig,
+    dsl::compiled::JoinPolicy,
     dsl::compiler::CompileLimits,
     nodes::default_node_registries,
     resources::{
@@ -50,7 +51,14 @@ fn enabled_repository_agents_compile_through_production_registries() {
     )
     .unwrap();
 
-    assert_eq!(agents.list().count(), 3);
+    assert_eq!(agents.list().count(), 4);
+
+    let parallel = agents.get("parallel_researcher").unwrap();
+    let fork = &parallel.execution_plan.forks["fanout"];
+    assert_eq!(fork.branches.len(), 2);
+    assert_eq!(fork.join_id, "collect");
+    assert!(fork.branches.values().all(|branch| branch.nodes.len() >= 2));
+    assert_eq!(fork.policy, JoinPolicy::AllSettled);
 
     let researcher = agents.get("researcher").unwrap();
     assert_eq!(researcher.nodes["plan"].kind, "core.chat");

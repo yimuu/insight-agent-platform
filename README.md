@@ -254,6 +254,29 @@ RUN_HISTORY_POSTGRES_URL='postgres://insight:insight@127.0.0.1:5433/insight_agen
 - `agents/researcher`：私有计划 + 公开答案。
 - `agents/code_node_demo`：`example.text_metrics` 原生 Action，不调用模型，适合确定性冒烟测试。
 - `agents/medical_report_interpreter`：使用同一个通用 `core.chat` 多模态协议的垂直示例。
+- `agents/parallel_researcher`：两个多节点分支汇聚后再综合：
+
+```yaml
+fanout:
+  type: core.fork
+  config:
+    branches: {perspective_a: analyze_a, perspective_b: analyze_b}
+    join: collect
+collect:
+  type: core.join
+  next: synthesize
+  config: {mode: all_settled}
+```
+
+每个分支依次执行 `analyze_* (core.chat) -> normalize_* (core.template) -> collect`；`synthesize` 只允许引用 `nodes.collect.output`。分支就绪并进入执行队列时发布 `branch.started`，完成或失败时分别发布 `branch.completed` / `branch.failed`，payload 包含 `branch_id`、`fork_id`、`join_id` 和（失败时）错误码。`branch.started` 表示 ready-queue activation，不代表模型已开始返回内容。
+
+部分成功的终态使用固定 envelope：
+
+```json
+{"schema_version":1,"type":"run.completed","code":"PARTIAL_SUCCESS","message":"one or more branches failed","data":{"status":"partial_success","branches":{"perspective_a":{"status":"completed"},"perspective_b":{"status":"failed","error":{"code":"NODE_FAILED","message":"..."}}}}}
+```
+
+`max_concurrent_runs` 和 `max_parallel_node_executions` 是进程范围上限；`max_parallel_branches_per_run` 与 `max_fork_branches` 分别限制单 Run 并发分支和单 fork 分支数。取消会停止整个 Run；单个分支失败只结算该分支，`all_settled` 仍等待其余分支并可产生部分成功。V1 不支持嵌套 fork、resume、新 join 模式，也不允许 post-join 节点直接引用分支节点。
 
 ## 验证
 
