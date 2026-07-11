@@ -17,8 +17,8 @@ use crate::{
     },
     nodes::registry::{NodeExecutor, NodeType},
     resources::models::{
-        ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest, ChatRole, ImageUrl,
-        ModelCapability,
+        model_response_too_large, ChatContent, ChatContentPart, ChatMessage, ChatModel,
+        ChatRequest, ChatRole, ImageUrl, ModelCapability,
     },
     runtime::{ExecutionControl, RunContext, RunError},
 };
@@ -277,6 +277,7 @@ impl NodeExecutor for ChatNode {
         let mut text = String::new();
         let mut finish_reason = None;
         let mut usage = None;
+        let max_accumulated_text_bytes = body.model.max_accumulated_text_bytes();
         loop {
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
@@ -288,6 +289,9 @@ impl NodeExecutor for ChatNode {
             };
             let chunk = chunk?;
             if !chunk.text.is_empty() {
+                if text.len().saturating_add(chunk.text.len()) > max_accumulated_text_bytes {
+                    return Err(model_response_too_large());
+                }
                 text.push_str(&chunk.text);
                 if node.emit == EmitPolicy::Content {
                     control.emit_content(chunk.text).await?;

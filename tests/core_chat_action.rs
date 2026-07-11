@@ -93,6 +93,43 @@ impl ChatModel for RecordingModel {
     }
 }
 
+#[derive(Clone)]
+struct LimitModel {
+    chunks: Vec<ChatChunk>,
+    max_accumulated_text_bytes: usize,
+}
+
+impl fmt::Debug for LimitModel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("LimitModel").finish()
+    }
+}
+
+#[async_trait]
+impl ChatModel for LimitModel {
+    fn capabilities(&self) -> BTreeSet<ModelCapability> {
+        BTreeSet::new()
+    }
+
+    fn validate_parameters(
+        &self,
+        _parameters: &Value,
+    ) -> Result<(), insight_agent_platform::dsl::CompileError> {
+        Ok(())
+    }
+
+    fn max_accumulated_text_bytes(&self) -> usize {
+        self.max_accumulated_text_bytes
+    }
+
+    async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, RunError> {
+        assert_eq!(request.messages.len(), 1);
+        Ok(Box::pin(stream::iter(
+            self.chunks.clone().into_iter().map(Ok),
+        )))
+    }
+}
+
 fn context(input: Value) -> RunContext {
     RunContext::new(
         RunMetadata {
@@ -195,6 +232,108 @@ async fn chat_renders_multimodal_messages_streams_and_normalizes_output() {
         }
     );
     assert_eq!(*emitted.lock().unwrap(), vec!["Hel", "lo"]);
+}
+
+#[tokio::test]
+async fn chat_allows_accumulated_text_at_exact_model_limit() {
+    let mut models = ModelRegistry::default();
+    models
+        .register(
+            "limited",
+            LimitModel {
+                chunks: vec![
+                    ChatChunk {
+                        text: "ab".to_string(),
+                        finish_reason: None,
+                        usage: None,
+                    },
+                    ChatChunk {
+                        text: "c".to_string(),
+                        finish_reason: Some("stop".to_string()),
+                        usage: None,
+                    },
+                ],
+                max_accumulated_text_bytes: 3,
+            },
+        )
+        .unwrap();
+    let actions = ActionRegistry::default();
+    let mut compile_context = CompileContext::new(&models, &actions);
+    let compilation = ChatNode
+        .compile(
+            "answer",
+            json!({
+                "model":"limited",
+                "messages":[{"role":"user", "content":"Hi"}]
+            }),
+            &mut compile_context,
+        )
+        .unwrap();
+    let node = compiled_node("answer", "core.chat", EmitPolicy::Content, compilation);
+    let context = context(json!({})).with_templates(Arc::new(compile_context.into_templates()));
+    let (control, emitted) = capturing_control();
+
+    let outcome = ChatNode.execute(&node, &context, &control).await.unwrap();
+
+    assert_eq!(outcome.output["text"], "abc");
+    assert_eq!(
+        *emitted.lock().unwrap(),
+        vec!["ab".to_string(), "c".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn chat_rejects_accumulated_text_before_appending_or_emitting_over_limit_chunk() {
+    const OVER_LIMIT_SECRET: &str = "accumulated-text-secret";
+    let mut models = ModelRegistry::default();
+    models
+        .register(
+            "limited",
+            LimitModel {
+                chunks: vec![
+                    ChatChunk {
+                        text: "ok".to_string(),
+                        finish_reason: None,
+                        usage: None,
+                    },
+                    ChatChunk {
+                        text: OVER_LIMIT_SECRET.to_string(),
+                        finish_reason: Some("stop".to_string()),
+                        usage: None,
+                    },
+                ],
+                max_accumulated_text_bytes: 2,
+            },
+        )
+        .unwrap();
+    let actions = ActionRegistry::default();
+    let mut compile_context = CompileContext::new(&models, &actions);
+    let compilation = ChatNode
+        .compile(
+            "answer",
+            json!({
+                "model":"limited",
+                "messages":[{"role":"user", "content":"Hi"}]
+            }),
+            &mut compile_context,
+        )
+        .unwrap();
+    let node = compiled_node("answer", "core.chat", EmitPolicy::Content, compilation);
+    let context = context(json!({})).with_templates(Arc::new(compile_context.into_templates()));
+    let (control, emitted) = capturing_control();
+
+    let error = ChatNode
+        .execute(&node, &context, &control)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "MODEL_RESPONSE_TOO_LARGE");
+    assert_eq!(
+        error.message(),
+        "chat provider response exceeded the configured size limit"
+    );
+    assert!(!format!("{error:?} {error}").contains(OVER_LIMIT_SECRET));
+    assert_eq!(*emitted.lock().unwrap(), vec!["ok".to_string()]);
 }
 
 #[test]
