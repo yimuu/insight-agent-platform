@@ -537,6 +537,19 @@ async fn wait_for_status(service: &RunService, run_id: &str, expected: RunStatus
     panic!("run {run_id} did not reach {expected:?}; last status: {last_status:?}")
 }
 
+async fn run_event_types(repository: &CountingRepository, run_id: &str) -> Vec<RunEventType> {
+    repository
+        .events
+        .lock()
+        .await
+        .get(run_id)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|event| event.event_type)
+        .collect()
+}
+
 #[tokio::test]
 async fn zero_parallel_capacities_are_rejected() {
     for config in [
@@ -810,6 +823,54 @@ async fn shutdown_waits_for_detached_run_blocked_in_create_run() {
     assert_eq!(interrupted.status, RunStatus::Interrupted);
     assert_eq!(interrupted.error_code.as_deref(), Some("RUN_INTERRUPTED"));
     assert_eq!(repository.creates.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn shutdown_after_durable_create_finalizes_before_detached_launch() {
+    let get_gate = RepositoryGate::new();
+    let (service, repository) = service_with_repository_hooks(
+        RunServiceConfig {
+            max_concurrent_runs: 1,
+            max_parallel_node_executions: 32,
+            max_parallel_branches_per_run: 8,
+            run_timeout: Duration::from_secs(3600),
+        },
+        vec![agent("fast", ServiceBehavior::Complete)],
+        RepositoryHooks {
+            create_run: None,
+            get_run: Some(Arc::clone(&get_gate)),
+        },
+    )
+    .await
+    .unwrap();
+
+    let creator_service = service.clone();
+    let create_task = tokio::spawn(async move {
+        creator_service
+            .create_detached("fast", json!({}), RequestMetadata::default())
+            .await
+    });
+    get_gate.wait_entered().await;
+
+    let shutdown_service = service.clone();
+    let mut shutdown_task =
+        tokio::spawn(async move { shutdown_service.shutdown(Duration::from_secs(1)).await });
+    tokio::select! {
+        result = &mut shutdown_task => panic!("shutdown completed while get_run was blocked: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+    }
+
+    get_gate.release();
+    let created = create_task.await.unwrap().unwrap();
+    shutdown_task.await.unwrap().unwrap();
+    let interrupted = wait_for_status(&service, &created.run_id, RunStatus::Interrupted).await;
+
+    assert_eq!(interrupted.started_at, None);
+    assert_eq!(interrupted.error_code.as_deref(), Some("RUN_INTERRUPTED"));
+    assert_eq!(
+        run_event_types(&repository, &created.run_id).await,
+        vec![RunEventType::RunCreated, RunEventType::RunInterrupted]
+    );
 }
 
 #[tokio::test]
