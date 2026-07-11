@@ -162,6 +162,8 @@ async fn execute_node_inner(
             return Err(NodeExecutionFailure::Infrastructure(error));
         }
         Err(error) => {
+            let error = normalize_execution_error(&control, error)
+                .map_err(NodeExecutionFailure::Infrastructure)?;
             events
                 .publish_error(
                     node_scope,
@@ -239,6 +241,27 @@ fn classify_failure(node_id: &str, error: RunError) -> NodeExecutionFailure {
         },
         RunErrorKind::Infrastructure => NodeExecutionFailure::Infrastructure(error),
     }
+}
+
+fn normalize_execution_error(
+    control: &ExecutionControl,
+    error: RunError,
+) -> Result<RunError, RunError> {
+    if error.kind() != RunErrorKind::Stop {
+        return Ok(error);
+    }
+
+    match control.stop_reason() {
+        Some(reason) => Ok(RunError::stopped(reason)),
+        None => Err(unbacked_stop_error()),
+    }
+}
+
+fn unbacked_stop_error() -> RunError {
+    RunError::infrastructure(
+        "UNBACKED_STOP",
+        "node returned a stop error without a runtime stop signal",
+    )
 }
 
 fn stopped_error(control: &ExecutionControl) -> RunError {

@@ -1572,13 +1572,13 @@ async fn parallel_scheduler_never_captures_stop_as_a_branch_result() {
     let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
     let (_, stop) = stop_pair();
 
-    assert_eq!(
-        scheduler
-            .run(context("run_parallel_stop"), stop)
-            .await
-            .unwrap(),
-        SchedulerResult::Stopped(RunError::stopped(StopReason::Interrupted))
-    );
+    let error = scheduler
+        .run(context("run_parallel_stop"), stop)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "INFRASTRUCTURE_FAILURE");
+    assert_eq!(error.kind(), RunErrorKind::Infrastructure);
     assert!(!repository.events.lock().await.iter().any(|event| {
         event.event_type.as_str() == "branch.failed" && event.data["branch_id"] == "source_a"
     }));
