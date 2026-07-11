@@ -113,6 +113,12 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
         event(&run_id, RunEventType::RunCreated, 1, None),
         event(&run_id, RunEventType::RunStarted, 2, None),
         event(&run_id, RunEventType::NodeStarted, 3, Some("answer")),
+        event(
+            &run_id,
+            RunEventType::BranchFailed,
+            4,
+            Some("must_be_ignored"),
+        ),
     ])
     .await
     .unwrap();
@@ -131,13 +137,16 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
             .iter()
             .map(|event| event.seq)
             .collect::<Vec<_>>(),
-        vec![2, 3]
+        vec![2, 3, 4]
     );
+    let replay = repo.list_events_after(&run_id, 3, 100).await.unwrap();
+    assert_eq!(replay[0].event_type, RunEventType::BranchFailed);
+    assert_eq!(replay[0].node_id, None);
 
     assert!(repo
         .finish_run(
             completed_update(&run_id),
-            event(&run_id, RunEventType::RunCompleted, 4, None),
+            event(&run_id, RunEventType::RunCompleted, 5, None),
         )
         .await
         .unwrap());
@@ -155,7 +164,7 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
             losing_update,
             RunEvent::error_at(
                 RunEventType::RunCancelled,
-                4,
+                5,
                 scope(&run_id, None),
                 at(11),
                 "RUN_CANCELLED",
@@ -176,11 +185,11 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
             .iter()
             .map(|event| event.seq)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4]
+        vec![1, 2, 3, 4, 5]
     );
 
     let duplicate_error = repo
-        .append_events(&[event(&run_id, RunEventType::RunStarted, 4, None)])
+        .append_events(&[event(&run_id, RunEventType::RunStarted, 5, None)])
         .await
         .unwrap_err();
     assert_eq!(duplicate_error.code(), "HISTORY_WRITE_FAILED");

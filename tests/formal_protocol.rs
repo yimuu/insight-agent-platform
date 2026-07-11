@@ -74,6 +74,20 @@ fn run_events_omit_node_id_and_error_events_keep_stable_string_codes() {
     assert_eq!(value["code"], "UPSTREAM_FAILURE");
     assert_eq!(value["message"], "model request failed");
     assert_eq!(value["node_id"], "answer");
+
+    let branch_event = RunEvent::ok_at(
+        RunEventType::BranchCompleted,
+        6,
+        scope(Some("must_be_ignored")),
+        at(6),
+        json!({
+            "fork_id":"fanout",
+            "branch_id":"source_a",
+            "terminal_node_id":"summarize_a"
+        }),
+    );
+    let value = serde_json::to_value(branch_event).unwrap();
+    assert!(value.get("node_id").is_none());
 }
 
 #[test]
@@ -85,13 +99,17 @@ fn formal_event_type_set_is_exact_and_uses_dotted_names() {
         RunEventType::ContentDelta,
         RunEventType::NodeCompleted,
         RunEventType::NodeFailed,
+        RunEventType::BranchStarted,
+        RunEventType::BranchCompleted,
+        RunEventType::BranchFailed,
         RunEventType::RunCompleted,
         RunEventType::RunFailed,
         RunEventType::RunCancelled,
         RunEventType::RunInterrupted,
     ];
     let serialized = types
-        .into_iter()
+        .iter()
+        .copied()
         .map(|event_type| serde_json::to_value(event_type).unwrap())
         .collect::<Vec<_>>();
 
@@ -104,12 +122,26 @@ fn formal_event_type_set_is_exact_and_uses_dotted_names() {
             json!("content.delta"),
             json!("node.completed"),
             json!("node.failed"),
+            json!("branch.started"),
+            json!("branch.completed"),
+            json!("branch.failed"),
             json!("run.completed"),
             json!("run.failed"),
             json!("run.cancelled"),
             json!("run.interrupted"),
         ]
     );
+    for (event_type, serialized) in types.into_iter().zip(serialized) {
+        assert_eq!(serialized, json!(event_type.as_str()));
+        assert_eq!(
+            RunEventType::parse(serialized.as_str().unwrap()),
+            Some(event_type)
+        );
+        assert_eq!(
+            serde_json::from_value::<RunEventType>(serialized).unwrap(),
+            event_type
+        );
+    }
 }
 
 #[test]

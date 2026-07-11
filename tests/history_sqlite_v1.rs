@@ -96,6 +96,12 @@ async fn sqlite_repository_persists_lifecycle_events_outputs_and_replay() {
         event(RUN_ID, RunEventType::RunCreated, 1, None),
         event(RUN_ID, RunEventType::RunStarted, 2, None),
         event(RUN_ID, RunEventType::NodeStarted, 3, Some("answer")),
+        event(
+            RUN_ID,
+            RunEventType::BranchFailed,
+            4,
+            Some("must_be_ignored"),
+        ),
     ];
     repo.append_events(&events).await.unwrap();
     repo.put_node_output(NodeOutputRecord {
@@ -110,11 +116,13 @@ async fn sqlite_repository_persists_lifecycle_events_outputs_and_replay() {
     let replay = repo.list_events_after(RUN_ID, 1, 100).await.unwrap();
     assert_eq!(
         replay.iter().map(|event| event.seq).collect::<Vec<_>>(),
-        vec![2, 3]
+        vec![2, 3, 4]
     );
     assert_eq!(replay[1].node_id.as_deref(), Some("answer"));
+    assert_eq!(replay[2].event_type, RunEventType::BranchFailed);
+    assert_eq!(replay[2].node_id, None);
 
-    let terminal_event = event(RUN_ID, RunEventType::RunCompleted, 4, None);
+    let terminal_event = event(RUN_ID, RunEventType::RunCompleted, 5, None);
     assert!(repo
         .finish_run(completed_update(RUN_ID), terminal_event)
         .await
@@ -133,7 +141,7 @@ async fn sqlite_repository_persists_lifecycle_events_outputs_and_replay() {
             losing_update,
             RunEvent::error_at(
                 RunEventType::RunCancelled,
-                4,
+                5,
                 scope(RUN_ID, None),
                 at(11),
                 "RUN_CANCELLED",
@@ -159,7 +167,7 @@ async fn sqlite_repository_persists_lifecycle_events_outputs_and_replay() {
             .iter()
             .map(|event| event.seq)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4]
+        vec![1, 2, 3, 4, 5]
     );
 }
 

@@ -18,6 +18,12 @@ pub enum RunEventType {
     NodeCompleted,
     #[serde(rename = "node.failed")]
     NodeFailed,
+    #[serde(rename = "branch.started")]
+    BranchStarted,
+    #[serde(rename = "branch.completed")]
+    BranchCompleted,
+    #[serde(rename = "branch.failed")]
+    BranchFailed,
     #[serde(rename = "run.completed")]
     RunCompleted,
     #[serde(rename = "run.failed")]
@@ -37,6 +43,9 @@ impl RunEventType {
             Self::ContentDelta => "content.delta",
             Self::NodeCompleted => "node.completed",
             Self::NodeFailed => "node.failed",
+            Self::BranchStarted => "branch.started",
+            Self::BranchCompleted => "branch.completed",
+            Self::BranchFailed => "branch.failed",
             Self::RunCompleted => "run.completed",
             Self::RunFailed => "run.failed",
             Self::RunCancelled => "run.cancelled",
@@ -52,6 +61,9 @@ impl RunEventType {
             "content.delta" => Some(Self::ContentDelta),
             "node.completed" => Some(Self::NodeCompleted),
             "node.failed" => Some(Self::NodeFailed),
+            "branch.started" => Some(Self::BranchStarted),
+            "branch.completed" => Some(Self::BranchCompleted),
+            "branch.failed" => Some(Self::BranchFailed),
             "run.completed" => Some(Self::RunCompleted),
             "run.failed" => Some(Self::RunFailed),
             "run.cancelled" => Some(Self::RunCancelled),
@@ -60,15 +72,10 @@ impl RunEventType {
         }
     }
 
-    pub fn is_run_scoped(self) -> bool {
+    pub fn is_node_scoped(self) -> bool {
         matches!(
             self,
-            Self::RunCreated
-                | Self::RunStarted
-                | Self::RunCompleted
-                | Self::RunFailed
-                | Self::RunCancelled
-                | Self::RunInterrupted
+            Self::NodeStarted | Self::ContentDelta | Self::NodeCompleted | Self::NodeFailed
         )
     }
 }
@@ -170,10 +177,10 @@ impl RunEvent {
         message: impl Into<String>,
         data: Value,
     ) -> Self {
-        let node_id = if event_type.is_run_scoped() {
-            None
-        } else {
+        let node_id = if event_type.is_node_scoped() {
             scope.node_id
+        } else {
+            None
         };
         Self {
             schema_version: EVENT_SCHEMA_VERSION,

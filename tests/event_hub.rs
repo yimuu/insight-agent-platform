@@ -243,6 +243,41 @@ async fn publish_allocates_sequence_and_replay_returns_ordered_events() {
 }
 
 #[tokio::test]
+async fn branch_lifecycle_events_use_contiguous_sequences_and_replay_after_a_cursor() {
+    let repository = Arc::new(MemoryRepository::default());
+    let hub = EventHub::new(repository, config(8, 8));
+
+    let mut published = Vec::new();
+    for event_type in [
+        RunEventType::BranchStarted,
+        RunEventType::BranchCompleted,
+        RunEventType::BranchFailed,
+    ] {
+        published.push(
+            hub.publish(scope(Some("must_be_ignored")), event_type, json!({}))
+                .await
+                .unwrap(),
+        );
+    }
+
+    assert_eq!(
+        published.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert!(published.iter().all(|event| event.node_id.is_none()));
+
+    assert_eq!(
+        hub.replay_after(RUN_ID, 1)
+            .await
+            .unwrap()
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+}
+
+#[tokio::test]
 async fn two_subscribers_receive_identical_ordered_events() {
     let hub = EventHub::new(Arc::new(MemoryRepository::default()), config(8, 8));
     let mut first = hub.subscribe(RUN_ID).await;
