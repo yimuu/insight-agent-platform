@@ -37,8 +37,6 @@ use jsonschema::JSONSchema;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-const GRACE: Duration = Duration::from_secs(10);
-
 enum ServiceBehavior {
     Complete,
     Block,
@@ -244,6 +242,7 @@ struct CountingRepository {
     events: Mutex<BTreeMap<String, Vec<RunEvent>>>,
     outputs: Mutex<Vec<NodeOutputRecord>>,
     creates: AtomicUsize,
+    event_history_reads: AtomicUsize,
     fail_appends: AtomicBool,
 }
 
@@ -363,6 +362,7 @@ impl RunRepository for CountingRepository {
         after_seq: u64,
         limit: usize,
     ) -> Result<Vec<RunEvent>, HistoryError> {
+        self.event_history_reads.fetch_add(1, Ordering::SeqCst);
         Ok(self
             .events
             .lock()
@@ -436,6 +436,7 @@ async fn service_with_agents(
         events: Mutex::new(BTreeMap::new()),
         outputs: Mutex::new(Vec::new()),
         creates: AtomicUsize::new(0),
+        event_history_reads: AtomicUsize::new(0),
         fail_appends: AtomicBool::new(false),
     });
     let repository_trait: Arc<dyn RunRepository> = repository.clone();
@@ -462,7 +463,6 @@ async fn service(max_concurrent_runs: usize) -> (RunService, Arc<CountingReposit
         max_parallel_node_executions: 32,
         max_parallel_branches_per_run: 8,
         run_timeout: Duration::from_secs(3600),
-        attached_reconnect_grace: GRACE,
     })
     .await
     .unwrap()
@@ -489,14 +489,12 @@ async fn zero_parallel_capacities_are_rejected() {
             max_parallel_node_executions: 0,
             max_parallel_branches_per_run: 8,
             run_timeout: Duration::from_secs(1),
-            attached_reconnect_grace: Duration::from_secs(1),
         },
         RunServiceConfig {
             max_concurrent_runs: 1,
             max_parallel_node_executions: 32,
             max_parallel_branches_per_run: 0,
             run_timeout: Duration::from_secs(1),
-            attached_reconnect_grace: Duration::from_secs(1),
         },
     ] {
         let error = service_with_config(config).await.err().unwrap();
@@ -505,7 +503,7 @@ async fn zero_parallel_capacities_are_rejected() {
 }
 
 #[tokio::test]
-async fn attached_run_disconnect_uses_reconnect_grace_then_cancels() {
+async fn attached_run_disconnect_cancels_immediately() {
     let (service, _) = service(2).await;
     let attached = service
         .create_attached("blocking", json!({}), RequestMetadata::default())
@@ -513,33 +511,18 @@ async fn attached_run_disconnect_uses_reconnect_grace_then_cancels() {
         .unwrap();
     let run_id = attached.run_id.clone();
     wait_for_status(&service, &run_id, RunStatus::Running).await;
-    tokio::time::pause();
-
     drop(attached.subscription);
-    tokio::time::advance(Duration::ZERO).await;
-    tokio::time::advance(GRACE - Duration::from_millis(1)).await;
-    tokio::task::yield_now().await;
-    assert_eq!(
-        service.get_run(&run_id).await.unwrap().status,
-        RunStatus::Running
-    );
-
-    let reconnected = service.subscribe(&run_id, 0).await.unwrap();
-    tokio::time::advance(GRACE + Duration::from_millis(1)).await;
-    tokio::task::yield_now().await;
-    assert_eq!(
-        service.get_run(&run_id).await.unwrap().status,
-        RunStatus::Running
-    );
-
-    drop(reconnected);
-    tokio::time::advance(Duration::ZERO).await;
-    tokio::time::advance(GRACE + Duration::from_millis(1)).await;
-    wait_for_status(&service, &run_id, RunStatus::Cancelled).await;
+    let cancelled = tokio::time::timeout(
+        Duration::from_secs(1),
+        wait_for_status(&service, &run_id, RunStatus::Cancelled),
+    )
+    .await
+    .expect("Attached cancellation must not wait for a reconnect grace period");
+    assert_eq!(cancelled.status, RunStatus::Cancelled);
 }
 
 #[tokio::test]
-async fn attached_reconnect_grace_globally_stops_and_drains_all_active_branches() {
+async fn attached_disconnect_immediately_stops_and_drains_all_active_branches() {
     let active = Arc::new(AtomicUsize::new(0));
     let started = Arc::new(tokio::sync::Notify::new());
     let stopped = Arc::new(AtomicUsize::new(0));
@@ -554,7 +537,6 @@ async fn attached_reconnect_grace_globally_stops_and_drains_all_active_branches(
             max_parallel_node_executions: 4,
             max_parallel_branches_per_run: 4,
             run_timeout: Duration::from_secs(3600),
-            attached_reconnect_grace: GRACE,
         },
         vec![parallel],
     )
@@ -568,13 +550,13 @@ async fn attached_reconnect_grace_globally_stops_and_drains_all_active_branches(
     while active.load(Ordering::SeqCst) != 2 {
         started.notified().await;
     }
-    tokio::time::pause();
-
     drop(attached.subscription);
-    tokio::time::advance(Duration::ZERO).await;
-    tokio::time::advance(GRACE + Duration::from_millis(1)).await;
-
-    wait_for_status(&service, &run_id, RunStatus::Cancelled).await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        wait_for_status(&service, &run_id, RunStatus::Cancelled),
+    )
+    .await
+    .expect("parallel Attached cancellation must drain promptly");
     assert_eq!(stopped.load(Ordering::SeqCst), 2);
     assert_eq!(active.load(Ordering::SeqCst), 0);
     let events = repository.events.lock().await;
@@ -595,6 +577,47 @@ async fn attached_reconnect_grace_globally_stops_and_drains_all_active_branches(
     assert!(!run_events
         .iter()
         .any(|event| event.node_id.as_deref() == Some("collect")));
+}
+
+#[tokio::test]
+async fn attached_terminal_drop_never_reads_history_or_rewrites_completion() {
+    let (service, repository) = service(2).await;
+    let attached = service
+        .create_attached("fast", json!({}), RequestMetadata::default())
+        .await
+        .unwrap();
+    let run_id = attached.run_id.clone();
+    let mut subscription = attached.subscription;
+
+    loop {
+        let event = subscription.recv().await.unwrap();
+        if matches!(event.event_type, RunEventType::RunCompleted) {
+            break;
+        }
+    }
+    drop(subscription);
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        service.get_run(&run_id).await.unwrap().status,
+        RunStatus::Completed
+    );
+    assert_eq!(repository.event_history_reads.load(Ordering::SeqCst), 0);
+    let events = repository.events.lock().await;
+    let terminal = events[&run_id]
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event_type,
+                RunEventType::RunCompleted
+                    | RunEventType::RunFailed
+                    | RunEventType::RunCancelled
+                    | RunEventType::RunInterrupted
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0].event_type, RunEventType::RunCompleted);
 }
 
 #[tokio::test]

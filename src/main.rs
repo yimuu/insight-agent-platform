@@ -75,7 +75,6 @@ async fn main() -> MainResult<()> {
             max_parallel_node_executions: config.runtime.max_parallel_node_executions,
             max_parallel_branches_per_run: config.runtime.max_parallel_branches_per_run,
             run_timeout: config.runtime.run_timeout,
-            attached_reconnect_grace: config.runtime.attached_reconnect_grace,
         },
     )?;
     let interrupted = service.reconcile_startup().await?;

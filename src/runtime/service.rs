@@ -14,13 +14,13 @@ use serde_json::Value;
 use tokio::{
     sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore},
     task::JoinHandle,
-    time::{sleep, sleep_until, timeout, Instant},
+    time::{sleep, timeout},
 };
 use uuid::Uuid;
 
 use crate::{
     dsl::{compiled::CompiledAgent, CompileError},
-    events::hub::{EventError, EventHub},
+    events::hub::EventHub,
     history::{
         repository::{HistoryError, RunRepository},
         types::{summarize_input, NewRun, RunAttachment, RunRecord},
@@ -73,7 +73,6 @@ pub struct RunServiceConfig {
     pub max_parallel_node_executions: usize,
     pub max_parallel_branches_per_run: usize,
     pub run_timeout: Duration,
-    pub attached_reconnect_grace: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,9 +105,6 @@ impl Error for ServiceError {}
 struct ActiveRun {
     attachment: RunAttachment,
     stop: StopController,
-    state: Arc<RunState>,
-    subscribers: usize,
-    grace_generation: u64,
     task: JoinHandle<()>,
     _permit: OwnedSemaphorePermit,
 }
@@ -166,7 +162,6 @@ impl RunService {
             || config.max_parallel_node_executions == 0
             || config.max_parallel_branches_per_run == 0
             || config.run_timeout.is_zero()
-            || config.attached_reconnect_grace.is_zero()
         {
             return Err(ServiceError::new(
                 "RUN_SERVICE_CONFIG_INVALID",
@@ -209,21 +204,13 @@ impl RunService {
         let run_id = prepared.new_run.run_id.clone();
         let request_id = prepared.new_run.request_id.clone();
         let live = self.inner.events.subscribe(&run_id).await;
-        self.launch(prepared, 1);
         let owner: Arc<dyn LeaseOwner> = self.inner.clone();
-        let lease = Arc::new(SubscriptionLease::new(owner, &run_id, true));
+        let lease = SubscriptionLease::new(owner, &run_id);
+        self.launch(prepared);
         Ok(AttachedRun {
             run_id: run_id.clone(),
             request_id,
-            subscription: RunSubscription::new(
-                run_id,
-                Vec::new(),
-                Some(live),
-                true,
-                false,
-                0,
-                lease,
-            ),
+            subscription: RunSubscription::new(run_id, live, lease),
         })
     }
 
@@ -237,57 +224,8 @@ impl RunService {
             .prepare_run(agent_id, input, request, RunAttachment::Detached)
             .await?;
         let record = self.get_run(&prepared.new_run.run_id).await?;
-        self.launch(prepared, 0);
+        self.launch(prepared);
         Ok(record)
-    }
-
-    pub async fn subscribe(
-        &self,
-        run_id: &str,
-        after_seq: u64,
-    ) -> Result<RunSubscription, ServiceError> {
-        let record = self.get_run(run_id).await?;
-        let terminal = record.status.is_terminal();
-        let counted = {
-            let mut active = lock_active(&self.inner);
-            match active.get_mut(run_id).filter(|_| !terminal) {
-                Some(run) => {
-                    run.subscribers = run.subscribers.saturating_add(1);
-                    run.grace_generation = run.grace_generation.wrapping_add(1);
-                    true
-                }
-                None => false,
-            }
-        };
-        let live = if counted {
-            self.inner.events.subscribe_existing(run_id).await
-        } else {
-            None
-        };
-        let live_counted = counted && live.is_some();
-        if counted && !live_counted {
-            Arc::clone(&self.inner).release_subscription(run_id);
-        }
-        let replay = match self.inner.events.replay_page_after(run_id, after_seq).await {
-            Ok(replay) => replay,
-            Err(error) => {
-                if live_counted {
-                    Arc::clone(&self.inner).release_subscription(run_id);
-                }
-                return Err(service_event_error(error));
-            }
-        };
-        let owner: Arc<dyn LeaseOwner> = self.inner.clone();
-        let lease = Arc::new(SubscriptionLease::new(owner, run_id, live_counted));
-        Ok(RunSubscription::new(
-            run_id,
-            replay.events,
-            live,
-            live_counted && !replay.has_more,
-            replay.has_more,
-            after_seq,
-            lease,
-        ))
     }
 
     pub async fn get_run(&self, run_id: &str) -> Result<RunRecord, ServiceError> {
@@ -441,7 +379,7 @@ impl RunService {
         })
     }
 
-    fn launch(&self, prepared: PreparedRun, subscribers: usize) {
+    fn launch(&self, prepared: PreparedRun) {
         let PreparedRun {
             agent,
             new_run,
@@ -504,9 +442,6 @@ impl RunService {
             ActiveRun {
                 attachment,
                 stop,
-                state,
-                subscribers,
-                grace_generation: 0,
                 task,
                 _permit: permit,
             },
@@ -517,44 +452,15 @@ impl RunService {
 
 impl LeaseOwner for RunServiceInner {
     fn release_subscription(self: Arc<Self>, run_id: &str) {
-        let generation = {
-            let mut active = lock_active(&self);
-            let Some(run) = active.get_mut(run_id) else {
-                return;
-            };
-            run.subscribers = run.subscribers.saturating_sub(1);
-            if run.attachment != RunAttachment::Attached || run.subscribers != 0 {
-                return;
-            }
-            run.grace_generation = run.grace_generation.wrapping_add(1);
-            run.grace_generation
+        let stop = {
+            let active = lock_active(&self);
+            active
+                .get(run_id)
+                .filter(|run| run.attachment == RunAttachment::Attached)
+                .map(|run| run.stop.clone())
         };
-        let grace = self.config.attached_reconnect_grace;
-        let deadline = Instant::now() + grace;
-        let run_id = run_id.to_string();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                sleep_until(deadline).await;
-                let candidate = {
-                    let active = lock_active(&self);
-                    active.get(&run_id).and_then(|run| {
-                        (run.attachment == RunAttachment::Attached
-                            && run.subscribers == 0
-                            && run.grace_generation == generation)
-                            .then(|| (run.stop.clone(), Arc::clone(&run.state)))
-                    })
-                };
-                if let Some((stop, state)) = candidate {
-                    if !state.status().await.is_terminal() {
-                        stop.request(StopReason::Cancelled);
-                    }
-                }
-            });
-        } else {
-            let stop = lock_active(&self).get(&run_id).map(|run| run.stop.clone());
-            if let Some(stop) = stop {
-                stop.request(StopReason::Cancelled);
-            }
+        if let Some(stop) = stop {
+            stop.request(StopReason::Cancelled);
         }
     }
 }
@@ -567,9 +473,5 @@ fn lock_active(inner: &RunServiceInner) -> MutexGuard<'_, BTreeMap<String, Activ
 }
 
 fn service_history_error(error: HistoryError) -> ServiceError {
-    ServiceError::new(error.code(), error.to_string())
-}
-
-fn service_event_error(error: EventError) -> ServiceError {
     ServiceError::new(error.code(), error.to_string())
 }

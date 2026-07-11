@@ -152,7 +152,6 @@ async fn fixture(auth: ApiAuth, capacity: usize) -> (Router, RunService) {
             max_parallel_node_executions: 32,
             max_parallel_branches_per_run: 8,
             run_timeout: Duration::from_secs(30),
-            attached_reconnect_grace: Duration::from_secs(1),
         },
     )
     .unwrap();
