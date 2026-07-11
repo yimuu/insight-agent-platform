@@ -87,7 +87,13 @@ enum SchedulerBehavior {
         executions: Arc<AtomicUsize>,
     },
     Stop {
+        reason: StopReason,
         executions: Arc<AtomicUsize>,
+    },
+    ReturnedStopAfterRuntimeStop {
+        returned: StopReason,
+        executions: Arc<AtomicUsize>,
+        started: Arc<Notify>,
     },
     WaitForever {
         executions: Arc<AtomicUsize>,
@@ -265,9 +271,19 @@ impl NodeExecutor for SchedulerExecutor {
                     "synthetic infrastructure failure",
                 ))
             }
-            SchedulerBehavior::Stop { executions } => {
+            SchedulerBehavior::Stop { reason, executions } => {
                 executions.fetch_add(1, Ordering::SeqCst);
-                Err(RunError::stopped(StopReason::Interrupted))
+                Err(RunError::stopped(*reason))
+            }
+            SchedulerBehavior::ReturnedStopAfterRuntimeStop {
+                returned,
+                executions,
+                started,
+            } => {
+                executions.fetch_add(1, Ordering::SeqCst);
+                started.notify_one();
+                control.stopped().await;
+                Err(RunError::stopped(*returned))
             }
             SchedulerBehavior::WaitForever { executions } => {
                 executions.fetch_add(1, Ordering::SeqCst);
@@ -1548,6 +1564,7 @@ async fn parallel_scheduler_never_captures_stop_as_a_branch_result() {
         &mut agent,
         "search_a",
         SchedulerBehavior::Stop {
+            reason: StopReason::Interrupted,
             executions: Arc::new(AtomicUsize::new(0)),
         },
     );
@@ -1564,6 +1581,93 @@ async fn parallel_scheduler_never_captures_stop_as_a_branch_result() {
     );
     assert!(!repository.events.lock().await.iter().any(|event| {
         event.event_type.as_str() == "branch.failed" && event.data["branch_id"] == "source_a"
+    }));
+}
+
+#[tokio::test]
+async fn unbacked_executor_stop_is_infrastructure_failure() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let agent = scheduler_agent(
+        vec![scheduler_node(
+            "self_stop",
+            None,
+            SchedulerBehavior::Stop {
+                reason: StopReason::Interrupted,
+                executions: Arc::clone(&executions),
+            },
+        )],
+        "self_stop",
+    );
+    let repository = Arc::new(SchedulerRepository::default());
+    let scheduler = scheduler(agent, Arc::clone(&repository));
+    let (_, stop) = stop_pair();
+
+    let error = scheduler
+        .run(context("run_unbacked_stop"), stop)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "INFRASTRUCTURE_FAILURE");
+    assert_eq!(error.kind(), RunErrorKind::Infrastructure);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    let events = repository.events.lock().await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type.as_str(), "node.started");
+}
+
+#[tokio::test]
+async fn unbacked_executor_stop_cancels_parallel_siblings_and_releases_permits() {
+    let mut agent = compile_parallel_agent(two_branch_yaml());
+    let stopper_runs = Arc::new(AtomicUsize::new(0));
+    let blocked_runs = Arc::new(AtomicUsize::new(0));
+    let successors = Arc::new(AtomicUsize::new(0));
+    replace_behavior(
+        &mut agent,
+        "search_a",
+        SchedulerBehavior::Stop {
+            reason: StopReason::Interrupted,
+            executions: Arc::clone(&stopper_runs),
+        },
+    );
+    replace_behavior(
+        &mut agent,
+        "search_b",
+        SchedulerBehavior::WaitForever {
+            executions: Arc::clone(&blocked_runs),
+        },
+    );
+    for node_id in ["summarize_a", "summarize_b", "collect", "result"] {
+        replace_behavior(
+            &mut agent,
+            node_id,
+            SchedulerBehavior::Next {
+                output: json!({}),
+                require_output: None,
+                executions: Arc::clone(&successors),
+            },
+        );
+    }
+    let repository = Arc::new(SchedulerRepository::default());
+    let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 2);
+    let (_, stop) = stop_pair();
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        scheduler.run(context("run_unbacked_parallel_stop"), stop),
+    )
+    .await
+    .expect("unbacked stopped return must cancel sibling wrappers")
+    .unwrap_err();
+
+    assert_eq!(error.code(), "INFRASTRUCTURE_FAILURE");
+    assert_eq!(stopper_runs.load(Ordering::SeqCst), 1);
+    assert_eq!(blocked_runs.load(Ordering::SeqCst), 1);
+    assert_eq!(successors.load(Ordering::SeqCst), 0);
+    assert!(!repository.events.lock().await.iter().any(|event| {
+        matches!(
+            event.event_type.as_str(),
+            "node.failed" | "branch.completed" | "branch.failed"
+        )
     }));
 }
 
