@@ -823,6 +823,14 @@ async fn authoritative_recovery_terminal_with_mismatched_history_closes_without_
             .code(),
         "JOURNAL_OPERATION_TIMEOUT"
     );
+    let replayed_created = RunEvent::error(
+        RunEventType::RunCreated,
+        1,
+        scope(None),
+        "OK",
+        "ok",
+        json!({}),
+    );
     let wrong_terminal = RunEvent::error(
         RunEventType::RunCancelled,
         2,
@@ -831,7 +839,9 @@ async fn authoritative_recovery_terminal_with_mismatched_history_closes_without_
         "run cancelled by explicit request",
         json!({}),
     );
-    repository.set_override_list(vec![wrong_terminal]).await;
+    repository
+        .set_override_list(vec![replayed_created, wrong_terminal])
+        .await;
 
     let error = hub
         .recover_terminal(

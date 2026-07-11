@@ -2,7 +2,7 @@ use std::{collections::HashMap, error::Error, fmt, sync::Arc, time::Duration};
 
 use serde_json::Value;
 use tokio::{
-    sync::{broadcast, Mutex},
+    sync::{broadcast, watch, Mutex},
     time::timeout,
 };
 
@@ -87,12 +87,48 @@ struct EventRunState {
     live: broadcast::Sender<RunEvent>,
 }
 
+#[derive(Clone)]
+struct RecoveryRequest {
+    scope: RunEventScope,
+    event_type: RunEventType,
+    update: TerminalUpdate,
+    code: String,
+    message: String,
+    data: Value,
+}
+
+impl RecoveryRequest {
+    fn run_id(&self) -> &str {
+        &self.scope.run_id
+    }
+
+    fn terminal_event(&self, seq: u64) -> RunEvent {
+        RunEvent::error(
+            self.event_type,
+            seq,
+            self.scope.clone(),
+            self.code.clone(),
+            self.message.clone(),
+            self.data.clone(),
+        )
+    }
+}
+
 struct EventHubInner {
     repository: Arc<dyn RunRepository>,
     journal: EventJournal,
     states: Mutex<HashMap<String, Arc<Mutex<EventRunState>>>>,
+    recoveries: Mutex<HashMap<String, ()>>,
+    recovery_changed: watch::Sender<u64>,
     subscriber_capacity: usize,
     operation_timeout: Duration,
+}
+
+impl EventHubInner {
+    fn notify_recovery_changed(&self) {
+        self.recovery_changed
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
 }
 
 #[derive(Clone)]
@@ -108,11 +144,14 @@ impl EventHub {
             config.journal_batch_size,
             config.operation_timeout,
         );
+        let (recovery_changed, _) = watch::channel(0);
         Self {
             inner: Arc::new(EventHubInner {
                 repository,
                 journal,
                 states: Mutex::new(HashMap::new()),
+                recoveries: Mutex::new(HashMap::new()),
+                recovery_changed,
                 subscriber_capacity: config.subscriber_capacity.max(1),
                 operation_timeout: config.operation_timeout,
             }),
@@ -189,7 +228,7 @@ impl EventHub {
             {
                 commit_live_event(&mut state, existing);
                 drop(state);
-                self.remove_run_state(&run_id, &state_handle).await;
+                self.isolate_run_state(&run_id, &state_handle).await;
                 return Ok(None);
             }
             return Err(EventError::History(HistoryError::new(
@@ -199,7 +238,7 @@ impl EventHub {
         }
         commit_live_event(&mut state, event.clone());
         drop(state);
-        self.remove_run_state(&run_id, &state_handle).await;
+        self.isolate_run_state(&run_id, &state_handle).await;
         Ok(Some(event))
     }
 
@@ -240,17 +279,15 @@ impl EventHub {
 
         self.inner.journal.close_and_wait().await?;
 
-        let run_id = scope.run_id.clone();
-        let state_handle = self.run_state(&run_id).await;
-        let mut state = state_handle.lock().await;
-        ensure_sequence_available(&state)?;
-        let event = RunEvent::error(event_type, state.next_seq, scope, code, message, data);
-        let authoritative = self.inner.repository.recover_run(update, event).await?;
-        self.reconcile_durable_through(&run_id, &mut state, &authoritative)
-            .await?;
-        drop(state);
-        self.remove_run_state(&run_id, &state_handle).await;
-        Ok((authoritative.event_type == event_type).then_some(authoritative))
+        let request = RecoveryRequest {
+            scope,
+            event_type,
+            update,
+            code,
+            message,
+            data,
+        };
+        self.recover_terminal_direct(request).await
     }
 
     pub async fn subscribe(&self, run_id: &str) -> EventSubscription {
@@ -271,6 +308,28 @@ impl EventHub {
         self.inner.states.lock().await.len()
     }
 
+    pub async fn retained_recovery_count(&self) -> usize {
+        self.inner.recoveries.lock().await.len()
+    }
+
+    pub async fn wait_for_recoveries(&self, deadline: Duration) -> Result<(), EventError> {
+        let mut changed = self.inner.recovery_changed.subscribe();
+        let wait = async {
+            loop {
+                if self.inner.recoveries.lock().await.is_empty() {
+                    return Ok(());
+                }
+                changed
+                    .changed()
+                    .await
+                    .map_err(|_| EventError::JournalClosed)?;
+            }
+        };
+        timeout(deadline, wait)
+            .await
+            .map_err(|_| EventError::JournalOperationTimeout)?
+    }
+
     pub fn is_healthy(&self) -> bool {
         self.inner.journal.is_healthy()
     }
@@ -283,13 +342,102 @@ impl EventHub {
         }))
     }
 
-    async fn remove_run_state(&self, run_id: &str, expected: &Arc<Mutex<EventRunState>>) {
+    async fn isolate_run_state(&self, run_id: &str, expected: &Arc<Mutex<EventRunState>>) {
         let mut states = self.inner.states.lock().await;
         if states
             .get(run_id)
             .is_some_and(|current| Arc::ptr_eq(current, expected))
         {
             states.remove(run_id);
+        }
+    }
+
+    async fn start_recovery_owner(&self, request: RecoveryRequest) {
+        let run_id = request.run_id().to_string();
+        {
+            let mut recoveries = self.inner.recoveries.lock().await;
+            if recoveries.contains_key(&run_id) {
+                return;
+            }
+            recoveries.insert(run_id.clone(), ());
+        }
+        self.inner.notify_recovery_changed();
+
+        let hub = self.clone();
+        tokio::spawn(async move {
+            hub.run_recovery_owner(run_id, request).await;
+        });
+    }
+
+    async fn run_recovery_owner(&self, run_id: String, request: RecoveryRequest) {
+        let terminal = request.terminal_event(1);
+        if let Err(error) = self
+            .inner
+            .repository
+            .recover_run(request.update.clone(), terminal)
+            .await
+        {
+            tracing::error!(
+                run_id,
+                code = error.code(),
+                "background terminal recovery failed"
+            );
+        }
+        self.finish_recovery_owner(&run_id).await;
+    }
+
+    async fn finish_recovery_owner(&self, run_id: &str) {
+        self.inner.recoveries.lock().await.remove(run_id);
+        self.inner.notify_recovery_changed();
+    }
+
+    async fn recover_terminal_direct(
+        &self,
+        request: RecoveryRequest,
+    ) -> Result<Option<RunEvent>, EventError> {
+        let run_id = request.run_id().to_string();
+        let state_handle = self.run_state(&run_id).await;
+        let mut state = state_handle.lock().await;
+        ensure_sequence_available(&state)?;
+        let event = request.terminal_event(state.next_seq);
+        let recovered = timeout(
+            self.inner.operation_timeout,
+            self.inner
+                .repository
+                .recover_run(request.update.clone(), event),
+        )
+        .await;
+
+        let authoritative = match recovered {
+            Ok(Ok(authoritative)) => authoritative,
+            Ok(Err(error)) => {
+                drop(state);
+                self.isolate_run_state(&run_id, &state_handle).await;
+                self.start_recovery_owner(request).await;
+                return Err(EventError::History(error));
+            }
+            Err(_) => {
+                drop(state);
+                self.isolate_run_state(&run_id, &state_handle).await;
+                self.start_recovery_owner(request).await;
+                return Err(EventError::JournalOperationTimeout);
+            }
+        };
+
+        let reconcile = self
+            .reconcile_durable_through(&run_id, &mut state, &authoritative)
+            .await;
+        match reconcile {
+            Ok(()) => {
+                drop(state);
+                self.isolate_run_state(&run_id, &state_handle).await;
+                Ok((authoritative.event_type == request.event_type).then_some(authoritative))
+            }
+            Err(error) => {
+                drop(state);
+                self.isolate_run_state(&run_id, &state_handle).await;
+                Err(error)
+            }
         }
     }
 
