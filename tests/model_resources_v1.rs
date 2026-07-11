@@ -1,7 +1,7 @@
 use std::fs;
 
 use insight_agent_platform::resources::{
-    config::load_model_registry_with_env, models::ModelCapability,
+    config::load_model_registry_with_env, models::ModelCapability, openai_chat::OpenAiChatLimits,
 };
 use tempfile::tempdir;
 
@@ -39,6 +39,50 @@ fn strict_model_resources_resolve_alias_capability_and_redacted_secret() {
 
     assert!(model.capabilities().contains(&ModelCapability::Vision));
     assert!(!format!("{model:?}").contains("never-log-this-key"));
+}
+
+#[test]
+fn model_resources_default_and_override_response_limits() {
+    let defaults = OpenAiChatLimits::default();
+    let (_directory, path) = write_config(&model_yaml(""));
+    let default_registry = load_model_registry_with_env(&path, |name| {
+        (name == "MODEL_API_KEY").then(|| "never-log-this-key".to_string())
+    })
+    .unwrap();
+    let default_model = default_registry.resolve("primary").unwrap();
+    assert_eq!(
+        default_model.max_accumulated_text_bytes(),
+        defaults.max_accumulated_text_bytes
+    );
+
+    let (_directory, path) = write_config(&model_yaml(
+        "    limits:\n      max_accumulated_text_bytes: 7\n",
+    ));
+    let overridden = load_model_registry_with_env(&path, |name| {
+        (name == "MODEL_API_KEY").then(|| "never-log-this-key".to_string())
+    })
+    .unwrap();
+    let model = overridden.resolve("primary").unwrap();
+    assert_eq!(model.max_accumulated_text_bytes(), 7);
+}
+
+#[test]
+fn model_resources_reject_zero_response_limits() {
+    for field in [
+        "max_upstream_bytes",
+        "max_buffered_line_bytes",
+        "max_event_payload_bytes",
+        "max_chunk_text_bytes",
+        "max_usage_json_bytes",
+        "max_accumulated_text_bytes",
+    ] {
+        let yaml = model_yaml(&format!("    limits:\n      {field}: 0\n"));
+        let (_directory, path) = write_config(&yaml);
+        let error = load_model_registry_with_env(&path, |_| Some("secret".to_string()))
+            .err()
+            .expect("zero limit must fail model configuration");
+        assert_eq!(error.code(), "MODEL_CONFIG_INVALID", "{field}: {error}");
+    }
 }
 
 #[test]

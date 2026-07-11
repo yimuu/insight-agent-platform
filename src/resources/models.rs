@@ -96,10 +96,25 @@ pub struct ChatChunk {
 
 pub type ChatStream = Pin<Box<dyn Stream<Item = Result<ChatChunk, RunError>> + Send>>;
 
+pub const DEFAULT_MAX_ACCUMULATED_TEXT_BYTES: usize = 1024 * 1024;
+pub const MODEL_RESPONSE_TOO_LARGE_CODE: &str = "MODEL_RESPONSE_TOO_LARGE";
+pub const MODEL_RESPONSE_TOO_LARGE_MESSAGE: &str =
+    "chat provider response exceeded the configured size limit";
+
+pub fn model_response_too_large() -> RunError {
+    RunError::new(
+        MODEL_RESPONSE_TOO_LARGE_CODE,
+        MODEL_RESPONSE_TOO_LARGE_MESSAGE,
+    )
+}
+
 #[async_trait]
 pub trait ChatModel: Send + Sync + fmt::Debug {
     fn capabilities(&self) -> BTreeSet<ModelCapability>;
     fn validate_parameters(&self, parameters: &Value) -> Result<(), CompileError>;
+    fn max_accumulated_text_bytes(&self) -> usize {
+        DEFAULT_MAX_ACCUMULATED_TEXT_BYTES
+    }
     async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, RunError>;
 }
 

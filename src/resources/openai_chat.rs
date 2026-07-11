@@ -10,7 +10,60 @@ use serde_json::{json, Map, Value};
 
 use crate::{dsl::CompileError, runtime::RunError};
 
-use super::models::{ChatChunk, ChatMessage, ChatModel, ChatRequest, ChatStream, ModelCapability};
+use super::models::{
+    ChatChunk, ChatMessage, ChatModel, ChatRequest, ChatStream, ModelCapability,
+    DEFAULT_MAX_ACCUMULATED_TEXT_BYTES,
+};
+
+pub const DEFAULT_MAX_UPSTREAM_BYTES: usize = 8 * 1024 * 1024;
+pub const DEFAULT_MAX_BUFFERED_LINE_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_MAX_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_MAX_CHUNK_TEXT_BYTES: usize = 256 * 1024;
+pub const DEFAULT_MAX_USAGE_JSON_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenAiChatLimits {
+    pub max_upstream_bytes: usize,
+    pub max_buffered_line_bytes: usize,
+    pub max_event_payload_bytes: usize,
+    pub max_chunk_text_bytes: usize,
+    pub max_usage_json_bytes: usize,
+    pub max_accumulated_text_bytes: usize,
+}
+
+impl Default for OpenAiChatLimits {
+    fn default() -> Self {
+        Self {
+            max_upstream_bytes: DEFAULT_MAX_UPSTREAM_BYTES,
+            max_buffered_line_bytes: DEFAULT_MAX_BUFFERED_LINE_BYTES,
+            max_event_payload_bytes: DEFAULT_MAX_EVENT_PAYLOAD_BYTES,
+            max_chunk_text_bytes: DEFAULT_MAX_CHUNK_TEXT_BYTES,
+            max_usage_json_bytes: DEFAULT_MAX_USAGE_JSON_BYTES,
+            max_accumulated_text_bytes: DEFAULT_MAX_ACCUMULATED_TEXT_BYTES,
+        }
+    }
+}
+
+impl OpenAiChatLimits {
+    pub fn validate(self) -> Result<Self, CompileError> {
+        if [
+            self.max_upstream_bytes,
+            self.max_buffered_line_bytes,
+            self.max_event_payload_bytes,
+            self.max_chunk_text_bytes,
+            self.max_usage_json_bytes,
+            self.max_accumulated_text_bytes,
+        ]
+        .contains(&0)
+        {
+            return Err(CompileError::new(
+                "MODEL_CONFIG_INVALID",
+                "OpenAI response limits must be greater than zero",
+            ));
+        }
+        Ok(self)
+    }
+}
 
 #[derive(Clone)]
 pub struct OpenAiChatModel {
@@ -20,6 +73,7 @@ pub struct OpenAiChatModel {
     model: String,
     capabilities: BTreeSet<ModelCapability>,
     parameter_validator: std::sync::Arc<JSONSchema>,
+    limits: OpenAiChatLimits,
 }
 
 impl OpenAiChatModel {
@@ -31,12 +85,33 @@ impl OpenAiChatModel {
         connect_timeout: Duration,
         request_timeout: Duration,
     ) -> Result<Self, CompileError> {
+        Self::new_with_limits(
+            api_key,
+            base_url,
+            model,
+            capabilities,
+            connect_timeout,
+            request_timeout,
+            OpenAiChatLimits::default(),
+        )
+    }
+
+    pub fn new_with_limits(
+        api_key: Option<String>,
+        base_url: String,
+        model: String,
+        capabilities: BTreeSet<ModelCapability>,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+        limits: OpenAiChatLimits,
+    ) -> Result<Self, CompileError> {
         if model.trim().is_empty() || connect_timeout.is_zero() || request_timeout.is_zero() {
             return Err(CompileError::new(
                 "MODEL_CONFIG_INVALID",
                 "OpenAI model and timeouts must be non-empty",
             ));
         }
+        let limits = limits.validate()?;
         let mut endpoint = Url::parse(&base_url)
             .map_err(|_| CompileError::new("MODEL_CONFIG_INVALID", "OpenAI base URL is invalid"))?;
         if !matches!(endpoint.scheme(), "http" | "https") || endpoint.host_str().is_none() {
@@ -70,6 +145,7 @@ impl OpenAiChatModel {
             model,
             capabilities,
             parameter_validator: std::sync::Arc::new(parameter_validator),
+            limits,
         })
     }
 }
@@ -102,6 +178,10 @@ impl ChatModel for OpenAiChatModel {
                 "OpenAI parameters do not match the allowed schema",
             ))
         }
+    }
+
+    fn max_accumulated_text_bytes(&self) -> usize {
+        self.limits.max_accumulated_text_bytes
     }
 
     async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, RunError> {

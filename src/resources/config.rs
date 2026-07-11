@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use super::{
     models::{ModelCapability, ModelRegistry},
-    openai_chat::OpenAiChatModel,
+    openai_chat::{OpenAiChatLimits, OpenAiChatModel},
 };
 
 pub fn load_model_registry(path: &Path) -> Result<ModelRegistry, ResourceConfigError> {
@@ -58,6 +58,7 @@ pub fn load_model_registry_with_env(
                 capabilities,
                 connect_timeout,
                 request_timeout,
+                limits,
             } => {
                 let api_key = api_key_env
                     .map(|name| required_secret(&name, &get_env))
@@ -68,13 +69,15 @@ pub fn load_model_registry_with_env(
                         CapabilityYaml::Vision => ModelCapability::Vision,
                     })
                     .collect::<BTreeSet<_>>();
-                let model = OpenAiChatModel::new(
+                let limits = limits.unwrap_or_default().resolve()?;
+                let model = OpenAiChatModel::new_with_limits(
                     api_key,
                     base_url,
                     model,
                     capabilities,
                     positive_duration(&connect_timeout, "connect_timeout")?,
                     positive_duration(&request_timeout, "request_timeout")?,
+                    limits,
                 )
                 .map_err(|error| {
                     ResourceConfigError::new(error.code(), format!("model '{alias}': {error}"))
@@ -106,7 +109,47 @@ enum ModelYaml {
         capabilities: BTreeSet<CapabilityYaml>,
         connect_timeout: String,
         request_timeout: String,
+        limits: Option<OpenAiChatLimitsYaml>,
     },
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenAiChatLimitsYaml {
+    max_upstream_bytes: Option<usize>,
+    max_buffered_line_bytes: Option<usize>,
+    max_event_payload_bytes: Option<usize>,
+    max_chunk_text_bytes: Option<usize>,
+    max_usage_json_bytes: Option<usize>,
+    max_accumulated_text_bytes: Option<usize>,
+}
+
+impl OpenAiChatLimitsYaml {
+    fn resolve(self) -> Result<OpenAiChatLimits, ResourceConfigError> {
+        let defaults = OpenAiChatLimits::default();
+        OpenAiChatLimits {
+            max_upstream_bytes: self
+                .max_upstream_bytes
+                .unwrap_or(defaults.max_upstream_bytes),
+            max_buffered_line_bytes: self
+                .max_buffered_line_bytes
+                .unwrap_or(defaults.max_buffered_line_bytes),
+            max_event_payload_bytes: self
+                .max_event_payload_bytes
+                .unwrap_or(defaults.max_event_payload_bytes),
+            max_chunk_text_bytes: self
+                .max_chunk_text_bytes
+                .unwrap_or(defaults.max_chunk_text_bytes),
+            max_usage_json_bytes: self
+                .max_usage_json_bytes
+                .unwrap_or(defaults.max_usage_json_bytes),
+            max_accumulated_text_bytes: self
+                .max_accumulated_text_bytes
+                .unwrap_or(defaults.max_accumulated_text_bytes),
+        }
+        .validate()
+        .map_err(|error| ResourceConfigError::new(error.code(), error.to_string()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
