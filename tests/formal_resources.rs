@@ -11,9 +11,9 @@ use insight_agent_platform::{
             ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest, ChatRole, ImageUrl,
             ModelCapability,
         },
-        openai_chat::OpenAiChatModel,
+        openai_chat::{OpenAiChatLimits, OpenAiChatModel},
     },
-    runtime::{stop_pair, ExecutionControl},
+    runtime::{stop_pair, ExecutionControl, RunError},
 };
 use serde_json::{json, Value};
 use tokio::{
@@ -41,6 +41,54 @@ fn model(base_url: String, api_key: Option<String>) -> OpenAiChatModel {
         Duration::from_secs(2),
     )
     .unwrap()
+}
+
+fn model_with_limits(
+    base_url: String,
+    api_key: Option<String>,
+    limits: OpenAiChatLimits,
+) -> OpenAiChatModel {
+    OpenAiChatModel::new_with_limits(
+        api_key,
+        base_url,
+        "fallback-model".to_string(),
+        BTreeSet::from([ModelCapability::Vision]),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        limits,
+    )
+    .unwrap()
+}
+
+fn default_chat_request() -> ChatRequest {
+    ChatRequest {
+        messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
+        parameters: json!({}),
+    }
+}
+
+async fn next_stream_error(model: OpenAiChatModel) -> RunError {
+    let mut stream = model.stream_chat(default_chat_request()).await.unwrap();
+    stream
+        .next()
+        .await
+        .expect("stream should yield an error")
+        .expect_err("limit violation must be an error")
+}
+
+fn assert_too_large(error: &RunError, forbidden: &[&str]) {
+    assert_eq!(error.code(), "MODEL_RESPONSE_TOO_LARGE");
+    assert_eq!(
+        error.message(),
+        "chat provider response exceeded the configured size limit"
+    );
+    let rendered = format!("{error:?} {error}");
+    for value in forbidden {
+        assert!(
+            !rendered.contains(value),
+            "limit error leaked forbidden value {value}: {rendered}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -106,6 +154,203 @@ async fn openai_adapter_serializes_formal_messages_and_allowed_parameters() {
     assert_eq!(second.finish_reason.as_deref(), Some("stop"));
     assert_eq!(second.usage, Some(json!({"completion_tokens":1})));
     assert!(stream.next().await.is_none());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_stream_accepts_exact_configured_response_limits() {
+    let payload =
+        r#"{"choices":[{"delta":{"content":"abc"},"finish_reason":"stop"}],"usage":{"u":"xy"}}"#;
+    let data_line = format!("data: {payload}\n");
+    let done_line = "data: [DONE]\n";
+    let body = format!("{data_line}\n{done_line}\n");
+    let usage = json!({"u":"xy"});
+    let mut limits = OpenAiChatLimits::default();
+    limits.max_upstream_bytes = body.as_bytes().len();
+    limits.max_buffered_line_bytes = data_line.trim_end_matches('\n').as_bytes().len();
+    limits.max_event_payload_bytes = payload.as_bytes().len();
+    limits.max_chunk_text_bytes = "abc".len();
+    limits.max_usage_json_bytes = serde_json::to_vec(&usage).unwrap().len();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_json(&mut socket).await;
+        write_sse_headers(&mut socket).await;
+        socket.write_all(body.as_bytes()).await.unwrap();
+    });
+
+    let model = model_with_limits(format!("http://{address}"), None, limits);
+    let mut stream = model.stream_chat(default_chat_request()).await.unwrap();
+    let chunk = stream.next().await.unwrap().unwrap();
+    assert_eq!(chunk.text, "abc");
+    assert_eq!(chunk.finish_reason.as_deref(), Some("stop"));
+    assert_eq!(chunk.usage, Some(usage));
+    assert!(stream.next().await.is_none());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_stream_rejects_total_upstream_bytes_without_echoing_body() {
+    let body_secret = "upstream-body-secret";
+    let body = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{body_secret}\"}},\"finish_reason\":null}}]}}\n\n"
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let response_body = body.clone();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_json(&mut socket).await;
+        write_sse_headers(&mut socket).await;
+        socket.write_all(response_body.as_bytes()).await.unwrap();
+    });
+    let mut limits = OpenAiChatLimits::default();
+    limits.max_upstream_bytes = body.as_bytes().len() - 1;
+
+    let model = model_with_limits(
+        format!("http://{address}/v1?token=url-secret"),
+        Some("api-key-secret".to_string()),
+        limits,
+    );
+    let error = next_stream_error(model).await;
+
+    assert_too_large(&error, &[body_secret, "url-secret", "api-key-secret"]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_stream_rejects_no_lf_buffer_growth() {
+    let line_secret = "line-buffer-secret";
+    let body = format!("data: {line_secret}");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let response_body = body.clone();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_json(&mut socket).await;
+        write_sse_headers(&mut socket).await;
+        socket.write_all(response_body.as_bytes()).await.unwrap();
+    });
+    let mut limits = OpenAiChatLimits::default();
+    limits.max_buffered_line_bytes = body.as_bytes().len() - 1;
+
+    let model = model_with_limits(format!("http://{address}"), None, limits);
+    let error = next_stream_error(model).await;
+
+    assert_too_large(&error, &[line_secret]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_stream_rejects_oversized_event_payload_without_parsing_secret() {
+    let payload_secret = "event-payload-secret";
+    let payload = format!(
+        "{{\"choices\":[{{\"delta\":{{\"content\":\"{payload_secret}\"}},\"finish_reason\":null}}]}}"
+    );
+    let body = format!("data: {payload}\n\n");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let response_body = body.clone();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_json(&mut socket).await;
+        write_sse_headers(&mut socket).await;
+        socket.write_all(response_body.as_bytes()).await.unwrap();
+    });
+    let mut limits = OpenAiChatLimits::default();
+    limits.max_event_payload_bytes = payload.as_bytes().len() - 1;
+
+    let model = model_with_limits(format!("http://{address}"), None, limits);
+    let error = next_stream_error(model).await;
+
+    assert_too_large(&error, &[payload_secret]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_stream_rejects_oversized_chunk_text_without_echoing_text() {
+    let text_secret = "chunk-text-secret";
+    let body = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{text_secret}\"}},\"finish_reason\":null}}]}}\n\n"
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let response_body = body.clone();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_json(&mut socket).await;
+        write_sse_headers(&mut socket).await;
+        socket.write_all(response_body.as_bytes()).await.unwrap();
+    });
+    let mut limits = OpenAiChatLimits::default();
+    limits.max_chunk_text_bytes = text_secret.len() - 1;
+
+    let model = model_with_limits(format!("http://{address}"), None, limits);
+    let error = next_stream_error(model).await;
+
+    assert_too_large(&error, &[text_secret]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_stream_rejects_oversized_usage_json_without_echoing_usage() {
+    let usage_secret = "usage-json-secret";
+    let usage = json!({"detail": usage_secret});
+    let body = format!(
+        "data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{usage}}}\n\n"
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let response_body = body.clone();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_json(&mut socket).await;
+        write_sse_headers(&mut socket).await;
+        socket.write_all(response_body.as_bytes()).await.unwrap();
+    });
+    let mut limits = OpenAiChatLimits::default();
+    limits.max_usage_json_bytes = serde_json::to_vec(&usage).unwrap().len() - 1;
+
+    let model = model_with_limits(format!("http://{address}"), None, limits);
+    let error = next_stream_error(model).await;
+
+    assert_too_large(&error, &[usage_secret]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_limit_error_drops_the_in_flight_http_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let closed = Arc::new(Notify::new());
+    let server_closed = Arc::clone(&closed);
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_json(&mut socket).await;
+        write_sse_headers(&mut socket).await;
+        socket
+            .write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"too-large\"},\"finish_reason\":null}]}\n\n")
+            .await
+            .unwrap();
+        let mut byte = [0_u8; 1];
+        if socket.read(&mut byte).await.unwrap_or(0) == 0 {
+            server_closed.notify_one();
+        }
+    });
+    let mut limits = OpenAiChatLimits::default();
+    limits.max_chunk_text_bytes = "too-large".len() - 1;
+    let model = model_with_limits(format!("http://{address}"), None, limits);
+    let mut stream = model.stream_chat(default_chat_request()).await.unwrap();
+    let error = stream.next().await.unwrap().unwrap_err();
+    assert_too_large(&error, &["too-large"]);
+
+    drop(stream);
+
+    tokio::time::timeout(Duration::from_secs(1), closed.notified())
+        .await
+        .unwrap();
     server.await.unwrap();
 }
 

@@ -11,8 +11,8 @@ use serde_json::{json, Map, Value};
 use crate::{dsl::CompileError, runtime::RunError};
 
 use super::models::{
-    ChatChunk, ChatMessage, ChatModel, ChatRequest, ChatStream, ModelCapability,
-    DEFAULT_MAX_ACCUMULATED_TEXT_BYTES,
+    model_response_too_large, ChatChunk, ChatMessage, ChatModel, ChatRequest, ChatStream,
+    ModelCapability, DEFAULT_MAX_ACCUMULATED_TEXT_BYTES,
 };
 
 pub const DEFAULT_MAX_UPSTREAM_BYTES: usize = 8 * 1024 * 1024;
@@ -232,12 +232,20 @@ impl ChatModel for OpenAiChatModel {
                 format!("chat provider returned HTTP {}", status.as_u16()),
             ));
         }
+        if response
+            .content_length()
+            .is_some_and(|length| length > self.limits.max_upstream_bytes as u64)
+        {
+            return Err(model_response_too_large());
+        }
 
         let stream = stream::try_unfold(
             StreamState {
                 bytes: Box::pin(response.bytes_stream()),
-                decoder: SseDecoder::default(),
+                decoder: SseDecoder::new(self.limits),
                 pending: VecDeque::new(),
+                upstream_bytes: 0,
+                limits: self.limits,
             },
             |mut state| async move {
                 loop {
@@ -246,6 +254,12 @@ impl ChatModel for OpenAiChatModel {
                     }
                     match state.bytes.next().await {
                         Some(Ok(bytes)) => {
+                            if state.upstream_bytes.saturating_add(bytes.len())
+                                > state.limits.max_upstream_bytes
+                            {
+                                return Err(model_response_too_large());
+                            }
+                            state.upstream_bytes += bytes.len();
                             state.pending.extend(state.decoder.push(&bytes)?);
                         }
                         Some(Err(error)) => {
@@ -285,24 +299,49 @@ struct StreamState {
     bytes: std::pin::Pin<Box<dyn futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     decoder: SseDecoder,
     pending: VecDeque<ChatChunk>,
+    upstream_bytes: usize,
+    limits: OpenAiChatLimits,
 }
 
-#[derive(Default)]
 struct SseDecoder {
     buffer: Vec<u8>,
+    limits: OpenAiChatLimits,
 }
 
 impl SseDecoder {
+    fn new(limits: OpenAiChatLimits) -> Self {
+        Self {
+            buffer: Vec::new(),
+            limits,
+        }
+    }
+
     fn push(&mut self, bytes: &[u8]) -> Result<Vec<ChatChunk>, RunError> {
-        self.buffer.extend_from_slice(bytes);
-        self.drain_complete_lines()
+        let mut chunks = Vec::new();
+        for segment in bytes.split_inclusive(|byte| *byte == b'\n') {
+            let includes_lf = segment.last() == Some(&b'\n');
+            let projected_line_len = self
+                .buffer
+                .len()
+                .saturating_add(segment.len())
+                .saturating_sub(usize::from(includes_lf));
+            if projected_line_len > self.limits.max_buffered_line_bytes {
+                return Err(model_response_too_large());
+            }
+            self.buffer.extend_from_slice(segment);
+            chunks.extend(self.drain_complete_lines()?);
+        }
+        Ok(chunks)
     }
 
     fn finish(&mut self) -> Result<Vec<ChatChunk>, RunError> {
         let mut chunks = self.drain_complete_lines()?;
         if !self.buffer.is_empty() {
+            if self.buffer.len() > self.limits.max_buffered_line_bytes {
+                return Err(model_response_too_large());
+            }
             let line = std::mem::take(&mut self.buffer);
-            chunks.extend(parse_sse_line(trim_carriage_return(&line))?);
+            chunks.extend(parse_sse_line(trim_carriage_return(&line), self.limits)?);
         }
         Ok(chunks)
     }
@@ -310,9 +349,12 @@ impl SseDecoder {
     fn drain_complete_lines(&mut self) -> Result<Vec<ChatChunk>, RunError> {
         let mut chunks = Vec::new();
         while let Some(index) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            if index > self.limits.max_buffered_line_bytes {
+                return Err(model_response_too_large());
+            }
             let mut line = self.buffer.drain(..=index).collect::<Vec<_>>();
             line.pop();
-            chunks.extend(parse_sse_line(trim_carriage_return(&line))?);
+            chunks.extend(parse_sse_line(trim_carriage_return(&line), self.limits)?);
         }
         Ok(chunks)
     }
@@ -322,19 +364,22 @@ fn trim_carriage_return(line: &[u8]) -> &[u8] {
     line.strip_suffix(b"\r").unwrap_or(line)
 }
 
-fn parse_sse_line(line: &[u8]) -> Result<Vec<ChatChunk>, RunError> {
+fn parse_sse_line(line: &[u8], limits: OpenAiChatLimits) -> Result<Vec<ChatChunk>, RunError> {
     if line.is_empty() {
         return Ok(Vec::new());
     }
-    let line = std::str::from_utf8(line)
-        .map_err(|_| RunError::new("UPSTREAM_STREAM_INVALID", "invalid UTF-8 in chat stream"))?;
-    let Some(payload) = line.strip_prefix("data:") else {
+    let Some(payload) = line.strip_prefix(b"data:") else {
         return Ok(Vec::new());
     };
-    let payload = payload.trim_start();
-    if payload == "[DONE]" {
+    let payload = trim_ascii_space(payload);
+    if payload.len() > limits.max_event_payload_bytes {
+        return Err(model_response_too_large());
+    }
+    if payload == b"[DONE]" {
         return Ok(Vec::new());
     }
+    let payload = std::str::from_utf8(payload)
+        .map_err(|_| RunError::new("UPSTREAM_STREAM_INVALID", "invalid UTF-8 in chat stream"))?;
     let parsed: OpenAiChunk = serde_json::from_str(payload).map_err(|_| {
         RunError::new(
             "UPSTREAM_STREAM_INVALID",
@@ -342,26 +387,45 @@ fn parse_sse_line(line: &[u8]) -> Result<Vec<ChatChunk>, RunError> {
         )
     })?;
     let choice_count = parsed.choices.len();
-    let mut chunks = parsed
-        .choices
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, choice)| {
-            let text = choice.delta.content.unwrap_or_default();
-            let usage = (index + 1 == choice_count)
-                .then(|| parsed.usage.clone())
-                .flatten();
-            (!text.is_empty() || choice.finish_reason.is_some() || usage.is_some()).then_some(
-                ChatChunk {
-                    text,
-                    finish_reason: choice.finish_reason,
-                    usage,
-                },
-            )
-        })
-        .collect::<Vec<_>>();
+    let mut chunks = Vec::new();
+    for (index, choice) in parsed.choices.into_iter().enumerate() {
+        let text = choice.delta.content.unwrap_or_default();
+        if text.len() > limits.max_chunk_text_bytes {
+            return Err(model_response_too_large());
+        }
+        let usage = (index + 1 == choice_count)
+            .then(|| parsed.usage.clone())
+            .flatten();
+        if let Some(usage) = &usage {
+            let bytes = serde_json::to_vec(usage).map_err(|_| {
+                RunError::new(
+                    "UPSTREAM_STREAM_INVALID",
+                    "invalid chat provider stream payload",
+                )
+            })?;
+            if bytes.len() > limits.max_usage_json_bytes {
+                return Err(model_response_too_large());
+            }
+        }
+        if !text.is_empty() || choice.finish_reason.is_some() || usage.is_some() {
+            chunks.push(ChatChunk {
+                text,
+                finish_reason: choice.finish_reason,
+                usage,
+            });
+        }
+    }
     if chunks.is_empty() {
         if let Some(usage) = parsed.usage {
+            let bytes = serde_json::to_vec(&usage).map_err(|_| {
+                RunError::new(
+                    "UPSTREAM_STREAM_INVALID",
+                    "invalid chat provider stream payload",
+                )
+            })?;
+            if bytes.len() > limits.max_usage_json_bytes {
+                return Err(model_response_too_large());
+            }
             chunks.push(ChatChunk {
                 text: String::new(),
                 finish_reason: None,
@@ -370,6 +434,14 @@ fn parse_sse_line(line: &[u8]) -> Result<Vec<ChatChunk>, RunError> {
         }
     }
     Ok(chunks)
+}
+
+fn trim_ascii_space(bytes: &[u8]) -> &[u8] {
+    let first_non_space = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    &bytes[first_non_space..]
 }
 
 #[derive(Deserialize)]
