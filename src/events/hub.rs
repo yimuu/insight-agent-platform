@@ -313,6 +313,9 @@ impl EventHub {
     }
 
     pub async fn wait_for_recoveries(&self, deadline: Duration) -> Result<(), EventError> {
+        if self.inner.recoveries.lock().await.is_empty() {
+            return Ok(());
+        }
         let mut changed = self.inner.recovery_changed.subscribe();
         let wait = async {
             loop {

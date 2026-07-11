@@ -6,7 +6,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, MutexGuard,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
@@ -379,6 +379,7 @@ impl RunService {
 
     pub async fn shutdown(&self, deadline: Duration) -> Result<(), ServiceError> {
         self.inner.accepting.store(false, Ordering::Release);
+        let started = Instant::now();
         let mut lifecycle_changed = self.inner.lifecycle_changed.subscribe();
         let stops = self.inner.lifecycle_stops();
         for (stop, attachment) in stops {
@@ -399,6 +400,18 @@ impl RunService {
             .await
             .map_err(|_| ServiceError::new("SHUTDOWN_TIMEOUT", "run shutdown timed out"))?;
         result?;
+        let remaining = deadline.checked_sub(started.elapsed()).unwrap_or_default();
+        self.inner
+            .events
+            .wait_for_recoveries(remaining)
+            .await
+            .map_err(|error| {
+                if error.code() == "JOURNAL_OPERATION_TIMEOUT" {
+                    ServiceError::new("SHUTDOWN_TIMEOUT", "run shutdown timed out")
+                } else {
+                    ServiceError::new(error.code(), error.to_string())
+                }
+            })?;
         Ok(())
     }
 

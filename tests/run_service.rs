@@ -241,6 +241,7 @@ fn parallel_blocking_agent(
 struct RepositoryHooks {
     create_run: Option<Arc<RepositoryGate>>,
     get_run: Option<Arc<RepositoryGate>>,
+    recover_run: Option<Arc<RecoveryGate>>,
 }
 
 struct RepositoryGate {
@@ -274,6 +275,45 @@ impl RepositoryGate {
     }
 
     fn release(&self) {
+        self.release.notify_waiters();
+    }
+}
+
+struct RecoveryGate {
+    calls: AtomicUsize,
+    entered: watch::Sender<usize>,
+    release: Notify,
+    released: AtomicBool,
+}
+
+impl RecoveryGate {
+    fn new() -> Arc<Self> {
+        let (entered, _) = watch::channel(0);
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            entered,
+            release: Notify::new(),
+            released: AtomicBool::new(false),
+        })
+    }
+
+    async fn block_until_released(&self) {
+        let calls = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self.entered.send(calls);
+        if !self.released.load(Ordering::SeqCst) {
+            self.release.notified().await;
+        }
+    }
+
+    async fn wait_calls(&self, expected: usize) {
+        let mut entered = self.entered.subscribe();
+        while *entered.borrow() < expected {
+            entered.changed().await.unwrap();
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
         self.release.notify_waiters();
     }
 }
@@ -386,6 +426,9 @@ impl RunRepository for CountingRepository {
         update: TerminalUpdate,
         mut terminal: RunEvent,
     ) -> Result<RunEvent, HistoryError> {
+        if let Some(gate) = self.hooks.recover_run.as_ref() {
+            gate.block_until_released().await;
+        }
         terminal.seq = self
             .events
             .lock()
@@ -487,6 +530,16 @@ async fn service_with_repository_hooks(
     agents: Vec<Arc<CompiledAgent>>,
     hooks: RepositoryHooks,
 ) -> Result<(RunService, Arc<CountingRepository>), ServiceError> {
+    service_with_repository_hooks_and_event_timeout(config, agents, hooks, Duration::from_secs(1))
+        .await
+}
+
+async fn service_with_repository_hooks_and_event_timeout(
+    config: RunServiceConfig,
+    agents: Vec<Arc<CompiledAgent>>,
+    hooks: RepositoryHooks,
+    operation_timeout: Duration,
+) -> Result<(RunService, Arc<CountingRepository>), ServiceError> {
     let repository = Arc::new(CountingRepository {
         records: Mutex::new(BTreeMap::new()),
         events: Mutex::new(BTreeMap::new()),
@@ -503,7 +556,7 @@ async fn service_with_repository_hooks(
             subscriber_capacity: 8,
             journal_capacity: 32,
             journal_batch_size: 8,
-            operation_timeout: Duration::from_secs(1),
+            operation_timeout,
         },
     );
     let agents = CompiledAgentRegistry::new(agents).unwrap();
@@ -721,6 +774,97 @@ async fn permanent_journal_failure_rejects_later_runs_and_marks_service_unhealth
 }
 
 #[tokio::test]
+async fn shutdown_waits_for_background_recovery_owner() {
+    let recover_gate = RecoveryGate::new();
+    let (service, repository) = service_with_repository_hooks_and_event_timeout(
+        RunServiceConfig {
+            max_concurrent_runs: 1,
+            max_parallel_node_executions: 32,
+            max_parallel_branches_per_run: 8,
+            run_timeout: Duration::from_secs(3600),
+        },
+        vec![agent("fast", ServiceBehavior::Complete)],
+        RepositoryHooks {
+            create_run: None,
+            get_run: None,
+            recover_run: Some(Arc::clone(&recover_gate)),
+        },
+        Duration::from_millis(20),
+    )
+    .await
+    .unwrap();
+    repository.fail_appends.store(true, Ordering::SeqCst);
+
+    let created = service
+        .create_detached("fast", json!({}), RequestMetadata::default())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_millis(250), recover_gate.wait_calls(2))
+        .await
+        .expect("foreground timeout must hand off to a background recovery owner");
+    assert!(!service.is_healthy());
+
+    let error = service
+        .shutdown(Duration::from_millis(40))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "SHUTDOWN_TIMEOUT");
+
+    recover_gate.release();
+    service.shutdown(Duration::from_secs(1)).await.unwrap();
+    let recovered = service.get_run(&created.run_id).await.unwrap();
+    assert_eq!(recovered.status, RunStatus::Failed);
+    assert_eq!(
+        recovered.error_code.as_deref(),
+        Some("INFRASTRUCTURE_FAILURE")
+    );
+}
+
+#[tokio::test]
+async fn recovery_handoff_releases_active_ownership_but_keeps_service_unhealthy() {
+    let recover_gate = RecoveryGate::new();
+    let (service, repository) = service_with_repository_hooks_and_event_timeout(
+        RunServiceConfig {
+            max_concurrent_runs: 1,
+            max_parallel_node_executions: 32,
+            max_parallel_branches_per_run: 8,
+            run_timeout: Duration::from_secs(3600),
+        },
+        vec![agent("fast", ServiceBehavior::Complete)],
+        RepositoryHooks {
+            create_run: None,
+            get_run: None,
+            recover_run: Some(Arc::clone(&recover_gate)),
+        },
+        Duration::from_millis(20),
+    )
+    .await
+    .unwrap();
+    repository.fail_appends.store(true, Ordering::SeqCst);
+
+    let created = service
+        .create_detached("fast", json!({}), RequestMetadata::default())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_millis(250), recover_gate.wait_calls(2))
+        .await
+        .expect("foreground timeout must hand off to a background recovery owner");
+
+    let error = service
+        .create_detached("fast", json!({}), RequestMetadata::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "RUN_SERVICE_UNAVAILABLE");
+
+    recover_gate.release();
+    service.shutdown(Duration::from_secs(1)).await.unwrap();
+    assert_eq!(
+        service.get_run(&created.run_id).await.unwrap().status,
+        RunStatus::Failed
+    );
+}
+
+#[tokio::test]
 async fn cancellation_is_idempotent_and_does_not_rewrite_completed_runs() {
     let (service, _) = service(3).await;
     let running = service
@@ -786,6 +930,7 @@ async fn shutdown_waits_for_detached_run_blocked_in_create_run() {
         RepositoryHooks {
             create_run: Some(Arc::clone(&create_gate)),
             get_run: None,
+            recover_run: None,
         },
     )
     .await
@@ -839,6 +984,7 @@ async fn shutdown_after_durable_create_finalizes_before_detached_launch() {
         RepositoryHooks {
             create_run: None,
             get_run: Some(Arc::clone(&get_gate)),
+            recover_run: None,
         },
     )
     .await
@@ -887,6 +1033,7 @@ async fn dropped_detached_create_future_releases_capacity_after_durable_create()
         RepositoryHooks {
             create_run: None,
             get_run: Some(Arc::clone(&get_gate)),
+            recover_run: None,
         },
     )
     .await
