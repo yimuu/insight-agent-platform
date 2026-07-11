@@ -88,8 +88,10 @@ impl Scheduler {
 
         match result {
             Ok(SchedulerResult::Stopped(error)) => {
-                drain_external_stop(&mut state, &mut executions).await;
-                Ok(SchedulerResult::Stopped(error))
+                match drain_external_stop(&mut state, &mut executions).await {
+                    Ok(()) => Ok(SchedulerResult::Stopped(error)),
+                    Err(error) => Err(error),
+                }
             }
             Err(_) => {
                 cancel_and_drain_infrastructure(&mut state, &task_cancel, &mut executions).await;
@@ -335,12 +337,23 @@ impl Scheduler {
     }
 }
 
-async fn drain_external_stop<T>(state: &mut SchedulerState, executions: &mut JoinSet<T>)
+async fn drain_external_stop<T>(
+    state: &mut SchedulerState,
+    executions: &mut JoinSet<T>,
+) -> Result<(), RunError>
 where
     T: 'static,
 {
     state.stop_admission();
-    while executions.join_next().await.is_some() {}
+    let mut task_failed = false;
+    while let Some(joined) = executions.join_next().await {
+        task_failed |= joined.is_err();
+    }
+    if task_failed {
+        Err(global_failure())
+    } else {
+        Ok(())
+    }
 }
 
 async fn cancel_and_drain_infrastructure<T>(
@@ -629,4 +642,49 @@ fn branch_scope(state: &SchedulerState, fork_id: &str) -> Result<RunEventScope, 
 
 fn event_error(error: crate::events::hub::EventError) -> RunError {
     RunError::infrastructure(error.code(), error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn external_drain_reports_task_panic_after_draining_every_task() {
+        let drained = Arc::new(AtomicBool::new(false));
+        let mut executions: JoinSet<(
+            String,
+            WorkScope,
+            Result<NodeExecutionResult, NodeExecutionFailure>,
+        )> = JoinSet::new();
+        let task_drained = Arc::clone(&drained);
+        executions.spawn(async move {
+            task_drained.store(true, Ordering::SeqCst);
+            (
+                "ordinary".to_string(),
+                WorkScope::Main,
+                Err(NodeExecutionFailure::Node {
+                    node_id: "ordinary".to_string(),
+                    error: RunError::new("NODE_FAILED", "node failed during drain"),
+                }),
+            )
+        });
+        executions.spawn(async move { panic!("panic during external drain") });
+        let mut state = SchedulerState {
+            ready: VecDeque::new(),
+            node_states: BTreeMap::from([("pending".to_string(), NodeState::Pending)]),
+            branch_states: BTreeMap::new(),
+            active_fork: None,
+        };
+
+        let error = drain_external_stop(&mut state, &mut executions)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, global_failure());
+        assert!(drained.load(Ordering::SeqCst));
+        assert_eq!(state.node_states["pending"], NodeState::Skipped);
+        assert!(executions.is_empty());
+    }
 }
