@@ -31,9 +31,8 @@ runtime:
   max_parallel_branches_per_run: 8
   default_node_timeout: 60s
   run_timeout: 5m
-  attached_reconnect_grace: 10s
+  sse_keep_alive_interval: 5s
   subscriber_capacity: 128
-  replay_ring_capacity: 512
   journal_capacity: 1024
   journal_batch_size: 32
   journal_operation_timeout: 30s

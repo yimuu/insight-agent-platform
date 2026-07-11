@@ -12,6 +12,7 @@ use axum::{
     http::{header, Method, Request, StatusCode},
     Router,
 };
+use futures::StreamExt;
 use handlebars::Handlebars;
 use insight_agent_platform::{
     api::formal::{build_router, ApiAuth, FormalApiState},
@@ -36,6 +37,8 @@ use insight_agent_platform::{
 use jsonschema::JSONSchema;
 use serde_json::{json, Value};
 use tower::ServiceExt;
+
+const TEST_SSE_KEEP_ALIVE: Duration = Duration::from_millis(10);
 
 enum ApiBehavior {
     Complete,
@@ -157,6 +160,7 @@ async fn fixture(auth: ApiAuth, capacity: usize) -> (Router, RunService) {
     let router = build_router(FormalApiState {
         service: service.clone(),
         auth,
+        sse_keep_alive_interval: TEST_SSE_KEEP_ALIVE,
     });
     (router, service)
 }
@@ -341,7 +345,13 @@ async fn attached_creation_validates_before_sse_and_exposes_formal_event_headers
         .unwrap()
         .starts_with("text/event-stream"));
 
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = tokio::time::timeout(
+        Duration::from_secs(1),
+        to_bytes(response.into_body(), usize::MAX),
+    )
+    .await
+    .expect("terminal event must close Attached SSE immediately")
+    .unwrap();
     let events = sse_data(&body);
     assert_eq!(events.first().unwrap()["type"], "run.created");
     assert_eq!(events.last().unwrap()["type"], "run.completed");
@@ -356,6 +366,40 @@ async fn attached_creation_validates_before_sse_and_exposes_formal_event_headers
             .collect::<Vec<_>>(),
         (1..=events.len() as u64).collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn attached_stream_emits_configured_keep_alive_and_disconnects_cleanly() {
+    let (app, service) = fixture(ApiAuth::disabled(), 4).await;
+    let response = app
+        .oneshot(request(
+            Method::POST,
+            "/v1/agents/blocking/runs/stream",
+            Some(json!({"text":"hello"})),
+        ))
+        .await
+        .unwrap();
+    let run_id = response.headers()["x-run-id"].to_str().unwrap().to_string();
+    let mut body = response.into_body().into_data_stream();
+
+    let encoded = tokio::time::timeout(Duration::from_millis(250), async {
+        let mut encoded = String::new();
+        while !encoded.contains(": keep-alive") {
+            let chunk = body.next().await.unwrap().unwrap();
+            encoded.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        encoded
+    })
+    .await
+    .expect("configured keepalive must be emitted");
+    assert!(encoded.contains(": keep-alive"));
+    drop(body);
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        wait_for_status(&service, &run_id, RunStatus::Cancelled),
+    )
+    .await
+    .expect("dropping SSE must cancel the Attached Run");
 }
 
 #[tokio::test]

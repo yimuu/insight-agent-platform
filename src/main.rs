@@ -87,6 +87,7 @@ async fn main() -> MainResult<()> {
     let app = build_router(FormalApiState {
         service: service.clone(),
         auth: ApiAuth::from(&config.auth),
+        sse_keep_alive_interval: config.runtime.sse_keep_alive_interval,
     });
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     tracing::info!(

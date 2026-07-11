@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 
 use insight_agent_platform::config::{
     AuthConfig, HistoryConfig, PlatformConfig, PlatformConfigError,
@@ -28,9 +28,8 @@ runtime:
   max_parallel_branches_per_run: 8
   default_node_timeout: 30s
   run_timeout: 5m
-  attached_reconnect_grace: 10s
+  sse_keep_alive_interval: 5s
   subscriber_capacity: 64
-  replay_ring_capacity: 256
   journal_capacity: 512
   journal_batch_size: 32
   journal_operation_timeout: 5s
@@ -90,6 +89,10 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
     assert_eq!(config.runtime.max_fork_branches, 32);
     assert_eq!(config.runtime.max_parallel_node_executions, 32);
     assert_eq!(config.runtime.max_parallel_branches_per_run, 8);
+    assert_eq!(
+        config.runtime.sse_keep_alive_interval,
+        Duration::from_secs(5)
+    );
     assert_eq!(config.agents.directory, directory.path().join("agents"));
     assert_eq!(
         config.models.config,
@@ -179,6 +182,7 @@ fn zero_capacities_and_durations_are_rejected() {
         ),
         ("default_node_timeout: 30s", "default_node_timeout: 0s"),
         ("run_timeout: 5m", "run_timeout: 0s"),
+        ("sse_keep_alive_interval: 5s", "sse_keep_alive_interval: 0s"),
         ("subscriber_capacity: 64", "subscriber_capacity: 0"),
         ("journal_batch_size: 32", "journal_batch_size: 0"),
         (
@@ -193,6 +197,37 @@ fn zero_capacities_and_durations_are_rejected() {
             "PLATFORM_RUNTIME_INVALID"
         );
     }
+}
+
+#[test]
+fn removed_sse_recovery_settings_are_unknown() {
+    for removed in [
+        "  attached_reconnect_grace: 10s\n",
+        "  replay_ring_capacity: 256\n",
+    ] {
+        let yaml = base_yaml("  mode: disabled").replace(
+            "  sse_keep_alive_interval: 5s\n",
+            &format!("  sse_keep_alive_interval: 5s\n{removed}"),
+        );
+        let (_directory, path) = write_config(&yaml);
+        assert_eq!(
+            load(&path, BTreeMap::new()).unwrap_err().code(),
+            "PLATFORM_CONFIG_INVALID"
+        );
+    }
+}
+
+#[test]
+fn invalid_sse_keep_alive_duration_is_rejected() {
+    let yaml = base_yaml("  mode: disabled").replace(
+        "sse_keep_alive_interval: 5s",
+        "sse_keep_alive_interval: soon",
+    );
+    let (_directory, path) = write_config(&yaml);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_RUNTIME_INVALID"
+    );
 }
 
 #[test]

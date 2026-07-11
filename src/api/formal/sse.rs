@@ -10,6 +10,7 @@ use crate::{
 
 pub(crate) fn response_stream(
     subscription: RunSubscription,
+    keep_alive_interval: Duration,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = stream::unfold(Some(subscription), |state| async move {
         let mut subscription = state?;
@@ -53,7 +54,7 @@ pub(crate) fn response_stream(
     });
     Sse::new(stream).keep_alive(
         KeepAlive::new()
-            .interval(Duration::from_secs(15))
+            .interval(keep_alive_interval)
             .text("keep-alive"),
     )
 }

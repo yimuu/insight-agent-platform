@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     body::Body,
@@ -30,6 +30,7 @@ const X_RUN_ID: HeaderName = HeaderName::from_static("x-run-id");
 pub struct FormalApiState {
     pub service: RunService,
     pub auth: ApiAuth,
+    pub sse_keep_alive_interval: Duration,
 }
 
 pub fn build_router(state: FormalApiState) -> Router {
@@ -147,7 +148,8 @@ async fn create_attached_run(
         .map_err(ApiError::from)?;
     let run_id = attached.run_id;
     let request_id = attached.request_id;
-    let mut response = response_stream(attached.subscription).into_response();
+    let mut response =
+        response_stream(attached.subscription, state.sse_keep_alive_interval).into_response();
     insert_header(&mut response, X_RUN_ID, &run_id)?;
     insert_header(&mut response, X_REQUEST_ID, &request_id)?;
     Ok(response)
