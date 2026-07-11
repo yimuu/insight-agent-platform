@@ -85,12 +85,8 @@ fn validate_json(
     code: &'static str,
     message: &'static str,
 ) -> Result<(), RunError> {
-    if let Err(errors) = validator.validate(value) {
-        let details = errors.map(|error| error.to_string()).collect::<Vec<_>>();
-        return Err(RunError::new(
-            code,
-            format!("{message}: {}", details.join("; ")),
-        ));
+    if !validator.is_valid(value) {
+        return Err(RunError::new(code, message));
     }
     Ok(())
 }

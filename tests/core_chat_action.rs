@@ -304,7 +304,7 @@ impl Action for EchoAction {
             context.control.emit_content("two").await?;
         }
         if self.invalid_output {
-            Ok(json!({"wrong":true}))
+            Ok(json!({"echoed":input["payload"]["secret"].clone()}))
         } else {
             Ok(json!({"echoed":input["payload"].clone()}))
         }
@@ -351,11 +351,15 @@ async fn action_renders_recursive_input_validates_and_returns_output_unchanged()
 }
 
 #[tokio::test]
-async fn action_validates_rendered_input_and_returned_output() {
+async fn action_validation_errors_are_fixed_and_instance_free() {
+    const INPUT_SECRET: &str = "rendered-input-never-expose";
+    const OUTPUT_SECRET: &str = "returned-output-never-expose";
+
+    let valid_calls = Arc::new(Mutex::new(Vec::new()));
     let mut actions = ActionRegistry::default();
     actions
         .register(EchoAction {
-            calls: Arc::new(Mutex::new(Vec::new())),
+            calls: Arc::clone(&valid_calls),
             streams_content: false,
             invalid_output: false,
         })
@@ -373,36 +377,44 @@ async fn action_validates_rendered_input_and_returned_output() {
     let invalid_input = ActionNode
         .compile(
             "echo",
-            json!({"action":"echo", "input":{"payload":"not-an-object"}}),
+            json!({"action":"echo", "input":{"payload":"{{ input.secret }}"}}),
             &mut compile_context,
         )
         .unwrap();
     let invalid_input_node = compiled_node("echo", "core.action", EmitPolicy::None, invalid_input);
-    let invalid_input_context =
-        context(json!({})).with_templates(Arc::new(compile_context.into_templates()));
+    let invalid_input_context = context(json!({"secret":INPUT_SECRET}))
+        .with_templates(Arc::new(compile_context.into_templates()));
     let (control, _) = capturing_control();
-    let error = ActionNode
+    let input_error = ActionNode
         .execute(&invalid_input_node, &invalid_input_context, &control)
         .await
         .unwrap_err();
-    assert_eq!(error.code(), "ACTION_INPUT_INVALID");
+    assert_eq!(input_error.code(), "ACTION_INPUT_INVALID");
+    assert_eq!(input_error.message(), "action input validation failed");
+    assert!(!format!("{input_error:?}").contains(INPUT_SECRET));
+    assert!(valid_calls.lock().unwrap().is_empty());
 
     let mut compile_context = CompileContext::new(&models, &actions);
     let invalid_output = ActionNode
         .compile(
             "bad",
-            json!({"action":"bad_echo", "input":{"payload":{}}}),
+            json!({
+                "action":"bad_echo",
+                "input":{"payload":{"secret":"{{ input.secret }}"}}
+            }),
             &mut compile_context,
         )
         .unwrap();
     let invalid_output_node = compiled_node("bad", "core.action", EmitPolicy::None, invalid_output);
-    let invalid_output_context =
-        context(json!({})).with_templates(Arc::new(compile_context.into_templates()));
-    let error = ActionNode
+    let invalid_output_context = context(json!({"secret":OUTPUT_SECRET}))
+        .with_templates(Arc::new(compile_context.into_templates()));
+    let output_error = ActionNode
         .execute(&invalid_output_node, &invalid_output_context, &control)
         .await
         .unwrap_err();
-    assert_eq!(error.code(), "ACTION_OUTPUT_INVALID");
+    assert_eq!(output_error.code(), "ACTION_OUTPUT_INVALID");
+    assert_eq!(output_error.message(), "action output validation failed");
+    assert!(!format!("{output_error:?}").contains(OUTPUT_SECRET));
 }
 
 #[tokio::test]

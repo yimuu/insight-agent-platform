@@ -89,7 +89,37 @@ impl Action for InvalidOutputAction {
     }
 
     async fn call(&self, _input: Value, _context: ActionContext) -> Result<Value, RunError> {
-        Ok(json!({"not":"a string"}))
+        Ok(json!({"secret":"never-expose-output"}))
+    }
+}
+
+struct SchemaMatrixAction;
+
+#[async_trait]
+impl Action for SchemaMatrixAction {
+    fn descriptor(&self) -> ActionDescriptor {
+        ActionDescriptor {
+            name: "schema_matrix",
+            input_schema: json!({
+                "type":"object",
+                "required":["typed","sized","patterned","selected","choice"],
+                "additionalProperties":false,
+                "properties":{
+                    "typed":{"type":"integer"},
+                    "sized":{"type":"string","maxLength":4},
+                    "patterned":{"type":"string","pattern":"^allowed$"},
+                    "selected":{"enum":["allowed"]},
+                    "choice":{"oneOf":[{"type":"integer"},{"const":"allowed"}]}
+                }
+            }),
+            output_schema: json!({"type":"object"}),
+            idempotent: true,
+            streams_content: false,
+        }
+    }
+
+    async fn call(&self, _input: Value, _context: ActionContext) -> Result<Value, RunError> {
+        Ok(json!({}))
     }
 }
 
@@ -123,7 +153,10 @@ fn registries_reject_duplicate_aliases() {
 }
 
 #[tokio::test]
-async fn action_registry_validates_input_and_output() {
+async fn action_registry_validates_input_and_output_without_exposing_instances() {
+    const INPUT_SECRET: &str = "never-expose-input";
+    const OUTPUT_SECRET: &str = "never-expose-output";
+
     let mut registry = ActionRegistry::default();
     registry.register(EchoAction).unwrap();
     registry.register(InvalidOutputAction).unwrap();
@@ -131,7 +164,15 @@ async fn action_registry_validates_input_and_output() {
     let echo = registry.resolve("echo").unwrap();
     assert_eq!(echo.descriptor().name, "echo");
     assert!(echo.descriptor().idempotent);
-    assert!(echo.validate_input(&json!({"text": 7})).is_err());
+
+    let input_error = echo
+        .validate_input(&json!({"text":{"secret":INPUT_SECRET}}))
+        .unwrap_err();
+    assert_eq!(input_error.code(), "ACTION_INPUT_INVALID");
+    assert_eq!(input_error.message(), "action input validation failed");
+    assert!(!input_error.to_string().contains(INPUT_SECRET));
+    assert!(!format!("{input_error:?}").contains(INPUT_SECRET));
+
     assert_eq!(
         echo.call(json!({"text":"hi"}), test_action_context())
             .await
@@ -140,11 +181,37 @@ async fn action_registry_validates_input_and_output() {
     );
 
     let invalid = registry.resolve("invalid_output").unwrap();
-    let error = invalid
+    let output_error = invalid
         .call(json!({}), test_action_context())
         .await
         .unwrap_err();
-    assert_eq!(error.code(), "ACTION_OUTPUT_INVALID");
+    assert_eq!(output_error.code(), "ACTION_OUTPUT_INVALID");
+    assert_eq!(output_error.message(), "action output validation failed");
+    assert!(!output_error.to_string().contains(OUTPUT_SECRET));
+    assert!(!format!("{output_error:?}").contains(OUTPUT_SECRET));
+}
+
+#[test]
+fn action_validation_keyword_matrix_never_exposes_values() {
+    const SECRET: &str = "keyword-matrix-never-expose";
+    let mut registry = ActionRegistry::default();
+    registry.register(SchemaMatrixAction).unwrap();
+    let action = registry.resolve("schema_matrix").unwrap();
+
+    let cases = [
+        json!({"typed":SECRET,"sized":"okay","patterned":"allowed","selected":"allowed","choice":1}),
+        json!({"typed":1,"sized":SECRET,"patterned":"allowed","selected":"allowed","choice":1}),
+        json!({"typed":1,"sized":"okay","patterned":SECRET,"selected":"allowed","choice":1}),
+        json!({"typed":1,"sized":"okay","patterned":"allowed","selected":SECRET,"choice":1}),
+        json!({"typed":1,"sized":"okay","patterned":"allowed","selected":"allowed","choice":SECRET}),
+    ];
+
+    for input in cases {
+        let error = action.validate_input(&input).unwrap_err();
+        assert_eq!(error.code(), "ACTION_INPUT_INVALID");
+        assert_eq!(error.message(), "action input validation failed");
+        assert!(!format!("{error:?}").contains(SECRET));
+    }
 }
 
 #[test]
