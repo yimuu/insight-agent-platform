@@ -225,6 +225,49 @@ async fn openai_stream_rejects_total_upstream_bytes_without_echoing_body() {
 }
 
 #[tokio::test]
+async fn openai_stream_rejects_oversized_content_length_without_echoing_body() {
+    let body_secret = "content-length-body-secret";
+    let body = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{body_secret}\"}},\"finish_reason\":null}}]}}\n\n"
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let response_body = body.clone();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_json(&mut socket).await;
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    response_body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let _ = socket.write_all(response_body.as_bytes()).await;
+    });
+    let limits = OpenAiChatLimits {
+        max_upstream_bytes: body.len() - 1,
+        ..OpenAiChatLimits::default()
+    };
+
+    let model = model_with_limits(
+        format!("http://{address}/v1?token=url-secret"),
+        Some("api-key-secret".to_string()),
+        limits,
+    );
+    let error = match model.stream_chat(default_chat_request()).await {
+        Ok(_) => panic!("oversized content-length must fail before returning a stream"),
+        Err(error) => error,
+    };
+
+    assert_too_large(&error, &[body_secret, "url-secret", "api-key-secret"]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn openai_stream_rejects_no_lf_buffer_growth() {
     let line_secret = "line-buffer-secret";
     let body = format!("data: {line_secret}");
