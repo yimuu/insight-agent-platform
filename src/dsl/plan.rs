@@ -133,7 +133,7 @@ fn collect_fork_topologies<'a>(
                 },
             );
         }
-        validate_sibling_regions(fork_id, &branch_plans)?;
+        validate_sibling_regions(fork_id, &branch_plans, nodes)?;
         topologies.insert(
             fork_id.clone(),
             ForkTopology {
@@ -188,6 +188,7 @@ fn collect_branch_nodes(
 fn validate_sibling_regions(
     fork_id: &str,
     branches: &BTreeMap<String, BranchPlan>,
+    nodes: &BTreeMap<String, CompiledNode>,
 ) -> Result<(), CompileError> {
     let branches = branches.values().collect::<Vec<_>>();
     for (index, left) in branches.iter().enumerate() {
@@ -201,7 +202,11 @@ fn validate_sibling_regions(
                     ),
                 ));
             }
-            if left.nodes.contains(&right.entry) || right.nodes.contains(&left.entry) {
+            if branch_has_edge_into(left, right, nodes)
+                || branch_has_edge_into(right, left, nodes)
+                || left.nodes.contains(&right.entry)
+                || right.nodes.contains(&left.entry)
+            {
                 return Err(CompileError::new(
                     "BRANCH_CROSS_REGION_EDGE",
                     format!(
@@ -222,6 +227,19 @@ fn validate_sibling_regions(
         }
     }
     Ok(())
+}
+
+fn branch_has_edge_into(
+    source: &BranchPlan,
+    target: &BranchPlan,
+    nodes: &BTreeMap<String, CompiledNode>,
+) -> bool {
+    source.nodes.difference(&target.nodes).any(|node_id| {
+        nodes[node_id]
+            .edges
+            .iter()
+            .any(|edge| target.nodes.contains(edge))
+    })
 }
 
 fn validate_branch_regions(

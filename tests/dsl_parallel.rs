@@ -244,6 +244,17 @@ fn rejects_branch_edge_into_sibling_region() {
 }
 
 #[test]
+fn rejects_branch_edge_into_sibling_interior() {
+    assert_compile_error(
+        &parallel_yaml().replace(
+            "  summarize_a:\n    type: core.template\n    next: collect",
+            "  summarize_a:\n    type: core.template\n    next: summarize_b",
+        ),
+        "BRANCH_CROSS_REGION_EDGE",
+    );
+}
+
+#[test]
 fn rejects_linear_edge_into_branch_entry() {
     assert_compile_error(
         &parallel_yaml_with_outside_edge("search_a"),
@@ -552,6 +563,39 @@ nodes:
             fork_id: "fork_b".to_string(),
             branch_id: "b1".to_string(),
         }
+    );
+}
+
+#[test]
+fn rejects_fork_with_only_one_branch() {
+    assert_compile_error(
+        r#"
+version: 1
+id: one-branch
+name: One Branch
+input:
+  schema: {type: object}
+entry: fanout
+nodes:
+  fanout:
+    type: core.fork
+    config:
+      branches: {only: work}
+      join: collect
+  work:
+    type: core.template
+    next: collect
+    config: {value: work}
+  collect:
+    type: core.join
+    next: result
+    config: {mode: all_settled}
+  result:
+    type: core.output
+    config:
+      data: {ok: true}
+"#,
+        "FORK_BRANCH_COUNT_INVALID",
     );
 }
 
