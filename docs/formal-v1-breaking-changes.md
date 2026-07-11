@@ -111,3 +111,35 @@ docker compose -f docker-compose.postgres.yml up -d
 ```
 
 正式 migration 只位于 `migrations/formal_v1/{sqlite,postgres}`。生产环境如需保留原型审计数据，应先导出到独立只读存储；不要把旧表复制进正式 V1 数据库。
+
+### A0 Action validation error containment
+
+旧版本可能把 Action JSON Schema 校验失败的原始 input/output instance 写入 Run 和事件错误消息。A0 从校验源头改为固定消息：
+
+- `ACTION_INPUT_INVALID` / `action input validation failed`
+- `ACTION_OUTPUT_INVALID` / `action output validation failed`
+
+错误码和 HTTP/SSE/Event/Run 数据结构不变；动态 validator 文本不再是兼容合同。由于旧错误文本不可靠区分诊断内容和敏感值，本次升级不迁移或扫描历史 Run，部署前必须显式重置历史。
+
+停止所有使用目标 history store 的进程后执行以下一种操作。
+
+SQLite：
+
+```bash
+SQLITE_DB=/absolute/path/to/run_history.sqlite3
+rm -f "$SQLITE_DB" "$SQLITE_DB-wal" "$SQLITE_DB-shm"
+```
+
+PostgreSQL：
+
+```bash
+psql "$RUN_HISTORY_DATABASE_URL" <<'SQL'
+BEGIN;
+TRUNCATE TABLE node_outputs, run_events, runs;
+COMMIT;
+SQL
+```
+
+不要删除 SQLx migration metadata。应用不会自动删除历史，也不提供 reset API/CLI。删除后的历史不能通过回滚旧二进制恢复；不要把 A0 前的 Run/Event 数据重新导入运行库。
+
+部署顺序：停止服务、重置历史、部署新二进制、启动并完成 migration check、运行 `cargo test --test action_error_containment -- --nocapture --test-threads=1`、检查 `/health`，然后恢复流量。

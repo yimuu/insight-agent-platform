@@ -1,6 +1,6 @@
 # Insight Agent Platform
 
-一个面向平台自有 Agent 的通用 Rust 运行时基线。它把严格 DSL 编译为不可变执行图，通过可扩展的节点、模型和 Action 注册表运行，并提供可重连的 SSE、显式取消以及 SQLite/PostgreSQL 事件历史。
+一个面向平台自有 Agent 的通用 Rust 运行时基线。它把严格 DSL 编译为不可变执行图，通过可扩展的节点、模型和 Action 注册表运行，并提供实时 SSE、显式取消以及 SQLite/PostgreSQL 事件历史。
 
 医学报告单解读只是仓库中的一个多模态示例，不是平台的领域边界。
 
@@ -250,6 +250,8 @@ docker compose -f docker-compose.postgres.yml up -d
 RUN_HISTORY_POSTGRES_URL='postgres://insight:insight@127.0.0.1:5433/insight_agent_platform' \
   cargo test --test history_postgres -- --nocapture
 ```
+
+A0 Action 校验错误安全修复不兼容既有 Run 历史；部署前按[正式 V1 破坏性变更中的 A0 重置流程](docs/formal-v1-breaking-changes.md#a0-action-validation-error-containment)停止服务并显式清空历史。应用不会自动删除数据。
 
 正式 V1 不存储原始输入，只保存顶层键和序列化字节数摘要。journal 只有在数据库确认事件持久化后才向订阅者广播；单次数据库操作受 `journal_operation_timeout` 限制。失败时先停止 journal worker，恢复事务锁定 Run，并基于持久化的 `MAX(seq)` 原子派生终态序号；这也能判定超时发生在 `COMMIT` 附近时的实际结果。journal 永久关闭后拒绝新 Run。进程启动时遗留的 `created/running` 记录会被标记为 `interrupted`，V1 不恢复工作。
 
