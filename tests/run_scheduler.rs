@@ -210,6 +210,7 @@ impl NodeExecutor for SchedulerExecutor {
                 executions,
             } => {
                 executions.fetch_add(1, Ordering::SeqCst);
+                assert!(context.branch_results().is_none());
                 assert_eq!(context.node_output(predecessor), Some(expected));
                 assert!(context.node_output(absent).is_none());
                 Ok(NodeOutcome {
@@ -247,6 +248,7 @@ impl NodeExecutor for SchedulerExecutor {
                 executions,
             } => {
                 executions.fetch_add(1, Ordering::SeqCst);
+                assert!(context.branch_results().is_none());
                 assert_eq!(context.node_output(predecessor), Some(expected));
                 Ok(NodeOutcome {
                     output: json!({"terminal":true}),
@@ -952,11 +954,26 @@ async fn parallel_scheduler_overlaps_compiled_branches_and_waits_before_join() {
             })
             .unwrap()
     };
-    assert!(position("node.completed", "fanout") < position("branch.started", "source_a"));
-    assert!(position("node.completed", "summarize_a") < position("branch.completed", "source_a"));
-    assert!(position("node.completed", "summarize_b") < position("branch.completed", "source_b"));
-    assert!(position("branch.completed", "source_a") < position("node.started", "collect"));
-    assert!(position("branch.completed", "source_b") < position("node.started", "collect"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type.as_str() == "branch.started")
+            .map(|event| event.data["branch_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["source_a", "source_b"]
+    );
+    let fanout_completed = position("node.completed", "fanout");
+    let collect_started = position("node.started", "collect");
+    for (branch_id, terminal_node_id) in [("source_a", "summarize_a"), ("source_b", "summarize_b")]
+    {
+        let branch_started = position("branch.started", branch_id);
+        let node_terminal = position("node.completed", terminal_node_id);
+        let branch_terminal = position("branch.completed", branch_id);
+        assert!(fanout_completed < branch_started);
+        assert!(branch_started < node_terminal);
+        assert!(node_terminal < branch_terminal);
+        assert!(branch_terminal < collect_started);
+    }
     assert!(position("node.started", "collect") < position("node.completed", "collect"));
     let sibling_content = events
         .iter()
@@ -1188,6 +1205,20 @@ async fn parallel_scheduler_settles_partial_failure_and_runs_join() {
             .output,
         expected
     );
+    let events = repository.events.lock().await.clone();
+    let position = |kind: &str, node_or_branch: &str| {
+        events
+            .iter()
+            .position(|event| {
+                event.event_type.as_str() == kind
+                    && (event.node_id.as_deref() == Some(node_or_branch)
+                        || event.data["branch_id"] == node_or_branch)
+            })
+            .unwrap()
+    };
+    assert!(position("branch.started", "source_b") < position("node.failed", "search_b"));
+    assert!(position("node.failed", "search_b") < position("branch.failed", "source_b"));
+    assert!(position("branch.failed", "source_b") < position("node.started", "collect"));
 }
 
 #[tokio::test]
@@ -1238,6 +1269,114 @@ async fn parallel_scheduler_runs_join_and_post_join_when_all_branches_fail() {
             .unwrap()
             .output["summary"],
         json!({"total":2,"succeeded":0,"failed":2})
+    );
+}
+
+#[tokio::test]
+async fn parallel_scheduler_runs_sequential_compiled_fork_regions() {
+    let mut agent = compile_parallel_agent(
+        r#"
+version: 1
+id: scheduler-agent
+name: Sequential Forks
+input:
+  schema: {type: object}
+entry: fork_a
+nodes:
+  fork_a:
+    type: core.fork
+    config:
+      branches: {a1: a1, a2: a2}
+      join: join_a
+  a1:
+    type: core.template
+    next: join_a
+    config: {value: a1}
+  a2:
+    type: core.template
+    next: join_a
+    config: {value: a2}
+  join_a:
+    type: core.join
+    next: fork_b
+    config: {mode: all_settled}
+  fork_b:
+    type: core.fork
+    config:
+      branches: {b1: b1, b2: b2}
+      join: join_b
+  b1:
+    type: core.template
+    next: join_b
+    config: {value: b1}
+  b2:
+    type: core.template
+    next: join_b
+    config: {value: b2}
+  join_b:
+    type: core.join
+    next: result
+    config: {mode: all_settled}
+  result:
+    type: core.output
+    config: {data: {done: true}}
+"#,
+    );
+    let counts = ["a1", "a2", "b1", "b2", "result"]
+        .into_iter()
+        .map(|node_id| (node_id, Arc::new(AtomicUsize::new(0))))
+        .collect::<BTreeMap<_, _>>();
+    for node_id in ["a1", "a2", "b1", "b2"] {
+        replace_behavior(
+            &mut agent,
+            node_id,
+            SchedulerBehavior::Next {
+                output: json!({"node":node_id}),
+                require_output: None,
+                executions: Arc::clone(&counts[node_id]),
+            },
+        );
+    }
+    let output = RunOutput {
+        content: None,
+        format: None,
+        data: json!({"done":true}),
+    };
+    replace_behavior(
+        &mut agent,
+        "result",
+        SchedulerBehavior::Complete {
+            output: output.clone(),
+            executions: Arc::clone(&counts["result"]),
+        },
+    );
+    let repository = Arc::new(SchedulerRepository::default());
+    let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
+    let (_, stop) = stop_pair();
+
+    assert_eq!(
+        scheduler
+            .run(context("run_sequential_forks"), stop)
+            .await
+            .unwrap(),
+        SchedulerResult::Completed(output)
+    );
+    assert!(counts
+        .values()
+        .all(|executions| executions.load(Ordering::SeqCst) == 1));
+    assert_eq!(
+        repository
+            .events
+            .lock()
+            .await
+            .iter()
+            .filter(|event| {
+                event.event_type.as_str() == "node.started"
+                    && matches!(event.node_id.as_deref(), Some("join_a" | "join_b"))
+            })
+            .map(|event| event.node_id.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["join_a", "join_b"]
     );
 }
 

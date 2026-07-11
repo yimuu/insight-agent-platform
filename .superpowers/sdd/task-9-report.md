@@ -106,3 +106,53 @@ cargo test
 ## Concerns
 
 Task 10 remains responsible for explicitly signalling and draining sibling tasks on global Stop or Infrastructure failure. Task 9 preserves their global classification and never captures them as branch data; dropping the current `JoinSet` still aborts remaining tasks on scheduler exit.
+
+## Review Fixes
+
+Review identified that successful join execution advanced with the temporary join context, leaving scheduler-owned `BranchResult` visible through `RunContext::branch_results()` to downstream custom executors.
+
+### RED
+
+The downstream test executor was strengthened to require both conditions:
+
+```text
+context.branch_results().is_none()
+context.node_output("collect") == Some(expected_join_output)
+```
+
+Command:
+
+```text
+cargo test --test run_scheduler parallel -- --nocapture
+```
+
+Observed exit 101: both the full-success and partial-failure downstream executors panicked specifically because `context.branch_results().is_none()` was false. The other seven parallel tests passed.
+
+### GREEN
+
+After successful join execution, the scheduler now takes the matched `ActiveFork`, rebuilds the continuation context from its saved main context, inserts only the already-persisted join node output, and then advances. The temporary join-results context is no longer observable downstream, and clearing the active fork at this boundary permits later compiled forks.
+
+Coverage was also strengthened to prove:
+
+- `branch.started` is emitted in deterministic branch-ID order;
+- for every successful branch, `fanout node.completed < branch.started < terminal node.completed < branch.completed < collect node.started`;
+- for a failed branch, `branch.started < node.failed < branch.failed < collect node.started`;
+- a compiler-produced `fork_a -> join_a -> fork_b -> join_b -> result` graph completes, each branch/result node executes once, and both joins start exactly once.
+
+Final review verification:
+
+```text
+cargo test --test run_scheduler parallel -- --nocapture
+9 passed; 0 failed
+
+cargo test --test run_scheduler --test api
+26 passed; 0 failed
+
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+git diff --check
+all exited 0
+
+cargo test
+166 integration tests passed; 0 failed; no compiler warnings
+```

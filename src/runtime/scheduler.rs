@@ -230,7 +230,11 @@ impl Scheduler {
                 continue;
             }
 
-            state.finish_join_if_completed(&scheduled_node_id);
+            if let Some(post_join_context) =
+                state.finish_join_if_completed(&scheduled_node_id, &result.outcome.output)
+            {
+                context = post_join_context;
+            }
             match result.outcome.transition {
                 NodeTransition::Next => {
                     state.activate(&self.agent, node.next.as_deref(), scope, context)?
@@ -398,14 +402,25 @@ impl SchedulerState {
         self.activate(agent, Some(&join_id), WorkScope::Main, context)
     }
 
-    fn finish_join_if_completed(&mut self, node_id: &str) {
+    fn finish_join_if_completed(
+        &mut self,
+        node_id: &str,
+        join_output: &serde_json::Value,
+    ) -> Option<RunContext> {
         let is_active_join = self
             .active_fork
             .as_ref()
             .is_some_and(|active| active.plan.join_id == node_id);
-        if is_active_join {
-            self.active_fork = None;
+        if !is_active_join {
+            return None;
         }
+        let active = self
+            .active_fork
+            .take()
+            .expect("the paired join was matched against the active fork");
+        let mut context = active.main_context;
+        context.set_node_output(node_id, join_output.clone());
+        Some(context)
     }
 
     fn active_fork(&self, fork_id: &str) -> Result<&ActiveFork, RunError> {
