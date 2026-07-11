@@ -33,6 +33,10 @@ use tracing_subscriber::fmt::MakeWriter;
 const INPUT_SECRET: &str = "attached-input-never-expose";
 const OUTPUT_SECRET: &str = "detached-output-never-expose";
 const PARALLEL_SECRET: &str = "parallel-output-never-expose";
+const INPUT_CODE: &str = "ACTION_INPUT_INVALID";
+const INPUT_MESSAGE: &str = "action input validation failed";
+const OUTPUT_CODE: &str = "ACTION_OUTPUT_INVALID";
+const OUTPUT_MESSAGE: &str = "action output validation failed";
 
 #[derive(Clone)]
 struct ContainmentAction {
@@ -111,6 +115,26 @@ struct Fixture {
     database_url: String,
     calls: Arc<Mutex<Vec<Value>>>,
     logs: Arc<Mutex<Vec<u8>>>,
+}
+
+#[derive(Debug)]
+struct RawRun {
+    error_code: Option<String>,
+    error_message: Option<String>,
+}
+
+#[derive(Debug)]
+struct RawEvent {
+    event_type: String,
+    code: String,
+    message: String,
+    data: String,
+}
+
+#[derive(Debug)]
+struct RawHistory {
+    run: RawRun,
+    events: Vec<RawEvent>,
 }
 
 fn write_agent(root: &Path, id: &str, nodes: &str) {
@@ -326,13 +350,21 @@ async fn json_body(response: axum::response::Response) -> Value {
 }
 
 async fn wait_for_status(service: &RunService, run_id: &str, expected: RunStatus) {
-    for _ in 0..200 {
-        if service.get_run(run_id).await.unwrap().status == expected {
-            return;
+    let mut last_observed = None;
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let observed = service.get_run(run_id).await.unwrap().status;
+            last_observed = Some(observed);
+            if observed == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        tokio::task::yield_now().await;
+    })
+    .await;
+    if result.is_err() {
+        panic!("run {run_id} did not reach {expected:?}; last observed status: {last_observed:?}");
     }
-    panic!("run {run_id} did not reach {expected:?}");
 }
 
 async fn create_detached(app: &Router, agent_id: &str, secret: &str) -> String {
@@ -352,13 +384,51 @@ async fn create_detached(app: &Router, agent_id: &str, secret: &str) -> String {
         .to_string()
 }
 
-async fn raw_history(database_url: &str, run_id: &str) -> String {
+fn sse_events(body: &[u8]) -> Vec<Value> {
+    String::from_utf8_lossy(body)
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str(data).unwrap())
+        .collect()
+}
+
+fn json_event<'a>(events: &'a [Value], event_type: &str) -> &'a Value {
+    let matches = events
+        .iter()
+        .filter(|event| event["type"] == event_type)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one {event_type} SSE event: {events:?}"
+    );
+    matches[0]
+}
+
+fn assert_json_failure_event(
+    event: &Value,
+    event_type: &str,
+    code: &str,
+    message: &str,
+    secret: &str,
+) {
+    assert_eq!(event["type"], event_type);
+    assert_eq!(event["code"], code);
+    assert_eq!(event["message"], message);
+    assert!(
+        !event.to_string().contains(secret),
+        "secret leaked in {event_type} SSE event: {event}"
+    );
+}
+
+async fn raw_history(database_url: &str, run_id: &str) -> RawHistory {
     let pool = SqlitePool::connect(database_url).await.unwrap();
-    let run: (Option<String>,) = sqlx::query_as("SELECT error_message FROM runs WHERE run_id = ?")
-        .bind(run_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let run: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT error_code, error_message FROM runs WHERE run_id = ?")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let events: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT event_type, code, message, data FROM run_events WHERE run_id = ? ORDER BY seq",
     )
@@ -367,13 +437,90 @@ async fn raw_history(database_url: &str, run_id: &str) -> String {
     .await
     .unwrap();
     pool.close().await;
-    format!("{run:?}{events:?}")
+    RawHistory {
+        run: RawRun {
+            error_code: run.0,
+            error_message: run.1,
+        },
+        events: events
+            .into_iter()
+            .map(|(event_type, code, message, data)| RawEvent {
+                event_type,
+                code,
+                message,
+                data,
+            })
+            .collect(),
+    }
 }
 
-fn assert_safe_failure(encoded: &str, code: &str, message: &str, secret: &str) {
-    assert!(encoded.contains(code), "missing {code}: {encoded}");
-    assert!(encoded.contains(message), "missing {message}: {encoded}");
-    assert!(!encoded.contains(secret), "secret leaked: {encoded}");
+fn raw_event<'a>(history: &'a RawHistory, event_type: &str) -> &'a RawEvent {
+    let matches = history
+        .events
+        .iter()
+        .filter(|event| event.event_type == event_type)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one {event_type} history event: {history:?}"
+    );
+    matches[0]
+}
+
+fn assert_raw_run_failure(history: &RawHistory, code: &str, message: &str, secret: &str) {
+    assert_eq!(history.run.error_code.as_deref(), Some(code));
+    assert_eq!(history.run.error_message.as_deref(), Some(message));
+    assert!(
+        !history
+            .run
+            .error_code
+            .as_deref()
+            .unwrap_or_default()
+            .contains(secret),
+        "secret leaked in raw Run error code: {history:?}"
+    );
+    assert!(
+        !history
+            .run
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains(secret),
+        "secret leaked in raw Run error message: {history:?}"
+    );
+}
+
+fn assert_raw_failure_event(
+    history: &RawHistory,
+    event_type: &str,
+    code: &str,
+    message: &str,
+    secret: &str,
+) {
+    let event = raw_event(history, event_type);
+    assert_eq!(event.code, code);
+    assert_eq!(event.message, message);
+    for (field, value) in [
+        ("code", event.code.as_str()),
+        ("message", event.message.as_str()),
+        ("data", event.data.as_str()),
+    ] {
+        assert!(
+            !value.contains(secret),
+            "secret leaked in raw {event_type}.{field}: {event:?}"
+        );
+    }
+}
+
+fn assert_raw_event_data_is_safe(history: &RawHistory, secret: &str) {
+    for event in &history.events {
+        assert!(
+            !event.data.contains(secret),
+            "secret leaked in raw {}.data: {event:?}",
+            event.event_type
+        );
+    }
 }
 
 #[tokio::test]
@@ -399,23 +546,46 @@ async fn action_validation_instances_never_escape_the_runtime_boundary() {
     .await
     .unwrap()
     .unwrap();
-    let attached_text = String::from_utf8(attached_body.to_vec()).unwrap();
-    assert_safe_failure(
-        &attached_text,
-        "ACTION_INPUT_INVALID",
-        "action input validation failed",
+    let attached_events = sse_events(&attached_body);
+    assert!(!attached_events.is_empty());
+    for event in &attached_events {
+        assert!(
+            !event.to_string().contains(INPUT_SECRET),
+            "secret leaked in SSE event: {event}"
+        );
+    }
+    assert_json_failure_event(
+        json_event(&attached_events, "node.failed"),
+        "node.failed",
+        INPUT_CODE,
+        INPUT_MESSAGE,
         INPUT_SECRET,
     );
-    assert!(attached_text.contains("node.failed"));
-    assert!(attached_text.contains("run.failed"));
+    assert_json_failure_event(
+        json_event(&attached_events, "run.failed"),
+        "run.failed",
+        INPUT_CODE,
+        INPUT_MESSAGE,
+        INPUT_SECRET,
+    );
     assert!(fixture.calls.lock().unwrap().is_empty());
     let attached_history = raw_history(&fixture.database_url, &attached_run_id).await;
-    assert_safe_failure(
+    assert_raw_run_failure(&attached_history, INPUT_CODE, INPUT_MESSAGE, INPUT_SECRET);
+    assert_raw_failure_event(
         &attached_history,
-        "ACTION_INPUT_INVALID",
-        "action input validation failed",
+        "node.failed",
+        INPUT_CODE,
+        INPUT_MESSAGE,
         INPUT_SECRET,
     );
+    assert_raw_failure_event(
+        &attached_history,
+        "run.failed",
+        INPUT_CODE,
+        INPUT_MESSAGE,
+        INPUT_SECRET,
+    );
+    assert_raw_event_data_is_safe(&attached_history, INPUT_SECRET);
 
     let detached_run_id = create_detached(&fixture.app, "linear-output", OUTPUT_SECRET).await;
     wait_for_status(&fixture.service, &detached_run_id, RunStatus::Failed).await;
@@ -429,31 +599,49 @@ async fn action_validation_instances_never_escape_the_runtime_boundary() {
         ))
         .await
         .unwrap();
-    let detached_text = json_body(detached).await.to_string();
-    assert_safe_failure(
-        &detached_text,
-        "ACTION_OUTPUT_INVALID",
-        "action output validation failed",
-        OUTPUT_SECRET,
+    let detached = json_body(detached).await;
+    assert_eq!(detached["data"]["error_code"], OUTPUT_CODE);
+    assert_eq!(detached["data"]["error_message"], OUTPUT_MESSAGE);
+    assert!(
+        !detached.to_string().contains(OUTPUT_SECRET),
+        "secret leaked in Detached GET: {detached}"
     );
     let detached_history = raw_history(&fixture.database_url, &detached_run_id).await;
-    assert_safe_failure(
+    assert_raw_run_failure(
         &detached_history,
-        "ACTION_OUTPUT_INVALID",
-        "action output validation failed",
+        OUTPUT_CODE,
+        OUTPUT_MESSAGE,
         OUTPUT_SECRET,
     );
+    assert_raw_failure_event(
+        &detached_history,
+        "node.failed",
+        OUTPUT_CODE,
+        OUTPUT_MESSAGE,
+        OUTPUT_SECRET,
+    );
+    assert_raw_failure_event(
+        &detached_history,
+        "run.failed",
+        OUTPUT_CODE,
+        OUTPUT_MESSAGE,
+        OUTPUT_SECRET,
+    );
+    assert_raw_event_data_is_safe(&detached_history, OUTPUT_SECRET);
 
     let parallel_run_id = create_detached(&fixture.app, "parallel-output", PARALLEL_SECRET).await;
     wait_for_status(&fixture.service, &parallel_run_id, RunStatus::Completed).await;
     let parallel_history = raw_history(&fixture.database_url, &parallel_run_id).await;
-    assert!(parallel_history.contains("branch.failed"));
-    assert_safe_failure(
+    assert_eq!(parallel_history.run.error_code, None);
+    assert_eq!(parallel_history.run.error_message, None);
+    assert_raw_failure_event(
         &parallel_history,
-        "ACTION_OUTPUT_INVALID",
-        "action output validation failed",
+        "branch.failed",
+        OUTPUT_CODE,
+        OUTPUT_MESSAGE,
         PARALLEL_SECRET,
     );
+    assert_raw_event_data_is_safe(&parallel_history, PARALLEL_SECRET);
 
     let success_run_id = create_detached(&fixture.app, "success", "safe-success-value").await;
     wait_for_status(&fixture.service, &success_run_id, RunStatus::Completed).await;
