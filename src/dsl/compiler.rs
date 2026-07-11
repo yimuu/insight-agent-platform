@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use handlebars::{no_escape, Handlebars};
+use handlebars::{no_escape, Handlebars, Template};
 use jsonschema::JSONSchema;
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -21,6 +21,7 @@ use super::{
     graph::{validate_graph_structure, validate_references},
     parse_raw_agent,
     plan::compile_execution_plan,
+    references::{extract_handlebars_references, handlebars_static_text},
     CompileError, EmitPolicy,
 };
 
@@ -28,6 +29,7 @@ use super::{
 pub struct TemplateProgram {
     pub name: String,
     pub references: BTreeSet<String>,
+    pub static_value: Option<String>,
 }
 
 pub struct CompileContext<'a> {
@@ -108,25 +110,21 @@ impl<'a> CompileContext<'a> {
         field: &str,
         source: &str,
     ) -> Result<TemplateProgram, CompileError> {
-        if source.contains("nodes[") || source.contains("nodes.[") {
-            return Err(CompileError::new(
-                "TEMPLATE_REFERENCE_INVALID",
-                format!("template '{owner}.{field}' must use dotted node references"),
-            ));
-        }
         self.template_index += 1;
         let name = format!("{owner}.{field}.{}", self.template_index);
-        self.templates
-            .register_template_string(&name, source)
-            .map_err(|error| {
-                CompileError::new(
-                    "TEMPLATE_INVALID",
-                    format!("invalid template '{owner}.{field}': {error}"),
-                )
-            })?;
+        let template = Template::compile(source).map_err(|error| {
+            CompileError::new(
+                "TEMPLATE_INVALID",
+                format!("invalid template '{owner}.{field}': {error}"),
+            )
+        })?;
+        let references = extract_handlebars_references(&template, owner, field)?;
+        let static_value = handlebars_static_text(&template);
+        self.templates.register_template(&name, template);
         Ok(TemplateProgram {
             name,
-            references: node_references(source),
+            references,
+            static_value,
         })
     }
 

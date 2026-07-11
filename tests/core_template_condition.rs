@@ -161,6 +161,52 @@ async fn string_template_emits_its_complete_rendered_content() {
     assert_eq!(*emitted.lock().unwrap(), vec!["A&B"]);
 }
 
+#[test]
+fn template_reference_extraction_ignores_inert_handlebars_syntax() {
+    let models = ModelRegistry::default();
+    let actions = ActionRegistry::default();
+    let mut compile_context = CompileContext::new(&models, &actions);
+
+    let compilation = TemplateNode
+        .compile(
+            "render",
+            json!({
+                "value": {
+                    "plain": "literal nodes.future.output.text",
+                    "comment": "{{!-- nodes.future.output.text --}}visible",
+                    "escaped": "\\{{ nodes.future.output.text }}",
+                    "real": "{{ nodes.prepare.output.text }}",
+                    "helper": "{{#if nodes.ready.output.flag}}{{ nodes.prepare.output.text }}{{/if}}"
+                }
+            }),
+            &mut compile_context,
+        )
+        .unwrap();
+
+    assert_eq!(
+        compilation.references,
+        BTreeSet::from(["prepare".to_string(), "ready".to_string()])
+    );
+}
+
+#[test]
+fn template_reference_extraction_rejects_non_canonical_nodes_paths() {
+    let models = ModelRegistry::default();
+    let actions = ActionRegistry::default();
+    let mut compile_context = CompileContext::new(&models, &actions);
+
+    let error = TemplateNode
+        .compile(
+            "render",
+            json!({"value": "{{ nodes.prepare }}"}),
+            &mut compile_context,
+        )
+        .err()
+        .expect("non-canonical nodes path must fail compilation");
+
+    assert_eq!(error.code(), "TEMPLATE_REFERENCE_INVALID");
+}
+
 #[tokio::test]
 async fn condition_selects_the_first_matching_case_then_falls_back_to_default() {
     let models = ModelRegistry::default();
