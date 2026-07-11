@@ -211,7 +211,10 @@ fn collect_cel_expression(
             collect_cel_expression(&select.operand, references, node_id, case_index)
         }
         Expr::Call(call) => {
-            if matches!(call.func_name.as_str(), operators::INDEX | operators::OPT_INDEX) {
+            if matches!(
+                call.func_name.as_str(),
+                operators::INDEX | operators::OPT_INDEX
+            ) {
                 collect_cel_index(call, references, node_id, case_index)
             } else {
                 if let Some(target) = &call.target {

@@ -1238,7 +1238,6 @@ dependencies = [
  "handlebars",
  "humantime",
  "jsonschema",
- "regex",
  "reqwest",
  "serde",
  "serde_json",

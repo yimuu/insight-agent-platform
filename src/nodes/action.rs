@@ -57,9 +57,9 @@ impl NodeType for ActionNode {
         let action = context.actions().resolve(&config.action)?;
         let input = CompiledTemplateValue::compile(config.input, node_id, "input", context)?;
         if let Some(static_input) = input.static_value() {
-            action.validate_input(&static_input).map_err(|error| {
-                CompileError::new(error.code(), error.message().to_string())
-            })?;
+            action
+                .validate_input(&static_input)
+                .map_err(|error| CompileError::new(error.code(), error.message().to_string()))?;
         }
         let references = input.references();
         let allows_content_emit = action.descriptor().streams_content;
