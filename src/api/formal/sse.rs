@@ -29,7 +29,6 @@ pub(crate) fn response_stream(
                     }
                 }
             }
-            Err(crate::events::hub::EventError::ReplayFinished) => None,
             Err(error) => {
                 tracing::debug!(
                     run_id = subscription.run_id,
@@ -37,7 +36,7 @@ pub(crate) fn response_stream(
                     last_seq = subscription.last_seq(),
                     "formal SSE subscription closed"
                 );
-                match transport_error(error.code(), subscription.last_seq()) {
+                match transport_error(error.code()) {
                     Ok(event) => Some((Ok(event), None)),
                     Err(encoding_error) => {
                         tracing::error!(
@@ -59,14 +58,18 @@ pub(crate) fn response_stream(
     )
 }
 
-fn transport_error(code: &'static str, after_seq: u64) -> Result<Event, axum::Error> {
+fn transport_error(code: &'static str) -> Result<Event, axum::Error> {
     Event::default()
         .event("transport.error")
-        .json_data(serde_json::json!({
-            "code": code,
-            "message": "event stream closed; reconnect with after_seq",
-            "data": {"after_seq": after_seq},
-        }))
+        .json_data(transport_error_payload(code))
+}
+
+fn transport_error_payload(code: &'static str) -> serde_json::Value {
+    serde_json::json!({
+        "code": code,
+        "message": "event stream closed",
+        "data": {},
+    })
 }
 
 fn encode_event(event: &RunEvent) -> Result<Event, axum::Error> {
@@ -84,4 +87,19 @@ fn is_terminal(event_type: RunEventType) -> bool {
             | RunEventType::RunCancelled
             | RunEventType::RunInterrupted
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transport_error_payload;
+
+    #[test]
+    fn transport_error_does_not_advertise_recovery() {
+        let payload = transport_error_payload("SUBSCRIBER_LAGGED");
+        assert_eq!(payload["code"], "SUBSCRIBER_LAGGED");
+        assert_eq!(payload["message"], "event stream closed");
+        assert_eq!(payload["data"], serde_json::json!({}));
+        assert!(payload.get("after_seq").is_none());
+        assert!(!payload.to_string().contains("reconnect"));
+    }
 }

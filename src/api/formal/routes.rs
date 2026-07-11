@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{rejection::JsonRejection, Path, Query, State},
+    extract::{rejection::JsonRejection, Path, State},
     http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::{
@@ -44,7 +44,6 @@ pub fn build_router(state: FormalApiState) -> Router {
         )
         .route("/v1/agents/:agent_id/runs", post(create_detached_run))
         .route("/v1/runs/:run_id", get(get_run).delete(cancel_run))
-        .route("/v1/runs/:run_id/events", get(subscribe_events))
         .route_layer(middleware::from_fn(
             move |headers: HeaderMap, request: Request<Body>, next: Next| {
                 let auth = auth.clone();
@@ -190,30 +189,6 @@ async fn get_run(
         .await
         .map_err(ApiError::from)?;
     Ok(Json(ApiResponse::ok(run)))
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct EventQuery {
-    after_seq: Option<String>,
-}
-
-async fn subscribe_events(
-    State(state): State<Arc<FormalApiState>>,
-    Path(run_id): Path<String>,
-    Query(query): Query<EventQuery>,
-) -> Result<Response, ApiError> {
-    let after_seq = query
-        .after_seq
-        .as_deref()
-        .unwrap_or("0")
-        .parse::<u64>()
-        .map_err(|_| ApiError::input_invalid())?;
-    let subscription = state
-        .service
-        .subscribe(&run_id, after_seq)
-        .await
-        .map_err(ApiError::from)?;
-    Ok(response_stream(subscription).into_response())
 }
 
 async fn cancel_run(

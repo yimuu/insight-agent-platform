@@ -2,8 +2,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
-    path::Path,
     sync::Arc,
     time::Duration,
 };
@@ -22,7 +20,7 @@ use insight_agent_platform::{
             CompiledAgent, CompiledNode, ExecutionPlan, NodeCompilation, NodeControl, NodeOutcome,
             NodeTransition, RunOutput,
         },
-        compiler::{AgentCompiler, CompileContext, CompileLimits},
+        compiler::CompileContext,
         CompileError, EmitPolicy,
     },
     events::hub::{EventHub, EventHubConfig},
@@ -31,7 +29,6 @@ use insight_agent_platform::{
         default_node_registries,
         registry::{NodeExecutor, NodeType},
     },
-    resources::{actions::ActionRegistry, models::ModelRegistry},
     runtime::{
         CompiledAgentRegistry, ExecutionControl, RunContext, RunError, RunService, RunServiceConfig,
     },
@@ -43,7 +40,6 @@ use tower::ServiceExt;
 enum ApiBehavior {
     Complete,
     Block,
-    Next(Value),
 }
 
 struct ApiNode;
@@ -87,10 +83,6 @@ impl NodeExecutor for ApiNode {
                 control.stopped().await;
                 Err(RunError::stopped(control.stop_reason().unwrap()))
             }
-            ApiBehavior::Next(output) => Ok(NodeOutcome {
-                output: output.clone(),
-                transition: NodeTransition::Next,
-            }),
         }
     }
 }
@@ -131,39 +123,22 @@ fn agent(id: &str, behavior: ApiBehavior) -> Arc<CompiledAgent> {
 }
 
 async fn fixture(auth: ApiAuth, capacity: usize) -> (Router, RunService) {
-    let (app, service, _) = fixture_internal(auth, capacity, 4, false).await;
-    (app, service)
-}
-
-async fn parallel_fixture() -> (Router, RunService, Arc<SqliteRunRepository>) {
-    fixture_internal(ApiAuth::disabled(), 4, 64, true).await
-}
-
-async fn fixture_internal(
-    auth: ApiAuth,
-    capacity: usize,
-    ring_capacity: usize,
-    include_parallel: bool,
-) -> (Router, RunService, Arc<SqliteRunRepository>) {
     let repository = Arc::new(SqliteRunRepository::in_memory().await.unwrap());
     let repository_trait: Arc<dyn RunRepository> = repository.clone();
     let events = EventHub::new(
         Arc::clone(&repository_trait),
         EventHubConfig {
-            ring_capacity,
+            ring_capacity: 4,
             subscriber_capacity: 16,
             journal_capacity: 32,
             journal_batch_size: 4,
             operation_timeout: Duration::from_secs(1),
         },
     );
-    let mut agents = vec![
+    let agents = vec![
         agent("fast", ApiBehavior::Complete),
         agent("blocking", ApiBehavior::Block),
     ];
-    if include_parallel {
-        agents.push(parallel_agent());
-    }
     let agents = CompiledAgentRegistry::new(agents).unwrap();
     let (_, mut executors) = default_node_registries().unwrap();
     executors.register(ApiNode).unwrap();
@@ -185,74 +160,7 @@ async fn fixture_internal(
         service: service.clone(),
         auth,
     });
-    (router, service, repository)
-}
-
-fn parallel_agent() -> Arc<CompiledAgent> {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("agent");
-    fs::create_dir_all(&root).unwrap();
-    fs::write(
-        root.join("agent.yaml"),
-        r#"
-version: 1
-id: parallel
-name: Parallel API Agent
-input:
-  schema:
-    type: object
-    required: [text]
-    additionalProperties: false
-    properties: {text: {type: string}}
-entry: fanout
-nodes:
-  fanout:
-    type: core.fork
-    config:
-      branches: {source_a: source_a, source_b: source_b}
-      join: collect
-  source_a:
-    type: core.template
-    next: collect
-    config: {value: a}
-  source_b:
-    type: core.template
-    next: collect
-    config: {value: b}
-  collect:
-    type: core.join
-    next: result
-    config: {mode: all_settled}
-  result:
-    type: core.output
-    config: {data: {done: true}}
-"#,
-    )
-    .unwrap();
-    let (types, _) = default_node_registries().unwrap();
-    let mut agent = AgentCompiler::new(
-        types,
-        ModelRegistry::default(),
-        ActionRegistry::default(),
-        Duration::from_secs(30),
-        CompileLimits {
-            max_fork_branches: 8,
-        },
-    )
-    .compile_dir(Path::new(&root))
-    .unwrap();
-    for (node_id, output) in [
-        ("source_a", json!({"text":"a"})),
-        ("source_b", json!({"text":"b"})),
-    ] {
-        let node = agent.nodes.get_mut(node_id).unwrap();
-        node.kind = "test.api".to_string();
-        node.body = Arc::new(ApiBehavior::Next(output));
-    }
-    let result = agent.nodes.get_mut("result").unwrap();
-    result.kind = "test.api".to_string();
-    result.body = Arc::new(ApiBehavior::Complete);
-    Arc::new(agent)
+    (router, service)
 }
 
 fn request(method: Method, uri: &str, body: Option<Value>) -> Request<Body> {
@@ -453,7 +361,7 @@ async fn attached_creation_validates_before_sse_and_exposes_formal_event_headers
 }
 
 #[tokio::test]
-async fn completed_events_replay_after_seq_and_invalid_cursors_use_json_errors() {
+async fn event_replay_route_and_recovery_headers_are_not_supported() {
     let (app, service) = fixture(ApiAuth::disabled(), 4).await;
     let created = app
         .clone()
@@ -468,130 +376,26 @@ async fn completed_events_replay_after_seq_and_invalid_cursors_use_json_errors()
     let run_id = created["data"]["run_id"].as_str().unwrap();
     wait_for_status(&service, run_id, RunStatus::Completed).await;
 
-    let first_page = app
-        .clone()
-        .oneshot(request(
-            Method::GET,
-            &format!("/v1/runs/{run_id}/events?after_seq=0"),
-            None,
-        ))
-        .await
-        .unwrap();
-    let first_page = to_bytes(first_page.into_body(), usize::MAX).await.unwrap();
-    let first_page = sse_data(&first_page);
-    assert_eq!(first_page.len(), 5);
-    assert_eq!(first_page[3]["seq"], 4);
-    assert_eq!(first_page[4]["code"], "REPLAY_TRUNCATED");
-    assert_eq!(first_page[4]["data"]["after_seq"], 4);
+    for uri in [
+        format!("/v1/runs/{run_id}/events"),
+        format!("/v1/runs/{run_id}/events?after_seq=0"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(Method::GET, &uri, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 
-    let replay = app
-        .clone()
-        .oneshot(request(
-            Method::GET,
-            &format!("/v1/runs/{run_id}/events?after_seq=2"),
-            None,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(replay.status(), StatusCode::OK);
-    let replay = to_bytes(replay.into_body(), usize::MAX).await.unwrap();
-    let events = sse_data(&replay);
-    assert!(!events.is_empty());
-    assert!(events
-        .iter()
-        .all(|event| event["seq"].as_u64().unwrap() > 2));
-    assert_eq!(events.last().unwrap()["type"], "run.completed");
-    let terminal_seq = events.last().unwrap()["seq"].as_u64().unwrap();
-
-    let caught_up = app
-        .clone()
-        .oneshot(request(
-            Method::GET,
-            &format!("/v1/runs/{run_id}/events?after_seq={terminal_seq}"),
-            None,
-        ))
-        .await
-        .unwrap();
-    let caught_up = to_bytes(caught_up.into_body(), usize::MAX).await.unwrap();
-    assert!(sse_data(&caught_up).is_empty());
-
-    let invalid = app
-        .oneshot(request(
-            Method::GET,
-            &format!("/v1/runs/{run_id}/events?after_seq=abc"),
-            None,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json_body(invalid).await["code"], "INPUT_INVALID");
-}
-
-#[tokio::test]
-async fn detached_parallel_run_replays_repository_order_after_branch_cursor() {
-    let (app, service, repository) = parallel_fixture().await;
-    let created = app
-        .clone()
-        .oneshot(request(
-            Method::POST,
-            "/v1/agents/parallel/runs",
-            Some(json!({"text":"hello"})),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(created.status(), StatusCode::ACCEPTED);
-    let created = json_body(created).await;
-    let run_id = created["data"]["run_id"].as_str().unwrap();
-    wait_for_status(&service, run_id, RunStatus::Completed).await;
-
-    let stored = repository.list_events_after(run_id, 0, 100).await.unwrap();
-    let branch_started_seq = stored
-        .iter()
-        .find(|event| event.event_type.as_str() == "branch.started")
-        .unwrap()
-        .seq;
-    let expected = stored
-        .iter()
-        .filter(|event| event.seq > branch_started_seq)
-        .map(|event| {
-            (
-                event.seq,
-                event.event_type.as_str().to_string(),
-                event.node_id.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let replay = app
-        .oneshot(request(
-            Method::GET,
-            &format!("/v1/runs/{run_id}/events?after_seq={branch_started_seq}"),
-            None,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(replay.status(), StatusCode::OK);
-    let replay = to_bytes(replay.into_body(), usize::MAX).await.unwrap();
-    let replay = sse_data(&replay);
-    let actual = replay
-        .iter()
-        .map(|event| {
-            (
-                event["seq"].as_u64().unwrap(),
-                event["type"].as_str().unwrap().to_string(),
-                event["node_id"].as_str().map(str::to_string),
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(actual, expected);
-    assert!(actual.iter().any(|(_, kind, _)| kind == "branch.completed"));
-    assert!(actual
-        .iter()
-        .any(|(_, kind, node)| { kind == "node.started" && node.as_deref() == Some("collect") }));
-    assert!(actual
-        .iter()
-        .any(|(_, kind, node)| { kind == "node.completed" && node.as_deref() == Some("collect") }));
-    assert!(actual.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    let mut request = request(Method::GET, &format!("/v1/runs/{run_id}/events"), None);
+    request
+        .headers_mut()
+        .insert("last-event-id", "3".parse().unwrap());
+    assert_eq!(
+        app.oneshot(request).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
