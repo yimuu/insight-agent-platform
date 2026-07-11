@@ -10,9 +10,9 @@ use std::{
 };
 
 use chrono::Utc;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::{
-    sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore},
+    sync::{watch, OwnedSemaphorePermit, Semaphore},
     task::JoinHandle,
     time::{sleep, timeout},
 };
@@ -20,10 +20,13 @@ use uuid::Uuid;
 
 use crate::{
     dsl::{compiled::CompiledAgent, CompileError},
-    events::hub::EventHub,
+    events::{
+        hub::EventHub,
+        protocol::{RunEventScope, RunEventType},
+    },
     history::{
         repository::{HistoryError, RunRepository},
-        types::{summarize_input, NewRun, RunAttachment, RunRecord},
+        types::{summarize_input, NewRun, RunAttachment, RunRecord, RunStatus, TerminalUpdate},
     },
     nodes::registry::NodeExecutorRegistry,
 };
@@ -109,6 +112,18 @@ struct ActiveRun {
     _permit: OwnedSemaphorePermit,
 }
 
+struct PreparingRun {
+    agent: Arc<CompiledAgent>,
+    new_run: NewRun,
+    input: Value,
+    attachment: RunAttachment,
+    stop: StopController,
+    signal: StopSignal,
+    state: Arc<RunState>,
+    permit: OwnedSemaphorePermit,
+    durable: bool,
+}
+
 struct RunServiceInner {
     agents: CompiledAgentRegistry,
     executors: NodeExecutorRegistry,
@@ -117,8 +132,9 @@ struct RunServiceInner {
     capacity: Arc<Semaphore>,
     node_capacity: Arc<Semaphore>,
     config: RunServiceConfig,
+    preparing: Mutex<BTreeMap<String, PreparingRun>>,
     active: Mutex<BTreeMap<String, ActiveRun>>,
-    active_changed: watch::Sender<u64>,
+    lifecycle_changed: watch::Sender<u64>,
     accepting: AtomicBool,
 }
 
@@ -141,13 +157,97 @@ impl fmt::Debug for RunService {
 }
 
 struct PreparedRun {
-    agent: Arc<CompiledAgent>,
-    new_run: NewRun,
-    input: Value,
-    stop: StopController,
-    signal: StopSignal,
-    state: Arc<RunState>,
-    permit: OwnedSemaphorePermit,
+    run_id: String,
+    request_id: String,
+    guard: PreparingGuard,
+}
+
+struct PreparingGuard {
+    inner: Arc<RunServiceInner>,
+    run_id: String,
+    armed: bool,
+}
+
+impl PreparingGuard {
+    fn new(inner: Arc<RunServiceInner>, run_id: String) -> Self {
+        Self {
+            inner,
+            run_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PreparingGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.inner.finalize_preparing_from_guard_drop(&self.run_id);
+        }
+    }
+}
+
+impl RunServiceInner {
+    fn notify_lifecycle(&self) {
+        self.lifecycle_changed
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    fn lifecycle_is_empty(&self) -> bool {
+        lock_preparing(self).is_empty() && lock_active(self).is_empty()
+    }
+
+    fn mark_preparing_durable(&self, run_id: &str) {
+        if let Some(run) = lock_preparing(self).get_mut(run_id) {
+            run.durable = true;
+        }
+        self.notify_lifecycle();
+    }
+
+    fn remove_preparing(&self, run_id: &str) {
+        let removed = lock_preparing(self).remove(run_id);
+        drop(removed);
+        self.notify_lifecycle();
+    }
+
+    fn lifecycle_stops(&self) -> Vec<(StopController, RunAttachment)> {
+        let preparing = lock_preparing(self)
+            .values()
+            .map(|run| (run.stop.clone(), run.attachment))
+            .collect::<Vec<_>>();
+        let active = lock_active(self)
+            .values()
+            .map(|run| {
+                let _already_finished = run.task.is_finished();
+                (run.stop.clone(), run.attachment)
+            })
+            .collect::<Vec<_>>();
+        preparing.into_iter().chain(active).collect()
+    }
+
+    fn finalize_preparing_from_guard_drop(self: &Arc<Self>, run_id: &str) {
+        let mut preparing = lock_preparing(self);
+        let Some(preparing_run) = preparing.remove(run_id) else {
+            return;
+        };
+        let mut active = lock_active(self);
+        let reason = preparing_run
+            .signal
+            .reason()
+            .unwrap_or_else(|| stop_reason_for_attachment(preparing_run.attachment));
+        preparing_run.stop.request(reason);
+        let service = RunService {
+            inner: Arc::clone(self),
+        };
+        let active_run = service.spawn_finalizer_active(preparing_run, reason);
+        active.insert(run_id.to_string(), active_run);
+        drop(active);
+        drop(preparing);
+        self.notify_lifecycle();
+    }
 }
 
 impl RunService {
@@ -177,8 +277,9 @@ impl RunService {
                 capacity: Arc::new(Semaphore::new(config.max_concurrent_runs)),
                 node_capacity: Arc::new(Semaphore::new(config.max_parallel_node_executions)),
                 config,
+                preparing: Mutex::new(BTreeMap::new()),
                 active: Mutex::new(BTreeMap::new()),
-                active_changed: watch::channel(0).0,
+                lifecycle_changed: watch::channel(0).0,
                 accepting: AtomicBool::new(true),
             }),
         })
@@ -201,8 +302,8 @@ impl RunService {
         let prepared = self
             .prepare_run(agent_id, input, request, RunAttachment::Attached)
             .await?;
-        let run_id = prepared.new_run.run_id.clone();
-        let request_id = prepared.new_run.request_id.clone();
+        let run_id = prepared.run_id.clone();
+        let request_id = prepared.request_id.clone();
         let live = self.inner.events.subscribe(&run_id).await;
         let owner: Arc<dyn LeaseOwner> = self.inner.clone();
         let lease = SubscriptionLease::new(owner, &run_id);
@@ -223,7 +324,7 @@ impl RunService {
         let prepared = self
             .prepare_run(agent_id, input, request, RunAttachment::Detached)
             .await?;
-        let record = self.get_run(&prepared.new_run.run_id).await?;
+        let record = self.get_run(&prepared.run_id).await?;
         self.launch(prepared);
         Ok(record)
     }
@@ -242,12 +343,12 @@ impl RunService {
         if record.status.is_terminal() {
             return Ok(record);
         }
-        let (stop, mut active_changed) = {
+        let (stop, mut lifecycle_changed) = {
             let active = lock_active(&self.inner);
             let run = active.get(run_id).ok_or_else(|| {
                 ServiceError::new("RUN_CONFLICT", "run is not active in this process")
             })?;
-            (run.stop.clone(), self.inner.active_changed.subscribe())
+            (run.stop.clone(), self.inner.lifecycle_changed.subscribe())
         };
         stop.request(StopReason::Cancelled);
         loop {
@@ -261,7 +362,7 @@ impl RunService {
                     "run execution ended without a durable terminal state",
                 ));
             }
-            active_changed
+            lifecycle_changed
                 .changed()
                 .await
                 .map_err(|_| ServiceError::new("RUN_CONFLICT", "run completion channel closed"))?;
@@ -278,38 +379,26 @@ impl RunService {
 
     pub async fn shutdown(&self, deadline: Duration) -> Result<(), ServiceError> {
         self.inner.accepting.store(false, Ordering::Release);
-        let mut active_changed = self.inner.active_changed.subscribe();
-        let stops = {
-            let active = lock_active(&self.inner);
-            active
-                .values()
-                .map(|run| {
-                    let _already_finished = run.task.is_finished();
-                    (run.stop.clone(), run.attachment)
-                })
-                .collect::<Vec<_>>()
-        };
+        let mut lifecycle_changed = self.inner.lifecycle_changed.subscribe();
+        let stops = self.inner.lifecycle_stops();
         for (stop, attachment) in stops {
-            let reason = match attachment {
-                RunAttachment::Attached => StopReason::Cancelled,
-                RunAttachment::Detached => StopReason::Interrupted,
-            };
-            stop.request(reason);
+            stop.request(stop_reason_for_attachment(attachment));
         }
         let wait_for_empty = async {
             loop {
-                if lock_active(&self.inner).is_empty() {
+                if self.inner.lifecycle_is_empty() {
                     break;
                 }
-                active_changed.changed().await.map_err(|_| {
+                lifecycle_changed.changed().await.map_err(|_| {
                     ServiceError::new("SHUTDOWN_FAILED", "run completion channel closed")
                 })?;
             }
             Ok::<(), ServiceError>(())
         };
-        timeout(deadline, wait_for_empty)
+        let result = timeout(deadline, wait_for_empty)
             .await
-            .map_err(|_| ServiceError::new("SHUTDOWN_TIMEOUT", "run shutdown timed out"))??;
+            .map_err(|_| ServiceError::new("SHUTDOWN_TIMEOUT", "run shutdown timed out"))?;
+        result?;
         Ok(())
     }
 
@@ -353,53 +442,102 @@ impl RunService {
             .filter(|request_id| !request_id.trim().is_empty())
             .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple()));
         let new_run = NewRun {
-            run_id,
-            request_id,
+            run_id: run_id.clone(),
+            request_id: request_id.clone(),
             agent_id: agent.id.clone(),
             agent_version: agent.version_hash.clone(),
             attachment,
             created_at: Utc::now(),
             input_summary: summarize_input(&input),
         };
+        let (stop, signal) = stop_pair();
+        lock_preparing(&self.inner).insert(
+            run_id.clone(),
+            PreparingRun {
+                agent,
+                new_run: new_run.clone(),
+                input,
+                attachment,
+                stop,
+                signal,
+                state: Arc::new(RunState::new()),
+                permit,
+                durable: false,
+            },
+        );
+        self.inner.notify_lifecycle();
+        let guard = PreparingGuard::new(Arc::clone(&self.inner), run_id.clone());
+
         self.inner
             .repository
             .create_run(new_run.clone())
             .await
-            .map_err(service_history_error)?;
-        self.inner.events.open_run(&new_run.run_id).await;
-        let (stop, signal) = stop_pair();
+            .map_err(|error| {
+                self.inner.remove_preparing(&run_id);
+                service_history_error(error)
+            })?;
+        self.inner.mark_preparing_durable(&run_id);
+        self.inner.events.open_run(&run_id).await;
+
         Ok(PreparedRun {
-            agent,
-            new_run,
-            input,
-            stop,
-            signal,
-            state: Arc::new(RunState::new()),
-            permit,
+            run_id,
+            request_id,
+            guard,
         })
     }
 
     fn launch(&self, prepared: PreparedRun) {
-        let PreparedRun {
+        let run_id = prepared.run_id.clone();
+        let promoted = self.promote_preparing(&run_id);
+        prepared.guard.disarm();
+        if !promoted {
+            tracing::warn!(run_id, "prepared run was already removed before launch");
+        }
+    }
+
+    fn promote_preparing(&self, run_id: &str) -> bool {
+        let mut preparing = lock_preparing(&self.inner);
+        let Some(preparing_run) = preparing.remove(run_id) else {
+            return false;
+        };
+        let mut active = lock_active(&self.inner);
+        let should_run =
+            self.inner.accepting.load(Ordering::Acquire) && preparing_run.signal.reason().is_none();
+        let active_run = if should_run {
+            self.spawn_scheduler_active(preparing_run)
+        } else {
+            let reason = preparing_run
+                .signal
+                .reason()
+                .unwrap_or_else(|| stop_reason_for_attachment(preparing_run.attachment));
+            preparing_run.stop.request(reason);
+            self.spawn_finalizer_active(preparing_run, reason)
+        };
+        active.insert(run_id.to_string(), active_run);
+        drop(active);
+        drop(preparing);
+        self.inner.notify_lifecycle();
+        true
+    }
+
+    fn spawn_scheduler_active(&self, preparing: PreparingRun) -> ActiveRun {
+        let PreparingRun {
             agent,
             new_run,
             input,
+            attachment,
             stop,
             signal,
             state,
             permit,
-        } = prepared;
+            durable: _,
+        } = preparing;
         let run_id = new_run.run_id.clone();
-        let attachment = new_run.attachment;
         let task_stop = stop.clone();
         let task_state = Arc::clone(&state);
         let inner = Arc::clone(&self.inner);
-        let (start, started) = oneshot::channel();
         let task_run_id = run_id.clone();
         let task = tokio::spawn(async move {
-            if started.await.is_err() {
-                return;
-            }
             let coordinator = RunCoordinator::new(
                 agent,
                 inner.executors.clone(),
@@ -433,20 +571,51 @@ impl RunService {
             }
             let removed = lock_active(&inner).remove(&task_run_id);
             drop(removed);
-            inner
-                .active_changed
-                .send_modify(|revision| *revision = revision.wrapping_add(1));
+            inner.notify_lifecycle();
         });
-        lock_active(&self.inner).insert(
-            run_id,
-            ActiveRun {
-                attachment,
-                stop,
-                task,
-                _permit: permit,
-            },
-        );
-        let _ = start.send(());
+        ActiveRun {
+            attachment,
+            stop,
+            task,
+            _permit: permit,
+        }
+    }
+
+    fn spawn_finalizer_active(&self, preparing: PreparingRun, reason: StopReason) -> ActiveRun {
+        let PreparingRun {
+            new_run,
+            attachment,
+            stop,
+            permit,
+            durable,
+            ..
+        } = preparing;
+        let inner = Arc::clone(&self.inner);
+        let run_id = new_run.run_id.clone();
+        let task_run_id = run_id.clone();
+        let task = tokio::spawn(async move {
+            if durable {
+                if let Err(error) =
+                    publish_prelaunch_terminal(Arc::clone(&inner), new_run, reason).await
+                {
+                    inner.accepting.store(false, Ordering::Release);
+                    tracing::error!(
+                        run_id = task_run_id,
+                        code = error.code(),
+                        "prelaunch finalizer failed"
+                    );
+                }
+            }
+            let removed = lock_active(&inner).remove(&task_run_id);
+            drop(removed);
+            inner.notify_lifecycle();
+        });
+        ActiveRun {
+            attachment,
+            stop,
+            task,
+            _permit: permit,
+        }
     }
 }
 
@@ -465,11 +634,99 @@ impl LeaseOwner for RunServiceInner {
     }
 }
 
+fn lock_preparing(inner: &RunServiceInner) -> MutexGuard<'_, BTreeMap<String, PreparingRun>> {
+    inner
+        .preparing
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn lock_active(inner: &RunServiceInner) -> MutexGuard<'_, BTreeMap<String, ActiveRun>> {
     inner
         .active
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn stop_reason_for_attachment(attachment: RunAttachment) -> StopReason {
+    match attachment {
+        RunAttachment::Attached => StopReason::Cancelled,
+        RunAttachment::Detached => StopReason::Interrupted,
+    }
+}
+
+fn run_scope(run: &NewRun) -> RunEventScope {
+    RunEventScope::for_run(
+        run.request_id.clone(),
+        run.run_id.clone(),
+        run.agent_id.clone(),
+        run.agent_version.clone(),
+    )
+}
+
+fn terminal_spec(reason: StopReason) -> (RunStatus, RunEventType, &'static str, &'static str) {
+    match reason {
+        StopReason::Cancelled => (
+            RunStatus::Cancelled,
+            RunEventType::RunCancelled,
+            "RUN_CANCELLED",
+            "run cancelled",
+        ),
+        StopReason::Interrupted => (
+            RunStatus::Interrupted,
+            RunEventType::RunInterrupted,
+            "RUN_INTERRUPTED",
+            "run interrupted",
+        ),
+        StopReason::TimedOut => (
+            RunStatus::Failed,
+            RunEventType::RunFailed,
+            "RUN_TIMEOUT",
+            "run timed out",
+        ),
+    }
+}
+
+async fn publish_prelaunch_terminal(
+    inner: Arc<RunServiceInner>,
+    run: NewRun,
+    reason: StopReason,
+) -> Result<(), ServiceError> {
+    inner
+        .events
+        .publish(
+            run_scope(&run),
+            RunEventType::RunCreated,
+            json!({
+                "status": RunStatus::Created,
+                "attachment": run.attachment,
+            }),
+        )
+        .await
+        .map_err(|error| ServiceError::new(error.code(), error.to_string()))?;
+    let (status, event_type, code, message) = terminal_spec(reason);
+    let update = TerminalUpdate::new(
+        &run.run_id,
+        status,
+        Utc::now(),
+        None,
+        Some(code.to_string()),
+        Some(message.to_string()),
+    )
+    .map_err(|error| ServiceError::new(error.code(), error.to_string()))?;
+    inner
+        .events
+        .publish_terminal(
+            run_scope(&run),
+            event_type,
+            update,
+            code,
+            message,
+            json!({}),
+        )
+        .await
+        .map_err(|error| ServiceError::new(error.code(), error.to_string()))?;
+    Ok(())
 }
 
 fn service_history_error(error: HistoryError) -> ServiceError {
