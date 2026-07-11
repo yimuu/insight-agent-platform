@@ -96,7 +96,7 @@ impl NodeExecutorRegistry {
 
     pub fn resolve(&self, kind: &str) -> Result<Arc<dyn NodeExecutor>, RunError> {
         self.executors.get(kind).cloned().ok_or_else(|| {
-            RunError::new(
+            RunError::infrastructure(
                 "NODE_EXECUTOR_NOT_FOUND",
                 format!("node executor '{kind}' is not registered"),
             )

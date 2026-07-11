@@ -2,6 +2,7 @@ pub mod attachment;
 pub mod context;
 pub mod control;
 pub mod coordinator;
+pub mod execution;
 pub mod service;
 pub mod state;
 
@@ -11,15 +12,24 @@ pub use attachment::{AttachedRun, RunSubscription};
 pub use context::{RunContext, RunMetadata};
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
 pub use coordinator::RunCoordinator;
+pub use execution::{execute_node, ExecutionLimiter, NodeExecutionFailure, NodeExecutionResult};
 pub use service::{
     CompiledAgentRegistry, RequestMetadata, RunService, RunServiceConfig, ServiceError,
 };
 pub use state::{BranchError, BranchResult, RunState};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunErrorKind {
+    Node,
+    Stop,
+    Infrastructure,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunError {
     code: &'static str,
     message: String,
+    kind: RunErrorKind,
 }
 
 impl RunError {
@@ -27,6 +37,15 @@ impl RunError {
         Self {
             code,
             message: message.into(),
+            kind: RunErrorKind::Node,
+        }
+    }
+
+    pub fn infrastructure(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            kind: RunErrorKind::Infrastructure,
         }
     }
 
@@ -38,11 +57,20 @@ impl RunError {
         &self.message
     }
 
+    pub fn kind(&self) -> RunErrorKind {
+        self.kind
+    }
+
     pub fn stopped(reason: StopReason) -> Self {
-        match reason {
-            StopReason::Cancelled => Self::new("RUN_CANCELLED", "run cancelled"),
-            StopReason::Interrupted => Self::new("RUN_INTERRUPTED", "run interrupted"),
-            StopReason::TimedOut => Self::new("RUN_TIMEOUT", "run timed out"),
+        let (code, message) = match reason {
+            StopReason::Cancelled => ("RUN_CANCELLED", "run cancelled"),
+            StopReason::Interrupted => ("RUN_INTERRUPTED", "run interrupted"),
+            StopReason::TimedOut => ("RUN_TIMEOUT", "run timed out"),
+        };
+        Self {
+            code,
+            message: message.to_string(),
+            kind: RunErrorKind::Stop,
         }
     }
 

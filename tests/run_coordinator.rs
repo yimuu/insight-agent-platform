@@ -29,12 +29,13 @@ use insight_agent_platform::{
     },
     nodes::registry::{NodeExecutor, NodeExecutorRegistry, NodeType},
     runtime::{
-        stop_pair, ExecutionControl, RunContext, RunCoordinator, RunError, RunState, StopReason,
+        stop_pair, ExecutionControl, ExecutionLimiter, RunContext, RunCoordinator, RunError,
+        RunState, StopReason,
     },
 };
 use jsonschema::JSONSchema;
 use serde_json::{json, Value};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, Semaphore};
 
 const RUN_ID: &str = "run_coordinator";
 
@@ -306,7 +307,13 @@ fn coordinator(
             operation_timeout: Duration::from_secs(1),
         },
     );
-    RunCoordinator::new(agent, executors, events, repository_trait)
+    RunCoordinator::new(
+        agent,
+        executors,
+        events,
+        repository_trait,
+        ExecutionLimiter::new(Arc::new(Semaphore::new(32)), Arc::new(Semaphore::new(8))),
+    )
 }
 
 fn event_types(events: &[RunEvent]) -> Vec<RunEventType> {
@@ -521,10 +528,17 @@ async fn explicit_cancellation_stops_in_flight_node_and_wins_one_terminal_state(
     assert_eq!(repository.terminal_updates.lock().await.len(), 1);
     let events = repository.events.lock().await;
     assert_eq!(
-        events.last().unwrap().event_type,
-        RunEventType::RunCancelled
+        event_types(&events),
+        vec![
+            RunEventType::RunCreated,
+            RunEventType::RunStarted,
+            RunEventType::NodeStarted,
+            RunEventType::NodeFailed,
+            RunEventType::RunCancelled,
+        ]
     );
-    assert_eq!(events.last().unwrap().code, "RUN_CANCELLED");
+    assert_eq!(events[3].code, "RUN_CANCELLED");
+    assert_eq!(events[4].code, "RUN_CANCELLED");
 }
 
 #[tokio::test]
@@ -555,8 +569,16 @@ async fn missing_executor_is_an_infrastructure_run_failure() {
         RunStatus::Failed
     );
     let events = repository.events.lock().await;
-    assert_eq!(events[3].code, "NODE_EXECUTOR_NOT_FOUND");
-    assert_eq!(events[4].event_type, RunEventType::RunFailed);
+    assert_eq!(
+        event_types(&events),
+        vec![
+            RunEventType::RunCreated,
+            RunEventType::RunStarted,
+            RunEventType::NodeStarted,
+            RunEventType::RunFailed,
+        ]
+    );
+    assert_eq!(events[3].code, "INFRASTRUCTURE_FAILURE");
 }
 
 #[tokio::test]

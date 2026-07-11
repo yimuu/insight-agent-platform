@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::{json, Value};
-use tokio::time::sleep;
 
 use crate::{
     dsl::compiled::{CompiledAgent, NodeTransition, RunOutput},
@@ -12,18 +11,22 @@ use crate::{
     },
     history::{
         repository::{HistoryError, RunRepository},
-        types::{NewRun, NodeOutputRecord, RunStatus, TerminalUpdate},
+        types::{NewRun, RunStatus, TerminalUpdate},
     },
     nodes::registry::NodeExecutorRegistry,
 };
 
-use super::{ExecutionControl, RunContext, RunError, RunMetadata, RunState, StopSignal};
+use super::{
+    execute_node, ExecutionLimiter, NodeExecutionFailure, RunContext, RunError, RunMetadata,
+    RunState, StopSignal,
+};
 
 pub struct RunCoordinator {
     agent: Arc<CompiledAgent>,
     executors: NodeExecutorRegistry,
     events: EventHub,
     repository: Arc<dyn RunRepository>,
+    limiter: ExecutionLimiter,
 }
 
 impl RunCoordinator {
@@ -32,12 +35,14 @@ impl RunCoordinator {
         executors: NodeExecutorRegistry,
         events: EventHub,
         repository: Arc<dyn RunRepository>,
+        limiter: ExecutionLimiter,
     ) -> Self {
         Self {
             agent,
             executors,
             events,
             repository,
+            limiter,
         }
     }
 
@@ -140,92 +145,36 @@ impl RunCoordinator {
         loop {
             if let Some(reason) = stop.reason() {
                 return self
-                    .finish_error(&state, new_run, None, RunError::stopped(reason))
+                    .finish_error(&state, new_run, RunError::stopped(reason))
                     .await;
             }
-            let node = self.agent.nodes.get(&current).ok_or_else(|| {
+            let node = self.agent.nodes.get(&current).cloned().ok_or_else(|| {
                 RunError::new(
                     "NODE_NOT_FOUND",
                     format!("compiled node '{current}' was not found"),
                 )
             })?;
-            let node_scope = run_scope(new_run).for_node(&node.id);
-            self.events
-                .publish(
-                    node_scope.clone(),
-                    RunEventType::NodeStarted,
-                    json!({"type":node.kind}),
-                )
-                .await
-                .map_err(event_error)?;
-
-            let executor = match self.executors.resolve(&node.kind) {
-                Ok(executor) => executor,
-                Err(error) => {
-                    return self
-                        .finish_error(&state, new_run, Some(&node.id), error)
-                        .await;
+            let outcome = match execute_node(
+                node.clone(),
+                context,
+                self.executors.clone(),
+                self.events.clone(),
+                stop.clone(),
+                self.limiter.clone(),
+            )
+            .await
+            {
+                Ok(result) => {
+                    context = result.context;
+                    context.set_node_output(&result.node_id, result.outcome.output.clone());
+                    result.outcome
                 }
+                Err(NodeExecutionFailure::Node { error, .. })
+                | Err(NodeExecutionFailure::Stop { error, .. }) => {
+                    return self.finish_error(&state, new_run, error).await;
+                }
+                Err(NodeExecutionFailure::Infrastructure(error)) => return Err(error),
             };
-            let emitter_events = self.events.clone();
-            let emitter_scope = node_scope.clone();
-            let control = ExecutionControl::new(stop.clone(), node.timeout, move |content| {
-                let events = emitter_events.clone();
-                let scope = emitter_scope.clone();
-                async move {
-                    events
-                        .publish(
-                            scope,
-                            RunEventType::ContentDelta,
-                            json!({"content":content}),
-                        )
-                        .await
-                        .map(|_| ())
-                        .map_err(event_error)
-                }
-            })
-            .with_content_enabled(node.emit == crate::dsl::EmitPolicy::Content);
-            let outcome = {
-                let execution = executor.execute(node, &context, &control);
-                tokio::pin!(execution);
-                tokio::select! {
-                    result = &mut execution => result,
-                    _ = control.stopped() => Err(stopped_error(&control)),
-                    _ = sleep(control.remaining()) => Err(RunError::timeout()),
-                }
-            };
-            let outcome = match outcome {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return self
-                        .finish_error(&state, new_run, Some(&node.id), error)
-                        .await;
-                }
-            };
-            if let Some(reason) = stop.reason() {
-                return self
-                    .finish_error(&state, new_run, Some(&node.id), RunError::stopped(reason))
-                    .await;
-            }
-
-            self.events
-                .put_node_output(NodeOutputRecord {
-                    run_id: new_run.run_id.clone(),
-                    node_id: node.id.clone(),
-                    output: outcome.output.clone(),
-                    completed_at: Utc::now(),
-                })
-                .await
-                .map_err(event_error)?;
-            self.events
-                .publish(
-                    node_scope,
-                    RunEventType::NodeCompleted,
-                    json!({"output":outcome.output}),
-                )
-                .await
-                .map_err(event_error)?;
-            context.set_node_output(&node.id, outcome.output);
 
             match outcome.transition {
                 NodeTransition::Next => {
@@ -280,7 +229,7 @@ impl RunCoordinator {
             None,
             None,
         )
-        .map_err(|error| RunError::new(error.code(), error.to_string()))?;
+        .map_err(|error| RunError::infrastructure(error.code(), error.to_string()))?;
         let data = serde_json::to_value(&output)
             .map_err(|_| RunError::new("RUN_OUTPUT_INVALID", "failed to serialize run output"))?;
         let published = self
@@ -303,21 +252,8 @@ impl RunCoordinator {
         &self,
         state: &RunState,
         run: &NewRun,
-        node_id: Option<&str>,
         error: RunError,
     ) -> Result<RunStatus, RunError> {
-        if let Some(node_id) = node_id {
-            self.events
-                .publish_error(
-                    run_scope(run).for_node(node_id),
-                    RunEventType::NodeFailed,
-                    error.code(),
-                    error.message(),
-                    json!({}),
-                )
-                .await
-                .map_err(event_error)?;
-        }
         let (status, event_type) = match error.code() {
             "RUN_CANCELLED" => (RunStatus::Cancelled, RunEventType::RunCancelled),
             "RUN_INTERRUPTED" => (RunStatus::Interrupted, RunEventType::RunInterrupted),
@@ -331,7 +267,9 @@ impl RunCoordinator {
             Some(error.code().to_string()),
             Some(error.message().to_string()),
         )
-        .map_err(|type_error| RunError::new(type_error.code(), type_error.to_string()))?;
+        .map_err(|type_error| {
+            RunError::infrastructure(type_error.code(), type_error.to_string())
+        })?;
         let published = self
             .events
             .publish_terminal(
@@ -362,7 +300,7 @@ impl RunCoordinator {
             Some("INFRASTRUCTURE_FAILURE".to_string()),
             Some(message.to_string()),
         )
-        .map_err(|error| RunError::new(error.code(), error.to_string()))?;
+        .map_err(|error| RunError::infrastructure(error.code(), error.to_string()))?;
         let published = self
             .events
             .recover_terminal(
@@ -410,17 +348,10 @@ fn run_scope(run: &NewRun) -> RunEventScope {
     )
 }
 
-fn stopped_error(control: &ExecutionControl) -> RunError {
-    control
-        .stop_reason()
-        .map(RunError::stopped)
-        .unwrap_or_else(|| RunError::new("RUN_STOPPED", "run stopped"))
-}
-
 fn history_error(error: HistoryError) -> RunError {
-    RunError::new(error.code(), error.to_string())
+    RunError::infrastructure(error.code(), error.to_string())
 }
 
 fn event_error(error: EventError) -> RunError {
-    RunError::new(error.code(), error.to_string())
+    RunError::infrastructure(error.code(), error.to_string())
 }

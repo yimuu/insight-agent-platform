@@ -30,7 +30,7 @@ use crate::{
 
 use super::{
     attachment::{AttachedRun, LeaseOwner, RunSubscription, SubscriptionLease},
-    stop_pair, RunCoordinator, RunState, StopController, StopReason, StopSignal,
+    stop_pair, ExecutionLimiter, RunCoordinator, RunState, StopController, StopReason, StopSignal,
 };
 
 #[derive(Clone, Default)]
@@ -119,6 +119,7 @@ struct RunServiceInner {
     repository: Arc<dyn RunRepository>,
     events: EventHub,
     capacity: Arc<Semaphore>,
+    node_capacity: Arc<Semaphore>,
     config: RunServiceConfig,
     active: Mutex<BTreeMap<String, ActiveRun>>,
     active_changed: watch::Sender<u64>,
@@ -179,6 +180,7 @@ impl RunService {
                 repository,
                 events,
                 capacity: Arc::new(Semaphore::new(config.max_concurrent_runs)),
+                node_capacity: Arc::new(Semaphore::new(config.max_parallel_node_executions)),
                 config,
                 active: Mutex::new(BTreeMap::new()),
                 active_changed: watch::channel(0).0,
@@ -465,6 +467,10 @@ impl RunService {
                 inner.executors.clone(),
                 inner.events.clone(),
                 Arc::clone(&inner.repository),
+                ExecutionLimiter::new(
+                    Arc::clone(&inner.node_capacity),
+                    Arc::new(Semaphore::new(inner.config.max_parallel_branches_per_run)),
+                ),
             );
             let execution =
                 coordinator.execute_existing(new_run, input, signal, Arc::clone(&task_state));
