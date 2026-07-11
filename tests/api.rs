@@ -128,7 +128,6 @@ async fn fixture(auth: ApiAuth, capacity: usize) -> (Router, RunService) {
     let events = EventHub::new(
         Arc::clone(&repository_trait),
         EventHubConfig {
-            ring_capacity: 4,
             subscriber_capacity: 16,
             journal_capacity: 32,
             journal_batch_size: 4,

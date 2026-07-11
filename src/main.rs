@@ -58,7 +58,6 @@ async fn main() -> MainResult<()> {
     let events = EventHub::new(
         Arc::clone(&repository),
         EventHubConfig {
-            ring_capacity: config.runtime.replay_ring_capacity,
             subscriber_capacity: config.runtime.subscriber_capacity,
             journal_capacity: config.runtime.journal_capacity,
             journal_batch_size: config.runtime.journal_batch_size,

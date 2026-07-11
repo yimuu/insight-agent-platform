@@ -478,7 +478,6 @@ fn coordinator(
     let events = EventHub::new(
         Arc::clone(&repository_trait),
         EventHubConfig {
-            ring_capacity: 32,
             subscriber_capacity: 8,
             journal_capacity: 32,
             journal_batch_size: 8,

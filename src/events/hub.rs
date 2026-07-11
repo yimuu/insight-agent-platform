@@ -1,10 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
-    error::Error,
-    fmt,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, error::Error, fmt, sync::Arc, time::Duration};
 
 use serde_json::Value;
 use tokio::{
@@ -24,7 +18,6 @@ use super::{
 
 #[derive(Debug, Clone, Copy)]
 pub struct EventHubConfig {
-    pub ring_capacity: usize,
     pub subscriber_capacity: usize,
     pub journal_capacity: usize,
     pub journal_batch_size: usize,
@@ -34,8 +27,6 @@ pub struct EventHubConfig {
 #[derive(Debug)]
 pub enum EventError {
     SubscriberLagged { last_seq: u64 },
-    ReplayTruncated { last_seq: u64 },
-    ReplayFinished,
     SubscriptionClosed,
     JournalClosed,
     JournalCapacityExceeded,
@@ -48,8 +39,6 @@ impl EventError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::SubscriberLagged { .. } => "SUBSCRIBER_LAGGED",
-            Self::ReplayTruncated { .. } => "REPLAY_TRUNCATED",
-            Self::ReplayFinished => "REPLAY_FINISHED",
             Self::SubscriptionClosed => "SUBSCRIPTION_CLOSED",
             Self::JournalClosed => "JOURNAL_CLOSED",
             Self::JournalCapacityExceeded => "JOURNAL_CAPACITY_EXCEEDED",
@@ -63,15 +52,9 @@ impl EventError {
 impl fmt::Display for EventError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SubscriberLagged { last_seq } => write!(
-                formatter,
-                "subscriber lagged; reconnect after sequence {last_seq}"
-            ),
-            Self::ReplayTruncated { last_seq } => write!(
-                formatter,
-                "replay page is full; reconnect after sequence {last_seq}"
-            ),
-            Self::ReplayFinished => formatter.write_str("event replay finished"),
+            Self::SubscriberLagged { last_seq } => {
+                write!(formatter, "subscriber lagged after sequence {last_seq}")
+            }
             Self::SubscriptionClosed => formatter.write_str("event subscription closed"),
             Self::JournalClosed => formatter.write_str("event journal closed"),
             Self::JournalCapacityExceeded => formatter.write_str("event journal queue is full"),
@@ -101,7 +84,6 @@ impl From<HistoryError> for EventError {
 
 struct EventRunState {
     next_seq: u64,
-    ring: VecDeque<RunEvent>,
     live: broadcast::Sender<RunEvent>,
 }
 
@@ -109,7 +91,6 @@ struct EventHubInner {
     repository: Arc<dyn RunRepository>,
     journal: EventJournal,
     states: Mutex<HashMap<String, Arc<Mutex<EventRunState>>>>,
-    ring_capacity: usize,
     subscriber_capacity: usize,
     operation_timeout: Duration,
 }
@@ -121,7 +102,6 @@ pub struct EventHub {
 
 impl EventHub {
     pub fn new(repository: Arc<dyn RunRepository>, config: EventHubConfig) -> Self {
-        let ring_capacity = config.ring_capacity.max(1);
         let journal = EventJournal::new(
             Arc::clone(&repository),
             config.journal_capacity,
@@ -133,7 +113,6 @@ impl EventHub {
                 repository,
                 journal,
                 states: Mutex::new(HashMap::new()),
-                ring_capacity,
                 subscriber_capacity: config.subscriber_capacity.max(1),
                 operation_timeout: config.operation_timeout,
             }),
@@ -175,7 +154,7 @@ impl EventHub {
         ensure_sequence_available(&state)?;
         let event = RunEvent::error(event_type, state.next_seq, scope, code, message, data);
         self.inner.journal.append(event.clone()).await?;
-        commit_live_event(&mut state, event.clone(), self.inner.ring_capacity);
+        commit_live_event(&mut state, event.clone());
         Ok(event)
     }
 
@@ -208,7 +187,7 @@ impl EventHub {
                 .next()
                 .filter(|existing| existing.seq == expected_seq && is_terminal(existing.event_type))
             {
-                commit_live_event(&mut state, existing, self.inner.ring_capacity);
+                commit_live_event(&mut state, existing);
                 drop(state);
                 self.remove_run_state(&run_id, &state_handle).await;
                 return Ok(None);
@@ -218,7 +197,7 @@ impl EventHub {
                 "run is terminal but its authoritative terminal event is missing",
             )));
         }
-        commit_live_event(&mut state, event.clone(), self.inner.ring_capacity);
+        commit_live_event(&mut state, event.clone());
         drop(state);
         self.remove_run_state(&run_id, &state_handle).await;
         Ok(Some(event))
@@ -288,16 +267,6 @@ impl EventHub {
         self.run_state(run_id).await;
     }
 
-    pub async fn subscribe_existing(&self, run_id: &str) -> Option<EventSubscription> {
-        let state = self.inner.states.lock().await.get(run_id).cloned()?;
-        let receiver = state.lock().await.live.subscribe();
-        Some(EventSubscription {
-            receiver,
-            last_seq: 0,
-            closed: false,
-        })
-    }
-
     pub async fn retained_run_count(&self) -> usize {
         self.inner.states.lock().await.len()
     }
@@ -306,58 +275,11 @@ impl EventHub {
         self.inner.journal.is_healthy()
     }
 
-    pub async fn replay_after(
-        &self,
-        run_id: &str,
-        after_seq: u64,
-    ) -> Result<Vec<RunEvent>, EventError> {
-        Ok(self.replay_page_after(run_id, after_seq).await?.events)
-    }
-
-    pub async fn replay_page_after(
-        &self,
-        run_id: &str,
-        after_seq: u64,
-    ) -> Result<ReplayPage, EventError> {
-        let limit = self.inner.ring_capacity.saturating_add(1);
-        let durable = self
-            .inner
-            .repository
-            .list_events_after(run_id, after_seq, limit)
-            .await?;
-        let active_state = self.inner.states.lock().await.get(run_id).cloned();
-        let in_memory = match active_state {
-            Some(state) => state
-                .lock()
-                .await
-                .ring
-                .iter()
-                .filter(|event| event.seq > after_seq)
-                .cloned()
-                .collect::<Vec<_>>(),
-            None => Vec::new(),
-        };
-        let mut merged = BTreeMap::new();
-        for event in durable.into_iter().chain(in_memory) {
-            merged.insert(event.seq, event);
-        }
-        let has_more = merged.len() > self.inner.ring_capacity;
-        let events = merged
-            .into_values()
-            .take(self.inner.ring_capacity)
-            .collect();
-        Ok(ReplayPage { events, has_more })
-    }
-
     async fn run_state(&self, run_id: &str) -> Arc<Mutex<EventRunState>> {
         let mut states = self.inner.states.lock().await;
         Arc::clone(states.entry(run_id.to_string()).or_insert_with(|| {
             let (live, _) = broadcast::channel(self.inner.subscriber_capacity);
-            Arc::new(Mutex::new(EventRunState {
-                next_seq: 1,
-                ring: VecDeque::with_capacity(self.inner.ring_capacity),
-                live,
-            }))
+            Arc::new(Mutex::new(EventRunState { next_seq: 1, live }))
         }))
     }
 
@@ -425,24 +347,14 @@ impl EventHub {
             )));
         }
         for event in durable {
-            commit_live_event(state, event, self.inner.ring_capacity);
+            commit_live_event(state, event);
         }
         Ok(())
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ReplayPage {
-    pub events: Vec<RunEvent>,
-    pub has_more: bool,
-}
-
-fn commit_live_event(state: &mut EventRunState, event: RunEvent, ring_capacity: usize) {
+fn commit_live_event(state: &mut EventRunState, event: RunEvent) {
     state.next_seq += 1;
-    if state.ring.len() == ring_capacity {
-        state.ring.pop_front();
-    }
-    state.ring.push_back(event.clone());
     let _ = state.live.send(event);
 }
 

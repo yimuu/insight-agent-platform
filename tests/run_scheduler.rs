@@ -733,7 +733,6 @@ fn event_hub(repository: Arc<SchedulerRepository>) -> EventHub {
     EventHub::new(
         repository,
         EventHubConfig {
-            ring_capacity: 32,
             subscriber_capacity: 8,
             journal_capacity: 32,
             journal_batch_size: 8,

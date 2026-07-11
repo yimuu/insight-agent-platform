@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -43,12 +43,11 @@ fn scope_for(run_id: &str, node_id: Option<&str>) -> RunEventScope {
     }
 }
 
-fn config(ring_capacity: usize, subscriber_capacity: usize) -> EventHubConfig {
+fn config(subscriber_capacity: usize) -> EventHubConfig {
     EventHubConfig {
-        ring_capacity,
         subscriber_capacity,
         journal_capacity: 8,
-        journal_batch_size: ring_capacity.clamp(1, 4),
+        journal_batch_size: 4,
         operation_timeout: Duration::from_secs(1),
     }
 }
@@ -66,6 +65,7 @@ struct MemoryRepository {
     terminal_called: Notify,
     allow_terminal: Notify,
     block_terminal: AtomicBool,
+    list_calls: AtomicUsize,
 }
 
 impl MemoryRepository {
@@ -186,6 +186,7 @@ impl RunRepository for MemoryRepository {
         after_seq: u64,
         limit: usize,
     ) -> Result<Vec<RunEvent>, HistoryError> {
+        self.list_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self
             .events
             .lock()
@@ -208,44 +209,31 @@ impl RunRepository for MemoryRepository {
 }
 
 #[tokio::test]
-async fn publish_allocates_sequence_and_replay_returns_ordered_events() {
+async fn publish_allocates_and_persists_ordered_sequences() {
     let repository = Arc::new(MemoryRepository::default());
-    let hub = EventHub::new(repository, config(8, 8));
-
+    let hub = EventHub::new(repository.clone(), config(8));
     assert_eq!(
-        hub.publish(scope(Some("plan")), RunEventType::NodeStarted, json!({}))
+        hub.publish(scope(None), RunEventType::RunCreated, json!({}))
             .await
             .unwrap()
             .seq,
         1
     );
     assert_eq!(
-        hub.publish(
-            scope(Some("plan")),
-            RunEventType::ContentDelta,
-            json!({"content":"a"}),
-        )
-        .await
-        .unwrap()
-        .seq,
-        2
-    );
-
-    assert_eq!(
-        hub.replay_after(RUN_ID, 0)
+        hub.publish(scope(None), RunEventType::RunStarted, json!({}))
             .await
             .unwrap()
-            .iter()
-            .map(|event| event.seq)
-            .collect::<Vec<_>>(),
-        vec![1, 2]
+            .seq,
+        2
     );
+    hub.flush().await.unwrap();
+    assert_eq!(repository.stored_sequences(RUN_ID).await, vec![1, 2]);
 }
 
 #[tokio::test]
-async fn branch_lifecycle_events_use_contiguous_sequences_and_replay_after_a_cursor() {
+async fn branch_lifecycle_events_use_contiguous_durable_sequences() {
     let repository = Arc::new(MemoryRepository::default());
-    let hub = EventHub::new(repository, config(8, 8));
+    let hub = EventHub::new(repository.clone(), config(8));
 
     let mut published = Vec::new();
     for event_type in [
@@ -265,21 +253,13 @@ async fn branch_lifecycle_events_use_contiguous_sequences_and_replay_after_a_cur
         vec![1, 2, 3]
     );
     assert!(published.iter().all(|event| event.node_id.is_none()));
-
-    assert_eq!(
-        hub.replay_after(RUN_ID, 1)
-            .await
-            .unwrap()
-            .iter()
-            .map(|event| event.seq)
-            .collect::<Vec<_>>(),
-        vec![2, 3]
-    );
+    hub.flush().await.unwrap();
+    assert_eq!(repository.stored_sequences(RUN_ID).await, vec![1, 2, 3]);
 }
 
 #[tokio::test]
 async fn two_subscribers_receive_identical_ordered_events() {
-    let hub = EventHub::new(Arc::new(MemoryRepository::default()), config(8, 8));
+    let hub = EventHub::new(Arc::new(MemoryRepository::default()), config(8));
     let mut first = hub.subscribe(RUN_ID).await;
     let mut second = hub.subscribe(RUN_ID).await;
 
@@ -306,7 +286,7 @@ async fn two_subscribers_receive_identical_ordered_events() {
 async fn nonterminal_event_is_broadcast_only_after_the_repository_commit() {
     let repository = Arc::new(MemoryRepository::default());
     repository.block_appends.store(true, Ordering::SeqCst);
-    let hub = EventHub::new(repository.clone(), config(8, 8));
+    let hub = EventHub::new(repository.clone(), config(8));
     let mut subscriber = hub.subscribe(RUN_ID).await;
     let publishing = {
         let hub = hub.clone();
@@ -332,7 +312,7 @@ async fn nonterminal_event_is_broadcast_only_after_the_repository_commit() {
 
 #[tokio::test]
 async fn lagging_subscriber_is_closed_with_its_last_delivered_sequence() {
-    let hub = EventHub::new(Arc::new(MemoryRepository::default()), config(8, 2));
+    let hub = EventHub::new(Arc::new(MemoryRepository::default()), config(2));
     let mut subscriber = hub.subscribe(RUN_ID).await;
 
     for _ in 0..3 {
@@ -348,47 +328,12 @@ async fn lagging_subscriber_is_closed_with_its_last_delivered_sequence() {
 }
 
 #[tokio::test]
-async fn replay_reads_durable_events_that_fell_out_of_the_active_ring() {
-    let repository = Arc::new(MemoryRepository::default());
-    let hub = EventHub::new(repository.clone(), config(2, 8));
-    for _ in 0..4 {
-        hub.publish(scope(None), RunEventType::RunStarted, json!({}))
-            .await
-            .unwrap();
-    }
-    hub.flush().await.unwrap();
-    assert_eq!(repository.stored_sequences(RUN_ID).await, vec![1, 2, 3, 4]);
-
-    let first = hub.replay_page_after(RUN_ID, 0).await.unwrap();
-    assert_eq!(
-        first
-            .events
-            .iter()
-            .map(|event| event.seq)
-            .collect::<Vec<_>>(),
-        vec![1, 2]
-    );
-    assert!(first.has_more);
-    let second = hub.replay_page_after(RUN_ID, 2).await.unwrap();
-    assert_eq!(
-        second
-            .events
-            .iter()
-            .map(|event| event.seq)
-            .collect::<Vec<_>>(),
-        vec![3, 4]
-    );
-    assert!(!second.has_more);
-}
-
-#[tokio::test]
 async fn full_journal_queue_fails_immediately_instead_of_blocking_the_run() {
     let repository = Arc::new(MemoryRepository::default());
     repository.block_appends.store(true, Ordering::SeqCst);
     let hub = EventHub::new(
         repository.clone(),
         EventHubConfig {
-            ring_capacity: 8,
             subscriber_capacity: 8,
             journal_capacity: 1,
             journal_batch_size: 1,
@@ -442,7 +387,6 @@ async fn saturated_queue_failure_drops_no_broadcast_and_each_run_can_recover() {
     let hub = EventHub::new(
         repository.clone(),
         EventHubConfig {
-            ring_capacity: 1,
             subscriber_capacity: 8,
             journal_capacity: 1,
             journal_batch_size: 1,
@@ -543,7 +487,6 @@ async fn journal_operation_timeout_bounds_terminal_persistence_waits() {
     let hub = EventHub::new(
         repository.clone(),
         EventHubConfig {
-            ring_capacity: 8,
             subscriber_capacity: 8,
             journal_capacity: 8,
             journal_batch_size: 4,
@@ -583,7 +526,6 @@ async fn recovery_derives_terminal_after_an_uncertain_append_commit() {
     let hub = EventHub::new(
         repository.clone(),
         EventHubConfig {
-            ring_capacity: 8,
             subscriber_capacity: 8,
             journal_capacity: 8,
             journal_batch_size: 4,
@@ -646,7 +588,6 @@ async fn timed_out_terminal_write_is_cancelled_before_recovery() {
     let hub = EventHub::new(
         repository.clone(),
         EventHubConfig {
-            ring_capacity: 8,
             subscriber_capacity: 8,
             journal_capacity: 8,
             journal_batch_size: 4,
@@ -713,19 +654,27 @@ async fn timed_out_terminal_write_is_cancelled_before_recovery() {
         repository.terminal_updates.lock().await[0].status,
         RunStatus::Failed
     );
-    assert_eq!(
-        hub.replay_after(RUN_ID, 0).await.unwrap()[0].event_type,
-        RunEventType::RunFailed
-    );
-    assert!(hub.subscribe_existing(RUN_ID).await.is_none());
     assert_eq!(hub.retained_run_count().await, 0);
+}
+
+#[tokio::test]
+async fn ordinary_live_publish_never_reads_event_history() {
+    let repository = Arc::new(MemoryRepository::default());
+    let hub = EventHub::new(repository.clone(), config(8));
+    let mut subscription = hub.subscribe(RUN_ID).await;
+    let published = hub
+        .publish(scope(None), RunEventType::RunCreated, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(subscription.recv().await.unwrap(), published);
+    assert_eq!(repository.list_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
 async fn journal_worker_failure_closes_the_queue_instead_of_dropping_history() {
     let repository = Arc::new(MemoryRepository::default());
     repository.fail_appends.store(true, Ordering::SeqCst);
-    let hub = EventHub::new(repository, config(8, 8));
+    let hub = EventHub::new(repository, config(8));
 
     let error = hub
         .publish(scope(None), RunEventType::RunCreated, json!({}))
@@ -741,7 +690,7 @@ async fn journal_worker_failure_closes_the_queue_instead_of_dropping_history() {
 async fn terminal_event_is_broadcast_only_after_the_repository_commit() {
     let repository = Arc::new(MemoryRepository::default());
     repository.block_terminal.store(true, Ordering::SeqCst);
-    let hub = EventHub::new(repository.clone(), config(8, 8));
+    let hub = EventHub::new(repository.clone(), config(8));
     let mut subscriber = hub.subscribe(RUN_ID).await;
     let update = TerminalUpdate::new(
         RUN_ID,
