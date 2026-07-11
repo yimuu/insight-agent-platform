@@ -1,7 +1,7 @@
 # Stable Baseline Review and Dependency Governance Design
 
 **Date:** 2026-07-11
-**Status:** Pending written-spec review
+**Status:** Approved
 **Code baseline:** `main@af414de`
 **Scope:** Read-only whole-repository review followed by two independent remediation roadmaps
 
