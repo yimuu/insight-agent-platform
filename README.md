@@ -93,9 +93,8 @@ runtime:
   max_parallel_branches_per_run: 8
   default_node_timeout: 60s
   run_timeout: 5m
-  attached_reconnect_grace: 10s
+  sse_keep_alive_interval: 5s
   subscriber_capacity: 128
-  replay_ring_capacity: 512
   journal_capacity: 1024
   journal_batch_size: 32
   journal_operation_timeout: 30s
@@ -184,7 +183,9 @@ curl --silent --request POST \
   http://127.0.0.1:3000/v1/agents/code_node_demo/runs
 ```
 
-创建 attached Run 会直接返回 SSE，并在响应头给出 `X-Run-Id` 和 `X-Request-Id`。最后一个订阅断开后进入重连宽限期；宽限期内没有订阅恢复时，运行会被取消：
+创建 attached Run 会原子地订阅实时事件并启动执行，响应头包含 X-Run-Id 和 X-Request-Id。终态事件写入历史后发送，发送后 SSE 立即关闭。客户端断开会立即取消仍在运行的 attached Run；该接口不支持重连补发。
+
+SSE 每 5 秒发送 keepalive 注释用于尽快发现半开连接；注释不是协议事件，不占用 seq。网络栈、代理和调度会影响实际发现时间，因此 5 秒是检测目标而不是硬实时保证。
 
 ```bash
 curl --no-buffer \
@@ -202,15 +203,20 @@ event: content.delta
 data: {"schema_version":1,"type":"content.delta","seq":3,"request_id":"req_demo_001","run_id":"run_...","agent_id":"researcher","agent_version":"sha256:...","node_id":"answer","time":"2026-07-10T00:00:00Z","code":"OK","message":"ok","data":{"content":"Rust"}}
 ```
 
-查询、按序补发和显式取消：
+Detached：创建后通过 Run 资源轮询，断开不会停止任务：
 
 ```bash
+# Detached：创建后通过 Run 资源轮询，断开不会停止任务
+curl --silent --request POST \
+  --header 'content-type: application/json' \
+  --data '{"text":"hello rust world"}' \
+  http://127.0.0.1:3000/v1/agents/code_node_demo/runs
+
 curl --silent http://127.0.0.1:3000/v1/runs/run_xxx
-curl --no-buffer 'http://127.0.0.1:3000/v1/runs/run_xxx/events?after_seq=3'
 curl --silent --request DELETE http://127.0.0.1:3000/v1/runs/run_xxx
 ```
 
-`DELETE` 幂等：活动 Run 返回取消后的记录，已终止 Run 原样返回。客户端应保存最后处理成功的 `seq`，重连时把它作为 `after_seq`；服务分批补发有界数量的持久事件，再接入活动事件，不产生重复序号。若单批尚未追平或订阅落后，服务发送不带 `id/seq` 的 `transport.error`，其中 `data.after_seq` 是下一次重连游标。
+`GET /v1/runs/{run_id}/events` 和 `after_seq` 已删除。`seq` 与 SSE `id` 只用于单 Run 事件排序和审计关联，不是恢复游标。`DELETE` 仍然幂等：活动 Run 返回取消后的记录，已终止 Run 原样返回。
 
 以下命令可在默认开发配置下完整验证确定性 action-only 路径（需要 `jq`）：
 
@@ -222,8 +228,6 @@ CREATED=$(curl --fail --silent --request POST \
   --data '{"text":"hello rust world"}' \
   http://127.0.0.1:3000/v1/agents/code_node_demo/runs)
 RUN_ID=$(printf '%s' "$CREATED" | jq --exit-status --raw-output '.data.run_id')
-curl --fail --silent --no-buffer \
-  "http://127.0.0.1:3000/v1/runs/$RUN_ID/events?after_seq=0"
 curl --fail --silent "http://127.0.0.1:3000/v1/runs/$RUN_ID" | jq
 curl --fail --silent --request DELETE \
   "http://127.0.0.1:3000/v1/runs/$RUN_ID" | jq

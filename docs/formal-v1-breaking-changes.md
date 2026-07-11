@@ -6,7 +6,7 @@
 
 ## 变更总表
 
-本次内部接口变化是有意的：拓扑必须编译一次并冻结；单一 scalar cursor 无法表达 fork/join 同步；普通 node 事件无法表达分支 settlement；无界并行工作会耗尽进程资源。HTTP 路由和顺序 YAML 的既有 V1 形式没有改变。
+fork/join 引入的 DSL、调度和事件接口变化是有意的；本次 live-only SSE 基线还会删除公开事件恢复路由。删除原因不是事件不再持久化，而是公开补发会让重连潮直接竞争数据库连接与 journal 写入，并且既有 Run 的纯实时订阅无法补齐创建到订阅之间的事件缺口。
 
 | 原型 | 正式 V1 | 为什么改 | 最小迁移示例 |
 |---|---|---|---|
@@ -19,7 +19,7 @@
 | 节点 `stream: true/false` | 公共 envelope 的 `emit: content/none` | 供应商是否使用流传输与内容是否公开给客户端是两件事 | `stream: true` → `emit: content` |
 | Agent `public/default_public/exposure` | 平台 `auth.mode` + `agents.enabled` | 工作流元数据不能决定部署安全；鉴权和启用策略必须分离 | 删除 `public`，在平台配置中显式写 `auth.mode` 和 `agents.enabled` |
 | SSE 连接拥有所有 Run | attached 与 detached 两种创建接口 | 交互式断开取消和后台执行是两种明确意图 | `/runs/stream` 创建 attached；`/runs` 创建 detached 并返回 202 |
-| 传输消费时才写历史 | 独立 `EventHub` + bounded journal | 持久化不能依赖某个 SSE 消费者是否在线 | 客户端用 `/events?after_seq=N` 从 journal 补发 |
+| 传输消费时才写历史 | 独立 `EventHub` + bounded journal + live-only Attached SSE | 持久化不能依赖 SSE 消费者；公开补发会让重连潮直接竞争数据库连接和 journal 写入 | Attached 使用 `/runs/stream`；Detached 使用 `/runs` 后轮询 Run 资源 |
 | 数字 API/event code | 稳定字符串码 | 字符串自描述，避免维护未文档化的数字区间 | `"code":0` → `"code":"OK"`；错误如 `RUN_NOT_FOUND` |
 | 原型 SQLite/PostgreSQL 表 | 全新 formal V1 `runs/run_events/node_outputs` | 新生命周期、attachment、序号和终态事务约束无法安全套用旧表 | 删除本地旧 SQLite 文件或重建开发 PostgreSQL volume 后启动 |
 
@@ -78,7 +78,6 @@ GET    /v1/agents/{agent_id}
 POST   /v1/agents/{agent_id}/runs/stream
 POST   /v1/agents/{agent_id}/runs
 GET    /v1/runs/{run_id}
-GET    /v1/runs/{run_id}/events?after_seq=<u64>
 DELETE /v1/runs/{run_id}
 ```
 
@@ -86,9 +85,9 @@ DELETE /v1/runs/{run_id}
 
 原型的 Run 列表/过滤端点和 `X-Caller-Service/X-Tenant-Id/X-User-Id` 元数据不属于正式 V1。原因是执行合同不应提前绑定多租户管理面；后续查询/管理 API 可以在独立授权与分页合同下增加。`X-Request-Id` 保留用于关联请求。
 
-请求体仍是 Agent 输入对象本身，不使用 `{input: ...}` 包装。attached POST 在构造 SSE 前完成 JSON 与 Schema 校验，并返回 `X-Run-Id`；detached POST 返回 202。`DELETE` 是唯一显式取消接口且幂等。
+attached POST 在构造 SSE 前完成 JSON 与 Schema 校验，先订阅实时广播再启动 Run，并返回 X-Run-Id；终态事件发送后连接立即结束，非终态连接断开会立即取消 Run。正式 V1 不提供 GET /runs/{run_id}/events、after_seq 或 Last-Event-ID 恢复：公开恢复会让并发重连直接查询事件库，而 live-only 的既有 Run 订阅又无法保证创建到订阅之间无缺口。detached POST 返回 202，客户端通过 GET Run 轮询最终状态；DELETE 是唯一显式取消接口且幂等。
 
-事件增加 `schema_version: 1`、`agent_version` 和可选 `node_id`；`step.*` 攺为 `node.*`。客户端应持久化最后成功处理的 `seq`，断线后请求 `after_seq`。keepalive 注释不是协议事件，不消耗序号。
+事件的 schema_version 仍为 1，seq 和 SSE id 仍表示单 Run 顺序并用于审计关联，但不再表示可恢复游标。事件继续先持久化再广播；数据库事件历史保留给内部终态恢复和审计，不删除表、不执行 migration。
 
 ## 配置与安全迁移
 
