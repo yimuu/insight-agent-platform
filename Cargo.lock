@@ -1230,6 +1230,7 @@ dependencies = [
  "axum",
  "bytes",
  "cel-interpreter",
+ "cel-parser",
  "chrono",
  "chrono-tz",
  "dotenvy",

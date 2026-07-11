@@ -174,6 +174,16 @@ fn reference_allows_join_aggregate_after_join() {
     ));
 }
 
+#[test]
+fn condition_indexed_node_access_fails_before_branch_validation() {
+    let yaml = valid_parallel_yaml_with("summarize_a", "{{ nodes.search_a.output.text }}")
+        .replace(
+            "  search_b:\n    type: core.condition\n    config:\n      cases:\n        - when: \"true\"\n          next: summarize_b\n      default: collect",
+            "  search_b:\n    type: core.condition\n    config:\n      cases:\n        - when: 'nodes[\"search_a\"].output.text == \"x\"'\n          next: summarize_b\n      default: collect",
+        );
+    assert_compile_error(&yaml, "CONDITION_REFERENCE_INVALID");
+}
+
 fn parallel_yaml_with_outside_edge(target: &str) -> String {
     parallel_yaml()
         .replace(

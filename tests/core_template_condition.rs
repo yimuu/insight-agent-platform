@@ -322,6 +322,66 @@ fn condition_rejects_invalid_or_incomplete_configuration_at_compile_time() {
 }
 
 #[test]
+fn condition_reference_extraction_ignores_cel_string_literals() {
+    let models = ModelRegistry::default();
+    let actions = ActionRegistry::default();
+    let mut context = CompileContext::new(&models, &actions);
+
+    let compilation = ConditionNode
+        .compile(
+            "route",
+            json!({
+                "cases": [{
+                    "when": "nodes.prepare.output.kind == 'ready' && 'nodes.future.output' == 'nodes.future.output' && size(nodes.prepare.output.items) >= 0",
+                    "next": "done"
+                }],
+                "default": "done"
+            }),
+            &mut context,
+        )
+        .unwrap();
+
+    assert_eq!(
+        compilation.references,
+        BTreeSet::from(["prepare".to_string()])
+    );
+}
+
+#[test]
+fn condition_rejects_non_canonical_nodes_access() {
+    let cases = [
+        "nodes[\"prepare\"].output == true",
+        "nodes[id].output == true",
+        "nodes.prepare[\"output\"] == true",
+        "nodes.prepare == true",
+        "nodes == {}",
+    ];
+
+    for expression in cases {
+        let models = ModelRegistry::default();
+        let actions = ActionRegistry::default();
+        let mut context = CompileContext::new(&models, &actions);
+        let error = ConditionNode
+            .compile(
+                "route",
+                json!({
+                    "cases": [{"when": expression, "next": "done"}],
+                    "default": "done"
+                }),
+                &mut context,
+            )
+            .err()
+            .expect("non-canonical nodes access must fail compilation");
+
+        assert_eq!(
+            error.code(),
+            "CONDITION_REFERENCE_INVALID",
+            "{expression} should be rejected"
+        );
+    }
+}
+
+#[test]
 fn compiler_enforces_condition_and_template_envelope_rules() {
     let common = r#"
 version: 1

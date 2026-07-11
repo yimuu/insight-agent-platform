@@ -2,6 +2,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use cel_interpreter::{Context as CelContext, Program as CelProgram, Value as CelValue};
+use cel_parser::Parser;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -11,7 +12,8 @@ use crate::{
             CompiledNode, NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules, NodeOutcome,
             NodeTransition,
         },
-        compiler::{node_references, CompileContext},
+        compiler::CompileContext,
+        references::extract_cel_references,
         CompileError,
     },
     nodes::registry::{NodeExecutor, NodeType},
@@ -91,6 +93,15 @@ impl NodeType for ConditionNode {
                     ),
                 ));
             }
+            let parsed = Parser::default().parse(&expression).map_err(|error| {
+                CompileError::new(
+                    "CONDITION_EXPRESSION_INVALID",
+                    format!(
+                        "condition node '{node_id}' case {index} has invalid CEL expression: {error}"
+                    ),
+                )
+            })?;
+            references.extend(extract_cel_references(&parsed, node_id, index)?);
             let program = CelProgram::compile(&expression).map_err(|error| {
                 CompileError::new(
                     "CONDITION_EXPRESSION_INVALID",
@@ -99,7 +110,6 @@ impl NodeType for ConditionNode {
                     ),
                 )
             })?;
-            references.extend(node_references(&expression));
             edges.push(case.next.clone());
             cases.push(CompiledConditionCase {
                 expression,

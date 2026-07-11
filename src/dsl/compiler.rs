@@ -2,13 +2,12 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::Duration,
 };
 
 use handlebars::{no_escape, Handlebars, Template};
 use jsonschema::JSONSchema;
-use regex::Regex;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -150,15 +149,6 @@ impl<'a> CompileContext<'a> {
     pub fn into_templates(self) -> Handlebars<'static> {
         self.templates
     }
-}
-
-pub(crate) fn node_references(source: &str) -> BTreeSet<String> {
-    static NODE_REFERENCE: OnceLock<Regex> = OnceLock::new();
-    NODE_REFERENCE
-        .get_or_init(|| Regex::new(r"nodes\.([A-Za-z_][A-Za-z0-9_-]*)\.output").unwrap())
-        .captures_iter(source)
-        .map(|capture| capture[1].to_string())
-        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

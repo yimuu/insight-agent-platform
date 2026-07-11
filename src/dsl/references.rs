@@ -1,5 +1,9 @@
 use std::collections::BTreeSet;
 
+use cel_parser::{
+    ast::{operators, EntryExpr, Expr, IdedExpr},
+    Expression,
+};
 use handlebars::{
     template::{HelperTemplate, Parameter, TemplateElement},
     Template,
@@ -178,6 +182,155 @@ fn collect_handlebars_path(
             format!("template '{owner}.{field}' must use nodes.<node_id>.output references"),
         )),
     }
+}
+
+pub(crate) fn extract_cel_references(
+    expression: &Expression,
+    node_id: &str,
+    case_index: usize,
+) -> Result<BTreeSet<String>, CompileError> {
+    let mut references = BTreeSet::new();
+    collect_cel_expression(expression, &mut references, node_id, case_index)?;
+    Ok(references)
+}
+
+fn collect_cel_expression(
+    expression: &IdedExpr,
+    references: &mut BTreeSet<String>,
+    node_id: &str,
+    case_index: usize,
+) -> Result<(), CompileError> {
+    if let Some(path) = cel_select_path(expression) {
+        return collect_cel_path(&path, references, node_id, case_index);
+    }
+
+    match &expression.expr {
+        Expr::Unspecified | Expr::Literal(_) => Ok(()),
+        Expr::Ident(_) => Ok(()),
+        Expr::Select(select) => {
+            collect_cel_expression(&select.operand, references, node_id, case_index)
+        }
+        Expr::Call(call) => {
+            if matches!(call.func_name.as_str(), operators::INDEX | operators::OPT_INDEX) {
+                collect_cel_index(call, references, node_id, case_index)
+            } else {
+                if let Some(target) = &call.target {
+                    collect_cel_expression(target, references, node_id, case_index)?;
+                }
+                for argument in &call.args {
+                    collect_cel_expression(argument, references, node_id, case_index)?;
+                }
+                Ok(())
+            }
+        }
+        Expr::List(list) => {
+            for element in &list.elements {
+                collect_cel_expression(element, references, node_id, case_index)?;
+            }
+            Ok(())
+        }
+        Expr::Map(map) => collect_cel_entries(&map.entries, references, node_id, case_index),
+        Expr::Struct(structure) => {
+            collect_cel_entries(&structure.entries, references, node_id, case_index)
+        }
+        Expr::Comprehension(comprehension) => {
+            collect_cel_expression(&comprehension.iter_range, references, node_id, case_index)?;
+            collect_cel_expression(&comprehension.accu_init, references, node_id, case_index)?;
+            collect_cel_expression(&comprehension.loop_cond, references, node_id, case_index)?;
+            collect_cel_expression(&comprehension.loop_step, references, node_id, case_index)?;
+            collect_cel_expression(&comprehension.result, references, node_id, case_index)
+        }
+    }
+}
+
+fn collect_cel_index(
+    call: &cel_parser::ast::CallExpr,
+    references: &mut BTreeSet<String>,
+    node_id: &str,
+    case_index: usize,
+) -> Result<(), CompileError> {
+    if let Some(target) = &call.target {
+        collect_cel_index_target(target, references, node_id, case_index)?;
+        for argument in &call.args {
+            collect_cel_expression(argument, references, node_id, case_index)?;
+        }
+        return Ok(());
+    }
+
+    if let Some((target, arguments)) = call.args.split_first() {
+        collect_cel_index_target(target, references, node_id, case_index)?;
+        for argument in arguments {
+            collect_cel_expression(argument, references, node_id, case_index)?;
+        }
+        return Ok(());
+    }
+
+    Ok(())
+}
+
+fn collect_cel_index_target(
+    target: &IdedExpr,
+    references: &mut BTreeSet<String>,
+    node_id: &str,
+    case_index: usize,
+) -> Result<(), CompileError> {
+    if let Some(path) = cel_select_path(target) {
+        return collect_cel_path(&path, references, node_id, case_index);
+    }
+    collect_cel_expression(target, references, node_id, case_index)
+}
+
+fn collect_cel_entries(
+    entries: &[cel_parser::ast::IdedEntryExpr],
+    references: &mut BTreeSet<String>,
+    node_id: &str,
+    case_index: usize,
+) -> Result<(), CompileError> {
+    for entry in entries {
+        match &entry.expr {
+            EntryExpr::StructField(field) => {
+                collect_cel_expression(&field.value, references, node_id, case_index)?;
+            }
+            EntryExpr::MapEntry(entry) => {
+                collect_cel_expression(&entry.key, references, node_id, case_index)?;
+                collect_cel_expression(&entry.value, references, node_id, case_index)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cel_select_path(expression: &IdedExpr) -> Option<Vec<String>> {
+    match &expression.expr {
+        Expr::Ident(name) => Some(vec![name.clone()]),
+        Expr::Select(select) => {
+            let mut path = cel_select_path(&select.operand)?;
+            path.push(select.field.clone());
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+fn collect_cel_path(
+    path: &[String],
+    references: &mut BTreeSet<String>,
+    node_id: &str,
+    case_index: usize,
+) -> Result<(), CompileError> {
+    if path.first().map(String::as_str) != Some("nodes") {
+        return Ok(());
+    }
+    if path.len() >= 3 && is_dsl_identifier(&path[1]) && path[2] == "output" {
+        references.insert(path[1].clone());
+        return Ok(());
+    }
+    Err(CompileError::new(
+        "CONDITION_REFERENCE_INVALID",
+        format!(
+            "condition node '{node_id}' case {case_index} must use nodes.<node_id>.output references"
+        ),
+    ))
 }
 
 #[cfg(test)]
