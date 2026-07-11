@@ -23,7 +23,7 @@ A0 has already contained Action validation errors. A1 is independent and should 
 - Requiring HTTPS-only model transport; that belongs to A8.
 - Changing OpenAI clean-EOF or `[DONE]` semantics; that remains Needs verification.
 - Adding metrics, tracing fields, or a metrics backend; A7 owns body-free INFO observability.
-- Changing provider parameter schema, `ChatModel` trait signatures, `ChatStream` item shape, node output JSON, migrations, or dependency versions.
+- Changing provider parameter schema, required `ChatModel` methods, `ChatStream` item shape, node output JSON, migrations, or dependency versions.
 - Limiting rendered prompt/request bytes. A1 bounds provider responses and accumulated model output; prompt-size policy remains separate.
 
 ## Selected approach
@@ -123,11 +123,11 @@ The stream returns `MODEL_RESPONSE_TOO_LARGE` as soon as a limit is exceeded. Re
 
 ### Chat accumulated output limit
 
-`ChatNode` enforces `max_accumulated_text_bytes` while reading chunks. Because `ChatNode` only has access to `Arc<dyn ChatModel>`, the model interface needs a way to expose the chat output limit without changing stream shape. Add a default method to `ChatModel`:
+`ChatNode` enforces `max_accumulated_text_bytes` while reading chunks. Because `ChatNode` only has access to `Arc<dyn ChatModel>`, the model interface needs a way to expose the chat output limit without changing stream shape or requiring every existing model implementation to change. Add a default method to `ChatModel`; the generic `models` module owns the default accumulated-text constant so the trait does not depend on the OpenAI-specific provider:
 
 ```rust
 fn max_accumulated_text_bytes(&self) -> usize {
-    OpenAiChatLimits::default().max_accumulated_text_bytes
+    DEFAULT_MAX_ACCUMULATED_TEXT_BYTES
 }
 ```
 

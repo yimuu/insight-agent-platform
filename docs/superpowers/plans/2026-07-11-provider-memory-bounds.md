@@ -49,8 +49,9 @@
 - Produces: `OpenAiChatLimits::validate(self) -> Result<Self, CompileError>`.
 - Produces: `OpenAiChatModel::new_with_limits(..., limits: OpenAiChatLimits) -> Result<Self, CompileError>`.
 - Preserves: `OpenAiChatModel::new(...) -> Result<Self, CompileError>` as the default-limit constructor.
-- Produces: `ChatModel::max_accumulated_text_bytes(&self) -> usize`.
+- Produces: `ChatModel::max_accumulated_text_bytes(&self) -> usize` with a default implementation.
 - Produces: shared too-large helper in `src/resources/models.rs`: `pub fn model_response_too_large() -> RunError`.
+- Produces: shared default constant in `src/resources/models.rs`: `pub const DEFAULT_MAX_ACCUMULATED_TEXT_BYTES: usize = 1024 * 1024`.
 
 - [ ] **Step 1: Write failing config/default/override tests**
 
@@ -138,7 +139,6 @@ pub const DEFAULT_MAX_BUFFERED_LINE_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_MAX_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_MAX_CHUNK_TEXT_BYTES: usize = 256 * 1024;
 pub const DEFAULT_MAX_USAGE_JSON_BYTES: usize = 64 * 1024;
-pub const DEFAULT_MAX_ACCUMULATED_TEXT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenAiChatLimits {
@@ -184,6 +184,8 @@ impl OpenAiChatLimits {
     }
 }
 ```
+
+Before this block, update the existing `super::models` import in `src/resources/openai_chat.rs` to include `DEFAULT_MAX_ACCUMULATED_TEXT_BYTES`. Do not define `DEFAULT_MAX_ACCUMULATED_TEXT_BYTES` in `src/resources/openai_chat.rs`; it is owned by `src/resources/models.rs` so the generic model trait does not depend on the concrete OpenAI provider.
 
 Add `limits: OpenAiChatLimits` to `OpenAiChatModel`.
 
@@ -268,6 +270,7 @@ pub fn new_with_limits(
 In `src/resources/models.rs`, add:
 
 ```rust
+pub const DEFAULT_MAX_ACCUMULATED_TEXT_BYTES: usize = 1024 * 1024;
 pub const MODEL_RESPONSE_TOO_LARGE_CODE: &str = "MODEL_RESPONSE_TOO_LARGE";
 pub const MODEL_RESPONSE_TOO_LARGE_MESSAGE: &str =
     "chat provider response exceeded the configured size limit";
@@ -281,11 +284,11 @@ Extend the `ChatModel` trait:
 
 ```rust
 fn max_accumulated_text_bytes(&self) -> usize {
-    crate::resources::openai_chat::OpenAiChatLimits::default().max_accumulated_text_bytes
+    DEFAULT_MAX_ACCUMULATED_TEXT_BYTES
 }
 ```
 
-In `src/resources/openai_chat.rs`, add this method to `impl ChatModel for OpenAiChatModel`:
+In `src/resources/openai_chat.rs`, import `DEFAULT_MAX_ACCUMULATED_TEXT_BYTES` from `models`, use it in `OpenAiChatLimits::default()`, and add this method to `impl ChatModel for OpenAiChatModel`:
 
 ```rust
 fn max_accumulated_text_bytes(&self) -> usize {
@@ -820,10 +823,19 @@ impl SseDecoder {
     }
 
     fn push(&mut self, bytes: &[u8]) -> Result<Vec<ChatChunk>, RunError> {
-        self.buffer.extend_from_slice(bytes);
-        let chunks = self.drain_complete_lines()?;
-        if self.buffer.len() > self.limits.max_buffered_line_bytes {
-            return Err(model_response_too_large());
+        let mut chunks = Vec::new();
+        for segment in bytes.split_inclusive(|byte| *byte == b'\n') {
+            let includes_lf = segment.last() == Some(&b'\n');
+            let projected_line_len = self
+                .buffer
+                .len()
+                .saturating_add(segment.len())
+                .saturating_sub(usize::from(includes_lf));
+            if projected_line_len > self.limits.max_buffered_line_bytes {
+                return Err(model_response_too_large());
+            }
+            self.buffer.extend_from_slice(segment);
+            chunks.extend(self.drain_complete_lines()?);
         }
         Ok(chunks)
     }
@@ -1280,7 +1292,12 @@ nodes:
     .unwrap();
 }
 
-async fn fixture() -> RunService {
+struct Fixture {
+    _root: tempfile::TempDir,
+    service: RunService,
+}
+
+async fn fixture() -> Fixture {
     let root = tempdir().unwrap();
     write_agent(root.path(), "too-large", "too_large_model");
     write_agent(root.path(), "success", "success_model");
@@ -1352,7 +1369,7 @@ async fn fixture() -> RunService {
             operation_timeout: Duration::from_secs(1),
         },
     );
-    RunService::new(
+    let service = RunService::new(
         agents,
         executors,
         repository_trait,
@@ -1364,7 +1381,11 @@ async fn fixture() -> RunService {
             run_timeout: Duration::from_secs(5),
         },
     )
-    .unwrap()
+    .unwrap();
+    Fixture {
+        _root: root,
+        service,
+    }
 }
 
 async fn wait_for_status(service: &RunService, run_id: &str, expected: RunStatus) {
@@ -1383,13 +1404,14 @@ async fn wait_for_status(service: &RunService, run_id: &str, expected: RunStatus
 
 #[tokio::test]
 async fn bounded_chat_failure_releases_capacity_for_later_runs() {
-    let service = fixture().await;
+    let fixture = fixture().await;
+    let service = &fixture.service;
 
     let failed = service
         .create_detached("too-large", json!({}), RequestMetadata::default())
         .await
         .unwrap();
-    wait_for_status(&service, &failed.run_id, RunStatus::Failed).await;
+    wait_for_status(service, &failed.run_id, RunStatus::Failed).await;
     let failed_record = service.get_run(&failed.run_id).await.unwrap();
     assert_eq!(
         failed_record.error_code.as_deref(),
@@ -1408,11 +1430,11 @@ async fn bounded_chat_failure_releases_capacity_for_later_runs() {
         .create_detached("success", json!({}), RequestMetadata::default())
         .await
         .unwrap();
-    wait_for_status(&service, &success.run_id, RunStatus::Completed).await;
+    wait_for_status(service, &success.run_id, RunStatus::Completed).await;
     let success_record = service.get_run(&success.run_id).await.unwrap();
     assert_eq!(success_record.status, RunStatus::Completed);
 
-    service.shutdown(Duration::from_secs(1)).await.unwrap();
+    fixture.service.shutdown(Duration::from_secs(1)).await.unwrap();
 }
 ```
 
