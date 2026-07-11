@@ -1,7 +1,7 @@
 # Live-Only SSE Design
 
 **Date:** 2026-07-11
-**Status:** Pending written-spec review
+**Status:** Approved
 **Scope:** Remove public SSE replay and make Attached streaming live-only
 
 ## 1. Context
