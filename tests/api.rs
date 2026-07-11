@@ -2,6 +2,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
     sync::Arc,
     time::Duration,
 };
@@ -20,12 +22,16 @@ use insight_agent_platform::{
             CompiledAgent, CompiledNode, ExecutionPlan, NodeCompilation, NodeControl, NodeOutcome,
             NodeTransition, RunOutput,
         },
-        compiler::CompileContext,
+        compiler::{AgentCompiler, CompileContext, CompileLimits},
         CompileError, EmitPolicy,
     },
     events::hub::{EventHub, EventHubConfig},
     history::{repository::RunRepository, sqlite::SqliteRunRepository, types::RunStatus},
-    nodes::registry::{NodeExecutor, NodeExecutorRegistry, NodeType},
+    nodes::{
+        default_node_registries,
+        registry::{NodeExecutor, NodeType},
+    },
+    resources::{actions::ActionRegistry, models::ModelRegistry},
     runtime::{
         CompiledAgentRegistry, ExecutionControl, RunContext, RunError, RunService, RunServiceConfig,
     },
@@ -37,6 +43,7 @@ use tower::ServiceExt;
 enum ApiBehavior {
     Complete,
     Block,
+    Next(Value),
 }
 
 struct ApiNode;
@@ -80,6 +87,10 @@ impl NodeExecutor for ApiNode {
                 control.stopped().await;
                 Err(RunError::stopped(control.stop_reason().unwrap()))
             }
+            ApiBehavior::Next(output) => Ok(NodeOutcome {
+                output: output.clone(),
+                transition: NodeTransition::Next,
+            }),
         }
     }
 }
@@ -120,24 +131,41 @@ fn agent(id: &str, behavior: ApiBehavior) -> Arc<CompiledAgent> {
 }
 
 async fn fixture(auth: ApiAuth, capacity: usize) -> (Router, RunService) {
+    let (app, service, _) = fixture_internal(auth, capacity, 4, false).await;
+    (app, service)
+}
+
+async fn parallel_fixture() -> (Router, RunService, Arc<SqliteRunRepository>) {
+    fixture_internal(ApiAuth::disabled(), 4, 64, true).await
+}
+
+async fn fixture_internal(
+    auth: ApiAuth,
+    capacity: usize,
+    ring_capacity: usize,
+    include_parallel: bool,
+) -> (Router, RunService, Arc<SqliteRunRepository>) {
     let repository = Arc::new(SqliteRunRepository::in_memory().await.unwrap());
-    let repository_trait: Arc<dyn RunRepository> = repository;
+    let repository_trait: Arc<dyn RunRepository> = repository.clone();
     let events = EventHub::new(
         Arc::clone(&repository_trait),
         EventHubConfig {
-            ring_capacity: 4,
+            ring_capacity,
             subscriber_capacity: 16,
             journal_capacity: 32,
             journal_batch_size: 4,
             operation_timeout: Duration::from_secs(1),
         },
     );
-    let agents = CompiledAgentRegistry::new(vec![
+    let mut agents = vec![
         agent("fast", ApiBehavior::Complete),
         agent("blocking", ApiBehavior::Block),
-    ])
-    .unwrap();
-    let mut executors = NodeExecutorRegistry::default();
+    ];
+    if include_parallel {
+        agents.push(parallel_agent());
+    }
+    let agents = CompiledAgentRegistry::new(agents).unwrap();
+    let (_, mut executors) = default_node_registries().unwrap();
     executors.register(ApiNode).unwrap();
     let service = RunService::new(
         agents,
@@ -157,7 +185,74 @@ async fn fixture(auth: ApiAuth, capacity: usize) -> (Router, RunService) {
         service: service.clone(),
         auth,
     });
-    (router, service)
+    (router, service, repository)
+}
+
+fn parallel_agent() -> Arc<CompiledAgent> {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("agent");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("agent.yaml"),
+        r#"
+version: 1
+id: parallel
+name: Parallel API Agent
+input:
+  schema:
+    type: object
+    required: [text]
+    additionalProperties: false
+    properties: {text: {type: string}}
+entry: fanout
+nodes:
+  fanout:
+    type: core.fork
+    config:
+      branches: {source_a: source_a, source_b: source_b}
+      join: collect
+  source_a:
+    type: core.template
+    next: collect
+    config: {value: a}
+  source_b:
+    type: core.template
+    next: collect
+    config: {value: b}
+  collect:
+    type: core.join
+    next: result
+    config: {mode: all_settled}
+  result:
+    type: core.output
+    config: {data: {done: true}}
+"#,
+    )
+    .unwrap();
+    let (types, _) = default_node_registries().unwrap();
+    let mut agent = AgentCompiler::new(
+        types,
+        ModelRegistry::default(),
+        ActionRegistry::default(),
+        Duration::from_secs(30),
+        CompileLimits {
+            max_fork_branches: 8,
+        },
+    )
+    .compile_dir(Path::new(&root))
+    .unwrap();
+    for (node_id, output) in [
+        ("source_a", json!({"text":"a"})),
+        ("source_b", json!({"text":"b"})),
+    ] {
+        let node = agent.nodes.get_mut(node_id).unwrap();
+        node.kind = "test.api".to_string();
+        node.body = Arc::new(ApiBehavior::Next(output));
+    }
+    let result = agent.nodes.get_mut("result").unwrap();
+    result.kind = "test.api".to_string();
+    result.body = Arc::new(ApiBehavior::Complete);
+    Arc::new(agent)
 }
 
 fn request(method: Method, uri: &str, body: Option<Value>) -> Request<Body> {
@@ -430,6 +525,73 @@ async fn completed_events_replay_after_seq_and_invalid_cursors_use_json_errors()
         .unwrap();
     assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     assert_eq!(json_body(invalid).await["code"], "INPUT_INVALID");
+}
+
+#[tokio::test]
+async fn detached_parallel_run_replays_repository_order_after_branch_cursor() {
+    let (app, service, repository) = parallel_fixture().await;
+    let created = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/v1/agents/parallel/runs",
+            Some(json!({"text":"hello"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::ACCEPTED);
+    let created = json_body(created).await;
+    let run_id = created["data"]["run_id"].as_str().unwrap();
+    wait_for_status(&service, run_id, RunStatus::Completed).await;
+
+    let stored = repository.list_events_after(run_id, 0, 100).await.unwrap();
+    let branch_started_seq = stored
+        .iter()
+        .find(|event| event.event_type.as_str() == "branch.started")
+        .unwrap()
+        .seq;
+    let expected = stored
+        .iter()
+        .filter(|event| event.seq > branch_started_seq)
+        .map(|event| {
+            (
+                event.seq,
+                event.event_type.as_str().to_string(),
+                event.node_id.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let replay = app
+        .oneshot(request(
+            Method::GET,
+            &format!("/v1/runs/{run_id}/events?after_seq={branch_started_seq}"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay = to_bytes(replay.into_body(), usize::MAX).await.unwrap();
+    let replay = sse_data(&replay);
+    let actual = replay
+        .iter()
+        .map(|event| {
+            (
+                event["seq"].as_u64().unwrap(),
+                event["type"].as_str().unwrap().to_string(),
+                event["node_id"].as_str().map(str::to_string),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    assert!(actual.iter().any(|(_, kind, _)| kind == "branch.completed"));
+    assert!(actual
+        .iter()
+        .any(|(_, kind, node)| { kind == "node.started" && node.as_deref() == Some("collect") }));
+    assert!(actual
+        .iter()
+        .any(|(_, kind, node)| { kind == "node.completed" && node.as_deref() == Some("collect") }));
+    assert!(actual.windows(2).all(|pair| pair[0].0 < pair[1].0));
 }
 
 #[tokio::test]

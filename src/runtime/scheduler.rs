@@ -6,14 +6,16 @@ use std::{
 use tokio::task::JoinSet;
 
 use crate::{
-    dsl::compiled::{CompiledAgent, NodeTransition, RunOutput},
+    dsl::compiled::{CompiledAgent, ForkPlan, NodeTransition, RunOutput},
     events::hub::EventHub,
+    events::protocol::{RunEventScope, RunEventType},
     nodes::registry::NodeExecutorRegistry,
 };
+use serde_json::json;
 
 use super::{
-    execute_node, BranchState, ExecutionLimiter, NodeExecutionFailure, NodeExecutionResult,
-    NodeState, RunContext, RunError, StopSignal,
+    execute_node, BranchError, BranchResult, BranchState, ExecutionLimiter, NodeExecutionFailure,
+    NodeExecutionResult, NodeState, RunContext, RunError, StopSignal,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,7 +48,14 @@ struct ReadyNode {
 struct SchedulerState {
     ready: VecDeque<ReadyNode>,
     node_states: BTreeMap<String, NodeState>,
-    _branch_states: BTreeMap<WorkScope, BranchState>,
+    branch_states: BTreeMap<WorkScope, BranchState>,
+    active_fork: Option<ActiveFork>,
+}
+
+struct ActiveFork {
+    plan: ForkPlan,
+    main_context: RunContext,
+    results: BTreeMap<String, BranchResult>,
 }
 
 impl Scheduler {
@@ -123,6 +132,36 @@ impl Scheduler {
                 Ok(result) => result,
                 Err(NodeExecutionFailure::Node { node_id, error }) => {
                     state.fail(&scheduled_node_id, &node_id)?;
+                    if let WorkScope::Branch { fork_id, branch_id } = &scope {
+                        let result = BranchResult::Failed {
+                            terminal_node_id: node_id.clone(),
+                            error: BranchError {
+                                code: error.code().to_string(),
+                                message: error.message().to_string(),
+                            },
+                        };
+                        state.settle_branch(&scope, result)?;
+                        self.events
+                            .publish_error(
+                                branch_scope(&state, fork_id)?,
+                                RunEventType::BranchFailed,
+                                error.code(),
+                                error.message(),
+                                json!({
+                                    "fork_id": fork_id,
+                                    "branch_id": branch_id,
+                                    "terminal_node_id": node_id,
+                                    "error": {
+                                        "code": error.code(),
+                                        "message": error.message(),
+                                    }
+                                }),
+                            )
+                            .await
+                            .map_err(event_error)?;
+                        state.activate_join_if_settled(&self.agent)?;
+                        continue;
+                    }
                     return Ok(SchedulerResult::Failed(error));
                 }
                 Err(NodeExecutionFailure::Stop { node_id, error }) => {
@@ -143,6 +182,55 @@ impl Scheduler {
                 .expect("scheduled nodes are checked before execution");
             let mut context = result.context;
             context.set_node_output(&result.node_id, result.outcome.output.clone());
+            if let WorkScope::Branch { fork_id, branch_id } = &scope {
+                let target = match &result.outcome.transition {
+                    NodeTransition::Next => node.next.as_deref().ok_or_else(|| {
+                        invariant(format!(
+                            "successful branch node '{}' did not identify a successor",
+                            node.id
+                        ))
+                    })?,
+                    NodeTransition::Goto(target) => target,
+                    NodeTransition::ActivateFork => {
+                        return Err(invariant(format!(
+                            "branch node '{}' requested nested fork activation",
+                            node.id
+                        )));
+                    }
+                    NodeTransition::Complete(_) => {
+                        return Err(invariant(format!(
+                            "branch node '{}' completed the run before its paired join",
+                            node.id
+                        )));
+                    }
+                };
+                if state.is_paired_join(fork_id, target)? {
+                    let branch_result = BranchResult::Succeeded {
+                        terminal_node_id: result.node_id.clone(),
+                        output: result.outcome.output.clone(),
+                    };
+                    state.settle_branch(&scope, branch_result)?;
+                    self.events
+                        .publish(
+                            run_scope(&context),
+                            RunEventType::BranchCompleted,
+                            json!({
+                                "fork_id": fork_id,
+                                "branch_id": branch_id,
+                                "terminal_node_id": result.node_id,
+                            }),
+                        )
+                        .await
+                        .map_err(event_error)?;
+                    state.activate_join_if_settled(&self.agent)?;
+                } else {
+                    state.validate_branch_target(fork_id, branch_id, target)?;
+                    state.activate(&self.agent, Some(target), scope, context)?;
+                }
+                continue;
+            }
+
+            state.finish_join_if_completed(&scheduled_node_id);
             match result.outcome.transition {
                 NodeTransition::Next => {
                     state.activate(&self.agent, node.next.as_deref(), scope, context)?
@@ -151,19 +239,43 @@ impl Scheduler {
                     state.activate(&self.agent, Some(&target), scope, context)?
                 }
                 NodeTransition::ActivateFork => {
-                    if !self.agent.execution_plan.forks.contains_key(&node.id) {
-                        return Err(invariant(format!(
-                            "node '{}' requested fork activation without a compiled fork plan",
-                            node.id
-                        )));
+                    let plan = self
+                        .agent
+                        .execution_plan
+                        .forks
+                        .get(&node.id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            invariant(format!(
+                                "node '{}' requested fork activation without a compiled fork plan",
+                                node.id
+                            ))
+                        })?;
+                    state.begin_fork(plan.clone(), context.clone())?;
+                    for (branch_id, branch) in &plan.branches {
+                        let branch_scope = WorkScope::Branch {
+                            fork_id: plan.fork_id.clone(),
+                            branch_id: branch_id.clone(),
+                        };
+                        state.start_branch(&branch_scope)?;
+                        self.events
+                            .publish(
+                                run_scope(&context),
+                                RunEventType::BranchStarted,
+                                json!({
+                                    "fork_id": plan.fork_id,
+                                    "branch_id": branch_id,
+                                }),
+                            )
+                            .await
+                            .map_err(event_error)?;
+                        state.activate(
+                            &self.agent,
+                            Some(&branch.entry),
+                            branch_scope,
+                            context.fork_branch(),
+                        )?;
                     }
-                    return Err(RunError::infrastructure(
-                        "SCHEDULER_FORK_UNSUPPORTED",
-                        format!(
-                            "fork activation for node '{}' is not available yet",
-                            node.id
-                        ),
-                    ));
                 }
                 NodeTransition::Complete(output) => {
                     return Ok(SchedulerResult::Completed(output));
@@ -200,8 +312,126 @@ impl SchedulerState {
         Self {
             ready: VecDeque::new(),
             node_states,
-            _branch_states: branch_states,
+            branch_states,
+            active_fork: None,
         }
+    }
+
+    fn begin_fork(&mut self, plan: ForkPlan, main_context: RunContext) -> Result<(), RunError> {
+        if self.active_fork.is_some() {
+            return Err(invariant(format!(
+                "fork '{}' cannot activate while another fork is active",
+                plan.fork_id
+            )));
+        }
+        self.active_fork = Some(ActiveFork {
+            plan,
+            main_context,
+            results: BTreeMap::new(),
+        });
+        Ok(())
+    }
+
+    fn start_branch(&mut self, scope: &WorkScope) -> Result<(), RunError> {
+        self.transition_branch(scope, BranchState::Pending, BranchState::Running)
+    }
+
+    fn settle_branch(&mut self, scope: &WorkScope, result: BranchResult) -> Result<(), RunError> {
+        let WorkScope::Branch { fork_id, branch_id } = scope else {
+            return Err(invariant("only a branch scope can settle a branch"));
+        };
+        let next = match result {
+            BranchResult::Succeeded { .. } => BranchState::Succeeded,
+            BranchResult::Failed { .. } => BranchState::Failed,
+        };
+        let active = self.active_fork(fork_id)?;
+        if active.results.contains_key(branch_id) {
+            return Err(invariant(format!(
+                "branch '{fork_id}.{branch_id}' cannot settle more than once"
+            )));
+        }
+        self.transition_branch(scope, BranchState::Running, next)?;
+        self.active_fork
+            .as_mut()
+            .expect("the active fork was validated before branch settlement")
+            .results
+            .insert(branch_id.clone(), result);
+        Ok(())
+    }
+
+    fn is_paired_join(&self, fork_id: &str, target: &str) -> Result<bool, RunError> {
+        let active = self.active_fork(fork_id)?;
+        Ok(active.plan.join_id == target)
+    }
+
+    fn validate_branch_target(
+        &self,
+        fork_id: &str,
+        branch_id: &str,
+        target: &str,
+    ) -> Result<(), RunError> {
+        let active = self.active_fork(fork_id)?;
+        let branch = active.plan.branches.get(branch_id).ok_or_else(|| {
+            invariant(format!(
+                "active fork '{fork_id}' has no branch '{branch_id}'"
+            ))
+        })?;
+        if !branch.nodes.contains(target) {
+            return Err(invariant(format!(
+                "branch '{fork_id}.{branch_id}' cannot activate node '{target}' outside its region"
+            )));
+        }
+        Ok(())
+    }
+
+    fn activate_join_if_settled(&mut self, agent: &CompiledAgent) -> Result<(), RunError> {
+        let Some(active) = &self.active_fork else {
+            return Err(invariant("cannot activate a join without an active fork"));
+        };
+        if active.results.len() != active.plan.branches.len() {
+            return Ok(());
+        }
+        let join_id = active.plan.join_id.clone();
+        let context = active
+            .main_context
+            .with_join_results(active.results.clone());
+        self.activate(agent, Some(&join_id), WorkScope::Main, context)
+    }
+
+    fn finish_join_if_completed(&mut self, node_id: &str) {
+        let is_active_join = self
+            .active_fork
+            .as_ref()
+            .is_some_and(|active| active.plan.join_id == node_id);
+        if is_active_join {
+            self.active_fork = None;
+        }
+    }
+
+    fn active_fork(&self, fork_id: &str) -> Result<&ActiveFork, RunError> {
+        self.active_fork
+            .as_ref()
+            .filter(|active| active.plan.fork_id == fork_id)
+            .ok_or_else(|| invariant(format!("fork '{fork_id}' is not active")))
+    }
+
+    fn transition_branch(
+        &mut self,
+        scope: &WorkScope,
+        expected: BranchState,
+        next: BranchState,
+    ) -> Result<(), RunError> {
+        let state = self
+            .branch_states
+            .get_mut(scope)
+            .ok_or_else(|| invariant(format!("branch scope '{scope:?}' has no scheduler state")))?;
+        if *state != expected {
+            return Err(invariant(format!(
+                "branch scope '{scope:?}' cannot transition from {state:?} to {next:?}"
+            )));
+        }
+        *state = next;
+        Ok(())
     }
 
     fn activate(
@@ -287,4 +517,22 @@ impl SchedulerState {
 
 fn invariant(message: impl Into<String>) -> RunError {
     RunError::infrastructure("SCHEDULER_INVARIANT_VIOLATION", message)
+}
+
+fn run_scope(context: &RunContext) -> RunEventScope {
+    let metadata = context.metadata();
+    RunEventScope::for_run(
+        &metadata.request_id,
+        &metadata.run_id,
+        &metadata.agent_id,
+        &metadata.agent_version,
+    )
+}
+
+fn branch_scope(state: &SchedulerState, fork_id: &str) -> Result<RunEventScope, RunError> {
+    Ok(run_scope(&state.active_fork(fork_id)?.main_context))
+}
+
+fn event_error(error: crate::events::hub::EventError) -> RunError {
+    RunError::infrastructure(error.code(), error.to_string())
 }
