@@ -184,13 +184,19 @@ pub fn validate_references(
                             ),
                         ));
                     }
-                    (NodeRegion::Linear | NodeRegion::Join { .. }, NodeRegion::Branch { .. }) => {
-                        return Err(CompileError::new(
-                            "POST_JOIN_BRANCH_REFERENCE",
-                            format!(
-                                "node '{node_id}' must reference joined output instead of branch node '{reference}'"
-                            ),
-                        ));
+                    (
+                        NodeRegion::Linear | NodeRegion::Join { .. },
+                        NodeRegion::Branch { fork_id, .. },
+                    ) => {
+                        let join_id = &plan.forks[fork_id].join_id;
+                        if join_id == node_id || dominators[node_id].contains(join_id) {
+                            return Err(CompileError::new(
+                                "POST_JOIN_BRANCH_REFERENCE",
+                                format!(
+                                    "node '{node_id}' must reference joined output instead of branch node '{reference}'"
+                                ),
+                            ));
+                        }
                     }
                     _ => {}
                 }

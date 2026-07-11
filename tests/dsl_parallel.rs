@@ -104,6 +104,12 @@ nodes:
 
 fn valid_parallel_yaml_with(node_id: &str, reference: &str) -> String {
     match node_id {
+        "prepare" => parallel_yaml().replace(
+            "  prepare:\n    type: core.template\n    next: fanout\n    config:\n      value: prepared",
+            &format!(
+                "  prepare:\n    type: core.template\n    next: fanout\n    config:\n      value: '{reference}'"
+            ),
+        ),
         "summarize_a" => parallel_yaml().replace(
             "  summarize_a:\n    type: core.template\n    next: collect\n    config:\n      value: summary-a",
             &format!(
@@ -118,6 +124,14 @@ fn valid_parallel_yaml_with(node_id: &str, reference: &str) -> String {
         ),
         _ => panic!("unsupported reference target '{node_id}'"),
     }
+}
+
+#[test]
+fn reference_rejects_future_branch_output_before_fork_as_generic_invalid() {
+    assert_compile_error(
+        &valid_parallel_yaml_with("prepare", "{{ nodes.search_a.output.text }}"),
+        "INVALID_NODE_REFERENCE",
+    );
 }
 
 #[test]
