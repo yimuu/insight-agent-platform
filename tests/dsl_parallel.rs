@@ -184,6 +184,12 @@ fn condition_indexed_node_access_fails_before_branch_validation() {
     assert_compile_error(&yaml, "CONDITION_REFERENCE_INVALID");
 }
 
+#[test]
+fn rejects_fork_branch_ids_outside_canonical_identifier_grammar() {
+    let invalid = parallel_yaml().replace("source_a: search_a", "source-a: search_a");
+    assert_compile_error(&invalid, "FORK_BRANCH_ID_INVALID");
+}
+
 fn parallel_yaml_with_outside_edge(target: &str) -> String {
     parallel_yaml()
         .replace(

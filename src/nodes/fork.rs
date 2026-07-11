@@ -14,6 +14,7 @@ use crate::{
             NodeTransition,
         },
         compiler::CompileContext,
+        references::is_dsl_identifier,
         CompileError,
     },
     nodes::registry::{NodeExecutor, NodeType},
@@ -54,7 +55,7 @@ impl NodeType for ForkNode {
             ));
         }
         for (branch_id, target) in &config.branches {
-            if !valid_identifier(branch_id) {
+            if !is_dsl_identifier(branch_id) {
                 return Err(CompileError::new(
                     "FORK_BRANCH_ID_INVALID",
                     format!("fork node '{node_id}' has invalid branch ID '{branch_id}'"),
@@ -113,15 +114,4 @@ impl NodeExecutor for ForkNode {
             transition: NodeTransition::ActivateFork,
         })
     }
-}
-
-fn valid_identifier(value: &str) -> bool {
-    let mut characters = value.chars();
-    let Some(first) = characters.next() else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || first == '_')
-        && characters.all(|character| {
-            character.is_ascii_alphanumeric() || character == '_' || character == '-'
-        })
 }

@@ -20,7 +20,7 @@ use super::{
     graph::{validate_graph_structure, validate_references},
     parse_raw_agent,
     plan::compile_execution_plan,
-    references::{extract_handlebars_references, handlebars_static_text},
+    references::{extract_handlebars_references, handlebars_static_text, validate_node_id},
     CompileError, EmitPolicy,
 };
 
@@ -194,6 +194,9 @@ impl AgentCompiler {
             )
         })?;
         let raw = parse_raw_agent(&yaml)?;
+        for node_id in raw.nodes.keys() {
+            validate_node_id(node_id)?;
+        }
         let input_schema = Arc::new(JSONSchema::compile(&raw.input.schema).map_err(|error| {
             CompileError::new(
                 "INPUT_SCHEMA_INVALID",

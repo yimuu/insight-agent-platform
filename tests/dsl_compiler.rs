@@ -244,6 +244,12 @@ fn rejects_missing_entry_and_edges() {
 }
 
 #[test]
+fn rejects_node_ids_outside_canonical_identifier_grammar() {
+    let invalid = valid_yaml().replace("  first:", "  first-node:");
+    assert_compile_error(&invalid, "NODE_ID_INVALID");
+}
+
+#[test]
 fn rejects_cycles_and_unreachable_nodes() {
     let cycle = valid_yaml()
         .replace("next: result", "next: second")
