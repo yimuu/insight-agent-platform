@@ -52,6 +52,18 @@ fn config(subscriber_capacity: usize) -> EventHubConfig {
     }
 }
 
+fn failed_update(run_id: &str, second: u32) -> TerminalUpdate {
+    TerminalUpdate::new(
+        run_id,
+        RunStatus::Failed,
+        at(second),
+        None,
+        Some("INFRASTRUCTURE_FAILURE".to_string()),
+        Some("runtime infrastructure failed".to_string()),
+    )
+    .unwrap()
+}
+
 #[derive(Default)]
 struct MemoryRepository {
     events: Mutex<BTreeMap<String, Vec<RunEvent>>>,
@@ -65,7 +77,13 @@ struct MemoryRepository {
     terminal_called: Notify,
     allow_terminal: Notify,
     block_terminal: AtomicBool,
+    recover_calls: AtomicUsize,
+    block_recover: AtomicBool,
+    allow_recover: Notify,
     list_calls: AtomicUsize,
+    block_list: AtomicBool,
+    allow_list: Notify,
+    override_list: Mutex<Option<Vec<RunEvent>>>,
 }
 
 impl MemoryRepository {
@@ -79,6 +97,23 @@ impl MemoryRepository {
             .into_iter()
             .map(|event| event.seq)
             .collect()
+    }
+
+    async fn wait_recover_calls(&self, expected: usize) {
+        for _ in 0..200 {
+            if self.recover_calls.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!(
+            "recover_run was called {} times, expected at least {expected}",
+            self.recover_calls.load(Ordering::SeqCst)
+        );
+    }
+
+    async fn set_override_list(&self, events: Vec<RunEvent>) {
+        *self.override_list.lock().await = Some(events);
     }
 }
 
@@ -165,6 +200,10 @@ impl RunRepository for MemoryRepository {
         update: TerminalUpdate,
         mut terminal: RunEvent,
     ) -> Result<RunEvent, HistoryError> {
+        self.recover_calls.fetch_add(1, Ordering::SeqCst);
+        if self.block_recover.load(Ordering::SeqCst) {
+            self.allow_recover.notified().await;
+        }
         terminal.seq = self
             .events
             .lock()
@@ -187,6 +226,16 @@ impl RunRepository for MemoryRepository {
         limit: usize,
     ) -> Result<Vec<RunEvent>, HistoryError> {
         self.list_calls.fetch_add(1, Ordering::SeqCst);
+        if self.block_list.load(Ordering::SeqCst) {
+            self.allow_list.notified().await;
+        }
+        if let Some(events) = self.override_list.lock().await.clone() {
+            return Ok(events
+                .into_iter()
+                .filter(|event| event.seq > after_seq)
+                .take(limit)
+                .collect());
+        }
         Ok(self
             .events
             .lock()
@@ -579,6 +628,230 @@ async fn recovery_derives_terminal_after_an_uncertain_append_commit() {
     );
     assert_eq!(repository.stored_sequences(RUN_ID).await, vec![1, 2]);
     assert_eq!(hub.retained_run_count().await, 0);
+}
+
+#[tokio::test]
+async fn recovery_timeout_isolates_live_state_and_hands_off_one_owner() {
+    let repository = Arc::new(MemoryRepository::default());
+    repository.fail_appends.store(true, Ordering::SeqCst);
+    repository.block_recover.store(true, Ordering::SeqCst);
+    let hub = EventHub::new(
+        repository.clone(),
+        EventHubConfig {
+            subscriber_capacity: 8,
+            journal_capacity: 8,
+            journal_batch_size: 4,
+            operation_timeout: Duration::from_millis(20),
+        },
+    );
+    let mut subscriber = hub.subscribe(RUN_ID).await;
+
+    assert_eq!(
+        hub.publish(scope(None), RunEventType::RunCreated, json!({}))
+            .await
+            .unwrap_err()
+            .code(),
+        "SYNTHETIC_WRITE_FAILURE"
+    );
+
+    let error = tokio::time::timeout(
+        Duration::from_millis(250),
+        hub.recover_terminal(
+            scope(None),
+            RunEventType::RunFailed,
+            failed_update(RUN_ID, 21),
+            "INFRASTRUCTURE_FAILURE",
+            "runtime infrastructure failed",
+            json!({}),
+        ),
+    )
+    .await
+    .expect("foreground recovery must be bounded")
+    .unwrap_err();
+
+    assert_eq!(error.code(), "JOURNAL_OPERATION_TIMEOUT");
+    assert_eq!(hub.retained_run_count().await, 0);
+    assert_eq!(hub.retained_recovery_count().await, 1);
+    let closed = tokio::time::timeout(Duration::from_millis(50), subscriber.recv())
+        .await
+        .expect("subscriber must be closed after recovery handoff")
+        .unwrap_err();
+    assert_eq!(closed.code(), "SUBSCRIPTION_CLOSED");
+    repository.wait_recover_calls(2).await;
+
+    repository.block_recover.store(false, Ordering::SeqCst);
+    repository.allow_recover.notify_waiters();
+    hub.wait_for_recoveries(Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    assert_eq!(hub.retained_recovery_count().await, 0);
+    assert_eq!(repository.terminal_updates.lock().await.len(), 1);
+    assert_eq!(repository.stored_sequences(RUN_ID).await, vec![1]);
+}
+
+#[tokio::test]
+async fn duplicate_recovery_timeouts_reuse_the_same_background_owner() {
+    let repository = Arc::new(MemoryRepository::default());
+    repository.fail_appends.store(true, Ordering::SeqCst);
+    repository.block_recover.store(true, Ordering::SeqCst);
+    let hub = EventHub::new(
+        repository.clone(),
+        EventHubConfig {
+            subscriber_capacity: 8,
+            journal_capacity: 8,
+            journal_batch_size: 4,
+            operation_timeout: Duration::from_millis(20),
+        },
+    );
+
+    assert_eq!(
+        hub.publish(scope(None), RunEventType::RunCreated, json!({}))
+            .await
+            .unwrap_err()
+            .code(),
+        "SYNTHETIC_WRITE_FAILURE"
+    );
+
+    for second in [22, 23] {
+        let error = tokio::time::timeout(
+            Duration::from_millis(250),
+            hub.recover_terminal(
+                scope(None),
+                RunEventType::RunFailed,
+                failed_update(RUN_ID, second),
+                "INFRASTRUCTURE_FAILURE",
+                "runtime infrastructure failed",
+                json!({}),
+            ),
+        )
+        .await
+        .expect("foreground recovery must be bounded")
+        .unwrap_err();
+        assert_eq!(error.code(), "JOURNAL_OPERATION_TIMEOUT");
+    }
+
+    assert_eq!(hub.retained_run_count().await, 0);
+    assert_eq!(hub.retained_recovery_count().await, 1);
+    tokio::time::timeout(Duration::from_millis(50), repository.wait_recover_calls(3))
+        .await
+        .expect("duplicate recovery calls must share one background owner");
+    assert_eq!(
+        repository.recover_calls.load(Ordering::SeqCst),
+        3,
+        "two foreground attempts plus one deduplicated background owner"
+    );
+
+    repository.block_recover.store(false, Ordering::SeqCst);
+    repository.allow_recover.notify_waiters();
+    hub.wait_for_recoveries(Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(hub.retained_recovery_count().await, 0);
+}
+
+#[tokio::test]
+async fn authoritative_recovery_terminal_with_blocked_reconciliation_closes_live_state() {
+    let repository = Arc::new(MemoryRepository::default());
+    repository
+        .commit_then_block_appends
+        .store(true, Ordering::SeqCst);
+    repository.block_list.store(true, Ordering::SeqCst);
+    let hub = EventHub::new(
+        repository.clone(),
+        EventHubConfig {
+            subscriber_capacity: 8,
+            journal_capacity: 8,
+            journal_batch_size: 4,
+            operation_timeout: Duration::from_millis(20),
+        },
+    );
+    let mut subscriber = hub.subscribe(RUN_ID).await;
+
+    assert_eq!(
+        hub.publish(scope(None), RunEventType::RunCreated, json!({}))
+            .await
+            .unwrap_err()
+            .code(),
+        "JOURNAL_OPERATION_TIMEOUT"
+    );
+
+    let error = hub
+        .recover_terminal(
+            scope(None),
+            RunEventType::RunFailed,
+            failed_update(RUN_ID, 24),
+            "INFRASTRUCTURE_FAILURE",
+            "runtime infrastructure failed",
+            json!({}),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "JOURNAL_OPERATION_TIMEOUT");
+    assert_eq!(hub.retained_run_count().await, 0);
+    let closed = tokio::time::timeout(Duration::from_millis(50), subscriber.recv())
+        .await
+        .expect("subscriber must be closed after reconciliation timeout")
+        .unwrap_err();
+    assert_eq!(closed.code(), "SUBSCRIPTION_CLOSED");
+    assert_eq!(repository.terminal_updates.lock().await.len(), 1);
+    assert_eq!(repository.stored_sequences(RUN_ID).await, vec![1, 2]);
+}
+
+#[tokio::test]
+async fn authoritative_recovery_terminal_with_mismatched_history_closes_without_broadcast() {
+    let repository = Arc::new(MemoryRepository::default());
+    repository
+        .commit_then_block_appends
+        .store(true, Ordering::SeqCst);
+    let hub = EventHub::new(
+        repository.clone(),
+        EventHubConfig {
+            subscriber_capacity: 8,
+            journal_capacity: 8,
+            journal_batch_size: 4,
+            operation_timeout: Duration::from_millis(20),
+        },
+    );
+    let mut subscriber = hub.subscribe(RUN_ID).await;
+
+    assert_eq!(
+        hub.publish(scope(None), RunEventType::RunCreated, json!({}))
+            .await
+            .unwrap_err()
+            .code(),
+        "JOURNAL_OPERATION_TIMEOUT"
+    );
+    let wrong_terminal = RunEvent::error(
+        RunEventType::RunCancelled,
+        2,
+        scope(None),
+        "RUN_CANCELLED",
+        "run cancelled by explicit request",
+        json!({}),
+    );
+    repository.set_override_list(vec![wrong_terminal]).await;
+
+    let error = hub
+        .recover_terminal(
+            scope(None),
+            RunEventType::RunFailed,
+            failed_update(RUN_ID, 25),
+            "INFRASTRUCTURE_FAILURE",
+            "runtime infrastructure failed",
+            json!({}),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "HISTORY_TERMINAL_EVENT_MISMATCH");
+    assert_eq!(hub.retained_run_count().await, 0);
+    let closed = tokio::time::timeout(Duration::from_millis(50), subscriber.recv())
+        .await
+        .expect("subscriber must be closed after reconciliation mismatch")
+        .unwrap_err();
+    assert_eq!(closed.code(), "SUBSCRIPTION_CLOSED");
 }
 
 #[tokio::test]
