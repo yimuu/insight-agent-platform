@@ -161,6 +161,18 @@ fn compile_agent() -> (
     )
 }
 
+fn medical_input(image_url: Option<Value>, messages: Value) -> Value {
+    let mut input = json!({
+        "report_text":"血红蛋白偏低",
+        "messages":messages,
+        "question":"请解读报告"
+    });
+    if let Some(image_url) = image_url {
+        input["image_url"] = image_url;
+    }
+    input
+}
+
 async fn run_agent(
     agent: Arc<insight_agent_platform::dsl::compiled::CompiledAgent>,
     run_id: &str,
@@ -201,6 +213,32 @@ async fn run_agent(
     }
 }
 
+#[test]
+fn medical_image_schema_accepts_optional_http_images_and_rejects_invalid_values() {
+    let (agent, _) = compile_agent();
+    for image_url in [
+        None,
+        Some(json!("")),
+        Some(json!("http://example.test/report.png")),
+        Some(json!("https://example.test/report.png")),
+        Some(json!("data:image/png;base64,AA==")),
+    ] {
+        assert!(agent
+            .input_schema
+            .is_valid(&medical_input(image_url, json!([]))));
+    }
+    for image_url in [
+        json!(null),
+        json!(7),
+        json!("ftp://example.test/report.png"),
+        json!("file:///tmp/report.png"),
+    ] {
+        assert!(!agent
+            .input_schema
+            .is_valid(&medical_input(Some(image_url), json!([]))));
+    }
+}
+
 #[tokio::test]
 async fn empty_history_keeps_the_existing_three_step_flow() {
     let (agent, requests) = compile_agent();
@@ -214,7 +252,7 @@ async fn empty_history_keeps_the_existing_three_step_flow() {
         "run_initial",
         json!({
             "report_text": "血红蛋白偏低",
-            "image_url": "https://example.test/report.png",
+            "image_url": "http://example.test/report.png",
             "messages": [],
             "question": "请解读报告"
         }),
@@ -232,9 +270,39 @@ async fn empty_history_keeps_the_existing_three_step_flow() {
         assert!(user_message.text().unwrap().starts_with(prompt_start));
         assert_eq!(
             user_message.image_urls(),
-            vec!["https://example.test/report.png"]
+            vec!["http://example.test/report.png"]
         );
     }
+    assert_eq!(
+        output.content.as_deref(),
+        Some("异常指标响应\n\n综合解读响应\n\n健康建议响应")
+    );
+    assert_eq!(output.format.as_deref(), Some("markdown"));
+    assert_eq!(
+        output.data,
+        json!({
+            "abnormal_indicators": ABNORMAL_RESPONSE,
+            "comprehensive_interpretation": COMPREHENSIVE_RESPONSE,
+            "health_advice": ADVICE_RESPONSE,
+        })
+    );
+}
+
+#[tokio::test]
+async fn missing_image_runs_initial_flow_with_text_only_messages() {
+    let (agent, requests) = compile_agent();
+    let output = run_agent(
+        agent,
+        "run_initial_without_image",
+        medical_input(None, json!([])),
+    )
+    .await;
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests
+        .iter()
+        .all(|request| request.messages[1].image_urls().is_empty()));
     assert_eq!(
         output.content.as_deref(),
         Some("异常指标响应\n\n综合解读响应\n\n健康建议响应")
@@ -285,4 +353,27 @@ async fn non_empty_history_uses_one_dedicated_follow_up_request() {
     assert_eq!(output.content.as_deref(), Some(FOLLOW_UP_RESPONSE));
     assert_eq!(output.format.as_deref(), Some("markdown"));
     assert!(output.data.is_null());
+}
+
+#[tokio::test]
+async fn missing_and_blank_images_run_follow_up_with_one_text_only_message() {
+    for (run_id, image_url) in [
+        ("run_follow_up_without_image", None),
+        ("run_follow_up_with_blank_image", Some(json!(""))),
+    ] {
+        let (agent, requests) = compile_agent();
+        let output = run_agent(
+            agent,
+            run_id,
+            medical_input(image_url, json!([{"role":"user", "content":"请解读报告"}])),
+        )
+        .await;
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].messages[1].image_urls().is_empty());
+        assert_eq!(output.content.as_deref(), Some(FOLLOW_UP_RESPONSE));
+        assert_eq!(output.format.as_deref(), Some("markdown"));
+        assert!(output.data.is_null());
+    }
 }
