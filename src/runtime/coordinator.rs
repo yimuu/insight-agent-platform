@@ -11,7 +11,7 @@ use crate::{
     },
     history::{
         repository::{HistoryError, RunRepository},
-        types::{NewRun, RunStatus, TerminalUpdate},
+        types::{NewRun, RunRecord, RunStatus, TerminalUpdate},
     },
     nodes::registry::NodeExecutorRegistry,
     observability::{elapsed_ms, json_size_bytes},
@@ -28,6 +28,12 @@ pub struct RunCoordinator {
     events: EventHub,
     repository: Arc<dyn RunRepository>,
     limiter: ExecutionLimiter,
+}
+
+struct TerminalLogSummary {
+    status: RunStatus,
+    output_bytes: usize,
+    error_code: String,
 }
 
 impl RunCoordinator {
@@ -219,7 +225,16 @@ impl RunCoordinator {
             .await
             .map_err(event_error)?;
         let durable = self
-            .commit_terminal_state(state, run, published, RunStatus::Completed)
+            .commit_terminal_state(
+                state,
+                run,
+                published,
+                TerminalLogSummary {
+                    status: RunStatus::Completed,
+                    output_bytes: json_size_bytes(&output),
+                    error_code: String::new(),
+                },
+            )
             .await?;
         tracing::info!(
             event_name = "run.finished",
@@ -228,13 +243,13 @@ impl RunCoordinator {
             agent_id = run.agent_id.as_str(),
             agent_version = run.agent_version.as_str(),
             attachment = run.attachment.as_str(),
-            status = durable.as_str(),
+            status = durable.status.as_str(),
             elapsed_ms = elapsed_ms(started),
-            output_bytes = json_size_bytes(&output),
-            error_code = "",
+            output_bytes = durable.output_bytes,
+            error_code = durable.error_code.as_str(),
             "run finished"
         );
-        Ok(durable)
+        Ok(durable.status)
     }
 
     async fn finish_error(
@@ -286,7 +301,16 @@ impl RunCoordinator {
             .map_err(event_error)?;
         let error_code = error.code().to_string();
         let durable = self
-            .commit_terminal_state(state, run, published, status)
+            .commit_terminal_state(
+                state,
+                run,
+                published,
+                TerminalLogSummary {
+                    status,
+                    output_bytes: 0,
+                    error_code,
+                },
+            )
             .await?;
         tracing::info!(
             event_name = "run.finished",
@@ -295,13 +319,13 @@ impl RunCoordinator {
             agent_id = run.agent_id.as_str(),
             agent_version = run.agent_version.as_str(),
             attachment = run.attachment.as_str(),
-            status = durable.as_str(),
+            status = durable.status.as_str(),
             elapsed_ms = elapsed_ms(started),
-            output_bytes = 0_usize,
-            error_code = error_code.as_str(),
+            output_bytes = durable.output_bytes,
+            error_code = durable.error_code.as_str(),
             "run finished"
         );
-        Ok(durable)
+        Ok(durable.status)
     }
 
     async fn recover_infrastructure_failure(
@@ -333,7 +357,16 @@ impl RunCoordinator {
             .await
             .map_err(event_error)?;
         let durable = self
-            .commit_terminal_state(state, run, published, RunStatus::Failed)
+            .commit_terminal_state(
+                state,
+                run,
+                published,
+                TerminalLogSummary {
+                    status: RunStatus::Failed,
+                    output_bytes: 0,
+                    error_code: "INFRASTRUCTURE_FAILURE".to_string(),
+                },
+            )
             .await?;
         tracing::info!(
             event_name = "run.finished",
@@ -342,13 +375,13 @@ impl RunCoordinator {
             agent_id = run.agent_id.as_str(),
             agent_version = run.agent_version.as_str(),
             attachment = run.attachment.as_str(),
-            status = durable.as_str(),
+            status = durable.status.as_str(),
             elapsed_ms = elapsed_ms(started),
-            output_bytes = 0_usize,
-            error_code = "INFRASTRUCTURE_FAILURE",
+            output_bytes = durable.output_bytes,
+            error_code = durable.error_code.as_str(),
             "run finished"
         );
-        Ok(durable)
+        Ok(durable.status)
     }
 
     async fn commit_terminal_state(
@@ -356,20 +389,36 @@ impl RunCoordinator {
         state: &RunState,
         run: &NewRun,
         published: Option<crate::events::protocol::RunEvent>,
-        expected: RunStatus,
-    ) -> Result<RunStatus, RunError> {
-        let durable_status = if published.is_some() {
-            expected
+        attempted: TerminalLogSummary,
+    ) -> Result<TerminalLogSummary, RunError> {
+        let durable = if published.is_some() {
+            attempted
         } else {
-            self.repository
+            let record = self
+                .repository
                 .get_run(&run.run_id)
                 .await
                 .map_err(history_error)?
-                .ok_or_else(|| RunError::new("RUN_NOT_FOUND", "run not found after terminal race"))?
-                .status
+                .ok_or_else(|| {
+                    RunError::new("RUN_NOT_FOUND", "run not found after terminal race")
+                })?;
+            terminal_log_summary_from_record(&record)
         };
-        state.try_terminal(durable_status).await?;
-        Ok(durable_status)
+        state.try_terminal(durable.status).await?;
+        Ok(durable)
+    }
+}
+
+fn terminal_log_summary_from_record(record: &RunRecord) -> TerminalLogSummary {
+    let output_bytes = if record.status == RunStatus::Completed {
+        record.output.as_ref().map_or(0, json_size_bytes)
+    } else {
+        0
+    };
+    TerminalLogSummary {
+        status: record.status,
+        output_bytes,
+        error_code: record.error_code.clone().unwrap_or_default(),
     }
 }
 

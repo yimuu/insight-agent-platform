@@ -1,8 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex as StdMutex,
     },
     time::Duration,
 };
@@ -36,6 +37,14 @@ use insight_agent_platform::{
 use jsonschema::JSONSchema;
 use serde_json::{json, Value};
 use tokio::sync::{Mutex, Notify, Semaphore};
+use tracing::{
+    field::{Field, Visit},
+    Event as TracingEvent, Level, Subscriber,
+};
+use tracing_subscriber::{
+    layer::{Context, SubscriberExt},
+    Layer, Registry,
+};
 
 const RUN_ID: &str = "run_coordinator";
 
@@ -196,8 +205,88 @@ impl NodeExecutor for SyntheticNode {
     }
 }
 
+#[derive(Debug, Clone)]
+struct RecordedEvent {
+    level: Level,
+    fields: BTreeMap<String, String>,
+}
+
+impl RecordedEvent {
+    fn field(&self, name: &str) -> Option<&str> {
+        self.fields.get(name).map(String::as_str)
+    }
+}
+
+#[derive(Clone)]
+struct RecordingLayer {
+    events: Arc<StdMutex<Vec<RecordedEvent>>>,
+}
+
+struct FieldRecorder<'a> {
+    fields: &'a mut BTreeMap<String, String>,
+}
+
+impl Visit for FieldRecorder<'_> {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        self.fields
+            .insert(field.name().to_string(), format!("{value:?}"));
+    }
+}
+
+impl<S> Layer<S> for RecordingLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &TracingEvent<'_>, _context: Context<'_, S>) {
+        let mut fields = BTreeMap::new();
+        event.record(&mut FieldRecorder {
+            fields: &mut fields,
+        });
+        self.events.lock().unwrap().push(RecordedEvent {
+            level: *event.metadata().level(),
+            fields,
+        });
+    }
+}
+
+fn recorded_info_logs(
+    events: &Arc<StdMutex<Vec<RecordedEvent>>>,
+    event_name: &str,
+) -> Vec<RecordedEvent> {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.level == Level::INFO)
+        .filter(|event| event.field("event_name") == Some(event_name))
+        .cloned()
+        .collect()
+}
+
 #[derive(Default)]
 struct MemoryRepository {
+    run: Mutex<Option<NewRun>>,
+    started_at: Mutex<Option<DateTime<Utc>>>,
     status: Mutex<Option<RunStatus>>,
     events: Mutex<Vec<RunEvent>>,
     outputs: Mutex<Vec<NodeOutputRecord>>,
@@ -206,11 +295,13 @@ struct MemoryRepository {
     fail_next_append: AtomicBool,
     fail_append_for: Mutex<Option<(String, String)>>,
     fail_output_for: Mutex<Option<String>>,
+    terminal_race: Mutex<Option<TerminalUpdate>>,
 }
 
 #[async_trait]
 impl RunRepository for MemoryRepository {
-    async fn create_run(&self, _run: NewRun) -> Result<(), HistoryError> {
+    async fn create_run(&self, run: NewRun) -> Result<(), HistoryError> {
+        *self.run.lock().await = Some(run);
         *self.status.lock().await = Some(RunStatus::Created);
         self.operations.lock().await.push("create".to_string());
         Ok(())
@@ -219,8 +310,9 @@ impl RunRepository for MemoryRepository {
     async fn mark_running(
         &self,
         _run_id: &str,
-        _started_at: DateTime<Utc>,
+        started_at: DateTime<Utc>,
     ) -> Result<(), HistoryError> {
+        *self.started_at.lock().await = Some(started_at);
         *self.status.lock().await = Some(RunStatus::Running);
         self.operations.lock().await.push("running".to_string());
         Ok(())
@@ -281,6 +373,30 @@ impl RunRepository for MemoryRepository {
         if status.is_some_and(RunStatus::is_terminal) {
             return Ok(false);
         }
+        if let Some(race_update) = self.terminal_race.lock().await.take() {
+            *status = Some(race_update.status);
+            self.terminal_updates.lock().await.push(race_update.clone());
+            self.operations.lock().await.push(format!(
+                "event:{}:-",
+                terminal_event_type(race_update.status).as_str()
+            ));
+            let mut terminal_event = event;
+            terminal_event.event_type = terminal_event_type(race_update.status);
+            terminal_event.code = race_update
+                .error_code
+                .clone()
+                .unwrap_or_else(|| "OK".to_string());
+            terminal_event.message = race_update
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "ok".to_string());
+            terminal_event.data = race_update.output.as_ref().map_or_else(
+                || json!({}),
+                |output| serde_json::to_value(output).unwrap_or_else(|_| json!({})),
+            );
+            self.events.lock().await.push(terminal_event);
+            return Ok(false);
+        }
         *status = Some(update.status);
         self.terminal_updates.lock().await.push(update);
         self.operations
@@ -307,7 +423,34 @@ impl RunRepository for MemoryRepository {
     }
 
     async fn get_run(&self, _run_id: &str) -> Result<Option<RunRecord>, HistoryError> {
-        Ok(None)
+        let Some(run) = self.run.lock().await.clone() else {
+            return Ok(None);
+        };
+        let Some(status) = *self.status.lock().await else {
+            return Ok(None);
+        };
+        let started_at = *self.started_at.lock().await;
+        let terminal = self.terminal_updates.lock().await.last().cloned();
+        let updated_at = terminal
+            .as_ref()
+            .map_or(run.created_at, |update| update.ended_at);
+        Ok(Some(RunRecord {
+            run_id: run.run_id,
+            request_id: run.request_id,
+            agent_id: run.agent_id,
+            agent_version: run.agent_version,
+            attachment: run.attachment,
+            status,
+            started_at,
+            ended_at: terminal.as_ref().map(|update| update.ended_at),
+            updated_at,
+            input_summary: run.input_summary,
+            output: terminal.as_ref().and_then(|update| update.output.clone()),
+            error_code: terminal
+                .as_ref()
+                .and_then(|update| update.error_code.clone()),
+            error_message: terminal.and_then(|update| update.error_message),
+        }))
     }
 
     async fn list_events_after(
@@ -329,6 +472,18 @@ impl RunRepository for MemoryRepository {
 
     async fn mark_incomplete_interrupted(&self, _at: DateTime<Utc>) -> Result<u64, HistoryError> {
         Ok(0)
+    }
+}
+
+fn terminal_event_type(status: RunStatus) -> RunEventType {
+    match status {
+        RunStatus::Completed => RunEventType::RunCompleted,
+        RunStatus::Failed => RunEventType::RunFailed,
+        RunStatus::Cancelled => RunEventType::RunCancelled,
+        RunStatus::Interrupted => RunEventType::RunInterrupted,
+        RunStatus::Created | RunStatus::Running => {
+            panic!("nonterminal status {status:?} cannot be represented as a terminal event")
+        }
     }
 }
 
@@ -953,6 +1108,61 @@ async fn journal_worker_failure_recovers_one_durable_failed_terminal() {
         (1..=events.len() as u64).collect::<Vec<_>>()
     );
     assert_eq!(repository.terminal_updates.lock().await.len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_finished_log_uses_durable_failed_terminal_when_completion_loses_race() {
+    let recorded = Arc::new(StdMutex::new(Vec::new()));
+    let subscriber = Registry::default().with(RecordingLayer {
+        events: Arc::clone(&recorded),
+    });
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+    let repository = Arc::new(MemoryRepository::default());
+    *repository.terminal_race.lock().await = Some(
+        TerminalUpdate::new(
+            RUN_ID,
+            RunStatus::Failed,
+            Utc::now(),
+            None,
+            Some("DURABLE_FAILURE".to_string()),
+            Some("durable failure won terminal race".to_string()),
+        )
+        .unwrap(),
+    );
+    let attempted_output = RunOutput {
+        content: Some("attempted success output".to_string()),
+        format: Some("text".to_string()),
+        data: json!({"ok": true}),
+    };
+    let coordinator = coordinator(
+        agent(
+            vec![node(
+                "result",
+                None,
+                Duration::from_secs(1),
+                Behavior::Complete(attempted_output),
+            )],
+            "result",
+        ),
+        Arc::clone(&repository),
+        true,
+    );
+    let (_, stop) = stop_pair();
+
+    assert_eq!(
+        coordinator
+            .execute(new_run(), json!({}), stop)
+            .await
+            .unwrap(),
+        RunStatus::Failed
+    );
+
+    let finished = recorded_info_logs(&recorded, "run.finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0].field("status"), Some("failed"));
+    assert_eq!(finished[0].field("output_bytes"), Some("0"));
+    assert_eq!(finished[0].field("error_code"), Some("DURABLE_FAILURE"));
 }
 
 #[tokio::test]

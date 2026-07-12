@@ -257,6 +257,24 @@ nodes:
     );
     write_agent(
         root.path(),
+        "action_success",
+        r#"entry: call
+nodes:
+  call:
+    type: core.action
+    next: result
+    config:
+      action: observability.action
+      input: {secret: "{{ input.secret }}"}
+  result:
+    type: core.output
+    config:
+      data:
+        action_ok: "{{ nodes.call.output.ok }}"
+"#,
+    );
+    write_agent(
+        root.path(),
         "failure",
         r#"entry: call
 nodes:
@@ -509,6 +527,47 @@ async fn run_and_node_info_logs_are_body_free_for_action_failure() {
 }
 
 #[tokio::test]
+async fn action_success_logs_node_bytes_without_action_bodies() {
+    let _guard = reset_logs().await;
+    let fixture = fixture(&["action_success"]).await;
+    let created = fixture
+        .service
+        .create_detached(
+            "action_success",
+            json!({"secret": INPUT_SECRET}),
+            RequestMetadata::default(),
+        )
+        .await
+        .unwrap();
+    wait_for_status(&fixture.service, &created.run_id, RunStatus::Completed).await;
+
+    let node_completed = info_logs("node.completed");
+    let action_log = node_completed
+        .iter()
+        .find(|event| event.field("node_id") == Some("call"))
+        .expect("action node should emit node.completed");
+    assert_eq!(action_log.field("kind"), Some("core.action"));
+    assert_eq!(
+        action_log
+            .field("output_bytes")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap(),
+        serde_json::to_vec(&json!({"secret": OUTPUT_SECRET, "ok": true}))
+            .unwrap()
+            .len()
+    );
+    assert_logs_exclude(&[
+        INPUT_SECRET,
+        OUTPUT_SECRET,
+        CHAT_PROMPT_SECRET,
+        CHAT_RESPONSE_SECRET,
+        IMAGE_SECRET,
+        USAGE_SECRET,
+    ]);
+}
+
+#[tokio::test]
 async fn parallel_nodes_emit_once_and_run_finish_is_once() {
     let _guard = reset_logs().await;
     let fixture = fixture(&["parallel"]).await;
@@ -639,6 +698,13 @@ async fn openai_provider_logs_response_metadata_without_body_or_key() {
         .await
         .unwrap();
     while stream.next().await.transpose().unwrap().is_some() {}
+
+    let requests = info_logs("openai.request");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].field("model"), Some("obs-provider"));
+    assert_eq!(requests[0].field("messages_count"), Some("1"));
+    assert_eq!(requests[0].field("image_parts_count"), Some("0"));
+    assert_eq!(requests[0].field("parameters_keys_count"), Some("0"));
 
     let responses = info_logs("openai.response");
     assert_eq!(responses.len(), 1);
