@@ -110,9 +110,9 @@ fn parse_formal_duration(value: &str) -> Result<Duration, String> {
 
 fn format_formal_duration(duration: Duration) -> String {
     let millis = duration.as_millis();
-    if millis % 60_000 == 0 {
+    if millis.is_multiple_of(60_000) {
         format!("{}m", millis / 60_000)
-    } else if millis % 1_000 == 0 {
+    } else if millis.is_multiple_of(1_000) {
         format!("{}s", millis / 1_000)
     } else {
         format!("{millis}ms")

@@ -132,6 +132,9 @@ impl OpenAiChatModel {
         )
     }
 
+    // Intentional: mirrors `new_with_limits` and adds an explicit transport policy
+    // so plaintext HTTP opt-in remains visible at the call site.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_limits_and_transport_policy(
         api_key: Option<String>,
         base_url: String,
