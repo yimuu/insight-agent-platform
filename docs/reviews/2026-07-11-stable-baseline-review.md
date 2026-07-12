@@ -1,5 +1,8 @@
 # Stable Baseline Review
 
+> Current remediation status: see `docs/reviews/2026-07-12-remediation-status.md`.
+> This document remains a dated audit snapshot and should not be read as the current open-work list.
+
 ## Audited baseline
 
 - Product baseline: `af414de7f43bc4c5ce580ed77db17053faab7a9f` (`main@af414de`).
