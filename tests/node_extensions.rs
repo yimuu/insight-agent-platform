@@ -470,6 +470,12 @@ fn compile_extension_agent(yaml: &str) -> Arc<CompiledAgent> {
     Arc::new(extension_compiler().compile_dir(&root).unwrap())
 }
 
+fn assert_extension_compile_error(yaml: &str, code: &'static str) {
+    let (_temp, root) = write_agent(yaml);
+    let error = extension_compiler().compile_dir(&root).unwrap_err();
+    assert_eq!(error.code(), code, "unexpected error: {error}");
+}
+
 fn extension_success_yaml() -> &'static str {
     r#"
 version: 1
@@ -668,4 +674,80 @@ async fn custom_node_body_mismatch_terminalizes_as_node_failure() {
         .await
         .into_iter()
         .all(|output| output.node_id != "constant"));
+}
+
+#[test]
+fn custom_node_required_next_is_enforced_by_agent_compiler() {
+    assert_extension_compile_error(
+        r#"
+version: 1
+id: extension_agent
+name: Extension Agent
+input:
+  schema: {type: object}
+entry: constant
+nodes:
+  constant:
+    type: test.constant
+    config:
+      value: 42
+  result:
+    type: core.output
+    config:
+      data: {ok: true}
+"#,
+        "NODE_NEXT_REQUIRED",
+    );
+}
+
+#[test]
+fn custom_node_references_use_shared_graph_validation() {
+    assert_extension_compile_error(
+        r#"
+version: 1
+id: extension_agent
+name: Extension Agent
+input:
+  schema: {type: object}
+entry: constant
+nodes:
+  constant:
+    type: test.constant
+    next: result
+    config:
+      value: 42
+      references: [result]
+  result:
+    type: core.output
+    config:
+      data: {ok: true}
+"#,
+        "INVALID_NODE_REFERENCE",
+    );
+}
+
+#[test]
+fn custom_node_content_emit_requires_envelope_support() {
+    assert_extension_compile_error(
+        r#"
+version: 1
+id: extension_agent
+name: Extension Agent
+input:
+  schema: {type: object}
+entry: constant
+nodes:
+  constant:
+    type: test.constant
+    emit: content
+    next: result
+    config:
+      value: 42
+  result:
+    type: core.output
+    config:
+      data: {ok: true}
+"#,
+        "NODE_EMIT_UNSUPPORTED",
+    );
 }
