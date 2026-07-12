@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, collections::VecDeque, fmt, time::Duration};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    fmt,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -8,7 +12,11 @@ use reqwest::{redirect::Policy, Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::{dsl::CompileError, runtime::RunError};
+use crate::{
+    dsl::CompileError,
+    observability::{elapsed_ms, json_size_bytes},
+    runtime::RunError,
+};
 
 use super::models::{
     model_response_too_large, ChatChunk, ChatMessage, ChatModel, ChatRequest, ChatStream,
@@ -193,6 +201,7 @@ impl ChatModel for OpenAiChatModel {
                 "model parameters must be an object",
             )
         })?;
+        let parameters_keys_count = parameters.len();
         let messages_count = request.messages.len();
         let image_parts_count = request
             .messages
@@ -200,9 +209,11 @@ impl ChatModel for OpenAiChatModel {
             .map(|message| message.image_urls().len())
             .sum::<usize>();
         tracing::info!(
-            model = self.model,
+            event_name = "openai.request",
+            model = self.model.as_str(),
             messages_count,
             image_parts_count,
+            parameters_keys_count,
             "sending OpenAI-compatible chat request"
         );
         let body = OpenAiRequest {
@@ -246,10 +257,14 @@ impl ChatModel for OpenAiChatModel {
                 pending: VecDeque::new(),
                 upstream_bytes: 0,
                 limits: self.limits,
+                model: self.model.clone(),
+                started: Instant::now(),
+                chunks_count: 0,
+                usage_bytes: 0,
             },
             |mut state| async move {
                 loop {
-                    if let Some(chunk) = state.pending.pop_front() {
+                    if let Some(chunk) = state.pop_pending_chunk() {
                         return Ok(Some((chunk, state)));
                     }
                     match state.bytes.next().await {
@@ -273,10 +288,18 @@ impl ChatModel for OpenAiChatModel {
                         }
                         None => {
                             state.pending.extend(state.decoder.finish()?);
-                            if let Some(chunk) = state.pending.pop_front() {
-                                return Ok(Some((chunk, state)));
+                            if state.pending.is_empty() {
+                                tracing::info!(
+                                    event_name = "openai.response",
+                                    model = state.model.as_str(),
+                                    upstream_bytes = state.upstream_bytes,
+                                    chunks_count = state.chunks_count,
+                                    usage_bytes = state.usage_bytes,
+                                    elapsed_ms = elapsed_ms(state.started),
+                                    "OpenAI-compatible chat response metadata"
+                                );
+                                return Ok(None);
                             }
-                            return Ok(None);
                         }
                     }
                 }
@@ -301,6 +324,21 @@ struct StreamState {
     pending: VecDeque<ChatChunk>,
     upstream_bytes: usize,
     limits: OpenAiChatLimits,
+    model: String,
+    started: Instant,
+    chunks_count: usize,
+    usage_bytes: usize,
+}
+
+impl StreamState {
+    fn pop_pending_chunk(&mut self) -> Option<ChatChunk> {
+        let chunk = self.pending.pop_front()?;
+        self.chunks_count += 1;
+        self.usage_bytes = self
+            .usage_bytes
+            .saturating_add(chunk.usage.as_ref().map_or(0, json_size_bytes));
+        Some(chunk)
+    }
 }
 
 struct SseDecoder {

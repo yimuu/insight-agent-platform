@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::stream;
+use futures::{stream, StreamExt};
 use insight_agent_platform::{
     dsl::compiler::{AgentCompiler, CompileLimits},
     events::hub::{EventHub, EventHubConfig},
@@ -580,6 +580,90 @@ async fn chat_info_logs_counts_and_sizes_without_bodies() {
         CHAT_PROMPT_SECRET,
         CHAT_RESPONSE_SECRET,
         IMAGE_SECRET,
+        USAGE_SECRET,
+    ]);
+}
+
+async fn openai_model_with_response(
+    response_body: String,
+) -> insight_agent_platform::resources::openai_chat::OpenAiChatModel {
+    use insight_agent_platform::resources::openai_chat::OpenAiChatModel;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0_u8; 2048];
+        let _ = socket.read(&mut buffer).await.unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    OpenAiChatModel::new(
+        Some("provider-secret-key".to_string()),
+        format!("http://{address}/v1"),
+        "obs-provider".to_string(),
+        BTreeSet::new(),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn openai_provider_logs_response_metadata_without_body_or_key() {
+    let _guard = reset_logs().await;
+    let response_body = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{CHAT_RESPONSE_SECRET}\"}},\"finish_reason\":null}}]}}\n\n\
+         data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"detail\":\"{USAGE_SECRET}\"}}}}\n\n"
+    );
+    let model = openai_model_with_response(response_body.clone()).await;
+    let mut stream = model
+        .stream_chat(ChatRequest {
+            messages: vec![
+                insight_agent_platform::resources::models::ChatMessage::from_text(
+                    insight_agent_platform::resources::models::ChatRole::User,
+                    CHAT_PROMPT_SECRET,
+                ),
+            ],
+            parameters: json!({}),
+        })
+        .await
+        .unwrap();
+    while stream.next().await.transpose().unwrap().is_some() {}
+
+    let responses = info_logs("openai.response");
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0].field("model"), Some("obs-provider"));
+    assert_eq!(
+        responses[0]
+            .field("upstream_bytes")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap(),
+        response_body.len()
+    );
+    assert_eq!(responses[0].field("chunks_count"), Some("2"));
+    assert!(
+        responses[0]
+            .field("usage_bytes")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            > 0
+    );
+    assert_logs_exclude(&[
+        "provider-secret-key",
+        CHAT_PROMPT_SECRET,
+        CHAT_RESPONSE_SECRET,
         USAGE_SECRET,
     ]);
 }
