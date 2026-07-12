@@ -56,6 +56,12 @@ struct ConstantBody {
 #[derive(Debug, Clone, Copy)]
 struct ConstantNode;
 
+#[derive(Debug)]
+struct WrongBodyConfig;
+
+#[derive(Debug, Clone, Copy)]
+struct WrongBodyExecutor;
+
 impl NodeType for ConstantNode {
     fn kind(&self) -> &'static str {
         "test.constant"
@@ -97,6 +103,40 @@ impl NodeExecutor for ConstantNode {
         let config = node.body::<ConstantBody>()?;
         Ok(NodeOutcome {
             output: json!({"value": config.value.clone()}),
+            transition: NodeTransition::Next,
+        })
+    }
+}
+
+impl NodeType for WrongBodyExecutor {
+    fn kind(&self) -> &'static str {
+        "test.constant"
+    }
+
+    fn compile(
+        &self,
+        _node_id: &str,
+        _config: Value,
+        _context: &mut CompileContext<'_>,
+    ) -> Result<NodeCompilation, CompileError> {
+        Err(CompileError::new(
+            "TEST_ONLY",
+            "wrong-body executor is runtime-only",
+        ))
+    }
+}
+
+#[async_trait]
+impl NodeExecutor for WrongBodyExecutor {
+    async fn execute(
+        &self,
+        node: &CompiledNode,
+        _context: &RunContext,
+        _control: &ExecutionControl,
+    ) -> Result<NodeOutcome, RunError> {
+        let _wrong = node.body::<WrongBodyConfig>()?;
+        Ok(NodeOutcome {
+            output: json!({}),
             transition: NodeTransition::Next,
         })
     }
@@ -430,9 +470,46 @@ fn compile_extension_agent(yaml: &str) -> Arc<CompiledAgent> {
     Arc::new(extension_compiler().compile_dir(&root).unwrap())
 }
 
+fn extension_success_yaml() -> &'static str {
+    r#"
+version: 1
+id: extension_agent
+name: Extension Agent
+input:
+  schema:
+    type: object
+entry: constant
+nodes:
+  constant:
+    type: test.constant
+    next: result
+    config:
+      value: 42
+  result:
+    type: core.output
+    config:
+      content:
+        template: "value={{ nodes.constant.output.value }}"
+      format: text
+      data:
+        value: "{{ nodes.constant.output.value }}"
+"#
+}
+
 fn default_extension_executors() -> NodeExecutorRegistry {
     let (_, mut executors) = default_node_registries().unwrap();
     executors.register(ConstantNode).unwrap();
+    executors
+}
+
+fn executors_without_constant() -> NodeExecutorRegistry {
+    let (_, executors) = default_node_registries().unwrap();
+    executors
+}
+
+fn executors_with_wrong_body() -> NodeExecutorRegistry {
+    let (_, mut executors) = default_node_registries().unwrap();
+    executors.register(WrongBodyExecutor).unwrap();
     executors
 }
 
@@ -494,31 +571,7 @@ async fn event_types(repository: &ExtensionRepository, run_id: &str) -> Vec<RunE
 
 #[tokio::test]
 async fn custom_node_runs_through_compiler_service_events_repository_and_terminal() {
-    let agent = compile_extension_agent(
-        r#"
-version: 1
-id: extension_agent
-name: Extension Agent
-input:
-  schema:
-    type: object
-entry: constant
-nodes:
-  constant:
-    type: test.constant
-    next: result
-    config:
-      value: 42
-  result:
-    type: core.output
-    config:
-      content:
-        template: "value={{ nodes.constant.output.value }}"
-      format: text
-      data:
-        value: "{{ nodes.constant.output.value }}"
-"#,
-    );
+    let agent = compile_extension_agent(extension_success_yaml());
     let (service, repository) = service_for(agent, default_extension_executors());
 
     let created = service
@@ -563,4 +616,56 @@ nodes:
             && event.node_id.as_deref() == Some("constant")
             && event.data == json!({"type":"test.constant"})
     }));
+}
+
+#[tokio::test]
+async fn custom_node_missing_executor_terminalizes_as_infrastructure_failure() {
+    let agent = compile_extension_agent(extension_success_yaml());
+    let (service, repository) = service_for(agent, executors_without_constant());
+
+    let created = service
+        .create_detached("extension_agent", json!({}), RequestMetadata::default())
+        .await
+        .unwrap();
+
+    let failed = wait_for_status(&service, &created.run_id, RunStatus::Failed).await;
+    assert_eq!(failed.error_code.as_deref(), Some("INFRASTRUCTURE_FAILURE"));
+    assert_eq!(
+        event_types(&repository, &created.run_id).await,
+        vec![
+            RunEventType::RunCreated,
+            RunEventType::RunStarted,
+            RunEventType::NodeStarted,
+            RunEventType::RunFailed,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn custom_node_body_mismatch_terminalizes_as_node_failure() {
+    let agent = compile_extension_agent(extension_success_yaml());
+    let (service, repository) = service_for(agent, executors_with_wrong_body());
+
+    let created = service
+        .create_detached("extension_agent", json!({}), RequestMetadata::default())
+        .await
+        .unwrap();
+
+    let failed = wait_for_status(&service, &created.run_id, RunStatus::Failed).await;
+    assert_eq!(failed.error_code.as_deref(), Some("NODE_BODY_TYPE_MISMATCH"));
+    assert_eq!(
+        event_types(&repository, &created.run_id).await,
+        vec![
+            RunEventType::RunCreated,
+            RunEventType::RunStarted,
+            RunEventType::NodeStarted,
+            RunEventType::NodeFailed,
+            RunEventType::RunFailed,
+        ]
+    );
+    assert!(repository
+        .outputs_for(&created.run_id)
+        .await
+        .into_iter()
+        .all(|output| output.node_id != "constant"));
 }
