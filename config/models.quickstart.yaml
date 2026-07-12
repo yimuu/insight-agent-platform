@@ -1,0 +1,10 @@
+version: 1
+
+models:
+  unused_quickstart_model:
+    type: open_ai_chat
+    base_url: https://models.example.invalid/v1
+    model: unused-quickstart-model
+    capabilities: []
+    connect_timeout: 1s
+    request_timeout: 5s

@@ -1,0 +1,34 @@
+version: 1
+bind_addr: 127.0.0.1:3000
+
+auth:
+  mode: disabled
+
+agents:
+  directory: ../agents
+  enabled:
+    - code_node_demo
+
+models:
+  config: models.quickstart.yaml
+
+actions:
+  enabled:
+    - example.text_metrics
+
+history:
+  provider: sqlite
+  path: ../data/quickstart.sqlite3
+
+runtime:
+  max_concurrent_runs: 4
+  max_fork_branches: 4
+  max_parallel_node_executions: 4
+  max_parallel_branches_per_run: 2
+  default_node_timeout: 30s
+  run_timeout: 1m
+  sse_keep_alive_interval: 5s
+  subscriber_capacity: 32
+  journal_capacity: 128
+  journal_batch_size: 16
+  journal_operation_timeout: 5s

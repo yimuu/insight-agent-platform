@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 
-use insight_agent_platform::config::{
-    AuthConfig, HistoryConfig, PlatformConfig, PlatformConfigError,
+use insight_agent_platform::{
+    config::{AuthConfig, HistoryConfig, PlatformConfig, PlatformConfigError},
+    resources::config::load_model_registry_with_env,
 };
 use tempfile::tempdir;
 
@@ -118,6 +119,31 @@ fn disabled_auth_is_explicit_and_agent_enablement_defaults_to_none() {
     assert_eq!(config.auth, AuthConfig::Disabled);
     assert!(config.agents.enabled.is_empty());
     assert!(config.actions.enabled.is_empty());
+}
+
+#[test]
+fn quickstart_configs_load_without_secrets() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config = PlatformConfig::load(&root.join("config/platform.quickstart.yaml")).unwrap();
+
+    assert_eq!(config.bind_addr.to_string(), "127.0.0.1:3000");
+    assert_eq!(config.auth, AuthConfig::Disabled);
+    assert_eq!(config.agents.directory, root.join("agents"));
+    assert_eq!(
+        config.agents.enabled.iter().cloned().collect::<Vec<_>>(),
+        vec!["code_node_demo".to_string()]
+    );
+    assert_eq!(
+        config.models.config,
+        root.join("config/models.quickstart.yaml")
+    );
+    assert_eq!(
+        config.actions.enabled.iter().cloned().collect::<Vec<_>>(),
+        vec!["example.text_metrics".to_string()]
+    );
+
+    let registry = load_model_registry_with_env(&config.models.config, |_| None).unwrap();
+    registry.resolve("unused_quickstart_model").unwrap();
 }
 
 #[test]
