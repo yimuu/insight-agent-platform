@@ -532,3 +532,54 @@ async fn parallel_nodes_emit_once_and_run_finish_is_once() {
     }
     assert_eq!(info_logs("run.finished").len(), 1);
 }
+
+#[tokio::test]
+async fn chat_info_logs_counts_and_sizes_without_bodies() {
+    let _guard = reset_logs().await;
+    let fixture = fixture(&["chat"]).await;
+    let created = fixture
+        .service
+        .create_detached(
+            "chat",
+            json!({"secret": CHAT_PROMPT_SECRET}),
+            RequestMetadata::default(),
+        )
+        .await
+        .unwrap();
+    wait_for_status(&fixture.service, &created.run_id, RunStatus::Completed).await;
+
+    let requests = info_logs("chat.request");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].field("node_id"), Some("answer"));
+    assert_eq!(requests[0].field("messages_count"), Some("1"));
+    assert_eq!(requests[0].field("image_parts_count"), Some("1"));
+    assert_eq!(requests[0].field("parameters_keys_count"), Some("1"));
+
+    let responses = info_logs("chat.response");
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0].field("node_id"), Some("answer"));
+    assert_eq!(responses[0].field("chunks_count"), Some("2"));
+    assert_eq!(responses[0].field("finish_reason_present"), Some("true"));
+    assert!(
+        responses[0]
+            .field("text_bytes")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            >= CHAT_RESPONSE_SECRET.len()
+    );
+    assert!(
+        responses[0]
+            .field("usage_bytes")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            > 0
+    );
+    assert_logs_exclude(&[
+        CHAT_PROMPT_SECRET,
+        CHAT_RESPONSE_SECRET,
+        IMAGE_SECRET,
+        USAGE_SECRET,
+    ]);
+}

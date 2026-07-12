@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -16,6 +16,7 @@ use crate::{
         CompileError, EmitPolicy,
     },
     nodes::registry::{NodeExecutor, NodeType},
+    observability::{elapsed_ms, json_size_bytes},
     resources::models::{
         model_response_too_large, ChatContent, ChatContentPart, ChatMessage, ChatModel,
         ChatRequest, ChatRole, ImageUrl, ModelCapability,
@@ -266,6 +267,30 @@ impl NodeExecutor for ChatNode {
             parameters: body.parameters.clone(),
         };
 
+        let messages_count = request.messages.len();
+        let image_parts_count = request
+            .messages
+            .iter()
+            .map(|message| message.image_urls().len())
+            .sum::<usize>();
+        let parameters_keys_count = request
+            .parameters
+            .as_object()
+            .map_or(0, |parameters| parameters.len());
+        tracing::info!(
+            event_name = "chat.request",
+            run_id = context.metadata().run_id.as_str(),
+            request_id = context.metadata().request_id.as_str(),
+            agent_id = context.metadata().agent_id.as_str(),
+            agent_version = context.metadata().agent_version.as_str(),
+            node_id = node.id.as_str(),
+            messages_count,
+            image_parts_count,
+            parameters_keys_count,
+            "chat request metadata"
+        );
+        let chat_started = Instant::now();
+
         let stream_future = body.model.stream_chat(request);
         tokio::pin!(stream_future);
         let mut stream = tokio::select! {
@@ -277,6 +302,8 @@ impl NodeExecutor for ChatNode {
         let mut text = String::new();
         let mut finish_reason = None;
         let mut usage = None;
+        let mut chunks_count = 0_usize;
+        let mut text_bytes = 0_usize;
         let max_accumulated_text_bytes = body.model.max_accumulated_text_bytes();
         loop {
             let chunk = tokio::select! {
@@ -288,6 +315,8 @@ impl NodeExecutor for ChatNode {
                 break;
             };
             let chunk = chunk?;
+            chunks_count += 1;
+            text_bytes = text_bytes.saturating_add(chunk.text.len());
             if !chunk.text.is_empty() {
                 if text.len().saturating_add(chunk.text.len()) > max_accumulated_text_bytes {
                     return Err(model_response_too_large());
@@ -304,6 +333,22 @@ impl NodeExecutor for ChatNode {
                 usage = chunk.usage;
             }
         }
+
+        let usage_bytes = usage.as_ref().map_or(0, json_size_bytes);
+        tracing::info!(
+            event_name = "chat.response",
+            run_id = context.metadata().run_id.as_str(),
+            request_id = context.metadata().request_id.as_str(),
+            agent_id = context.metadata().agent_id.as_str(),
+            agent_version = context.metadata().agent_version.as_str(),
+            node_id = node.id.as_str(),
+            chunks_count,
+            text_bytes,
+            usage_bytes,
+            finish_reason_present = finish_reason.is_some(),
+            elapsed_ms = elapsed_ms(chat_started),
+            "chat response metadata"
+        );
 
         Ok(NodeOutcome {
             output: json!({
