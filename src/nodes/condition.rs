@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
-use cel_interpreter::{Context as CelContext, Program as CelProgram, Value as CelValue};
+use cel::{Context as CelContext, Program as CelProgram, Value as CelValue};
 use cel_parser::Parser;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -157,12 +157,13 @@ impl NodeExecutor for ConditionNode {
         };
         let mut cel_context = CelContext::default();
         for (name, value) in variables {
-            cel_context.add_variable(&name, value).map_err(|error| {
+            let cel_value = cel::to_value(value.clone()).map_err(|error| {
                 RunError::new(
                     "CONDITION_CONTEXT_INVALID",
                     format!("failed to prepare condition variable '{name}': {error}"),
                 )
             })?;
+            cel_context.add_variable_from_value(name, cel_value);
         }
 
         for (index, case) in body.cases.iter().enumerate() {

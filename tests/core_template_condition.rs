@@ -288,6 +288,75 @@ async fn condition_uses_default_when_no_case_matches() {
     );
 }
 
+#[tokio::test]
+async fn condition_preserves_json_value_corpus() {
+    let models = ModelRegistry::default();
+    let actions = ActionRegistry::default();
+    let mut compile_context = CompileContext::new(&models, &actions);
+    let compilation = ConditionNode
+        .compile(
+            "route",
+            json!({
+                "cases": [{
+                    "when": "input.enabled && input.name == \"alpha\" && input.count == 3 && input.score > 1.5 && input.tags[1] == \"two\" && input.meta.region == \"apac\" && input.nullable == null",
+                    "next": "done"
+                }],
+                "default": "fallback"
+            }),
+            &mut compile_context,
+        )
+        .unwrap();
+    let node = compiled_node("route", "core.condition", EmitPolicy::None, compilation);
+    let (_, signal) = stop_pair();
+    let control = ExecutionControl::new(signal, Duration::from_secs(1), |_| async { Ok(()) });
+
+    let outcome = ConditionNode
+        .execute(
+            &node,
+            &run_context(json!({
+                "enabled": true,
+                "name": "alpha",
+                "count": 3,
+                "score": 2.25,
+                "tags": ["one", "two"],
+                "meta": {"region": "apac"},
+                "nullable": null
+            })),
+            &control,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.transition, NodeTransition::Goto("done".to_string()));
+}
+
+#[tokio::test]
+async fn condition_rejects_non_bool_results_at_runtime() {
+    let models = ModelRegistry::default();
+    let actions = ActionRegistry::default();
+    let mut compile_context = CompileContext::new(&models, &actions);
+    let compilation = ConditionNode
+        .compile(
+            "route",
+            json!({
+                "cases": [{"when": "input.kind", "next": "done"}],
+                "default": "fallback"
+            }),
+            &mut compile_context,
+        )
+        .unwrap();
+    let node = compiled_node("route", "core.condition", EmitPolicy::None, compilation);
+    let (_, signal) = stop_pair();
+    let control = ExecutionControl::new(signal, Duration::from_secs(1), |_| async { Ok(()) });
+
+    let error = ConditionNode
+        .execute(&node, &run_context(json!({"kind": "alpha"})), &control)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "CONDITION_RESULT_NOT_BOOL");
+}
+
 #[test]
 fn condition_rejects_invalid_or_incomplete_configuration_at_compile_time() {
     let models = ModelRegistry::default();
