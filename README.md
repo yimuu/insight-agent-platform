@@ -1,6 +1,6 @@
 # Insight Agent Platform
 
-一个面向平台自有 Agent 的通用 Rust 运行时基线。它把严格 DSL 编译为不可变执行图，通过可扩展的节点、模型和 Action 注册表运行，并提供实时 SSE、显式取消以及 SQLite/PostgreSQL 事件历史。
+一个面向平台自有 Agent 的通用 Rust 运行时基线。它把严格 DSL 编译为不可变执行图，通过可扩展的节点、模型和 Action 注册表运行，并提供 live-only Attached SSE、Detached 轮询、显式取消以及 SQLite/PostgreSQL 事件历史。
 
 医学报告单解读只是仓库中的一个多模态示例，不是平台的领域边界。
 
@@ -128,6 +128,22 @@ models:
       max_accumulated_text_bytes: 1048576
 ```
 
+`open_ai_chat.base_url` 默认必须使用 HTTPS。明文 HTTP 只能显式声明：
+
+```yaml
+transport:
+  plaintext_http: loopback        # 仅 127.0.0.1 / localhost / [::1]
+```
+
+或：
+
+```yaml
+transport:
+  plaintext_http: trusted_private # 部署方明确接受的私有网络模型服务链路
+```
+
+`trusted_private` 不会自动证明目标地址在内网，也不会做 DNS/IP 私网判定；它表示部署方确认该 HTTP 链路处于可信私有边界内。公网或其他不可信模型服务必须使用 HTTPS。模型 URL 不允许携带 username/password；密钥只通过 `api_key_env` 指向的环境变量注入。
+
 `limits` 可省略；省略时使用上述默认字节上限。零值非法，会以 `MODEL_CONFIG_INVALID` 阻止启动。上游响应体、SSE 行、单个 `data:` payload、单个文本 delta、usage JSON 和最终累计文本都会在写入或继续累计前检查。超限 Run 使用稳定错误 `MODEL_RESPONSE_TOO_LARGE`，错误消息为 `chat provider response exceeded the configured size limit`，不会包含 provider body、prompt、API key、URL query、响应头、usage、响应片段或配置的具体限制值。
 
 ## Agent DSL 示例
@@ -166,6 +182,8 @@ nodes:
 ```
 
 `emit: none` 保持节点增量私有，`emit: content` 才发布 `content.delta`。模板上下文只暴露 `input`、`run` 和已完成的 `nodes.<node_id>.output`。节点 ID 和 fork branch ID 必须匹配 `[A-Za-z_][A-Za-z0-9_]*`；跨节点引用只能使用 `nodes.<node_id>.output`，不能使用 `nodes["id"]`、computed access 或直接访问 `nodes` map。
+
+节点 `timeout` 使用正式 V1 窄语法：正整数紧跟 `ms`、`s` 或 `m`，例如 `250ms`、`5s`、`2m`。不接受空格、复合值、别名、分数、`h/d` 等更大单位或前导零。
 
 ## HTTP 与 Run 生命周期
 
