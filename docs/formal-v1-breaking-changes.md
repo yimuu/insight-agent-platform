@@ -192,3 +192,11 @@ route:
 ```
 
 如果旧 Agent 使用 `some-node` 这类 ID，需要改为 `some_node` 并同步更新所有 `next`、fork branch、join output 和模板/CEL 引用。A5 不需要数据库 migration，也不需要重置 Run 历史；它只影响 Agent 启动编译。
+
+## JSON Schema validator boundary
+
+`CompiledAgent.input_schema` and resource internals now use the project-owned `JsonSchemaValidator` adapter instead of exposing the upstream `jsonschema::JSONSchema` type.
+
+Reason: the platform needs a stable validation contract while upgrading `jsonschema` from 0.18 to 0.47. The adapter fixes the platform default at Draft 7, disables upstream HTTP/file/CLI default features, rejects non-Draft-7 `$schema` values, rejects external `$ref`, and keeps runtime validation errors redacted.
+
+Runtime API behavior is unchanged: invalid run input, Action input/output, and OpenAI model parameters keep the existing public error codes and fixed messages.
