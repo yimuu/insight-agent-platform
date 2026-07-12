@@ -73,6 +73,13 @@ impl OpenAiChatLimits {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiTransportPolicy {
+    HttpsOnly,
+    AllowLoopbackHttp,
+    AllowTrustedPrivateHttp,
+}
+
 #[derive(Clone)]
 pub struct OpenAiChatModel {
     client: Client,
@@ -113,6 +120,28 @@ impl OpenAiChatModel {
         request_timeout: Duration,
         limits: OpenAiChatLimits,
     ) -> Result<Self, CompileError> {
+        Self::new_with_limits_and_transport_policy(
+            api_key,
+            base_url,
+            model,
+            capabilities,
+            connect_timeout,
+            request_timeout,
+            limits,
+            OpenAiTransportPolicy::HttpsOnly,
+        )
+    }
+
+    pub fn new_with_limits_and_transport_policy(
+        api_key: Option<String>,
+        base_url: String,
+        model: String,
+        capabilities: BTreeSet<ModelCapability>,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+        limits: OpenAiChatLimits,
+        transport_policy: OpenAiTransportPolicy,
+    ) -> Result<Self, CompileError> {
         if model.trim().is_empty() || connect_timeout.is_zero() || request_timeout.is_zero() {
             return Err(CompileError::new(
                 "MODEL_CONFIG_INVALID",
@@ -122,12 +151,7 @@ impl OpenAiChatModel {
         let limits = limits.validate()?;
         let mut endpoint = Url::parse(&base_url)
             .map_err(|_| CompileError::new("MODEL_CONFIG_INVALID", "OpenAI base URL is invalid"))?;
-        if !matches!(endpoint.scheme(), "http" | "https") || endpoint.host_str().is_none() {
-            return Err(CompileError::new(
-                "MODEL_CONFIG_INVALID",
-                "OpenAI base URL must use HTTP or HTTPS and include a host",
-            ));
-        }
+        validate_endpoint_transport(&endpoint, transport_policy)?;
         endpoint.set_query(None);
         endpoint.set_fragment(None);
         let path = format!("{}/chat/completions", endpoint.path().trim_end_matches('/'));
@@ -526,6 +550,57 @@ fn endpoint_origin(endpoint: &Url) -> String {
         (Some(host), None) => format!("{}://{host}", endpoint.scheme()),
         (None, _) => "REDACTED".to_string(),
     }
+}
+
+fn validate_endpoint_transport(
+    endpoint: &Url,
+    policy: OpenAiTransportPolicy,
+) -> Result<(), CompileError> {
+    if endpoint.host_str().is_none() {
+        return Err(CompileError::new(
+            "MODEL_CONFIG_INVALID",
+            "OpenAI base URL must include a host",
+        ));
+    }
+    if !endpoint.username().is_empty() || endpoint.password().is_some() {
+        return Err(CompileError::new(
+            "MODEL_CONFIG_INVALID",
+            "OpenAI base URL must not include username or password",
+        ));
+    }
+    match endpoint.scheme() {
+        "https" => Ok(()),
+        "http" => validate_plaintext_http(endpoint, policy),
+        _ => Err(CompileError::new(
+            "MODEL_CONFIG_INVALID",
+            "OpenAI base URL must use HTTP or HTTPS and include a host",
+        )),
+    }
+}
+
+fn validate_plaintext_http(
+    endpoint: &Url,
+    policy: OpenAiTransportPolicy,
+) -> Result<(), CompileError> {
+    match policy {
+        OpenAiTransportPolicy::HttpsOnly => Err(CompileError::new(
+            "MODEL_CONFIG_INVALID",
+            "OpenAI base URL must use HTTPS unless plaintext HTTP is explicitly allowed",
+        )),
+        OpenAiTransportPolicy::AllowLoopbackHttp if is_exact_loopback_host(endpoint) => Ok(()),
+        OpenAiTransportPolicy::AllowLoopbackHttp => Err(CompileError::new(
+            "MODEL_CONFIG_INVALID",
+            "OpenAI loopback HTTP is restricted to localhost, 127.0.0.1, or ::1",
+        )),
+        OpenAiTransportPolicy::AllowTrustedPrivateHttp => Ok(()),
+    }
+}
+
+fn is_exact_loopback_host(endpoint: &Url) -> bool {
+    matches!(
+        endpoint.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    )
 }
 
 fn classify_request_error(error: &reqwest::Error) -> &'static str {

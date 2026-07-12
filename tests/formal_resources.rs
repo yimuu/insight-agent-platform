@@ -11,7 +11,7 @@ use insight_agent_platform::{
             ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest, ChatRole, ImageUrl,
             ModelCapability,
         },
-        openai_chat::{OpenAiChatLimits, OpenAiChatModel},
+        openai_chat::{OpenAiChatLimits, OpenAiChatModel, OpenAiTransportPolicy},
     },
     runtime::{stop_pair, ExecutionControl, RunError},
 };
@@ -32,15 +32,7 @@ fn action_context() -> ActionContext {
 }
 
 fn model(base_url: String, api_key: Option<String>) -> OpenAiChatModel {
-    OpenAiChatModel::new(
-        api_key,
-        base_url,
-        "fallback-model".to_string(),
-        BTreeSet::from([ModelCapability::Vision]),
-        Duration::from_secs(1),
-        Duration::from_secs(2),
-    )
-    .unwrap()
+    loopback_model(base_url, api_key)
 }
 
 fn model_with_limits(
@@ -48,7 +40,19 @@ fn model_with_limits(
     api_key: Option<String>,
     limits: OpenAiChatLimits,
 ) -> OpenAiChatModel {
-    OpenAiChatModel::new_with_limits(
+    loopback_model_with_limits(base_url, api_key, limits)
+}
+
+fn loopback_model(base_url: String, api_key: Option<String>) -> OpenAiChatModel {
+    loopback_model_with_limits(base_url, api_key, OpenAiChatLimits::default())
+}
+
+fn loopback_model_with_limits(
+    base_url: String,
+    api_key: Option<String>,
+    limits: OpenAiChatLimits,
+) -> OpenAiChatModel {
+    OpenAiChatModel::new_with_limits_and_transport_policy(
         api_key,
         base_url,
         "fallback-model".to_string(),
@@ -56,6 +60,21 @@ fn model_with_limits(
         Duration::from_secs(1),
         Duration::from_secs(2),
         limits,
+        OpenAiTransportPolicy::AllowLoopbackHttp,
+    )
+    .unwrap()
+}
+
+fn trusted_private_model(base_url: String, api_key: Option<String>) -> OpenAiChatModel {
+    OpenAiChatModel::new_with_limits_and_transport_policy(
+        api_key,
+        base_url,
+        "fallback-model".to_string(),
+        BTreeSet::from([ModelCapability::Vision]),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        OpenAiChatLimits::default(),
+        OpenAiTransportPolicy::AllowTrustedPrivateHttp,
     )
     .unwrap()
 }
@@ -434,6 +453,103 @@ fn openai_adapter_rejects_unknown_or_out_of_range_parameters() {
             "stop":["END"]
         }))
         .unwrap();
+}
+
+#[test]
+fn openai_transport_policy_rejects_plaintext_http_by_default() {
+    for constructor in ["new", "new_with_limits"] {
+        let error = if constructor == "new" {
+            OpenAiChatModel::new(
+                Some("api-key-secret".to_string()),
+                "http://model-service.internal/v1?token=url-secret".to_string(),
+                "fallback-model".to_string(),
+                BTreeSet::new(),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+            )
+            .unwrap_err()
+        } else {
+            OpenAiChatModel::new_with_limits(
+                Some("api-key-secret".to_string()),
+                "http://model-service.internal/v1?token=url-secret".to_string(),
+                "fallback-model".to_string(),
+                BTreeSet::new(),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                OpenAiChatLimits::default(),
+            )
+            .unwrap_err()
+        };
+        assert_eq!(error.code(), "MODEL_CONFIG_INVALID");
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains("api-key-secret"));
+        assert!(!rendered.contains("url-secret"));
+        assert!(!rendered.contains("model-service.internal"));
+    }
+}
+
+#[test]
+fn openai_transport_policy_allows_only_explicit_plaintext_scopes() {
+    for base_url in [
+        "http://127.0.0.1:8080/v1",
+        "http://localhost:8080/v1",
+        "http://[::1]:8080/v1",
+    ] {
+        loopback_model(base_url.to_string(), None);
+    }
+
+    let non_loopback = OpenAiChatModel::new_with_limits_and_transport_policy(
+        None,
+        "http://10.0.0.10:8080/v1".to_string(),
+        "fallback-model".to_string(),
+        BTreeSet::new(),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        OpenAiChatLimits::default(),
+        OpenAiTransportPolicy::AllowLoopbackHttp,
+    )
+    .unwrap_err();
+    assert_eq!(non_loopback.code(), "MODEL_CONFIG_INVALID");
+
+    trusted_private_model("http://10.0.0.10:8080/v1".to_string(), None);
+    trusted_private_model(
+        "http://model.default.svc.cluster.local:8080/v1".to_string(),
+        None,
+    );
+}
+
+#[test]
+fn openai_transport_policy_rejects_url_userinfo_for_every_policy() {
+    for (base_url, policy) in [
+        (
+            "https://user:pass@models.example.test/v1",
+            OpenAiTransportPolicy::HttpsOnly,
+        ),
+        (
+            "http://user:pass@127.0.0.1:8080/v1",
+            OpenAiTransportPolicy::AllowLoopbackHttp,
+        ),
+        (
+            "http://user:pass@model.internal:8080/v1",
+            OpenAiTransportPolicy::AllowTrustedPrivateHttp,
+        ),
+    ] {
+        let error = OpenAiChatModel::new_with_limits_and_transport_policy(
+            Some("api-key-secret".to_string()),
+            base_url.to_string(),
+            "fallback-model".to_string(),
+            BTreeSet::new(),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            OpenAiChatLimits::default(),
+            policy,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "MODEL_CONFIG_INVALID");
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains("user:pass"));
+        assert!(!rendered.contains("api-key-secret"));
+    }
 }
 
 #[tokio::test]
