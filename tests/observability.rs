@@ -16,6 +16,7 @@ use insight_agent_platform::{
     resources::{
         actions::{Action, ActionContext, ActionDescriptor, ActionRegistry},
         models::{ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability, ModelRegistry},
+        openai_chat::{OpenAiChatLimits, OpenAiChatModel, OpenAiTransportPolicy},
     },
     runtime::{CompiledAgentRegistry, RequestMetadata, RunError, RunService, RunServiceConfig},
 };
@@ -643,10 +644,7 @@ async fn chat_info_logs_counts_and_sizes_without_bodies() {
     ]);
 }
 
-async fn openai_model_with_response(
-    response_body: String,
-) -> insight_agent_platform::resources::openai_chat::OpenAiChatModel {
-    use insight_agent_platform::resources::openai_chat::OpenAiChatModel;
+async fn openai_model_with_response(response_body: String) -> OpenAiChatModel {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -666,13 +664,15 @@ async fn openai_model_with_response(
         socket.write_all(response.as_bytes()).await.unwrap();
     });
 
-    OpenAiChatModel::new(
+    OpenAiChatModel::new_with_limits_and_transport_policy(
         Some("provider-secret-key".to_string()),
         format!("http://{address}/v1"),
         "obs-provider".to_string(),
         BTreeSet::new(),
         Duration::from_secs(1),
         Duration::from_secs(1),
+        OpenAiChatLimits::default(),
+        OpenAiTransportPolicy::AllowLoopbackHttp,
     )
     .unwrap()
 }
