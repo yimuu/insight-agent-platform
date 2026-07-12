@@ -682,7 +682,7 @@ Expected: PASS. The test must not require `OPENAI_API_KEY`, PostgreSQL, external
 Run:
 
 ```bash
-cargo test --test api formal_v1_path_captures_match_after_axum_upgrade event_replay_route_and_recovery_headers_are_not_supported -- --nocapture
+cargo test --test api -- --nocapture formal_v1_path_captures_match_after_axum_upgrade event_replay_route_and_recovery_headers_are_not_supported
 ```
 
 Expected: PASS. This confirms the binary smoke did not require route contract changes.
