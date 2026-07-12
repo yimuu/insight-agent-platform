@@ -35,6 +35,11 @@ use insight_agent_platform::{
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
+const ABNORMAL_RESPONSE: &str = "异常指标响应";
+const COMPREHENSIVE_RESPONSE: &str = "综合解读响应";
+const ADVICE_RESPONSE: &str = "健康建议响应";
+const FOLLOW_UP_RESPONSE: &str = "直接回答追问";
+
 #[derive(Clone)]
 struct RecordingVisionModel {
     requests: Arc<Mutex<Vec<ChatRequest>>>,
@@ -60,9 +65,20 @@ impl ChatModel for RecordingVisionModel {
     }
 
     async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, RunError> {
+        let prompt = request.messages[1].text().unwrap();
+        let response = if prompt.starts_with("请执行第 1 步：异常指标解读。") {
+            ABNORMAL_RESPONSE
+        } else if prompt.starts_with("请执行第 2 步：综合解读。") {
+            COMPREHENSIVE_RESPONSE
+        } else if prompt.starts_with("请执行第 3 步：健康建议，并输出最终回复。")
+        {
+            ADVICE_RESPONSE
+        } else {
+            FOLLOW_UP_RESPONSE
+        };
         self.requests.lock().unwrap().push(request);
         Ok(Box::pin(stream::iter(vec![Ok(ChatChunk {
-            text: "直接回答追问".to_string(),
+            text: response.to_string(),
             finish_reason: Some("stop".to_string()),
             usage: None,
         })])))
@@ -205,10 +221,33 @@ async fn empty_history_keeps_the_existing_three_step_flow() {
     )
     .await;
 
-    assert_eq!(requests.lock().unwrap().len(), 3);
-    assert!(output.data.get("abnormal_indicators").is_some());
-    assert!(output.data.get("comprehensive_interpretation").is_some());
-    assert!(output.data.get("health_advice").is_some());
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    for (request, prompt_start) in requests.iter().zip([
+        "请执行第 1 步：异常指标解读。",
+        "请执行第 2 步：综合解读。",
+        "请执行第 3 步：健康建议，并输出最终回复。",
+    ]) {
+        let user_message = &request.messages[1];
+        assert!(user_message.text().unwrap().starts_with(prompt_start));
+        assert_eq!(
+            user_message.image_urls(),
+            vec!["https://example.test/report.png"]
+        );
+    }
+    assert_eq!(
+        output.content.as_deref(),
+        Some("异常指标响应\n\n综合解读响应\n\n健康建议响应")
+    );
+    assert_eq!(output.format.as_deref(), Some("markdown"));
+    assert_eq!(
+        output.data,
+        json!({
+            "abnormal_indicators": ABNORMAL_RESPONSE,
+            "comprehensive_interpretation": COMPREHENSIVE_RESPONSE,
+            "health_advice": ADVICE_RESPONSE,
+        })
+    );
 }
 
 #[tokio::test]
@@ -236,13 +275,14 @@ async fn non_empty_history_uses_one_dedicated_follow_up_request() {
     assert!(prompt.contains("血红蛋白 98 g/L"));
     assert!(prompt.contains("assistant: 血红蛋白偏低。"));
     assert!(prompt.contains("这和缺铁有关吗？"));
+    assert!(prompt.contains("直接回答当前问题"));
     assert!(prompt.contains("不要输出任何标题"));
     assert!(prompt.contains("不要重新执行首轮的三个步骤"));
     assert_eq!(
         user_message.image_urls(),
         vec!["https://example.test/report.png"]
     );
-    assert_eq!(output.content.as_deref(), Some("直接回答追问"));
+    assert_eq!(output.content.as_deref(), Some(FOLLOW_UP_RESPONSE));
     assert_eq!(output.format.as_deref(), Some("markdown"));
     assert!(output.data.is_null());
 }
