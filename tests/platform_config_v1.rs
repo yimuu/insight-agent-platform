@@ -246,6 +246,91 @@ fn postgres_history_rejects_loopback_aliases_without_verify_full() {
 }
 
 #[test]
+fn postgres_history_rejects_later_remote_hostaddr_query_override_without_verify_full() {
+    let yaml = base_yaml("  mode: disabled").replace(
+        "history:\n  provider: sqlite\n  path: ../data/history.sqlite3",
+        "history:\n  provider: postgres\n  database_url_env: HISTORY_URL",
+    );
+    let (_directory, path) = write_config(&yaml);
+    let secret = "postgres://user:password@database/private?host=localhost&hostaddr=8.8.8.8";
+
+    let error = load(
+        &path,
+        BTreeMap::from([("HISTORY_URL".to_string(), secret.to_string())]),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "PLATFORM_CONFIG_INVALID");
+    assert!(error.to_string().contains("sslmode=verify-full"));
+    assert!(!error.to_string().contains("password"));
+    assert!(!error.to_string().contains(secret));
+}
+
+#[test]
+fn postgres_history_rejects_later_remote_host_query_override_without_verify_full() {
+    let yaml = base_yaml("  mode: disabled").replace(
+        "history:\n  provider: sqlite\n  path: ../data/history.sqlite3",
+        "history:\n  provider: postgres\n  database_url_env: HISTORY_URL",
+    );
+    let (_directory, path) = write_config(&yaml);
+    let secret = "postgres://user:password@database/private?host=localhost&host=database";
+
+    let error = load(
+        &path,
+        BTreeMap::from([("HISTORY_URL".to_string(), secret.to_string())]),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "PLATFORM_CONFIG_INVALID");
+    assert!(error.to_string().contains("sslmode=verify-full"));
+    assert!(!error.to_string().contains("password"));
+    assert!(!error.to_string().contains(secret));
+}
+
+#[test]
+fn postgres_history_allows_later_exact_local_host_query_override_without_tls() {
+    let yaml = base_yaml("  mode: disabled").replace(
+        "history:\n  provider: sqlite\n  path: ../data/history.sqlite3",
+        "history:\n  provider: postgres\n  database_url_env: HISTORY_URL",
+    );
+    let (_directory, path) = write_config(&yaml);
+    let secret = "postgres://user:password@database/private?host=database&host=localhost";
+
+    let config = load(
+        &path,
+        BTreeMap::from([("HISTORY_URL".to_string(), secret.to_string())]),
+    )
+    .unwrap();
+
+    assert_eq!(config.history.database_url(), Some(secret));
+}
+
+#[test]
+fn postgres_history_rejects_non_postgres_schemes() {
+    let yaml = base_yaml("  mode: disabled").replace(
+        "history:\n  provider: sqlite\n  path: ../data/history.sqlite3",
+        "history:\n  provider: postgres\n  database_url_env: HISTORY_URL",
+    );
+    let (_directory, path) = write_config(&yaml);
+
+    for secret in [
+        "mysql://user:password@localhost/private",
+        "mysql://user:password@database/private?sslmode=verify-full",
+    ] {
+        let error = load(
+            &path,
+            BTreeMap::from([("HISTORY_URL".to_string(), secret.to_string())]),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "PLATFORM_CONFIG_INVALID");
+        assert!(error.to_string().contains("postgres:// or postgresql://"));
+        assert!(!error.to_string().contains("password"));
+        assert!(!error.to_string().contains(secret));
+    }
+}
+
+#[test]
 fn zero_capacities_and_durations_are_rejected() {
     for (from, to) in [
         ("max_concurrent_runs: 8", "max_concurrent_runs: 0"),

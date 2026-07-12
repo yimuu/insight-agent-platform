@@ -352,6 +352,13 @@ fn resolve_history(
 }
 
 fn validate_postgres_history_url(database_url: &str) -> Result<(), PlatformConfigError> {
+    if !raw_postgres_scheme_is_allowed(database_url) {
+        return Err(PlatformConfigError::new(
+            "PLATFORM_CONFIG_INVALID",
+            "PostgreSQL history URL must be a valid postgres:// or postgresql:// URL",
+        ));
+    }
+
     let options = PgConnectOptions::from_str(database_url).map_err(|_| {
         PlatformConfigError::new(
             "PLATFORM_CONFIG_INVALID",
@@ -372,9 +379,12 @@ fn validate_postgres_history_url(database_url: &str) -> Result<(), PlatformConfi
     ))
 }
 
+fn raw_postgres_scheme_is_allowed(database_url: &str) -> bool {
+    database_url.starts_with("postgres://") || database_url.starts_with("postgresql://")
+}
+
 fn raw_postgres_host_is_exact_local(database_url: &str) -> bool {
-    raw_query_value(database_url, "host")
-        .or_else(|| raw_query_value(database_url, "hostaddr"))
+    last_raw_query_value(database_url, &["host", "hostaddr"])
         .map(|host| exact_local_postgres_host(&host))
         .unwrap_or_else(|| {
             raw_authority_host(database_url)
@@ -388,16 +398,23 @@ fn exact_local_postgres_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
 }
 
-fn raw_query_value(database_url: &str, name: &str) -> Option<String> {
-    let query = database_url
-        .split_once('?')?
-        .1
-        .split_once('#')
-        .map_or(database_url.split_once('?')?.1, |(query, _)| query);
-    query.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        (key == name).then(|| value.to_string())
-    })
+fn last_raw_query_value(database_url: &str, names: &[&str]) -> Option<String> {
+    let query = raw_query(database_url)?;
+    let mut value = None;
+
+    for pair in query.split('&') {
+        let (key, pair_value) = pair.split_once('=').unwrap_or((pair, ""));
+        if names.contains(&key) {
+            value = Some(pair_value.to_string());
+        }
+    }
+
+    value
+}
+
+fn raw_query(database_url: &str) -> Option<&str> {
+    let (_, rest) = database_url.split_once('?')?;
+    Some(rest.split_once('#').map_or(rest, |(query, _)| query))
 }
 
 fn raw_authority_host(database_url: &str) -> Option<String> {
