@@ -208,6 +208,290 @@ fn compile_chat_with_parts(
     )
 }
 
+fn compile_chat_with_messages(
+    messages: Value,
+    capabilities: BTreeSet<ModelCapability>,
+) -> (
+    CompiledNode,
+    Arc<Handlebars<'static>>,
+    Arc<Mutex<Vec<ChatRequest>>>,
+) {
+    let model = RecordingModel {
+        requests: Arc::new(Mutex::new(Vec::new())),
+        capabilities,
+    };
+    let requests = Arc::clone(&model.requests);
+    let mut models = ModelRegistry::default();
+    models.register("primary", model).unwrap();
+    let actions = ActionRegistry::default();
+    let mut compile_context = CompileContext::new(&models, &actions);
+    let compilation = ChatNode
+        .compile(
+            "answer",
+            json!({"model":"primary", "messages":messages}),
+            &mut compile_context,
+        )
+        .unwrap();
+    (
+        compiled_node("answer", "core.chat", EmitPolicy::None, compilation),
+        Arc::new(compile_context.into_templates()),
+        requests,
+    )
+}
+
+#[tokio::test]
+async fn dynamic_messages_expand_in_order_without_second_rendering() {
+    let (node, templates, requests) = compile_chat_with_messages(
+        json!([
+            {"role":"system", "content":"system"},
+            {"from":{"path":"input.messages"}},
+            {"role":"user", "content":"current"}
+        ]),
+        BTreeSet::new(),
+    );
+    let context = context(json!({"messages":[
+        {"role":"user", "content":"{{ input.literal }}"},
+        {"role":"assistant", "content":"history"}
+    ]}))
+    .with_templates(templates);
+    let (control, _) = capturing_control();
+
+    ChatNode.execute(&node, &context, &control).await.unwrap();
+
+    let request = requests.lock().unwrap().pop().unwrap();
+    assert_eq!(
+        request
+            .messages
+            .iter()
+            .map(|message| message.role)
+            .collect::<Vec<_>>(),
+        vec![
+            ChatRole::System,
+            ChatRole::User,
+            ChatRole::Assistant,
+            ChatRole::User
+        ]
+    );
+    assert_eq!(request.messages[1].text(), Some("{{ input.literal }}"));
+    assert_eq!(request.messages[2].text(), Some("history"));
+    assert_eq!(request.messages[3].text(), Some("current"));
+}
+
+#[tokio::test]
+async fn dynamic_messages_resolve_direct_and_nested_node_outputs() {
+    for (path, output) in [
+        (
+            "nodes.prepare.output",
+            json!([{"role":"user", "content":"from node"}]),
+        ),
+        (
+            "nodes.prepare.output.messages",
+            json!({"messages":[{"role":"user", "content":"from node"}]}),
+        ),
+    ] {
+        let (node, templates, requests) =
+            compile_chat_with_messages(json!([{"from":{"path":path}}]), BTreeSet::new());
+        let mut context = context(json!({})).with_templates(templates);
+        context.set_node_output("prepare", output);
+        let (control, _) = capturing_control();
+
+        ChatNode.execute(&node, &context, &control).await.unwrap();
+
+        let request = requests.lock().unwrap().pop().unwrap();
+        assert_eq!(request.messages[0].text(), Some("from node"));
+    }
+}
+
+#[tokio::test]
+async fn dynamic_messages_handle_optional_missing_and_empty_sources() {
+    for input in [json!({}), json!({"messages":[]})] {
+        let (node, templates, requests) = compile_chat_with_messages(
+            json!([
+                {"role":"system", "content":"system"},
+                {"from":{"path":"input.messages", "optional":true}}
+            ]),
+            BTreeSet::new(),
+        );
+        let context = context(input).with_templates(templates);
+        let (control, _) = capturing_control();
+
+        ChatNode.execute(&node, &context, &control).await.unwrap();
+
+        let request = requests.lock().unwrap().pop().unwrap();
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.messages[0].role, ChatRole::System);
+    }
+}
+
+#[tokio::test]
+async fn dynamic_user_images_preserve_provider_shape() {
+    let (node, templates, requests) = compile_chat_with_messages(
+        json!([{"from":{
+            "path":"input.messages",
+            "allowed_content":["text", "image_url"]
+        }}]),
+        BTreeSet::from([ModelCapability::Vision]),
+    );
+    let context = context(json!({"messages":[{
+        "role":"user",
+        "content":[
+            {"type":"text", "text":"look"},
+            {"type":"image_url", "image_url":{"url":"http://example.test/a.png"}}
+        ]
+    }]}))
+    .with_templates(templates);
+    let (control, _) = capturing_control();
+
+    ChatNode.execute(&node, &context, &control).await.unwrap();
+
+    let request = requests.lock().unwrap().pop().unwrap();
+    assert_eq!(request.messages[0].text(), Some("look"));
+    assert_eq!(
+        request.messages[0].image_urls(),
+        vec!["http://example.test/a.png"]
+    );
+}
+
+#[tokio::test]
+async fn dynamic_messages_reject_an_empty_final_request() {
+    let (node, templates, requests) = compile_chat_with_messages(
+        json!([{"from":{"path":"input.messages", "optional":true}}]),
+        BTreeSet::new(),
+    );
+    let context = context(json!({})).with_templates(templates);
+    let (control, _) = capturing_control();
+
+    let error = ChatNode
+        .execute(&node, &context, &control)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "CHAT_MESSAGES_EMPTY");
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn dynamic_messages_reject_invalid_sources_without_leaking_bodies() {
+    const SECRET: &str = "dynamic-message-secret";
+    let cases = [
+        (
+            json!({"path":"input.messages"}),
+            json!({}),
+            "CHAT_DYNAMIC_MESSAGES_SOURCE_MISSING",
+        ),
+        (
+            json!({"path":"input.messages"}),
+            json!({"messages":null}),
+            "CHAT_DYNAMIC_MESSAGES_INVALID",
+        ),
+        (
+            json!({"path":"input.messages"}),
+            json!({"messages":{}}),
+            "CHAT_DYNAMIC_MESSAGES_INVALID",
+        ),
+        (
+            json!({"path":"input.messages", "max_messages":1}),
+            json!({"messages":[
+                {"role":"user", "content":"one"},
+                {"role":"assistant", "content":"two"}
+            ]}),
+            "CHAT_DYNAMIC_MESSAGES_LIMIT_EXCEEDED",
+        ),
+        (
+            json!({"path":"input.messages", "max_bytes":2}),
+            json!({"messages":[{"role":"user", "content":SECRET}]}),
+            "CHAT_DYNAMIC_MESSAGES_TOO_LARGE",
+        ),
+        (
+            json!({"path":"input.messages"}),
+            json!({"messages":[{"role":"system", "content":SECRET}]}),
+            "CHAT_DYNAMIC_MESSAGES_INVALID",
+        ),
+        (
+            json!({"path":"input.messages"}),
+            json!({"messages":[{"role":"tool", "content":SECRET}]}),
+            "CHAT_DYNAMIC_MESSAGES_INVALID",
+        ),
+        (
+            json!({"path":"input.messages"}),
+            json!({"messages":[{"role":"user", "content":42}]}),
+            "CHAT_DYNAMIC_MESSAGES_INVALID",
+        ),
+        (
+            json!({"path":"input.messages"}),
+            json!({"messages":[{"role":"user", "content":[]}]}),
+            "CHAT_DYNAMIC_MESSAGES_INVALID",
+        ),
+        (
+            json!({"path":"input.messages"}),
+            json!({"messages":[{"role":"user", "content":[
+                {"type":"image_url", "image_url":{"url":SECRET}}
+            ]}]}),
+            "CHAT_DYNAMIC_MESSAGES_INVALID",
+        ),
+        (
+            json!({"path":"input.messages", "allowed_content":["image_url"]}),
+            json!({"messages":[{"role":"assistant", "content":[
+                {"type":"image_url", "image_url":{"url":SECRET}}
+            ]}]}),
+            "CHAT_DYNAMIC_MESSAGES_INVALID",
+        ),
+        (
+            json!({"path":"input.messages", "allowed_content":["image_url"]}),
+            json!({"messages":[{"role":"user", "content":[
+                {"type":"image_url", "image_url":{"url":"   "}}
+            ]}]}),
+            "CHAT_DYNAMIC_MESSAGES_INVALID",
+        ),
+        (
+            json!({"path":"input.messages"}),
+            json!({"messages":[{"role":"user", "content":SECRET, "optional":true}]}),
+            "CHAT_DYNAMIC_MESSAGES_INVALID",
+        ),
+        (
+            json!({"path":"input.messages"}),
+            json!({"messages":[{"role":"user", "content":[
+                {"type":"text", "text":SECRET, "optional":true}
+            ]}]}),
+            "CHAT_DYNAMIC_MESSAGES_INVALID",
+        ),
+    ];
+
+    for (from, input, expected_code) in cases {
+        let (node, templates, requests) = compile_chat_with_messages(
+            json!([{"from":from}]),
+            BTreeSet::from([ModelCapability::Vision]),
+        );
+        let context = context(input).with_templates(templates);
+        let (control, _) = capturing_control();
+
+        let error = ChatNode
+            .execute(&node, &context, &control)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), expected_code);
+        assert!(!format!("{error:?} {error}").contains(SECRET));
+        assert!(requests.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn dynamic_messages_keep_empty_text_for_compatibility() {
+    let (node, templates, requests) =
+        compile_chat_with_messages(json!([{"from":{"path":"input.messages"}}]), BTreeSet::new());
+    let context = context(json!({
+        "messages":[{"role":"user", "content":""}]
+    }))
+    .with_templates(templates);
+    let (control, _) = capturing_control();
+
+    ChatNode.execute(&node, &context, &control).await.unwrap();
+
+    let request = requests.lock().unwrap().pop().unwrap();
+    assert_eq!(request.messages[0].text(), Some(""));
+}
+
 #[tokio::test]
 async fn optional_image_parts_omit_missing_empty_and_blank_values() {
     for input in [
@@ -455,6 +739,92 @@ async fn chat_rejects_accumulated_text_before_appending_or_emitting_over_limit_c
     );
     assert!(!format!("{error:?} {error}").contains(OVER_LIMIT_SECRET));
     assert_eq!(*emitted.lock().unwrap(), vec!["ok".to_string()]);
+}
+
+fn compile_messages_result(
+    messages: Value,
+    capabilities: BTreeSet<ModelCapability>,
+) -> Result<NodeCompilation, insight_agent_platform::dsl::CompileError> {
+    let mut models = ModelRegistry::default();
+    models
+        .register(
+            "primary",
+            RecordingModel {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                capabilities,
+            },
+        )
+        .unwrap();
+    let actions = ActionRegistry::default();
+    let mut context = CompileContext::new(&models, &actions);
+    ChatNode.compile(
+        "answer",
+        json!({"model":"primary", "messages":messages}),
+        &mut context,
+    )
+}
+
+#[test]
+fn dynamic_message_sources_validate_paths_configuration_and_capabilities() {
+    for path in [
+        "input",
+        "nodes.answer",
+        "nodes.answer.input.messages",
+        "input.items[0]",
+    ] {
+        assert_compile_error(
+            compile_messages_result(json!([{"from":{"path":path}}]), BTreeSet::new()),
+            "CHAT_DYNAMIC_MESSAGES_PATH_INVALID",
+        );
+    }
+
+    for from in [
+        json!({"path":"input.messages", "max_messages":0}),
+        json!({"path":"input.messages", "max_bytes":0}),
+        json!({"path":"input.messages", "allowed_content":[]}),
+        json!({"path":"input.messages", "allowed_content":["input_audio"]}),
+    ] {
+        assert_compile_error(
+            compile_messages_result(json!([{"from":from}]), BTreeSet::new()),
+            "CHAT_DYNAMIC_MESSAGES_CONFIG_INVALID",
+        );
+    }
+
+    compile_messages_result(json!([{"from":{"path":"input.messages"}}]), BTreeSet::new()).unwrap();
+    assert_compile_error(
+        compile_messages_result(
+            json!([{"from":{
+                "path":"input.messages",
+                "allowed_content":["image_url"]
+            }}]),
+            BTreeSet::new(),
+        ),
+        "MODEL_CAPABILITY_REQUIRED",
+    );
+    assert_compile_error(
+        compile_messages_result(
+            json!([{"from":{"path":"input.messages", "extra":true}}]),
+            BTreeSet::new(),
+        ),
+        "CHAT_DYNAMIC_MESSAGES_CONFIG_INVALID",
+    );
+    assert_compile_error(
+        compile_messages_result(
+            json!([{
+                "from":{"path":"input.messages"},
+                "role":"user"
+            }]),
+            BTreeSet::new(),
+        ),
+        "CHAT_DYNAMIC_MESSAGES_CONFIG_INVALID",
+    );
+    assert_compile_error(
+        compile_messages_result(
+            json!([{"role":"user", "content":"hi", "extra":true}]),
+            BTreeSet::new(),
+        ),
+        "NODE_CONFIG_INVALID",
+    );
 }
 
 #[test]

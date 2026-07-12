@@ -40,6 +40,9 @@ const CHAT_PROMPT_SECRET: &str = "observability-prompt-secret";
 const CHAT_RESPONSE_SECRET: &str = "observability-response-secret";
 const IMAGE_SECRET: &str = "observability-image-secret";
 const USAGE_SECRET: &str = "observability-usage-secret";
+const DYNAMIC_TEXT_SECRET: &str = "observability-dynamic-text-secret";
+const DYNAMIC_IMAGE_SECRET: &str = "observability-dynamic-image-secret";
+const DYNAMIC_MESSAGE_SECRET: &str = "observability-invalid-dynamic-secret";
 
 #[derive(Debug, Clone)]
 struct RecordedEvent {
@@ -397,6 +400,46 @@ nodes:
     config:
       data:
         text: "{{ nodes.answer.output.text }}"
+"#,
+    );
+    write_agent(
+        root.path(),
+        "chat_dynamic",
+        r#"entry: answer
+nodes:
+  answer:
+    type: core.chat
+    next: result
+    config:
+      model: obs
+      messages:
+        - role: system
+          content: system
+        - from:
+            path: input.messages
+            allowed_content: [text, image_url]
+  result:
+    type: core.output
+    config:
+      data:
+        text: "{{ nodes.answer.output.text }}"
+"#,
+    );
+    write_agent(
+        root.path(),
+        "chat_dynamic_invalid",
+        r#"entry: answer
+nodes:
+  answer:
+    type: core.chat
+    next: result
+    config:
+      model: obs
+      messages:
+        - from: {path: input.messages}
+  result:
+    type: core.output
+    config: {data: {ok: true}}
 "#,
     );
 
@@ -766,6 +809,71 @@ async fn message_emptied_by_optional_image_filtering_logs_no_request_or_model_ca
         IMAGE_SECRET,
         USAGE_SECRET,
     ]);
+}
+
+#[tokio::test]
+async fn dynamic_chat_logs_final_counts_without_bodies() {
+    let _guard = reset_logs().await;
+    let fixture = fixture(&["chat_dynamic"]).await;
+    let created = fixture
+        .service
+        .create_detached(
+            "chat_dynamic",
+            json!({"messages":[
+                {"role":"assistant", "content":DYNAMIC_TEXT_SECRET},
+                {"role":"user", "content":[
+                    {"type":"text", "text":"look"},
+                    {"type":"image_url", "image_url":{
+                        "url":format!("https://example.test/{DYNAMIC_IMAGE_SECRET}.png")
+                    }}
+                ]}
+            ]}),
+            RequestMetadata::default(),
+        )
+        .await
+        .unwrap();
+    wait_for_status(&fixture.service, &created.run_id, RunStatus::Completed).await;
+
+    assert_eq!(fixture.model_calls.load(Ordering::Relaxed), 1);
+    let requests = info_logs("chat.request");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].field("messages_count"), Some("3"));
+    assert_eq!(requests[0].field("image_parts_count"), Some("1"));
+    assert_logs_exclude(&[
+        DYNAMIC_TEXT_SECRET,
+        DYNAMIC_IMAGE_SECRET,
+        CHAT_RESPONSE_SECRET,
+    ]);
+}
+
+#[tokio::test]
+async fn invalid_dynamic_chat_logs_no_request_or_body() {
+    let _guard = reset_logs().await;
+    let fixture = fixture(&["chat_dynamic_invalid"]).await;
+    let created = fixture
+        .service
+        .create_detached(
+            "chat_dynamic_invalid",
+            json!({"messages":[{
+                "role":"user",
+                "content":DYNAMIC_MESSAGE_SECRET,
+                "extra":true
+            }]}),
+            RequestMetadata::default(),
+        )
+        .await
+        .unwrap();
+    wait_for_status(&fixture.service, &created.run_id, RunStatus::Failed).await;
+
+    let failed = fixture.service.get_run(&created.run_id).await.unwrap();
+    assert_eq!(
+        failed.error_code.as_deref(),
+        Some("CHAT_DYNAMIC_MESSAGES_INVALID")
+    );
+    assert_eq!(fixture.model_calls.load(Ordering::Relaxed), 0);
+    assert!(info_logs("chat.request").is_empty());
+    assert!(info_logs("chat.response").is_empty());
+    assert_logs_exclude(&[DYNAMIC_MESSAGE_SECRET]);
 }
 
 async fn openai_model_with_response(response_body: String) -> OpenAiChatModel {

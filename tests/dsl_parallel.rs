@@ -1,20 +1,55 @@
 use std::{collections::BTreeSet, fs, path::Path, time::Duration};
 
+use async_trait::async_trait;
+use futures::stream;
 use insight_agent_platform::{
     dsl::{
         compiled::{JoinPolicy, NodeRegion},
         compiler::{AgentCompiler, CompileLimits},
+        CompileError,
     },
     nodes::default_node_registries,
-    resources::{actions::ActionRegistry, models::ModelRegistry},
+    resources::{
+        actions::ActionRegistry,
+        models::{ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability, ModelRegistry},
+    },
+    runtime::RunError,
 };
+use serde_json::Value;
 use tempfile::TempDir;
+
+#[derive(Debug)]
+struct GraphModel;
+
+#[async_trait]
+impl ChatModel for GraphModel {
+    fn capabilities(&self) -> BTreeSet<ModelCapability> {
+        BTreeSet::new()
+    }
+
+    fn validate_parameters(&self, parameters: &Value) -> Result<(), CompileError> {
+        if parameters.is_object() {
+            Ok(())
+        } else {
+            Err(CompileError::new(
+                "MODEL_PARAMETERS_INVALID",
+                "parameters must be an object",
+            ))
+        }
+    }
+
+    async fn stream_chat(&self, _request: ChatRequest) -> Result<ChatStream, RunError> {
+        Ok(Box::pin(stream::empty::<Result<ChatChunk, RunError>>()))
+    }
+}
 
 fn compiler() -> AgentCompiler {
     let (node_types, _) = default_node_registries().unwrap();
+    let mut models = ModelRegistry::default();
+    models.register("graph", GraphModel).unwrap();
     AgentCompiler::new(
         node_types,
-        ModelRegistry::default(),
+        models,
         ActionRegistry::default(),
         Duration::from_secs(30),
         CompileLimits {
@@ -734,4 +769,78 @@ nodes:
     );
 
     assert_compile_error(&yaml, "FORK_BRANCH_LIMIT_EXCEEDED");
+}
+
+#[test]
+fn dynamic_chat_rejects_sibling_branch_source() {
+    assert_compile_error(
+        r#"
+version: 1
+id: sibling-dynamic-source
+name: Sibling Dynamic Source
+input:
+  schema: {type: object}
+entry: fanout
+nodes:
+  fanout:
+    type: core.fork
+    config:
+      branches: {answer: answer, prepare: prepare}
+      join: collect
+  answer:
+    type: core.chat
+    next: collect
+    config:
+      model: graph
+      messages:
+        - from: {path: nodes.prepare.output}
+  prepare:
+    type: core.template
+    next: collect
+    config:
+      value:
+        - {role: user, content: sibling}
+  collect:
+    type: core.join
+    next: result
+    config: {mode: all_settled}
+  result:
+    type: core.output
+    config: {data: {ok: true}}
+"#,
+        "CROSS_BRANCH_REFERENCE",
+    );
+}
+
+#[test]
+fn dynamic_chat_rejects_future_linear_source() {
+    assert_compile_error(
+        r#"
+version: 1
+id: future-dynamic-source
+name: Future Dynamic Source
+input:
+  schema: {type: object}
+entry: answer
+nodes:
+  answer:
+    type: core.chat
+    next: prepare
+    config:
+      model: graph
+      messages:
+        - from: {path: nodes.prepare.output.messages}
+  prepare:
+    type: core.template
+    next: result
+    config:
+      value:
+        messages:
+          - {role: user, content: future}
+  result:
+    type: core.output
+    config: {data: {ok: true}}
+"#,
+        "INVALID_NODE_REFERENCE",
+    );
 }

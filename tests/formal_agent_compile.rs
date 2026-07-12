@@ -103,7 +103,9 @@ nodes:
     next: answer
     config:
       value:
-        question: "{{ input.question }}"
+        messages:
+          - role: user
+            content: "{{ input.question }}"
   answer:
     type: core.chat
     next: classify
@@ -112,8 +114,8 @@ nodes:
       messages:
         - role: system
           content: "You are concise."
-        - role: user
-          content: "{{ nodes.prepare.output.question }}"
+        - from:
+            path: nodes.prepare.output.messages
       parameters: {}
   classify:
     type: core.action
@@ -188,5 +190,6 @@ nodes:
         .node_regions
         .values()
         .all(|region| region == &NodeRegion::Linear));
+    assert!(agent.nodes["answer"].references.contains("prepare"));
     assert!(agent.version_hash.starts_with("sha256:"));
 }

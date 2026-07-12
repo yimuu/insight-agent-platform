@@ -7,6 +7,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::time::sleep;
 
+mod dynamic;
+
+use dynamic::{CompiledDynamicMessages, DynamicMessageEntryConfig};
+
 use crate::{
     dsl::{
         compiled::{
@@ -29,7 +33,7 @@ use crate::{
 #[serde(deny_unknown_fields)]
 struct ChatConfig {
     model: String,
-    messages: Vec<MessageConfig>,
+    messages: Vec<Value>,
     #[serde(default = "empty_object")]
     parameters: Value,
 }
@@ -106,9 +110,14 @@ struct CompiledMessage {
     content: CompiledMessageContent,
 }
 
+enum CompiledMessageEntry {
+    Static(CompiledMessage),
+    Dynamic(CompiledDynamicMessages),
+}
+
 struct CompiledChat {
     model: Arc<dyn ChatModel>,
-    messages: Vec<CompiledMessage>,
+    messages: Vec<CompiledMessageEntry>,
     parameters: Value,
 }
 
@@ -150,76 +159,41 @@ impl NodeType for ChatNode {
         let mut references = BTreeSet::new();
         let mut has_images = false;
         let mut messages = Vec::with_capacity(config.messages.len());
-        for (message_index, message) in config.messages.into_iter().enumerate() {
-            let content = match message.content {
-                MessageContentConfig::Text(source) => {
-                    let template = compile_text_source(
-                        TextSourceConfig::Text(source),
-                        context,
-                        node_id,
-                        &format!("messages[{message_index}].content"),
-                    )?;
-                    references.extend(template.references.iter().cloned());
-                    CompiledMessageContent::Text(template)
-                }
-                MessageContentConfig::TemplateRef(source) => {
-                    let template = compile_text_source(
-                        TextSourceConfig::TemplateRef(source),
-                        context,
-                        node_id,
-                        &format!("messages[{message_index}].content"),
-                    )?;
-                    references.extend(template.references.iter().cloned());
-                    CompiledMessageContent::Text(template)
-                }
-                MessageContentConfig::Parts(parts) => {
-                    if parts.is_empty() {
-                        return Err(CompileError::new(
-                            "CHAT_CONTENT_PARTS_REQUIRED",
+        for (entry_index, entry) in config.messages.into_iter().enumerate() {
+            if entry
+                .as_object()
+                .is_some_and(|object| object.contains_key("from"))
+            {
+                let config: DynamicMessageEntryConfig =
+                    serde_json::from_value(entry).map_err(|_| {
+                        CompileError::new(
+                            "CHAT_DYNAMIC_MESSAGES_CONFIG_INVALID",
                             format!(
-                                "chat node '{node_id}' message {message_index} must contain at least one part"
+                                "chat node '{node_id}' dynamic message entry {entry_index} has invalid configuration"
                             ),
-                        ));
-                    }
-                    let mut compiled_parts = Vec::with_capacity(parts.len());
-                    for (part_index, part) in parts.into_iter().enumerate() {
-                        match part {
-                            MessagePartConfig::Text { text } => {
-                                let template = compile_text_source(
-                                    text,
-                                    context,
-                                    node_id,
-                                    &format!("messages[{message_index}].parts[{part_index}].text"),
-                                )?;
-                                references.extend(template.references.iter().cloned());
-                                compiled_parts.push(CompiledMessagePart::Text(template));
-                            }
-                            MessagePartConfig::ImageUrl {
-                                image_url,
-                                optional,
-                            } => {
-                                let template = compile_text_source(
-                                    TextSourceConfig::Text(image_url.url),
-                                    context,
-                                    node_id,
-                                    &format!(
-                                        "messages[{message_index}].parts[{part_index}].image_url.url"
-                                    ),
-                                )?;
-                                references.extend(template.references.iter().cloned());
-                                has_images = true;
-                                compiled_parts
-                                    .push(CompiledMessagePart::ImageUrl { template, optional });
-                            }
-                        }
-                    }
-                    CompiledMessageContent::Parts(compiled_parts)
+                        )
+                    })?;
+                let dynamic = CompiledDynamicMessages::compile(config.from, node_id, entry_index)?;
+                if let Some(reference) = dynamic.reference() {
+                    references.insert(reference.to_string());
                 }
-            };
-            messages.push(CompiledMessage {
-                role: message.role,
-                content,
-            });
+                has_images |= dynamic.requires_vision();
+                messages.push(CompiledMessageEntry::Dynamic(dynamic));
+            } else {
+                let message: MessageConfig = serde_json::from_value(entry).map_err(|error| {
+                    CompileError::new(
+                        "NODE_CONFIG_INVALID",
+                        format!(
+                            "invalid core.chat message {entry_index} for node '{node_id}': {error}"
+                        ),
+                    )
+                })?;
+                let (message, message_references, message_has_images) =
+                    compile_static_message(message, context, node_id, entry_index)?;
+                references.extend(message_references);
+                has_images |= message_has_images;
+                messages.push(CompiledMessageEntry::Static(message));
+            }
         }
 
         if has_images && !model.capabilities().contains(&ModelCapability::Vision) {
@@ -250,6 +224,86 @@ impl NodeType for ChatNode {
     }
 }
 
+fn compile_static_message(
+    message: MessageConfig,
+    context: &mut CompileContext<'_>,
+    node_id: &str,
+    message_index: usize,
+) -> Result<(CompiledMessage, BTreeSet<String>, bool), CompileError> {
+    let mut references = BTreeSet::new();
+    let mut has_images = false;
+    let content = match message.content {
+        MessageContentConfig::Text(source) => {
+            let template = compile_text_source(
+                TextSourceConfig::Text(source),
+                context,
+                node_id,
+                &format!("messages[{message_index}].content"),
+            )?;
+            references.extend(template.references.iter().cloned());
+            CompiledMessageContent::Text(template)
+        }
+        MessageContentConfig::TemplateRef(source) => {
+            let template = compile_text_source(
+                TextSourceConfig::TemplateRef(source),
+                context,
+                node_id,
+                &format!("messages[{message_index}].content"),
+            )?;
+            references.extend(template.references.iter().cloned());
+            CompiledMessageContent::Text(template)
+        }
+        MessageContentConfig::Parts(parts) => {
+            if parts.is_empty() {
+                return Err(CompileError::new(
+                    "CHAT_CONTENT_PARTS_REQUIRED",
+                    format!(
+                        "chat node '{node_id}' message {message_index} must contain at least one part"
+                    ),
+                ));
+            }
+            let mut compiled_parts = Vec::with_capacity(parts.len());
+            for (part_index, part) in parts.into_iter().enumerate() {
+                match part {
+                    MessagePartConfig::Text { text } => {
+                        let template = compile_text_source(
+                            text,
+                            context,
+                            node_id,
+                            &format!("messages[{message_index}].parts[{part_index}].text"),
+                        )?;
+                        references.extend(template.references.iter().cloned());
+                        compiled_parts.push(CompiledMessagePart::Text(template));
+                    }
+                    MessagePartConfig::ImageUrl {
+                        image_url,
+                        optional,
+                    } => {
+                        let template = compile_text_source(
+                            TextSourceConfig::Text(image_url.url),
+                            context,
+                            node_id,
+                            &format!("messages[{message_index}].parts[{part_index}].image_url.url"),
+                        )?;
+                        references.extend(template.references.iter().cloned());
+                        has_images = true;
+                        compiled_parts.push(CompiledMessagePart::ImageUrl { template, optional });
+                    }
+                }
+            }
+            CompiledMessageContent::Parts(compiled_parts)
+        }
+    };
+    Ok((
+        CompiledMessage {
+            role: message.role,
+            content,
+        },
+        references,
+        has_images,
+    ))
+}
+
 fn compile_text_source(
     source: TextSourceConfig,
     context: &mut CompileContext<'_>,
@@ -277,11 +331,23 @@ impl NodeExecutor for ChatNode {
         }
         let body = node.body::<CompiledChat>()?;
         let data = context.template_data();
-        let messages = body
-            .messages
-            .iter()
-            .map(|message| message.render(context, &data))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut messages = Vec::new();
+        for entry in &body.messages {
+            match entry {
+                CompiledMessageEntry::Static(message) => {
+                    messages.push(message.render(context, &data)?);
+                }
+                CompiledMessageEntry::Dynamic(dynamic) => {
+                    messages.extend(dynamic.expand(context)?);
+                }
+            }
+        }
+        if messages.is_empty() {
+            return Err(RunError::new(
+                "CHAT_MESSAGES_EMPTY",
+                "chat messages are empty after dynamic sources were expanded",
+            ));
+        }
         let request = ChatRequest {
             messages,
             parameters: body.parameters.clone(),
