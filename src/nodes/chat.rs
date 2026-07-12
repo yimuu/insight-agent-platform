@@ -2,6 +2,7 @@ use std::{collections::BTreeSet, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use handlebars::{RenderError, RenderErrorReason};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::time::sleep;
@@ -68,8 +69,14 @@ enum TextSourceConfig {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum MessagePartConfig {
-    Text { text: TextSourceConfig },
-    ImageUrl { image_url: ImageUrlConfig },
+    Text {
+        text: TextSourceConfig,
+    },
+    ImageUrl {
+        image_url: ImageUrlConfig,
+        #[serde(default)]
+        optional: bool,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,7 +94,10 @@ enum CompiledMessageContent {
 #[derive(Debug)]
 enum CompiledMessagePart {
     Text(TemplateProgram),
-    ImageUrl(TemplateProgram),
+    ImageUrl {
+        template: TemplateProgram,
+        optional: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -173,24 +183,34 @@ impl NodeType for ChatNode {
                     }
                     let mut compiled_parts = Vec::with_capacity(parts.len());
                     for (part_index, part) in parts.into_iter().enumerate() {
-                        let (field, source, image) = match part {
-                            MessagePartConfig::Text { text } => ("text", text, false),
-                            MessagePartConfig::ImageUrl { image_url } => {
-                                ("image_url.url", TextSourceConfig::Text(image_url.url), true)
+                        match part {
+                            MessagePartConfig::Text { text } => {
+                                let template = compile_text_source(
+                                    text,
+                                    context,
+                                    node_id,
+                                    &format!("messages[{message_index}].parts[{part_index}].text"),
+                                )?;
+                                references.extend(template.references.iter().cloned());
+                                compiled_parts.push(CompiledMessagePart::Text(template));
                             }
-                        };
-                        let template = compile_text_source(
-                            source,
-                            context,
-                            node_id,
-                            &format!("messages[{message_index}].parts[{part_index}].{field}"),
-                        )?;
-                        references.extend(template.references.iter().cloned());
-                        if image {
-                            has_images = true;
-                            compiled_parts.push(CompiledMessagePart::ImageUrl(template));
-                        } else {
-                            compiled_parts.push(CompiledMessagePart::Text(template));
+                            MessagePartConfig::ImageUrl {
+                                image_url,
+                                optional,
+                            } => {
+                                let template = compile_text_source(
+                                    TextSourceConfig::Text(image_url.url),
+                                    context,
+                                    node_id,
+                                    &format!(
+                                        "messages[{message_index}].parts[{part_index}].image_url.url"
+                                    ),
+                                )?;
+                                references.extend(template.references.iter().cloned());
+                                has_images = true;
+                                compiled_parts
+                                    .push(CompiledMessagePart::ImageUrl { template, optional });
+                            }
                         }
                     }
                     CompiledMessageContent::Parts(compiled_parts)
@@ -367,21 +387,40 @@ impl CompiledMessage {
             CompiledMessageContent::Text(template) => {
                 ChatContent::Text(render_template(context, template, data)?)
             }
-            CompiledMessageContent::Parts(parts) => ChatContent::Parts(
-                parts
-                    .iter()
-                    .map(|part| match part {
-                        CompiledMessagePart::Text(template) => Ok(ChatContentPart::Text {
-                            text: render_template(context, template, data)?,
-                        }),
-                        CompiledMessagePart::ImageUrl(template) => Ok(ChatContentPart::ImageUrl {
-                            image_url: ImageUrl {
-                                url: render_template(context, template, data)?,
-                            },
-                        }),
-                    })
-                    .collect::<Result<Vec<_>, RunError>>()?,
-            ),
+            CompiledMessageContent::Parts(parts) => {
+                let mut rendered = Vec::with_capacity(parts.len());
+                for part in parts {
+                    match part {
+                        CompiledMessagePart::Text(template) => {
+                            rendered.push(ChatContentPart::Text {
+                                text: render_template(context, template, data)?,
+                            });
+                        }
+                        CompiledMessagePart::ImageUrl { template, optional } => {
+                            match render_raw_template(context, template, data) {
+                                Ok(url) if *optional && url.trim().is_empty() => {}
+                                Ok(url) => rendered.push(ChatContentPart::ImageUrl {
+                                    image_url: ImageUrl { url },
+                                }),
+                                Err(error)
+                                    if *optional
+                                        && matches!(
+                                            error.reason(),
+                                            RenderErrorReason::MissingVariable(_)
+                                        ) => {}
+                                Err(error) => return Err(template_render_error(template, error)),
+                            }
+                        }
+                    }
+                }
+                if rendered.is_empty() {
+                    return Err(RunError::new(
+                        "CHAT_CONTENT_PARTS_EMPTY",
+                        "chat message has no content parts after optional parts were omitted",
+                    ));
+                }
+                ChatContent::Parts(rendered)
+            }
         };
         Ok(ChatMessage {
             role: self.role,
@@ -395,15 +434,23 @@ fn render_template(
     template: &TemplateProgram,
     data: &Value,
 ) -> Result<String, RunError> {
-    context
-        .templates()
-        .render(&template.name, data)
-        .map_err(|error| {
-            RunError::new(
-                "TEMPLATE_RENDER_FAILED",
-                format!("failed to render template '{}': {error}", template.name),
-            )
-        })
+    render_raw_template(context, template, data)
+        .map_err(|error| template_render_error(template, error))
+}
+
+fn render_raw_template(
+    context: &RunContext,
+    template: &TemplateProgram,
+    data: &Value,
+) -> Result<String, RenderError> {
+    context.templates().render(&template.name, data)
+}
+
+fn template_render_error(template: &TemplateProgram, error: RenderError) -> RunError {
+    RunError::new(
+        "TEMPLATE_RENDER_FAILED",
+        format!("failed to render template '{}': {error}", template.name),
+    )
 }
 
 fn stopped_error(control: &ExecutionControl) -> RunError {

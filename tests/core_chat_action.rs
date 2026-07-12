@@ -7,6 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures::stream;
+use handlebars::Handlebars;
 use insight_agent_platform::{
     dsl::{
         compiled::{CompiledNode, NodeCompilation, NodeControl, NodeOutcome, NodeTransition},
@@ -175,6 +176,126 @@ fn capturing_control() -> (ExecutionControl, Arc<Mutex<Vec<String>>>) {
         }
     });
     (control, emitted)
+}
+
+fn compile_chat_with_parts(
+    parts: Value,
+) -> (
+    CompiledNode,
+    Arc<Handlebars<'static>>,
+    Arc<Mutex<Vec<ChatRequest>>>,
+) {
+    let model = RecordingModel::vision();
+    let requests = Arc::clone(&model.requests);
+    let mut models = ModelRegistry::default();
+    models.register("primary", model).unwrap();
+    let actions = ActionRegistry::default();
+    let mut compile_context = CompileContext::new(&models, &actions);
+    let compilation = ChatNode
+        .compile(
+            "answer",
+            json!({
+                "model":"primary",
+                "messages":[{"role":"user", "content":parts}]
+            }),
+            &mut compile_context,
+        )
+        .unwrap();
+    (
+        compiled_node("answer", "core.chat", EmitPolicy::None, compilation),
+        Arc::new(compile_context.into_templates()),
+        requests,
+    )
+}
+
+#[tokio::test]
+async fn optional_image_parts_omit_missing_empty_and_blank_values() {
+    for input in [
+        json!({}),
+        json!({"image_url":""}),
+        json!({"image_url":"   "}),
+    ] {
+        let (node, templates, requests) = compile_chat_with_parts(json!([
+            {"type":"text", "text":"question"},
+            {"type":"image_url", "optional":true,
+             "image_url":{"url":"{{ input.image_url }}"}}
+        ]));
+        let context = context(input).with_templates(templates);
+        let (control, _) = capturing_control();
+        ChatNode.execute(&node, &context, &control).await.unwrap();
+        let request = requests.lock().unwrap().pop().unwrap();
+        assert_eq!(request.messages[0].text(), Some("question"));
+        assert!(request.messages[0].image_urls().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn optional_image_parts_preserve_non_blank_urls() {
+    for url in [
+        "http://example.test/report.png",
+        "https://example.test/report.png",
+        "data:image/png;base64,AA==",
+    ] {
+        let (node, templates, requests) = compile_chat_with_parts(json!([
+            {"type":"text", "text":"question"},
+            {"type":"image_url", "optional":true,
+             "image_url":{"url":"{{ input.image_url }}"}}
+        ]));
+        let context = context(json!({"image_url":url})).with_templates(templates);
+        let (control, _) = capturing_control();
+        ChatNode.execute(&node, &context, &control).await.unwrap();
+        let request = requests.lock().unwrap().pop().unwrap();
+        assert_eq!(request.messages[0].image_urls(), vec![url]);
+    }
+}
+
+#[tokio::test]
+async fn required_image_parts_still_fail_for_missing_values() {
+    let (node, templates, requests) = compile_chat_with_parts(json!([
+        {"type":"text", "text":"question"},
+        {"type":"image_url", "image_url":{"url":"{{ input.image_url }}"}}
+    ]));
+    let context = context(json!({})).with_templates(templates);
+    let (control, _) = capturing_control();
+    let error = ChatNode
+        .execute(&node, &context, &control)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "TEMPLATE_RENDER_FAILED");
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn optional_image_parts_preserve_non_missing_render_errors() {
+    let (node, templates, requests) = compile_chat_with_parts(json!([
+        {"type":"text", "text":"question"},
+        {"type":"image_url", "optional":true,
+         "image_url":{"url":"{{#if}}{{/if}}"}}
+    ]));
+    let context = context(json!({})).with_templates(templates);
+    let (control, _) = capturing_control();
+    let error = ChatNode
+        .execute(&node, &context, &control)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "TEMPLATE_RENDER_FAILED");
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn optional_image_parts_reject_messages_emptied_by_filtering() {
+    let (node, templates, requests) = compile_chat_with_parts(json!([
+        {"type":"image_url", "optional":true,
+         "image_url":{"url":"{{ input.image_url }}"}}
+    ]));
+    let context = context(json!({})).with_templates(templates);
+    let (control, _) = capturing_control();
+    let error = ChatNode
+        .execute(&node, &context, &control)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "CHAT_CONTENT_PARTS_EMPTY");
+    assert!(requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -392,6 +513,27 @@ fn chat_rejects_unknown_models_invalid_parameters_messages_roles_and_vision() {
             &mut context,
         ),
         "MODEL_CAPABILITY_REQUIRED",
+    );
+    assert_compile_error(
+        ChatNode.compile(
+            "chat",
+            json!({"model":"text", "messages":[{"role":"user", "content":[
+                {"type":"image_url", "optional":true,
+                 "image_url":{"url":"{{ input.image_url }}"}}
+            ]}]}),
+            &mut context,
+        ),
+        "MODEL_CAPABILITY_REQUIRED",
+    );
+    assert_compile_error(
+        ChatNode.compile(
+            "chat",
+            json!({"model":"text", "messages":[{"role":"user", "content":[
+                {"type":"text", "optional":true, "text":"hello"}
+            ]}]}),
+            &mut context,
+        ),
+        "NODE_CONFIG_INVALID",
     );
 }
 
