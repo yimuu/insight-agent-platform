@@ -267,6 +267,45 @@ fn postgres_history_rejects_later_remote_hostaddr_query_override_without_verify_
 }
 
 #[test]
+fn postgres_history_rejects_percent_encoded_remote_hostaddr_query_without_verify_full() {
+    let yaml = base_yaml("  mode: disabled").replace(
+        "history:\n  provider: sqlite\n  path: ../data/history.sqlite3",
+        "history:\n  provider: postgres\n  database_url_env: HISTORY_URL",
+    );
+    let (_directory, path) = write_config(&yaml);
+    let secret = "postgres://user:password@localhost/private?h%6Fstaddr=8.8.8.8";
+
+    let error = load(
+        &path,
+        BTreeMap::from([("HISTORY_URL".to_string(), secret.to_string())]),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "PLATFORM_CONFIG_INVALID");
+    assert!(error.to_string().contains("sslmode=verify-full"));
+    assert!(!error.to_string().contains("password"));
+    assert!(!error.to_string().contains(secret));
+}
+
+#[test]
+fn postgres_history_allows_percent_encoded_exact_local_hostaddr_query_without_tls() {
+    let yaml = base_yaml("  mode: disabled").replace(
+        "history:\n  provider: sqlite\n  path: ../data/history.sqlite3",
+        "history:\n  provider: postgres\n  database_url_env: HISTORY_URL",
+    );
+    let (_directory, path) = write_config(&yaml);
+    let secret = "postgres://user:password@database/private?hostaddr=127%2E0%2E0%2E1";
+
+    let config = load(
+        &path,
+        BTreeMap::from([("HISTORY_URL".to_string(), secret.to_string())]),
+    )
+    .unwrap();
+
+    assert_eq!(config.history.database_url(), Some(secret));
+}
+
+#[test]
 fn postgres_history_rejects_later_remote_host_query_override_without_verify_full() {
     let yaml = base_yaml("  mode: disabled").replace(
         "history:\n  provider: sqlite\n  path: ../data/history.sqlite3",
