@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -14,6 +14,7 @@ use crate::{
         types::{NewRun, RunStatus, TerminalUpdate},
     },
     nodes::registry::NodeExecutorRegistry,
+    observability::{elapsed_ms, json_size_bytes},
 };
 
 use super::{
@@ -79,8 +80,9 @@ impl RunCoordinator {
         stop: StopSignal,
         state: Arc<RunState>,
     ) -> Result<RunStatus, RunError> {
+        let started = Instant::now();
         match self
-            .execute_inner(&new_run, input, stop, Arc::clone(&state))
+            .execute_inner(&new_run, input, stop, Arc::clone(&state), started)
             .await
         {
             Ok(status) => Ok(status),
@@ -90,7 +92,8 @@ impl RunCoordinator {
                     code = error.code(),
                     "run infrastructure failed; recovering durable terminal state"
                 );
-                self.recover_infrastructure_failure(&state, &new_run).await
+                self.recover_infrastructure_failure(&state, &new_run, started)
+                    .await
             }
         }
     }
@@ -101,6 +104,7 @@ impl RunCoordinator {
         input: Value,
         stop: StopSignal,
         state: Arc<RunState>,
+        started: Instant,
     ) -> Result<RunStatus, RunError> {
         self.events
             .publish(
@@ -128,6 +132,15 @@ impl RunCoordinator {
             )
             .await
             .map_err(event_error)?;
+        tracing::info!(
+            event_name = "run.started",
+            run_id = new_run.run_id.as_str(),
+            request_id = new_run.request_id.as_str(),
+            agent_id = new_run.agent_id.as_str(),
+            agent_version = new_run.agent_version.as_str(),
+            attachment = new_run.attachment.as_str(),
+            "run started"
+        );
 
         let context = RunContext::new(
             RunMetadata {
@@ -150,9 +163,11 @@ impl RunCoordinator {
         .await?;
 
         match result {
-            SchedulerResult::Completed(output) => self.complete(&state, new_run, output).await,
+            SchedulerResult::Completed(output) => {
+                self.complete(&state, new_run, output, started).await
+            }
             SchedulerResult::Failed(error) | SchedulerResult::Stopped(error) => {
-                self.finish_error(&state, new_run, error).await
+                self.finish_error(&state, new_run, error, started).await
             }
         }
     }
@@ -178,6 +193,7 @@ impl RunCoordinator {
         state: &RunState,
         run: &NewRun,
         output: RunOutput,
+        started: Instant,
     ) -> Result<RunStatus, RunError> {
         let update = TerminalUpdate::new(
             &run.run_id,
@@ -202,8 +218,23 @@ impl RunCoordinator {
             )
             .await
             .map_err(event_error)?;
-        self.commit_terminal_state(state, run, published, RunStatus::Completed)
-            .await
+        let durable = self
+            .commit_terminal_state(state, run, published, RunStatus::Completed)
+            .await?;
+        tracing::info!(
+            event_name = "run.finished",
+            run_id = run.run_id.as_str(),
+            request_id = run.request_id.as_str(),
+            agent_id = run.agent_id.as_str(),
+            agent_version = run.agent_version.as_str(),
+            attachment = run.attachment.as_str(),
+            status = durable.as_str(),
+            elapsed_ms = elapsed_ms(started),
+            output_bytes = json_size_bytes(&output),
+            error_code = "",
+            "run finished"
+        );
+        Ok(durable)
     }
 
     async fn finish_error(
@@ -211,6 +242,7 @@ impl RunCoordinator {
         state: &RunState,
         run: &NewRun,
         error: RunError,
+        started: Instant,
     ) -> Result<RunStatus, RunError> {
         let (status, event_type) = match error.kind() {
             RunErrorKind::Node => (RunStatus::Failed, RunEventType::RunFailed),
@@ -252,14 +284,31 @@ impl RunCoordinator {
             )
             .await
             .map_err(event_error)?;
-        self.commit_terminal_state(state, run, published, status)
-            .await
+        let error_code = error.code().to_string();
+        let durable = self
+            .commit_terminal_state(state, run, published, status)
+            .await?;
+        tracing::info!(
+            event_name = "run.finished",
+            run_id = run.run_id.as_str(),
+            request_id = run.request_id.as_str(),
+            agent_id = run.agent_id.as_str(),
+            agent_version = run.agent_version.as_str(),
+            attachment = run.attachment.as_str(),
+            status = durable.as_str(),
+            elapsed_ms = elapsed_ms(started),
+            output_bytes = 0_usize,
+            error_code = error_code.as_str(),
+            "run finished"
+        );
+        Ok(durable)
     }
 
     async fn recover_infrastructure_failure(
         &self,
         state: &RunState,
         run: &NewRun,
+        started: Instant,
     ) -> Result<RunStatus, RunError> {
         let message = "runtime infrastructure failed";
         let update = TerminalUpdate::new(
@@ -283,8 +332,23 @@ impl RunCoordinator {
             )
             .await
             .map_err(event_error)?;
-        self.commit_terminal_state(state, run, published, RunStatus::Failed)
-            .await
+        let durable = self
+            .commit_terminal_state(state, run, published, RunStatus::Failed)
+            .await?;
+        tracing::info!(
+            event_name = "run.finished",
+            run_id = run.run_id.as_str(),
+            request_id = run.request_id.as_str(),
+            agent_id = run.agent_id.as_str(),
+            agent_version = run.agent_version.as_str(),
+            attachment = run.attachment.as_str(),
+            status = durable.as_str(),
+            elapsed_ms = elapsed_ms(started),
+            output_bytes = 0_usize,
+            error_code = "INFRASTRUCTURE_FAILURE",
+            "run finished"
+        );
+        Ok(durable)
     }
 
     async fn commit_terminal_state(

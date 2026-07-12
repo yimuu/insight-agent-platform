@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use chrono::Utc;
 use serde_json::json;
@@ -16,6 +16,7 @@ use crate::{
     },
     history::types::NodeOutputRecord,
     nodes::registry::NodeExecutorRegistry,
+    observability::{elapsed_ms, json_size_bytes},
 };
 
 use super::{ExecutionControl, RunContext, RunError, RunErrorKind, StopReason, StopSignal};
@@ -108,7 +109,9 @@ async fn execute_node_inner(
     stop: StopSignal,
     limiter: ExecutionLimiter,
 ) -> Result<NodeExecutionResult, NodeExecutionFailure> {
+    let started = Instant::now();
     let node_id = node.id.clone();
+    let node_kind = node.kind.clone();
     let _permits = limiter
         .acquire(&stop)
         .await
@@ -174,6 +177,19 @@ async fn execute_node_inner(
                 )
                 .await
                 .map_err(|event| NodeExecutionFailure::Infrastructure(event_error(event)))?;
+            tracing::info!(
+                event_name = "node.failed",
+                run_id = context.metadata().run_id.as_str(),
+                request_id = context.metadata().request_id.as_str(),
+                agent_id = context.metadata().agent_id.as_str(),
+                agent_version = context.metadata().agent_version.as_str(),
+                node_id = node_id.as_str(),
+                kind = node_kind.as_str(),
+                elapsed_ms = elapsed_ms(started),
+                error_code = error.code(),
+                error_kind = run_error_kind(error.kind()),
+                "node failed"
+            );
             return Err(classify_failure(&node_id, error));
         }
     };
@@ -194,6 +210,18 @@ async fn execute_node_inner(
         )
         .await
         .map_err(|error| NodeExecutionFailure::Infrastructure(event_error(error)))?;
+    tracing::info!(
+        event_name = "node.completed",
+        run_id = context.metadata().run_id.as_str(),
+        request_id = context.metadata().request_id.as_str(),
+        agent_id = context.metadata().agent_id.as_str(),
+        agent_version = context.metadata().agent_version.as_str(),
+        node_id = node_id.as_str(),
+        kind = node_kind.as_str(),
+        elapsed_ms = elapsed_ms(started),
+        output_bytes = json_size_bytes(&outcome.output),
+        "node completed"
+    );
 
     Ok(NodeExecutionResult {
         node_id,
@@ -240,6 +268,14 @@ fn classify_failure(node_id: &str, error: RunError) -> NodeExecutionFailure {
             error,
         },
         RunErrorKind::Infrastructure => NodeExecutionFailure::Infrastructure(error),
+    }
+}
+
+fn run_error_kind(kind: RunErrorKind) -> &'static str {
+    match kind {
+        RunErrorKind::Node => "node",
+        RunErrorKind::Stop => "stop",
+        RunErrorKind::Infrastructure => "infrastructure",
     }
 }
 
