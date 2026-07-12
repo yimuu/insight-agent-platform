@@ -23,7 +23,10 @@ impl JsonSchemaValidator {
 fn validate_schema_policy(value: &Value) -> Result<(), String> {
     match value {
         Value::Object(object) => {
-            if let Some(schema_uri) = object.get("$schema").and_then(Value::as_str) {
+            if let Some(schema_value) = object.get("$schema") {
+                let schema_uri = schema_value
+                    .as_str()
+                    .ok_or_else(|| "$schema must be a string".to_string())?;
                 validate_schema_uri(schema_uri)?;
             }
             if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
@@ -126,6 +129,17 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("unsupported JSON Schema draft"));
+    }
+
+    #[test]
+    fn rejects_non_string_schema_uri() {
+        let error = compile_schema(&json!({
+            "$schema": 7,
+            "type": "object"
+        }))
+        .unwrap_err();
+
+        assert_eq!(error, "$schema must be a string");
     }
 
     #[test]
