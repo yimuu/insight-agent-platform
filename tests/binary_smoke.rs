@@ -295,7 +295,6 @@ async fn expect_json(request: reqwest::RequestBuilder, expected_status: StatusCo
 
 async fn wait_for_completed_run(client: &Client, base_url: &str, run_id: &str) -> Value {
     let deadline = Instant::now() + RUN_TIMEOUT;
-    let mut last_record = Value::Null;
 
     loop {
         let record = expect_json(
@@ -303,18 +302,16 @@ async fn wait_for_completed_run(client: &Client, base_url: &str, run_id: &str) -
             StatusCode::OK,
         )
         .await;
-        match record["data"]["status"].as_str() {
+        let last_record = match record["data"]["status"].as_str() {
             Some("completed") => return record,
             Some("failed" | "cancelled" | "interrupted") => {
                 panic!("run reached terminal non-success state:\n{record}")
             }
-            Some("created" | "running") => {
-                last_record = record;
-            }
+            Some("created" | "running") => record,
             other => {
                 panic!("run returned unknown status {other:?}:\n{record}");
             }
-        }
+        };
 
         if Instant::now() >= deadline {
             panic!("run {run_id} did not complete within {RUN_TIMEOUT:?}:\n{last_record}");
