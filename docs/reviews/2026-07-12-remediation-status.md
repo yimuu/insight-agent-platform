@@ -12,7 +12,8 @@ Historical snapshots:
 ## Repository state
 
 - Branch: `main`.
-- Remote state: local `main` is ahead of `origin/main`; push is still pending for the latest remediation/status commits.
+- Remote state: `main` is synchronized with `origin/main`.
+- Stable-baseline tag candidate: latest `main` after this status refresh is pushed.
 - Scope of this document: status synchronization only. It does not change runtime code, dependencies, migrations, API behavior, DSL behavior, SSE behavior, or persistence behavior.
 
 ## Executive status
@@ -47,7 +48,7 @@ Historical snapshots:
 | R3 — YAML parser replacement | Close `DEP-P2-003` and AR-DEP-002 | Implemented | `06d715e`; current graph has `yaml_serde@0.10.4`; `serde_yaml` is absent | YAML compatibility/resource corpus can still be expanded, but archived parser use is closed. |
 | R4 — Compatible lock refresh | Safe direct updates for bytes and regex | Implemented | `55bc8cb` | No current follow-up unless a new compatible refresh is requested. |
 | R5 — HTTP stack majors | Axum 0.8 and Reqwest 0.13 | Implemented | `8b966fa`, `63bee41`, `d4fa74d`, `62006fa`, `c81f495`; current graph has `axum@0.8.9` and `reqwest@0.13.4` | Public Formal V1 paths and live-only SSE contract remain unchanged. |
-| R6 — Direct macro/crypto alignment | SHA-2 0.11 and thiserror direct dependency cleanup | Implemented locally; push pending | `0357aba`, `1fe9ca1`, `d211a49`, `ebb3a00`, `62695a9`, `4a35941`, `7db444f`; root crate directly uses `sha2@0.11.0`; direct `thiserror` was removed | Residual `sha2 0.10` and `thiserror 1` are upstream-owned transitive paths. |
+| R6 — Direct macro/crypto alignment | SHA-2 0.11 and thiserror direct dependency cleanup | Implemented and pushed | `0357aba`, `1fe9ca1`, `d211a49`, `ebb3a00`, `62695a9`, `4a35941`, `7db444f`; root crate directly uses `sha2@0.11.0`; direct `thiserror` was removed | Residual `sha2 0.10` and `thiserror 1` are upstream-owned transitive paths. |
 | R7 — Future SQLx upgrade gate | Governance gate for any future SQLx upgrade | Future gate / not executed | Current direct SQLx remains `0.9.0`, which was current in the 2026-07-11 review | Execute only when a future SQLx version is selected; requires its own MSRV, feature, DB, migration, TLS, and recovery matrix. |
 
 ## Residual duplicate dependency status
@@ -99,7 +100,7 @@ The items below remain verification work, not confirmed defects. They should be 
 
 ## Recommended next actions
 
-1. Push the current local `main` commits so R6 and this status synchronization are visible on `origin/main`.
+1. Tag the current synchronized `main` as the stable baseline if the team wants an explicit rollback/reference point.
 2. Treat `docs/reviews/2026-07-12-remediation-status.md` as the current open-work entrypoint.
 3. Do not repeat A0-A8 or R0-R6 unless a regression is found.
 4. Choose future work from either R7 or one Needs verification item at a time.
