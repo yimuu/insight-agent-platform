@@ -930,7 +930,7 @@ mod tests {
                     name: "agent".to_string(),
                     description: String::new(),
                     version_hash: "sha256:agent".to_string(),
-                    input_schema: Arc::new(jsonschema::JSONSchema::compile(&json!({})).unwrap()),
+                    input_schema: Arc::new(crate::schema::compile_schema(&json!({})).unwrap()),
                     entry: "missing".to_string(),
                     execution_plan: ExecutionPlan::sequential("missing", Vec::<String>::new()),
                     nodes: BTreeMap::new(),

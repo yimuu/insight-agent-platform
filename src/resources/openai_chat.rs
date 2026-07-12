@@ -7,7 +7,6 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream, StreamExt};
-use jsonschema::JSONSchema;
 use reqwest::{redirect::Policy, Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -16,6 +15,7 @@ use crate::{
     dsl::CompileError,
     observability::{elapsed_ms, json_size_bytes},
     runtime::RunError,
+    schema::{compile_schema, JsonSchemaValidator},
 };
 
 use super::models::{
@@ -87,7 +87,7 @@ pub struct OpenAiChatModel {
     endpoint: Url,
     model: String,
     capabilities: BTreeSet<ModelCapability>,
-    parameter_validator: std::sync::Arc<JSONSchema>,
+    parameter_validator: std::sync::Arc<JsonSchemaValidator>,
     limits: OpenAiChatLimits,
 }
 
@@ -167,7 +167,7 @@ impl OpenAiChatModel {
             .map_err(|_| {
                 CompileError::new("MODEL_CONFIG_INVALID", "failed to build OpenAI HTTP client")
             })?;
-        let parameter_validator = JSONSchema::compile(&parameter_schema()).map_err(|_| {
+        let parameter_validator = compile_schema(&parameter_schema()).map_err(|_| {
             CompileError::new(
                 "MODEL_CONFIG_INVALID",
                 "failed to compile OpenAI parameter schema",

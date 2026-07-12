@@ -1,12 +1,12 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
-use jsonschema::JSONSchema;
 use serde_json::Value;
 
 use crate::{
     dsl::CompileError,
     runtime::{ExecutionControl, RunError},
+    schema::{compile_schema, JsonSchemaValidator},
 };
 
 #[derive(Debug, Clone)]
@@ -48,8 +48,8 @@ pub trait Action: Send + Sync {
 pub struct RegisteredAction {
     descriptor: ActionDescriptor,
     action: Arc<dyn Action>,
-    input_validator: JSONSchema,
-    output_validator: JSONSchema,
+    input_validator: JsonSchemaValidator,
+    output_validator: JsonSchemaValidator,
 }
 
 impl RegisteredAction {
@@ -80,7 +80,7 @@ impl RegisteredAction {
 }
 
 fn validate_json(
-    validator: &JSONSchema,
+    validator: &JsonSchemaValidator,
     value: &Value,
     code: &'static str,
     message: &'static str,
@@ -115,13 +115,13 @@ impl ActionRegistry {
                 format!("action '{name}' is already registered"),
             ));
         }
-        let input_validator = JSONSchema::compile(&descriptor.input_schema).map_err(|error| {
+        let input_validator = compile_schema(&descriptor.input_schema).map_err(|error| {
             CompileError::new(
                 "ACTION_INPUT_SCHEMA_INVALID",
                 format!("action '{name}' input schema is invalid: {error}"),
             )
         })?;
-        let output_validator = JSONSchema::compile(&descriptor.output_schema).map_err(|error| {
+        let output_validator = compile_schema(&descriptor.output_schema).map_err(|error| {
             CompileError::new(
                 "ACTION_OUTPUT_SCHEMA_INVALID",
                 format!("action '{name}' output schema is invalid: {error}"),

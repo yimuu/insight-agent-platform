@@ -7,11 +7,10 @@ use std::{
 };
 
 use handlebars::Handlebars;
-use jsonschema::JSONSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::runtime::RunError;
+use crate::{runtime::RunError, schema::JsonSchemaValidator};
 
 use super::EmitPolicy;
 
@@ -135,7 +134,7 @@ pub struct CompiledAgent {
     pub name: String,
     pub description: String,
     pub version_hash: String,
-    pub input_schema: Arc<JSONSchema>,
+    pub input_schema: Arc<JsonSchemaValidator>,
     pub entry: String,
     pub nodes: BTreeMap<String, CompiledNode>,
     pub execution_plan: ExecutionPlan,

@@ -39,8 +39,8 @@ use insight_agent_platform::{
         execute_node, stop_pair, ExecutionControl, ExecutionLimiter, NodeExecutionFailure,
         RunContext, RunError, RunErrorKind, RunMetadata, Scheduler, SchedulerResult, StopReason,
     },
+    schema::compile_schema,
 };
-use jsonschema::JSONSchema;
 use serde_json::{json, Value};
 use tokio::sync::{Mutex, Notify, Semaphore};
 
@@ -629,7 +629,7 @@ fn scheduler_agent(nodes: Vec<CompiledNode>, entry: &str) -> Arc<CompiledAgent> 
         name: "Scheduler Agent".to_string(),
         description: String::new(),
         version_hash: "sha256:scheduler".to_string(),
-        input_schema: Arc::new(JSONSchema::compile(&json!({"type":"object"})).unwrap()),
+        input_schema: Arc::new(compile_schema(&json!({"type":"object"})).unwrap()),
         entry: entry.to_string(),
         execution_plan: ExecutionPlan::sequential(entry, nodes.keys().cloned()),
         nodes,

@@ -33,8 +33,8 @@ use insight_agent_platform::{
     runtime::{
         CompiledAgentRegistry, ExecutionControl, RunContext, RunError, RunService, RunServiceConfig,
     },
+    schema::compile_schema,
 };
-use jsonschema::JSONSchema;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -110,7 +110,7 @@ fn agent(id: &str, behavior: ApiBehavior) -> Arc<CompiledAgent> {
         description: "Safe public metadata".to_string(),
         version_hash: format!("sha256:{id}"),
         input_schema: Arc::new(
-            JSONSchema::compile(&json!({
+            compile_schema(&json!({
                 "type": "object",
                 "required": ["text"],
                 "additionalProperties": false,

@@ -8,4 +8,5 @@ pub mod nodes;
 pub(crate) mod observability;
 pub mod resources;
 pub mod runtime;
+pub mod schema;
 pub(crate) mod yaml;

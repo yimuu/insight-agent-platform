@@ -255,3 +255,71 @@ async fn execution_control_preserves_stop_reason_and_emits_content() {
     assert!(!controller.request(StopReason::Cancelled));
     assert_eq!(control.stop_reason(), Some(StopReason::Interrupted));
 }
+
+#[derive(Debug, Clone, Copy)]
+struct SchemaPolicyAction {
+    input_schema: fn() -> serde_json::Value,
+    output_schema: fn() -> serde_json::Value,
+}
+
+#[async_trait]
+impl Action for SchemaPolicyAction {
+    fn descriptor(&self) -> ActionDescriptor {
+        ActionDescriptor {
+            name: "schema_policy",
+            input_schema: (self.input_schema)(),
+            output_schema: (self.output_schema)(),
+            idempotent: true,
+            streams_content: false,
+        }
+    }
+
+    async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
+        Ok(input)
+    }
+}
+
+fn empty_object_schema() -> serde_json::Value {
+    json!({"type": "object"})
+}
+
+fn draft202012_schema() -> serde_json::Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object"
+    })
+}
+
+fn external_ref_schema() -> serde_json::Value {
+    json!({"$ref": "file:///tmp/shared-schema.json"})
+}
+
+#[test]
+fn action_registry_rejects_non_draft7_input_schema_uri() {
+    let mut registry = ActionRegistry::default();
+    let error = registry
+        .register(SchemaPolicyAction {
+            input_schema: draft202012_schema,
+            output_schema: empty_object_schema,
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code(), "ACTION_INPUT_SCHEMA_INVALID");
+    assert!(error.to_string().contains("unsupported JSON Schema draft"));
+}
+
+#[test]
+fn action_registry_rejects_external_output_schema_ref() {
+    let mut registry = ActionRegistry::default();
+    let error = registry
+        .register(SchemaPolicyAction {
+            input_schema: empty_object_schema,
+            output_schema: external_ref_schema,
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code(), "ACTION_OUTPUT_SCHEMA_INVALID");
+    assert!(error
+        .to_string()
+        .contains("external JSON Schema references are not supported"));
+}

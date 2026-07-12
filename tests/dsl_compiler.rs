@@ -341,3 +341,54 @@ fn accepts_references_to_dominating_predecessors() {
     let (_temp, root) = write_agent(&yaml, "Hello");
     assert!(compiler().compile_dir(Path::new(&root)).is_ok());
 }
+
+#[test]
+fn compiler_rejects_non_draft7_input_schema_uri() {
+    let yaml = r#"
+version: 1
+id: test_agent
+name: Test Agent
+input:
+  schema:
+    $schema: https://json-schema.org/draft/2020-12/schema
+    type: object
+prompts: {}
+entry: done
+nodes:
+  done:
+    type: test.terminal
+    config: {}
+"#;
+
+    let (_temp, root) = write_agent(yaml, "");
+    let error = compiler().compile_dir(&root).unwrap_err();
+
+    assert_eq!(error.code(), "INPUT_SCHEMA_INVALID");
+    assert!(error.to_string().contains("unsupported JSON Schema draft"));
+}
+
+#[test]
+fn compiler_rejects_external_input_schema_ref() {
+    let yaml = r#"
+version: 1
+id: test_agent
+name: Test Agent
+input:
+  schema:
+    $ref: https://example.invalid/schema.json
+prompts: {}
+entry: done
+nodes:
+  done:
+    type: test.terminal
+    config: {}
+"#;
+
+    let (_temp, root) = write_agent(yaml, "");
+    let error = compiler().compile_dir(&root).unwrap_err();
+
+    assert_eq!(error.code(), "INPUT_SCHEMA_INVALID");
+    assert!(error
+        .to_string()
+        .contains("external JSON Schema references are not supported"));
+}

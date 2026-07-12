@@ -32,8 +32,8 @@ use insight_agent_platform::{
         CompiledAgentRegistry, ExecutionControl, RequestMetadata, RunContext, RunError, RunService,
         RunServiceConfig, ServiceError,
     },
+    schema::compile_schema,
 };
-use jsonschema::JSONSchema;
 use serde_json::{json, Value};
 use tokio::sync::{watch, Mutex, Notify};
 
@@ -136,7 +136,7 @@ fn agent(id: &str, behavior: ServiceBehavior) -> Arc<CompiledAgent> {
         name: id.to_string(),
         description: String::new(),
         version_hash: format!("sha256:{id}"),
-        input_schema: Arc::new(JSONSchema::compile(&json!({"type":"object"})).unwrap()),
+        input_schema: Arc::new(compile_schema(&json!({"type":"object"})).unwrap()),
         entry: "work".to_string(),
         execution_plan: ExecutionPlan::sequential("work", nodes.keys().cloned()),
         nodes,
@@ -203,7 +203,7 @@ fn parallel_blocking_agent(
         name: "parallel-blocking".to_string(),
         description: String::new(),
         version_hash: "sha256:parallel-blocking".to_string(),
-        input_schema: Arc::new(JSONSchema::compile(&json!({"type":"object"})).unwrap()),
+        input_schema: Arc::new(compile_schema(&json!({"type":"object"})).unwrap()),
         entry: "fanout".to_string(),
         execution_plan: ExecutionPlan {
             entry: "fanout".to_string(),

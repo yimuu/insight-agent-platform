@@ -33,8 +33,8 @@ use insight_agent_platform::{
         stop_pair, ExecutionControl, ExecutionLimiter, RunContext, RunCoordinator, RunError,
         RunState, StopReason,
     },
+    schema::compile_schema,
 };
-use jsonschema::JSONSchema;
 use serde_json::{json, Value};
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tracing::{
@@ -512,7 +512,7 @@ fn agent(nodes: Vec<CompiledNode>, entry: &str) -> Arc<CompiledAgent> {
         name: "Coordinator Agent".to_string(),
         description: String::new(),
         version_hash: "sha256:coordinator".to_string(),
-        input_schema: Arc::new(JSONSchema::compile(&json!({"type":"object"})).unwrap()),
+        input_schema: Arc::new(compile_schema(&json!({"type":"object"})).unwrap()),
         entry: entry.to_string(),
         execution_plan: ExecutionPlan::sequential(entry, nodes.keys().cloned()),
         nodes,
@@ -583,7 +583,7 @@ fn parallel_agent(
         name: "Coordinator Agent".to_string(),
         description: String::new(),
         version_hash: "sha256:coordinator".to_string(),
-        input_schema: Arc::new(JSONSchema::compile(&json!({"type":"object"})).unwrap()),
+        input_schema: Arc::new(compile_schema(&json!({"type":"object"})).unwrap()),
         entry: "fanout".to_string(),
         execution_plan: ExecutionPlan {
             entry: "fanout".to_string(),

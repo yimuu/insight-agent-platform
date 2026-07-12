@@ -7,12 +7,12 @@ use std::{
 };
 
 use handlebars::{no_escape, Handlebars, Template};
-use jsonschema::JSONSchema;
 use sha2::{Digest, Sha256};
 
 use crate::{
     nodes::registry::NodeTypeRegistry,
     resources::{actions::ActionRegistry, models::ModelRegistry},
+    schema::compile_schema,
 };
 
 use super::{
@@ -197,7 +197,7 @@ impl AgentCompiler {
         for node_id in raw.nodes.keys() {
             validate_node_id(node_id)?;
         }
-        let input_schema = Arc::new(JSONSchema::compile(&raw.input.schema).map_err(|error| {
+        let input_schema = Arc::new(compile_schema(&raw.input.schema).map_err(|error| {
             CompileError::new(
                 "INPUT_SCHEMA_INVALID",
                 format!("agent '{}' input schema is invalid: {error}", raw.id),
