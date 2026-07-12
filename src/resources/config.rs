@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use super::{
     models::{ModelCapability, ModelRegistry},
-    openai_chat::{OpenAiChatLimits, OpenAiChatModel},
+    openai_chat::{OpenAiChatLimits, OpenAiChatModel, OpenAiTransportPolicy},
 };
 
 pub fn load_model_registry(path: &Path) -> Result<ModelRegistry, ResourceConfigError> {
@@ -59,6 +59,7 @@ pub fn load_model_registry_with_env(
                 connect_timeout,
                 request_timeout,
                 limits,
+                transport,
             } => {
                 let api_key = api_key_env
                     .map(|name| required_secret(&name, &get_env))
@@ -70,7 +71,8 @@ pub fn load_model_registry_with_env(
                     })
                     .collect::<BTreeSet<_>>();
                 let limits = limits.unwrap_or_default().resolve()?;
-                let model = OpenAiChatModel::new_with_limits(
+                let transport_policy = transport.unwrap_or_default().plaintext_http.into();
+                let model = OpenAiChatModel::new_with_limits_and_transport_policy(
                     api_key,
                     base_url,
                     model,
@@ -78,6 +80,7 @@ pub fn load_model_registry_with_env(
                     positive_duration(&connect_timeout, "connect_timeout")?,
                     positive_duration(&request_timeout, "request_timeout")?,
                     limits,
+                    transport_policy,
                 )
                 .map_err(|error| {
                     ResourceConfigError::new(error.code(), format!("model '{alias}': {error}"))
@@ -110,6 +113,7 @@ enum ModelYaml {
         connect_timeout: String,
         request_timeout: String,
         limits: Option<OpenAiChatLimitsYaml>,
+        transport: Option<OpenAiTransportYaml>,
     },
 }
 
@@ -149,6 +153,32 @@ impl OpenAiChatLimitsYaml {
         }
         .validate()
         .map_err(|error| ResourceConfigError::new(error.code(), error.to_string()))
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenAiTransportYaml {
+    #[serde(default)]
+    plaintext_http: PlaintextHttpYaml,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PlaintextHttpYaml {
+    #[default]
+    Disabled,
+    Loopback,
+    TrustedPrivate,
+}
+
+impl From<PlaintextHttpYaml> for OpenAiTransportPolicy {
+    fn from(value: PlaintextHttpYaml) -> Self {
+        match value {
+            PlaintextHttpYaml::Disabled => Self::HttpsOnly,
+            PlaintextHttpYaml::Loopback => Self::AllowLoopbackHttp,
+            PlaintextHttpYaml::TrustedPrivate => Self::AllowTrustedPrivateHttp,
+        }
     }
 }
 

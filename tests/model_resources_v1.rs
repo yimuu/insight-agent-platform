@@ -117,3 +117,85 @@ fn named_model_secrets_are_required_and_must_not_be_empty() {
         .unwrap();
     assert_eq!(empty.code(), "MODEL_SECRET_EMPTY");
 }
+
+#[test]
+fn model_resources_reject_plaintext_http_by_default_without_leaking_secrets() {
+    let yaml = model_yaml("").replace(
+        "base_url: https://models.example.test/v1",
+        "base_url: http://models.example.test/v1?token=url-secret",
+    );
+    let (_directory, path) = write_config(&yaml);
+    let error = load_model_registry_with_env(&path, |name| {
+        (name == "MODEL_API_KEY").then(|| "api-key-secret".to_string())
+    })
+    .err()
+    .expect("plaintext HTTP must fail by default");
+
+    assert_eq!(error.code(), "MODEL_CONFIG_INVALID");
+    let rendered = format!("{error:?} {error}");
+    assert!(!rendered.contains("api-key-secret"));
+    assert!(!rendered.contains("url-secret"));
+}
+
+#[test]
+fn model_resources_allow_explicit_loopback_and_trusted_private_http() {
+    let loopback = model_yaml("    transport:\n      plaintext_http: loopback\n").replace(
+        "base_url: https://models.example.test/v1",
+        "base_url: http://localhost:11434/v1",
+    );
+    let (_directory, path) = write_config(&loopback);
+    load_model_registry_with_env(&path, |name| {
+        (name == "MODEL_API_KEY").then(|| "api-key-secret".to_string())
+    })
+    .unwrap();
+
+    let trusted_private = model_yaml("    transport:\n      plaintext_http: trusted_private\n")
+        .replace(
+            "base_url: https://models.example.test/v1",
+            "base_url: http://model-service.internal:8080/v1",
+        );
+    let (_directory, path) = write_config(&trusted_private);
+    load_model_registry_with_env(&path, |name| {
+        (name == "MODEL_API_KEY").then(|| "api-key-secret".to_string())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_resources_reject_non_loopback_http_with_loopback_policy() {
+    let yaml = model_yaml("    transport:\n      plaintext_http: loopback\n").replace(
+        "base_url: https://models.example.test/v1",
+        "base_url: http://10.0.0.10:8080/v1",
+    );
+    let (_directory, path) = write_config(&yaml);
+    let error = load_model_registry_with_env(&path, |name| {
+        (name == "MODEL_API_KEY").then(|| "api-key-secret".to_string())
+    })
+    .err()
+    .expect("non-loopback HTTP must fail with loopback policy");
+
+    assert_eq!(error.code(), "MODEL_CONFIG_INVALID");
+}
+
+#[test]
+fn model_resources_reject_unknown_transport_policy_and_url_userinfo() {
+    let unknown = model_yaml("    transport:\n      plaintext_http: internet\n");
+    let (_directory, path) = write_config(&unknown);
+    let error = load_model_registry_with_env(&path, |_| Some("secret".to_string()))
+        .err()
+        .expect("unknown transport policy must fail");
+    assert_eq!(error.code(), "MODEL_CONFIG_INVALID");
+
+    let userinfo = model_yaml("    transport:\n      plaintext_http: trusted_private\n").replace(
+        "base_url: https://models.example.test/v1",
+        "base_url: http://user:pass@model-service.internal:8080/v1",
+    );
+    let (_directory, path) = write_config(&userinfo);
+    let error = load_model_registry_with_env(&path, |_| Some("api-key-secret".to_string()))
+        .err()
+        .expect("URL userinfo must fail");
+    assert_eq!(error.code(), "MODEL_CONFIG_INVALID");
+    let rendered = format!("{error:?} {error}");
+    assert!(!rendered.contains("user:pass"));
+    assert!(!rendered.contains("api-key-secret"));
+}
