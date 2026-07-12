@@ -128,6 +128,7 @@ impl RestrictedHttpGetAction {
             ));
         }
         let client = reqwest::Client::builder()
+            .tls_backend_rustls()
             .redirect(Policy::none())
             .connect_timeout(timeout)
             .timeout(timeout)

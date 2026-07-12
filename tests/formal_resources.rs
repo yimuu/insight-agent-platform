@@ -657,6 +657,62 @@ async fn openai_errors_and_debug_never_expose_api_key_or_response_body() {
 }
 
 #[tokio::test]
+async fn openai_client_does_not_follow_redirects_or_leak_authorization_to_location() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let second_request_seen = Arc::new(Notify::new());
+    let server_second_request_seen = Arc::clone(&second_request_seen);
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 2048];
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert!(read > 0);
+            buffer.extend_from_slice(&chunk[..read]);
+            if buffer.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&buffer);
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer api-key-secret"));
+        socket
+            .write_all(
+                b"HTTP/1.1 302 Found\r\nlocation: /redirected\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await {
+            Ok(Ok((_socket, _))) => server_second_request_seen.notify_one(),
+            Ok(Err(error)) => panic!("unexpected accept error: {error}"),
+            Err(_) => {}
+        }
+    });
+
+    let model = loopback_model(format!("http://{address}/v1"), Some("api-key-secret".to_string()));
+    let error = match model
+        .stream_chat(ChatRequest {
+            messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
+            parameters: json!({}),
+        })
+        .await
+    {
+        Ok(_) => panic!("expected upstream redirect status failure"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.code(), "UPSTREAM_STATUS");
+    assert!(error.to_string().contains("302"));
+    assert!(tokio::time::timeout(Duration::from_millis(10), second_request_seen.notified())
+        .await
+        .is_err());
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn dropping_openai_stream_closes_the_in_flight_http_body() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

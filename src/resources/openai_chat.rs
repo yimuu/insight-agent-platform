@@ -160,6 +160,7 @@ impl OpenAiChatModel {
         let path = format!("{}/chat/completions", endpoint.path().trim_end_matches('/'));
         endpoint.set_path(&path);
         let client = Client::builder()
+            .tls_backend_rustls()
             .redirect(Policy::none())
             .connect_timeout(connect_timeout)
             .timeout(request_timeout)

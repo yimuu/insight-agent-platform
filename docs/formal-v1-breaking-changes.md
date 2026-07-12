@@ -118,6 +118,15 @@ postgres://user:password@database/private?sslmode=verify-full
 - This is intentional: relying on old route syntax after the major upgrade would hide framework-compatibility behavior inside the route table and make future route reviews less clear.
 - API response envelopes, SSE event payloads, auth behavior, cancellation behavior, and unsupported replay/recovery routes are unchanged.
 
+## Dependency governance: Reqwest 0.13 TLS contract
+
+- Phase 3 upgrades the HTTP client from Reqwest 0.12 to Reqwest 0.13.
+- The direct feature selection changes from `rustls-tls` to `rustls` because Reqwest 0.13 changed its TLS feature contract.
+- Reqwest default features remain disabled. The platform does not opt into implicit `default-tls`, system proxy behavior, HTTP/2, compression, cookies, SOCKS, HTTP/3, or alternate DNS behavior in this phase.
+- Project-built Reqwest clients explicitly call `tls_backend_rustls()` so model and action traffic do not depend on a backend-abstract default TLS alias.
+- HTTPS verification uses Reqwest 0.13's rustls/platform verifier path and the runtime environment's trusted roots. Private HTTPS model services should install private CA roots at the host/container layer until a future explicit per-model CA configuration exists.
+- Existing `transport.plaintext_http` semantics are unchanged: default HTTPS-only, `loopback` for exact local hosts, and `trusted_private` when the deployment owner accepts a private-network plaintext model hop.
+
 医学示例也不是兼容合同。正式示例使用单个 `image_url` 展示一个有 `vision` 能力的多模态消息；原型的 `images` 数组调用方需要选择一个图片 URL，或通过自定义节点/后续多图内容类型扩展。这个限制只属于当前示例输入，不是核心运行时的医学规则。
 
 ## 历史重置
