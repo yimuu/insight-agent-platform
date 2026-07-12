@@ -519,6 +519,29 @@ fn openai_transport_policy_allows_only_explicit_plaintext_scopes() {
 }
 
 #[test]
+fn openai_transport_policy_rejects_non_exact_loopback_aliases() {
+    for base_url in [
+        "http://127.1:8080/v1",
+        "http://127.000.000.001:8080/v1",
+        "http://2130706433:8080/v1",
+        "http://[0:0:0:0:0:0:0:1]:8080/v1",
+    ] {
+        let error = OpenAiChatModel::new_with_limits_and_transport_policy(
+            None,
+            base_url.to_string(),
+            "fallback-model".to_string(),
+            BTreeSet::new(),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            OpenAiChatLimits::default(),
+            OpenAiTransportPolicy::AllowLoopbackHttp,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "MODEL_CONFIG_INVALID", "{base_url}");
+    }
+}
+
+#[test]
 fn openai_transport_policy_rejects_url_userinfo_for_every_policy() {
     for (base_url, policy) in [
         (

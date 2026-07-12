@@ -154,7 +154,7 @@ impl OpenAiChatModel {
         let limits = limits.validate()?;
         let mut endpoint = Url::parse(&base_url)
             .map_err(|_| CompileError::new("MODEL_CONFIG_INVALID", "OpenAI base URL is invalid"))?;
-        validate_endpoint_transport(&endpoint, transport_policy)?;
+        validate_endpoint_transport(&endpoint, &base_url, transport_policy)?;
         endpoint.set_query(None);
         endpoint.set_fragment(None);
         let path = format!("{}/chat/completions", endpoint.path().trim_end_matches('/'));
@@ -557,6 +557,7 @@ fn endpoint_origin(endpoint: &Url) -> String {
 
 fn validate_endpoint_transport(
     endpoint: &Url,
+    base_url: &str,
     policy: OpenAiTransportPolicy,
 ) -> Result<(), CompileError> {
     if endpoint.host_str().is_none() {
@@ -573,7 +574,7 @@ fn validate_endpoint_transport(
     }
     match endpoint.scheme() {
         "https" => Ok(()),
-        "http" => validate_plaintext_http(endpoint, policy),
+        "http" => validate_plaintext_http(base_url, policy),
         _ => Err(CompileError::new(
             "MODEL_CONFIG_INVALID",
             "OpenAI base URL must use HTTP or HTTPS and include a host",
@@ -582,7 +583,7 @@ fn validate_endpoint_transport(
 }
 
 fn validate_plaintext_http(
-    endpoint: &Url,
+    base_url: &str,
     policy: OpenAiTransportPolicy,
 ) -> Result<(), CompileError> {
     match policy {
@@ -590,20 +591,39 @@ fn validate_plaintext_http(
             "MODEL_CONFIG_INVALID",
             "OpenAI base URL must use HTTPS unless plaintext HTTP is explicitly allowed",
         )),
-        OpenAiTransportPolicy::AllowLoopbackHttp if is_exact_loopback_host(endpoint) => Ok(()),
+        OpenAiTransportPolicy::AllowLoopbackHttp if has_exact_raw_loopback_host(base_url) => Ok(()),
         OpenAiTransportPolicy::AllowLoopbackHttp => Err(CompileError::new(
             "MODEL_CONFIG_INVALID",
-            "OpenAI loopback HTTP is restricted to localhost, 127.0.0.1, or ::1",
+            "OpenAI loopback HTTP is restricted to localhost, 127.0.0.1, or [::1]",
         )),
         OpenAiTransportPolicy::AllowTrustedPrivateHttp => Ok(()),
     }
 }
 
-fn is_exact_loopback_host(endpoint: &Url) -> bool {
+fn has_exact_raw_loopback_host(base_url: &str) -> bool {
     matches!(
-        endpoint.host_str(),
-        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+        raw_authority_host(base_url),
+        Some("localhost" | "127.0.0.1" | "[::1]")
     )
+}
+
+fn raw_authority_host(base_url: &str) -> Option<&str> {
+    let (_, after_scheme) = base_url.split_once("://")?;
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host_port)| host_port);
+
+    if authority.starts_with('[') {
+        let host_end = authority.find(']')?;
+        return Some(&authority[..=host_end]);
+    }
+
+    let host_end = authority.find(':').unwrap_or(authority.len());
+    Some(&authority[..host_end])
 }
 
 fn classify_request_error(error: &reqwest::Error) -> &'static str {

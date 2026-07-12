@@ -178,6 +178,29 @@ fn model_resources_reject_non_loopback_http_with_loopback_policy() {
 }
 
 #[test]
+fn model_resources_reject_non_exact_loopback_aliases() {
+    for base_url in [
+        "http://127.1:8080/v1",
+        "http://127.000.000.001:8080/v1",
+        "http://2130706433:8080/v1",
+        "http://[0:0:0:0:0:0:0:1]:8080/v1",
+    ] {
+        let yaml = model_yaml("    transport:\n      plaintext_http: loopback\n").replace(
+            "base_url: https://models.example.test/v1",
+            &format!("base_url: {base_url}"),
+        );
+        let (_directory, path) = write_config(&yaml);
+        let error = load_model_registry_with_env(&path, |name| {
+            (name == "MODEL_API_KEY").then(|| "api-key-secret".to_string())
+        })
+        .err()
+        .expect("non-exact loopback alias must fail with loopback policy");
+
+        assert_eq!(error.code(), "MODEL_CONFIG_INVALID", "{base_url}");
+    }
+}
+
+#[test]
 fn model_resources_reject_unknown_transport_policy_and_url_userinfo() {
     let unknown = model_yaml("    transport:\n      plaintext_http: internet\n");
     let (_directory, path) = write_config(&unknown);
