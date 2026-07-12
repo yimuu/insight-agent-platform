@@ -54,7 +54,7 @@ In `tests/dsl_compiler.rs`, insert this constant immediately after `fn valid_yam
 
 ```rust
 const VALID_AGENT_VERSION_HASH: &str =
-    "sha256:45c05b5e6d369203beb19b3665b6218ea9005111b05a25d369dd";
+    "sha256:ddb7849ef262359b787d928f2bca65c90cfe5e670fad04a4a15614af0cf6f30c";
 ```
 
 - [ ] **Step 2: Replace the prefix-only hash assertions**
@@ -141,7 +141,7 @@ cargo test --test dsl_compiler compiles_valid_graph_and_hashes_prompt_contents -
 Expected:
 
 - Cargo resolves the root crate's direct `sha2` dependency to `0.11.0`.
-- The test passes with `sha256:45c05b5e6d369203beb19b3665b6218ea9005111b05a25d369dd`.
+- The test passes with `sha256:ddb7849ef262359b787d928f2bca65c90cfe5e670fad04a4a15614af0cf6f30c`.
 - No source change is required in `src/dsl/compiler.rs` unless `sha2 0.11` reports a compile error for the existing `Digest`/`Sha256` API.
 
 - [ ] **Step 3: Inspect the SHA-2 dependency paths**
@@ -271,7 +271,7 @@ In `docs/reviews/2026-07-11-dependency-governance-review.md`, insert this sectio
 R6 was implemented as direct dependency ownership cleanup rather than a mechanical `thiserror = "2"` declaration.
 
 - The root crate now directly depends on `sha2 0.11` for Agent version hashing.
-- The existing stable compiler fixture preserves the exact Agent hash `sha256:45c05b5e6d369203beb19b3665b6218ea9005111b05a25d369dd`.
+- The existing stable compiler fixture preserves the exact Agent hash `sha256:ddb7849ef262359b787d928f2bca65c90cfe5e670fad04a4a15614af0cf6f30c`.
 - The root crate no longer directly depends on `thiserror` because project error types are handwritten and no project-owned `thiserror::Error` derives are used.
 - Residual `sha2 0.10` paths remain expected through SQLx core/sqlite/macro paths and the Handlebars/Pest build path.
 - Residual `thiserror 1` remains expected through CEL, while `thiserror 2` remains expected through Handlebars and SQLx.
