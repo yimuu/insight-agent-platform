@@ -1,0 +1,248 @@
+use std::{
+    collections::BTreeSet,
+    fmt,
+    path::Path,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use futures::stream;
+use insight_agent_platform::{
+    dsl::{
+        compiled::RunOutput,
+        compiler::{AgentCompiler, CompileLimits},
+    },
+    events::{
+        hub::{EventHub, EventHubConfig},
+        protocol::RunEvent,
+    },
+    history::{
+        repository::{HistoryError, RunRepository},
+        types::{NewRun, NodeOutputRecord, RunRecord, TerminalUpdate},
+    },
+    nodes::default_node_registries,
+    resources::{
+        actions::ActionRegistry,
+        models::{ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability, ModelRegistry},
+    },
+    runtime::{
+        stop_pair, CompiledAgentRegistry, ExecutionLimiter, RunContext, RunError, RunMetadata,
+        Scheduler, SchedulerResult,
+    },
+};
+use serde_json::{json, Value};
+use tokio::sync::Semaphore;
+
+#[derive(Clone)]
+struct RecordingVisionModel {
+    requests: Arc<Mutex<Vec<ChatRequest>>>,
+}
+
+impl fmt::Debug for RecordingVisionModel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("RecordingVisionModel").finish()
+    }
+}
+
+#[async_trait]
+impl ChatModel for RecordingVisionModel {
+    fn capabilities(&self) -> BTreeSet<ModelCapability> {
+        BTreeSet::from([ModelCapability::Vision])
+    }
+
+    fn validate_parameters(
+        &self,
+        _parameters: &Value,
+    ) -> Result<(), insight_agent_platform::dsl::CompileError> {
+        Ok(())
+    }
+
+    async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, RunError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(Box::pin(stream::iter(vec![Ok(ChatChunk {
+            text: "直接回答追问".to_string(),
+            finish_reason: Some("stop".to_string()),
+            usage: None,
+        })])))
+    }
+}
+
+#[derive(Debug, Default)]
+struct NoopRepository;
+
+#[async_trait]
+impl RunRepository for NoopRepository {
+    async fn create_run(&self, _run: NewRun) -> Result<(), HistoryError> {
+        Ok(())
+    }
+    async fn mark_running(&self, _run_id: &str, _at: DateTime<Utc>) -> Result<(), HistoryError> {
+        Ok(())
+    }
+    async fn append_events(&self, _events: &[RunEvent]) -> Result<(), HistoryError> {
+        Ok(())
+    }
+    async fn put_node_output(&self, _output: NodeOutputRecord) -> Result<(), HistoryError> {
+        Ok(())
+    }
+    async fn finish_run(
+        &self,
+        _update: TerminalUpdate,
+        _event: RunEvent,
+    ) -> Result<bool, HistoryError> {
+        Ok(true)
+    }
+    async fn recover_run(
+        &self,
+        _update: TerminalUpdate,
+        event: RunEvent,
+    ) -> Result<RunEvent, HistoryError> {
+        Ok(event)
+    }
+    async fn get_run(&self, _run_id: &str) -> Result<Option<RunRecord>, HistoryError> {
+        Ok(None)
+    }
+    async fn list_events_after(
+        &self,
+        _run_id: &str,
+        _after_seq: u64,
+        _limit: usize,
+    ) -> Result<Vec<RunEvent>, HistoryError> {
+        Ok(Vec::new())
+    }
+    async fn mark_incomplete_interrupted(&self, _at: DateTime<Utc>) -> Result<u64, HistoryError> {
+        Ok(0)
+    }
+}
+
+fn compile_agent() -> (
+    Arc<insight_agent_platform::dsl::compiled::CompiledAgent>,
+    Arc<Mutex<Vec<ChatRequest>>>,
+) {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let model = RecordingVisionModel {
+        requests: Arc::clone(&requests),
+    };
+    let mut models = ModelRegistry::default();
+    models.register("vision_chat", model).unwrap();
+    let (node_types, _) = default_node_registries().unwrap();
+    let agent = AgentCompiler::new(
+        node_types,
+        models,
+        ActionRegistry::default(),
+        Duration::from_secs(1),
+        CompileLimits {
+            max_fork_branches: 32,
+        },
+    )
+    .compile_dir(Path::new("agents/medical_report_interpreter"))
+    .unwrap();
+    let registry = CompiledAgentRegistry::new(vec![Arc::new(agent)]).unwrap();
+    (
+        registry.get("medical_report_interpreter").unwrap(),
+        requests,
+    )
+}
+
+async fn run_agent(
+    agent: Arc<insight_agent_platform::dsl::compiled::CompiledAgent>,
+    run_id: &str,
+    input: Value,
+) -> RunOutput {
+    let (_, executors) = default_node_registries().unwrap();
+    let repository: Arc<dyn RunRepository> = Arc::new(NoopRepository);
+    let events = EventHub::new(
+        repository,
+        EventHubConfig {
+            subscriber_capacity: 8,
+            journal_capacity: 32,
+            journal_batch_size: 8,
+            operation_timeout: Duration::from_secs(1),
+        },
+    );
+    let scheduler = Scheduler::new(
+        Arc::clone(&agent),
+        executors,
+        events,
+        ExecutionLimiter::new(Arc::new(Semaphore::new(4)), Arc::new(Semaphore::new(4))),
+    );
+    let context = RunContext::new(
+        RunMetadata {
+            run_id: run_id.to_string(),
+            request_id: format!("req_{run_id}"),
+            agent_id: agent.id.clone(),
+            agent_version: agent.version_hash.clone(),
+            started_at: Utc::now(),
+        },
+        input,
+    )
+    .with_templates(Arc::clone(&agent.templates));
+    let (_, stop) = stop_pair();
+    match scheduler.run(context, stop).await.unwrap() {
+        SchedulerResult::Completed(output) => output,
+        result => panic!("expected completed run, got {result:?}"),
+    }
+}
+
+#[tokio::test]
+async fn empty_history_keeps_the_existing_three_step_flow() {
+    let (agent, requests) = compile_agent();
+    assert_eq!(agent.entry, "route");
+    assert_eq!(agent.nodes["route"].kind, "core.condition");
+    assert_eq!(agent.nodes["follow_up"].kind, "core.chat");
+    assert_eq!(agent.nodes["follow_up_result"].kind, "core.output");
+
+    let output = run_agent(
+        agent,
+        "run_initial",
+        json!({
+            "report_text": "血红蛋白偏低",
+            "image_url": "https://example.test/report.png",
+            "messages": [],
+            "question": "请解读报告"
+        }),
+    )
+    .await;
+
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert!(output.data.get("abnormal_indicators").is_some());
+    assert!(output.data.get("comprehensive_interpretation").is_some());
+    assert!(output.data.get("health_advice").is_some());
+}
+
+#[tokio::test]
+async fn non_empty_history_uses_one_dedicated_follow_up_request() {
+    let (agent, requests) = compile_agent();
+    let output = run_agent(
+        agent,
+        "run_follow_up",
+        json!({
+            "report_text": "血红蛋白 98 g/L，参考范围 115-150 g/L",
+            "image_url": "https://example.test/report.png",
+            "messages": [
+                {"role": "user", "content": "请解读报告"},
+                {"role": "assistant", "content": "血红蛋白偏低。"}
+            ],
+            "question": "这和缺铁有关吗？"
+        }),
+    )
+    .await;
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let user_message = &requests[0].messages[1];
+    let prompt = user_message.text().unwrap();
+    assert!(prompt.contains("血红蛋白 98 g/L"));
+    assert!(prompt.contains("assistant: 血红蛋白偏低。"));
+    assert!(prompt.contains("这和缺铁有关吗？"));
+    assert!(prompt.contains("不要输出任何标题"));
+    assert!(prompt.contains("不要重新执行首轮的三个步骤"));
+    assert_eq!(
+        user_message.image_urls(),
+        vec!["https://example.test/report.png"]
+    );
+    assert_eq!(output.content.as_deref(), Some("直接回答追问"));
+    assert_eq!(output.format.as_deref(), Some("markdown"));
+    assert!(output.data.is_null());
+}

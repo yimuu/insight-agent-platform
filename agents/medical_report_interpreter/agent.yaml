@@ -34,10 +34,47 @@ prompts:
   abnormal_indicators: prompts/abnormal_indicators.md
   comprehensive_interpretation: prompts/comprehensive_interpretation.md
   health_advice: prompts/health_advice.md
+  follow_up: prompts/follow_up.md
 
-entry: abnormal_indicators
+entry: route
 
 nodes:
+  route:
+    type: core.condition
+    config:
+      cases:
+        - when: "size(input.messages) > 0"
+          next: follow_up
+      default: abnormal_indicators
+
+  follow_up:
+    type: core.chat
+    next: follow_up_result
+    emit: content
+    config:
+      model: vision_chat
+      messages:
+        - role: system
+          content:
+            template_ref: system
+        - role: user
+          content:
+            - type: text
+              text:
+                template_ref: follow_up
+            - type: image_url
+              image_url:
+                url: "{{ input.image_url }}"
+      parameters:
+        temperature: 0.2
+
+  follow_up_result:
+    type: core.output
+    config:
+      content:
+        template: "{{ nodes.follow_up.output.text }}"
+      format: markdown
+
   abnormal_indicators:
     type: core.chat
     next: comprehensive_interpretation
