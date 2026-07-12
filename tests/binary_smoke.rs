@@ -31,16 +31,24 @@ async fn binary_starts_and_completes_code_node_demo_run() {
     let mut child = ChildGuard::spawn(&platform_config);
     wait_for_health(&client, &base_url, &mut child).await;
 
-    let agents = expect_json(client.get(format!("{base_url}/v1/agents")), StatusCode::OK).await;
+    let agents_url = format!("{base_url}/v1/agents");
+    let agents = expect_json(
+        format!("GET {agents_url}"),
+        client.get(agents_url),
+        StatusCode::OK,
+    )
+    .await;
     let agents = agents["data"]
         .as_array()
         .expect("agents data must be array");
     assert_eq!(agents.len(), 1, "quickstart smoke should expose one Agent");
     assert_eq!(agents[0]["id"], "code_node_demo");
 
+    let create_run_url = format!("{base_url}/v1/agents/code_node_demo/runs");
     let created = expect_json(
+        format!("POST {create_run_url}"),
         client
-            .post(format!("{base_url}/v1/agents/code_node_demo/runs"))
+            .post(create_run_url)
             .json(&json!({"text":"hello rust world"})),
         StatusCode::ACCEPTED,
     )
@@ -281,24 +289,44 @@ async fn wait_for_health(client: &Client, base_url: &str, child: &mut ChildGuard
     }
 }
 
-async fn expect_json(request: reqwest::RequestBuilder, expected_status: StatusCode) -> Value {
-    let response = request.send().await.expect("HTTP request failed");
+async fn expect_json(
+    label: String,
+    request: reqwest::RequestBuilder,
+    expected_status: StatusCode,
+) -> Value {
+    let response = request.send().await.unwrap_or_else(|error| {
+        let detail = format!("HTTP request failed: {error}");
+        panic!("{}", http_diagnostic_message(&label, &detail, None));
+    });
     let status = response.status();
-    let body = response.text().await.expect("failed to read response body");
+    let body = response.text().await.unwrap_or_else(|error| {
+        let detail = format!("failed to read response body after HTTP status {status}: {error}");
+        panic!("{}", http_diagnostic_message(&label, &detail, None));
+    });
     assert_eq!(
-        status, expected_status,
-        "unexpected HTTP status; body:\n{body}"
+        status,
+        expected_status,
+        "{}",
+        http_diagnostic_message(
+            &label,
+            &format!("unexpected HTTP status {status}; expected {expected_status}"),
+            Some(&body)
+        )
     );
-    serde_json::from_str(&body)
-        .unwrap_or_else(|error| panic!("response body is not JSON: {error}\n{body}"))
+    serde_json::from_str(&body).unwrap_or_else(|error| {
+        let detail = format!("response body for HTTP status {status} is not JSON: {error}");
+        panic!("{}", http_diagnostic_message(&label, &detail, Some(&body)));
+    })
 }
 
 async fn wait_for_completed_run(client: &Client, base_url: &str, run_id: &str) -> Value {
     let deadline = Instant::now() + RUN_TIMEOUT;
 
     loop {
+        let run_url = format!("{base_url}/v1/runs/{run_id}");
         let record = expect_json(
-            client.get(format!("{base_url}/v1/runs/{run_id}")),
+            format!("GET {run_url}"),
+            client.get(run_url),
             StatusCode::OK,
         )
         .await;
@@ -320,6 +348,13 @@ async fn wait_for_completed_run(client: &Client, base_url: &str, run_id: &str) -
     }
 }
 
+fn http_diagnostic_message(label: &str, detail: &str, body: Option<&str>) -> String {
+    match body {
+        Some(body) => format!("{label}: {detail}\nbody:\n{body}"),
+        None => format!("{label}: {detail}"),
+    }
+}
+
 fn format_output(output: &Output) -> String {
     format!(
         "status: {}\nstdout:\n{}\nstderr:\n{}",
@@ -327,4 +362,18 @@ fn format_output(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+#[test]
+fn http_diagnostic_message_includes_request_context_and_body() {
+    let message = http_diagnostic_message(
+        "GET http://127.0.0.1:3000/v1/runs/run-123",
+        "unexpected HTTP status 500 Internal Server Error; expected 200 OK",
+        Some("{\"code\":\"ERR\"}"),
+    );
+
+    assert_eq!(
+        message,
+        "GET http://127.0.0.1:3000/v1/runs/run-123: unexpected HTTP status 500 Internal Server Error; expected 200 OK\nbody:\n{\"code\":\"ERR\"}"
+    );
 }

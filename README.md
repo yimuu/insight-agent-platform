@@ -86,11 +86,17 @@ curl --silent --request POST \
   http://127.0.0.1:3000/v1/agents/code_node_demo/runs
 ```
 
-复制响应里的 `data.run_id`，再查询 Run：
+复制响应里的 `data.run_id`，循环查询 Run；detached Run 是异步执行，短时间内可能返回 `created` 或 `running`，直到 `data.status` 为 `completed` 再继续：
 
 ```bash
 RUN_ID=<paste-run-id>
-curl --silent "http://127.0.0.1:3000/v1/runs/${RUN_ID}"
+while true; do
+  BODY=$(curl --silent "http://127.0.0.1:3000/v1/runs/${RUN_ID}")
+  printf '%s\n' "$BODY"
+  STATUS=$(printf '%s' "$BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["status"])')
+  [ "$STATUS" = "completed" ] && break
+  sleep 0.2
+done
 ```
 
 模型能力示例需要配置真实模型密钥：

@@ -327,7 +327,7 @@ Expected: FAIL with `no test target named 'binary_smoke'`. This confirms the mis
 
 - [ ] **Step 2: Create `tests/binary_smoke.rs`**
 
-Create `tests/binary_smoke.rs` with exactly:
+Create `tests/binary_smoke.rs` with this implementation shape:
 
 ```rust
 //! Real binary smoke test for the formal V1 runtime.
@@ -363,8 +363,10 @@ async fn binary_starts_and_completes_code_node_demo_run() {
     let mut child = ChildGuard::spawn(&platform_config);
     wait_for_health(&client, &base_url, &mut child).await;
 
+    let agents_url = format!("{base_url}/v1/agents");
     let agents = expect_json(
-        client.get(format!("{base_url}/v1/agents")),
+        format!("GET {agents_url}"),
+        client.get(agents_url),
         StatusCode::OK,
     )
     .await;
@@ -372,9 +374,11 @@ async fn binary_starts_and_completes_code_node_demo_run() {
     assert_eq!(agents.len(), 1, "quickstart smoke should expose one Agent");
     assert_eq!(agents[0]["id"], "code_node_demo");
 
+    let create_run_url = format!("{base_url}/v1/agents/code_node_demo/runs");
     let created = expect_json(
+        format!("POST {create_run_url}"),
         client
-            .post(format!("{base_url}/v1/agents/code_node_demo/runs"))
+            .post(create_run_url)
             .json(&json!({"text":"hello rust world"})),
         StatusCode::ACCEPTED,
     )
@@ -615,45 +619,69 @@ async fn wait_for_health(client: &Client, base_url: &str, child: &mut ChildGuard
     }
 }
 
-async fn expect_json(request: reqwest::RequestBuilder, expected_status: StatusCode) -> Value {
-    let response = request.send().await.expect("HTTP request failed");
+async fn expect_json(
+    label: String,
+    request: reqwest::RequestBuilder,
+    expected_status: StatusCode,
+) -> Value {
+    let response = request.send().await.unwrap_or_else(|error| {
+        let detail = format!("HTTP request failed: {error}");
+        panic!("{}", http_diagnostic_message(&label, &detail, None));
+    });
     let status = response.status();
-    let body = response.text().await.expect("failed to read response body");
+    let body = response.text().await.unwrap_or_else(|error| {
+        let detail = format!("failed to read response body after HTTP status {status}: {error}");
+        panic!("{}", http_diagnostic_message(&label, &detail, None));
+    });
     assert_eq!(
-        status, expected_status,
-        "unexpected HTTP status; body:\n{body}"
+        status,
+        expected_status,
+        "{}",
+        http_diagnostic_message(
+            &label,
+            &format!("unexpected HTTP status {status}; expected {expected_status}"),
+            Some(&body)
+        )
     );
-    serde_json::from_str(&body)
-        .unwrap_or_else(|error| panic!("response body is not JSON: {error}\n{body}"))
+    serde_json::from_str(&body).unwrap_or_else(|error| {
+        let detail = format!("response body for HTTP status {status} is not JSON: {error}");
+        panic!("{}", http_diagnostic_message(&label, &detail, Some(&body)));
+    })
 }
 
 async fn wait_for_completed_run(client: &Client, base_url: &str, run_id: &str) -> Value {
     let deadline = Instant::now() + RUN_TIMEOUT;
-    let mut last_record = Value::Null;
 
     loop {
+        let run_url = format!("{base_url}/v1/runs/{run_id}");
         let record = expect_json(
-            client.get(format!("{base_url}/v1/runs/{run_id}")),
+            format!("GET {run_url}"),
+            client.get(run_url),
             StatusCode::OK,
         )
         .await;
-        match record["data"]["status"].as_str() {
+        let last_record = match record["data"]["status"].as_str() {
             Some("completed") => return record,
             Some("failed" | "cancelled" | "interrupted") => {
                 panic!("run reached terminal non-success state:\n{record}")
             }
-            Some("created" | "running") => {
-                last_record = record;
-            }
+            Some("created" | "running") => record,
             other => {
                 panic!("run returned unknown status {other:?}:\n{record}");
             }
-        }
+        };
 
         if Instant::now() >= deadline {
             panic!("run {run_id} did not complete within {RUN_TIMEOUT:?}:\n{last_record}");
         }
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+fn http_diagnostic_message(label: &str, detail: &str, body: Option<&str>) -> String {
+    match body {
+        Some(body) => format!("{label}: {detail}\nbody:\n{body}"),
+        None => format!("{label}: {detail}"),
     }
 }
 
