@@ -242,6 +242,17 @@ The roadmap contains exactly **8** independently reviewable groups. None is appr
 | R6 — Direct macro/crypto alignment | Coupled direct migrations for SHA-2 0.11 and thiserror 2, independently reviewed | Agent hash golden contract; error-derive behavior; no duplicate-convergence promise | Golden hashes, all error derives/codes, full gates, documented residual duplicate paths | No |
 | R7 — Future SQLx upgrade gate | Governance gate, not current upgrade recommendation | A future version must remain MSRV-compatible; R0 TLS contract already established | Exact feature audit, both DB/migrations, transactions/CAS/recovery/pagination/reconciliation, TLS Postgres | No |
 
+### R6 execution note — direct macro/crypto alignment
+
+R6 was implemented as direct dependency ownership cleanup rather than a mechanical `thiserror = "2"` declaration.
+
+- The root crate now directly depends on `sha2 0.11` for Agent version hashing.
+- The existing stable compiler fixture preserves the exact Agent hash `sha256:ddb7849ef262359b787d928f2bca65c90cfe5e670fad04a4a15614af0cf6f30c`.
+- The root crate no longer directly depends on `thiserror` because project error types are handwritten and no project-owned `thiserror::Error` derives are used.
+- Residual `sha2 0.10` paths remain expected through SQLx core/sqlite/macro paths and the Handlebars/Pest build path.
+- Residual `thiserror 1` remains expected through CEL, while `thiserror 2` remains expected through Handlebars and SQLx.
+- This phase does not change public API routes, Formal V1 schemas, DSL syntax, Run lifecycle, SSE behavior, persistence, or user-facing error codes.
+
 ## Primary sources
 
 Current-version links for every direct dependency appear in the inventory. The material decision sources are:
