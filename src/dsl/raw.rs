@@ -121,7 +121,7 @@ fn format_formal_duration(duration: Duration) -> String {
 
 pub fn parse_raw_agent(yaml: &str) -> Result<RawAgent, CompileError> {
     let agent: RawAgent =
-        serde_yaml::from_str(yaml).map_err(|error| CompileError::yaml(error.to_string()))?;
+        crate::yaml::from_str(yaml, crate::yaml::YamlSurface::Agent).map_err(CompileError::yaml)?;
     if agent.version != 1 {
         return Err(CompileError::unsupported_version(agent.version));
     }

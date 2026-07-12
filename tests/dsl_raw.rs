@@ -130,10 +130,19 @@ fn rejects_duration_overflow() {
 }
 
 #[test]
+fn agent_yaml_rejects_multi_document_streams() {
+    let yaml = format!("{FORMAL_V1}\n---\nversion: 1\n");
+
+    let error = parse_raw_agent(&yaml).unwrap_err();
+
+    assert_eq!(error.code(), "DSL_YAML_INVALID");
+}
+
+#[test]
 fn serializes_duration_using_formal_v1_canonical_grammar() {
     for (input, expected) in [("120000ms", "2m"), ("2000ms", "2s"), ("1500ms", "1500ms")] {
         let timeout = parse_timeout(input).unwrap();
-        let value = serde_yaml::to_value(timeout).unwrap();
+        let value = serde_json::to_value(timeout).unwrap();
         assert_eq!(value.as_str(), Some(expected));
     }
 }

@@ -134,12 +134,13 @@ impl PlatformConfig {
                 format!("failed to read platform config '{}'", path.display()),
             )
         })?;
-        let raw: PlatformYaml = serde_yaml::from_str(&yaml).map_err(|error| {
-            PlatformConfigError::new(
-                "PLATFORM_CONFIG_INVALID",
-                format!("invalid platform config: {error}"),
-            )
-        })?;
+        let raw: PlatformYaml = crate::yaml::from_str(&yaml, crate::yaml::YamlSurface::Platform)
+            .map_err(|error| {
+                PlatformConfigError::new(
+                    "PLATFORM_CONFIG_INVALID",
+                    format!("invalid platform config: {error}"),
+                )
+            })?;
         if raw.version != 1 {
             return Err(PlatformConfigError::new(
                 "PLATFORM_VERSION_UNSUPPORTED",

@@ -26,12 +26,15 @@ pub fn load_model_registry_with_env(
             format!("failed to read model config '{}'", path.display()),
         )
     })?;
-    let raw: ModelResourcesYaml = serde_yaml::from_str(&yaml).map_err(|error| {
-        ResourceConfigError::new(
-            "MODEL_CONFIG_INVALID",
-            format!("invalid model config: {error}"),
-        )
-    })?;
+    let raw: ModelResourcesYaml =
+        crate::yaml::from_str(&yaml, crate::yaml::YamlSurface::ModelResources).map_err(
+            |error| {
+                ResourceConfigError::new(
+                    "MODEL_CONFIG_INVALID",
+                    format!("invalid model config: {error}"),
+                )
+            },
+        )?;
     if raw.version != 1 {
         return Err(ResourceConfigError::new(
             "MODEL_CONFIG_VERSION_UNSUPPORTED",
