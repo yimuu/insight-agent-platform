@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
-use cel_parser::{
-    ast::{operators, EntryExpr, Expr, IdedExpr},
-    Expression,
+use cel::{
+    common::ast::{operators, CallExpr, EntryExpr, Expr, IdedEntryExpr, IdedExpr},
+    parser::Expression,
 };
 use handlebars::{
     template::{HelperTemplate, Parameter, TemplateElement},
@@ -247,7 +247,7 @@ fn collect_cel_expression(
 }
 
 fn collect_cel_index(
-    call: &cel_parser::ast::CallExpr,
+    call: &CallExpr,
     references: &mut BTreeSet<String>,
     node_id: &str,
     case_index: usize,
@@ -284,7 +284,7 @@ fn collect_cel_index_target(
 }
 
 fn collect_cel_entries(
-    entries: &[cel_parser::ast::IdedEntryExpr],
+    entries: &[IdedEntryExpr],
     references: &mut BTreeSet<String>,
     node_id: &str,
     case_index: usize,
