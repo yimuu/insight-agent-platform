@@ -277,6 +277,8 @@ fn agent_hash(
     raw: &super::RawAgent,
     prompts: &BTreeMap<String, String>,
 ) -> Result<String, CompileError> {
+    use std::fmt::Write as _;
+
     let mut hasher = Sha256::new();
     let raw = serde_json::to_vec(raw).map_err(|error| {
         CompileError::new(
@@ -291,5 +293,12 @@ fn agent_hash(
         hasher.update(body.as_bytes());
         hasher.update([0]);
     }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    let digest = hasher.finalize();
+    let digest_bytes: &[u8] = digest.as_ref();
+    let mut hash = String::with_capacity("sha256:".len() + digest_bytes.len() * 2);
+    hash.push_str("sha256:");
+    for byte in digest_bytes {
+        write!(&mut hash, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    Ok(hash)
 }
