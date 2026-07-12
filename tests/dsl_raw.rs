@@ -1,4 +1,4 @@
-use insight_agent_platform::dsl::{parse_raw_agent, EmitPolicy};
+use insight_agent_platform::dsl::{parse_raw_agent, DurationSpec, EmitPolicy};
 
 const FORMAL_V1: &str = r#"
 version: 1
@@ -32,6 +32,16 @@ nodes:
         template: "{{ nodes.answer.output }}"
       format: text
 "#;
+
+fn parse_timeout(value: &str) -> Result<DurationSpec, String> {
+    let yaml = FORMAL_V1.replace("timeout: 5s", &format!("timeout: {value}"));
+    parse_raw_agent(&yaml)
+        .map(|agent| agent.nodes["answer"].timeout.unwrap())
+        .map_err(|error| {
+            assert_eq!(error.code(), "DSL_YAML_INVALID");
+            error.to_string()
+        })
+}
 
 #[test]
 fn parses_formal_v1_node_envelope() {
@@ -89,4 +99,41 @@ fn defaults_optional_envelope_fields() {
 
     assert_eq!(node.emit, EmitPolicy::None);
     assert!(node.timeout.is_none());
+}
+
+#[test]
+fn accepts_only_formal_v1_positive_integer_duration_units() {
+    assert_eq!(parse_timeout("1ms").unwrap().get().as_millis(), 1);
+    assert_eq!(parse_timeout("250ms").unwrap().get().as_millis(), 250);
+    assert_eq!(parse_timeout("5s").unwrap().get().as_secs(), 5);
+    assert_eq!(parse_timeout("2m").unwrap().get().as_secs(), 120);
+}
+
+#[test]
+fn rejects_out_of_contract_duration_spellings() {
+    for value in [
+        "0s", "01s", "+5s", "1.5s", "1 sec", "1s 500ms", "1h", "1d", "5S", "5 s", "soon",
+    ] {
+        let error = parse_timeout(value).expect_err("duration spelling must be rejected");
+        assert!(
+            error.contains("duration must match"),
+            "unexpected error for {value}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_duration_overflow() {
+    let error =
+        parse_timeout("18446744073709551615m").expect_err("overflowing duration must be rejected");
+    assert!(error.contains("duration is too large"), "{error}");
+}
+
+#[test]
+fn serializes_duration_using_formal_v1_canonical_grammar() {
+    for (input, expected) in [("120000ms", "2m"), ("2000ms", "2s"), ("1500ms", "1500ms")] {
+        let timeout = parse_timeout(input).unwrap();
+        let value = serde_yaml::to_value(timeout).unwrap();
+        assert_eq!(value.as_str(), Some(expected));
+    }
 }

@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt, time::Duration};
 
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use super::CompileError;
@@ -63,10 +63,7 @@ impl<'de> Deserialize<'de> for DurationSpec {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        let duration = humantime::parse_duration(&value).map_err(de::Error::custom)?;
-        if duration.is_zero() {
-            return Err(de::Error::custom("duration must be greater than zero"));
-        }
+        let duration = parse_formal_duration(&value).map_err(serde::de::Error::custom)?;
         Ok(Self(duration))
     }
 }
@@ -76,13 +73,49 @@ impl Serialize for DurationSpec {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&humantime::format_duration(self.0).to_string())
+        serializer.serialize_str(&format_formal_duration(self.0))
     }
 }
 
 impl fmt::Display for DurationSpec {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        humantime::format_duration(self.0).fmt(formatter)
+        formatter.write_str(&format_formal_duration(self.0))
+    }
+}
+
+fn parse_formal_duration(value: &str) -> Result<Duration, String> {
+    let (number, multiplier) = if let Some(number) = value.strip_suffix("ms") {
+        (number, 1_u64)
+    } else if let Some(number) = value.strip_suffix('s') {
+        (number, 1_000_u64)
+    } else if let Some(number) = value.strip_suffix('m') {
+        (number, 60_000_u64)
+    } else {
+        return Err("duration must match a positive integer followed by ms, s, or m".to_string());
+    };
+    if number.is_empty()
+        || number.starts_with('0')
+        || !number.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("duration must match a positive integer followed by ms, s, or m".to_string());
+    }
+    let amount = number
+        .parse::<u64>()
+        .map_err(|_| "duration is too large".to_string())?;
+    let millis = amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| "duration is too large".to_string())?;
+    Ok(Duration::from_millis(millis))
+}
+
+fn format_formal_duration(duration: Duration) -> String {
+    let millis = duration.as_millis();
+    if millis % 60_000 == 0 {
+        format!("{}m", millis / 60_000)
+    } else if millis % 1_000 == 0 {
+        format!("{}s", millis / 1_000)
+    } else {
+        format!("{millis}ms")
     }
 }
 
