@@ -692,7 +692,10 @@ async fn openai_client_does_not_follow_redirects_or_leak_authorization_to_locati
         }
     });
 
-    let model = loopback_model(format!("http://{address}/v1"), Some("api-key-secret".to_string()));
+    let model = loopback_model(
+        format!("http://{address}/v1"),
+        Some("api-key-secret".to_string()),
+    );
     let error = match model
         .stream_chat(ChatRequest {
             messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
@@ -706,9 +709,11 @@ async fn openai_client_does_not_follow_redirects_or_leak_authorization_to_locati
 
     assert_eq!(error.code(), "UPSTREAM_STATUS");
     assert!(error.to_string().contains("302"));
-    assert!(tokio::time::timeout(Duration::from_millis(10), second_request_seen.notified())
-        .await
-        .is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), second_request_seen.notified())
+            .await
+            .is_err()
+    );
     server.await.unwrap();
 }
 
