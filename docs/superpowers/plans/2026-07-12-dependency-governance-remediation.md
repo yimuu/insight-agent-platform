@@ -6,7 +6,7 @@
 
 **Architecture:** Add narrow project-owned boundaries before changing risky dependencies: a YAML adapter hides `yaml_serde`, a PostgreSQL URL policy hides SQLx TLS details, and the condition node hides the upstream CEL runtime. Compatible lockfile refresh stays separate from semantic replacement work so hidden dependency churn is easy to audit.
 
-**Tech Stack:** Rust 1.94.1, Cargo, SQLx 0.9.0 with `tls-rustls-ring-webpki`, `cel` 0.14.0, `cel-parser` 0.10.1, `yaml_serde` 0.10.4, Tokio, Axum 0.7, serde/serde_json.
+**Tech Stack:** Rust 1.94.1, Cargo, SQLx 0.9.0 with `tls-rustls-ring-webpki`, `cel` 0.14.0, `yaml_serde` 0.10.4, Tokio, Axum 0.7, serde/serde_json.
 
 ## Global Constraints
 
@@ -35,6 +35,7 @@
 - `src/config.rs`: parse platform YAML through `crate::yaml`; enforce PostgreSQL transport policy.
 - `src/resources/config.rs`: parse model YAML through `crate::yaml`.
 - `src/nodes/condition.rs`: replace `cel_interpreter` with `cel` behind local conversion/evaluation helpers.
+- `src/dsl/references.rs`: use `cel`'s exposed parser and public AST for CEL reference extraction.
 - `tests/dsl_raw.rs`: YAML parser surface tests and removal of direct `serde_yaml`.
 - `tests/platform_config_v1.rs`: PostgreSQL TLS policy tests.
 - `tests/core_template_condition.rs`: CEL compatibility corpus.
@@ -581,11 +582,12 @@ git commit -m "fix: require verified tls for remote postgres history"
 - Modify: `Cargo.toml`
 - Modify: `Cargo.lock`
 - Modify: `src/nodes/condition.rs`
+- Modify: `src/dsl/references.rs`
 - Modify: `tests/core_template_condition.rs`
 
 **Interfaces:**
-- Consumes: `cel::{Context, Program, Value, to_value}` and existing `cel_parser::Parser`.
-- Produces: condition behavior equivalent for the frozen corpus, with `cel-interpreter` removed and `paste` absent.
+- Consumes: `cel::{Context, Program, Value, to_value}`, plus `cel::parser` and `cel::common::ast` for compile-time reference extraction.
+- Produces: condition behavior equivalent for the frozen corpus, with `cel-interpreter`, direct `cel-parser`, and `paste` absent.
 
 - [ ] **Step 1: Add CEL behavior corpus tests before the dependency swap**
 
@@ -685,10 +687,9 @@ with:
 
 ```toml
 cel = "0.14.0"
-cel-parser = "0.10.1"
 ```
 
-Keep `cel-parser` because `src/dsl/references.rs` still uses its AST for compile-time reference extraction.
+The original plan allowed temporarily keeping direct `cel-parser` while swapping the runtime, but the final branch removes that direct dependency. `src/dsl/references.rs` should import `cel::parser::Expression` and the public AST types exposed under `cel::common::ast` for compile-time reference extraction.
 
 - [ ] **Step 4: Swap condition runtime imports and context conversion**
 
@@ -727,12 +728,14 @@ Run:
 ```bash
 cargo test --test core_template_condition condition_ -- --nocapture
 cargo tree -i paste --locked
+cargo tree -i cel-parser --locked
 ```
 
 Expected:
 
 - condition tests pass;
 - `cargo tree -i paste --locked` exits nonzero with a message equivalent to "package ID specification `paste` did not match any packages".
+- `cargo tree -i cel-parser --locked` exits nonzero with a message equivalent to "package ID specification `cel-parser` did not match any packages".
 
 - [ ] **Step 6: Run broader compile/runtime checks**
 
@@ -770,9 +773,10 @@ git commit -m "fix: replace condition cel runtime"
 Run:
 
 ```bash
-rg -n "cel-interpreter|serde_yaml::|serde_yaml =" Cargo.toml Cargo.lock src tests
+rg -n "cel-interpreter|cel-parser|cel_parser|serde_yaml::|serde_yaml =" Cargo.toml Cargo.lock src tests
 cargo tree -i paste --locked
 cargo tree -i cel-interpreter --locked
+cargo tree -i cel-parser --locked
 cargo tree -i serde_yaml --locked
 cargo tree -i yaml_serde --locked
 cargo tree -i cel --locked
@@ -781,7 +785,7 @@ cargo tree -i cel --locked
 Expected:
 
 - `rg` has no matches.
-- `paste`, `cel-interpreter`, and `serde_yaml` tree commands fail because they are absent.
+- `paste`, `cel-interpreter`, `cel-parser`, and `serde_yaml` tree commands fail because they are absent.
 - `yaml_serde` and `cel` tree commands show the new dependency paths.
 
 - [ ] **Step 2: Check R4 did not hide unrelated major upgrades**
@@ -863,6 +867,7 @@ If no edits are required, do not create an empty commit.
 ## Final Acceptance Checklist
 
 - [ ] `Cargo.toml` no longer depends on `cel-interpreter`.
+- [ ] `Cargo.toml` no longer depends on direct `cel-parser`; CEL reference extraction uses `cel::parser` and `cel::common::ast`.
 - [ ] `Cargo.toml` no longer depends on `serde_yaml`.
 - [ ] `src` and `tests` do not call `serde_yaml::`.
 - [ ] `src` and `tests` do not call `yaml_serde::` outside `src/yaml.rs`.
