@@ -200,6 +200,9 @@ nodes:
 "#
 }
 
+const VALID_AGENT_VERSION_HASH: &str =
+    "sha256:ddb7849ef262359b787d928f2bca65c90cfe5e670fad04a4a15614af0cf6f30c";
+
 fn assert_compile_error(yaml: &str, code: &'static str) {
     let (_temp, root) = write_agent(yaml, "Hello {{ input.question }}");
     let error = compiler().compile_dir(&root).unwrap_err();
@@ -211,8 +214,14 @@ fn compiles_valid_graph_and_hashes_prompt_contents() {
     let (temp, root) = write_agent(valid_yaml(), "Hello {{ input.question }}");
     let first = compiler().compile_dir(&root).unwrap();
     let second = compiler().compile_dir(&root).unwrap();
-    assert_eq!(first.version_hash, second.version_hash);
-    assert!(first.version_hash.starts_with("sha256:"));
+    assert_eq!(
+        first.version_hash, VALID_AGENT_VERSION_HASH,
+        "Agent hash changed before the sha2 migration"
+    );
+    assert_eq!(
+        second.version_hash, VALID_AGENT_VERSION_HASH,
+        "Agent hash is not stable across repeated compiles"
+    );
     assert_eq!(first.nodes["first"].edges, vec!["result"]);
     assert!(first.execution_plan.forks.is_empty());
     assert!(first
