@@ -20,6 +20,7 @@ use insight_agent_platform::{
     },
     history::{
         repository::{HistoryError, RunRepository},
+        sqlite::SqliteRunRepository,
         types::{NewRun, NodeOutputRecord, RunRecord, TerminalUpdate},
     },
     nodes::default_node_registries,
@@ -28,8 +29,8 @@ use insight_agent_platform::{
         models::{ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability, ModelRegistry},
     },
     runtime::{
-        stop_pair, CompiledAgentRegistry, ExecutionLimiter, RunContext, RunError, RunMetadata,
-        Scheduler, SchedulerResult,
+        stop_pair, CompiledAgentRegistry, ExecutionLimiter, RequestMetadata, RunContext, RunError,
+        RunMetadata, RunService, RunServiceConfig, Scheduler, SchedulerResult,
     },
 };
 use serde_json::{json, Value};
@@ -173,6 +174,36 @@ fn medical_input(image_url: Option<Value>, messages: Value) -> Value {
     input
 }
 
+async fn run_service(
+    agent: Arc<insight_agent_platform::dsl::compiled::CompiledAgent>,
+) -> RunService {
+    let (_, executors) = default_node_registries().unwrap();
+    let repository = Arc::new(SqliteRunRepository::in_memory().await.unwrap());
+    let repository: Arc<dyn RunRepository> = repository;
+    let events = EventHub::new(
+        Arc::clone(&repository),
+        EventHubConfig {
+            subscriber_capacity: 8,
+            journal_capacity: 32,
+            journal_batch_size: 8,
+            operation_timeout: Duration::from_secs(1),
+        },
+    );
+    RunService::new(
+        CompiledAgentRegistry::new(vec![agent]).unwrap(),
+        executors,
+        repository,
+        events,
+        RunServiceConfig {
+            max_concurrent_runs: 4,
+            max_parallel_node_executions: 4,
+            max_parallel_branches_per_run: 4,
+            run_timeout: Duration::from_secs(5),
+        },
+    )
+    .unwrap()
+}
+
 async fn run_agent(
     agent: Arc<insight_agent_platform::dsl::compiled::CompiledAgent>,
     run_id: &str,
@@ -236,6 +267,31 @@ fn medical_image_schema_accepts_optional_http_images_and_rejects_invalid_values(
         assert!(!agent
             .input_schema
             .is_valid(&medical_input(Some(image_url), json!([]))));
+    }
+}
+
+#[tokio::test]
+async fn medical_service_rejects_invalid_image_values_before_provider_invocation() {
+    let (agent, requests) = compile_agent();
+    let service = run_service(agent).await;
+
+    for image_url in [
+        json!(null),
+        json!(7),
+        json!("ftp://example.test/report.png"),
+        json!("file:///tmp/report.png"),
+    ] {
+        let error = service
+            .create_detached(
+                "medical_report_interpreter",
+                medical_input(Some(image_url), json!([])),
+                RequestMetadata::default(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "INPUT_INVALID");
+        assert!(requests.lock().unwrap().is_empty());
     }
 }
 

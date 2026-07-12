@@ -2,7 +2,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     path::Path,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::Duration,
 };
 
@@ -195,7 +198,9 @@ impl Action for ObservabilityAction {
 }
 
 #[derive(Clone)]
-struct ObservabilityModel;
+struct ObservabilityModel {
+    calls: Arc<AtomicUsize>,
+}
 
 impl fmt::Debug for ObservabilityModel {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -217,6 +222,7 @@ impl ChatModel for ObservabilityModel {
     }
 
     async fn stream_chat(&self, _request: ChatRequest) -> Result<ChatStream, RunError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(Box::pin(stream::iter([
             Ok(ChatChunk {
                 text: "safe".to_string(),
@@ -235,6 +241,7 @@ impl ChatModel for ObservabilityModel {
 struct Fixture {
     _root: TempDir,
     service: RunService,
+    model_calls: Arc<AtomicUsize>,
 }
 
 async fn fixture(agent_ids: &[&str]) -> Fixture {
@@ -344,11 +351,67 @@ nodes:
         text: "{{ nodes.answer.output.text }}"
 "#,
     );
+    write_agent(
+        root.path(),
+        "chat_optional_image",
+        r#"entry: answer
+nodes:
+  answer:
+    type: core.chat
+    next: result
+    config:
+      model: obs
+      messages:
+        - role: user
+          content:
+            - type: text
+              text: "prompt={{ input.secret }}"
+            - type: image_url
+              optional: true
+              image_url: {url: "{{ input.image_url }}"}
+  result:
+    type: core.output
+    config:
+      data:
+        text: "{{ nodes.answer.output.text }}"
+"#,
+    );
+    write_agent(
+        root.path(),
+        "chat_empty_after_optional_image",
+        r#"entry: answer
+nodes:
+  answer:
+    type: core.chat
+    next: result
+    config:
+      model: obs
+      messages:
+        - role: user
+          content:
+            - type: image_url
+              optional: true
+              image_url: {url: "{{ input.image_url }}"}
+  result:
+    type: core.output
+    config:
+      data:
+        text: "{{ nodes.answer.output.text }}"
+"#,
+    );
 
     let mut actions = ActionRegistry::default();
     actions.register(ObservabilityAction).unwrap();
+    let model_calls = Arc::new(AtomicUsize::new(0));
     let mut models = ModelRegistry::default();
-    models.register("obs", ObservabilityModel).unwrap();
+    models
+        .register(
+            "obs",
+            ObservabilityModel {
+                calls: Arc::clone(&model_calls),
+            },
+        )
+        .unwrap();
     let (node_types, executors) = default_node_registries().unwrap();
     let compiler = AgentCompiler::new(
         node_types,
@@ -396,6 +459,7 @@ nodes:
     Fixture {
         _root: root,
         service,
+        model_calls,
     }
 }
 
@@ -636,6 +700,66 @@ async fn chat_info_logs_counts_and_sizes_without_bodies() {
             .unwrap()
             > 0
     );
+    assert_logs_exclude(&[
+        CHAT_PROMPT_SECRET,
+        CHAT_RESPONSE_SECRET,
+        IMAGE_SECRET,
+        USAGE_SECRET,
+    ]);
+}
+
+#[tokio::test]
+async fn omitted_optional_image_logs_zero_rendered_image_parts_without_bodies() {
+    let _guard = reset_logs().await;
+    let fixture = fixture(&["chat_optional_image"]).await;
+    let created = fixture
+        .service
+        .create_detached(
+            "chat_optional_image",
+            json!({"secret": CHAT_PROMPT_SECRET}),
+            RequestMetadata::default(),
+        )
+        .await
+        .unwrap();
+    wait_for_status(&fixture.service, &created.run_id, RunStatus::Completed).await;
+
+    assert_eq!(fixture.model_calls.load(Ordering::Relaxed), 1);
+    let requests = info_logs("chat.request");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].field("node_id"), Some("answer"));
+    assert_eq!(requests[0].field("messages_count"), Some("1"));
+    assert_eq!(requests[0].field("image_parts_count"), Some("0"));
+    assert_logs_exclude(&[
+        CHAT_PROMPT_SECRET,
+        CHAT_RESPONSE_SECRET,
+        IMAGE_SECRET,
+        USAGE_SECRET,
+    ]);
+}
+
+#[tokio::test]
+async fn message_emptied_by_optional_image_filtering_logs_no_request_or_model_call() {
+    let _guard = reset_logs().await;
+    let fixture = fixture(&["chat_empty_after_optional_image"]).await;
+    let created = fixture
+        .service
+        .create_detached(
+            "chat_empty_after_optional_image",
+            json!({}),
+            RequestMetadata::default(),
+        )
+        .await
+        .unwrap();
+    wait_for_status(&fixture.service, &created.run_id, RunStatus::Failed).await;
+
+    let failed = fixture.service.get_run(&created.run_id).await.unwrap();
+    assert_eq!(
+        failed.error_code.as_deref(),
+        Some("CHAT_CONTENT_PARTS_EMPTY")
+    );
+    assert_eq!(fixture.model_calls.load(Ordering::Relaxed), 0);
+    assert!(info_logs("chat.request").is_empty());
+    assert!(info_logs("chat.response").is_empty());
     assert_logs_exclude(&[
         CHAT_PROMPT_SECRET,
         CHAT_RESPONSE_SECRET,
