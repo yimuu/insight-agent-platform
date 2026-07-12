@@ -34,7 +34,7 @@ DSL 使用显式 `entry + nodes` DAG，而不是隐式步骤数组。核心理�
 | `core.condition` | 按顺序执行预编译 CEL 条件并选择分支 |
 | `core.output` | 唯一成功终点，明确最终内容、格式和结构化数据 |
 
-条件节点和其他节点一样通过注册表解析。新增静态链接节点只需实现 `NodeType` 和 `NodeExecutor`，然后在启动注册表中注册；DSL 解析器、图校验器、协调器、事件系统和 HTTP 层不需要增加分支：
+条件节点和其他节点一样通过注册表解析。新增节点是静态链接的 Rust 扩展：实现 `NodeType` 负责编译期 config、envelope、边和引用声明，实现 `NodeExecutor` 负责运行期执行；两者分别注册到编译期和运行期注册表。注册后，自定义节点走同一套 DSL 解析、图校验、调度、事件、节点输出和终态提交路径，核心节点源码、调度器和 HTTP 层不需要增加分支：
 
 ```rust,ignore
 let mut types = NodeTypeRegistry::default();
@@ -43,6 +43,8 @@ types.register(MyNode)?;
 let mut executors = NodeExecutorRegistry::default();
 executors.register(MyNode)?;
 ```
+
+这不是动态插件系统：V1 不加载外部动态库、WASM、远程插件或下载代码。扩展代码由平台进程在构建/启动时显式链接和注册；如果编译期类型和运行期 executor 注册不一致，Run 会按普通运行时错误路径失败并写入终态。
 
 业务能力优先实现为 Action。Action 声明输入/输出 Schema、幂等元数据和是否允许流式内容，再由 `core.action` 调用：
 

@@ -73,9 +73,8 @@ impl NodeType for ConstantNode {
         config: Value,
         _context: &mut CompileContext<'_>,
     ) -> Result<NodeCompilation, CompileError> {
-        let config: ConstantConfig = serde_json::from_value(config).map_err(|error| {
-            CompileError::new("NODE_CONFIG_INVALID", error.to_string())
-        })?;
+        let config: ConstantConfig = serde_json::from_value(config)
+            .map_err(|error| CompileError::new("NODE_CONFIG_INVALID", error.to_string()))?;
         Ok(NodeCompilation {
             body: Arc::new(ConstantBody {
                 value: config.value,
@@ -544,16 +543,18 @@ fn service_for(
         },
     );
     let agents = CompiledAgentRegistry::new(vec![agent]).unwrap();
-    let service =
-        RunService::new(agents, executors, repository_trait, events, run_service_config()).unwrap();
+    let service = RunService::new(
+        agents,
+        executors,
+        repository_trait,
+        events,
+        run_service_config(),
+    )
+    .unwrap();
     (service, repository)
 }
 
-async fn wait_for_status(
-    service: &RunService,
-    run_id: &str,
-    expected: RunStatus,
-) -> RunRecord {
+async fn wait_for_status(service: &RunService, run_id: &str, expected: RunStatus) -> RunRecord {
     let mut last = None;
     for _ in 0..200 {
         let record = service.get_run(run_id).await.unwrap();
@@ -658,7 +659,10 @@ async fn custom_node_body_mismatch_terminalizes_as_node_failure() {
         .unwrap();
 
     let failed = wait_for_status(&service, &created.run_id, RunStatus::Failed).await;
-    assert_eq!(failed.error_code.as_deref(), Some("NODE_BODY_TYPE_MISMATCH"));
+    assert_eq!(
+        failed.error_code.as_deref(),
+        Some("NODE_BODY_TYPE_MISMATCH")
+    );
     assert_eq!(
         event_types(&repository, &created.run_id).await,
         vec![
