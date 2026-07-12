@@ -100,6 +100,17 @@ attached POST 在构造 SSE 前完成 JSON 与 Schema 校验，先订阅实时�
 - A8 后 `open_ai_chat.base_url` 默认只接受 HTTPS。既有 HTTP 模型服务必须改为 HTTPS，或显式声明 `transport.plaintext_http: loopback` / `trusted_private`。`trusted_private` 是部署方对私有网络明文链路的风险接受，不是运行时自动内网判定。
 - A8 后 Agent 节点 `timeout` 只接受正整数紧跟 `ms`、`s` 或 `m`。把 `1 sec`、`90 seconds`、`1h`、`1s 500ms` 等写法改为 `1s`、`90s`、`60m` 或等价毫秒值。
 
+## Dependency governance: PostgreSQL TLS transport
+
+Remote PostgreSQL history URLs now require `sslmode=verify-full`. This intentionally breaks remote URLs that relied on SQLx's default `prefer` behavior because that mode can fall back to plaintext. Local development may keep exact loopback or Unix socket URLs.
+
+Migration example:
+
+```text
+postgres://user:password@database/private
+postgres://user:password@database/private?sslmode=verify-full
+```
+
 医学示例也不是兼容合同。正式示例使用单个 `image_url` 展示一个有 `vision` 能力的多模态消息；原型的 `images` 数组调用方需要选择一个图片 URL，或通过自定义节点/后续多图内容类型扩展。这个限制只属于当前示例输入，不是核心运行时的医学规则。
 
 ## 历史重置

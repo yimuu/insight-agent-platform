@@ -5,10 +5,12 @@ use std::{
     env, fs,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
+    str::FromStr,
     time::Duration,
 };
 
 use serde::Deserialize;
+use sqlx::postgres::{PgConnectOptions, PgSslMode};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretString(String);
@@ -343,17 +345,72 @@ fn resolve_history(
         }),
         HistoryYaml::Postgres { database_url_env } => {
             let database_url = required_secret(&database_url_env, get_env)?;
-            if !database_url.expose().starts_with("postgres://")
-                && !database_url.expose().starts_with("postgresql://")
-            {
-                return Err(PlatformConfigError::new(
-                    "PLATFORM_CONFIG_INVALID",
-                    "PostgreSQL history URL must use postgres:// or postgresql://",
-                ));
-            }
+            validate_postgres_history_url(database_url.expose())?;
             Ok(HistoryConfig::Postgres { database_url })
         }
     }
+}
+
+fn validate_postgres_history_url(database_url: &str) -> Result<(), PlatformConfigError> {
+    let options = PgConnectOptions::from_str(database_url).map_err(|_| {
+        PlatformConfigError::new(
+            "PLATFORM_CONFIG_INVALID",
+            "PostgreSQL history URL must be a valid postgres:// or postgresql:// URL",
+        )
+    })?;
+
+    if matches!(options.get_ssl_mode(), PgSslMode::VerifyFull) {
+        return Ok(());
+    }
+    if options.get_socket().is_some() || raw_postgres_host_is_exact_local(database_url) {
+        return Ok(());
+    }
+
+    Err(PlatformConfigError::new(
+        "PLATFORM_CONFIG_INVALID",
+        "remote PostgreSQL history URL must set sslmode=verify-full; plaintext is allowed only for exact loopback or Unix socket development URLs",
+    ))
+}
+
+fn raw_postgres_host_is_exact_local(database_url: &str) -> bool {
+    raw_query_value(database_url, "host")
+        .or_else(|| raw_query_value(database_url, "hostaddr"))
+        .map(|host| exact_local_postgres_host(&host))
+        .unwrap_or_else(|| {
+            raw_authority_host(database_url)
+                .as_deref()
+                .map(exact_local_postgres_host)
+                .unwrap_or(false)
+        })
+}
+
+fn exact_local_postgres_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+}
+
+fn raw_query_value(database_url: &str, name: &str) -> Option<String> {
+    let query = database_url
+        .split_once('?')?
+        .1
+        .split_once('#')
+        .map_or(database_url.split_once('?')?.1, |(query, _)| query);
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| value.to_string())
+    })
+}
+
+fn raw_authority_host(database_url: &str) -> Option<String> {
+    let (_, rest) = database_url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if host_port.starts_with('[') {
+        let end = host_port.find(']')?;
+        return Some(host_port[..=end].to_string());
+    }
+    Some(host_port.split(':').next().unwrap_or(host_port).to_string())
 }
 
 fn resolve_runtime(raw: RuntimeYaml) -> Result<RuntimeConfig, PlatformConfigError> {

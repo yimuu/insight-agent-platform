@@ -274,6 +274,8 @@ history:
   database_url_env: RUN_HISTORY_DATABASE_URL
 ```
 
+Remote PostgreSQL URLs must include `sslmode=verify-full`. Plaintext PostgreSQL is accepted only for exact local development targets (`localhost`, `127.0.0.1`, `[::1]`) or Unix sockets.
+
 本地运行 PostgreSQL 合同测试：
 
 ```bash
