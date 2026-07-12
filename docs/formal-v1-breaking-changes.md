@@ -111,6 +111,13 @@ postgres://user:password@database/private
 postgres://user:password@database/private?sslmode=verify-full
 ```
 
+## Dependency governance: Axum 0.8 route syntax
+
+- Phase 3 upgrades the server framework from Axum 0.7 to Axum 0.8.
+- Public Formal V1 paths are unchanged, but internal route definitions now use Axum 0.8 `{param}` captures instead of Axum 0.7 `:param` captures.
+- This is intentional: relying on old route syntax after the major upgrade would hide framework-compatibility behavior inside the route table and make future route reviews less clear.
+- API response envelopes, SSE event payloads, auth behavior, cancellation behavior, and unsupported replay/recovery routes are unchanged.
+
 医学示例也不是兼容合同。正式示例使用单个 `image_url` 展示一个有 `vision` 能力的多模态消息；原型的 `images` 数组调用方需要选择一个图片 URL，或通过自定义节点/后续多图内容类型扩展。这个限制只属于当前示例输入，不是核心运行时的医学规则。
 
 ## 历史重置

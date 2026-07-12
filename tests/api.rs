@@ -267,6 +267,61 @@ async fn agent_metadata_omits_runtime_internals_and_unknown_agents_are_hidden() 
 }
 
 #[tokio::test]
+async fn formal_v1_path_captures_match_after_axum_upgrade() {
+    let (app, service) = fixture(ApiAuth::disabled(), 4).await;
+
+    let agent = app
+        .clone()
+        .oneshot(request(Method::GET, "/v1/agents/fast", None))
+        .await
+        .unwrap();
+    assert_eq!(agent.status(), StatusCode::OK);
+    assert_eq!(json_body(agent).await["data"]["id"], "fast");
+
+    let stream = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/v1/agents/fast/runs/stream",
+            Some(json!({"text":"hello"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), StatusCode::OK);
+    assert!(stream.headers().contains_key("x-run-id"));
+    let _ = to_bytes(stream.into_body(), usize::MAX).await.unwrap();
+
+    let detached = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/v1/agents/fast/runs",
+            Some(json!({"text":"hello"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(detached.status(), StatusCode::ACCEPTED);
+    let detached = json_body(detached).await;
+    let run_id = detached["data"]["run_id"].as_str().unwrap();
+    wait_for_status(&service, run_id, RunStatus::Completed).await;
+
+    let lookup = app
+        .clone()
+        .oneshot(request(Method::GET, &format!("/v1/runs/{run_id}"), None))
+        .await
+        .unwrap();
+    assert_eq!(lookup.status(), StatusCode::OK);
+    assert_eq!(json_body(lookup).await["data"]["run_id"], run_id);
+
+    let cancel = app
+        .oneshot(request(Method::DELETE, &format!("/v1/runs/{run_id}"), None))
+        .await
+        .unwrap();
+    assert_eq!(cancel.status(), StatusCode::OK);
+    assert_eq!(json_body(cancel).await["data"]["run_id"], run_id);
+}
+
+#[tokio::test]
 async fn detached_creation_uses_direct_input_returns_202_and_supports_lookup() {
     let (app, service) = fixture(ApiAuth::disabled(), 4).await;
     let mut create = request(

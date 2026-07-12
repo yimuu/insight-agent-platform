@@ -38,13 +38,13 @@ pub fn build_router(state: FormalApiState) -> Router {
     let auth = state.auth.clone();
     let v1 = Router::new()
         .route("/v1/agents", get(list_agents))
-        .route("/v1/agents/:agent_id", get(get_agent))
+        .route("/v1/agents/{agent_id}", get(get_agent))
         .route(
-            "/v1/agents/:agent_id/runs/stream",
+            "/v1/agents/{agent_id}/runs/stream",
             post(create_attached_run),
         )
-        .route("/v1/agents/:agent_id/runs", post(create_detached_run))
-        .route("/v1/runs/:run_id", get(get_run).delete(cancel_run))
+        .route("/v1/agents/{agent_id}/runs", post(create_detached_run))
+        .route("/v1/runs/{run_id}", get(get_run).delete(cancel_run))
         .route_layer(middleware::from_fn(
             move |headers: HeaderMap, request: Request<Body>, next: Next| {
                 let auth = auth.clone();
