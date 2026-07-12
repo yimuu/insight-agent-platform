@@ -62,7 +62,38 @@ actions.register(ClassifyAction)?;
 
 ## 配置与启动
 
-复制环境变量模板并填写模型密钥：
+无密钥本地 quickstart：
+
+```bash
+PLATFORM_CONFIG=config/platform.quickstart.yaml cargo run
+```
+
+该配置只启用 `code_node_demo`，使用 SQLite 本地历史和内置 `example.text_metrics` Action。它引用 `config/models.quickstart.yaml` 中的未使用 dummy 模型别名，因此不需要 `OPENAI_API_KEY`，也不会调用外部模型服务。
+
+另开一个终端验证健康状态和 Agent 列表：
+
+```bash
+curl --silent http://127.0.0.1:3000/health
+curl --silent http://127.0.0.1:3000/v1/agents
+```
+
+创建一个 detached Run：
+
+```bash
+curl --silent --request POST \
+  --header 'content-type: application/json' \
+  --data '{"text":"hello rust world"}' \
+  http://127.0.0.1:3000/v1/agents/code_node_demo/runs
+```
+
+复制响应里的 `data.run_id`，再查询 Run：
+
+```bash
+RUN_ID=<paste-run-id>
+curl --silent "http://127.0.0.1:3000/v1/runs/${RUN_ID}"
+```
+
+模型能力示例需要配置真实模型密钥：
 
 ```bash
 cp .env.example .env
