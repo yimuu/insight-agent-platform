@@ -731,7 +731,87 @@ nodes:
 "#
 }
 
-fn context(run_id: &str) -> RunContext {
+fn select_yaml() -> &'static str {
+    r#"
+version: 1
+id: scheduler-select
+name: Scheduler Select
+input:
+  schema: {type: object}
+entry: route
+nodes:
+  route:
+    type: core.condition
+    config:
+      cases: [{when: "input.kind == 'medical'", next: medical}]
+      default: general
+  medical:
+    type: core.template
+    next: selected
+    config: {value: {text: medical-answer}}
+  general:
+    type: core.template
+    next: selected
+    config: {value: {text: general-answer}}
+  selected:
+    type: core.select
+    next: result
+    config: {sources: [medical, general]}
+  result:
+    type: core.output
+    config:
+      data:
+        source: "{{ nodes.selected.output.source_node_id }}"
+        answer: "{{ nodes.selected.output.value.text }}"
+"#
+}
+
+fn branch_select_yaml() -> &'static str {
+    r#"
+version: 1
+id: scheduler-branch-select
+name: Scheduler Branch Select
+input:
+  schema: {type: object}
+entry: fanout
+nodes:
+  fanout:
+    type: core.fork
+    config:
+      branches: {choice: route, fixed: fixed}
+      join: collect
+  route:
+    type: core.condition
+    config:
+      cases: [{when: "true", next: left}]
+      default: right
+  left:
+    type: core.template
+    next: branch_select
+    config: {value: left}
+  right:
+    type: core.template
+    next: branch_select
+    config: {value: right}
+  branch_select:
+    type: core.select
+    next: collect
+    config: {sources: [left, right]}
+  fixed:
+    type: core.template
+    next: collect
+    config: {value: fixed}
+  collect:
+    type: core.join
+    next: result
+    config: {mode: all_settled}
+  result:
+    type: core.output
+    config: {data: {done: true}}
+"#
+}
+
+fn context_with_input(run_id: &str, input: Value) -> RunContext {
     RunContext::new(
         RunMetadata {
             run_id: run_id.to_string(),
@@ -740,8 +820,16 @@ fn context(run_id: &str) -> RunContext {
             agent_version: "sha256:scheduler".to_string(),
             started_at: Utc::now(),
         },
-        json!({}),
+        input,
     )
+}
+
+fn context(run_id: &str) -> RunContext {
+    context_with_input(run_id, json!({}))
+}
+
+fn context_with_agent_input(agent: &CompiledAgent, run_id: &str, input: Value) -> RunContext {
+    context_with_input(run_id, input).with_templates(Arc::clone(&agent.templates))
 }
 
 fn event_hub(repository: Arc<SchedulerRepository>) -> EventHub {
@@ -755,6 +843,124 @@ fn event_hub(repository: Arc<SchedulerRepository>) -> EventHub {
             operation_timeout: Duration::from_secs(1),
         },
     )
+}
+
+#[tokio::test]
+async fn select_scheduler_runs_only_the_chosen_path_and_persists_stable_output() {
+    for (kind, selected, unselected, answer) in [
+        ("medical", "medical", "general", "medical-answer"),
+        ("general", "general", "medical", "general-answer"),
+    ] {
+        let agent = compile_parallel_agent(select_yaml());
+        let context =
+            context_with_agent_input(&agent, &format!("run_select_{kind}"), json!({"kind":kind}));
+        let repository = Arc::new(SchedulerRepository::default());
+        let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
+        let (_, stop) = stop_pair();
+
+        assert_eq!(
+            scheduler.run(context, stop).await.unwrap(),
+            SchedulerResult::Completed(RunOutput {
+                content: None,
+                format: None,
+                data: json!({"source":selected, "answer":answer}),
+            })
+        );
+
+        let outputs = repository.outputs.lock().await.clone();
+        assert_eq!(
+            outputs
+                .iter()
+                .find(|output| output.node_id == "selected")
+                .unwrap()
+                .output,
+            json!({
+                "source_node_id": selected,
+                "value": {"text": answer},
+            })
+        );
+        assert!(outputs.iter().any(|output| output.node_id == selected));
+        assert!(!outputs.iter().any(|output| output.node_id == unselected));
+
+        let events = repository.events.lock().await.clone();
+        assert!(events.iter().any(|event| {
+            event.event_type.as_str() == "node.completed"
+                && event.node_id.as_deref() == Some("selected")
+        }));
+        assert!(!events.iter().any(|event| {
+            event.event_type.as_str() == "node.started"
+                && event.node_id.as_deref() == Some(unselected)
+        }));
+        let operations = repository.operations.lock().await.clone();
+        let output_position = operations
+            .iter()
+            .position(|operation| operation == "output:selected")
+            .unwrap();
+        let completed_position = operations
+            .iter()
+            .position(|operation| operation == "event:node.completed:selected")
+            .unwrap();
+        assert!(output_position < completed_position);
+    }
+}
+
+#[tokio::test]
+async fn select_missing_source_outside_a_fork_fails_the_run() {
+    let mut agent = compile_parallel_agent(select_yaml());
+    agent.nodes.get_mut("selected").unwrap().body =
+        Arc::new(BTreeSet::from(["never_completed".to_string()]));
+    let context = context_with_agent_input(&agent, "run_select_missing", json!({"kind":"medical"}));
+    let repository = Arc::new(SchedulerRepository::default());
+    let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
+    let (_, stop) = stop_pair();
+
+    let SchedulerResult::Failed(error) = scheduler.run(context, stop).await.unwrap() else {
+        panic!("missing Select source must fail the main Run");
+    };
+    assert_eq!(error.code(), "SELECT_SOURCE_MISSING");
+    assert!(repository.events.lock().await.iter().any(|event| {
+        event.event_type.as_str() == "node.failed" && event.node_id.as_deref() == Some("selected")
+    }));
+}
+
+#[tokio::test]
+async fn select_missing_source_inside_a_fork_settles_only_that_branch() {
+    let mut agent = compile_parallel_agent(branch_select_yaml());
+    agent.nodes.get_mut("branch_select").unwrap().body =
+        Arc::new(BTreeSet::from(["never_completed".to_string()]));
+    let context = context_with_agent_input(&agent, "run_branch_select_missing", json!({}));
+    let repository = Arc::new(SchedulerRepository::default());
+    let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
+    let (_, stop) = stop_pair();
+
+    assert_eq!(
+        scheduler.run(context, stop).await.unwrap(),
+        SchedulerResult::Completed(RunOutput {
+            content: None,
+            format: None,
+            data: json!({"done":true}),
+        })
+    );
+    assert_eq!(
+        repository
+            .outputs
+            .lock()
+            .await
+            .iter()
+            .find(|output| output.node_id == "collect")
+            .unwrap()
+            .output["summary"],
+        json!({"total":2, "succeeded":1, "failed":1})
+    );
+    let events = repository.events.lock().await.clone();
+    assert!(events.iter().any(|event| {
+        event.event_type.as_str() == "node.failed"
+            && event.node_id.as_deref() == Some("branch_select")
+            && event.code == "SELECT_SOURCE_MISSING"
+    }));
+    assert!(events.iter().any(|event| {
+        event.event_type.as_str() == "branch.failed" && event.data["branch_id"] == "choice"
+    }));
 }
 
 #[tokio::test]
