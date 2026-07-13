@@ -44,6 +44,9 @@ pub enum NodeControl {
     Join {
         policy: JoinPolicy,
     },
+    Select {
+        sources: BTreeSet<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

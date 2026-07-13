@@ -5,6 +5,7 @@ pub mod fork;
 pub mod join;
 pub mod output;
 pub mod registry;
+pub mod select;
 pub mod template;
 
 use crate::dsl::CompileError;
@@ -17,6 +18,7 @@ use self::{
     join::JoinNode,
     output::OutputNode,
     registry::{NodeExecutorRegistry, NodeTypeRegistry},
+    select::SelectNode,
     template::TemplateNode,
 };
 
@@ -29,6 +31,7 @@ pub fn default_node_registries() -> Result<(NodeTypeRegistry, NodeExecutorRegist
     types.register(OutputNode)?;
     types.register(ForkNode)?;
     types.register(JoinNode)?;
+    types.register(SelectNode)?;
 
     let mut executors = NodeExecutorRegistry::default();
     executors.register(TemplateNode)?;
@@ -38,6 +41,7 @@ pub fn default_node_registries() -> Result<(NodeTypeRegistry, NodeExecutorRegist
     executors.register(OutputNode)?;
     executors.register(ForkNode)?;
     executors.register(JoinNode)?;
+    executors.register(SelectNode)?;
 
     Ok((types, executors))
 }

@@ -190,6 +190,7 @@ fn default_registries_contain_all_formal_core_nodes() {
         "core.fork",
         "core.join",
         "core.output",
+        "core.select",
         "core.template",
     ];
 
