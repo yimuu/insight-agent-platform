@@ -191,6 +191,56 @@ fn rejects_missing_and_mismatched_sources_with_select_codes() {
 }
 
 #[test]
+fn rejects_all_predecessors_plus_an_existing_non_predecessor() {
+    assert_compile_error(
+        &select_yaml().replace("[medical, general]", "[medical, general, route]"),
+        "SELECT_PREDECESSOR_MISMATCH",
+    );
+}
+
+#[test]
+fn rejects_two_of_three_direct_predecessors() {
+    assert_compile_error(
+        r#"
+version: 1
+id: incomplete-multi-select
+name: Incomplete Multi Select
+input:
+  schema: {type: object}
+entry: route
+nodes:
+  route:
+    type: core.condition
+    config:
+      cases:
+        - {when: "input.kind == 'a'", next: a}
+        - {when: "input.kind == 'b'", next: b}
+      default: c
+  a:
+    type: core.template
+    next: selected
+    config: {value: a}
+  b:
+    type: core.template
+    next: selected
+    config: {value: b}
+  c:
+    type: core.template
+    next: selected
+    config: {value: c}
+  selected:
+    type: core.select
+    next: result
+    config: {sources: [a, b]}
+  result:
+    type: core.output
+    config: {data: {value: "{{ nodes.selected.output.value }}"}}
+"#,
+        "SELECT_PREDECESSOR_MISMATCH",
+    );
+}
+
+#[test]
 fn rejects_sources_connected_by_a_path() {
     assert_compile_error(
         r#"
