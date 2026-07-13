@@ -43,6 +43,7 @@ const USAGE_SECRET: &str = "observability-usage-secret";
 const DYNAMIC_TEXT_SECRET: &str = "observability-dynamic-text-secret";
 const DYNAMIC_IMAGE_SECRET: &str = "observability-dynamic-image-secret";
 const DYNAMIC_MESSAGE_SECRET: &str = "observability-invalid-dynamic-secret";
+const SELECT_SECRET: &str = "observability-select-secret";
 
 #[derive(Debug, Clone)]
 struct RecordedEvent {
@@ -264,6 +265,34 @@ nodes:
     config:
       data:
         secret: "{{ nodes.prepare.output }}"
+"#,
+    );
+    write_agent(
+        root.path(),
+        "select",
+        r#"entry: route
+nodes:
+  route:
+    type: core.condition
+    config:
+      cases: [{when: "true", next: left}]
+      default: right
+  left:
+    type: core.template
+    next: selected
+    config: {value: observability-select-secret}
+  right:
+    type: core.template
+    next: selected
+    config: {value: unused}
+  selected:
+    type: core.select
+    next: result
+    config: {sources: [left, right]}
+  result:
+    type: core.output
+    config:
+      data: {value: "{{ nodes.selected.output.value }}"}
 "#,
     );
     write_agent(
@@ -590,6 +619,34 @@ async fn run_and_node_info_logs_are_body_free_for_linear_success() {
         IMAGE_SECRET,
         USAGE_SECRET,
     ]);
+}
+
+#[tokio::test]
+async fn select_info_logs_record_metadata_without_selected_bodies() {
+    let _guard = reset_logs().await;
+    let fixture = fixture(&["select"]).await;
+    let created = fixture
+        .service
+        .create_detached("select", json!({}), RequestMetadata::default())
+        .await
+        .unwrap();
+    wait_for_status(&fixture.service, &created.run_id, RunStatus::Completed).await;
+
+    let completed = info_logs("node.completed");
+    let selected = completed
+        .iter()
+        .find(|event| event.field("node_id") == Some("selected"))
+        .expect("Select must emit one completion log");
+    assert_eq!(selected.field("kind"), Some("core.select"));
+    assert!(
+        selected
+            .field("output_bytes")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            > 0
+    );
+    assert_logs_exclude(&[SELECT_SECRET]);
 }
 
 #[tokio::test]

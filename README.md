@@ -24,7 +24,7 @@ RunService → RunCoordinator → EventHub/Journal → RunRepository
 
 DSL 使用显式 `entry + nodes` DAG，而不是隐式步骤数组。核心理由是：执行顺序、条件跳转和数据依赖本质上属于图语义；显式 DAG 可以在启动前统一发现缺边、环、不可达节点和非法前驱引用，也让新增节点类型无需修改调度器。
 
-正式 V1 内置五种节点：
+正式 V1 内置八种节点：
 
 | 节点 | 作用 |
 |---|---|
@@ -32,6 +32,9 @@ DSL 使用显式 `entry + nodes` DAG，而不是隐式步骤数组。核心理�
 | `core.chat` | 调用命名 Chat 模型，支持文本、多模态消息和私有/公开增量 |
 | `core.action` | 通过严格 JSON Schema 调用本地或受限外部能力 |
 | `core.condition` | 按顺序执行预编译 CEL 条件并选择分支 |
+| `core.fork` | 显式启动固定并行分支 |
+| `core.join` | 以 `all_settled` 汇合 fork 分支并输出稳定汇总 |
+| `core.select` | 将互斥条件路径中唯一已执行的结果汇合为稳定输出 |
 | `core.output` | 唯一成功终点，明确最终内容、格式和结构化数据 |
 
 条件节点和其他节点一样通过注册表解析。新增节点是静态链接的 Rust 扩展：实现 `NodeType` 负责编译期 config、envelope、边和引用声明，实现 `NodeExecutor` 负责运行期执行；两者分别注册到编译期和运行期注册表。注册后，自定义节点走同一套 DSL 解析、图校验、调度、事件、节点输出和终态提交路径，核心节点源码、调度器和 HTTP 层不需要增加分支：
@@ -218,6 +221,65 @@ nodes:
       format: markdown
 ```
 
+### 条件结果汇合
+
+```yaml
+version: 1
+id: select_demo
+name: Select Demo
+input:
+  schema:
+    type: object
+    additionalProperties: false
+    required: [kind]
+    properties:
+      kind:
+        type: string
+
+entry: route
+nodes:
+  route:
+    type: core.condition
+    config:
+      cases:
+        - when: "input.kind == 'medical'"
+          next: medical
+      default: general
+
+  medical:
+    type: core.template
+    next: selected_answer
+    config:
+      value:
+        kind: medical
+        text: "medical answer"
+
+  general:
+    type: core.template
+    next: selected_answer
+    config:
+      value:
+        kind: general
+        text: "general answer"
+
+  selected_answer:
+    type: core.select
+    next: result
+    config:
+      sources: [medical, general]
+
+  result:
+    type: core.output
+    config:
+      data:
+        source: "{{ nodes.selected_answer.output.source_node_id }}"
+        answer: "{{ nodes.selected_answer.output.value.text }}"
+```
+
+`core.select` 只用于互斥路径的一选一汇合。`sources` 必须完整列出 Select 的直接前驱，并且这些前驱必须处于同一执行区域且彼此不可达。运行时恰好一个来源可见才成功；已执行节点返回的 JSON `null` 仍是有效值，未执行来源不会被自动补 `null`。下游统一引用 `nodes.selected_answer.output.source_node_id` 和 `nodes.selected_answer.output.value`，不能绕过 Select 直接引用某个条件分支节点。
+
+Select 与 Join 的职责不同：Condition 只选择一条路径，因此使用 `core.select`；Fork 会执行全部固定分支，因此使用 `core.join` 和显式 `mode: all_settled`。Select 不做数组拼接、对象合并、优先级回退或并行聚合。
+
 `emit: none` 保持节点增量私有，`emit: content` 才发布 `content.delta`。模板上下文只暴露 `input`、`run` 和已完成的 `nodes.<node_id>.output`。节点 ID 和 fork branch ID 必须匹配 `[A-Za-z_][A-Za-z0-9_]*`；跨节点引用只能使用 `nodes.<node_id>.output`，不能使用 `nodes["id"]`、computed access 或直接访问 `nodes` map。
 
 节点 `timeout` 使用正式 V1 窄语法：正整数紧跟 `ms`、`s` 或 `m`，例如 `250ms`、`5s`、`2m`。不接受空格、复合值、别名、分数、`h/d` 等更大单位或前导零。
@@ -331,6 +393,8 @@ A0 Action 校验错误安全修复不兼容既有 Run 历史；部署前按[正�
 - `agents/code_node_demo`：`example.text_metrics` 原生 Action，不调用模型，适合确定性冒烟测试。
 - `agents/medical_report_interpreter`：使用同一个通用 `core.chat` 多模态协议的垂直示例。
 - `agents/parallel_researcher`：两个多节点分支汇聚后再综合：
+
+条件路径结果使用 core.select；以下示例是并行分支，因此继续使用 core.fork/core.join。
 
 ```yaml
 fanout:

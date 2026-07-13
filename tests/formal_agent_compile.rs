@@ -193,3 +193,96 @@ nodes:
     assert!(agent.nodes["answer"].references.contains("prepare"));
     assert!(agent.version_hash.starts_with("sha256:"));
 }
+
+#[test]
+fn select_output_compiles_for_all_builtin_consumers() {
+    let directory = tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("agent.yaml"),
+        r#"
+version: 1
+id: select-consumers
+name: Select Consumers
+input:
+  schema: {type: object}
+entry: route
+nodes:
+  route:
+    type: core.condition
+    config:
+      cases: [{when: "true", next: medical}]
+      default: general
+  medical:
+    type: core.template
+    next: selected
+    config: {value: {text: medical}}
+  general:
+    type: core.template
+    next: selected
+    config: {value: {text: general}}
+  selected:
+    type: core.select
+    next: render
+    config: {sources: [medical, general]}
+  render:
+    type: core.template
+    next: classify
+    config:
+      value: "{{ nodes.selected.output.value.text }}"
+  classify:
+    type: core.action
+    next: answer
+    config:
+      action: classify
+      input:
+        text: "{{ nodes.selected.output.value.text }}"
+  answer:
+    type: core.chat
+    next: result
+    config:
+      model: primary
+      messages:
+        - role: user
+          content: "{{ nodes.selected.output.value.text }}"
+      parameters: {}
+  result:
+    type: core.output
+    config:
+      data:
+        source: "{{ nodes.selected.output.source_node_id }}"
+        rendered: "{{ nodes.render.output }}"
+        kind: "{{ nodes.classify.output.kind }}"
+        answer: "{{ nodes.answer.output.text }}"
+"#,
+    )
+    .unwrap();
+
+    let mut models = ModelRegistry::default();
+    models.register("primary", FakeModel).unwrap();
+    let mut actions = ActionRegistry::default();
+    actions.register(ClassifyAction).unwrap();
+    let (types, _) = default_node_registries().unwrap();
+    let compiler = AgentCompiler::new(
+        types,
+        models,
+        actions,
+        Duration::from_secs(30),
+        CompileLimits {
+            max_fork_branches: 8,
+        },
+    );
+
+    let agent = compiler.compile_dir(directory.path()).unwrap();
+    assert_eq!(
+        agent.nodes["render"].references,
+        ["selected".to_string()].into_iter().collect()
+    );
+    assert_eq!(
+        agent.nodes["classify"].references,
+        ["selected".to_string()].into_iter().collect()
+    );
+    assert_eq!(
+        agent.nodes["answer"].references,
+        ["selected".to_string()].into_iter().collect()
+    );
+}
