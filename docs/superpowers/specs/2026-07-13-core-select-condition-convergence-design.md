@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-13
 
-**Status:** Design approved in conversation; awaiting written-spec review
+**Status:** Approved for implementation
 
 **Scope:** Explicit one-of-N result convergence for mutually exclusive control-flow paths
 
@@ -249,6 +249,8 @@ Every source must have the same `NodeRegion` as the Select:
 
 Existing fork-region validation remains authoritative. Select does not provide an escape hatch around `CROSS_BRANCH_REFERENCE`, `POST_JOIN_BRANCH_REFERENCE`, or branch boundary rules.
 
+If fork-region compilation rejects a topology before Select validation runs, its existing `BRANCH_*` or `JOIN_*` diagnostic remains authoritative. `SELECT_REGION_INVALID` is the defensive Select-specific diagnostic for a source/Select region mismatch once an execution plan exists.
+
 ### 8.4 Mutual exclusivity
 
 For every pair of sources `(a, b)`:
@@ -354,7 +356,6 @@ Select uses the ordinary node lifecycle:
 
 ```text
 node.started
-node.output
 node.completed
 ```
 
@@ -365,7 +366,7 @@ node.started
 node.failed
 ```
 
-No Select-specific event type is added. The selected source node ID and selected value are persisted as the ordinary node output. Existing body-free INFO logging policy continues to record only safe identifiers, timings, counts, and sizes, not the selected value body.
+No Select-specific event type is added. The selected source node ID and selected value are persisted through the ordinary node-output repository record before `node.completed` is published; `node.completed.data.output` carries the same ordinary event payload as every other successful node. Existing body-free INFO logging policy continues to record only safe identifiers, timings, counts, and sizes, not the selected value body.
 
 SQLite and PostgreSQL repository contracts require no schema or migration change.
 
