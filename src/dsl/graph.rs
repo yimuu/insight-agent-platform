@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     compiled::{CompiledNode, ExecutionPlan, NodeRegion},
+    select::validate_selects,
     CompileError,
 };
 
@@ -11,6 +12,7 @@ pub fn validate_graph(
     plan: &ExecutionPlan,
 ) -> Result<(), CompileError> {
     validate_graph_structure(entry, nodes)?;
+    validate_selects(nodes, plan)?;
     validate_references(entry, nodes, plan)
 }
 

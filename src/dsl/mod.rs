@@ -4,6 +4,7 @@ pub mod graph;
 pub mod plan;
 pub mod raw;
 pub(crate) mod references;
+pub(crate) mod select;
 
 use std::{error::Error, fmt};
 

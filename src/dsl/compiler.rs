@@ -21,6 +21,7 @@ use super::{
     parse_raw_agent,
     plan::compile_execution_plan,
     references::{extract_handlebars_references, handlebars_static_text, validate_node_id},
+    select::validate_selects,
     CompileError, EmitPolicy,
 };
 
@@ -257,6 +258,7 @@ impl AgentCompiler {
 
         validate_graph_structure(&raw.entry, &nodes)?;
         let execution_plan = compile_execution_plan(&raw.entry, &nodes, self.limits)?;
+        validate_selects(&nodes, &execution_plan)?;
         validate_references(&raw.entry, &nodes, &execution_plan)?;
         let version_hash = agent_hash(&raw, context.resolved_prompts())?;
         Ok(CompiledAgent {
