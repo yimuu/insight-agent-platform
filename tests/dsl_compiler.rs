@@ -337,7 +337,7 @@ fn rejects_node_ids_outside_canonical_identifier_grammar() {
 }
 
 #[test]
-fn rejects_cycles_and_unreachable_nodes() {
+fn rejects_cycles() {
     let cycle = valid_yaml()
         .replace("next: result", "next: second")
         .replace(
@@ -345,7 +345,17 @@ fn rejects_cycles_and_unreachable_nodes() {
             "  second:\n    type: test.step\n    next: first\n    config: {}",
         );
     assert_compile_error(&cycle, "GRAPH_CYCLE");
+}
 
+#[test]
+fn reachable_missing_next_precedes_unreachable_downstream_node() {
+    let broken_path = valid_yaml().replace("    next: result\n", "");
+
+    assert_compile_error(&broken_path, "END_REQUIRED");
+}
+
+#[test]
+fn genuine_orphan_without_reachable_broken_leaf_is_unreachable() {
     let unreachable = format!(
         "{}\n  orphan:\n    type: core.end\n    config: {{outcome: success, data: {{}}}}\n",
         valid_yaml()
