@@ -16,7 +16,7 @@ use crate::{
 };
 
 use super::{
-    compiled::{CompiledAgent, CompiledNode, NextPolicy},
+    compiled::{CompiledAgent, CompiledNode, ControlEdge, NextPolicy},
     graph::{validate_graph_structure, validate_references},
     parse_raw_agent,
     plan::compile_execution_plan,
@@ -220,7 +220,9 @@ impl AgentCompiler {
                             format!("node '{node_id}' requires next"),
                         )
                     })?;
-                    edges.push(next.clone());
+                    edges.push(ControlEdge::Direct {
+                        target: next.clone(),
+                    });
                 }
                 NextPolicy::Forbidden if raw_node.next.is_some() => {
                     return Err(CompileError::new(

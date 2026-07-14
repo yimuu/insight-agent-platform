@@ -1,9 +1,17 @@
-use std::{fs, path::Path, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use insight_agent_platform::{
     dsl::{
-        compiled::{NodeControl, NodeRegion},
+        compiled::{CompiledNode, ControlEdge, ExecutionPlan, NodeControl, NodeRegion},
         compiler::{AgentCompiler, CompileLimits},
+        graph::validate_graph,
+        EmitPolicy,
     },
     nodes::default_node_registries,
     resources::{actions::ActionRegistry, models::ModelRegistry},
@@ -40,6 +48,20 @@ fn assert_compile_error(yaml: &str, expected: &'static str) {
     let (_temp, root) = write_agent(yaml);
     let error = compiler().compile_dir(Path::new(&root)).unwrap_err();
     assert_eq!(error.code(), expected, "unexpected error: {error}");
+}
+
+fn topology_node(id: &str, control: NodeControl, edges: Vec<ControlEdge>) -> CompiledNode {
+    CompiledNode {
+        id: id.to_string(),
+        kind: "test.topology".to_string(),
+        next: None,
+        emit: EmitPolicy::None,
+        timeout: Duration::from_secs(1),
+        body: Arc::new(()),
+        edges,
+        references: BTreeSet::new(),
+        control,
+    }
 }
 
 fn select_yaml() -> &'static str {
@@ -98,6 +120,81 @@ fn compiles_condition_convergence_and_dominating_select_references() {
         agent.nodes["result"].references,
         ["selected".to_string()].into_iter().collect()
     );
+}
+
+#[test]
+fn fork_continuation_is_not_a_select_predecessor_candidate() {
+    let nodes = BTreeMap::from([
+        (
+            "route".to_string(),
+            topology_node(
+                "route",
+                NodeControl::Ordinary,
+                vec![
+                    ControlEdge::Direct { target: "a".into() },
+                    ControlEdge::Direct { target: "b".into() },
+                    ControlEdge::Direct {
+                        target: "fanout".into(),
+                    },
+                ],
+            ),
+        ),
+        (
+            "a".to_string(),
+            topology_node(
+                "a",
+                NodeControl::Ordinary,
+                vec![ControlEdge::Direct {
+                    target: "selected".into(),
+                }],
+            ),
+        ),
+        (
+            "b".to_string(),
+            topology_node(
+                "b",
+                NodeControl::Ordinary,
+                vec![ControlEdge::Direct {
+                    target: "selected".into(),
+                }],
+            ),
+        ),
+        (
+            "fanout".to_string(),
+            topology_node(
+                "fanout",
+                NodeControl::Ordinary,
+                vec![ControlEdge::ForkContinuation {
+                    target: "selected".into(),
+                }],
+            ),
+        ),
+        (
+            "selected".to_string(),
+            topology_node(
+                "selected",
+                NodeControl::Select {
+                    sources: BTreeSet::from(["a".to_string(), "b".to_string()]),
+                },
+                vec![ControlEdge::Direct {
+                    target: "result".into(),
+                }],
+            ),
+        ),
+        (
+            "result".to_string(),
+            topology_node(
+                "result",
+                NodeControl::End {
+                    outcome: insight_agent_platform::outcome::EndOutcomeKind::Success,
+                },
+                Vec::new(),
+            ),
+        ),
+    ]);
+    let plan = ExecutionPlan::sequential("route", nodes.keys().cloned());
+
+    validate_graph("route", &nodes, &plan).unwrap();
 }
 
 #[test]

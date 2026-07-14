@@ -2,7 +2,9 @@ use std::{collections::BTreeSet, fs, path::Path, sync::Arc, time::Duration};
 
 use insight_agent_platform::{
     dsl::{
-        compiled::{NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules, NodeRegion},
+        compiled::{
+            ControlEdge, NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules, NodeRegion,
+        },
         compiler::{AgentCompiler, CompileContext, CompileLimits},
         CompileError,
     },
@@ -87,7 +89,11 @@ impl NodeType for BranchNode {
             .map_err(|error| CompileError::new("NODE_CONFIG_INVALID", error.to_string()))?;
         Ok(NodeCompilation {
             body: Arc::new(()),
-            edges: config.targets,
+            edges: config
+                .targets
+                .into_iter()
+                .map(|target| ControlEdge::Direct { target })
+                .collect(),
             references: BTreeSet::new(),
             control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
@@ -289,7 +295,12 @@ fn compiles_valid_graph_and_hashes_prompt_contents() {
         second.version_hash, VALID_AGENT_VERSION_HASH,
         "Agent hash is not stable across repeated compiles"
     );
-    assert_eq!(first.nodes["first"].edges, vec!["result"]);
+    assert_eq!(
+        first.nodes["first"].edges,
+        vec![ControlEdge::Direct {
+            target: "result".into(),
+        }]
+    );
     assert!(first.execution_plan.forks.is_empty());
     assert!(first
         .execution_plan

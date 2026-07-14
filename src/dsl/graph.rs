@@ -29,10 +29,13 @@ pub fn validate_graph_structure(
 
     for (node_id, node) in nodes {
         for edge in &node.edges {
-            if !nodes.contains_key(edge) {
+            if !nodes.contains_key(edge.target()) {
                 return Err(CompileError::new(
                     "NODE_EDGE_NOT_FOUND",
-                    format!("node '{node_id}' points to missing node '{edge}'"),
+                    format!(
+                        "node '{node_id}' points to missing node '{}'",
+                        edge.target()
+                    ),
                 ));
             }
         }
@@ -84,8 +87,8 @@ fn reject_cycles(entry: &str, nodes: &BTreeMap<String, CompiledNode>) -> Result<
         }
         visiting.insert(node_id.to_string());
         if let Some(node) = nodes.get(node_id) {
-            for edge in &node.edges {
-                visit(edge, nodes, visiting, visited)?;
+            for target in node.structural_targets() {
+                visit(target, nodes, visiting, visited)?;
             }
         }
         visiting.remove(node_id);
@@ -104,7 +107,7 @@ fn reachable_from(entry: &str, nodes: &BTreeMap<String, CompiledNode>) -> BTreeS
             continue;
         }
         if let Some(node) = nodes.get(&node_id) {
-            pending.extend(node.edges.iter().cloned());
+            pending.extend(node.structural_targets().map(str::to_string));
         }
     }
     reachable
@@ -121,9 +124,9 @@ pub fn validate_references(
         .map(|node_id| (node_id.clone(), BTreeSet::new()))
         .collect::<BTreeMap<_, _>>();
     for (node_id, node) in nodes {
-        for edge in &node.edges {
+        for target in node.structural_targets() {
             predecessors
-                .get_mut(edge)
+                .get_mut(target)
                 .expect("edges were validated")
                 .insert(node_id.clone());
         }

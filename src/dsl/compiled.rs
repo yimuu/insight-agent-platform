@@ -20,6 +20,29 @@ use super::EmitPolicy;
 
 pub type CompiledBody = Arc<dyn Any + Send + Sync>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlEdge {
+    Direct { target: String },
+    Conditional { target: String },
+    ForkBranch { branch_id: String, target: String },
+    ForkContinuation { target: String },
+}
+
+impl ControlEdge {
+    pub fn target(&self) -> &str {
+        match self {
+            Self::Direct { target }
+            | Self::Conditional { target }
+            | Self::ForkBranch { target, .. }
+            | Self::ForkContinuation { target } => target,
+        }
+    }
+
+    pub fn is_direct_executable(&self) -> bool {
+        matches!(self, Self::Direct { .. } | Self::Conditional { .. })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NextPolicy {
     Required,
@@ -103,7 +126,7 @@ impl ExecutionPlan {
 
 pub struct NodeCompilation {
     pub body: CompiledBody,
-    pub edges: Vec<String>,
+    pub edges: Vec<ControlEdge>,
     pub references: BTreeSet<String>,
     pub control: NodeControl,
     pub envelope: NodeEnvelopeRules,
@@ -117,12 +140,23 @@ pub struct CompiledNode {
     pub emit: EmitPolicy,
     pub timeout: Duration,
     pub body: CompiledBody,
-    pub edges: Vec<String>,
+    pub edges: Vec<ControlEdge>,
     pub references: BTreeSet<String>,
     pub control: NodeControl,
 }
 
 impl CompiledNode {
+    pub fn structural_targets(&self) -> impl Iterator<Item = &str> {
+        self.edges.iter().map(ControlEdge::target)
+    }
+
+    pub fn direct_executable_targets(&self) -> impl Iterator<Item = &str> {
+        self.edges
+            .iter()
+            .filter(|edge| edge.is_direct_executable())
+            .map(ControlEdge::target)
+    }
+
     pub fn body<T: Any>(&self) -> Result<&T, RunError> {
         self.body.downcast_ref::<T>().ok_or_else(|| {
             RunError::new(

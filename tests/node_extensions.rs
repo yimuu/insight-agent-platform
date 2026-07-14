@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use insight_agent_platform::{
     dsl::{
         compiled::{
-            CompiledAgent, CompiledNode, NextPolicy, NodeCompilation, NodeControl,
+            CompiledAgent, CompiledNode, ControlEdge, NextPolicy, NodeCompilation, NodeControl,
             NodeEnvelopeRules, NodeOutcome, NodeTransition,
         },
         compiler::{AgentCompiler, CompileContext, CompileLimits},
@@ -173,7 +173,7 @@ async fn registered_node_compiles_and_executes_without_core_changes() {
         .unwrap()
         .compile("constant", json!({"value":42}), &mut compile_context)
         .unwrap();
-    assert_eq!(compilation.edges, Vec::<String>::new());
+    assert_eq!(compilation.edges, Vec::<ControlEdge>::new());
     assert_eq!(compilation.references, BTreeSet::new());
     assert_eq!(compilation.envelope.next, NextPolicy::Required);
     assert_eq!(compilation.control, NodeControl::Ordinary);
@@ -186,7 +186,9 @@ async fn registered_node_compiles_and_executes_without_core_changes() {
         emit: EmitPolicy::None,
         timeout: Duration::from_secs(1),
         body: compilation.body,
-        edges: vec!["result".to_string()],
+        edges: vec![ControlEdge::Direct {
+            target: "result".into(),
+        }],
         references: compilation.references,
         control: NodeControl::Ordinary,
     };
@@ -227,7 +229,9 @@ fn compiled_node_rejects_wrong_body_type() {
         emit: EmitPolicy::None,
         timeout: Duration::from_secs(1),
         body: Arc::new("wrong body".to_string()),
-        edges: vec!["result".to_string()],
+        edges: vec![ControlEdge::Direct {
+            target: "result".into(),
+        }],
         references: BTreeSet::new(),
         control: NodeControl::Ordinary,
     };

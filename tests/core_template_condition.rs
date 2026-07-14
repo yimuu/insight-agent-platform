@@ -8,8 +8,8 @@ use chrono::Utc;
 use insight_agent_platform::{
     dsl::{
         compiled::{
-            CompiledNode, NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules, NodeOutcome,
-            NodeTransition,
+            CompiledNode, ControlEdge, NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules,
+            NodeOutcome, NodeTransition,
         },
         compiler::{AgentCompiler, CompileContext, CompileLimits},
         EmitPolicy,
@@ -206,6 +206,37 @@ fn template_reference_extraction_rejects_non_canonical_nodes_paths() {
         .expect("non-canonical nodes path must fail compilation");
 
     assert_eq!(error.code(), "TEMPLATE_REFERENCE_INVALID");
+}
+
+#[test]
+fn condition_compiles_ordered_typed_edges() {
+    let models = ModelRegistry::default();
+    let actions = ActionRegistry::default();
+    let mut compile_context = CompileContext::new(&models, &actions);
+    let condition = ConditionNode
+        .compile(
+            "route",
+            json!({
+                "cases": [
+                    {"when":"input.kind == \"a\"", "next":"a"},
+                    {"when":"input.kind == \"b\"", "next":"b"}
+                ],
+                "default": "fallback"
+            }),
+            &mut compile_context,
+        )
+        .unwrap();
+
+    assert_eq!(
+        condition.edges,
+        vec![
+            ControlEdge::Conditional { target: "a".into() },
+            ControlEdge::Conditional { target: "b".into() },
+            ControlEdge::Conditional {
+                target: "fallback".into(),
+            },
+        ]
+    );
 }
 
 #[tokio::test]

@@ -15,8 +15,8 @@ use handlebars::Handlebars;
 use insight_agent_platform::{
     dsl::{
         compiled::{
-            CompiledAgent, CompiledNode, ExecutionPlan, NodeCompilation, NodeControl, NodeOutcome,
-            NodeTransition,
+            CompiledAgent, CompiledNode, ControlEdge, ExecutionPlan, NodeCompilation, NodeControl,
+            NodeOutcome, NodeTransition,
         },
         compiler::CompileContext,
         compiler::{AgentCompiler, CompileLimits},
@@ -616,7 +616,12 @@ fn scheduler_node(id: &str, next: Option<&str>, behavior: SchedulerBehavior) -> 
         emit: EmitPolicy::None,
         timeout: Duration::from_secs(1),
         body: Arc::new(behavior),
-        edges: next.into_iter().map(str::to_string).collect(),
+        edges: next
+            .into_iter()
+            .map(|target| ControlEdge::Direct {
+                target: target.to_string(),
+            })
+            .collect(),
         references: BTreeSet::new(),
         control: NodeControl::Ordinary,
     }

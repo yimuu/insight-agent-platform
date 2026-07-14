@@ -7,7 +7,8 @@ use chrono::Utc;
 use insight_agent_platform::{
     dsl::{
         compiled::{
-            CompiledNode, JoinPolicy, NextPolicy, NodeCompilation, NodeControl, NodeTransition,
+            CompiledNode, ControlEdge, JoinPolicy, NextPolicy, NodeCompilation, NodeControl,
+            NodeTransition,
         },
         compiler::CompileContext,
         EmitPolicy,
@@ -98,7 +99,22 @@ fn fork_and_join_compile_to_typed_controls() {
         .unwrap();
     assert_eq!(fork.envelope.next, NextPolicy::Forbidden);
     assert!(!fork.envelope.allows_content_emit);
-    assert_eq!(fork.edges, vec!["search_a", "search_b"]);
+    assert_eq!(
+        fork.edges,
+        vec![
+            ControlEdge::ForkBranch {
+                branch_id: "source_a".into(),
+                target: "search_a".into(),
+            },
+            ControlEdge::ForkBranch {
+                branch_id: "source_b".into(),
+                target: "search_b".into(),
+            },
+            ControlEdge::ForkContinuation {
+                target: "collect".into(),
+            },
+        ]
+    );
     assert_eq!(fork.references, BTreeSet::new());
     assert_eq!(
         fork.control,
@@ -118,7 +134,7 @@ fn fork_and_join_compile_to_typed_controls() {
         .unwrap();
     assert_eq!(join.envelope.next, NextPolicy::Required);
     assert!(!join.envelope.allows_content_emit);
-    assert_eq!(join.edges, Vec::<String>::new());
+    assert_eq!(join.edges, Vec::<ControlEdge>::new());
     assert_eq!(join.references, BTreeSet::new());
     assert_eq!(
         join.control,

@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use crate::{
     dsl::{
         compiled::{
-            CompiledNode, NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules, NodeOutcome,
-            NodeTransition,
+            CompiledNode, ControlEdge, NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules,
+            NodeOutcome, NodeTransition,
         },
         compiler::CompileContext,
         references::is_dsl_identifier,
@@ -75,7 +75,17 @@ impl NodeType for ForkNode {
             ));
         }
 
-        let edges = config.branches.values().cloned().collect();
+        let mut edges = config
+            .branches
+            .iter()
+            .map(|(branch_id, target)| ControlEdge::ForkBranch {
+                branch_id: branch_id.clone(),
+                target: target.clone(),
+            })
+            .collect::<Vec<_>>();
+        edges.push(ControlEdge::ForkContinuation {
+            target: config.join.clone(),
+        });
         let control = NodeControl::Fork {
             branches: config.branches.clone(),
             join: config.join.clone(),

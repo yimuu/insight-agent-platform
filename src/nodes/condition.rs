@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 use crate::{
     dsl::{
         compiled::{
-            CompiledNode, NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules, NodeOutcome,
-            NodeTransition,
+            CompiledNode, ControlEdge, NextPolicy, NodeCompilation, NodeControl, NodeEnvelopeRules,
+            NodeOutcome, NodeTransition,
         },
         compiler::CompileContext,
         references::extract_cel_references,
@@ -105,14 +105,18 @@ impl NodeType for ConditionNode {
                 node_id,
                 index,
             )?);
-            edges.push(case.next.clone());
+            edges.push(ControlEdge::Conditional {
+                target: case.next.clone(),
+            });
             cases.push(CompiledConditionCase {
                 expression,
                 program,
                 next: case.next,
             });
         }
-        edges.push(config.default.clone());
+        edges.push(ControlEdge::Conditional {
+            target: config.default.clone(),
+        });
 
         Ok(NodeCompilation {
             body: Arc::new(CompiledCondition {

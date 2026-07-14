@@ -81,9 +81,9 @@ fn node_predecessors(nodes: &BTreeMap<String, CompiledNode>) -> BTreeMap<String,
         .map(|node_id| (node_id.clone(), BTreeSet::new()))
         .collect::<BTreeMap<_, _>>();
     for (node_id, node) in nodes {
-        for edge in &node.edges {
+        for edge in node.edges.iter().filter(|edge| edge.is_direct_executable()) {
             predecessors
-                .get_mut(edge)
+                .get_mut(edge.target())
                 .expect("graph edges were validated before Select validation")
                 .insert(node_id.clone());
         }
@@ -93,13 +93,20 @@ fn node_predecessors(nodes: &BTreeMap<String, CompiledNode>) -> BTreeMap<String,
 
 fn is_reachable(from: &str, target: &str, nodes: &BTreeMap<String, CompiledNode>) -> bool {
     let mut visited = BTreeSet::new();
-    let mut pending = nodes[from].edges.clone();
+    let mut pending = nodes[from]
+        .direct_executable_targets()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     while let Some(node_id) = pending.pop() {
         if node_id == target {
             return true;
         }
         if visited.insert(node_id.clone()) {
-            pending.extend(nodes[&node_id].edges.iter().cloned());
+            pending.extend(
+                nodes[&node_id]
+                    .direct_executable_targets()
+                    .map(str::to_string),
+            );
         }
     }
     false

@@ -14,8 +14,8 @@ use handlebars::Handlebars;
 use insight_agent_platform::{
     dsl::{
         compiled::{
-            BranchPlan, CompiledAgent, CompiledNode, ExecutionPlan, ForkPlan, JoinPolicy,
-            NodeCompilation, NodeControl, NodeOutcome, NodeRegion, NodeTransition,
+            BranchPlan, CompiledAgent, CompiledNode, ControlEdge, ExecutionPlan, ForkPlan,
+            JoinPolicy, NodeCompilation, NodeControl, NodeOutcome, NodeRegion, NodeTransition,
         },
         compiler::CompileContext,
         CompileError, EmitPolicy,
@@ -498,7 +498,12 @@ fn node(id: &str, next: Option<&str>, timeout: Duration, behavior: Behavior) -> 
         emit: EmitPolicy::None,
         timeout,
         body: Arc::new(behavior),
-        edges: next.into_iter().map(str::to_string).collect(),
+        edges: next
+            .into_iter()
+            .map(|target| ControlEdge::Direct {
+                target: target.to_string(),
+            })
+            .collect(),
         references: BTreeSet::new(),
         control: NodeControl::Ordinary,
     }

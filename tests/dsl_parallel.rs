@@ -314,7 +314,7 @@ fn rejects_fork_whose_join_has_the_wrong_kind() {
 fn rejects_fork_whose_declared_join_is_absent() {
     assert_compile_error(
         &parallel_yaml().replace("join: collect", "join: missing"),
-        "FORK_JOIN_NOT_FOUND",
+        "NODE_EDGE_NOT_FOUND",
     );
 }
 

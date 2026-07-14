@@ -171,7 +171,8 @@ fn collect_branch_nodes(
                 ),
             ));
         }
-        if matches!(node.control, NodeControl::End { .. }) || node.edges.is_empty() {
+        let direct_targets = node.direct_executable_targets().collect::<Vec<_>>();
+        if matches!(node.control, NodeControl::End { .. }) || direct_targets.is_empty() {
             return Err(CompileError::new(
                 "BRANCH_PATH_MISSING_JOIN",
                 format!(
@@ -179,7 +180,7 @@ fn collect_branch_nodes(
                 ),
             ));
         }
-        pending.extend(node.edges.iter().map(String::as_str));
+        pending.extend(direct_targets);
     }
 
     Ok(visited)
@@ -236,9 +237,8 @@ fn branch_has_edge_into(
 ) -> bool {
     source.nodes.difference(&target.nodes).any(|node_id| {
         nodes[node_id]
-            .edges
-            .iter()
-            .any(|edge| target.nodes.contains(edge))
+            .direct_executable_targets()
+            .any(|target_id| target.nodes.contains(target_id))
     })
 }
 
@@ -274,7 +274,7 @@ fn validate_branch_regions(
         }
     }
 
-    let predecessors = node_predecessors(nodes);
+    let predecessors = structural_predecessors(nodes);
     for (node_id, (fork_id, branch_id)) in &owners {
         let branch_entry = &topologies[fork_id].branches[branch_id].entry;
         for predecessor in &predecessors[node_id.as_str()] {
@@ -292,15 +292,15 @@ fn validate_branch_regions(
     }
 
     for (node_id, (fork_id, branch_id)) in &owners {
-        for edge in &nodes[node_id].edges {
-            if edge == topologies[fork_id].join_id {
+        for target in nodes[node_id].direct_executable_targets() {
+            if target == topologies[fork_id].join_id {
                 continue;
             }
-            if owners.get(edge) != Some(&(fork_id.clone(), branch_id.clone())) {
+            if owners.get(target) != Some(&(fork_id.clone(), branch_id.clone())) {
                 return Err(CompileError::new(
                     "BRANCH_CROSS_REGION_EDGE",
                     format!(
-                        "fork node '{fork_id}' branch '{branch_id}' has an edge from '{node_id}' outside its region to '{edge}'"
+                        "fork node '{fork_id}' branch '{branch_id}' has an edge from '{node_id}' outside its region to '{target}'"
                     ),
                 ));
             }
@@ -328,7 +328,7 @@ fn validate_join_predecessors(
     topologies: &BTreeMap<String, ForkTopology<'_>>,
     branch_owners: &BTreeMap<String, (String, String)>,
 ) -> Result<(), CompileError> {
-    let predecessors = node_predecessors(nodes);
+    let predecessors = direct_executable_predecessors(nodes);
 
     for (fork_id, topology) in topologies {
         let mut contributing_branches = BTreeSet::new();
@@ -363,15 +363,35 @@ fn validate_join_predecessors(
     Ok(())
 }
 
-fn node_predecessors(nodes: &BTreeMap<String, CompiledNode>) -> BTreeMap<&str, BTreeSet<&str>> {
+fn structural_predecessors(
+    nodes: &BTreeMap<String, CompiledNode>,
+) -> BTreeMap<&str, BTreeSet<&str>> {
     let mut predecessors = nodes
         .keys()
         .map(|node_id| (node_id.as_str(), BTreeSet::new()))
         .collect::<BTreeMap<_, _>>();
     for (node_id, node) in nodes {
-        for edge in &node.edges {
+        for target in node.structural_targets() {
             predecessors
-                .get_mut(edge.as_str())
+                .get_mut(target)
+                .expect("graph edges were validated before plan construction")
+                .insert(node_id.as_str());
+        }
+    }
+    predecessors
+}
+
+fn direct_executable_predecessors(
+    nodes: &BTreeMap<String, CompiledNode>,
+) -> BTreeMap<&str, BTreeSet<&str>> {
+    let mut predecessors = nodes
+        .keys()
+        .map(|node_id| (node_id.as_str(), BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    for (node_id, node) in nodes {
+        for target in node.direct_executable_targets() {
+            predecessors
+                .get_mut(target)
                 .expect("graph edges were validated before plan construction")
                 .insert(node_id.as_str());
         }
