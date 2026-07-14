@@ -129,7 +129,7 @@ Branch execution
 ## 7. Error Handling
 
 - Scope/update run-ID mismatch remains `HISTORY_EVENT_INVALID` and occurs before EventHub allocates live state or writes storage.
-- Typed event serialization failure is an infrastructure/history boundary error and cannot partially persist a terminal.
+- Terminal event projection is constructed infallibly from owned strings and `serde_json::Value`; it cannot partially persist a terminal.
 - A different durable winner is not an error; it is `TerminalResolution::Authoritative`.
 - Missing or divergent durable terminal events retain the existing recovery errors.
 - Invalid Join taxonomy fails closed as `JOIN_RESULT_INVALID`; it is never exposed as authored workflow data.
