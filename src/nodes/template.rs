@@ -153,7 +153,6 @@ impl NodeType for TemplateNode {
             body: Arc::new(value),
             edges: Vec::new(),
             references,
-            terminal: false,
             control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Required,

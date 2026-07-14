@@ -84,7 +84,6 @@ impl NodeType for ForkNode {
             body: Arc::new(config),
             edges,
             references: BTreeSet::new(),
-            terminal: false,
             control,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Forbidden,

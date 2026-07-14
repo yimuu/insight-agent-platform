@@ -19,6 +19,7 @@ use insight_agent_platform::{
         registry::{NodeExecutor, NodeType, NodeTypeRegistry},
         template::TemplateNode,
     },
+    outcome::EndOutcomeKind,
     resources::{actions::ActionRegistry, models::ModelRegistry},
     runtime::{stop_pair, ExecutionControl, RunContext, RunMetadata},
 };
@@ -26,11 +27,11 @@ use serde_json::{json, Value};
 use tempfile::tempdir;
 
 #[derive(Debug, Clone, Copy)]
-struct TestOutput;
+struct TestEnd;
 
-impl NodeType for TestOutput {
+impl NodeType for TestEnd {
     fn kind(&self) -> &'static str {
-        "core.output"
+        "core.end"
     }
 
     fn compile(
@@ -43,8 +44,9 @@ impl NodeType for TestOutput {
             body: Arc::new(()),
             edges: Vec::new(),
             references: BTreeSet::new(),
-            terminal: true,
-            control: NodeControl::Ordinary,
+            control: NodeControl::End {
+                outcome: EndOutcomeKind::Success,
+            },
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Forbidden,
                 allows_content_emit: false,
@@ -81,7 +83,6 @@ fn compiled_node(
         body: compilation.body,
         edges: compilation.edges,
         references: compilation.references,
-        terminal: compilation.terminal,
         control: NodeControl::Ordinary,
     }
 }
@@ -463,12 +464,12 @@ nodes:
 "#;
 
     let condition_with_next = format!(
-        "{common}  start:\n    type: core.condition\n    next: done\n    config:\n      cases:\n        - when: 'true'\n          next: done\n      default: done\n  done:\n    type: core.output\n    config: {{}}\n"
+        "{common}  start:\n    type: core.condition\n    next: done\n    config:\n      cases:\n        - when: 'true'\n          next: done\n      default: done\n  done:\n    type: core.end\n    config: {{outcome: success, data: {{}}}}\n"
     );
     assert_compile_error(&condition_with_next, "NODE_NEXT_FORBIDDEN");
 
     let object_content = format!(
-        "{common}  start:\n    type: core.template\n    next: done\n    emit: content\n    config:\n      value:\n        answer: '{{{{ input.answer }}}}'\n  done:\n    type: core.output\n    config: {{}}\n"
+        "{common}  start:\n    type: core.template\n    next: done\n    emit: content\n    config:\n      value:\n        answer: '{{{{ input.answer }}}}'\n  done:\n    type: core.end\n    config: {{outcome: success, data: {{}}}}\n"
     );
     assert_compile_error(&object_content, "NODE_EMIT_UNSUPPORTED");
 }
@@ -479,7 +480,7 @@ fn assert_compile_error(yaml: &str, expected_code: &str) {
     let mut types = NodeTypeRegistry::default();
     types.register(TemplateNode).unwrap();
     types.register(ConditionNode).unwrap();
-    types.register(TestOutput).unwrap();
+    types.register(TestEnd).unwrap();
     let compiler = AgentCompiler::new(
         types,
         ModelRegistry::default(),

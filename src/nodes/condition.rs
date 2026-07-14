@@ -121,7 +121,6 @@ impl NodeType for ConditionNode {
             }),
             edges,
             references,
-            terminal: false,
             control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Forbidden,

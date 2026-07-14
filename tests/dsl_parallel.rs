@@ -131,8 +131,9 @@ nodes:
     config:
       mode: all_settled
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#
 }
@@ -152,9 +153,9 @@ fn valid_parallel_yaml_with(node_id: &str, reference: &str) -> String {
             ),
         ),
         "result" => parallel_yaml().replace(
-            "  result:\n    type: core.output\n    config:\n      data: {ok: true}",
+            "  result:\n    type: core.end\n    config:\n      outcome: success\n      data: {ok: true}",
             &format!(
-                "  result:\n    type: core.output\n    config:\n      data:\n        value: '{reference}'"
+                "  result:\n    type: core.end\n    config:\n      outcome: success\n      data:\n        value: '{reference}'"
             ),
         ),
         _ => panic!("unsupported reference target '{node_id}'"),
@@ -283,8 +284,9 @@ nodes:
     config:
       value: prepared
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
     );
@@ -352,8 +354,9 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
         "BRANCH_REGION_OVERLAP",
@@ -423,8 +426,9 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
         "JOIN_PREDECESSOR_INVALID",
@@ -473,8 +477,9 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
         "BRANCH_NESTED_FORK",
@@ -529,8 +534,9 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
         "JOIN_PREDECESSOR_INVALID",
@@ -586,8 +592,9 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
         "JOIN_PAIRING_INVALID",
@@ -614,8 +621,9 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
         "JOIN_PAIRING_INVALID",
@@ -668,8 +676,9 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
     );
@@ -719,8 +728,9 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
         "FORK_BRANCH_COUNT_INVALID",
@@ -762,8 +772,9 @@ nodes:
     next: result
     config: {{mode: all_settled}}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {{ok: true}}
 "#
     );
@@ -805,8 +816,8 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
-    config: {data: {ok: true}}
+    type: core.end
+    config: {outcome: success, data: {ok: true}}
 "#,
         "CROSS_BRANCH_REFERENCE",
     );
@@ -838,8 +849,8 @@ nodes:
         messages:
           - {role: user, content: future}
   result:
-    type: core.output
-    config: {data: {ok: true}}
+    type: core.end
+    config: {outcome: success, data: {ok: true}}
 "#,
         "INVALID_NODE_REFERENCE",
     );

@@ -71,7 +71,6 @@ impl NodeType for SelectNode {
             body: Arc::new(sources.clone()),
             edges: Vec::new(),
             references: BTreeSet::new(),
-            terminal: false,
             control: NodeControl::Select { sources },
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Required,

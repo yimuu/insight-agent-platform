@@ -16,7 +16,7 @@ use insight_agent_platform::{
     dsl::{
         compiled::{
             CompiledAgent, CompiledNode, ExecutionPlan, NodeCompilation, NodeControl, NodeOutcome,
-            NodeTransition, RunOutput,
+            NodeTransition,
         },
         compiler::CompileContext,
         compiler::{AgentCompiler, CompileLimits},
@@ -34,6 +34,7 @@ use insight_agent_platform::{
         default_node_registries,
         registry::{NodeExecutor, NodeExecutorRegistry, NodeType},
     },
+    outcome::{RunOutput, TerminalOutcome},
     resources::{actions::ActionRegistry, models::ModelRegistry},
     runtime::{
         execute_node, stop_pair, ExecutionControl, ExecutionLimiter, NodeExecutionFailure,
@@ -208,7 +209,9 @@ impl NodeExecutor for SchedulerExecutor {
                 executions.fetch_add(1, Ordering::SeqCst);
                 Ok(NodeOutcome {
                     output: json!({"terminal":true}),
-                    transition: NodeTransition::Complete(output.clone()),
+                    transition: NodeTransition::End(TerminalOutcome::Success {
+                        output: output.clone(),
+                    }),
                 })
             }
             SchedulerBehavior::BarrierNext {
@@ -357,7 +360,9 @@ impl NodeExecutor for SchedulerExecutor {
                 assert_eq!(context.node_output(predecessor), Some(expected));
                 Ok(NodeOutcome {
                     output: json!({"terminal":true}),
-                    transition: NodeTransition::Complete(output.clone()),
+                    transition: NodeTransition::End(TerminalOutcome::Success {
+                        output: output.clone(),
+                    }),
                 })
             }
         }
@@ -591,7 +596,6 @@ fn node(id: &str) -> CompiledNode {
         body: Arc::new(()),
         edges: Vec::new(),
         references: BTreeSet::new(),
-        terminal: false,
         control: NodeControl::Ordinary,
     }
 }
@@ -614,7 +618,6 @@ fn scheduler_node(id: &str, next: Option<&str>, behavior: SchedulerBehavior) -> 
         body: Arc::new(behavior),
         edges: next.into_iter().map(str::to_string).collect(),
         references: BTreeSet::new(),
-        terminal: next.is_none(),
         control: NodeControl::Ordinary,
     }
 }
@@ -726,8 +729,8 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
-    config: {data: {done: true}}
+    type: core.end
+    config: {outcome: success, data: {done: true}}
 "#
 }
 
@@ -758,8 +761,9 @@ nodes:
     next: result
     config: {sources: [medical, general]}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data:
         source: "{{ nodes.selected.output.source_node_id }}"
         answer: "{{ nodes.selected.output.value.text }}"
@@ -806,8 +810,8 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
-    config: {data: {done: true}}
+    type: core.end
+    config: {outcome: success, data: {done: true}}
 "#
 }
 
@@ -860,10 +864,12 @@ async fn select_scheduler_runs_only_the_chosen_path_and_persists_stable_output()
 
         assert_eq!(
             scheduler.run(context, stop).await.unwrap(),
-            SchedulerResult::Completed(RunOutput {
-                content: None,
-                format: None,
-                data: json!({"source":selected, "answer":answer}),
+            SchedulerResult::Ended(TerminalOutcome::Success {
+                output: RunOutput {
+                    content: None,
+                    format: None,
+                    data: json!({"source":selected, "answer":answer}),
+                },
             })
         );
 
@@ -935,10 +941,12 @@ async fn select_missing_source_inside_a_fork_settles_only_that_branch() {
 
     assert_eq!(
         scheduler.run(context, stop).await.unwrap(),
-        SchedulerResult::Completed(RunOutput {
-            content: None,
-            format: None,
-            data: json!({"done":true}),
+        SchedulerResult::Ended(TerminalOutcome::Success {
+            output: RunOutput {
+                content: None,
+                format: None,
+                data: json!({"done":true}),
+            },
         })
     );
     assert_eq!(
@@ -1023,7 +1031,9 @@ async fn sequential_scheduler_preserves_path_context_output_and_node_event_order
             .run(context("run_sequential"), stop)
             .await
             .unwrap(),
-        SchedulerResult::Completed(final_output)
+        SchedulerResult::Ended(TerminalOutcome::Success {
+            output: final_output
+        })
     );
     assert_eq!(
         [
@@ -1105,7 +1115,7 @@ async fn sequential_scheduler_goto_never_executes_unselected_path() {
 
     assert_eq!(
         scheduler.run(context("run_goto"), stop).await.unwrap(),
-        SchedulerResult::Completed(output)
+        SchedulerResult::Ended(TerminalOutcome::Success { output })
     );
     assert_eq!(route_runs.load(Ordering::SeqCst), 1);
     assert_eq!(selected_runs.load(Ordering::SeqCst), 1);
@@ -1265,7 +1275,9 @@ async fn parallel_scheduler_overlaps_compiled_branches_and_waits_before_join() {
 
     assert_eq!(
         execution.await.unwrap().unwrap(),
-        SchedulerResult::Completed(final_output)
+        SchedulerResult::Ended(TerminalOutcome::Success {
+            output: final_output
+        })
     );
     for id in [
         "search_a",
@@ -1347,8 +1359,8 @@ nodes:
     next: result
     config: {{mode: all_settled}}
   result:
-    type: core.output
-    config: {{data: {{done: true}}}}
+    type: core.end
+    config: {{outcome: success, data: {{done: true}}}}
 "#
     );
     let mut agent = compile_parallel_agent(&yaml);
@@ -1398,7 +1410,7 @@ nodes:
     release.notify_waiters();
     assert!(matches!(
         execution.await.unwrap().unwrap(),
-        SchedulerResult::Completed(_)
+        SchedulerResult::Ended(TerminalOutcome::Success { .. })
     ));
     assert_eq!(maximum.load(Ordering::SeqCst), 3);
     assert!(counts
@@ -1451,7 +1463,7 @@ async fn parallel_branch_goto_executes_only_selected_successor() {
             .run(context("run_parallel_goto"), stop)
             .await
             .unwrap(),
-        SchedulerResult::Completed(_)
+        SchedulerResult::Ended(TerminalOutcome::Success { .. })
     ));
     assert_eq!(route.load(Ordering::SeqCst), 1);
     assert_eq!(selected.load(Ordering::SeqCst), 1);
@@ -1527,7 +1539,7 @@ async fn parallel_scheduler_settles_partial_failure_and_runs_join() {
             .run(context("run_parallel_partial"), stop)
             .await
             .unwrap(),
-        SchedulerResult::Completed(_)
+        SchedulerResult::Ended(TerminalOutcome::Success { .. })
     ));
     assert_eq!(summarize_b.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -1592,7 +1604,7 @@ async fn parallel_scheduler_runs_join_and_post_join_when_all_branches_fail() {
             .run(context("run_parallel_all_failed"), stop)
             .await
             .unwrap(),
-        SchedulerResult::Completed(_)
+        SchedulerResult::Ended(TerminalOutcome::Success { .. })
     ));
     assert_eq!(result_runs.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -1654,8 +1666,8 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
-    config: {data: {done: true}}
+    type: core.end
+    config: {outcome: success, data: {done: true}}
 "#,
     );
     let counts = ["a1", "a2", "b1", "b2", "result"]
@@ -1695,7 +1707,7 @@ nodes:
             .run(context("run_sequential_forks"), stop)
             .await
             .unwrap(),
-        SchedulerResult::Completed(output)
+        SchedulerResult::Ended(TerminalOutcome::Success { output })
     );
     assert!(counts
         .values()
@@ -1745,7 +1757,7 @@ async fn parallel_scheduler_isolates_node_timeout_to_its_branch() {
             .run(context("run_parallel_timeout"), stop)
             .await
             .unwrap(),
-        SchedulerResult::Completed(_)
+        SchedulerResult::Ended(TerminalOutcome::Success { .. })
     ));
     assert_eq!(summarize_b.load(Ordering::SeqCst), 0);
     let collect = repository

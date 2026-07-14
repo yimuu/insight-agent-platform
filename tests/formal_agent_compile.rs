@@ -142,8 +142,9 @@ nodes:
     config:
       value: general
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       content:
         template: "{{ input.question }}"
       format: text
@@ -246,8 +247,9 @@ nodes:
           content: "{{ nodes.selected.output.value.text }}"
       parameters: {}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data:
         source: "{{ nodes.selected.output.source_node_id }}"
         rendered: "{{ nodes.render.output }}"

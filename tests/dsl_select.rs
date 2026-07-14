@@ -69,8 +69,9 @@ nodes:
     next: result
     config: {sources: [medical, general]}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data:
         source: "{{ nodes.selected.output.source_node_id }}"
         text: "{{ nodes.selected.output.value.text }}"
@@ -134,8 +135,8 @@ nodes:
     next: result
     config: {sources: [a, b, c]}
   result:
-    type: core.output
-    config: {data: {value: "{{ nodes.selected.output.value }}"}}
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.selected.output.value }}"}}
 "#,
     );
 
@@ -233,8 +234,8 @@ nodes:
     next: result
     config: {sources: [a, b]}
   result:
-    type: core.output
-    config: {data: {value: "{{ nodes.selected.output.value }}"}}
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.selected.output.value }}"}}
 "#,
         "SELECT_PREDECESSOR_MISMATCH",
     );
@@ -265,8 +266,8 @@ nodes:
     next: result
     config: {sources: [first, second]}
   result:
-    type: core.output
-    config: {data: {value: "{{ nodes.selected.output.value }}"}}
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.selected.output.value }}"}}
 "#,
         "SELECT_SOURCES_NOT_EXCLUSIVE",
     );
@@ -314,8 +315,8 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
-    config: {data: {ok: true}}
+    type: core.end
+    config: {outcome: success, data: {ok: true}}
 "#,
     );
 
@@ -361,8 +362,8 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
-    config: {data: {ok: true}}
+    type: core.end
+    config: {outcome: success, data: {ok: true}}
 "#,
         "BRANCH_CROSS_REGION_EDGE",
     );
@@ -410,8 +411,8 @@ nodes:
     next: result
     config: {sources: [collect, outside]}
   result:
-    type: core.output
-    config: {data: {ok: true}}
+    type: core.end
+    config: {outcome: success, data: {ok: true}}
 "#,
         "SELECT_REGION_INVALID",
     );

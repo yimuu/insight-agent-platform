@@ -48,7 +48,6 @@ impl NodeType for JoinNode {
             body: Arc::new(policy),
             edges: Vec::new(),
             references: BTreeSet::new(),
-            terminal: false,
             control: NodeControl::Join { policy },
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Required,

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    compiled::{CompiledNode, ExecutionPlan, NodeRegion},
+    compiled::{CompiledNode, ExecutionPlan, NodeControl, NodeRegion},
     select::validate_selects,
     CompileError,
 };
@@ -48,22 +48,17 @@ pub fn validate_graph_structure(
     }
 
     for (node_id, node) in nodes {
-        if node.terminal && node.kind != "core.output" {
+        let is_end = matches!(node.control, NodeControl::End { .. });
+        if is_end && !node.edges.is_empty() {
             return Err(CompileError::new(
-                "OUTPUT_REQUIRED",
-                format!("terminal node '{node_id}' must use type 'core.output'"),
+                "END_HAS_SUCCESSOR",
+                format!("end node '{node_id}' cannot have outgoing edges"),
             ));
         }
-        if node.terminal && !node.edges.is_empty() {
+        if !is_end && node.edges.is_empty() {
             return Err(CompileError::new(
-                "OUTPUT_INVALID",
-                format!("output node '{node_id}' cannot have outgoing edges"),
-            ));
-        }
-        if !node.terminal && node.edges.is_empty() {
-            return Err(CompileError::new(
-                "OUTPUT_REQUIRED",
-                format!("reachable path ends at non-output node '{node_id}'"),
+                "END_REQUIRED",
+                format!("reachable path ends at non-end node '{node_id}'"),
             ));
         }
     }

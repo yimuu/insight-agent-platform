@@ -19,7 +19,7 @@ use insight_agent_platform::{
     dsl::{
         compiled::{
             CompiledAgent, CompiledNode, ExecutionPlan, NodeCompilation, NodeControl, NodeOutcome,
-            NodeTransition, RunOutput,
+            NodeTransition,
         },
         compiler::CompileContext,
         CompileError, EmitPolicy,
@@ -30,6 +30,7 @@ use insight_agent_platform::{
         default_node_registries,
         registry::{NodeExecutor, NodeType},
     },
+    outcome::{RunOutput, TerminalOutcome},
     runtime::{
         CompiledAgentRegistry, ExecutionControl, RunContext, RunError, RunService, RunServiceConfig,
     },
@@ -76,10 +77,12 @@ impl NodeExecutor for ApiNode {
         match node.body::<ApiBehavior>()? {
             ApiBehavior::Complete => Ok(NodeOutcome {
                 output: json!({"answer":"done"}),
-                transition: NodeTransition::Complete(RunOutput {
-                    content: Some("done".to_string()),
-                    format: Some("text".to_string()),
-                    data: json!({"answer":"done"}),
+                transition: NodeTransition::End(TerminalOutcome::Success {
+                    output: RunOutput {
+                        content: Some("done".to_string()),
+                        format: Some("text".to_string()),
+                        data: json!({"answer":"done"}),
+                    },
                 }),
             }),
             ApiBehavior::Block => {
@@ -100,7 +103,6 @@ fn agent(id: &str, behavior: ApiBehavior) -> Arc<CompiledAgent> {
         body: Arc::new(behavior),
         edges: Vec::new(),
         references: BTreeSet::new(),
-        terminal: true,
         control: NodeControl::Ordinary,
     };
     let nodes = BTreeMap::from([("work".to_string(), node)]);

@@ -70,11 +70,11 @@ fn enabled_repository_agents_compile_through_production_registries() {
         researcher.nodes["answer"].emit,
         insight_agent_platform::dsl::EmitPolicy::Content
     );
-    assert_eq!(researcher.nodes["result"].kind, "core.output");
+    assert_eq!(researcher.nodes["result"].kind, "core.end");
 
     let code_demo = agents.get("code_node_demo").unwrap();
     assert_eq!(code_demo.nodes["analyze_text"].kind, "core.action");
-    assert_eq!(code_demo.nodes["result"].kind, "core.output");
+    assert_eq!(code_demo.nodes["result"].kind, "core.end");
     assert!(code_demo.nodes["render"]
         .references
         .contains("analyze_text"));
@@ -95,7 +95,7 @@ fn enabled_repository_agents_compile_through_production_registries() {
     ] {
         assert_eq!(medical.nodes[node_id].kind, "core.chat");
     }
-    assert_eq!(medical.nodes["result"].kind, "core.output");
+    assert_eq!(medical.nodes["result"].kind, "core.end");
     assert!(medical.nodes["abnormal_indicators"].references.is_empty());
     assert!(medical.nodes["comprehensive_interpretation"]
         .references

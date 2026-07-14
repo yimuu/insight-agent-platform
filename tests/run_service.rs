@@ -14,7 +14,7 @@ use insight_agent_platform::{
     dsl::{
         compiled::{
             BranchPlan, CompiledAgent, CompiledNode, ExecutionPlan, ForkPlan, JoinPolicy,
-            NodeCompilation, NodeControl, NodeOutcome, NodeRegion, NodeTransition, RunOutput,
+            NodeCompilation, NodeControl, NodeOutcome, NodeRegion, NodeTransition,
         },
         compiler::CompileContext,
         CompileError, EmitPolicy,
@@ -28,6 +28,7 @@ use insight_agent_platform::{
         types::{NewRun, NodeOutputRecord, RunRecord, RunStatus, TerminalUpdate},
     },
     nodes::registry::{NodeExecutor, NodeExecutorRegistry, NodeType},
+    outcome::{RunOutput, TerminalOutcome},
     runtime::{
         CompiledAgentRegistry, ExecutionControl, RequestMetadata, RunContext, RunError, RunService,
         RunServiceConfig, ServiceError,
@@ -87,10 +88,12 @@ impl NodeExecutor for ServiceNode {
         match node.body::<ServiceBehavior>()? {
             ServiceBehavior::Complete => Ok(NodeOutcome {
                 output: json!({"complete":true}),
-                transition: NodeTransition::Complete(RunOutput {
-                    content: Some("done".to_string()),
-                    format: Some("text".to_string()),
-                    data: json!({"done":true}),
+                transition: NodeTransition::End(TerminalOutcome::Success {
+                    output: RunOutput {
+                        content: Some("done".to_string()),
+                        format: Some("text".to_string()),
+                        data: json!({"done":true}),
+                    },
                 }),
             }),
             ServiceBehavior::Block => {
@@ -127,7 +130,6 @@ fn agent(id: &str, behavior: ServiceBehavior) -> Arc<CompiledAgent> {
         body: Arc::new(behavior),
         edges: Vec::new(),
         references: BTreeSet::new(),
-        terminal: true,
         control: NodeControl::Ordinary,
     };
     let nodes = BTreeMap::from([("work".to_string(), node)]);
@@ -163,7 +165,6 @@ fn parallel_blocking_agent(
         body: Arc::new(behavior),
         edges: next.into_iter().map(str::to_string).collect(),
         references: BTreeSet::new(),
-        terminal: next.is_none(),
         control: NodeControl::Ordinary,
     };
     let nodes = vec![

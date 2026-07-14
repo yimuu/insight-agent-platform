@@ -1,6 +1,5 @@
 use chrono::{DateTime, TimeZone, Utc};
 use insight_agent_platform::{
-    dsl::compiled::RunOutput,
     events::protocol::{RunEvent, RunEventScope, RunEventType},
     history::{
         postgres::PostgresRunRepository,
@@ -9,6 +8,7 @@ use insight_agent_platform::{
             summarize_input, NewRun, NodeOutputRecord, RunAttachment, RunStatus, TerminalUpdate,
         },
     },
+    outcome::RunOutput,
 };
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, AssertSqlSafe};

@@ -171,7 +171,7 @@ fn collect_branch_nodes(
                 ),
             ));
         }
-        if node.terminal || node.edges.is_empty() {
+        if matches!(node.control, NodeControl::End { .. }) || node.edges.is_empty() {
             return Err(CompileError::new(
                 "BRANCH_PATH_MISSING_JOIN",
                 format!(

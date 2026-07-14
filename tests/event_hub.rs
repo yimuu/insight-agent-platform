@@ -10,7 +10,6 @@ use std::{
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use insight_agent_platform::{
-    dsl::compiled::RunOutput,
     events::{
         hub::{EventError, EventHub, EventHubConfig},
         protocol::{RunEvent, RunEventScope, RunEventType},
@@ -19,6 +18,7 @@ use insight_agent_platform::{
         repository::{HistoryError, RunRepository},
         types::{NewRun, NodeOutputRecord, RunRecord, RunStatus, TerminalUpdate},
     },
+    outcome::RunOutput,
 };
 use serde_json::json;
 use tokio::sync::{Mutex, Notify};

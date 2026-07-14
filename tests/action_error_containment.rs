@@ -170,8 +170,8 @@ nodes:
       action: containment
       input: {mode: valid, payload: "{{ input.secret }}"}
   result:
-    type: core.output
-    config: {data: {ok: true}}
+    type: core.end
+    config: {outcome: success, data: {ok: true}}
 "#,
     );
     write_agent(
@@ -188,8 +188,8 @@ nodes:
         mode: invalid_output
         payload: {secret: "{{ input.secret }}"}
   result:
-    type: core.output
-    config: {data: {ok: true}}
+    type: core.end
+    config: {outcome: success, data: {ok: true}}
 "#,
     );
     write_agent(
@@ -223,8 +223,8 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
-    config: {data: {ok: true}}
+    type: core.end
+    config: {outcome: success, data: {ok: true}}
 "#,
     );
     write_agent(
@@ -241,8 +241,8 @@ nodes:
         mode: valid
         payload: {secret: "{{ input.secret }}"}
   result:
-    type: core.output
-    config: {data: {ok: true}}
+    type: core.end
+    config: {outcome: success, data: {ok: true}}
 "#,
     );
 }

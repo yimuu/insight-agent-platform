@@ -41,7 +41,6 @@ fn compiled_node(
         body: compilation.body,
         edges: compilation.edges,
         references: compilation.references,
-        terminal: compilation.terminal,
         control: compilation.control,
     }
 }
@@ -91,7 +90,6 @@ fn select_compiles_to_a_typed_ordinary_successor_contract() {
     assert!(!compilation.envelope.allows_content_emit);
     assert!(compilation.edges.is_empty());
     assert!(compilation.references.is_empty());
-    assert!(!compilation.terminal);
     assert_eq!(
         compilation.control,
         NodeControl::Select {

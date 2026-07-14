@@ -159,7 +159,6 @@ fn compiled_node(
         body: compilation.body,
         edges: compilation.edges,
         references: compilation.references,
-        terminal: compilation.terminal,
         control: NodeControl::Ordinary,
     }
 }

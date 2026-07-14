@@ -26,8 +26,9 @@ nodes:
       value: "{{ input.text }}"
 
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       content:
         template: "{{ nodes.answer.output }}"
       format: text

@@ -6,6 +6,7 @@ pub mod events;
 pub mod history;
 pub mod nodes;
 pub(crate) mod observability;
+pub mod outcome;
 pub mod resources;
 pub mod runtime;
 pub mod schema;

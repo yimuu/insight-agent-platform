@@ -7,12 +7,12 @@ use sqlx::{
 };
 
 use crate::{
-    dsl::compiled::RunOutput,
     events::protocol::{RunEvent, RunEventType, EVENT_SCHEMA_VERSION},
     history::{
         repository::{validate_recovery_event, HistoryError, RunRepository},
         types::{NewRun, NodeOutputRecord, RunAttachment, RunRecord, RunStatus, TerminalUpdate},
     },
+    outcome::RunOutput,
 };
 
 static MIGRATOR: Migrator = sqlx::migrate!("migrations/formal_v1/postgres");

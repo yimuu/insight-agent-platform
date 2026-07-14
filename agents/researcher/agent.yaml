@@ -61,8 +61,9 @@ nodes:
         temperature: 0.3
 
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       content:
         template: "{{ nodes.answer.output.text }}"
       format: markdown

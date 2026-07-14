@@ -81,7 +81,6 @@ impl NodeType for ConstantNode {
             }),
             edges: Vec::new(),
             references: config.references.into_iter().collect(),
-            terminal: false,
             control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Required,
@@ -176,7 +175,6 @@ async fn registered_node_compiles_and_executes_without_core_changes() {
         .unwrap();
     assert_eq!(compilation.edges, Vec::<String>::new());
     assert_eq!(compilation.references, BTreeSet::new());
-    assert!(!compilation.terminal);
     assert_eq!(compilation.envelope.next, NextPolicy::Required);
     assert_eq!(compilation.control, NodeControl::Ordinary);
     assert_eq!(NodeTransition::ActivateFork, NodeTransition::ActivateFork);
@@ -190,7 +188,6 @@ async fn registered_node_compiles_and_executes_without_core_changes() {
         body: compilation.body,
         edges: vec!["result".to_string()],
         references: compilation.references,
-        terminal: compilation.terminal,
         control: NodeControl::Ordinary,
     };
     let outcome = executors
@@ -232,7 +229,6 @@ fn compiled_node_rejects_wrong_body_type() {
         body: Arc::new("wrong body".to_string()),
         edges: vec!["result".to_string()],
         references: BTreeSet::new(),
-        terminal: false,
         control: NodeControl::Ordinary,
     };
 
@@ -491,8 +487,9 @@ nodes:
     config:
       value: 42
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       content:
         template: "value={{ nodes.constant.output.value }}"
       format: text
@@ -696,8 +693,9 @@ nodes:
     config:
       value: 42
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
         "NODE_NEXT_REQUIRED",
@@ -722,8 +720,9 @@ nodes:
       value: 42
       references: [result]
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
         "INVALID_NODE_REFERENCE",
@@ -748,8 +747,9 @@ nodes:
     config:
       value: 42
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
         "NODE_EMIT_UNSUPPORTED",

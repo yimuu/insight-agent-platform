@@ -1,10 +1,10 @@
 use chrono::{TimeZone, Utc};
 use insight_agent_platform::{
-    dsl::compiled::RunOutput,
     events::protocol::{RunEvent, RunEventScope, RunEventType},
     history::types::{
         NewRun, NodeOutputRecord, RunAttachment, RunRecord, RunStatus, RunSummary, TerminalUpdate,
     },
+    outcome::RunOutput,
 };
 use serde_json::json;
 

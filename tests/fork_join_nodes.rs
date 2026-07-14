@@ -51,7 +51,6 @@ fn compiled_node(
         body: compilation.body,
         edges: compilation.edges,
         references: compilation.references,
-        terminal: compilation.terminal,
         control: compilation.control,
     }
 }
@@ -101,7 +100,6 @@ fn fork_and_join_compile_to_typed_controls() {
     assert!(!fork.envelope.allows_content_emit);
     assert_eq!(fork.edges, vec!["search_a", "search_b"]);
     assert_eq!(fork.references, BTreeSet::new());
-    assert!(!fork.terminal);
     assert_eq!(
         fork.control,
         NodeControl::Fork {
@@ -122,7 +120,6 @@ fn fork_and_join_compile_to_typed_controls() {
     assert!(!join.envelope.allows_content_emit);
     assert_eq!(join.edges, Vec::<String>::new());
     assert_eq!(join.references, BTreeSet::new());
-    assert!(!join.terminal);
     assert_eq!(
         join.control,
         NodeControl::Join {

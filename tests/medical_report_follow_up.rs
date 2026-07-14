@@ -10,10 +10,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::stream;
 use insight_agent_platform::{
-    dsl::{
-        compiled::RunOutput,
-        compiler::{AgentCompiler, CompileLimits},
-    },
+    dsl::compiler::{AgentCompiler, CompileLimits},
     events::{
         hub::{EventHub, EventHubConfig},
         protocol::RunEvent,
@@ -24,6 +21,7 @@ use insight_agent_platform::{
         types::{NewRun, NodeOutputRecord, RunRecord, TerminalUpdate},
     },
     nodes::default_node_registries,
+    outcome::{RunOutput, TerminalOutcome},
     resources::{
         actions::ActionRegistry,
         models::{ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability, ModelRegistry},
@@ -239,7 +237,7 @@ async fn run_agent(
     .with_templates(Arc::clone(&agent.templates));
     let (_, stop) = stop_pair();
     match scheduler.run(context, stop).await.unwrap() {
-        SchedulerResult::Completed(output) => output,
+        SchedulerResult::Ended(TerminalOutcome::Success { output }) => output,
         result => panic!("expected completed run, got {result:?}"),
     }
 }
@@ -301,7 +299,7 @@ async fn empty_history_keeps_the_existing_three_step_flow() {
     assert_eq!(agent.entry, "route");
     assert_eq!(agent.nodes["route"].kind, "core.condition");
     assert_eq!(agent.nodes["follow_up"].kind, "core.chat");
-    assert_eq!(agent.nodes["follow_up_result"].kind, "core.output");
+    assert_eq!(agent.nodes["follow_up_result"].kind, "core.end");
 
     let output = run_agent(
         agent,

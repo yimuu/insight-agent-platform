@@ -68,7 +68,6 @@ impl NodeType for ActionNode {
             body: Arc::new(CompiledAction { action, input }),
             edges: Vec::new(),
             references,
-            terminal: false,
             control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Required,

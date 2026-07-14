@@ -7,10 +7,11 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    dsl::compiled::{CompiledAgent, ForkPlan, NodeTransition, RunOutput},
+    dsl::compiled::{CompiledAgent, ForkPlan, NodeTransition},
     events::hub::EventHub,
     events::protocol::{RunEventScope, RunEventType},
     nodes::registry::NodeExecutorRegistry,
+    outcome::TerminalOutcome,
 };
 use serde_json::json;
 
@@ -21,7 +22,7 @@ use super::{
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SchedulerResult {
-    Completed(RunOutput),
+    Ended(TerminalOutcome),
     Failed(RunError),
     Stopped(RunError),
 }
@@ -245,9 +246,9 @@ impl Scheduler {
                             node.id
                         )));
                     }
-                    NodeTransition::Complete(_) => {
+                    NodeTransition::End(_) => {
                         return Err(invariant(format!(
-                            "branch node '{}' completed the run before its paired join",
+                            "branch node '{}' ended before structured branch terminal support",
                             node.id
                         )));
                     }
@@ -329,8 +330,8 @@ impl Scheduler {
                         )?;
                     }
                 }
-                NodeTransition::Complete(output) => {
-                    return Ok(SchedulerResult::Completed(output));
+                NodeTransition::End(outcome) => {
+                    return Ok(SchedulerResult::Ended(outcome));
                 }
             }
         }

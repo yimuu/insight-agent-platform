@@ -6,7 +6,11 @@ use insight_agent_platform::{
         compiler::{AgentCompiler, CompileContext, CompileLimits},
         CompileError,
     },
-    nodes::registry::{NodeType, NodeTypeRegistry},
+    nodes::{
+        default_node_registries,
+        registry::{NodeType, NodeTypeRegistry},
+    },
+    outcome::EndOutcomeKind,
     resources::{actions::ActionRegistry, models::ModelRegistry},
 };
 use serde::Deserialize;
@@ -50,7 +54,6 @@ impl NodeType for StepNode {
             body: Arc::new(()),
             edges: Vec::new(),
             references,
-            terminal: false,
             control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Required,
@@ -86,7 +89,6 @@ impl NodeType for BranchNode {
             body: Arc::new(()),
             edges: config.targets,
             references: BTreeSet::new(),
-            terminal: false,
             control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Forbidden,
@@ -112,7 +114,12 @@ impl NodeType for TerminalNode {
         config: Value,
         _context: &mut CompileContext<'_>,
     ) -> Result<NodeCompilation, CompileError> {
-        if config != serde_json::json!({}) {
+        let expected_config = if self.kind == "core.end" {
+            serde_json::json!({"outcome":"success", "data":{}})
+        } else {
+            serde_json::json!({})
+        };
+        if config != expected_config {
             return Err(CompileError::new(
                 "NODE_CONFIG_INVALID",
                 "terminal config must be empty",
@@ -122,8 +129,13 @@ impl NodeType for TerminalNode {
             body: Arc::new(()),
             edges: Vec::new(),
             references: BTreeSet::new(),
-            terminal: true,
-            control: NodeControl::Ordinary,
+            control: if self.kind == "core.end" {
+                NodeControl::End {
+                    outcome: EndOutcomeKind::Success,
+                }
+            } else {
+                NodeControl::Ordinary
+            },
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Forbidden,
                 allows_content_emit: false,
@@ -137,9 +149,7 @@ fn compiler() -> AgentCompiler {
     node_types.register(StepNode).unwrap();
     node_types.register(BranchNode).unwrap();
     node_types
-        .register(TerminalNode {
-            kind: "core.output",
-        })
+        .register(TerminalNode { kind: "core.end" })
         .unwrap();
     node_types
         .register(TerminalNode {
@@ -195,18 +205,75 @@ nodes:
     config:
       prompt_ref: system
   result:
-    type: core.output
-    config: {}
+    type: core.end
+    config: {outcome: success, data: {}}
 "#
 }
 
 const VALID_AGENT_VERSION_HASH: &str =
-    "sha256:ddb7849ef262359b787d928f2bca65c90cfe5e670fad04a4a15614af0cf6f30c";
+    "sha256:7e5748bbd8ba60e127a43351670d2498faf85db5e8e537ac62801d35d254848c";
 
 fn assert_compile_error(yaml: &str, code: &'static str) {
     let (_temp, root) = write_agent(yaml, "Hello {{ input.question }}");
     let error = compiler().compile_dir(&root).unwrap_err();
     assert_eq!(error.code(), code, "unexpected error: {error}");
+}
+
+fn assert_core_compile_error(yaml: &str, code: &'static str) {
+    let (_temp, root) = write_agent(yaml, "unused");
+    let (types, _) = default_node_registries().unwrap();
+    let compiler = AgentCompiler::new(
+        types,
+        ModelRegistry::default(),
+        ActionRegistry::default(),
+        Duration::from_secs(30),
+        CompileLimits {
+            max_fork_branches: 32,
+        },
+    );
+    let error = compiler.compile_dir(&root).unwrap_err();
+    assert_eq!(error.code(), code, "unexpected error: {error}");
+}
+
+#[test]
+fn rejects_next_and_content_emit_on_end() {
+    assert_core_compile_error(
+        r#"
+version: 1
+id: end_next
+name: End Next
+input:
+  schema: {type: object}
+entry: result
+nodes:
+  result:
+    type: core.end
+    next: result
+    config:
+      outcome: success
+      data: {ok: true}
+"#,
+        "NODE_NEXT_FORBIDDEN",
+    );
+    assert_core_compile_error(
+        r#"
+version: 1
+id: end_emit
+name: End Emit
+input:
+  schema: {type: object}
+entry: result
+nodes:
+  result:
+    type: core.end
+    emit: content
+    config:
+      outcome: success
+      content: {template: answer}
+      format: text
+"#,
+        "NODE_EMIT_UNSUPPORTED",
+    );
 }
 
 #[test]
@@ -263,21 +330,21 @@ fn rejects_cycles_and_unreachable_nodes() {
     let cycle = valid_yaml()
         .replace("next: result", "next: second")
         .replace(
-            "  result:\n    type: core.output\n    config: {}",
+            "  result:\n    type: core.end\n    config: {outcome: success, data: {}}",
             "  second:\n    type: test.step\n    next: first\n    config: {}",
         );
     assert_compile_error(&cycle, "GRAPH_CYCLE");
 
     let unreachable = format!(
-        "{}\n  orphan:\n    type: core.output\n    config: {{}}\n",
+        "{}\n  orphan:\n    type: core.end\n    config: {{outcome: success, data: {{}}}}\n",
         valid_yaml()
     );
     assert_compile_error(&unreachable, "NODE_UNREACHABLE");
 }
 
 #[test]
-fn rejects_non_output_terminal_and_invalid_predecessor_reference() {
-    let non_output = r#"
+fn rejects_non_end_dead_end_and_invalid_predecessor_reference() {
+    let non_end = r#"
 version: 1
 id: test_agent
 name: Test Agent
@@ -289,7 +356,7 @@ nodes:
     type: test.terminal
     config: {}
 "#;
-    assert_compile_error(non_output, "OUTPUT_REQUIRED");
+    assert_compile_error(non_end, "END_REQUIRED");
 
     let future_reference = valid_yaml()
         .replace("next: result", "next: second")
@@ -298,8 +365,8 @@ nodes:
             "      prompt_ref: system\n      references: [second]",
         )
         .replace(
-            "  result:\n    type: core.output",
-            "  second:\n    type: test.step\n    next: result\n    config: {}\n  result:\n    type: core.output",
+            "  result:\n    type: core.end",
+            "  second:\n    type: test.step\n    next: result\n    config: {}\n  result:\n    type: core.end",
         );
     assert_compile_error(&future_reference, "INVALID_NODE_REFERENCE");
 
@@ -344,8 +411,8 @@ fn accepts_references_to_dominating_predecessors() {
     let yaml = valid_yaml()
         .replace("next: result", "next: second")
         .replace(
-            "  result:\n    type: core.output",
-            "  second:\n    type: test.step\n    next: result\n    config:\n      references: [first]\n  result:\n    type: core.output",
+            "  result:\n    type: core.end",
+            "  second:\n    type: test.step\n    next: result\n    config:\n      references: [first]\n  result:\n    type: core.end",
         );
     let (_temp, root) = write_agent(&yaml, "Hello");
     assert!(compiler().compile_dir(Path::new(&root)).is_ok());

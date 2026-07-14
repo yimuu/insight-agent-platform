@@ -76,8 +76,9 @@ nodes:
         - role: user
           content: Hi
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {{ok: true}}
 "#
         ),

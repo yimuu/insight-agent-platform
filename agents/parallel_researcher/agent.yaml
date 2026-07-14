@@ -69,7 +69,8 @@ nodes:
           content: "Synthesize the collected perspectives: {{ nodes.collect.output }}"
       parameters: {temperature: 0.2}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       content: {template: "{{ nodes.synthesize.output.text }}"}
       format: markdown

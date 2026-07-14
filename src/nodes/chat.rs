@@ -214,7 +214,6 @@ impl NodeType for ChatNode {
             }),
             edges: Vec::new(),
             references,
-            terminal: false,
             control: NodeControl::Ordinary,
             envelope: NodeEnvelopeRules {
                 next: NextPolicy::Required,

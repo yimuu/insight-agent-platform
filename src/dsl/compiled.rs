@@ -10,7 +10,11 @@ use handlebars::Handlebars;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{runtime::RunError, schema::JsonSchemaValidator};
+use crate::{
+    outcome::{EndOutcomeKind, TerminalOutcome},
+    runtime::RunError,
+    schema::JsonSchemaValidator,
+};
 
 use super::EmitPolicy;
 
@@ -46,6 +50,9 @@ pub enum NodeControl {
     },
     Select {
         sources: BTreeSet<String>,
+    },
+    End {
+        outcome: EndOutcomeKind,
     },
 }
 
@@ -98,7 +105,6 @@ pub struct NodeCompilation {
     pub body: CompiledBody,
     pub edges: Vec<String>,
     pub references: BTreeSet<String>,
-    pub terminal: bool,
     pub control: NodeControl,
     pub envelope: NodeEnvelopeRules,
 }
@@ -113,7 +119,6 @@ pub struct CompiledNode {
     pub body: CompiledBody,
     pub edges: Vec<String>,
     pub references: BTreeSet<String>,
-    pub terminal: bool,
     pub control: NodeControl,
 }
 
@@ -162,21 +167,12 @@ impl fmt::Debug for CompiledAgent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RunOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    pub data: Value,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeTransition {
     Next,
     Goto(String),
     ActivateFork,
-    Complete(RunOutput),
+    End(TerminalOutcome),
 }
 
 #[derive(Debug, Clone, PartialEq)]

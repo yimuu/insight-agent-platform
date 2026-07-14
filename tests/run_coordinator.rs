@@ -15,7 +15,7 @@ use insight_agent_platform::{
     dsl::{
         compiled::{
             BranchPlan, CompiledAgent, CompiledNode, ExecutionPlan, ForkPlan, JoinPolicy,
-            NodeCompilation, NodeControl, NodeOutcome, NodeRegion, NodeTransition, RunOutput,
+            NodeCompilation, NodeControl, NodeOutcome, NodeRegion, NodeTransition,
         },
         compiler::CompileContext,
         CompileError, EmitPolicy,
@@ -29,6 +29,7 @@ use insight_agent_platform::{
         types::{NewRun, NodeOutputRecord, RunAttachment, RunRecord, RunStatus, TerminalUpdate},
     },
     nodes::registry::{NodeExecutor, NodeExecutorRegistry, NodeType},
+    outcome::{RunOutput, TerminalOutcome},
     runtime::{
         stop_pair, ExecutionControl, ExecutionLimiter, RunContext, RunCoordinator, RunError,
         RunState, StopReason,
@@ -140,7 +141,9 @@ impl NodeExecutor for SyntheticNode {
             }),
             Behavior::Complete(output) => Ok(NodeOutcome {
                 output: json!({"terminal":true}),
-                transition: NodeTransition::Complete(output.clone()),
+                transition: NodeTransition::End(TerminalOutcome::Success {
+                    output: output.clone(),
+                }),
             }),
             Behavior::Fail(error) => Err(error.clone()),
             Behavior::Delay(duration) => {
@@ -497,7 +500,6 @@ fn node(id: &str, next: Option<&str>, timeout: Duration, behavior: Behavior) -> 
         body: Arc::new(behavior),
         edges: next.into_iter().map(str::to_string).collect(),
         references: BTreeSet::new(),
-        terminal: next.is_none(),
         control: NodeControl::Ordinary,
     }
 }
@@ -525,13 +527,11 @@ fn parallel_agent(
     second: Behavior,
     missing_second_executor: bool,
 ) -> Arc<CompiledAgent> {
-    let mut first_node = node("work_a", Some("collect"), Duration::from_secs(30), first);
+    let first_node = node("work_a", Some("collect"), Duration::from_secs(30), first);
     let mut second_node = node("work_b", Some("collect"), Duration::from_secs(30), second);
     if missing_second_executor {
         second_node.kind = "company.not_registered".to_string();
     }
-    first_node.terminal = false;
-    second_node.terminal = false;
     let nodes = vec![
         node(
             "fanout",

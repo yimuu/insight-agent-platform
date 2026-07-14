@@ -4,7 +4,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 use crate::{
-    dsl::compiled::{CompiledAgent, RunOutput},
+    dsl::compiled::CompiledAgent,
     events::{
         hub::{EventError, EventHub},
         protocol::{RunEventScope, RunEventType},
@@ -15,6 +15,7 @@ use crate::{
     },
     nodes::registry::NodeExecutorRegistry,
     observability::{elapsed_ms, json_size_bytes},
+    outcome::{RunOutput, TerminalOutcome, WorkflowError},
 };
 
 use super::{
@@ -169,8 +170,11 @@ impl RunCoordinator {
         .await?;
 
         match result {
-            SchedulerResult::Completed(output) => {
+            SchedulerResult::Ended(TerminalOutcome::Success { output }) => {
                 self.complete(&state, new_run, output, started).await
+            }
+            SchedulerResult::Ended(TerminalOutcome::Failure { error }) => {
+                self.fail_workflow(&state, new_run, error, started).await
             }
             SchedulerResult::Failed(error) | SchedulerResult::Stopped(error) => {
                 self.finish_error(&state, new_run, error, started).await
@@ -309,6 +313,64 @@ impl RunCoordinator {
                     status,
                     output_bytes: 0,
                     error_code,
+                },
+            )
+            .await?;
+        tracing::info!(
+            event_name = "run.finished",
+            run_id = run.run_id.as_str(),
+            request_id = run.request_id.as_str(),
+            agent_id = run.agent_id.as_str(),
+            agent_version = run.agent_version.as_str(),
+            attachment = run.attachment.as_str(),
+            status = durable.status.as_str(),
+            elapsed_ms = elapsed_ms(started),
+            output_bytes = durable.output_bytes,
+            error_code = durable.error_code.as_str(),
+            "run finished"
+        );
+        Ok(durable.status)
+    }
+
+    async fn fail_workflow(
+        &self,
+        state: &RunState,
+        run: &NewRun,
+        error: WorkflowError,
+        started: Instant,
+    ) -> Result<RunStatus, RunError> {
+        let update = TerminalUpdate::new(
+            &run.run_id,
+            RunStatus::Failed,
+            Utc::now(),
+            None,
+            Some(error.code.clone()),
+            Some(error.message.clone()),
+        )
+        .map_err(|type_error| {
+            RunError::infrastructure(type_error.code(), type_error.to_string())
+        })?;
+        let published = self
+            .events
+            .publish_terminal(
+                run_scope(run),
+                RunEventType::RunFailed,
+                update,
+                &error.code,
+                &error.message,
+                json!({"kind":"workflow"}),
+            )
+            .await
+            .map_err(event_error)?;
+        let durable = self
+            .commit_terminal_state(
+                state,
+                run,
+                published,
+                TerminalLogSummary {
+                    status: RunStatus::Failed,
+                    output_bytes: 0,
+                    error_code: error.code,
                 },
             )
             .await?;

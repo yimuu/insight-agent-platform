@@ -70,8 +70,9 @@ nodes:
         temperature: 0.2
 
   follow_up_result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       content:
         template: "{{ nodes.follow_up.output.text }}"
       format: markdown
@@ -143,8 +144,9 @@ nodes:
         temperature: 0.2
 
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       content:
         template: |-
           {{ nodes.abnormal_indicators.output.text }}

@@ -35,8 +35,9 @@ nodes:
         - lines: {{ nodes.analyze_text.output.lines }}
 
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       content:
         template: "{{ nodes.render.output }}"
       format: text

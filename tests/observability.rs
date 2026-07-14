@@ -261,8 +261,9 @@ nodes:
     config:
       value: "{{ input.secret }}"
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data:
         secret: "{{ nodes.prepare.output }}"
 "#,
@@ -290,8 +291,9 @@ nodes:
     next: result
     config: {sources: [left, right]}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {value: "{{ nodes.selected.output.value }}"}
 "#,
     );
@@ -307,8 +309,9 @@ nodes:
       action: observability.action
       input: {secret: "{{ input.secret }}"}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data:
         action_ok: "{{ nodes.call.output.ok }}"
 "#,
@@ -325,8 +328,9 @@ nodes:
       action: observability.action
       input: {fail: true, secret: "{{ input.secret }}"}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
     );
@@ -353,8 +357,9 @@ nodes:
     next: result
     config: {mode: all_settled}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data: {ok: true}
 "#,
     );
@@ -377,8 +382,9 @@ nodes:
             - type: image_url
               image_url: {url: "https://example.test/observability-image-secret.png"}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data:
         text: "{{ nodes.answer.output.text }}"
 "#,
@@ -402,8 +408,9 @@ nodes:
               optional: true
               image_url: {url: "{{ input.image_url }}"}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data:
         text: "{{ nodes.answer.output.text }}"
 "#,
@@ -425,8 +432,9 @@ nodes:
               optional: true
               image_url: {url: "{{ input.image_url }}"}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data:
         text: "{{ nodes.answer.output.text }}"
 "#,
@@ -448,8 +456,9 @@ nodes:
             path: input.messages
             allowed_content: [text, image_url]
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data:
         text: "{{ nodes.answer.output.text }}"
 "#,
@@ -467,8 +476,8 @@ nodes:
       messages:
         - from: {path: input.messages}
   result:
-    type: core.output
-    config: {data: {ok: true}}
+    type: core.end
+    config: {outcome: success, data: {ok: true}}
 "#,
     );
 
@@ -603,7 +612,7 @@ async fn run_and_node_info_logs_are_body_free_for_linear_success() {
     }));
     assert!(node_completed.iter().any(|event| {
         event.field("node_id") == Some("result")
-            && event.field("kind") == Some("core.output")
+            && event.field("kind") == Some("core.end")
             && event
                 .field("output_bytes")
                 .unwrap()
