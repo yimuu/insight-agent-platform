@@ -191,7 +191,7 @@ fn collect_branch_nodes(
                 ),
             ));
         }
-        if direct_targets.iter().any(|target| *target == join_id) {
+        if direct_targets.contains(&join_id) {
             return Err(CompileError::new(
                 "BRANCH_DIRECT_JOIN_FORBIDDEN",
                 format!(
