@@ -154,11 +154,36 @@ runtime:
     platform_config
 }
 
-struct ChildGuard {
-    child: Option<Child>,
+trait RecoverableChild {
+    fn kill_for_drop(&mut self);
+    fn wait_for_drop(&mut self);
 }
 
-impl ChildGuard {
+impl RecoverableChild for Child {
+    fn kill_for_drop(&mut self) {
+        let _ = self.kill();
+    }
+
+    fn wait_for_drop(&mut self) {
+        let _ = self.wait();
+    }
+}
+
+struct ChildGuard<C: RecoverableChild = Child> {
+    child: Option<C>,
+}
+
+impl<C: RecoverableChild> ChildGuard<C> {
+    fn new(child: C) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn run_guarded_shutdown_step<R>(&mut self, step: impl FnOnce(&mut C) -> R) -> R {
+        step(self.child.as_mut().expect("child already collected"))
+    }
+}
+
+impl ChildGuard<Child> {
     fn spawn(platform_config: &Path) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_insight-agent-platform"))
             .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -168,52 +193,81 @@ impl ChildGuard {
             .stderr(Stdio::piped())
             .spawn()
             .expect("failed to spawn insight-agent-platform binary");
-        Self { child: Some(child) }
+        Self::new(child)
     }
 
     fn try_wait(&mut self) -> Option<ExitStatus> {
-        self.child
-            .as_mut()
-            .expect("child already collected")
-            .try_wait()
-            .expect("failed to poll child process")
+        self.run_guarded_shutdown_step(|child| {
+            child.try_wait().expect("failed to poll child process")
+        })
     }
 
     fn shutdown(mut self) -> Output {
-        let mut child = self.child.take().expect("child already collected");
-        request_graceful_shutdown(&mut child);
+        self.run_guarded_shutdown_step(request_graceful_shutdown);
         for _ in 0..30 {
-            if child
-                .try_wait()
-                .expect("failed to poll child during shutdown")
-                .is_some()
-            {
-                return child
-                    .wait_with_output()
-                    .expect("failed to collect child output");
+            if let Some(output) = self.try_collect_exited_output(
+                "failed to poll child during shutdown",
+                "failed to collect child output",
+            ) {
+                return output;
             }
             thread::sleep(Duration::from_millis(100));
         }
-        let _ = child.kill();
-        child
-            .wait_with_output()
-            .expect("failed to collect killed child output")
+        self.run_guarded_shutdown_step(|child| {
+            child
+                .kill()
+                .expect("failed to kill child after shutdown timeout");
+            child
+                .wait()
+                .expect("failed to wait for killed child after shutdown timeout");
+        });
+        self.try_collect_exited_output(
+            "failed to confirm killed child exit",
+            "failed to collect killed child output",
+        )
+        .expect("killed child must be exited before output collection")
     }
 
     fn terminate_and_collect(&mut self) -> Output {
-        let mut child = self.child.take().expect("child already collected");
-        let _ = child.kill();
-        child
-            .wait_with_output()
-            .expect("failed to collect child output")
+        if let Some(output) = self.try_collect_exited_output(
+            "failed to poll child before termination",
+            "failed to collect already-exited child output",
+        ) {
+            return output;
+        }
+
+        self.run_guarded_shutdown_step(|child| {
+            child.kill().expect("failed to terminate child");
+            child.wait().expect("failed to wait for terminated child");
+        });
+        self.try_collect_exited_output(
+            "failed to confirm terminated child exit",
+            "failed to collect terminated child output",
+        )
+        .expect("terminated child must be exited before output collection")
+    }
+
+    fn try_collect_exited_output(
+        &mut self,
+        poll_context: &str,
+        collect_context: &str,
+    ) -> Option<Output> {
+        let exited =
+            self.run_guarded_shutdown_step(|child| child.try_wait().expect(poll_context).is_some());
+        if !exited {
+            return None;
+        }
+
+        let child = self.child.take().expect("child already collected");
+        Some(child.wait_with_output().expect(collect_context))
     }
 }
 
-impl Drop for ChildGuard {
+impl<C: RecoverableChild> Drop for ChildGuard<C> {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(child) = self.child.as_mut() {
+            child.kill_for_drop();
+            child.wait_for_drop();
         }
     }
 }
@@ -245,7 +299,7 @@ fn shutdown_was_graceful(_output: &Output) -> bool {
 
 async fn wait_for_health(client: &Client, base_url: &str, child: &mut ChildGuard) {
     let deadline = Instant::now() + READY_TIMEOUT;
-    let mut last_error = String::new();
+    let mut last_error = health_diagnostic_message(base_url, "request not attempted", None);
 
     loop {
         if child.try_wait().is_some() {
@@ -259,23 +313,43 @@ async fn wait_for_health(client: &Client, base_url: &str, child: &mut ChildGuard
         match client.get(format!("{base_url}/health")).send().await {
             Ok(response) => {
                 let status = response.status();
-                let body = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|error| format!("failed to read body: {error}"));
+                let body = response.text().await.unwrap_or_else(|error| {
+                    let detail = format!("failed to read response body: {error}");
+                    panic!("{}", health_diagnostic_message(base_url, &detail, None));
+                });
                 if status == StatusCode::OK {
-                    let body: Value = serde_json::from_str(&body)
-                        .unwrap_or_else(|error| panic!("health body is not JSON: {error}"));
+                    let body: Value = serde_json::from_str(&body).unwrap_or_else(|error| {
+                        let detail = format!("health body is not JSON: {error}");
+                        panic!(
+                            "{}",
+                            health_diagnostic_message(base_url, &detail, Some(&body))
+                        );
+                    });
                     if body["code"] == "OK" {
                         return;
                     }
-                    last_error = format!("unexpected health body: {body}");
+                    last_error = health_diagnostic_message(
+                        base_url,
+                        "unexpected health response body",
+                        Some(&body.to_string()),
+                    );
                 } else {
-                    last_error = format!("health returned {status}: {body}");
+                    last_error = health_diagnostic_message(
+                        base_url,
+                        &format!(
+                            "unexpected HTTP status {status}; expected {}",
+                            StatusCode::OK
+                        ),
+                        Some(&body),
+                    );
                 }
             }
             Err(error) => {
-                last_error = error.to_string();
+                last_error = health_diagnostic_message(
+                    base_url,
+                    &format!("HTTP request failed: {error}"),
+                    None,
+                );
             }
         }
 
@@ -367,6 +441,10 @@ fn http_diagnostic_message(label: &str, detail: &str, body: Option<&str>) -> Str
     }
 }
 
+fn health_diagnostic_message(base_url: &str, detail: &str, body: Option<&str>) -> String {
+    http_diagnostic_message(&format!("GET {base_url}/health"), detail, body)
+}
+
 fn format_output(output: &Output) -> String {
     format!(
         "status: {}\nstdout:\n{}\nstderr:\n{}",
@@ -387,5 +465,63 @@ fn http_diagnostic_message_includes_request_context_and_body() {
     assert_eq!(
         message,
         "GET http://127.0.0.1:3000/v1/runs/run-123: unexpected HTTP status 500 Internal Server Error; expected 200 OK\nbody:\n{\"code\":\"ERR\"}"
+    );
+}
+
+#[test]
+fn shutdown_step_panic_keeps_child_guard_armed_for_drop() {
+    use std::{
+        panic::{catch_unwind, AssertUnwindSafe},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+
+    struct RecoveryProbe {
+        kill_calls: Arc<AtomicUsize>,
+        wait_calls: Arc<AtomicUsize>,
+    }
+
+    impl RecoverableChild for RecoveryProbe {
+        fn kill_for_drop(&mut self) {
+            self.kill_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wait_for_drop(&mut self) {
+            self.wait_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let kill_calls = Arc::new(AtomicUsize::new(0));
+    let wait_calls = Arc::new(AtomicUsize::new(0));
+    let result = catch_unwind(AssertUnwindSafe({
+        let kill_calls = Arc::clone(&kill_calls);
+        let wait_calls = Arc::clone(&wait_calls);
+        move || {
+            let mut guard = ChildGuard::new(RecoveryProbe {
+                kill_calls,
+                wait_calls,
+            });
+            guard.run_guarded_shutdown_step(|_| panic!("simulated shutdown step panic"));
+        }
+    }));
+
+    assert!(result.is_err(), "the injected shutdown step must panic");
+    assert_eq!(kill_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wait_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn health_diagnostic_includes_exact_get_health_request() {
+    let message = health_diagnostic_message(
+        "http://127.0.0.1:3000",
+        "unexpected HTTP status 503 Service Unavailable; expected 200 OK",
+        Some("{\"code\":\"STARTING\"}"),
+    );
+
+    assert_eq!(
+        message,
+        "GET http://127.0.0.1:3000/health: unexpected HTTP status 503 Service Unavailable; expected 200 OK\nbody:\n{\"code\":\"STARTING\"}"
     );
 }
