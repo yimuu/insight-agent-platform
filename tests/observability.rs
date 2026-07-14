@@ -13,7 +13,10 @@ use async_trait::async_trait;
 use futures::{stream, StreamExt};
 use insight_agent_platform::{
     dsl::compiler::{AgentCompiler, CompileLimits},
-    events::hub::{EventHub, EventHubConfig},
+    events::{
+        hub::{EventHub, EventHubConfig},
+        protocol::RunEventType,
+    },
     history::{repository::RunRepository, sqlite::SqliteRunRepository, types::RunStatus},
     nodes::default_node_registries,
     resources::{
@@ -44,6 +47,8 @@ const DYNAMIC_TEXT_SECRET: &str = "observability-dynamic-text-secret";
 const DYNAMIC_IMAGE_SECRET: &str = "observability-dynamic-image-secret";
 const DYNAMIC_MESSAGE_SECRET: &str = "observability-invalid-dynamic-secret";
 const SELECT_SECRET: &str = "observability-select-secret";
+const WORKFLOW_FAILURE_INPUT: &str = "observability-workflow-input-secret";
+const WORKFLOW_FAILURE_MESSAGE: &str = "observability workflow failure message";
 
 #[derive(Debug, Clone)]
 struct RecordedEvent {
@@ -245,6 +250,7 @@ impl ChatModel for ObservabilityModel {
 struct Fixture {
     _root: TempDir,
     service: RunService,
+    repository: Arc<SqliteRunRepository>,
     model_calls: Arc<AtomicUsize>,
 }
 
@@ -332,6 +338,19 @@ nodes:
     config:
       outcome: success
       data: {ok: true}
+"#,
+    );
+    write_agent(
+        root.path(),
+        "authored_failure",
+        r#"entry: result
+nodes:
+  result:
+    type: core.end
+    config:
+      outcome: failure
+      code: WORKFLOW_OBSERVABILITY_FAILED
+      message: observability workflow failure message
 "#,
     );
     write_agent(
@@ -514,7 +533,7 @@ nodes:
             .await
             .unwrap(),
     );
-    let repository_trait: Arc<dyn RunRepository> = repository;
+    let repository_trait: Arc<dyn RunRepository> = repository.clone();
     let events = EventHub::new(
         Arc::clone(&repository_trait),
         EventHubConfig {
@@ -540,6 +559,7 @@ nodes:
     Fixture {
         _root: root,
         service,
+        repository,
         model_calls,
     }
 }
@@ -698,6 +718,73 @@ async fn run_and_node_info_logs_are_body_free_for_action_failure() {
         IMAGE_SECRET,
         USAGE_SECRET,
     ]);
+}
+
+#[tokio::test]
+async fn authored_end_failure_uses_production_terminal_path_without_info_log_bodies() {
+    let _guard = reset_logs().await;
+    let fixture = fixture(&["authored_failure"]).await;
+    let created = fixture
+        .service
+        .create_detached(
+            "authored_failure",
+            json!({"secret": WORKFLOW_FAILURE_INPUT}),
+            RequestMetadata::default(),
+        )
+        .await
+        .unwrap();
+    wait_for_status(&fixture.service, &created.run_id, RunStatus::Failed).await;
+
+    let failed = fixture.service.get_run(&created.run_id).await.unwrap();
+    assert_eq!(failed.status, RunStatus::Failed);
+    assert_eq!(
+        failed.error_code.as_deref(),
+        Some("WORKFLOW_OBSERVABILITY_FAILED")
+    );
+    assert_eq!(
+        failed.error_message.as_deref(),
+        Some(WORKFLOW_FAILURE_MESSAGE)
+    );
+    assert_eq!(failed.output, None);
+
+    let events = fixture
+        .repository
+        .list_events_after(&created.run_id, 0, 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.event_type)
+            .collect::<Vec<_>>(),
+        vec![
+            RunEventType::RunCreated,
+            RunEventType::RunStarted,
+            RunEventType::NodeStarted,
+            RunEventType::NodeCompleted,
+            RunEventType::RunFailed,
+        ]
+    );
+    assert_eq!(events[3].node_id.as_deref(), Some("result"));
+    assert_eq!(events[4].data, json!({"kind":"workflow"}));
+    assert_eq!(events[4].code, "WORKFLOW_OBSERVABILITY_FAILED");
+    assert_eq!(events[4].message, WORKFLOW_FAILURE_MESSAGE);
+
+    let completed = info_logs("node.completed");
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].field("node_id"), Some("result"));
+    assert_eq!(completed[0].field("kind"), Some("core.end"));
+    assert!(info_logs("node.failed").is_empty());
+
+    let finished = info_logs("run.finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0].field("status"), Some("failed"));
+    assert_eq!(
+        finished[0].field("error_code"),
+        Some("WORKFLOW_OBSERVABILITY_FAILED")
+    );
+    assert_eq!(finished[0].field("output_bytes"), Some("0"));
+    assert_logs_exclude(&[WORKFLOW_FAILURE_MESSAGE, WORKFLOW_FAILURE_INPUT]);
 }
 
 #[tokio::test]
