@@ -80,6 +80,42 @@ fn completed_update(run_id: &str, second: u32) -> TerminalUpdate {
     )
 }
 
+#[tokio::test]
+async fn terminal_publish_rejects_mismatched_typed_request_before_storage() {
+    let repository = Arc::new(MemoryRepository::default());
+    let hub = EventHub::new(repository.clone(), config(8));
+
+    let wrong_run = hub
+        .publish_terminal(
+            scope(None),
+            RunEventType::RunFailed,
+            failed_update("different_run", 10),
+            "INFRASTRUCTURE_FAILURE",
+            "runtime infrastructure failed",
+            json!({}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(wrong_run.code(), "HISTORY_EVENT_INVALID");
+
+    let wrong_type = hub
+        .publish_terminal(
+            scope(None),
+            RunEventType::RunCompleted,
+            failed_update(RUN_ID, 11),
+            "INFRASTRUCTURE_FAILURE",
+            "runtime infrastructure failed",
+            json!({}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(wrong_type.code(), "HISTORY_EVENT_INVALID");
+
+    assert!(repository.terminal_updates.lock().await.is_empty());
+    assert!(repository.events.lock().await.is_empty());
+    assert_eq!(hub.retained_run_count().await, 0);
+}
+
 #[derive(Default)]
 struct MemoryRepository {
     events: Mutex<BTreeMap<String, Vec<RunEvent>>>,

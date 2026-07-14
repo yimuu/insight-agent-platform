@@ -3,7 +3,7 @@ use insight_agent_platform::{
     events::protocol::{RunEvent, RunEventScope, RunEventType},
     history::types::{
         NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunRecord, RunStatus, RunSummary,
-        RunTerminal, TerminalUpdate,
+        RunTerminal, StopError, TerminalUpdate,
     },
     outcome::{FailureKind, RunFailure, RunOutput},
 };
@@ -221,6 +221,74 @@ fn run_lifecycle_serializes_mutually_exclusive_terminal_shapes() {
             "error":{"kind":"workflow","code":"WORKFLOW_REJECTED","message":"workflow rejected"}
         })
     );
+}
+
+#[test]
+fn every_run_lifecycle_round_trips_through_flattened_record_and_summary_shapes() {
+    let lifecycles = vec![
+        RunLifecycle::Created,
+        RunLifecycle::Running,
+        RunLifecycle::Completed {
+            output: RunOutput {
+                content: Some("answer".into()),
+                format: Some("text".into()),
+                data: json!({"answer":"answer"}),
+            },
+        },
+        RunLifecycle::Failed {
+            error: RunFailure {
+                kind: FailureKind::Workflow,
+                code: "WORKFLOW_REJECTED".into(),
+                message: "workflow rejected".into(),
+            },
+        },
+        RunLifecycle::Cancelled {
+            error: StopError {
+                code: "RUN_CANCELLED".into(),
+                message: "run cancelled".into(),
+            },
+        },
+        RunLifecycle::Interrupted {
+            error: StopError {
+                code: "RUN_INTERRUPTED".into(),
+                message: "run interrupted".into(),
+            },
+        },
+    ];
+
+    for lifecycle in lifecycles {
+        let record = RunRecord {
+            run_id: "run_round_trip".into(),
+            request_id: "req_round_trip".into(),
+            agent_id: "agent_round_trip".into(),
+            agent_version: "sha256:round-trip".into(),
+            attachment: RunAttachment::Detached,
+            started_at: Some(at(1)),
+            ended_at: lifecycle.status().is_terminal().then(|| at(2)),
+            updated_at: at(2),
+            input_summary: json!({"keys":[],"serialized_bytes":2}),
+            lifecycle,
+        };
+
+        let lifecycle_value = serde_json::to_value(&record.lifecycle).unwrap();
+        assert_eq!(
+            serde_json::from_value::<RunLifecycle>(lifecycle_value).unwrap(),
+            record.lifecycle
+        );
+
+        let record_value = serde_json::to_value(&record).unwrap();
+        assert_eq!(
+            serde_json::from_value::<RunRecord>(record_value).unwrap(),
+            record
+        );
+
+        let summary = RunSummary::from(&record);
+        let summary_value = serde_json::to_value(&summary).unwrap();
+        assert_eq!(
+            serde_json::from_value::<RunSummary>(summary_value).unwrap(),
+            summary
+        );
+    }
 }
 
 #[test]
