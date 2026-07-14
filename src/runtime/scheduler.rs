@@ -11,14 +11,14 @@ use crate::{
     events::hub::EventHub,
     events::protocol::{RunEventScope, RunEventType},
     nodes::registry::NodeExecutorRegistry,
-    outcome::{FailureKind, TerminalOutcome},
+    outcome::TerminalOutcome,
 };
 use serde_json::json;
 
 use super::{
-    execute_node_with_cancellation, BranchError, BranchResult, BranchState, ExecutionLimiter,
-    NodeExecutionFailure, NodeExecutionResult, NodeState, RunContext, RunError, RunErrorKind,
-    StopSignal,
+    execute_node_with_cancellation, BranchError, BranchFailureKind, BranchResult, BranchState,
+    ExecutionLimiter, NodeExecutionFailure, NodeExecutionResult, NodeState, RunContext, RunError,
+    RunErrorKind, StopSignal,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -184,8 +184,8 @@ impl Scheduler {
                     state.fail(&scheduled_node_id, &node_id)?;
                     if matches!(scope, WorkScope::Branch { .. }) {
                         let kind = match error.kind() {
-                            RunErrorKind::Node => FailureKind::Node,
-                            RunErrorKind::Timeout => FailureKind::Timeout,
+                            RunErrorKind::Node => BranchFailureKind::Node,
+                            RunErrorKind::Timeout => BranchFailureKind::Timeout,
                             RunErrorKind::Stop | RunErrorKind::Infrastructure => {
                                 return Err(invariant(
                                     "contained node failure had a non-settleable runtime origin",
@@ -247,7 +247,7 @@ impl Scheduler {
                             BranchResult::Failed {
                                 terminal_node_id: result.node_id,
                                 error: BranchError {
-                                    kind: FailureKind::Workflow,
+                                    kind: BranchFailureKind::Workflow,
                                     code: error.code,
                                     message: error.message,
                                 },

@@ -19,7 +19,7 @@ pub use scheduler::{Scheduler, SchedulerResult};
 pub use service::{
     CompiledAgentRegistry, RequestMetadata, RunService, RunServiceConfig, ServiceError,
 };
-pub use state::{BranchError, BranchResult, BranchState, NodeState, RunState};
+pub use state::{BranchError, BranchFailureKind, BranchResult, BranchState, NodeState, RunState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunErrorKind {

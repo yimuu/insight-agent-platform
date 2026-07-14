@@ -14,8 +14,7 @@ use crate::{
         CompileError,
     },
     nodes::registry::{NodeExecutor, NodeType},
-    outcome::FailureKind,
-    runtime::{BranchResult, ExecutionControl, RunContext, RunError},
+    runtime::{BranchFailureKind, BranchResult, ExecutionControl, RunContext, RunError},
 };
 
 #[derive(Debug, Deserialize)]
@@ -81,36 +80,24 @@ impl NodeExecutor for JoinNode {
             .filter(|result| matches!(result, BranchResult::Succeeded { .. }))
             .count();
         let failed = results.len() - succeeded;
-        let workflow = results
-            .values()
-            .filter(|result| {
-                matches!(
-                    result,
-                    BranchResult::Failed { error, .. }
-                        if error.kind == FailureKind::Workflow
-                )
-            })
-            .count();
-        let node = results
-            .values()
-            .filter(|result| {
-                matches!(
-                    result,
-                    BranchResult::Failed { error, .. }
-                        if error.kind == FailureKind::Node
-                )
-            })
-            .count();
-        let timeout = results
-            .values()
-            .filter(|result| {
-                matches!(
-                    result,
-                    BranchResult::Failed { error, .. }
-                        if error.kind == FailureKind::Timeout
-                )
-            })
-            .count();
+        let mut workflow = 0;
+        let mut node = 0;
+        let mut timeout = 0;
+        for result in results.values() {
+            if let BranchResult::Failed { error, .. } = result {
+                match error.kind {
+                    BranchFailureKind::Workflow => workflow += 1,
+                    BranchFailureKind::Node => node += 1,
+                    BranchFailureKind::Timeout => timeout += 1,
+                }
+            }
+        }
+        if failed != workflow + node + timeout {
+            return Err(RunError::infrastructure(
+                "JOIN_RESULT_INVALID",
+                "join branch failure taxonomy is inconsistent",
+            ));
+        }
 
         Ok(NodeOutcome {
             output: json!({

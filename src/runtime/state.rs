@@ -1,10 +1,7 @@
 use serde::Serialize;
 use tokio::sync::Mutex;
 
-use crate::{
-    history::types::RunStatus,
-    outcome::{FailureKind, RunOutput},
-};
+use crate::{history::types::RunStatus, outcome::RunOutput};
 
 use super::RunError;
 
@@ -26,9 +23,17 @@ pub enum BranchState {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchFailureKind {
+    Workflow,
+    Node,
+    Timeout,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BranchError {
-    pub kind: FailureKind,
+    pub kind: BranchFailureKind,
     pub code: String,
     pub message: String,
 }

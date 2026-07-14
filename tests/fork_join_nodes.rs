@@ -14,9 +14,12 @@ use insight_agent_platform::{
         EmitPolicy,
     },
     nodes::default_node_registries,
-    outcome::{FailureKind, RunOutput},
+    outcome::RunOutput,
     resources::{actions::ActionRegistry, models::ModelRegistry},
-    runtime::{stop_pair, BranchError, BranchResult, ExecutionControl, RunContext, RunMetadata},
+    runtime::{
+        stop_pair, BranchError, BranchFailureKind, BranchResult, ExecutionControl, RunContext,
+        RunMetadata,
+    },
 };
 use serde_json::{json, Value};
 
@@ -75,13 +78,26 @@ fn branch_results() -> BTreeMap<String, BranchResult> {
             BranchResult::Failed {
                 terminal_node_id: "search_b".to_string(),
                 error: BranchError {
-                    kind: FailureKind::Workflow,
+                    kind: BranchFailureKind::Workflow,
                     code: "UPSTREAM_FAILURE".to_string(),
                     message: "upstream service failed".to_string(),
                 },
             },
         ),
     ])
+}
+
+#[test]
+fn branch_failure_kind_serializes_only_settleable_origins() {
+    assert_eq!(
+        [
+            BranchFailureKind::Workflow,
+            BranchFailureKind::Node,
+            BranchFailureKind::Timeout,
+        ]
+        .map(|kind| serde_json::to_value(kind).unwrap()),
+        [json!("workflow"), json!("node"), json!("timeout")]
+    );
 }
 
 #[test]
@@ -233,7 +249,7 @@ async fn join_advances_when_all_branches_failed() {
             BranchResult::Failed {
                 terminal_node_id: "search_a".to_string(),
                 error: BranchError {
-                    kind: FailureKind::Node,
+                    kind: BranchFailureKind::Node,
                     code: "FAILED_A".to_string(),
                     message: "source a failed".to_string(),
                 },
@@ -244,7 +260,7 @@ async fn join_advances_when_all_branches_failed() {
             BranchResult::Failed {
                 terminal_node_id: "search_b".to_string(),
                 error: BranchError {
-                    kind: FailureKind::Timeout,
+                    kind: BranchFailureKind::Timeout,
                     code: "FAILED_B".to_string(),
                     message: "source b failed".to_string(),
                 },
@@ -270,6 +286,64 @@ async fn join_advances_when_all_branches_failed() {
         failures["workflow"].as_u64().unwrap()
             + failures["node"].as_u64().unwrap()
             + failures["timeout"].as_u64().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn join_counts_each_settleable_failure_origin_once() {
+    let results = BTreeMap::from([
+        (
+            "source_a".to_string(),
+            BranchResult::Succeeded {
+                terminal_node_id: "summarize_a".to_string(),
+                output: RunOutput {
+                    content: None,
+                    format: None,
+                    data: json!({"text":"result a"}),
+                },
+            },
+        ),
+        (
+            "source_b".to_string(),
+            BranchResult::Failed {
+                terminal_node_id: "end_b".to_string(),
+                error: BranchError {
+                    kind: BranchFailureKind::Workflow,
+                    code: "WORKFLOW_FAILED".to_string(),
+                    message: "workflow failed".to_string(),
+                },
+            },
+        ),
+        (
+            "source_c".to_string(),
+            BranchResult::Failed {
+                terminal_node_id: "action_c".to_string(),
+                error: BranchError {
+                    kind: BranchFailureKind::Node,
+                    code: "NODE_FAILED".to_string(),
+                    message: "node failed".to_string(),
+                },
+            },
+        ),
+        (
+            "source_d".to_string(),
+            BranchResult::Failed {
+                terminal_node_id: "action_d".to_string(),
+                error: BranchError {
+                    kind: BranchFailureKind::Timeout,
+                    code: "NODE_TIMEOUT".to_string(),
+                    message: "node timed out".to_string(),
+                },
+            },
+        ),
+    ]);
+
+    let outcome = execute_join(results).await.unwrap();
+
+    assert_eq!(outcome.output["summary"]["failed"], 3);
+    assert_eq!(
+        outcome.output["summary"]["failures"],
+        json!({"workflow":1,"node":1,"timeout":1})
     );
 }
 
