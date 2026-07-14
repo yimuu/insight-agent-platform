@@ -14,6 +14,7 @@ use insight_agent_platform::{
         EmitPolicy,
     },
     nodes::default_node_registries,
+    outcome::{FailureKind, RunOutput},
     resources::{actions::ActionRegistry, models::ModelRegistry},
     runtime::{stop_pair, BranchError, BranchResult, ExecutionControl, RunContext, RunMetadata},
 };
@@ -62,7 +63,11 @@ fn branch_results() -> BTreeMap<String, BranchResult> {
             "source_a".to_string(),
             BranchResult::Succeeded {
                 terminal_node_id: "summarize_a".to_string(),
-                output: json!({"text":"result a"}),
+                output: RunOutput {
+                    content: None,
+                    format: None,
+                    data: json!({"text":"result a"}),
+                },
             },
         ),
         (
@@ -70,6 +75,7 @@ fn branch_results() -> BTreeMap<String, BranchResult> {
             BranchResult::Failed {
                 terminal_node_id: "search_b".to_string(),
                 error: BranchError {
+                    kind: FailureKind::Workflow,
                     code: "UPSTREAM_FAILURE".to_string(),
                     message: "upstream service failed".to_string(),
                 },
@@ -190,18 +196,24 @@ async fn join_serializes_the_stable_all_settled_envelope() {
                 "source_a": {
                     "status": "succeeded",
                     "terminal_node_id": "summarize_a",
-                    "output": {"text": "result a"}
+                    "output": {"data": {"text": "result a"}}
                 },
                 "source_b": {
                     "status": "failed",
                     "terminal_node_id": "search_b",
                     "error": {
+                        "kind": "workflow",
                         "code": "UPSTREAM_FAILURE",
                         "message": "upstream service failed"
                     }
                 }
             },
-            "summary": {"total": 2, "succeeded": 1, "failed": 1}
+            "summary": {
+                "total": 2,
+                "succeeded": 1,
+                "failed": 1,
+                "failures": {"workflow": 1, "node": 0, "timeout": 0}
+            }
         })
     );
     let branch_keys = outcome.output["branches"]
@@ -221,6 +233,7 @@ async fn join_advances_when_all_branches_failed() {
             BranchResult::Failed {
                 terminal_node_id: "search_a".to_string(),
                 error: BranchError {
+                    kind: FailureKind::Node,
                     code: "FAILED_A".to_string(),
                     message: "source a failed".to_string(),
                 },
@@ -231,6 +244,7 @@ async fn join_advances_when_all_branches_failed() {
             BranchResult::Failed {
                 terminal_node_id: "search_b".to_string(),
                 error: BranchError {
+                    kind: FailureKind::Timeout,
                     code: "FAILED_B".to_string(),
                     message: "source b failed".to_string(),
                 },
@@ -243,7 +257,19 @@ async fn join_advances_when_all_branches_failed() {
     assert_eq!(outcome.transition, NodeTransition::Next);
     assert_eq!(
         outcome.output["summary"],
-        json!({"total": 2, "succeeded": 0, "failed": 2})
+        json!({
+            "total": 2,
+            "succeeded": 0,
+            "failed": 2,
+            "failures": {"workflow": 0, "node": 1, "timeout": 1}
+        })
+    );
+    let failures = &outcome.output["summary"]["failures"];
+    assert_eq!(
+        outcome.output["summary"]["failed"].as_u64().unwrap(),
+        failures["workflow"].as_u64().unwrap()
+            + failures["node"].as_u64().unwrap()
+            + failures["timeout"].as_u64().unwrap()
     );
 }
 

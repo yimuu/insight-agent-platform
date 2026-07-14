@@ -317,14 +317,20 @@ The compiler enforces the following order so stable structural diagnostics remai
 
 1. node and edge target existence;
 2. typed structural cycle detection;
-3. whole-agent structural reachability;
-4. End envelope and no-successor requirements;
+3. End envelope and no-successor requirements for reachable nodes;
+4. whole-agent structural reachability;
 5. Fork declaration and Join ownership;
 6. branch-region construction and all-paths-End proof;
 7. sibling-region and illegal incoming/outgoing edge checks;
 8. Join ownership and no-direct-entry checks;
 9. Select topology validation;
 10. shared reference dominance and cross-region validation.
+
+Required-`next` envelope handling is deferred until this graph pass. A reachable
+non-End node without an executable successor reports `END_REQUIRED`, even when
+the missing successor also leaves declared downstream nodes unreachable.
+`NODE_UNREACHABLE` remains authoritative only when no earlier reachable
+non-End leaf exists.
 
 Required graph rules:
 

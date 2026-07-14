@@ -259,7 +259,7 @@ fn scope_for(context: &RunContext) -> RunEventScope {
 
 fn classify_failure(node_id: &str, error: RunError) -> NodeExecutionFailure {
     match error.kind() {
-        RunErrorKind::Node => NodeExecutionFailure::Node {
+        RunErrorKind::Node | RunErrorKind::Timeout => NodeExecutionFailure::Node {
             node_id: node_id.to_string(),
             error,
         },
@@ -274,6 +274,7 @@ fn classify_failure(node_id: &str, error: RunError) -> NodeExecutionFailure {
 fn run_error_kind(kind: RunErrorKind) -> &'static str {
     match kind {
         RunErrorKind::Node => "node",
+        RunErrorKind::Timeout => "timeout",
         RunErrorKind::Stop => "stop",
         RunErrorKind::Infrastructure => "infrastructure",
     }

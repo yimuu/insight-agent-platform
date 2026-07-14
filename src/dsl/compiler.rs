@@ -214,15 +214,11 @@ impl AgentCompiler {
             let mut edges = compilation.edges;
             match compilation.envelope.next {
                 NextPolicy::Required => {
-                    let next = raw_node.next.as_ref().ok_or_else(|| {
-                        CompileError::new(
-                            "NODE_NEXT_REQUIRED",
-                            format!("node '{node_id}' requires next"),
-                        )
-                    })?;
-                    edges.push(ControlEdge::Direct {
-                        target: next.clone(),
-                    });
+                    if let Some(next) = &raw_node.next {
+                        edges.push(ControlEdge::Direct {
+                            target: next.clone(),
+                        });
+                    }
                 }
                 NextPolicy::Forbidden if raw_node.next.is_some() => {
                     return Err(CompileError::new(

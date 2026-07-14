@@ -532,8 +532,8 @@ fn parallel_agent(
     second: Behavior,
     missing_second_executor: bool,
 ) -> Arc<CompiledAgent> {
-    let first_node = node("work_a", Some("collect"), Duration::from_secs(30), first);
-    let mut second_node = node("work_b", Some("collect"), Duration::from_secs(30), second);
+    let first_node = node("work_a", Some("end_a"), Duration::from_secs(30), first);
+    let mut second_node = node("work_b", Some("end_b"), Duration::from_secs(30), second);
     if missing_second_executor {
         second_node.kind = "company.not_registered".to_string();
     }
@@ -546,6 +546,8 @@ fn parallel_agent(
         ),
         first_node,
         second_node,
+        branch_end_node("end_a"),
+        branch_end_node("end_b"),
         node(
             "collect",
             None,
@@ -569,7 +571,7 @@ fn parallel_agent(
                 BranchPlan {
                     branch_id: "source_a".to_string(),
                     entry: "work_a".to_string(),
-                    nodes: BTreeSet::from(["work_a".to_string()]),
+                    nodes: BTreeSet::from(["work_a".to_string(), "end_a".to_string()]),
                 },
             ),
             (
@@ -577,7 +579,7 @@ fn parallel_agent(
                 BranchPlan {
                     branch_id: "source_b".to_string(),
                     entry: "work_b".to_string(),
-                    nodes: BTreeSet::from(["work_b".to_string()]),
+                    nodes: BTreeSet::from(["work_b".to_string(), "end_b".to_string()]),
                 },
             ),
         ]),
@@ -610,6 +612,20 @@ fn parallel_agent(
                     },
                 ),
                 (
+                    "end_a".to_string(),
+                    NodeRegion::Branch {
+                        fork_id: "fanout".to_string(),
+                        branch_id: "source_a".to_string(),
+                    },
+                ),
+                (
+                    "end_b".to_string(),
+                    NodeRegion::Branch {
+                        fork_id: "fanout".to_string(),
+                        branch_id: "source_b".to_string(),
+                    },
+                ),
+                (
                     "collect".to_string(),
                     NodeRegion::Join {
                         fork_id: "fanout".to_string(),
@@ -620,6 +636,23 @@ fn parallel_agent(
         nodes,
         templates: Arc::new(Handlebars::new()),
     })
+}
+
+fn branch_end_node(id: &str) -> CompiledNode {
+    let mut end = node(
+        id,
+        None,
+        Duration::from_secs(30),
+        Behavior::Complete(RunOutput {
+            content: None,
+            format: None,
+            data: json!({"branch":id}),
+        }),
+    );
+    end.control = NodeControl::End {
+        outcome: insight_agent_platform::outcome::EndOutcomeKind::Success,
+    };
+    end
 }
 
 fn new_run() -> NewRun {
@@ -1214,6 +1247,12 @@ async fn global_external_stop_preserves_reason_after_all_branches_drain() {
                     RunEventType::BranchCompleted | RunEventType::BranchFailed
                 )
         }));
+        assert!(!repository
+            .outputs
+            .lock()
+            .await
+            .iter()
+            .any(|output| output.node_id == "collect"));
     }
 }
 
@@ -1308,5 +1347,12 @@ async fn global_failures_recover_exactly_one_durable_infrastructure_terminal() {
             }),
             "{failure:?}"
         );
+        drop(events);
+        assert!(!repository
+            .outputs
+            .lock()
+            .await
+            .iter()
+            .any(|output| output.node_id == "collect"));
     }
 }

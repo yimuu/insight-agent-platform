@@ -36,8 +36,13 @@ nodes:
       parameters: {temperature: 0.2}
   normalize_a:
     type: core.template
-    next: collect
+    next: end_a
     config: {value: "{{ nodes.analyze_a.output.text }}"}
+  end_a:
+    type: core.end
+    config:
+      outcome: success
+      data: {value: "{{ nodes.normalize_a.output }}"}
   analyze_b:
     type: core.chat
     next: normalize_b
@@ -51,8 +56,13 @@ nodes:
       parameters: {temperature: 0.2}
   normalize_b:
     type: core.template
-    next: collect
+    next: end_b
     config: {value: "{{ nodes.analyze_b.output.text }}"}
+  end_b:
+    type: core.end
+    config:
+      outcome: success
+      data: {value: "{{ nodes.normalize_b.output }}"}
   collect:
     type: core.join
     next: synthesize

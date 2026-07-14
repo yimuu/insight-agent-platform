@@ -24,7 +24,7 @@ use insight_agent_platform::{
     },
     events::{
         hub::{EventHub, EventHubConfig},
-        protocol::RunEvent,
+        protocol::{RunEvent, RunEventType},
     },
     history::{
         repository::{HistoryError, RunRepository},
@@ -719,16 +719,22 @@ nodes:
     config: {value: search-a}
   summarize_a:
     type: core.template
-    next: collect
-    config: {value: summary-a}
+    next: end_a
+    config: {value: {text: summary-a}}
+  end_a:
+    type: core.end
+    config: {outcome: success, data: {text: "{{ nodes.summarize_a.output.text }}"}}
   search_b:
     type: core.template
     next: summarize_b
     config: {value: search-b}
   summarize_b:
     type: core.template
-    next: collect
-    config: {value: summary-b}
+    next: end_b
+    config: {value: {text: summary-b}}
+  end_b:
+    type: core.end
+    config: {outcome: success, data: {text: "{{ nodes.summarize_b.output.text }}"}}
   collect:
     type: core.join
     next: result
@@ -737,6 +743,213 @@ nodes:
     type: core.end
     config: {outcome: success, data: {done: true}}
 "#
+}
+
+fn structured_end_yaml() -> &'static str {
+    include_str!("fixtures/structured_end_agent.yaml")
+}
+
+struct StructuredEndFixture {
+    result: SchedulerResult,
+    join_output: Value,
+    events: Vec<RunEvent>,
+    operations: Vec<String>,
+}
+
+async fn run_structured_end_agent() -> StructuredEndFixture {
+    run_structured_agent(
+        compile_parallel_agent(structured_end_yaml()),
+        "run_structured_end",
+    )
+    .await
+}
+
+async fn run_structured_agent(agent: CompiledAgent, run_id: &str) -> StructuredEndFixture {
+    let context = context_with_agent_input(&agent, run_id, json!({}));
+    let repository = Arc::new(SchedulerRepository::default());
+    let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
+    let (_, stop) = stop_pair();
+    let result = scheduler.run(context, stop).await.unwrap();
+    let join_output = repository
+        .outputs
+        .lock()
+        .await
+        .iter()
+        .find(|output| output.node_id == "collect")
+        .expect("collect output")
+        .output
+        .clone();
+    let events = repository.events.lock().await.clone();
+    let operations = repository.operations.lock().await.clone();
+    StructuredEndFixture {
+        result,
+        join_output,
+        events,
+        operations,
+    }
+}
+
+#[tokio::test]
+async fn explicit_branch_ends_settle_then_activate_join() {
+    let fixture = run_structured_end_agent().await;
+    assert!(matches!(
+        fixture.result,
+        SchedulerResult::Ended(TerminalOutcome::Success { .. })
+    ));
+    assert_eq!(fixture.join_output["summary"]["total"], 2);
+    assert_eq!(fixture.join_output["summary"]["succeeded"], 1);
+    assert_eq!(fixture.join_output["summary"]["failed"], 1);
+    assert_eq!(fixture.join_output["summary"]["failures"]["workflow"], 1);
+    assert!(fixture.events.iter().any(|event| {
+        event.event_type == RunEventType::NodeCompleted && event.node_id.as_deref() == Some("end_b")
+    }));
+    assert!(!fixture.events.iter().any(|event| {
+        event.event_type == RunEventType::NodeFailed && event.node_id.as_deref() == Some("end_b")
+    }));
+    let output_position = fixture
+        .operations
+        .iter()
+        .position(|operation| operation == "output:end_b")
+        .unwrap();
+    let node_completed_position = fixture
+        .operations
+        .iter()
+        .position(|operation| operation == "event:node.completed:end_b")
+        .unwrap();
+    let branch_failed_position = fixture
+        .operations
+        .iter()
+        .position(|operation| operation == "event:branch.failed:-")
+        .unwrap();
+    assert!(output_position < node_completed_position);
+    assert!(node_completed_position < branch_failed_position);
+}
+
+#[tokio::test]
+async fn contained_node_error_is_counted_by_typed_origin() {
+    let mut agent = compile_parallel_agent(structured_end_yaml());
+    replace_behavior(
+        &mut agent,
+        "make_b",
+        SchedulerBehavior::Fail {
+            code: "NODE_TIMEOUT_LOOKALIKE",
+            message: "ordinary node failure",
+            executions: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+
+    let fixture = run_structured_agent(agent, "run_structured_node_error").await;
+
+    assert_eq!(fixture.join_output["summary"]["failures"]["node"], 1);
+    assert_eq!(fixture.join_output["summary"]["failures"]["timeout"], 0);
+    assert_eq!(
+        fixture.join_output["branches"]["b"]["error"]["kind"],
+        "node"
+    );
+}
+
+#[tokio::test]
+async fn contained_node_timeout_is_counted_by_typed_origin() {
+    let mut agent = compile_parallel_agent(structured_end_yaml());
+    replace_behavior(
+        &mut agent,
+        "make_b",
+        SchedulerBehavior::WaitForever {
+            executions: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    agent.nodes.get_mut("make_b").unwrap().timeout = Duration::from_millis(1);
+
+    let fixture = run_structured_agent(agent, "run_structured_timeout").await;
+
+    assert_eq!(fixture.join_output["summary"]["failures"]["node"], 0);
+    assert_eq!(fixture.join_output["summary"]["failures"]["timeout"], 1);
+    assert_eq!(
+        fixture.join_output["branches"]["b"]["error"]["kind"],
+        "timeout"
+    );
+}
+
+#[tokio::test]
+async fn all_workflow_failed_branches_still_run_join_then_main_failure_end() {
+    let yaml = structured_end_yaml()
+        .replace(
+            "    config: {outcome: success, data: {value: \"{{ nodes.make_a.output }}\"}}",
+            "    config: {outcome: failure, code: WORKFLOW_A_REJECTED, message: branch a rejected}",
+        )
+        .replace("    next: result\n    config: {mode: all_settled}", "    next: decide\n    config: {mode: all_settled}")
+        .replace(
+            "  result:\n    type: core.end\n    config: {outcome: success, data: {summary: \"{{ nodes.collect.output.summary }}\"}}",
+            "  decide:\n    type: core.condition\n    config:\n      cases: [{when: \"nodes.collect.output.summary.succeeded == 0\", next: failed}]\n      default: result\n  failed:\n    type: core.end\n    config: {outcome: failure, code: WORKFLOW_ALL_BRANCHES_FAILED, message: all branches failed}\n  result:\n    type: core.end\n    config: {outcome: success, data: {summary: \"{{ nodes.collect.output.summary }}\"}}",
+        );
+
+    let fixture =
+        run_structured_agent(compile_parallel_agent(&yaml), "run_all_workflow_failed").await;
+
+    assert!(matches!(
+        fixture.result,
+        SchedulerResult::Ended(TerminalOutcome::Failure { ref error })
+            if error.code == "WORKFLOW_ALL_BRANCHES_FAILED"
+    ));
+    assert_eq!(fixture.join_output["summary"]["succeeded"], 0);
+    assert_eq!(fixture.join_output["summary"]["failures"]["workflow"], 2);
+    let join_output_position = fixture
+        .operations
+        .iter()
+        .position(|operation| operation == "output:collect")
+        .unwrap();
+    let failure_end_output_position = fixture
+        .operations
+        .iter()
+        .position(|operation| operation == "output:failed")
+        .unwrap();
+    assert!(join_output_position < failure_end_output_position);
+}
+
+#[tokio::test]
+async fn all_node_failed_branches_still_run_join() {
+    let mut agent = compile_parallel_agent(structured_end_yaml());
+    for (node_id, code) in [("make_a", "NODE_A_FAILED"), ("make_b", "NODE_B_FAILED")] {
+        replace_behavior(
+            &mut agent,
+            node_id,
+            SchedulerBehavior::Fail {
+                code,
+                message: "node failed",
+                executions: Arc::new(AtomicUsize::new(0)),
+            },
+        );
+    }
+
+    let fixture = run_structured_agent(agent, "run_all_node_failed").await;
+
+    assert!(matches!(
+        fixture.result,
+        SchedulerResult::Ended(TerminalOutcome::Success { .. })
+    ));
+    assert_eq!(fixture.join_output["summary"]["succeeded"], 0);
+    assert_eq!(fixture.join_output["summary"]["failures"]["node"], 2);
+    assert!(fixture
+        .operations
+        .iter()
+        .any(|operation| operation == "output:result"));
+}
+
+#[tokio::test]
+async fn partial_success_can_end_as_explicit_degraded_success() {
+    let yaml = structured_end_yaml().replace(
+        "    config: {outcome: success, data: {summary: \"{{ nodes.collect.output.summary }}\"}}",
+        "    config:\n      outcome: success\n      data:\n        summary:\n          total: \"{{ nodes.collect.output.summary.total }}\"\n          succeeded: \"{{ nodes.collect.output.summary.succeeded }}\"\n          failed: \"{{ nodes.collect.output.summary.failed }}\"\n          workflow: \"{{ nodes.collect.output.summary.failures.workflow }}\"",
+    );
+    let fixture = run_structured_agent(compile_parallel_agent(&yaml), "run_partial_degraded").await;
+
+    let SchedulerResult::Ended(TerminalOutcome::Success { output }) = fixture.result else {
+        panic!("partial success must follow the authored success End")
+    };
+    assert_eq!(
+        output.data["summary"],
+        json!({"total":"2", "succeeded":"1", "failed":"1", "workflow":"1"})
+    );
 }
 
 fn select_yaml() -> &'static str {
@@ -804,12 +1017,18 @@ nodes:
     config: {value: right}
   branch_select:
     type: core.select
-    next: collect
+    next: end_choice
     config: {sources: [left, right]}
+  end_choice:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.branch_select.output }}"}}
   fixed:
     type: core.template
-    next: collect
+    next: end_fixed
     config: {value: fixed}
+  end_fixed:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.fixed.output }}"}}
   collect:
     type: core.join
     next: result
@@ -852,6 +1071,21 @@ fn event_hub(repository: Arc<SchedulerRepository>) -> EventHub {
             operation_timeout: Duration::from_secs(1),
         },
     )
+}
+
+async fn assert_no_branch_result_or_join_output(repository: &SchedulerRepository, join_id: &str) {
+    assert!(!repository.events.lock().await.iter().any(|event| {
+        matches!(
+            event.event_type,
+            RunEventType::BranchCompleted | RunEventType::BranchFailed
+        )
+    }));
+    assert!(!repository
+        .outputs
+        .lock()
+        .await
+        .iter()
+        .any(|output| output.node_id == join_id));
 }
 
 #[tokio::test]
@@ -963,7 +1197,12 @@ async fn select_missing_source_inside_a_fork_settles_only_that_branch() {
             .find(|output| output.node_id == "collect")
             .unwrap()
             .output["summary"],
-        json!({"total":2, "succeeded":1, "failed":1})
+        json!({
+            "total":2,
+            "succeeded":1,
+            "failed":1,
+            "failures":{"workflow":0,"node":1,"timeout":0}
+        })
     );
     let events = repository.events.lock().await.clone();
     assert!(events.iter().any(|event| {
@@ -1236,10 +1475,10 @@ async fn parallel_scheduler_overlaps_compiled_branches_and_waits_before_join() {
     }
     let expected_join = json!({
         "branches": {
-            "source_a": {"status":"succeeded", "terminal_node_id":"summarize_a", "output":{"text":"result a"}},
-            "source_b": {"status":"succeeded", "terminal_node_id":"summarize_b", "output":{"text":"result b"}}
+            "source_a": {"status":"succeeded", "terminal_node_id":"end_a", "output":{"data":{"text":"result a"}}},
+            "source_b": {"status":"succeeded", "terminal_node_id":"end_b", "output":{"data":{"text":"result b"}}}
         },
-        "summary":{"total":2,"succeeded":2,"failed":0}
+        "summary":{"total":2,"succeeded":2,"failed":0,"failures":{"workflow":0,"node":0,"timeout":0}}
     });
     let final_output = RunOutput {
         content: None,
@@ -1256,11 +1495,11 @@ async fn parallel_scheduler_overlaps_compiled_branches_and_waits_before_join() {
             executions: Arc::clone(&counts["result"]),
         },
     );
+    let run_context = context_with_agent_input(&agent, "run_parallel", json!({}));
     let repository = Arc::new(SchedulerRepository::default());
     let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
     let (_, stop) = stop_pair();
-    let mut execution =
-        tokio::spawn(async move { scheduler.run(context("run_parallel"), stop).await });
+    let mut execution = tokio::spawn(async move { scheduler.run(run_context, stop).await });
 
     while in_flight.load(Ordering::SeqCst) < 2 {
         let notified = started.notified();
@@ -1317,8 +1556,7 @@ async fn parallel_scheduler_overlaps_compiled_branches_and_waits_before_join() {
     );
     let fanout_completed = position("node.completed", "fanout");
     let collect_started = position("node.started", "collect");
-    for (branch_id, terminal_node_id) in [("source_a", "summarize_a"), ("source_b", "summarize_b")]
-    {
+    for (branch_id, terminal_node_id) in [("source_a", "end_a"), ("source_b", "end_b")] {
         let branch_started = position("branch.started", branch_id);
         let node_terminal = position("node.completed", terminal_node_id);
         let branch_terminal = position("branch.completed", branch_id);
@@ -1342,7 +1580,7 @@ async fn parallel_scheduler_limits_ten_compiled_branches_to_three_and_drains_all
         .map(|i| format!("branch_{i}: work_{i}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let workers = (0..10).map(|i| format!("  work_{i}:\n    type: core.template\n    next: collect\n    config: {{value: {i}}}"))
+    let workers = (0..10).map(|i| format!("  work_{i}:\n    type: core.template\n    next: end_{i}\n    config: {{value: {i}}}\n  end_{i}:\n    type: core.end\n    config: {{outcome: success, data: {{value: \"{{{{ nodes.work_{i}.output }}}}\"}}}}"))
         .collect::<Vec<_>>().join("\n");
     let yaml = format!(
         r#"
@@ -1393,11 +1631,11 @@ nodes:
             },
         );
     }
+    let run_context = context_with_agent_input(&agent, "run_parallel_ten", json!({}));
     let repository = Arc::new(SchedulerRepository::default());
     let scheduler = parallel_scheduler(Arc::new(agent), repository, 3);
     let (_, stop) = stop_pair();
-    let mut execution =
-        tokio::spawn(async move { scheduler.run(context("run_parallel_ten"), stop).await });
+    let mut execution = tokio::spawn(async move { scheduler.run(run_context, stop).await });
     while in_flight.load(Ordering::SeqCst) < 3 {
         let notified = started.notified();
         tokio::pin!(notified);
@@ -1428,7 +1666,7 @@ async fn parallel_branch_goto_executes_only_selected_successor() {
     let yaml = two_branch_yaml()
         .replace("type: core.template\n    next: summarize_a\n    config: {value: search-a}",
             "type: core.condition\n    config:\n      cases: [{when: \"true\", next: summarize_a}]\n      default: unused_a")
-        .replace("  summarize_a:", "  unused_a:\n    type: core.template\n    next: collect\n    config: {value: unused}\n  summarize_a:");
+        .replace("  summarize_a:", "  unused_a:\n    type: core.template\n    next: unused_end_a\n    config: {value: unused}\n  unused_end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.unused_a.output }}\"}}\n  summarize_a:");
     let mut agent = compile_parallel_agent(&yaml);
     let route = Arc::new(AtomicUsize::new(0));
     let selected = Arc::new(AtomicUsize::new(0));
@@ -1460,14 +1698,12 @@ async fn parallel_branch_goto_executes_only_selected_successor() {
             executions: Arc::clone(&unselected),
         },
     );
+    let run_context = context_with_agent_input(&agent, "run_parallel_goto", json!({}));
     let repository = Arc::new(SchedulerRepository::default());
     let scheduler = parallel_scheduler(Arc::new(agent), repository, 4);
     let (_, stop) = stop_pair();
     assert!(matches!(
-        scheduler
-            .run(context("run_parallel_goto"), stop)
-            .await
-            .unwrap(),
+        scheduler.run(run_context, stop).await.unwrap(),
         SchedulerResult::Ended(TerminalOutcome::Success { .. })
     ));
     assert_eq!(route.load(Ordering::SeqCst), 1);
@@ -1517,10 +1753,10 @@ async fn parallel_scheduler_settles_partial_failure_and_runs_join() {
     );
     let expected = json!({
         "branches": {
-            "source_a": {"status":"succeeded", "terminal_node_id":"summarize_a", "output":{"text":"result a"}},
-            "source_b": {"status":"failed", "terminal_node_id":"search_b", "error":{"code":"UPSTREAM_FAILURE", "message":"upstream service failed"}}
+            "source_a": {"status":"succeeded", "terminal_node_id":"end_a", "output":{"data":{"text":"result a"}}},
+            "source_b": {"status":"failed", "terminal_node_id":"search_b", "error":{"kind":"node", "code":"UPSTREAM_FAILURE", "message":"upstream service failed"}}
         },
-        "summary":{"total":2,"succeeded":1,"failed":1}
+        "summary":{"total":2,"succeeded":1,"failed":1,"failures":{"workflow":0,"node":1,"timeout":0}}
     });
     replace_behavior(
         &mut agent,
@@ -1536,14 +1772,12 @@ async fn parallel_scheduler_settles_partial_failure_and_runs_join() {
             executions: Arc::new(AtomicUsize::new(0)),
         },
     );
+    let run_context = context_with_agent_input(&agent, "run_parallel_partial", json!({}));
     let repository = Arc::new(SchedulerRepository::default());
     let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
     let (_, stop) = stop_pair();
     assert!(matches!(
-        scheduler
-            .run(context("run_parallel_partial"), stop)
-            .await
-            .unwrap(),
+        scheduler.run(run_context, stop).await.unwrap(),
         SchedulerResult::Ended(TerminalOutcome::Success { .. })
     ));
     assert_eq!(summarize_b.load(Ordering::SeqCst), 0);
@@ -1601,14 +1835,12 @@ async fn parallel_scheduler_runs_join_and_post_join_when_all_branches_fail() {
             executions: Arc::clone(&result_runs),
         },
     );
+    let run_context = context_with_agent_input(&agent, "run_parallel_all_failed", json!({}));
     let repository = Arc::new(SchedulerRepository::default());
     let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
     let (_, stop) = stop_pair();
     assert!(matches!(
-        scheduler
-            .run(context("run_parallel_all_failed"), stop)
-            .await
-            .unwrap(),
+        scheduler.run(run_context, stop).await.unwrap(),
         SchedulerResult::Ended(TerminalOutcome::Success { .. })
     ));
     assert_eq!(result_runs.load(Ordering::SeqCst), 1);
@@ -1621,7 +1853,7 @@ async fn parallel_scheduler_runs_join_and_post_join_when_all_branches_fail() {
             .find(|output| output.node_id == "collect")
             .unwrap()
             .output["summary"],
-        json!({"total":2,"succeeded":0,"failed":2})
+        json!({"total":2,"succeeded":0,"failed":2,"failures":{"workflow":0,"node":2,"timeout":0}})
     );
 }
 
@@ -1643,12 +1875,18 @@ nodes:
       join: join_a
   a1:
     type: core.template
-    next: join_a
+    next: end_a1
     config: {value: a1}
+  end_a1:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.a1.output }}"}}
   a2:
     type: core.template
-    next: join_a
+    next: end_a2
     config: {value: a2}
+  end_a2:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.a2.output }}"}}
   join_a:
     type: core.join
     next: fork_b
@@ -1660,12 +1898,18 @@ nodes:
       join: join_b
   b1:
     type: core.template
-    next: join_b
+    next: end_b1
     config: {value: b1}
+  end_b1:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.b1.output }}"}}
   b2:
     type: core.template
-    next: join_b
+    next: end_b2
     config: {value: b2}
+  end_b2:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.b2.output }}"}}
   join_b:
     type: core.join
     next: result
@@ -1703,15 +1947,13 @@ nodes:
             executions: Arc::clone(&counts["result"]),
         },
     );
+    let run_context = context_with_agent_input(&agent, "run_sequential_forks", json!({}));
     let repository = Arc::new(SchedulerRepository::default());
     let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
     let (_, stop) = stop_pair();
 
     assert_eq!(
-        scheduler
-            .run(context("run_sequential_forks"), stop)
-            .await
-            .unwrap(),
+        scheduler.run(run_context, stop).await.unwrap(),
         SchedulerResult::Ended(TerminalOutcome::Success { output })
     );
     assert!(counts
@@ -1754,14 +1996,12 @@ async fn parallel_scheduler_isolates_node_timeout_to_its_branch() {
             executions: Arc::clone(&summarize_b),
         },
     );
+    let run_context = context_with_agent_input(&agent, "run_parallel_timeout", json!({}));
     let repository = Arc::new(SchedulerRepository::default());
     let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
     let (_, stop) = stop_pair();
     assert!(matches!(
-        scheduler
-            .run(context("run_parallel_timeout"), stop)
-            .await
-            .unwrap(),
+        scheduler.run(run_context, stop).await.unwrap(),
         SchedulerResult::Ended(TerminalOutcome::Success { .. })
     ));
     assert_eq!(summarize_b.load(Ordering::SeqCst), 0);
@@ -1776,8 +2016,11 @@ async fn parallel_scheduler_isolates_node_timeout_to_its_branch() {
         .clone();
     assert_eq!(
         collect["branches"]["source_b"]["error"],
-        json!({"code":"NODE_TIMEOUT","message":"node execution timed out"})
+        json!({"kind":"timeout","code":"NODE_TIMEOUT","message":"node execution timed out"})
     );
+    assert_eq!(collect["branches"]["source_a"]["status"], "succeeded");
+    assert_eq!(collect["summary"]["succeeded"], 1);
+    assert_eq!(collect["summary"]["failures"]["timeout"], 1);
 }
 
 #[tokio::test]
@@ -1805,6 +2048,7 @@ async fn parallel_scheduler_never_captures_stop_as_a_branch_result() {
     assert!(!repository.events.lock().await.iter().any(|event| {
         event.event_type.as_str() == "branch.failed" && event.data["branch_id"] == "source_a"
     }));
+    assert_no_branch_result_or_join_output(&repository, "collect").await;
 }
 
 #[tokio::test]
@@ -1892,6 +2136,7 @@ async fn unbacked_executor_stop_cancels_parallel_siblings_and_releases_permits()
             "node.failed" | "branch.completed" | "branch.failed"
         )
     }));
+    assert_no_branch_result_or_join_output(&repository, "collect").await;
 }
 
 #[tokio::test]
@@ -1917,6 +2162,7 @@ async fn parallel_scheduler_never_captures_infrastructure_as_a_branch_result() {
     assert!(!repository.events.lock().await.iter().any(|event| {
         event.event_type.as_str() == "branch.failed" && event.data["branch_id"] == "source_a"
     }));
+    assert_no_branch_result_or_join_output(&repository, "collect").await;
 }
 
 #[tokio::test]
@@ -1980,6 +2226,7 @@ async fn global_external_stop_is_observed_by_all_branches_and_drained_before_ret
                 Some("summarize_a" | "summarize_b" | "collect")
             )
         }));
+        assert_no_branch_result_or_join_output(&repository, "collect").await;
     }
 }
 
@@ -2070,7 +2317,7 @@ async fn global_external_stop_drains_journal_stage_without_private_task_abort() 
         blocked_output_node: Some("search_a".to_string()),
         ..SchedulerRepository::default()
     });
-    let scheduler = parallel_scheduler(Arc::new(agent), repository, 1);
+    let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 1);
     let (controller, stop) = stop_pair();
     let mut execution = tokio::spawn(async move {
         scheduler
@@ -2095,6 +2342,7 @@ async fn global_external_stop_drains_journal_stage_without_private_task_abort() 
         execution.await.unwrap().unwrap(),
         SchedulerResult::Stopped(RunError::stopped(StopReason::Cancelled))
     );
+    assert_no_branch_result_or_join_output(&repository, "collect").await;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2193,6 +2441,8 @@ async fn global_infrastructure_failures_cancel_siblings_and_never_start_join() {
             }),
             "{failure:?}"
         );
+        drop(events);
+        assert_no_branch_result_or_join_output(&repository, "collect").await;
     }
 }
 
@@ -2404,6 +2654,9 @@ fn execution_errors_are_classified_by_source() {
     let node = RunError::new("UPSTREAM_FAILURE", "failed");
     assert!(matches!(node.kind(), RunErrorKind::Node));
     assert_eq!(node.stop_reason(), None);
+    let timeout = RunError::timeout();
+    assert!(matches!(timeout.kind(), RunErrorKind::Timeout));
+    assert_eq!(timeout.code(), "NODE_TIMEOUT");
     assert!(matches!(
         RunError::infrastructure("EVENT_APPEND_FAILED", "failed").kind(),
         RunErrorKind::Infrastructure

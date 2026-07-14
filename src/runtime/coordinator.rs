@@ -264,7 +264,9 @@ impl RunCoordinator {
         started: Instant,
     ) -> Result<RunStatus, RunError> {
         let (status, event_type) = match error.kind() {
-            RunErrorKind::Node => (RunStatus::Failed, RunEventType::RunFailed),
+            RunErrorKind::Node | RunErrorKind::Timeout => {
+                (RunStatus::Failed, RunEventType::RunFailed)
+            }
             RunErrorKind::Stop => match error.stop_reason() {
                 Some(StopReason::Cancelled) => (RunStatus::Cancelled, RunEventType::RunCancelled),
                 Some(StopReason::Interrupted) => {

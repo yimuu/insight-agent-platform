@@ -20,7 +20,7 @@ pub fn compile_execution_plan(
     let join_claims = validate_fork_declarations(nodes, limits)?;
     let topologies = collect_fork_topologies(nodes)?;
     let branch_owners = validate_branch_regions(nodes, &join_claims, &topologies)?;
-    validate_join_predecessors(nodes, &topologies, &branch_owners)?;
+    validate_join_predecessors(nodes)?;
 
     let mut plan = ExecutionPlan::sequential(entry, nodes.keys().cloned());
     for (node_id, (fork_id, branch_id)) in branch_owners {
@@ -157,8 +157,16 @@ fn collect_branch_nodes(
     let mut pending = vec![branch_entry];
 
     while let Some(node_id) = pending.pop() {
-        if node_id == join_id || !visited.insert(node_id.to_string()) {
+        if !visited.insert(node_id.to_string()) {
             continue;
+        }
+        if node_id == join_id {
+            return Err(CompileError::new(
+                "BRANCH_DIRECT_JOIN_FORBIDDEN",
+                format!(
+                    "fork node '{fork_id}' branch '{branch_id}' points directly to join '{join_id}'"
+                ),
+            ));
         }
         let node = nodes
             .get(node_id)
@@ -171,12 +179,23 @@ fn collect_branch_nodes(
                 ),
             ));
         }
+        if matches!(node.control, NodeControl::End { .. }) {
+            continue;
+        }
         let direct_targets = node.direct_executable_targets().collect::<Vec<_>>();
-        if matches!(node.control, NodeControl::End { .. }) || direct_targets.is_empty() {
+        if direct_targets.is_empty() {
             return Err(CompileError::new(
-                "BRANCH_PATH_MISSING_JOIN",
+                "BRANCH_END_REQUIRED",
                 format!(
-                    "fork node '{fork_id}' branch '{branch_id}' has a path ending at '{node_id}' before join '{join_id}'"
+                    "fork node '{fork_id}' branch '{branch_id}' has a path ending at non-end node '{node_id}'"
+                ),
+            ));
+        }
+        if direct_targets.iter().any(|target| *target == join_id) {
+            return Err(CompileError::new(
+                "BRANCH_DIRECT_JOIN_FORBIDDEN",
+                format!(
+                    "fork node '{fork_id}' branch '{branch_id}' points directly to join '{join_id}'"
                 ),
             ));
         }
@@ -293,9 +312,6 @@ fn validate_branch_regions(
 
     for (node_id, (fork_id, branch_id)) in &owners {
         for target in nodes[node_id].direct_executable_targets() {
-            if target == topologies[fork_id].join_id {
-                continue;
-            }
             if owners.get(target) != Some(&(fork_id.clone(), branch_id.clone())) {
                 return Err(CompileError::new(
                     "BRANCH_CROSS_REGION_EDGE",
@@ -323,40 +339,20 @@ fn branch_owners_match(
         })
 }
 
-fn validate_join_predecessors(
-    nodes: &BTreeMap<String, CompiledNode>,
-    topologies: &BTreeMap<String, ForkTopology<'_>>,
-    branch_owners: &BTreeMap<String, (String, String)>,
-) -> Result<(), CompileError> {
-    let predecessors = direct_executable_predecessors(nodes);
-
-    for (fork_id, topology) in topologies {
-        let mut contributing_branches = BTreeSet::new();
-        for predecessor in &predecessors[topology.join_id] {
-            let Some((owner_fork, owner_branch)) = branch_owners.get(*predecessor) else {
-                return Err(invalid_join_predecessor(
-                    fork_id,
-                    topology.join_id,
-                    predecessor,
-                ));
-            };
-            if owner_fork != fork_id {
-                return Err(invalid_join_predecessor(
-                    fork_id,
-                    topology.join_id,
-                    predecessor,
+fn validate_join_predecessors(nodes: &BTreeMap<String, CompiledNode>) -> Result<(), CompileError> {
+    for (node_id, node) in nodes {
+        for edge in &node.edges {
+            if edge.is_direct_executable()
+                && matches!(nodes[edge.target()].control, NodeControl::Join { .. })
+            {
+                return Err(CompileError::new(
+                    "JOIN_DIRECT_PREDECESSOR_FORBIDDEN",
+                    format!(
+                        "node '{node_id}' points directly to join '{}'",
+                        edge.target()
+                    ),
                 ));
             }
-            contributing_branches.insert(owner_branch.as_str());
-        }
-        if contributing_branches.len() != topology.branches.len() {
-            return Err(CompileError::new(
-                "JOIN_PREDECESSOR_INVALID",
-                format!(
-                    "join node '{}' does not have a predecessor from every branch of fork '{fork_id}'",
-                    topology.join_id
-                ),
-            ));
         }
     }
 
@@ -379,31 +375,4 @@ fn structural_predecessors(
         }
     }
     predecessors
-}
-
-fn direct_executable_predecessors(
-    nodes: &BTreeMap<String, CompiledNode>,
-) -> BTreeMap<&str, BTreeSet<&str>> {
-    let mut predecessors = nodes
-        .keys()
-        .map(|node_id| (node_id.as_str(), BTreeSet::new()))
-        .collect::<BTreeMap<_, _>>();
-    for (node_id, node) in nodes {
-        for target in node.direct_executable_targets() {
-            predecessors
-                .get_mut(target)
-                .expect("graph edges were validated before plan construction")
-                .insert(node_id.as_str());
-        }
-    }
-    predecessors
-}
-
-fn invalid_join_predecessor(fork_id: &str, join_id: &str, predecessor: &str) -> CompileError {
-    CompileError::new(
-        "JOIN_PREDECESSOR_INVALID",
-        format!(
-            "join node '{join_id}' for fork '{fork_id}' has predecessor '{predecessor}' outside its branches"
-        ),
-    )
 }

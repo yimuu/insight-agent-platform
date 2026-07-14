@@ -365,12 +365,18 @@ nodes:
       join: collect
   branch_a:
     type: core.template
-    next: collect
+    next: end_a
     config: {value: a}
+  end_a:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.branch_a.output }}"}}
   branch_b:
     type: core.template
-    next: collect
+    next: end_b
     config: {value: b}
+  end_b:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.branch_b.output }}"}}
   collect:
     type: core.join
     next: result

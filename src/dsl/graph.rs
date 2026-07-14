@@ -43,14 +43,10 @@ pub fn validate_graph_structure(
 
     reject_cycles(entry, nodes)?;
     let reachable = reachable_from(entry, nodes);
-    if let Some(unreachable) = nodes.keys().find(|node_id| !reachable.contains(*node_id)) {
-        return Err(CompileError::new(
-            "NODE_UNREACHABLE",
-            format!("node '{unreachable}' is unreachable from entry '{entry}'"),
-        ));
-    }
-
-    for (node_id, node) in nodes {
+    for (node_id, node) in nodes
+        .iter()
+        .filter(|(node_id, _)| reachable.contains(*node_id))
+    {
         let is_end = matches!(node.control, NodeControl::End { .. });
         if is_end && !node.edges.is_empty() {
             return Err(CompileError::new(
@@ -64,6 +60,12 @@ pub fn validate_graph_structure(
                 format!("reachable path ends at non-end node '{node_id}'"),
             ));
         }
+    }
+    if let Some(unreachable) = nodes.keys().find(|node_id| !reachable.contains(*node_id)) {
+        return Err(CompileError::new(
+            "NODE_UNREACHABLE",
+            format!("node '{unreachable}' is unreachable from entry '{entry}'"),
+        ));
     }
 
     Ok(())

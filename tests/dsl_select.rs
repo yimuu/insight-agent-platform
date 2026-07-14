@@ -251,7 +251,7 @@ nodes:
 fn select_requires_next_and_rejects_content_emit() {
     assert_compile_error(
         &select_yaml().replace("    next: result\n", ""),
-        "NODE_NEXT_REQUIRED",
+        "END_REQUIRED",
     );
     assert_compile_error(
         &select_yaml().replace(
@@ -401,12 +401,18 @@ nodes:
     config: {value: right}
   branch_select:
     type: core.select
-    next: collect
+    next: end_choice
     config: {sources: [left, right]}
+  end_choice:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.branch_select.output }}"}}
   fixed:
     type: core.template
-    next: collect
+    next: end_fixed
     config: {value: fixed}
+  end_fixed:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.fixed.output }}"}}
   collect:
     type: core.join
     next: result
@@ -452,8 +458,11 @@ nodes:
     config: {value: b}
   selected:
     type: core.select
-    next: collect
+    next: end_selected
     config: {sources: [a, b]}
+  end_selected:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.selected.output }}"}}
   collect:
     type: core.join
     next: result
@@ -489,12 +498,18 @@ nodes:
       join: collect
   a:
     type: core.template
-    next: collect
+    next: end_a
     config: {value: a}
+  end_a:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.a.output }}"}}
   b:
     type: core.template
-    next: collect
+    next: end_b
     config: {value: b}
+  end_b:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.b.output }}"}}
   collect:
     type: core.join
     next: selected

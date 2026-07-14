@@ -1,8 +1,10 @@
 use serde::Serialize;
-use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::history::types::RunStatus;
+use crate::{
+    history::types::RunStatus,
+    outcome::{FailureKind, RunOutput},
+};
 
 use super::RunError;
 
@@ -26,6 +28,7 @@ pub enum BranchState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BranchError {
+    pub kind: FailureKind,
     pub code: String,
     pub message: String,
 }
@@ -35,7 +38,7 @@ pub struct BranchError {
 pub enum BranchResult {
     Succeeded {
         terminal_node_id: String,
-        output: Value,
+        output: RunOutput,
     },
     Failed {
         terminal_node_id: String,

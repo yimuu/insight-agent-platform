@@ -24,6 +24,7 @@ pub use state::{BranchError, BranchResult, BranchState, NodeState, RunState};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunErrorKind {
     Node,
+    Timeout,
     Stop,
     Infrastructure,
 }
@@ -86,7 +87,12 @@ impl RunError {
     }
 
     pub fn timeout() -> Self {
-        Self::new("NODE_TIMEOUT", "node execution timed out")
+        Self {
+            code: "NODE_TIMEOUT",
+            message: "node execution timed out".to_string(),
+            kind: RunErrorKind::Timeout,
+            stop_reason: None,
+        }
     }
 }
 

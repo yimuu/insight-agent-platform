@@ -170,12 +170,20 @@ fn parallel_blocking_agent(
             })
             .collect(),
         references: BTreeSet::new(),
-        control: NodeControl::Ordinary,
+        control: if id.starts_with("end_") {
+            NodeControl::End {
+                outcome: insight_agent_platform::outcome::EndOutcomeKind::Success,
+            }
+        } else {
+            NodeControl::Ordinary
+        },
     };
     let nodes = vec![
         make_node("fanout", None, ServiceBehavior::ActivateFork),
-        make_node("work_a", Some("collect"), tracked()),
-        make_node("work_b", Some("collect"), tracked()),
+        make_node("work_a", Some("end_a"), tracked()),
+        make_node("work_b", Some("end_b"), tracked()),
+        make_node("end_a", None, ServiceBehavior::Complete),
+        make_node("end_b", None, ServiceBehavior::Complete),
         make_node("collect", None, ServiceBehavior::Complete),
     ]
     .into_iter()
@@ -190,7 +198,7 @@ fn parallel_blocking_agent(
                 BranchPlan {
                     branch_id: "source_a".to_string(),
                     entry: "work_a".to_string(),
-                    nodes: BTreeSet::from(["work_a".to_string()]),
+                    nodes: BTreeSet::from(["work_a".to_string(), "end_a".to_string()]),
                 },
             ),
             (
@@ -198,7 +206,7 @@ fn parallel_blocking_agent(
                 BranchPlan {
                     branch_id: "source_b".to_string(),
                     entry: "work_b".to_string(),
-                    nodes: BTreeSet::from(["work_b".to_string()]),
+                    nodes: BTreeSet::from(["work_b".to_string(), "end_b".to_string()]),
                 },
             ),
         ]),
@@ -225,6 +233,20 @@ fn parallel_blocking_agent(
                 ),
                 (
                     "work_b".to_string(),
+                    NodeRegion::Branch {
+                        fork_id: "fanout".to_string(),
+                        branch_id: "source_b".to_string(),
+                    },
+                ),
+                (
+                    "end_a".to_string(),
+                    NodeRegion::Branch {
+                        fork_id: "fanout".to_string(),
+                        branch_id: "source_a".to_string(),
+                    },
+                ),
+                (
+                    "end_b".to_string(),
                     NodeRegion::Branch {
                         fork_id: "fanout".to_string(),
                         branch_id: "source_b".to_string(),
@@ -705,6 +727,13 @@ async fn attached_disconnect_immediately_stops_and_drains_all_active_branches() 
     assert!(!run_events
         .iter()
         .any(|event| event.node_id.as_deref() == Some("collect")));
+    drop(events);
+    assert!(!repository
+        .outputs
+        .lock()
+        .await
+        .iter()
+        .any(|output| output.run_id == run_id && output.node_id == "collect"));
 }
 
 #[tokio::test]

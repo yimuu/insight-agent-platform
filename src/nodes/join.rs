@@ -14,6 +14,7 @@ use crate::{
         CompileError,
     },
     nodes::registry::{NodeExecutor, NodeType},
+    outcome::FailureKind,
     runtime::{BranchResult, ExecutionControl, RunContext, RunError},
 };
 
@@ -80,6 +81,36 @@ impl NodeExecutor for JoinNode {
             .filter(|result| matches!(result, BranchResult::Succeeded { .. }))
             .count();
         let failed = results.len() - succeeded;
+        let workflow = results
+            .values()
+            .filter(|result| {
+                matches!(
+                    result,
+                    BranchResult::Failed { error, .. }
+                        if error.kind == FailureKind::Workflow
+                )
+            })
+            .count();
+        let node = results
+            .values()
+            .filter(|result| {
+                matches!(
+                    result,
+                    BranchResult::Failed { error, .. }
+                        if error.kind == FailureKind::Node
+                )
+            })
+            .count();
+        let timeout = results
+            .values()
+            .filter(|result| {
+                matches!(
+                    result,
+                    BranchResult::Failed { error, .. }
+                        if error.kind == FailureKind::Timeout
+                )
+            })
+            .count();
 
         Ok(NodeOutcome {
             output: json!({
@@ -88,6 +119,11 @@ impl NodeExecutor for JoinNode {
                     "total": results.len(),
                     "succeeded": succeeded,
                     "failed": failed,
+                    "failures": {
+                        "workflow": workflow,
+                        "node": node,
+                        "timeout": timeout,
+                    },
                 },
             }),
             transition: NodeTransition::Next,

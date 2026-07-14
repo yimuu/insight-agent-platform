@@ -538,6 +538,13 @@ let expected = vec![
 
 - [ ] **Step 7: Make graph validation recognize only typed End dead ends**
 
+Defer missing required-`next` envelope rejection until graph validation. After
+edge existence and cycle checks, validate reachable End/non-End leaves before
+reporting unreachable declared nodes. This makes a reachable non-End leaf
+return `END_REQUIRED`, including when its missing successor also orphans a
+declared downstream node; retain `NODE_UNREACHABLE` only when there is no
+earlier reachable non-End leaf.
+
 Replace the string-based `core.output` checks in `src/dsl/graph.rs` with:
 
 ```rust
@@ -1113,7 +1120,11 @@ Expected: compiler rejects branch End under the old missing-Join rule and schedu
 
 - [ ] **Step 4: Replace branch-to-Join traversal with all-paths-End proof**
 
-Keep the validation order from the design: generic graph validation already rejects every reachable non-End leaf as `END_REQUIRED`; execution-plan construction then proves that branch traversal stops only at End and rejects illegal Join entry with Fork/branch context.
+Keep the validation order from the design: after edge existence and cycle
+checks, generic graph validation rejects every reachable non-End leaf as
+`END_REQUIRED` before reporting downstream unreachable declarations;
+execution-plan construction then proves that branch traversal stops only at
+End and rejects illegal Join entry with Fork/branch context.
 
 In `collect_branch_nodes`, walk only Direct/Conditional targets and stop successfully at End:
 

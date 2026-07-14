@@ -11,13 +11,14 @@ use crate::{
     events::hub::EventHub,
     events::protocol::{RunEventScope, RunEventType},
     nodes::registry::NodeExecutorRegistry,
-    outcome::TerminalOutcome,
+    outcome::{FailureKind, TerminalOutcome},
 };
 use serde_json::json;
 
 use super::{
     execute_node_with_cancellation, BranchError, BranchResult, BranchState, ExecutionLimiter,
-    NodeExecutionFailure, NodeExecutionResult, NodeState, RunContext, RunError, StopSignal,
+    NodeExecutionFailure, NodeExecutionResult, NodeState, RunContext, RunError, RunErrorKind,
+    StopSignal,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -181,34 +182,29 @@ impl Scheduler {
                 Ok(result) => result,
                 Err(NodeExecutionFailure::Node { node_id, error }) => {
                     state.fail(&scheduled_node_id, &node_id)?;
-                    if let WorkScope::Branch { fork_id, branch_id } = &scope {
-                        let result = BranchResult::Failed {
-                            terminal_node_id: node_id.clone(),
-                            error: BranchError {
-                                code: error.code().to_string(),
-                                message: error.message().to_string(),
-                            },
+                    if matches!(scope, WorkScope::Branch { .. }) {
+                        let kind = match error.kind() {
+                            RunErrorKind::Node => FailureKind::Node,
+                            RunErrorKind::Timeout => FailureKind::Timeout,
+                            RunErrorKind::Stop | RunErrorKind::Infrastructure => {
+                                return Err(invariant(
+                                    "contained node failure had a non-settleable runtime origin",
+                                ));
+                            }
                         };
-                        state.settle_branch(&scope, result)?;
-                        self.events
-                            .publish_error(
-                                branch_scope(state, fork_id)?,
-                                RunEventType::BranchFailed,
-                                error.code(),
-                                error.message(),
-                                json!({
-                                    "fork_id": fork_id,
-                                    "branch_id": branch_id,
-                                    "terminal_node_id": node_id,
-                                    "error": {
-                                        "code": error.code(),
-                                        "message": error.message(),
-                                    }
-                                }),
-                            )
-                            .await
-                            .map_err(event_error)?;
-                        state.activate_join_if_settled(&self.agent)?;
+                        self.settle_branch_result(
+                            state,
+                            &scope,
+                            BranchResult::Failed {
+                                terminal_node_id: node_id,
+                                error: BranchError {
+                                    kind,
+                                    code: error.code().to_string(),
+                                    message: error.message().to_string(),
+                                },
+                            },
+                        )
+                        .await?;
                         continue;
                     }
                     return Ok(SchedulerResult::Failed(error));
@@ -232,49 +228,53 @@ impl Scheduler {
             let mut context = result.context;
             context.set_node_output(&result.node_id, result.outcome.output.clone());
             if let WorkScope::Branch { fork_id, branch_id } = &scope {
-                let target = match &result.outcome.transition {
-                    NodeTransition::Next => node.next.as_deref().ok_or_else(|| {
-                        invariant(format!(
-                            "successful branch node '{}' did not identify a successor",
-                            node.id
-                        ))
-                    })?,
-                    NodeTransition::Goto(target) => target,
+                match result.outcome.transition {
+                    NodeTransition::End(TerminalOutcome::Success { output }) => {
+                        self.settle_branch_result(
+                            state,
+                            &scope,
+                            BranchResult::Succeeded {
+                                terminal_node_id: result.node_id,
+                                output,
+                            },
+                        )
+                        .await?;
+                    }
+                    NodeTransition::End(TerminalOutcome::Failure { error }) => {
+                        self.settle_branch_result(
+                            state,
+                            &scope,
+                            BranchResult::Failed {
+                                terminal_node_id: result.node_id,
+                                error: BranchError {
+                                    kind: FailureKind::Workflow,
+                                    code: error.code,
+                                    message: error.message,
+                                },
+                            },
+                        )
+                        .await?;
+                    }
+                    NodeTransition::Next => {
+                        let target = node.next.as_deref().ok_or_else(|| {
+                            invariant(format!(
+                                "successful branch node '{}' did not identify a successor",
+                                node.id
+                            ))
+                        })?;
+                        state.validate_branch_target(fork_id, branch_id, target)?;
+                        state.activate(&self.agent, Some(target), scope, context)?;
+                    }
+                    NodeTransition::Goto(target) => {
+                        state.validate_branch_target(fork_id, branch_id, &target)?;
+                        state.activate(&self.agent, Some(&target), scope, context)?;
+                    }
                     NodeTransition::ActivateFork => {
                         return Err(invariant(format!(
                             "branch node '{}' requested nested fork activation",
                             node.id
                         )));
                     }
-                    NodeTransition::End(_) => {
-                        return Err(invariant(format!(
-                            "branch node '{}' ended before structured branch terminal support",
-                            node.id
-                        )));
-                    }
-                };
-                if state.is_paired_join(fork_id, target)? {
-                    let branch_result = BranchResult::Succeeded {
-                        terminal_node_id: result.node_id.clone(),
-                        output: result.outcome.output.clone(),
-                    };
-                    state.settle_branch(&scope, branch_result)?;
-                    self.events
-                        .publish(
-                            run_scope(&context),
-                            RunEventType::BranchCompleted,
-                            json!({
-                                "fork_id": fork_id,
-                                "branch_id": branch_id,
-                                "terminal_node_id": result.node_id,
-                            }),
-                        )
-                        .await
-                        .map_err(event_error)?;
-                    state.activate_join_if_settled(&self.agent)?;
-                } else {
-                    state.validate_branch_target(fork_id, branch_id, target)?;
-                    state.activate(&self.agent, Some(target), scope, context)?;
                 }
                 continue;
             }
@@ -335,6 +335,61 @@ impl Scheduler {
                 }
             }
         }
+    }
+
+    async fn settle_branch_result(
+        &self,
+        state: &mut SchedulerState,
+        scope: &WorkScope,
+        result: BranchResult,
+    ) -> Result<(), RunError> {
+        let WorkScope::Branch { fork_id, branch_id } = scope else {
+            return Err(invariant("only a branch scope can settle a branch"));
+        };
+        let fork_id = fork_id.clone();
+        let branch_id = branch_id.clone();
+        let event_scope = branch_scope(state, &fork_id)?;
+        state.settle_branch(scope, result.clone())?;
+        match result {
+            BranchResult::Succeeded {
+                terminal_node_id, ..
+            } => {
+                self.events
+                    .publish(
+                        event_scope,
+                        RunEventType::BranchCompleted,
+                        json!({
+                            "fork_id": fork_id,
+                            "branch_id": branch_id,
+                            "terminal_node_id": terminal_node_id,
+                        }),
+                    )
+                    .await
+                    .map_err(event_error)?;
+            }
+            BranchResult::Failed {
+                terminal_node_id,
+                error,
+            } => {
+                self.events
+                    .publish_error(
+                        event_scope,
+                        RunEventType::BranchFailed,
+                        &error.code,
+                        &error.message,
+                        json!({
+                            "fork_id": fork_id,
+                            "branch_id": branch_id,
+                            "terminal_node_id": terminal_node_id,
+                            "kind": error.kind,
+                            "error": &error,
+                        }),
+                    )
+                    .await
+                    .map_err(event_error)?;
+            }
+        }
+        state.activate_join_if_settled(&self.agent)
     }
 }
 
@@ -450,11 +505,6 @@ impl SchedulerState {
             .results
             .insert(branch_id.clone(), result);
         Ok(())
-    }
-
-    fn is_paired_join(&self, fork_id: &str, target: &str) -> Result<bool, RunError> {
-        let active = self.active_fork(fork_id)?;
-        Ok(active.plan.join_id == target)
     }
 
     fn validate_branch_target(

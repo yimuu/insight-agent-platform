@@ -204,20 +204,26 @@ nodes:
       join: collect
   bad_action:
     type: core.action
-    next: collect
+    next: end_bad
     config:
       action: containment
       input:
         mode: invalid_output
         payload: {secret: "{{ input.secret }}"}
+  end_bad:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.bad_action.output }}"}}
   good_action:
     type: core.action
-    next: collect
+    next: end_good
     config:
       action: containment
       input:
         mode: valid
         payload: {secret: "{{ input.secret }}"}
+  end_good:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.good_action.output }}"}}
   collect:
     type: core.join
     next: result

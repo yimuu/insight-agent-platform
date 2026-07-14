@@ -110,21 +110,30 @@ nodes:
       value: result-a
   summarize_a:
     type: core.template
-    next: collect
+    next: end_a
     config:
       value: summary-a
+  end_a:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.summarize_a.output }}"}}
   search_b:
     type: core.condition
     config:
       cases:
         - when: "true"
           next: summarize_b
-      default: collect
+      default: end_b_default
+  end_b_default:
+    type: core.end
+    config: {outcome: success, data: {value: default-b}}
   summarize_b:
     type: core.template
-    next: collect
+    next: end_b
     config:
       value: summary-b
+  end_b:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.summarize_b.output }}"}}
   collect:
     type: core.join
     next: result
@@ -138,6 +147,47 @@ nodes:
 "#
 }
 
+fn structured_end_yaml() -> &'static str {
+    include_str!("fixtures/structured_end_agent.yaml")
+}
+
+fn branch_directly_targets_join_yaml() -> String {
+    structured_end_yaml().replace(
+        "  make_a:\n    type: core.template\n    next: end_a\n    config: {value: a}\n  end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.make_a.output }}\"}}",
+        "  make_a:\n    type: core.template\n    next: collect\n    config: {value: a}",
+    )
+}
+
+fn branch_dead_ends_without_end_yaml() -> String {
+    structured_end_yaml().replace(
+        "  make_a:\n    type: core.template\n    next: end_a\n    config: {value: a}\n  end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.make_a.output }}\"}}",
+        "  make_a:\n    type: core.template\n    config: {value: a}",
+    )
+}
+
+fn ordinary_node_targets_join_yaml() -> String {
+    structured_end_yaml()
+        .replace("entry: fanout", "entry: route")
+        .replace(
+            "nodes:\n  fanout:",
+            "nodes:\n  route:\n    type: core.condition\n    config:\n      cases: [{when: \"true\", next: fanout}]\n      default: collect\n  fanout:",
+        )
+}
+
+#[test]
+fn branches_must_return_through_end_without_executable_join_edges() {
+    assert_compile_ok(structured_end_yaml());
+    assert_compile_error(
+        &branch_directly_targets_join_yaml(),
+        "BRANCH_DIRECT_JOIN_FORBIDDEN",
+    );
+    assert_compile_error(&branch_dead_ends_without_end_yaml(), "END_REQUIRED");
+    assert_compile_error(
+        &ordinary_node_targets_join_yaml(),
+        "JOIN_DIRECT_PREDECESSOR_FORBIDDEN",
+    );
+}
+
 fn valid_parallel_yaml_with(node_id: &str, reference: &str) -> String {
     match node_id {
         "prepare" => parallel_yaml().replace(
@@ -147,9 +197,9 @@ fn valid_parallel_yaml_with(node_id: &str, reference: &str) -> String {
             ),
         ),
         "summarize_a" => parallel_yaml().replace(
-            "  summarize_a:\n    type: core.template\n    next: collect\n    config:\n      value: summary-a",
+            "  summarize_a:\n    type: core.template\n    next: end_a\n    config:\n      value: summary-a",
             &format!(
-                "  summarize_a:\n    type: core.template\n    next: collect\n    config:\n      value: '{reference}'"
+                "  summarize_a:\n    type: core.template\n    next: end_a\n    config:\n      value: '{reference}'"
             ),
         ),
         "result" => parallel_yaml().replace(
@@ -214,8 +264,8 @@ fn reference_allows_join_aggregate_after_join() {
 fn condition_indexed_node_access_fails_before_branch_validation() {
     let yaml = valid_parallel_yaml_with("summarize_a", "{{ nodes.search_a.output.text }}")
         .replace(
-            "  search_b:\n    type: core.condition\n    config:\n      cases:\n        - when: \"true\"\n          next: summarize_b\n      default: collect",
-            "  search_b:\n    type: core.condition\n    config:\n      cases:\n        - when: 'nodes[\"search_a\"].output.text == \"x\"'\n          next: summarize_b\n      default: collect",
+            "  search_b:\n    type: core.condition\n    config:\n      cases:\n        - when: \"true\"\n          next: summarize_b\n      default: end_b_default",
+            "  search_b:\n    type: core.condition\n    config:\n      cases:\n        - when: 'nodes[\"search_a\"].output.text == \"x\"'\n          next: summarize_b\n      default: end_b_default",
         );
     assert_compile_error(&yaml, "CONDITION_REFERENCE_INVALID");
 }
@@ -250,7 +300,11 @@ fn compiles_immutable_parallel_regions() {
     assert_eq!(fork.branches["source_a"].entry, "search_a");
     assert_eq!(
         fork.branches["source_a"].nodes,
-        BTreeSet::from(["search_a".to_string(), "summarize_a".to_string()])
+        BTreeSet::from([
+            "search_a".to_string(),
+            "summarize_a".to_string(),
+            "end_a".to_string(),
+        ])
     );
     assert_eq!(
         agent.execution_plan.node_regions["search_b"],
@@ -321,11 +375,16 @@ fn rejects_fork_whose_declared_join_is_absent() {
 #[test]
 fn rejects_branch_that_escapes_to_output() {
     assert_compile_error(
-        &parallel_yaml().replace(
-            "  summarize_a:\n    type: core.template\n    next: collect",
-            "  summarize_a:\n    type: core.template\n    next: result",
-        ),
-        "BRANCH_PATH_MISSING_JOIN",
+        &parallel_yaml()
+            .replace(
+                "  summarize_a:\n    type: core.template\n    next: end_a",
+                "  summarize_a:\n    type: core.template\n    next: result",
+            )
+            .replace(
+                "  end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.summarize_a.output }}\"}}\n",
+                "",
+            ),
+        "BRANCH_CROSS_REGION_EDGE",
     );
 }
 
@@ -347,8 +406,11 @@ nodes:
       join: collect
   shared:
     type: core.template
-    next: collect
+    next: end_shared
     config: {value: shared}
+  end_shared:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.shared.output }}"}}
   collect:
     type: core.join
     next: result
@@ -366,10 +428,15 @@ nodes:
 #[test]
 fn rejects_branch_edge_into_sibling_region() {
     assert_compile_error(
-        &parallel_yaml().replace(
-            "  summarize_a:\n    type: core.template\n    next: collect",
-            "  summarize_a:\n    type: core.template\n    next: search_b",
-        ),
+        &parallel_yaml()
+            .replace(
+                "  summarize_a:\n    type: core.template\n    next: end_a",
+                "  summarize_a:\n    type: core.template\n    next: search_b",
+            )
+            .replace(
+                "  end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.summarize_a.output }}\"}}\n",
+                "",
+            ),
         "BRANCH_CROSS_REGION_EDGE",
     );
 }
@@ -377,10 +444,15 @@ fn rejects_branch_edge_into_sibling_region() {
 #[test]
 fn rejects_branch_edge_into_sibling_interior() {
     assert_compile_error(
-        &parallel_yaml().replace(
-            "  summarize_a:\n    type: core.template\n    next: collect",
-            "  summarize_a:\n    type: core.template\n    next: summarize_b",
-        ),
+        &parallel_yaml()
+            .replace(
+                "  summarize_a:\n    type: core.template\n    next: end_a",
+                "  summarize_a:\n    type: core.template\n    next: summarize_b",
+            )
+            .replace(
+                "  end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.summarize_a.output }}\"}}\n",
+                "",
+            ),
         "BRANCH_CROSS_REGION_EDGE",
     );
 }
@@ -403,36 +475,16 @@ fn rejects_linear_edge_into_branch_interior() {
 
 #[test]
 fn rejects_direct_fork_to_join_bypass() {
-    assert_compile_error(
-        r#"
-version: 1
-id: direct-bypass
-name: Direct Bypass
-input:
-  schema: {type: object}
-entry: fanout
-nodes:
-  fanout:
-    type: core.fork
-    config:
-      branches: {bypass: collect, work: search}
-      join: collect
-  search:
-    type: core.template
-    next: collect
-    config: {value: found}
-  collect:
-    type: core.join
-    next: result
-    config: {mode: all_settled}
-  result:
-    type: core.end
-    config:
-      outcome: success
-      data: {ok: true}
-"#,
-        "JOIN_PREDECESSOR_INVALID",
-    );
+    let yaml = structured_end_yaml()
+        .replace(
+            "branches: {a: make_a, b: make_b}",
+            "branches: {a: collect, b: make_b}",
+        )
+        .replace(
+            "  make_a:\n    type: core.template\n    next: end_a\n    config: {value: a}\n  end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.make_a.output }}\"}}\n",
+            "",
+        );
+    assert_compile_error(&yaml, "BRANCH_DIRECT_JOIN_FORBIDDEN");
 }
 
 #[test]
@@ -458,20 +510,32 @@ nodes:
       join: nested_join
   x:
     type: core.template
-    next: nested_join
+    next: end_x
     config: {value: x}
+  end_x:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.x.output }}"}}
   y:
     type: core.template
-    next: nested_join
+    next: end_y
     config: {value: y}
+  end_y:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.y.output }}"}}
   nested_join:
     type: core.join
-    next: outer_join
+    next: end_nested
     config: {mode: all_settled}
+  end_nested:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.nested_join.output }}"}}
   plain:
     type: core.template
-    next: outer_join
+    next: end_plain
     config: {value: plain}
+  end_plain:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.plain.output }}"}}
   outer_join:
     type: core.join
     next: result
@@ -489,57 +553,21 @@ nodes:
 #[test]
 fn rejects_condition_path_that_bypasses_join() {
     assert_compile_error(
-        &parallel_yaml().replace("      default: collect", "      default: result"),
-        "BRANCH_PATH_MISSING_JOIN",
+        &parallel_yaml()
+            .replace("      default: end_b_default", "      default: result")
+            .replace(
+                "  end_b_default:\n    type: core.end\n    config: {outcome: success, data: {value: default-b}}\n",
+                "",
+            ),
+        "BRANCH_CROSS_REGION_EDGE",
     );
 }
 
 #[test]
 fn rejects_outside_predecessor_entering_join() {
     assert_compile_error(
-        r#"
-version: 1
-id: outside-predecessor
-name: Outside Predecessor
-input:
-  schema: {type: object}
-entry: prepare
-nodes:
-  prepare:
-    type: core.condition
-    config:
-      cases:
-        - when: "true"
-          next: fanout
-      default: outside
-  outside:
-    type: core.template
-    next: collect
-    config: {value: outside}
-  fanout:
-    type: core.fork
-    config:
-      branches: {source_a: a, source_b: b}
-      join: collect
-  a:
-    type: core.template
-    next: collect
-    config: {value: a}
-  b:
-    type: core.template
-    next: collect
-    config: {value: b}
-  collect:
-    type: core.join
-    next: result
-    config: {mode: all_settled}
-  result:
-    type: core.end
-    config:
-      outcome: success
-      data: {ok: true}
-"#,
-        "JOIN_PREDECESSOR_INVALID",
+        &ordinary_node_targets_join_yaml(),
+        "JOIN_DIRECT_PREDECESSOR_FORBIDDEN",
     );
 }
 
@@ -568,12 +596,18 @@ nodes:
       join: collect
   a1:
     type: core.template
-    next: collect
+    next: end_a1
     config: {value: a1}
+  end_a1:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.a1.output }}"}}
   a2:
     type: core.template
-    next: collect
+    next: end_a2
     config: {value: a2}
+  end_a2:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.a2.output }}"}}
   fork_b:
     type: core.fork
     config:
@@ -581,12 +615,18 @@ nodes:
       join: collect
   b1:
     type: core.template
-    next: collect
+    next: end_b1
     config: {value: b1}
+  end_b1:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.b1.output }}"}}
   b2:
     type: core.template
-    next: collect
+    next: end_b2
     config: {value: b2}
+  end_b2:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.b2.output }}"}}
   collect:
     type: core.join
     next: result
@@ -603,8 +643,7 @@ nodes:
 
 #[test]
 fn rejects_unclaimed_join() {
-    assert_compile_error(
-        r#"
+    let yaml = r#"
 version: 1
 id: unclaimed-join
 name: Unclaimed Join
@@ -614,7 +653,7 @@ entry: prepare
 nodes:
   prepare:
     type: core.template
-    next: collect
+    next: result
     config: {value: prepared}
   collect:
     type: core.join
@@ -625,9 +664,12 @@ nodes:
     config:
       outcome: success
       data: {ok: true}
-"#,
-        "JOIN_PAIRING_INVALID",
+"#
+    .replace(
+        "  prepare:\n    type: core.template\n    next: result",
+        "  prepare:\n    type: core.template\n    next: collect",
     );
+    assert_compile_error(&yaml, "JOIN_PAIRING_INVALID");
 }
 
 #[test]
@@ -648,12 +690,18 @@ nodes:
       join: join_a
   a1:
     type: core.template
-    next: join_a
+    next: end_a1
     config: {value: a1}
+  end_a1:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.a1.output }}"}}
   a2:
     type: core.template
-    next: join_a
+    next: end_a2
     config: {value: a2}
+  end_a2:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.a2.output }}"}}
   join_a:
     type: core.join
     next: fork_b
@@ -665,12 +713,18 @@ nodes:
       join: join_b
   b1:
     type: core.template
-    next: join_b
+    next: end_b1
     config: {value: b1}
+  end_b1:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.b1.output }}"}}
   b2:
     type: core.template
-    next: join_b
+    next: end_b2
     config: {value: b2}
+  end_b2:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.b2.output }}"}}
   join_b:
     type: core.join
     next: result
@@ -721,8 +775,11 @@ nodes:
       join: collect
   work:
     type: core.template
-    next: collect
+    next: end_work
     config: {value: work}
+  end_work:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.work.output }}"}}
   collect:
     type: core.join
     next: result
@@ -746,7 +803,7 @@ fn rejects_fork_over_configured_branch_limit() {
     let branch_nodes = (0..33)
         .map(|index| {
             format!(
-                "  n{index:02}:\n    type: core.template\n    next: collect\n    config: {{value: {index}}}"
+                "  n{index:02}:\n    type: core.template\n    next: end_{index:02}\n    config: {{value: {index}}}\n  end_{index:02}:\n    type: core.end\n    config: {{outcome: success, data: {{value: \"{{{{ nodes.n{index:02}.output }}}}\"}}}}"
             )
         })
         .collect::<Vec<_>>()
@@ -800,17 +857,23 @@ nodes:
       join: collect
   answer:
     type: core.chat
-    next: collect
+    next: end_answer
     config:
       model: graph
       messages:
         - from: {path: nodes.prepare.output}
+  end_answer:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.answer.output }}"}}
   prepare:
     type: core.template
-    next: collect
+    next: end_prepare
     config:
       value:
         - {role: user, content: sibling}
+  end_prepare:
+    type: core.end
+    config: {outcome: success, data: {value: "{{ nodes.prepare.output }}"}}
   collect:
     type: core.join
     next: result

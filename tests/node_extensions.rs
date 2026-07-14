@@ -702,7 +702,7 @@ nodes:
       outcome: success
       data: {ok: true}
 "#,
-        "NODE_NEXT_REQUIRED",
+        "END_REQUIRED",
     );
 }
 
