@@ -24,7 +24,7 @@ use insight_agent_platform::{
         protocol::{RunEvent, RunEventScope, RunEventType},
     },
     history::{
-        repository::{HistoryError, RunRepository},
+        repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
         types::{
             NewRun, NodeOutputRecord, RunLifecycle, RunRecord, RunStatus, RunTerminal, StopError,
             TerminalUpdate,
@@ -272,7 +272,7 @@ fn parallel_blocking_agent(
 struct RepositoryHooks {
     create_run: Option<Arc<RepositoryGate>>,
     get_run: Option<Arc<RepositoryGate>>,
-    recover_run: Option<Arc<RecoveryGate>>,
+    terminal_recovery: Option<Arc<RecoveryGate>>,
 }
 
 struct RepositoryGate {
@@ -421,18 +421,51 @@ impl RunRepository for CountingRepository {
         Ok(())
     }
 
-    async fn finish_run(
+    async fn commit_terminal(
         &self,
-        update: TerminalUpdate,
-        event: RunEvent,
-    ) -> Result<bool, HistoryError> {
+        proposal: TerminalProposal,
+        sequence: TerminalSequence,
+    ) -> Result<RunEvent, HistoryError> {
+        if matches!(sequence, TerminalSequence::NextDurable) {
+            if let Some(gate) = self.hooks.terminal_recovery.as_ref() {
+                gate.block_until_released().await;
+            }
+        }
+        let run_id = proposal.run_id().to_string();
         let mut records = self.records.lock().await;
         let record = records
-            .get_mut(&update.run_id)
+            .get_mut(&run_id)
             .ok_or_else(|| HistoryError::new("RUN_NOT_FOUND", "run not found"))?;
         if record.status().is_terminal() {
-            return Ok(false);
+            return self
+                .events
+                .lock()
+                .await
+                .get(&run_id)
+                .and_then(|events| events.last())
+                .cloned()
+                .ok_or_else(|| {
+                    HistoryError::new(
+                        "HISTORY_TERMINAL_EVENT_MISSING",
+                        "terminal run has no terminal event",
+                    )
+                });
         }
+        let next_seq = self
+            .events
+            .lock()
+            .await
+            .get(&run_id)
+            .and_then(|events| events.last())
+            .map_or(1, |event| event.seq + 1);
+        if matches!(sequence, TerminalSequence::Expected(expected) if expected != next_seq) {
+            return Err(HistoryError::new(
+                "HISTORY_EVENT_INVALID",
+                "expected terminal sequence does not match durable next sequence",
+            ));
+        }
+        let event = proposal.event_at(next_seq);
+        let update = proposal.update();
         record.lifecycle = lifecycle_from_terminal(&update.terminal);
         record.ended_at = Some(update.ended_at);
         record.updated_at = update.ended_at;
@@ -442,27 +475,8 @@ impl RunRepository for CountingRepository {
             .await
             .entry(event.run_id.clone())
             .or_default()
-            .push(event);
-        Ok(true)
-    }
-
-    async fn recover_run(
-        &self,
-        update: TerminalUpdate,
-        mut terminal: RunEvent,
-    ) -> Result<RunEvent, HistoryError> {
-        if let Some(gate) = self.hooks.recover_run.as_ref() {
-            gate.block_until_released().await;
-        }
-        terminal.seq = self
-            .events
-            .lock()
-            .await
-            .get(&update.run_id)
-            .and_then(|events| events.last())
-            .map_or(1, |event| event.seq + 1);
-        self.finish_run(update, terminal.clone()).await?;
-        Ok(terminal)
+            .push(event.clone());
+        Ok(event)
     }
 
     async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, HistoryError> {
@@ -518,15 +532,20 @@ impl RunRepository for CountingRepository {
         for (run_id, request_id, agent_id, agent_version) in &interrupted {
             let run_events = events.entry(run_id.clone()).or_default();
             let seq = run_events.last().map_or(1, |event| event.seq + 1);
-            run_events.push(RunEvent::error_at(
-                RunEventType::RunInterrupted,
-                seq,
+            let proposal = TerminalProposal::new(
                 RunEventScope::for_run(request_id, run_id, agent_id, agent_version),
-                at,
-                "RUN_INTERRUPTED",
-                "run interrupted during startup reconciliation",
-                json!({}),
-            ));
+                TerminalUpdate::new(
+                    run_id,
+                    at,
+                    RunTerminal::Interrupted {
+                        error: StopError {
+                            code: "RUN_INTERRUPTED".to_string(),
+                            message: "run interrupted during startup reconciliation".to_string(),
+                        },
+                    },
+                ),
+            )?;
+            run_events.push(proposal.event_at(seq));
         }
         Ok(interrupted.len() as u64)
     }
@@ -856,7 +875,7 @@ async fn shutdown_waits_for_background_recovery_owner() {
         RepositoryHooks {
             create_run: None,
             get_run: None,
-            recover_run: Some(Arc::clone(&recover_gate)),
+            terminal_recovery: Some(Arc::clone(&recover_gate)),
         },
         Duration::from_millis(20),
     )
@@ -903,7 +922,7 @@ async fn recovery_handoff_releases_active_ownership_but_keeps_service_unhealthy(
         RepositoryHooks {
             create_run: None,
             get_run: None,
-            recover_run: Some(Arc::clone(&recover_gate)),
+            terminal_recovery: Some(Arc::clone(&recover_gate)),
         },
         Duration::from_millis(20),
     )
@@ -999,7 +1018,7 @@ async fn shutdown_waits_for_detached_run_blocked_in_create_run() {
         RepositoryHooks {
             create_run: Some(Arc::clone(&create_gate)),
             get_run: None,
-            recover_run: None,
+            terminal_recovery: None,
         },
     )
     .await
@@ -1053,7 +1072,7 @@ async fn shutdown_after_durable_create_finalizes_before_detached_launch() {
         RepositoryHooks {
             create_run: None,
             get_run: Some(Arc::clone(&get_gate)),
-            recover_run: None,
+            terminal_recovery: None,
         },
     )
     .await
@@ -1102,7 +1121,7 @@ async fn dropped_detached_create_future_releases_capacity_after_durable_create()
         RepositoryHooks {
             create_run: None,
             get_run: Some(Arc::clone(&get_gate)),
-            recover_run: None,
+            terminal_recovery: None,
         },
     )
     .await

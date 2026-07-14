@@ -15,7 +15,7 @@ use insight_agent_platform::{
         protocol::{RunEvent, RunEventScope, RunEventType},
     },
     history::{
-        repository::{HistoryError, RunRepository},
+        repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
         types::{
             NewRun, NodeOutputRecord, RunRecord, RunStatus, RunTerminal, StopError, TerminalUpdate,
         },
@@ -378,7 +378,7 @@ impl MemoryRepository {
             tokio::task::yield_now().await;
         }
         panic!(
-            "recover_run was called {} times, expected at least {expected}",
+            "NextDurable commit was called {} times, expected at least {expected}",
             self.recover_calls.load(Ordering::SeqCst)
         );
     }
@@ -440,50 +440,63 @@ impl RunRepository for MemoryRepository {
         Ok(())
     }
 
-    async fn finish_run(
+    async fn commit_terminal(
         &self,
-        update: TerminalUpdate,
-        event: RunEvent,
-    ) -> Result<bool, HistoryError> {
+        proposal: TerminalProposal,
+        sequence: TerminalSequence,
+    ) -> Result<RunEvent, HistoryError> {
+        if matches!(sequence, TerminalSequence::NextDurable) {
+            self.recover_calls.fetch_add(1, Ordering::SeqCst);
+            if self.block_recover.load(Ordering::SeqCst) {
+                self.allow_recover.notified().await;
+            }
+        }
         self.terminal_called.notify_one();
         if self.block_terminal.load(Ordering::SeqCst) {
             self.allow_terminal.notified().await;
         }
+        let run_id = proposal.run_id().to_string();
         let mut terminal_updates = self.terminal_updates.lock().await;
         if terminal_updates
             .iter()
-            .any(|existing| existing.run_id == update.run_id)
+            .any(|existing| existing.run_id == run_id)
         {
-            return Ok(false);
+            return self
+                .events
+                .lock()
+                .await
+                .get(&run_id)
+                .and_then(|events| events.last())
+                .cloned()
+                .ok_or_else(|| {
+                    HistoryError::new(
+                        "HISTORY_TERMINAL_EVENT_MISSING",
+                        "terminal run has no terminal event",
+                    )
+                });
         }
-        terminal_updates.push(update);
+        let next_seq = self
+            .events
+            .lock()
+            .await
+            .get(&run_id)
+            .and_then(|events| events.last())
+            .map_or(1, |event| event.seq + 1);
+        if matches!(sequence, TerminalSequence::Expected(expected) if expected != next_seq) {
+            return Err(HistoryError::new(
+                "HISTORY_EVENT_INVALID",
+                "expected terminal sequence does not match durable next sequence",
+            ));
+        }
+        let event = proposal.event_at(next_seq);
+        terminal_updates.push(proposal.update().clone());
         self.events
             .lock()
             .await
             .entry(event.run_id.clone())
             .or_default()
-            .push(event);
-        Ok(true)
-    }
-
-    async fn recover_run(
-        &self,
-        update: TerminalUpdate,
-        mut terminal: RunEvent,
-    ) -> Result<RunEvent, HistoryError> {
-        self.recover_calls.fetch_add(1, Ordering::SeqCst);
-        if self.block_recover.load(Ordering::SeqCst) {
-            self.allow_recover.notified().await;
-        }
-        terminal.seq = self
-            .events
-            .lock()
-            .await
-            .get(&update.run_id)
-            .and_then(|events| events.last())
-            .map_or(1, |event| event.seq + 1);
-        self.finish_run(update, terminal.clone()).await?;
-        Ok(terminal)
+            .push(event.clone());
+        Ok(event)
     }
 
     async fn get_run(&self, _run_id: &str) -> Result<Option<RunRecord>, HistoryError> {

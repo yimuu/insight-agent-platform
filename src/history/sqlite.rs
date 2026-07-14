@@ -10,12 +10,12 @@ use sqlx::{
 };
 
 use crate::{
-    events::protocol::{RunEvent, RunEventType, EVENT_SCHEMA_VERSION},
+    events::protocol::{RunEvent, RunEventScope, RunEventType, EVENT_SCHEMA_VERSION},
     history::{
-        repository::{validate_recovery_event, HistoryError, RunRepository},
+        repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
         types::{
-            NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunRecord, RunStatus, StopError,
-            TerminalUpdate,
+            NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunRecord, RunStatus,
+            RunTerminal, StopError, TerminalUpdate,
         },
     },
     outcome::{FailureKind, RunFailure, RunOutput},
@@ -147,71 +147,18 @@ impl RunRepository for SqliteRunRepository {
         Ok(())
     }
 
-    async fn finish_run(
+    async fn commit_terminal(
         &self,
-        update: TerminalUpdate,
-        event: RunEvent,
-    ) -> Result<bool, HistoryError> {
-        let expected_event_type = terminal_event_type(update.status());
-        if update.run_id != event.run_id {
-            return Err(HistoryError::new(
-                "HISTORY_EVENT_INVALID",
-                "terminal update and event belong to different runs",
-            ));
-        }
-        if event.event_type != expected_event_type || event.node_id.is_some() {
-            return Err(HistoryError::new(
-                "HISTORY_EVENT_INVALID",
-                "terminal event does not match the terminal status",
-            ));
-        }
-        let output = update
-            .terminal
-            .output()
-            .map(|output| serialize_json(output, "run output"))
-            .transpose()?;
-        let error_kind = update.terminal.failure().map(|error| error.kind.as_str());
-        let mut transaction = self.pool.begin().await.map_err(write_error)?;
-        let result = sqlx::query(
-            "UPDATE runs
-             SET status = ?, ended_at = ?, updated_at = ?, output = ?,
-                 error_kind = ?, error_code = ?, error_message = ?
-             WHERE run_id = ? AND status IN (?, ?)",
-        )
-        .bind(update.status().as_str())
-        .bind(format_timestamp(update.ended_at))
-        .bind(format_timestamp(update.ended_at))
-        .bind(output)
-        .bind(error_kind)
-        .bind(update.terminal.error_code())
-        .bind(update.terminal.error_message())
-        .bind(&update.run_id)
-        .bind(RunStatus::Created.as_str())
-        .bind(RunStatus::Running.as_str())
-        .execute(&mut *transaction)
-        .await
-        .map_err(write_error)?;
-        if result.rows_affected() == 0 {
-            transaction.commit().await.map_err(write_error)?;
-            return Ok(false);
-        }
-        insert_event(&mut transaction, &event).await?;
-        transaction.commit().await.map_err(write_error)?;
-        Ok(true)
-    }
-
-    async fn recover_run(
-        &self,
-        update: TerminalUpdate,
-        terminal: RunEvent,
+        proposal: TerminalProposal,
+        sequence: TerminalSequence,
     ) -> Result<RunEvent, HistoryError> {
-        validate_recovery_event(&update, &terminal)?;
-        match recover_sqlite_once(&self.pool, update.clone(), terminal.clone()).await {
+        match commit_sqlite_once(&self.pool, proposal.clone(), sequence).await {
             Ok(event) => Ok(event),
             Err(error)
-                if matches!(error.code(), "HISTORY_WRITE_FAILED" | "HISTORY_READ_FAILED") =>
+                if matches!(sequence, TerminalSequence::NextDurable)
+                    && matches!(error.code(), "HISTORY_WRITE_FAILED" | "HISTORY_READ_FAILED") =>
             {
-                recover_sqlite_once(&self.pool, update, terminal).await
+                commit_sqlite_once(&self.pool, proposal, sequence).await
             }
             Err(error) => Err(error),
         }
@@ -299,24 +246,32 @@ impl RunRepository for SqliteRunRepository {
             if result.rows_affected() == 0 {
                 continue;
             }
-            let seq = row.max_seq.checked_add(1).ok_or_else(|| {
-                HistoryError::new("HISTORY_DATA_INVALID", "stored event sequence overflowed")
-            })?;
-            sqlx::query(
-                "INSERT INTO run_events (
-                    run_id, seq, event_type, node_id, timestamp, code, message, data
-                 ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)",
-            )
-            .bind(&row.run_id)
-            .bind(seq)
-            .bind(RunEventType::RunInterrupted.as_str())
-            .bind(&timestamp)
-            .bind("RUN_INTERRUPTED")
-            .bind("run interrupted during startup reconciliation")
-            .bind("{}")
-            .execute(&mut *transaction)
-            .await
-            .map_err(write_error)?;
+            let seq = row
+                .max_seq
+                .checked_add(1)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(|| {
+                    HistoryError::new("HISTORY_DATA_INVALID", "stored event sequence overflowed")
+                })?;
+            let proposal = TerminalProposal::new(
+                RunEventScope::for_run(
+                    row.request_id,
+                    row.run_id.clone(),
+                    row.agent_id,
+                    row.agent_version,
+                ),
+                TerminalUpdate::new(
+                    row.run_id,
+                    at,
+                    RunTerminal::Interrupted {
+                        error: StopError {
+                            code: "RUN_INTERRUPTED".to_string(),
+                            message: "run interrupted during startup reconciliation".to_string(),
+                        },
+                    },
+                ),
+            )?;
+            insert_event(&mut transaction, &proposal.event_at(seq)).await?;
             interrupted += 1;
         }
         transaction.commit().await.map_err(write_error)?;
@@ -324,20 +279,15 @@ impl RunRepository for SqliteRunRepository {
     }
 }
 
-async fn recover_sqlite_once(
+async fn commit_sqlite_once(
     pool: &SqlitePool,
-    update: TerminalUpdate,
-    mut terminal: RunEvent,
+    proposal: TerminalProposal,
+    sequence: TerminalSequence,
 ) -> Result<RunEvent, HistoryError> {
-    let output = update
-        .terminal
-        .output()
-        .map(|output| serialize_json(output, "run output"))
-        .transpose()?;
-    let error_kind = update.terminal.failure().map(|error| error.kind.as_str());
+    let run_id = proposal.run_id().to_string();
     let mut transaction = pool.begin().await.map_err(write_error)?;
     let locked = sqlx::query("UPDATE runs SET updated_at = updated_at WHERE run_id = ?")
-        .bind(&update.run_id)
+        .bind(&run_id)
         .execute(&mut *transaction)
         .await
         .map_err(write_error)?;
@@ -345,15 +295,15 @@ async fn recover_sqlite_once(
         return Err(HistoryError::new("RUN_NOT_FOUND", "run not found"));
     }
     let status_value: String = sqlx::query_scalar("SELECT status FROM runs WHERE run_id = ?")
-        .bind(&update.run_id)
+        .bind(&run_id)
         .fetch_one(&mut *transaction)
         .await
         .map_err(read_error)?;
     let status = RunStatus::parse(&status_value)
         .ok_or_else(|| invalid_data(format!("invalid stored run status '{status_value}'")))?;
     if status.is_terminal() {
-        ensure_contiguous_events_sqlite(&mut transaction, &update.run_id).await?;
-        let existing = load_last_event_sqlite(&mut transaction, &update.run_id).await?;
+        ensure_contiguous_events_sqlite(&mut transaction, &run_id).await?;
+        let existing = load_last_event_sqlite(&mut transaction, &run_id).await?;
         ensure_terminal_matches_status(status, &existing)?;
         transaction.rollback().await.map_err(write_error)?;
         return Ok(existing);
@@ -366,7 +316,7 @@ async fn recover_sqlite_once(
     }
     let maximum: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE run_id = ?")
-            .bind(&update.run_id)
+            .bind(&run_id)
             .fetch_one(&mut *transaction)
             .await
             .map_err(read_error)?;
@@ -374,7 +324,22 @@ async fn recover_sqlite_once(
         .checked_add(1)
         .and_then(|value| u64::try_from(value).ok())
         .ok_or_else(|| HistoryError::new("HISTORY_DATA_INVALID", "event sequence overflowed"))?;
-    terminal.seq = next;
+    if let TerminalSequence::Expected(expected) = sequence {
+        if expected != next {
+            return Err(HistoryError::new(
+                "HISTORY_EVENT_INVALID",
+                "expected terminal sequence does not match durable next sequence",
+            ));
+        }
+    }
+    let terminal = proposal.event_at(next);
+    let (_, update) = proposal.into_parts();
+    let output = update
+        .terminal
+        .output()
+        .map(|output| serialize_json(output, "run output"))
+        .transpose()?;
+    let error_kind = update.terminal.failure().map(|error| error.kind.as_str());
     sqlx::query(
         "UPDATE runs
          SET status = ?, ended_at = ?, updated_at = ?, output = ?,
@@ -388,12 +353,12 @@ async fn recover_sqlite_once(
     .bind(error_kind)
     .bind(update.terminal.error_code())
     .bind(update.terminal.error_message())
-    .bind(&update.run_id)
+    .bind(&run_id)
     .execute(&mut *transaction)
     .await
     .map_err(write_error)?;
     insert_event(&mut transaction, &terminal).await?;
-    ensure_contiguous_events_sqlite(&mut transaction, &update.run_id).await?;
+    ensure_contiguous_events_sqlite(&mut transaction, &run_id).await?;
     transaction.commit().await.map_err(write_error)?;
     Ok(terminal)
 }
@@ -648,11 +613,8 @@ fn run_event_from_row(row: EventRow) -> Result<RunEvent, HistoryError> {
 #[derive(Debug, FromRow)]
 struct IncompleteRunRow {
     run_id: String,
-    #[allow(dead_code)]
     request_id: String,
-    #[allow(dead_code)]
     agent_id: String,
-    #[allow(dead_code)]
     agent_version: String,
     max_seq: i64,
 }

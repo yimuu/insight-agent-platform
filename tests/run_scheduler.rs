@@ -27,8 +27,8 @@ use insight_agent_platform::{
         protocol::{RunEvent, RunEventType},
     },
     history::{
-        repository::{HistoryError, RunRepository},
-        types::{NewRun, NodeOutputRecord, RunRecord, TerminalUpdate},
+        repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
+        types::{NewRun, NodeOutputRecord, RunRecord},
     },
     nodes::{
         default_node_registries,
@@ -544,20 +544,21 @@ impl RunRepository for SchedulerRepository {
         Ok(())
     }
 
-    async fn finish_run(
+    async fn commit_terminal(
         &self,
-        _update: TerminalUpdate,
-        _event: RunEvent,
-    ) -> Result<bool, HistoryError> {
-        Ok(true)
-    }
-
-    async fn recover_run(
-        &self,
-        _update: TerminalUpdate,
-        event: RunEvent,
+        proposal: TerminalProposal,
+        sequence: TerminalSequence,
     ) -> Result<RunEvent, HistoryError> {
-        Ok(event)
+        let seq = match sequence {
+            TerminalSequence::Expected(seq) => seq,
+            TerminalSequence::NextDurable => self
+                .events
+                .lock()
+                .await
+                .last()
+                .map_or(1, |event| event.seq + 1),
+        };
+        Ok(proposal.event_at(seq))
     }
 
     async fn get_run(&self, _run_id: &str) -> Result<Option<RunRecord>, HistoryError> {

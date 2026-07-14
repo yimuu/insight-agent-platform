@@ -25,7 +25,7 @@ use insight_agent_platform::{
         protocol::{RunEvent, RunEventType},
     },
     history::{
-        repository::{HistoryError, RunRepository},
+        repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
         types::{
             NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunRecord, RunStatus,
             RunTerminal, TerminalUpdate,
@@ -377,66 +377,54 @@ impl RunRepository for MemoryRepository {
         Ok(())
     }
 
-    async fn finish_run(
+    async fn commit_terminal(
         &self,
-        update: TerminalUpdate,
-        event: RunEvent,
-    ) -> Result<bool, HistoryError> {
+        proposal: TerminalProposal,
+        sequence: TerminalSequence,
+    ) -> Result<RunEvent, HistoryError> {
         let mut status = self.status.lock().await;
         if status.is_some_and(RunStatus::is_terminal) {
-            return Ok(false);
+            return self.events.lock().await.last().cloned().ok_or_else(|| {
+                HistoryError::new(
+                    "HISTORY_TERMINAL_EVENT_MISSING",
+                    "terminal run has no terminal event",
+                )
+            });
         }
-        if let Some(race_update) = self.terminal_race.lock().await.take() {
-            *status = Some(race_update.status());
-            self.terminal_updates.lock().await.push(race_update.clone());
-            self.operations.lock().await.push(format!(
-                "event:{}:-",
-                terminal_event_type(race_update.status()).as_str()
-            ));
-            let mut terminal_event = event;
-            terminal_event.event_type = terminal_event_type(race_update.status());
-            terminal_event.code = race_update
-                .terminal
-                .error_code()
-                .map(str::to_string)
-                .unwrap_or_else(|| "OK".to_string());
-            terminal_event.message = race_update
-                .terminal
-                .error_message()
-                .map(str::to_string)
-                .unwrap_or_else(|| "ok".to_string());
-            terminal_event.data = terminal_event_data(&race_update.terminal);
-            self.events.lock().await.push(terminal_event);
-            return Ok(false);
-        }
-        *status = Some(update.status());
-        self.terminal_updates.lock().await.push(update);
-        self.operations
-            .lock()
-            .await
-            .push(format!("event:{}:-", event.event_type.as_str()));
-        self.events.lock().await.push(event);
-        Ok(true)
-    }
-
-    async fn recover_run(
-        &self,
-        update: TerminalUpdate,
-        mut terminal: RunEvent,
-    ) -> Result<RunEvent, HistoryError> {
-        terminal.seq = self
+        let next_seq = self
             .events
             .lock()
             .await
             .last()
             .map_or(1, |event| event.seq + 1);
-        self.finish_run(update, terminal).await?;
-        self.events.lock().await.last().cloned().ok_or_else(|| {
-            HistoryError::new(
-                "TEST_TERMINAL_EVENT_MISSING",
-                "synthetic recovery did not store a terminal event",
-            )
-        })
+        if matches!(sequence, TerminalSequence::Expected(expected) if expected != next_seq) {
+            return Err(HistoryError::new(
+                "HISTORY_EVENT_INVALID",
+                "expected terminal sequence does not match durable next sequence",
+            ));
+        }
+        if let Some(race_update) = self.terminal_race.lock().await.take() {
+            *status = Some(race_update.status());
+            self.terminal_updates.lock().await.push(race_update.clone());
+            let race_proposal = TerminalProposal::new(proposal.scope().clone(), race_update)?;
+            let terminal_event = race_proposal.event_at(next_seq);
+            self.operations
+                .lock()
+                .await
+                .push(format!("event:{}:-", terminal_event.event_type.as_str()));
+            self.events.lock().await.push(terminal_event.clone());
+            return Ok(terminal_event);
+        }
+        let terminal_event = proposal.event_at(next_seq);
+        let update = proposal.update().clone();
+        *status = Some(update.status());
+        self.terminal_updates.lock().await.push(update);
+        self.operations
+            .lock()
+            .await
+            .push(format!("event:{}:-", terminal_event.event_type.as_str()));
+        self.events.lock().await.push(terminal_event.clone());
+        Ok(terminal_event)
     }
 
     async fn get_run(&self, _run_id: &str) -> Result<Option<RunRecord>, HistoryError> {
@@ -508,28 +496,6 @@ fn lifecycle_from_terminal(terminal: &RunTerminal) -> RunLifecycle {
         RunTerminal::Interrupted { error } => RunLifecycle::Interrupted {
             error: error.clone(),
         },
-    }
-}
-
-fn terminal_event_data(terminal: &RunTerminal) -> Value {
-    match terminal {
-        RunTerminal::Completed { output } => {
-            serde_json::to_value(output).unwrap_or_else(|_| json!({}))
-        }
-        RunTerminal::Failed { error } => json!({"kind":error.kind}),
-        RunTerminal::Cancelled { .. } | RunTerminal::Interrupted { .. } => json!({}),
-    }
-}
-
-fn terminal_event_type(status: RunStatus) -> RunEventType {
-    match status {
-        RunStatus::Completed => RunEventType::RunCompleted,
-        RunStatus::Failed => RunEventType::RunFailed,
-        RunStatus::Cancelled => RunEventType::RunCancelled,
-        RunStatus::Interrupted => RunEventType::RunInterrupted,
-        RunStatus::Created | RunStatus::Running => {
-            panic!("nonterminal status {status:?} cannot be represented as a terminal event")
-        }
     }
 }
 

@@ -4,7 +4,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use insight_agent_platform::{
     events::protocol::{RunEvent, RunEventScope, RunEventType},
     history::{
-        repository::RunRepository,
+        repository::{RunRepository, TerminalProposal, TerminalSequence},
         sqlite::SqliteRunRepository,
         types::{
             summarize_input, NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunStatus,
@@ -123,11 +123,25 @@ async fn sqlite_repository_persists_lifecycle_events_outputs_and_replay() {
     assert_eq!(replay[2].event_type, RunEventType::BranchFailed);
     assert_eq!(replay[2].node_id, None);
 
-    let terminal_event = event(RUN_ID, RunEventType::RunCompleted, 5, None);
-    assert!(repo
-        .finish_run(completed_update(RUN_ID), terminal_event)
+    let committed = repo
+        .commit_terminal(
+            TerminalProposal::new(scope(RUN_ID, None), completed_update(RUN_ID)).unwrap(),
+            TerminalSequence::Expected(5),
+        )
         .await
-        .unwrap());
+        .unwrap();
+    let expected = RunEvent::ok_at(
+        RunEventType::RunCompleted,
+        5,
+        scope(RUN_ID, None),
+        at(10),
+        json!({
+            "content": "answer",
+            "format": "text",
+            "data": {"answer":"answer"},
+        }),
+    );
+    assert_eq!(committed, expected);
     let losing_update = TerminalUpdate::new(
         RUN_ID,
         at(11),
@@ -138,21 +152,14 @@ async fn sqlite_repository_persists_lifecycle_events_outputs_and_replay() {
             },
         },
     );
-    assert!(!repo
-        .finish_run(
-            losing_update,
-            RunEvent::error_at(
-                RunEventType::RunCancelled,
-                5,
-                scope(RUN_ID, None),
-                at(11),
-                "RUN_CANCELLED",
-                "run cancelled",
-                json!({}),
-            ),
+    let authoritative = repo
+        .commit_terminal(
+            TerminalProposal::new(scope(RUN_ID, None), losing_update).unwrap(),
+            TerminalSequence::Expected(5),
         )
         .await
-        .unwrap());
+        .unwrap();
+    assert_eq!(authoritative, expected);
 
     let record = repo.get_run(RUN_ID).await.unwrap().unwrap();
     assert_eq!(record.status(), RunStatus::Completed);
@@ -169,15 +176,12 @@ async fn sqlite_repository_persists_lifecycle_events_outputs_and_replay() {
             }
         } if content == "answer"
     ));
+    let replay = repo.list_events_after(RUN_ID, 0, 100).await.unwrap();
     assert_eq!(
-        repo.list_events_after(RUN_ID, 0, 100)
-            .await
-            .unwrap()
-            .iter()
-            .map(|event| event.seq)
-            .collect::<Vec<_>>(),
+        replay.iter().map(|event| event.seq).collect::<Vec<_>>(),
         vec![1, 2, 3, 4, 5]
     );
+    assert_eq!(replay.last(), Some(&expected));
 }
 
 #[tokio::test]
@@ -352,18 +356,11 @@ async fn recovery_atomically_fills_missing_events_and_terminal_state() {
     repo.append_events(std::slice::from_ref(&created))
         .await
         .unwrap();
-    let failed = RunEvent::error_at(
-        RunEventType::RunFailed,
-        2,
-        scope(RUN_ID, None),
-        at(10),
-        "INFRASTRUCTURE_FAILURE",
-        "runtime infrastructure failed",
-        json!({"kind":"infrastructure"}),
-    );
-
     let recovered = repo
-        .recover_run(failed_update(RUN_ID), failed)
+        .commit_terminal(
+            TerminalProposal::new(scope(RUN_ID, None), failed_update(RUN_ID)).unwrap(),
+            TerminalSequence::NextDurable,
+        )
         .await
         .unwrap();
     assert_eq!(recovered.seq, 2);
@@ -414,18 +411,11 @@ async fn recovery_derives_terminal_sequence_from_locked_durable_state() {
     repo.append_events(&[event(RUN_ID, RunEventType::RunStarted, 2, None)])
         .await
         .unwrap();
-    let proposal = RunEvent::error_at(
-        RunEventType::RunFailed,
-        1,
-        scope(RUN_ID, None),
-        at(10),
-        "INFRASTRUCTURE_FAILURE",
-        "runtime infrastructure failed",
-        json!({"kind":"infrastructure"}),
-    );
-
     let terminal = repo
-        .recover_run(failed_update(RUN_ID), proposal)
+        .commit_terminal(
+            TerminalProposal::new(scope(RUN_ID, None), failed_update(RUN_ID)).unwrap(),
+            TerminalSequence::NextDurable,
+        )
         .await
         .unwrap();
     assert_eq!(terminal.seq, 3);
@@ -438,18 +428,32 @@ async fn recovery_derives_terminal_sequence_from_locked_durable_state() {
         repo.list_events_after(RUN_ID, 0, 100).await.unwrap().len(),
         3
     );
+
+    let durable_winner = repo
+        .commit_terminal(
+            TerminalProposal::new(scope(RUN_ID, None), completed_update(RUN_ID)).unwrap(),
+            TerminalSequence::NextDurable,
+        )
+        .await
+        .unwrap();
+    assert_eq!(durable_winner, terminal);
 }
 
 #[tokio::test]
-async fn repository_rejects_terminal_event_mismatches_before_mutating_the_run() {
+async fn terminal_proposal_and_expected_sequence_are_validated_before_storage() {
     let repo = SqliteRunRepository::in_memory().await.unwrap();
     repo.create_run(new_run(RUN_ID, RunAttachment::Detached))
         .await
         .unwrap();
+
+    let scope_error =
+        TerminalProposal::new(scope("different_run", None), completed_update(RUN_ID)).unwrap_err();
+    assert_eq!(scope_error.code(), "HISTORY_EVENT_INVALID");
+
     let error = repo
-        .finish_run(
-            completed_update(RUN_ID),
-            event(RUN_ID, RunEventType::RunFailed, 1, None),
+        .commit_terminal(
+            TerminalProposal::new(scope(RUN_ID, None), completed_update(RUN_ID)).unwrap(),
+            TerminalSequence::Expected(2),
         )
         .await
         .unwrap_err();

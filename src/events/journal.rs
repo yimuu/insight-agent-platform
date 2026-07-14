@@ -15,8 +15,8 @@ use tokio::{
 use crate::{
     events::protocol::RunEvent,
     history::{
-        repository::{HistoryError, RunRepository},
-        types::{NodeOutputRecord, TerminalUpdate},
+        repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
+        types::NodeOutputRecord,
     },
 };
 
@@ -32,9 +32,9 @@ enum JournalCommand {
         reply: oneshot::Sender<Result<(), EventError>>,
     },
     Finish {
-        update: TerminalUpdate,
-        event: Box<RunEvent>,
-        reply: oneshot::Sender<Result<bool, EventError>>,
+        proposal: TerminalProposal,
+        expected_seq: u64,
+        reply: oneshot::Sender<Result<RunEvent, EventError>>,
     },
     Flush(oneshot::Sender<Result<(), EventError>>),
 }
@@ -101,13 +101,13 @@ impl EventJournal {
 
     pub(crate) async fn finish(
         &self,
-        update: TerminalUpdate,
-        event: RunEvent,
-    ) -> Result<bool, EventError> {
+        proposal: TerminalProposal,
+        expected_seq: u64,
+    ) -> Result<RunEvent, EventError> {
         let (reply, response) = oneshot::channel();
         self.try_send(JournalCommand::Finish {
-            update,
-            event: Box::new(event),
+            proposal,
+            expected_seq,
             reply,
         })?;
         wait_for_response(response).await?
@@ -249,14 +249,14 @@ async fn run_worker(
                 }
             }
             JournalCommand::Finish {
-                update,
-                event,
+                proposal,
+                expected_seq,
                 reply,
             } => {
                 let result = bounded_repository_call(
                     &mut stop,
                     operation_timeout,
-                    repository.finish_run(update, *event),
+                    repository.commit_terminal(proposal, TerminalSequence::Expected(expected_seq)),
                 )
                 .await;
                 if send_repository_result(&mut receiver, reply, result) {

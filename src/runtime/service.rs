@@ -758,7 +758,10 @@ mod tests {
 
     use crate::{
         dsl::compiled::ExecutionPlan,
-        history::types::{NodeOutputRecord, RunLifecycle},
+        history::{
+            repository::{TerminalProposal, TerminalSequence},
+            types::{NodeOutputRecord, RunLifecycle},
+        },
     };
 
     #[derive(Default)]
@@ -815,35 +818,67 @@ mod tests {
             Ok(())
         }
 
-        async fn finish_run(
+        async fn commit_terminal(
             &self,
-            update: TerminalUpdate,
-            event: crate::events::protocol::RunEvent,
-        ) -> Result<bool, HistoryError> {
+            proposal: TerminalProposal,
+            sequence: TerminalSequence,
+        ) -> Result<crate::events::protocol::RunEvent, HistoryError> {
+            let run_id = proposal.run_id().to_string();
             let mut runs = self.runs.lock().await;
             let run = runs
-                .get_mut(&update.run_id)
+                .get_mut(&run_id)
                 .ok_or_else(|| HistoryError::new("RUN_NOT_FOUND", "run not found"))?;
-            run.lifecycle = match update.terminal {
-                RunTerminal::Completed { output } => RunLifecycle::Completed { output },
-                RunTerminal::Failed { error } => RunLifecycle::Failed { error },
-                RunTerminal::Cancelled { error } => RunLifecycle::Cancelled { error },
-                RunTerminal::Interrupted { error } => RunLifecycle::Interrupted { error },
+            if run.status().is_terminal() {
+                return self
+                    .events
+                    .lock()
+                    .await
+                    .iter()
+                    .rev()
+                    .find(|event| event.run_id == run_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        HistoryError::new(
+                            "HISTORY_TERMINAL_EVENT_MISSING",
+                            "terminal run has no terminal event",
+                        )
+                    });
+            }
+            let next_seq = self
+                .events
+                .lock()
+                .await
+                .iter()
+                .rev()
+                .find(|event| event.run_id == run_id)
+                .map_or(1, |event| event.seq + 1);
+            if matches!(sequence, TerminalSequence::Expected(expected) if expected != next_seq) {
+                return Err(HistoryError::new(
+                    "HISTORY_EVENT_INVALID",
+                    "expected terminal sequence does not match durable next sequence",
+                ));
+            }
+            let event = proposal.event_at(next_seq);
+            let update = proposal.update();
+            run.lifecycle = match &update.terminal {
+                RunTerminal::Completed { output } => RunLifecycle::Completed {
+                    output: output.clone(),
+                },
+                RunTerminal::Failed { error } => RunLifecycle::Failed {
+                    error: error.clone(),
+                },
+                RunTerminal::Cancelled { error } => RunLifecycle::Cancelled {
+                    error: error.clone(),
+                },
+                RunTerminal::Interrupted { error } => RunLifecycle::Interrupted {
+                    error: error.clone(),
+                },
             };
             run.ended_at = Some(update.ended_at);
             run.updated_at = update.ended_at;
             drop(runs);
-            self.events.lock().await.push(event);
-            Ok(true)
-        }
-
-        async fn recover_run(
-            &self,
-            update: TerminalUpdate,
-            terminal: crate::events::protocol::RunEvent,
-        ) -> Result<crate::events::protocol::RunEvent, HistoryError> {
-            self.finish_run(update, terminal.clone()).await?;
-            Ok(terminal)
+            self.events.lock().await.push(event.clone());
+            Ok(event)
         }
 
         async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, HistoryError> {

@@ -2,10 +2,14 @@ use std::{error::Error, fmt};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde_json::{json, Value};
 
-use crate::events::protocol::{RunEvent, RunEventType};
+use crate::{
+    events::protocol::{RunEvent, RunEventScope, RunEventType},
+    outcome::RunOutput,
+};
 
-use super::types::{NewRun, NodeOutputRecord, RunRecord, TerminalUpdate};
+use super::types::{NewRun, NodeOutputRecord, RunRecord, RunTerminal, TerminalUpdate};
 
 pub struct HistoryError {
     code: &'static str,
@@ -62,6 +66,97 @@ impl Error for HistoryError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TerminalProposal {
+    scope: RunEventScope,
+    update: TerminalUpdate,
+}
+
+impl TerminalProposal {
+    pub fn new(scope: RunEventScope, update: TerminalUpdate) -> Result<Self, HistoryError> {
+        if scope.run_id != update.run_id {
+            return Err(HistoryError::new(
+                "HISTORY_EVENT_INVALID",
+                "terminal event scope does not match its typed update",
+            ));
+        }
+        Ok(Self { scope, update })
+    }
+
+    pub fn scope(&self) -> &RunEventScope {
+        &self.scope
+    }
+
+    pub fn update(&self) -> &TerminalUpdate {
+        &self.update
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.update.run_id
+    }
+
+    pub fn into_parts(self) -> (RunEventScope, TerminalUpdate) {
+        (self.scope, self.update)
+    }
+
+    pub fn event_at(&self, seq: u64) -> RunEvent {
+        match &self.update.terminal {
+            RunTerminal::Completed { output } => RunEvent::ok_at(
+                RunEventType::RunCompleted,
+                seq,
+                self.scope.clone(),
+                self.update.ended_at,
+                completed_data(output),
+            ),
+            RunTerminal::Failed { error } => RunEvent::error_at(
+                RunEventType::RunFailed,
+                seq,
+                self.scope.clone(),
+                self.update.ended_at,
+                error.code.clone(),
+                error.message.clone(),
+                json!({"kind": error.kind}),
+            ),
+            RunTerminal::Cancelled { error } => RunEvent::error_at(
+                RunEventType::RunCancelled,
+                seq,
+                self.scope.clone(),
+                self.update.ended_at,
+                error.code.clone(),
+                error.message.clone(),
+                json!({}),
+            ),
+            RunTerminal::Interrupted { error } => RunEvent::error_at(
+                RunEventType::RunInterrupted,
+                seq,
+                self.scope.clone(),
+                self.update.ended_at,
+                error.code.clone(),
+                error.message.clone(),
+                json!({}),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalSequence {
+    Expected(u64),
+    NextDurable,
+}
+
+fn completed_data(output: &RunOutput) -> Value {
+    let mut data = serde_json::Map::new();
+    data.insert("data".to_string(), output.data.clone());
+    if let Some(content) = &output.content {
+        data.insert("content".to_string(), Value::String(content.clone()));
+    }
+    if let Some(format) = &output.format {
+        data.insert("format".to_string(), Value::String(format.clone()));
+    }
+    Value::Object(data)
+}
+
 #[async_trait]
 pub trait RunRepository: Send + Sync {
     async fn create_run(&self, run: NewRun) -> Result<(), HistoryError>;
@@ -76,19 +171,10 @@ pub trait RunRepository: Send + Sync {
 
     async fn put_node_output(&self, output: NodeOutputRecord) -> Result<(), HistoryError>;
 
-    async fn finish_run(
+    async fn commit_terminal(
         &self,
-        update: TerminalUpdate,
-        event: RunEvent,
-    ) -> Result<bool, HistoryError>;
-
-    /// Atomically locks the run, derives the next sequence from durable state,
-    /// inserts the terminal event, and transitions the run. If the run is
-    /// already terminal, returns its authoritative stored terminal event.
-    async fn recover_run(
-        &self,
-        update: TerminalUpdate,
-        terminal: RunEvent,
+        proposal: TerminalProposal,
+        sequence: TerminalSequence,
     ) -> Result<RunEvent, HistoryError>;
 
     async fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>, HistoryError>;
@@ -101,32 +187,4 @@ pub trait RunRepository: Send + Sync {
     ) -> Result<Vec<RunEvent>, HistoryError>;
 
     async fn mark_incomplete_interrupted(&self, at: DateTime<Utc>) -> Result<u64, HistoryError>;
-}
-
-pub(crate) fn validate_recovery_event(
-    update: &TerminalUpdate,
-    terminal: &RunEvent,
-) -> Result<(), HistoryError> {
-    let expected_type = match update.status() {
-        super::types::RunStatus::Completed => RunEventType::RunCompleted,
-        super::types::RunStatus::Failed => RunEventType::RunFailed,
-        super::types::RunStatus::Cancelled => RunEventType::RunCancelled,
-        super::types::RunStatus::Interrupted => RunEventType::RunInterrupted,
-        _ => {
-            return Err(HistoryError::new(
-                "HISTORY_RECOVERY_INVALID",
-                "recovery update must be terminal",
-            ));
-        }
-    };
-    if terminal.event_type != expected_type
-        || terminal.node_id.is_some()
-        || terminal.run_id != update.run_id
-    {
-        return Err(HistoryError::new(
-            "HISTORY_RECOVERY_INVALID",
-            "recovery terminal event does not match its update",
-        ));
-    }
-    Ok(())
 }

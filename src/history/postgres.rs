@@ -7,12 +7,12 @@ use sqlx::{
 };
 
 use crate::{
-    events::protocol::{RunEvent, RunEventType, EVENT_SCHEMA_VERSION},
+    events::protocol::{RunEvent, RunEventScope, RunEventType, EVENT_SCHEMA_VERSION},
     history::{
-        repository::{validate_recovery_event, HistoryError, RunRepository},
+        repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
         types::{
-            NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunRecord, RunStatus, StopError,
-            TerminalUpdate,
+            NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunRecord, RunStatus,
+            RunTerminal, StopError, TerminalUpdate,
         },
     },
     outcome::{FailureKind, RunFailure, RunOutput},
@@ -131,66 +131,18 @@ impl RunRepository for PostgresRunRepository {
         Ok(())
     }
 
-    async fn finish_run(
+    async fn commit_terminal(
         &self,
-        update: TerminalUpdate,
-        event: RunEvent,
-    ) -> Result<bool, HistoryError> {
-        let expected_event_type = terminal_event_type(update.status());
-        if update.run_id != event.run_id {
-            return Err(HistoryError::new(
-                "HISTORY_EVENT_INVALID",
-                "terminal update and event belong to different runs",
-            ));
-        }
-        if event.event_type != expected_event_type || event.node_id.is_some() {
-            return Err(HistoryError::new(
-                "HISTORY_EVENT_INVALID",
-                "terminal event does not match the terminal status",
-            ));
-        }
-        let output = update.terminal.output().cloned().map(Json);
-        let error_kind = update.terminal.failure().map(|error| error.kind.as_str());
-        let mut transaction = self.pool.begin().await.map_err(write_error)?;
-        let result = sqlx::query(
-            "UPDATE runs
-             SET status = $1, ended_at = $2, updated_at = $2, output = $3,
-                 error_kind = $4, error_code = $5, error_message = $6
-             WHERE run_id = $7 AND status IN ($8, $9)",
-        )
-        .bind(update.status().as_str())
-        .bind(update.ended_at)
-        .bind(output)
-        .bind(error_kind)
-        .bind(update.terminal.error_code())
-        .bind(update.terminal.error_message())
-        .bind(&update.run_id)
-        .bind(RunStatus::Created.as_str())
-        .bind(RunStatus::Running.as_str())
-        .execute(&mut *transaction)
-        .await
-        .map_err(write_error)?;
-        if result.rows_affected() == 0 {
-            transaction.commit().await.map_err(write_error)?;
-            return Ok(false);
-        }
-        insert_event(&mut transaction, &event).await?;
-        transaction.commit().await.map_err(write_error)?;
-        Ok(true)
-    }
-
-    async fn recover_run(
-        &self,
-        update: TerminalUpdate,
-        terminal: RunEvent,
+        proposal: TerminalProposal,
+        sequence: TerminalSequence,
     ) -> Result<RunEvent, HistoryError> {
-        validate_recovery_event(&update, &terminal)?;
-        match recover_postgres_once(&self.pool, update.clone(), terminal.clone()).await {
+        match commit_postgres_once(&self.pool, proposal.clone(), sequence).await {
             Ok(event) => Ok(event),
             Err(error)
-                if matches!(error.code(), "HISTORY_WRITE_FAILED" | "HISTORY_READ_FAILED") =>
+                if matches!(sequence, TerminalSequence::NextDurable)
+                    && matches!(error.code(), "HISTORY_WRITE_FAILED" | "HISTORY_READ_FAILED") =>
             {
-                recover_postgres_once(&self.pool, update, terminal).await
+                commit_postgres_once(&self.pool, proposal, sequence).await
             }
             Err(error) => Err(error),
         }
@@ -242,11 +194,12 @@ impl RunRepository for PostgresRunRepository {
     async fn mark_incomplete_interrupted(&self, at: DateTime<Utc>) -> Result<u64, HistoryError> {
         let mut transaction = self.pool.begin().await.map_err(write_error)?;
         let rows = sqlx::query_as::<_, IncompleteRunRow>(
-            "SELECT r.run_id, COALESCE(MAX(e.seq), 0) AS max_seq
+            "SELECT r.run_id, r.request_id, r.agent_id, r.agent_version,
+                    COALESCE(MAX(e.seq), 0) AS max_seq
              FROM runs r
              LEFT JOIN run_events e ON e.run_id = r.run_id
              WHERE r.status IN ($1, $2)
-             GROUP BY r.run_id
+             GROUP BY r.run_id, r.request_id, r.agent_id, r.agent_version
              ORDER BY r.run_id",
         )
         .bind(RunStatus::Created.as_str())
@@ -275,24 +228,32 @@ impl RunRepository for PostgresRunRepository {
             if result.rows_affected() == 0 {
                 continue;
             }
-            let seq = row.max_seq.checked_add(1).ok_or_else(|| {
-                HistoryError::new("HISTORY_DATA_INVALID", "stored event sequence overflowed")
-            })?;
-            sqlx::query(
-                "INSERT INTO run_events (
-                    run_id, seq, event_type, node_id, timestamp, code, message, data
-                 ) VALUES ($1, $2, $3, NULL, $4, $5, $6, $7)",
-            )
-            .bind(&row.run_id)
-            .bind(seq)
-            .bind(RunEventType::RunInterrupted.as_str())
-            .bind(at)
-            .bind("RUN_INTERRUPTED")
-            .bind("run interrupted during startup reconciliation")
-            .bind(Json(serde_json::json!({})))
-            .execute(&mut *transaction)
-            .await
-            .map_err(write_error)?;
+            let seq = row
+                .max_seq
+                .checked_add(1)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(|| {
+                    HistoryError::new("HISTORY_DATA_INVALID", "stored event sequence overflowed")
+                })?;
+            let proposal = TerminalProposal::new(
+                RunEventScope::for_run(
+                    row.request_id,
+                    row.run_id.clone(),
+                    row.agent_id,
+                    row.agent_version,
+                ),
+                TerminalUpdate::new(
+                    row.run_id,
+                    at,
+                    RunTerminal::Interrupted {
+                        error: StopError {
+                            code: "RUN_INTERRUPTED".to_string(),
+                            message: "run interrupted during startup reconciliation".to_string(),
+                        },
+                    },
+                ),
+            )?;
+            insert_event(&mut transaction, &proposal.event_at(seq)).await?;
             interrupted += 1;
         }
         transaction.commit().await.map_err(write_error)?;
@@ -300,17 +261,16 @@ impl RunRepository for PostgresRunRepository {
     }
 }
 
-async fn recover_postgres_once(
+async fn commit_postgres_once(
     pool: &PgPool,
-    update: TerminalUpdate,
-    mut terminal: RunEvent,
+    proposal: TerminalProposal,
+    sequence: TerminalSequence,
 ) -> Result<RunEvent, HistoryError> {
-    let output = update.terminal.output().map(Json);
-    let error_kind = update.terminal.failure().map(|error| error.kind.as_str());
+    let run_id = proposal.run_id().to_string();
     let mut transaction = pool.begin().await.map_err(write_error)?;
     let status_value: String =
         sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
-            .bind(&update.run_id)
+            .bind(&run_id)
             .fetch_optional(&mut *transaction)
             .await
             .map_err(read_error)?
@@ -318,8 +278,8 @@ async fn recover_postgres_once(
     let status = RunStatus::parse(&status_value)
         .ok_or_else(|| invalid_data(format!("invalid stored run status '{status_value}'")))?;
     if status.is_terminal() {
-        ensure_contiguous_events_postgres(&mut transaction, &update.run_id).await?;
-        let existing = load_last_event_postgres(&mut transaction, &update.run_id).await?;
+        ensure_contiguous_events_postgres(&mut transaction, &run_id).await?;
+        let existing = load_last_event_postgres(&mut transaction, &run_id).await?;
         ensure_terminal_matches_status(status, &existing)?;
         transaction.rollback().await.map_err(write_error)?;
         return Ok(existing);
@@ -332,7 +292,7 @@ async fn recover_postgres_once(
     }
     let maximum: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE run_id = $1")
-            .bind(&update.run_id)
+            .bind(&run_id)
             .fetch_one(&mut *transaction)
             .await
             .map_err(read_error)?;
@@ -340,7 +300,18 @@ async fn recover_postgres_once(
         .checked_add(1)
         .and_then(|value| u64::try_from(value).ok())
         .ok_or_else(|| HistoryError::new("HISTORY_DATA_INVALID", "event sequence overflowed"))?;
-    terminal.seq = next;
+    if let TerminalSequence::Expected(expected) = sequence {
+        if expected != next {
+            return Err(HistoryError::new(
+                "HISTORY_EVENT_INVALID",
+                "expected terminal sequence does not match durable next sequence",
+            ));
+        }
+    }
+    let terminal = proposal.event_at(next);
+    let (_, update) = proposal.into_parts();
+    let output = update.terminal.output().map(Json);
+    let error_kind = update.terminal.failure().map(|error| error.kind.as_str());
     sqlx::query(
         "UPDATE runs
          SET status = $1, ended_at = $2, updated_at = $2, output = $3,
@@ -353,12 +324,12 @@ async fn recover_postgres_once(
     .bind(error_kind)
     .bind(update.terminal.error_code())
     .bind(update.terminal.error_message())
-    .bind(&update.run_id)
+    .bind(&run_id)
     .execute(&mut *transaction)
     .await
     .map_err(write_error)?;
     insert_event(&mut transaction, &terminal).await?;
-    ensure_contiguous_events_postgres(&mut transaction, &update.run_id).await?;
+    ensure_contiguous_events_postgres(&mut transaction, &run_id).await?;
     transaction.commit().await.map_err(write_error)?;
     Ok(terminal)
 }
@@ -603,6 +574,9 @@ fn run_event_from_row(row: EventRow) -> Result<RunEvent, HistoryError> {
 #[derive(Debug, FromRow)]
 struct IncompleteRunRow {
     run_id: String,
+    request_id: String,
+    agent_id: String,
+    agent_version: String,
     max_seq: i64,
 }
 

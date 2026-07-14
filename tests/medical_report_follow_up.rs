@@ -16,9 +16,9 @@ use insight_agent_platform::{
         protocol::RunEvent,
     },
     history::{
-        repository::{HistoryError, RunRepository},
+        repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
         sqlite::SqliteRunRepository,
-        types::{NewRun, NodeOutputRecord, RunRecord, TerminalUpdate},
+        types::{NewRun, NodeOutputRecord, RunRecord},
     },
     nodes::default_node_registries,
     outcome::{RunOutput, TerminalOutcome},
@@ -101,19 +101,16 @@ impl RunRepository for NoopRepository {
     async fn put_node_output(&self, _output: NodeOutputRecord) -> Result<(), HistoryError> {
         Ok(())
     }
-    async fn finish_run(
+    async fn commit_terminal(
         &self,
-        _update: TerminalUpdate,
-        _event: RunEvent,
-    ) -> Result<bool, HistoryError> {
-        Ok(true)
-    }
-    async fn recover_run(
-        &self,
-        _update: TerminalUpdate,
-        event: RunEvent,
+        proposal: TerminalProposal,
+        sequence: TerminalSequence,
     ) -> Result<RunEvent, HistoryError> {
-        Ok(event)
+        let seq = match sequence {
+            TerminalSequence::Expected(seq) => seq,
+            TerminalSequence::NextDurable => 1,
+        };
+        Ok(proposal.event_at(seq))
     }
     async fn get_run(&self, _run_id: &str) -> Result<Option<RunRecord>, HistoryError> {
         Ok(None)

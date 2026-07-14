@@ -3,7 +3,7 @@ use insight_agent_platform::{
     events::protocol::{RunEvent, RunEventScope, RunEventType},
     history::{
         postgres::PostgresRunRepository,
-        repository::RunRepository,
+        repository::{RunRepository, TerminalProposal, TerminalSequence},
         types::{
             summarize_input, NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunStatus,
             RunTerminal, StopError, TerminalUpdate,
@@ -144,13 +144,38 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
     assert_eq!(replay[0].event_type, RunEventType::BranchFailed);
     assert_eq!(replay[0].node_id, None);
 
-    assert!(repo
-        .finish_run(
-            completed_update(&run_id),
-            event(&run_id, RunEventType::RunCompleted, 5, None),
+    let sequence_error = repo
+        .commit_terminal(
+            TerminalProposal::new(scope(&run_id, None), completed_update(&run_id)).unwrap(),
+            TerminalSequence::Expected(6),
         )
         .await
-        .unwrap());
+        .unwrap_err();
+    assert_eq!(sequence_error.code(), "HISTORY_EVENT_INVALID");
+    assert_eq!(
+        repo.get_run(&run_id).await.unwrap().unwrap().status(),
+        RunStatus::Running
+    );
+
+    let committed = repo
+        .commit_terminal(
+            TerminalProposal::new(scope(&run_id, None), completed_update(&run_id)).unwrap(),
+            TerminalSequence::Expected(5),
+        )
+        .await
+        .unwrap();
+    let expected = RunEvent::ok_at(
+        RunEventType::RunCompleted,
+        5,
+        scope(&run_id, None),
+        at(10),
+        json!({
+            "content": "answer",
+            "format": "text",
+            "data": {"answer":"answer"},
+        }),
+    );
+    assert_eq!(committed, expected);
     let losing_update = TerminalUpdate::new(
         &run_id,
         at(11),
@@ -161,21 +186,14 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
             },
         },
     );
-    assert!(!repo
-        .finish_run(
-            losing_update,
-            RunEvent::error_at(
-                RunEventType::RunCancelled,
-                5,
-                scope(&run_id, None),
-                at(11),
-                "RUN_CANCELLED",
-                "run cancelled",
-                json!({}),
-            ),
+    let authoritative = repo
+        .commit_terminal(
+            TerminalProposal::new(scope(&run_id, None), losing_update).unwrap(),
+            TerminalSequence::Expected(5),
         )
         .await
-        .unwrap());
+        .unwrap();
+    assert_eq!(authoritative, expected);
     let record = repo.get_run(&run_id).await.unwrap().unwrap();
     assert_eq!(record.status(), RunStatus::Completed);
     assert_eq!(record.agent_version, "sha256:postgres");
@@ -188,15 +206,12 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
             }
         } if content == "answer"
     ));
+    let replay = repo.list_events_after(&run_id, 0, 100).await.unwrap();
     assert_eq!(
-        repo.list_events_after(&run_id, 0, 100)
-            .await
-            .unwrap()
-            .iter()
-            .map(|event| event.seq)
-            .collect::<Vec<_>>(),
+        replay.iter().map(|event| event.seq).collect::<Vec<_>>(),
         vec![1, 2, 3, 4, 5]
     );
+    assert_eq!(replay.last(), Some(&expected));
 
     let duplicate_error = repo
         .append_events(&[event(&run_id, RunEventType::RunStarted, 5, None)])
@@ -211,17 +226,11 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
     repo.append_events(std::slice::from_ref(&created))
         .await
         .unwrap();
-    let failed = RunEvent::error_at(
-        RunEventType::RunFailed,
-        2,
-        scope(&recovery_id, None),
-        at(10),
-        "INFRASTRUCTURE_FAILURE",
-        "runtime infrastructure failed",
-        json!({"kind":"infrastructure"}),
-    );
     let recovered = repo
-        .recover_run(failed_update(&recovery_id), failed)
+        .commit_terminal(
+            TerminalProposal::new(scope(&recovery_id, None), failed_update(&recovery_id)).unwrap(),
+            TerminalSequence::NextDurable,
+        )
         .await
         .unwrap();
     assert_eq!(recovered.seq, 2);
@@ -258,17 +267,11 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
     repo.append_events(&[event(&conflict_id, RunEventType::RunStarted, 2, None)])
         .await
         .unwrap();
-    let proposal = RunEvent::error_at(
-        RunEventType::RunFailed,
-        1,
-        scope(&conflict_id, None),
-        at(10),
-        "INFRASTRUCTURE_FAILURE",
-        "runtime infrastructure failed",
-        json!({"kind":"infrastructure"}),
-    );
     let terminal = repo
-        .recover_run(failed_update(&conflict_id), proposal)
+        .commit_terminal(
+            TerminalProposal::new(scope(&conflict_id, None), failed_update(&conflict_id)).unwrap(),
+            TerminalSequence::NextDurable,
+        )
         .await
         .unwrap();
     assert_eq!(terminal.seq, 3);
@@ -283,6 +286,15 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
             .len(),
         3
     );
+    let durable_winner = repo
+        .commit_terminal(
+            TerminalProposal::new(scope(&conflict_id, None), completed_update(&conflict_id))
+                .unwrap(),
+            TerminalSequence::NextDurable,
+        )
+        .await
+        .unwrap();
+    assert_eq!(durable_winner, terminal);
 
     for active_id in ["created_pg", "running_pg"] {
         repo.create_run(new_run(active_id)).await.unwrap();
