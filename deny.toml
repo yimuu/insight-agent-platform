@@ -1,6 +1,12 @@
 [advisories]
 yanked = "deny"
 unmaintained = "workspace"
+ignore = [
+    # sqlx-sqlite 0.9.0 -> flume 0.12.0 currently hard-depends on this yanked
+    # release. Keep the global deny policy and remove this exact exception once
+    # upstream publishes a non-yanked dependency path.
+    { crate = "spin@0.9.8", reason = "transitive sqlx-sqlite dependency has no non-yanked compatible release" },
+]
 
 [licenses]
 confidence-threshold = 0.8
