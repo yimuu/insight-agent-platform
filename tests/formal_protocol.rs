@@ -2,9 +2,10 @@ use chrono::{TimeZone, Utc};
 use insight_agent_platform::{
     events::protocol::{RunEvent, RunEventScope, RunEventType},
     history::types::{
-        NewRun, NodeOutputRecord, RunAttachment, RunRecord, RunStatus, RunSummary, TerminalUpdate,
+        NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunRecord, RunStatus, RunSummary,
+        RunTerminal, TerminalUpdate,
     },
-    outcome::RunOutput,
+    outcome::{FailureKind, RunFailure, RunOutput},
 };
 use serde_json::json;
 
@@ -190,28 +191,52 @@ fn only_completed_failed_cancelled_and_interrupted_are_terminal() {
 }
 
 #[test]
-fn terminal_update_rejects_nonterminal_statuses() {
-    let error =
-        TerminalUpdate::new("run_1", RunStatus::Running, at(10), None, None, None).unwrap_err();
-    assert_eq!(error.code(), "TERMINAL_STATUS_REQUIRED");
-
-    let output = RunOutput {
-        content: Some("answer".to_string()),
-        format: Some("text".to_string()),
-        data: json!({"answer":"answer"}),
+fn run_lifecycle_serializes_mutually_exclusive_terminal_shapes() {
+    let completed = RunLifecycle::Completed {
+        output: RunOutput {
+            content: Some("answer".into()),
+            format: Some("text".into()),
+            data: json!({"answer":"answer"}),
+        },
     };
+    assert_eq!(
+        serde_json::to_value(completed).unwrap(),
+        json!({
+            "status":"completed",
+            "output":{"content":"answer","format":"text","data":{"answer":"answer"}}
+        })
+    );
+
+    let failed = RunLifecycle::Failed {
+        error: RunFailure {
+            kind: FailureKind::Workflow,
+            code: "WORKFLOW_REJECTED".into(),
+            message: "workflow rejected".into(),
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(failed).unwrap(),
+        json!({
+            "status":"failed",
+            "error":{"kind":"workflow","code":"WORKFLOW_REJECTED","message":"workflow rejected"}
+        })
+    );
+}
+
+#[test]
+fn terminal_update_derives_status_from_the_terminal_variant() {
     let update = TerminalUpdate::new(
         "run_1",
-        RunStatus::Completed,
         at(10),
-        Some(output.clone()),
-        None,
-        None,
-    )
-    .unwrap();
-    assert_eq!(update.run_id, "run_1");
-    assert_eq!(update.status, RunStatus::Completed);
-    assert_eq!(update.output, Some(output));
+        RunTerminal::Failed {
+            error: RunFailure {
+                kind: FailureKind::Node,
+                code: "NODE_FAILED".into(),
+                message: "node failed".into(),
+            },
+        },
+    );
+    assert_eq!(update.status(), RunStatus::Failed);
 }
 
 #[test]
@@ -231,16 +256,29 @@ fn formal_history_records_preserve_version_attachment_and_sanitized_terminal_dat
         agent_id: new_run.agent_id.clone(),
         agent_version: new_run.agent_version.clone(),
         attachment: new_run.attachment,
-        status: RunStatus::Failed,
+        lifecycle: RunLifecycle::Failed {
+            error: RunFailure {
+                kind: FailureKind::Infrastructure,
+                code: "UPSTREAM_FAILURE".to_string(),
+                message: "model request failed".to_string(),
+            },
+        },
         started_at: Some(at(1)),
         ended_at: Some(at(2)),
         updated_at: at(2),
         input_summary: new_run.input_summary.clone(),
-        output: None,
-        error_code: Some("UPSTREAM_FAILURE".to_string()),
-        error_message: Some("model request failed".to_string()),
     };
     let summary = RunSummary::from(&record);
+    let completed_summary = RunSummary::from(&RunRecord {
+        lifecycle: RunLifecycle::Completed {
+            output: RunOutput {
+                content: Some("must be omitted from summary".to_string()),
+                format: Some("text".to_string()),
+                data: json!({"private":"terminal output"}),
+            },
+        },
+        ..record.clone()
+    });
     let node_output = NodeOutputRecord {
         run_id: "run_1".to_string(),
         node_id: "plan".to_string(),
@@ -250,7 +288,15 @@ fn formal_history_records_preserve_version_attachment_and_sanitized_terminal_dat
 
     assert_eq!(summary.agent_version, "sha256:abc");
     assert_eq!(summary.attachment, RunAttachment::Detached);
-    assert_eq!(summary.error_code.as_deref(), Some("UPSTREAM_FAILURE"));
+    assert_eq!(summary.status(), RunStatus::Failed);
+    assert_eq!(
+        serde_json::to_value(&summary).unwrap()["error"]["code"],
+        "UPSTREAM_FAILURE"
+    );
+    let completed_summary = serde_json::to_value(completed_summary).unwrap();
+    assert_eq!(completed_summary["status"], "completed");
+    assert!(completed_summary.get("output").is_none());
+    assert!(completed_summary.get("error").is_none());
     assert_eq!(node_output.node_id, "plan");
     assert_eq!(node_output.output, json!({"text":"done"}));
 }

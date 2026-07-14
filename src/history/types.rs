@@ -1,10 +1,8 @@
-use std::{error::Error, fmt};
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::outcome::RunOutput;
+use crate::outcome::{RunFailure, RunOutput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -80,14 +78,18 @@ pub struct RunRecord {
     pub agent_id: String,
     pub agent_version: String,
     pub attachment: RunAttachment,
-    pub status: RunStatus,
+    #[serde(flatten)]
+    pub lifecycle: RunLifecycle,
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     pub input_summary: Value,
-    pub output: Option<RunOutput>,
-    pub error_code: Option<String>,
-    pub error_message: Option<String>,
+}
+
+impl RunRecord {
+    pub fn status(&self) -> RunStatus {
+        self.lifecycle.status()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -97,12 +99,24 @@ pub struct RunSummary {
     pub agent_id: String,
     pub agent_version: String,
     pub attachment: RunAttachment,
-    pub status: RunStatus,
+    #[serde(flatten)]
+    pub lifecycle: RunSummaryLifecycle,
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
-    pub error_code: Option<String>,
-    pub error_message: Option<String>,
+}
+
+impl RunSummary {
+    pub fn status(&self) -> RunStatus {
+        match self.lifecycle {
+            RunSummaryLifecycle::Created => RunStatus::Created,
+            RunSummaryLifecycle::Running => RunStatus::Running,
+            RunSummaryLifecycle::Completed => RunStatus::Completed,
+            RunSummaryLifecycle::Failed { .. } => RunStatus::Failed,
+            RunSummaryLifecycle::Cancelled { .. } => RunStatus::Cancelled,
+            RunSummaryLifecycle::Interrupted { .. } => RunStatus::Interrupted,
+        }
+    }
 }
 
 impl From<&RunRecord> for RunSummary {
@@ -113,12 +127,70 @@ impl From<&RunRecord> for RunSummary {
             agent_id: record.agent_id.clone(),
             agent_version: record.agent_version.clone(),
             attachment: record.attachment,
-            status: record.status,
+            lifecycle: RunSummaryLifecycle::from(&record.lifecycle),
             started_at: record.started_at,
             ended_at: record.ended_at,
             updated_at: record.updated_at,
-            error_code: record.error_code.clone(),
-            error_message: record.error_message.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RunLifecycle {
+    Created,
+    Running,
+    Completed { output: RunOutput },
+    Failed { error: RunFailure },
+    Cancelled { error: StopError },
+    Interrupted { error: StopError },
+}
+
+impl RunLifecycle {
+    pub fn status(&self) -> RunStatus {
+        match self {
+            Self::Created => RunStatus::Created,
+            Self::Running => RunStatus::Running,
+            Self::Completed { .. } => RunStatus::Completed,
+            Self::Failed { .. } => RunStatus::Failed,
+            Self::Cancelled { .. } => RunStatus::Cancelled,
+            Self::Interrupted { .. } => RunStatus::Interrupted,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StopError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RunSummaryLifecycle {
+    Created,
+    Running,
+    Completed,
+    Failed { error: RunFailure },
+    Cancelled { error: StopError },
+    Interrupted { error: StopError },
+}
+
+impl From<&RunLifecycle> for RunSummaryLifecycle {
+    fn from(lifecycle: &RunLifecycle) -> Self {
+        match lifecycle {
+            RunLifecycle::Created => Self::Created,
+            RunLifecycle::Running => Self::Running,
+            RunLifecycle::Completed { .. } => Self::Completed,
+            RunLifecycle::Failed { error } => Self::Failed {
+                error: error.clone(),
+            },
+            RunLifecycle::Cancelled { error } => Self::Cancelled {
+                error: error.clone(),
+            },
+            RunLifecycle::Interrupted { error } => Self::Interrupted {
+                error: error.clone(),
+            },
         }
     }
 }
@@ -142,68 +214,78 @@ pub struct NodeOutputRecord {
     pub completed_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunTerminal {
+    Completed { output: RunOutput },
+    Failed { error: RunFailure },
+    Cancelled { error: StopError },
+    Interrupted { error: StopError },
+}
+
+impl RunTerminal {
+    pub fn status(&self) -> RunStatus {
+        match self {
+            Self::Completed { .. } => RunStatus::Completed,
+            Self::Failed { .. } => RunStatus::Failed,
+            Self::Cancelled { .. } => RunStatus::Cancelled,
+            Self::Interrupted { .. } => RunStatus::Interrupted,
+        }
+    }
+
+    pub fn output(&self) -> Option<&RunOutput> {
+        match self {
+            Self::Completed { output } => Some(output),
+            _ => None,
+        }
+    }
+
+    pub fn failure(&self) -> Option<&RunFailure> {
+        match self {
+            Self::Failed { error } => Some(error),
+            _ => None,
+        }
+    }
+
+    pub fn stop_error(&self) -> Option<&StopError> {
+        match self {
+            Self::Cancelled { error } | Self::Interrupted { error } => Some(error),
+            _ => None,
+        }
+    }
+
+    pub fn error_code(&self) -> Option<&str> {
+        self.failure()
+            .map(|error| error.code.as_str())
+            .or_else(|| self.stop_error().map(|error| error.code.as_str()))
+    }
+
+    pub fn error_message(&self) -> Option<&str> {
+        self.failure()
+            .map(|error| error.message.as_str())
+            .or_else(|| self.stop_error().map(|error| error.message.as_str()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct TerminalUpdate {
     pub run_id: String,
-    pub status: RunStatus,
     pub ended_at: DateTime<Utc>,
-    pub output: Option<RunOutput>,
-    pub error_code: Option<String>,
-    pub error_message: Option<String>,
+    pub terminal: RunTerminal,
 }
 
 impl TerminalUpdate {
-    pub fn new(
-        run_id: impl Into<String>,
-        status: RunStatus,
-        ended_at: DateTime<Utc>,
-        output: Option<RunOutput>,
-        error_code: Option<String>,
-        error_message: Option<String>,
-    ) -> Result<Self, HistoryTypeError> {
-        if !status.is_terminal() {
-            return Err(HistoryTypeError::new(
-                "TERMINAL_STATUS_REQUIRED",
-                format!("status '{}' is not terminal", status.as_str()),
-            ));
-        }
-        Ok(Self {
-            run_id: run_id.into(),
-            status,
-            ended_at,
-            output,
-            error_code,
-            error_message,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistoryTypeError {
-    code: &'static str,
-    message: String,
-}
-
-impl HistoryTypeError {
-    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(run_id: impl Into<String>, ended_at: DateTime<Utc>, terminal: RunTerminal) -> Self {
         Self {
-            code,
-            message: message.into(),
+            run_id: run_id.into(),
+            ended_at,
+            terminal,
         }
     }
 
-    pub fn code(&self) -> &'static str {
-        self.code
+    pub fn status(&self) -> RunStatus {
+        self.terminal.status()
     }
 }
-
-impl fmt::Display for HistoryTypeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl Error for HistoryTypeError {}
 
 pub fn summarize_input(input: &Value) -> Value {
     let mut keys = input

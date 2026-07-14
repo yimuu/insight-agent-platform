@@ -11,11 +11,13 @@ use crate::{
     },
     history::{
         repository::{HistoryError, RunRepository},
-        types::{NewRun, RunRecord, RunStatus, TerminalUpdate},
+        types::{
+            NewRun, RunLifecycle, RunRecord, RunStatus, RunTerminal, StopError, TerminalUpdate,
+        },
     },
     nodes::registry::NodeExecutorRegistry,
     observability::{elapsed_ms, json_size_bytes},
-    outcome::{RunOutput, TerminalOutcome, WorkflowError},
+    outcome::{FailureKind, RunFailure, TerminalOutcome},
 };
 
 use super::{
@@ -169,17 +171,67 @@ impl RunCoordinator {
         .run(context, stop)
         .await?;
 
-        match result {
+        let terminal = match result {
             SchedulerResult::Ended(TerminalOutcome::Success { output }) => {
-                self.complete(&state, new_run, output, started).await
+                RunTerminal::Completed { output }
             }
-            SchedulerResult::Ended(TerminalOutcome::Failure { error }) => {
-                self.fail_workflow(&state, new_run, error, started).await
+            SchedulerResult::Ended(TerminalOutcome::Failure { error }) => RunTerminal::Failed {
+                error: RunFailure {
+                    kind: FailureKind::Workflow,
+                    code: error.code,
+                    message: error.message,
+                },
+            },
+            SchedulerResult::Failed(error) => {
+                let kind = match error.kind() {
+                    RunErrorKind::Node => FailureKind::Node,
+                    RunErrorKind::Timeout => FailureKind::Timeout,
+                    RunErrorKind::Infrastructure => FailureKind::Infrastructure,
+                    RunErrorKind::Stop => {
+                        return Err(RunError::infrastructure(
+                            "RUN_TERMINAL_INVALID",
+                            "scheduler returned a stop error as a failed result",
+                        ));
+                    }
+                };
+                RunTerminal::Failed {
+                    error: RunFailure {
+                        kind,
+                        code: error.code().to_string(),
+                        message: error.message().to_string(),
+                    },
+                }
             }
-            SchedulerResult::Failed(error) | SchedulerResult::Stopped(error) => {
-                self.finish_error(&state, new_run, error, started).await
-            }
-        }
+            SchedulerResult::Stopped(error) => match error.stop_reason() {
+                Some(StopReason::Cancelled) => RunTerminal::Cancelled {
+                    error: StopError {
+                        code: error.code().to_string(),
+                        message: error.message().to_string(),
+                    },
+                },
+                Some(StopReason::Interrupted) => RunTerminal::Interrupted {
+                    error: StopError {
+                        code: error.code().to_string(),
+                        message: error.message().to_string(),
+                    },
+                },
+                Some(StopReason::TimedOut) => RunTerminal::Failed {
+                    error: RunFailure {
+                        kind: FailureKind::Timeout,
+                        code: error.code().to_string(),
+                        message: error.message().to_string(),
+                    },
+                },
+                None => {
+                    return Err(RunError::infrastructure(
+                        "RUN_TERMINAL_INVALID",
+                        "scheduler returned an untyped stop result",
+                    ));
+                }
+            },
+        };
+        self.finish_terminal(&state, new_run, terminal, started)
+            .await
     }
 
     fn validate_run(&self, run: &NewRun, input: &Value) -> Result<(), RunError> {
@@ -198,114 +250,56 @@ impl RunCoordinator {
         Ok(())
     }
 
-    async fn complete(
+    async fn finish_terminal(
         &self,
         state: &RunState,
         run: &NewRun,
-        output: RunOutput,
+        terminal: RunTerminal,
         started: Instant,
     ) -> Result<RunStatus, RunError> {
-        let update = TerminalUpdate::new(
-            &run.run_id,
-            RunStatus::Completed,
-            Utc::now(),
-            Some(output.clone()),
-            None,
-            None,
-        )
-        .map_err(|error| RunError::infrastructure(error.code(), error.to_string()))?;
-        let data = serde_json::to_value(&output)
-            .map_err(|_| RunError::new("RUN_OUTPUT_INVALID", "failed to serialize run output"))?;
-        let published = self
-            .events
-            .publish_terminal(
-                run_scope(run),
+        let status = terminal.status();
+        let (event_type, code, message, data, output_bytes, error_code) = match &terminal {
+            RunTerminal::Completed { output } => (
                 RunEventType::RunCompleted,
-                update,
-                "OK",
-                "ok",
-                data,
-            )
-            .await
-            .map_err(event_error)?;
-        let durable = self
-            .commit_terminal_state(
-                state,
-                run,
-                published,
-                TerminalLogSummary {
-                    status: RunStatus::Completed,
-                    output_bytes: json_size_bytes(&output),
-                    error_code: String::new(),
-                },
-            )
-            .await?;
-        tracing::info!(
-            event_name = "run.finished",
-            run_id = run.run_id.as_str(),
-            request_id = run.request_id.as_str(),
-            agent_id = run.agent_id.as_str(),
-            agent_version = run.agent_version.as_str(),
-            attachment = run.attachment.as_str(),
-            status = durable.status.as_str(),
-            elapsed_ms = elapsed_ms(started),
-            output_bytes = durable.output_bytes,
-            error_code = durable.error_code.as_str(),
-            "run finished"
-        );
-        Ok(durable.status)
-    }
-
-    async fn finish_error(
-        &self,
-        state: &RunState,
-        run: &NewRun,
-        error: RunError,
-        started: Instant,
-    ) -> Result<RunStatus, RunError> {
-        let (status, event_type) = match error.kind() {
-            RunErrorKind::Node | RunErrorKind::Timeout => {
-                (RunStatus::Failed, RunEventType::RunFailed)
-            }
-            RunErrorKind::Stop => match error.stop_reason() {
-                Some(StopReason::Cancelled) => (RunStatus::Cancelled, RunEventType::RunCancelled),
-                Some(StopReason::Interrupted) => {
-                    (RunStatus::Interrupted, RunEventType::RunInterrupted)
-                }
-                Some(StopReason::TimedOut) => (RunStatus::Failed, RunEventType::RunFailed),
-                None => {
-                    return Err(RunError::infrastructure(
-                        "STOP_REASON_MISSING",
-                        "stop failure is missing its typed reason",
-                    ));
-                }
-            },
-            RunErrorKind::Infrastructure => return Err(error),
+                "OK".to_string(),
+                "ok".to_string(),
+                serde_json::to_value(output).map_err(|_| {
+                    RunError::new("RUN_OUTPUT_INVALID", "failed to serialize run output")
+                })?,
+                json_size_bytes(output),
+                String::new(),
+            ),
+            RunTerminal::Failed { error } => (
+                RunEventType::RunFailed,
+                error.code.clone(),
+                error.message.clone(),
+                json!({"kind": error.kind}),
+                0,
+                error.code.clone(),
+            ),
+            RunTerminal::Cancelled { error } => (
+                RunEventType::RunCancelled,
+                error.code.clone(),
+                error.message.clone(),
+                json!({}),
+                0,
+                error.code.clone(),
+            ),
+            RunTerminal::Interrupted { error } => (
+                RunEventType::RunInterrupted,
+                error.code.clone(),
+                error.message.clone(),
+                json!({}),
+                0,
+                error.code.clone(),
+            ),
         };
-        let update = TerminalUpdate::new(
-            &run.run_id,
-            status,
-            Utc::now(),
-            None,
-            Some(error.code().to_string()),
-            Some(error.message().to_string()),
-        )
-        .map_err(|type_error| {
-            RunError::infrastructure(type_error.code(), type_error.to_string())
-        })?;
+        let update = TerminalUpdate::new(&run.run_id, Utc::now(), terminal);
         let published = self
             .events
-            .publish_terminal(
-                run_scope(run),
-                event_type,
-                update,
-                error.code(),
-                error.message(),
-                json!({}),
-            )
+            .publish_terminal(run_scope(run), event_type, update, code, message, data)
             .await
             .map_err(event_error)?;
-        let error_code = error.code().to_string();
         let durable = self
             .commit_terminal_state(
                 state,
@@ -313,66 +307,8 @@ impl RunCoordinator {
                 published,
                 TerminalLogSummary {
                     status,
-                    output_bytes: 0,
+                    output_bytes,
                     error_code,
-                },
-            )
-            .await?;
-        tracing::info!(
-            event_name = "run.finished",
-            run_id = run.run_id.as_str(),
-            request_id = run.request_id.as_str(),
-            agent_id = run.agent_id.as_str(),
-            agent_version = run.agent_version.as_str(),
-            attachment = run.attachment.as_str(),
-            status = durable.status.as_str(),
-            elapsed_ms = elapsed_ms(started),
-            output_bytes = durable.output_bytes,
-            error_code = durable.error_code.as_str(),
-            "run finished"
-        );
-        Ok(durable.status)
-    }
-
-    async fn fail_workflow(
-        &self,
-        state: &RunState,
-        run: &NewRun,
-        error: WorkflowError,
-        started: Instant,
-    ) -> Result<RunStatus, RunError> {
-        let update = TerminalUpdate::new(
-            &run.run_id,
-            RunStatus::Failed,
-            Utc::now(),
-            None,
-            Some(error.code.clone()),
-            Some(error.message.clone()),
-        )
-        .map_err(|type_error| {
-            RunError::infrastructure(type_error.code(), type_error.to_string())
-        })?;
-        let published = self
-            .events
-            .publish_terminal(
-                run_scope(run),
-                RunEventType::RunFailed,
-                update,
-                &error.code,
-                &error.message,
-                json!({"kind":"workflow"}),
-            )
-            .await
-            .map_err(event_error)?;
-        let durable = self
-            .commit_terminal_state(
-                state,
-                run,
-                published,
-                TerminalLogSummary {
-                    status: RunStatus::Failed,
-                    output_bytes: 0,
-                    error_code: error.code,
                 },
             )
             .await?;
@@ -401,13 +337,15 @@ impl RunCoordinator {
         let message = "runtime infrastructure failed";
         let update = TerminalUpdate::new(
             &run.run_id,
-            RunStatus::Failed,
             Utc::now(),
-            None,
-            Some("INFRASTRUCTURE_FAILURE".to_string()),
-            Some(message.to_string()),
-        )
-        .map_err(|error| RunError::infrastructure(error.code(), error.to_string()))?;
+            RunTerminal::Failed {
+                error: RunFailure {
+                    kind: FailureKind::Infrastructure,
+                    code: "INFRASTRUCTURE_FAILURE".to_string(),
+                    message: message.to_string(),
+                },
+            },
+        );
         let published = self
             .events
             .recover_terminal(
@@ -416,7 +354,7 @@ impl RunCoordinator {
                 update,
                 "INFRASTRUCTURE_FAILURE",
                 message,
-                json!({}),
+                json!({"kind":FailureKind::Infrastructure}),
             )
             .await
             .map_err(event_error)?;
@@ -474,15 +412,18 @@ impl RunCoordinator {
 }
 
 fn terminal_log_summary_from_record(record: &RunRecord) -> TerminalLogSummary {
-    let output_bytes = if record.status == RunStatus::Completed {
-        record.output.as_ref().map_or(0, json_size_bytes)
-    } else {
-        0
+    let (output_bytes, error_code) = match &record.lifecycle {
+        RunLifecycle::Completed { output } => (json_size_bytes(output), String::new()),
+        RunLifecycle::Failed { error } => (0, error.code.clone()),
+        RunLifecycle::Cancelled { error } | RunLifecycle::Interrupted { error } => {
+            (0, error.code.clone())
+        }
+        RunLifecycle::Created | RunLifecycle::Running => (0, String::new()),
     };
     TerminalLogSummary {
-        status: record.status,
+        status: record.status(),
         output_bytes,
-        error_code: record.error_code.clone().unwrap_or_default(),
+        error_code,
     }
 }
 

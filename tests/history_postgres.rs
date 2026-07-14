@@ -5,10 +5,11 @@ use insight_agent_platform::{
         postgres::PostgresRunRepository,
         repository::RunRepository,
         types::{
-            summarize_input, NewRun, NodeOutputRecord, RunAttachment, RunStatus, TerminalUpdate,
+            summarize_input, NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunStatus,
+            RunTerminal, StopError, TerminalUpdate,
         },
     },
-    outcome::RunOutput,
+    outcome::{FailureKind, RunFailure, RunOutput},
 };
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, AssertSqlSafe};
@@ -53,29 +54,29 @@ fn event(run_id: &str, event_type: RunEventType, seq: u64, node_id: Option<&str>
 fn completed_update(run_id: &str) -> TerminalUpdate {
     TerminalUpdate::new(
         run_id,
-        RunStatus::Completed,
         at(10),
-        Some(RunOutput {
-            content: Some("answer".to_string()),
-            format: Some("text".to_string()),
-            data: json!({"answer":"answer"}),
-        }),
-        None,
-        None,
+        RunTerminal::Completed {
+            output: RunOutput {
+                content: Some("answer".to_string()),
+                format: Some("text".to_string()),
+                data: json!({"answer":"answer"}),
+            },
+        },
     )
-    .unwrap()
 }
 
 fn failed_update(run_id: &str) -> TerminalUpdate {
     TerminalUpdate::new(
         run_id,
-        RunStatus::Failed,
         at(10),
-        None,
-        Some("INFRASTRUCTURE_FAILURE".to_string()),
-        Some("runtime infrastructure failed".to_string()),
+        RunTerminal::Failed {
+            error: RunFailure {
+                kind: FailureKind::Infrastructure,
+                code: "INFRASTRUCTURE_FAILURE".to_string(),
+                message: "runtime infrastructure failed".to_string(),
+            },
+        },
     )
-    .unwrap()
 }
 
 #[tokio::test]
@@ -152,13 +153,14 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
         .unwrap());
     let losing_update = TerminalUpdate::new(
         &run_id,
-        RunStatus::Cancelled,
         at(11),
-        None,
-        Some("RUN_CANCELLED".to_string()),
-        Some("run cancelled".to_string()),
-    )
-    .unwrap();
+        RunTerminal::Cancelled {
+            error: StopError {
+                code: "RUN_CANCELLED".to_string(),
+                message: "run cancelled".to_string(),
+            },
+        },
+    );
     assert!(!repo
         .finish_run(
             losing_update,
@@ -175,9 +177,17 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
         .await
         .unwrap());
     let record = repo.get_run(&run_id).await.unwrap().unwrap();
-    assert_eq!(record.status, RunStatus::Completed);
+    assert_eq!(record.status(), RunStatus::Completed);
     assert_eq!(record.agent_version, "sha256:postgres");
-    assert_eq!(record.output.unwrap().content.as_deref(), Some("answer"));
+    assert!(matches!(
+        record.lifecycle,
+        RunLifecycle::Completed {
+            output: RunOutput {
+                content: Some(ref content),
+                ..
+            }
+        } if content == "answer"
+    ));
     assert_eq!(
         repo.list_events_after(&run_id, 0, 100)
             .await
@@ -208,7 +218,7 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
         at(10),
         "INFRASTRUCTURE_FAILURE",
         "runtime infrastructure failed",
-        json!({}),
+        json!({"kind":"infrastructure"}),
     );
     let recovered = repo
         .recover_run(failed_update(&recovery_id), failed)
@@ -216,9 +226,19 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
         .unwrap();
     assert_eq!(recovered.seq, 2);
     assert_eq!(
-        repo.get_run(&recovery_id).await.unwrap().unwrap().status,
+        repo.get_run(&recovery_id).await.unwrap().unwrap().status(),
         RunStatus::Failed
     );
+    assert!(matches!(
+        repo.get_run(&recovery_id).await.unwrap().unwrap().lifecycle,
+        RunLifecycle::Failed {
+            error: RunFailure {
+                kind: FailureKind::Infrastructure,
+                ..
+            }
+        }
+    ));
+    assert_eq!(recovered.data, json!({"kind":"infrastructure"}));
     assert_eq!(
         repo.list_events_after(&recovery_id, 0, 100)
             .await
@@ -245,7 +265,7 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
         at(10),
         "INFRASTRUCTURE_FAILURE",
         "runtime infrastructure failed",
-        json!({}),
+        json!({"kind":"infrastructure"}),
     );
     let terminal = repo
         .recover_run(failed_update(&conflict_id), proposal)
@@ -253,7 +273,7 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
         .unwrap();
     assert_eq!(terminal.seq, 3);
     assert_eq!(
-        repo.get_run(&conflict_id).await.unwrap().unwrap().status,
+        repo.get_run(&conflict_id).await.unwrap().unwrap().status(),
         RunStatus::Failed
     );
     assert_eq!(
@@ -276,9 +296,19 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
         .unwrap();
     assert_eq!(repo.mark_incomplete_interrupted(at(20)).await.unwrap(), 2);
     assert_eq!(
-        repo.get_run("created_pg").await.unwrap().unwrap().status,
+        repo.get_run("created_pg").await.unwrap().unwrap().status(),
         RunStatus::Interrupted
     );
+    let interrupted = repo.get_run("created_pg").await.unwrap().unwrap();
+    assert!(matches!(
+        interrupted.lifecycle,
+        RunLifecycle::Interrupted {
+            error: StopError { .. }
+        }
+    ));
+    assert!(serde_json::to_value(&interrupted).unwrap()["error"]
+        .get("kind")
+        .is_none());
     assert_eq!(
         repo.list_events_after("running_pg", 0, 100)
             .await
@@ -294,6 +324,31 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
         .connect(&scoped_url)
         .await
         .unwrap();
+    let constraints_id = format!("constraints_pg_{suffix}");
+    repo.create_run(new_run(&constraints_id)).await.unwrap();
+    assert!(sqlx::query(
+        "UPDATE runs SET status = 'completed', ended_at = CURRENT_TIMESTAMP WHERE run_id = $1",
+    )
+    .bind(&constraints_id)
+    .execute(&scoped_admin)
+    .await
+    .is_err());
+    assert!(sqlx::query(
+        "UPDATE runs SET status = 'failed', ended_at = CURRENT_TIMESTAMP WHERE run_id = $1",
+    )
+    .bind(&constraints_id)
+    .execute(&scoped_admin)
+    .await
+    .is_err());
+    assert!(
+        sqlx::query(
+            "UPDATE runs SET error_kind = 'workflow', error_code = 'WORKFLOW_X', error_message = 'x' WHERE run_id = $1",
+        )
+        .bind(&constraints_id)
+        .execute(&scoped_admin)
+        .await
+        .is_err()
+    );
     sqlx::query("DELETE FROM runs WHERE run_id = $1")
         .bind(&run_id)
         .execute(&scoped_admin)

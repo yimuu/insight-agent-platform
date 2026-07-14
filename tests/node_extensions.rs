@@ -23,7 +23,10 @@ use insight_agent_platform::{
     },
     history::{
         repository::{HistoryError, RunRepository},
-        types::{NewRun, NodeOutputRecord, RunRecord, RunStatus, TerminalUpdate},
+        types::{
+            NewRun, NodeOutputRecord, RunLifecycle, RunRecord, RunStatus, RunTerminal, StopError,
+            TerminalUpdate,
+        },
     },
     nodes::{
         default_node_registries,
@@ -293,14 +296,11 @@ impl RunRepository for ExtensionRepository {
                 agent_id: run.agent_id,
                 agent_version: run.agent_version,
                 attachment: run.attachment,
-                status: RunStatus::Created,
+                lifecycle: RunLifecycle::Created,
                 started_at: None,
                 ended_at: None,
                 updated_at: run.created_at,
                 input_summary: run.input_summary,
-                output: None,
-                error_code: None,
-                error_message: None,
             },
         );
         Ok(())
@@ -315,7 +315,7 @@ impl RunRepository for ExtensionRepository {
         let record = records
             .get_mut(run_id)
             .ok_or_else(|| HistoryError::new("RUN_NOT_FOUND", "run not found"))?;
-        record.status = RunStatus::Running;
+        record.lifecycle = RunLifecycle::Running;
         record.started_at = Some(started_at);
         record.updated_at = started_at;
         Ok(())
@@ -346,15 +346,12 @@ impl RunRepository for ExtensionRepository {
         let record = records
             .get_mut(&update.run_id)
             .ok_or_else(|| HistoryError::new("RUN_NOT_FOUND", "run not found"))?;
-        if record.status.is_terminal() {
+        if record.status().is_terminal() {
             return Ok(false);
         }
-        record.status = update.status;
+        record.lifecycle = lifecycle_from_terminal(&update.terminal);
         record.ended_at = Some(update.ended_at);
         record.updated_at = update.ended_at;
-        record.output = update.output;
-        record.error_code = update.error_code;
-        record.error_message = update.error_message;
         drop(records);
         self.events
             .lock()
@@ -408,13 +405,15 @@ impl RunRepository for ExtensionRepository {
         let mut records = self.records.lock().await;
         let mut interrupted = Vec::new();
         for record in records.values_mut() {
-            if matches!(record.status, RunStatus::Created | RunStatus::Running) {
-                record.status = RunStatus::Interrupted;
+            if matches!(record.status(), RunStatus::Created | RunStatus::Running) {
+                record.lifecycle = RunLifecycle::Interrupted {
+                    error: StopError {
+                        code: "RUN_INTERRUPTED".to_string(),
+                        message: "run interrupted during startup reconciliation".to_string(),
+                    },
+                };
                 record.ended_at = Some(at);
                 record.updated_at = at;
-                record.error_code = Some("RUN_INTERRUPTED".to_string());
-                record.error_message =
-                    Some("run interrupted during startup reconciliation".to_string());
                 interrupted.push((
                     record.run_id.clone(),
                     record.request_id.clone(),
@@ -439,6 +438,23 @@ impl RunRepository for ExtensionRepository {
             ));
         }
         Ok(interrupted.len() as u64)
+    }
+}
+
+fn lifecycle_from_terminal(terminal: &RunTerminal) -> RunLifecycle {
+    match terminal {
+        RunTerminal::Completed { output } => RunLifecycle::Completed {
+            output: output.clone(),
+        },
+        RunTerminal::Failed { error } => RunLifecycle::Failed {
+            error: error.clone(),
+        },
+        RunTerminal::Cancelled { error } => RunLifecycle::Cancelled {
+            error: error.clone(),
+        },
+        RunTerminal::Interrupted { error } => RunLifecycle::Interrupted {
+            error: error.clone(),
+        },
     }
 }
 
@@ -559,8 +575,8 @@ async fn wait_for_status(service: &RunService, run_id: &str, expected: RunStatus
     let mut last = None;
     for _ in 0..200 {
         let record = service.get_run(run_id).await.unwrap();
-        last = Some(record.status);
-        if record.status == expected {
+        last = Some(record.status());
+        if record.status() == expected {
             return record;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -592,7 +608,9 @@ async fn custom_node_runs_through_compiler_service_events_repository_and_termina
         .unwrap();
 
     let completed = wait_for_status(&service, &created.run_id, RunStatus::Completed).await;
-    let output = completed.output.unwrap();
+    let RunLifecycle::Completed { output } = completed.lifecycle else {
+        panic!("completed run must contain typed output");
+    };
     assert_eq!(output.content.as_deref(), Some("value=42"));
     assert_eq!(output.format.as_deref(), Some("text"));
     assert_eq!(output.data, json!({"value":"42"}));
@@ -637,7 +655,10 @@ async fn custom_node_missing_executor_terminalizes_as_infrastructure_failure() {
         .unwrap();
 
     let failed = wait_for_status(&service, &created.run_id, RunStatus::Failed).await;
-    assert_eq!(failed.error_code.as_deref(), Some("INFRASTRUCTURE_FAILURE"));
+    assert!(matches!(
+        failed.lifecycle,
+        RunLifecycle::Failed { ref error } if error.code == "INFRASTRUCTURE_FAILURE"
+    ));
     assert_eq!(
         event_types(&repository, &created.run_id).await,
         vec![
@@ -660,10 +681,10 @@ async fn custom_node_body_mismatch_terminalizes_as_node_failure() {
         .unwrap();
 
     let failed = wait_for_status(&service, &created.run_id, RunStatus::Failed).await;
-    assert_eq!(
-        failed.error_code.as_deref(),
-        Some("NODE_BODY_TYPE_MISMATCH")
-    );
+    assert!(matches!(
+        failed.lifecycle,
+        RunLifecycle::Failed { ref error } if error.code == "NODE_BODY_TYPE_MISMATCH"
+    ));
     assert_eq!(
         event_types(&repository, &created.run_id).await,
         vec![

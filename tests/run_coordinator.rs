@@ -26,10 +26,13 @@ use insight_agent_platform::{
     },
     history::{
         repository::{HistoryError, RunRepository},
-        types::{NewRun, NodeOutputRecord, RunAttachment, RunRecord, RunStatus, TerminalUpdate},
+        types::{
+            NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunRecord, RunStatus,
+            RunTerminal, TerminalUpdate,
+        },
     },
     nodes::registry::{NodeExecutor, NodeExecutorRegistry, NodeType},
-    outcome::{RunOutput, TerminalOutcome},
+    outcome::{FailureKind, RunFailure, RunOutput, TerminalOutcome, WorkflowError},
     runtime::{
         stop_pair, ExecutionControl, ExecutionLimiter, RunContext, RunCoordinator, RunError,
         RunState, StopReason,
@@ -59,6 +62,7 @@ enum Behavior {
         output: Value,
     },
     Complete(RunOutput),
+    EndFailure(WorkflowError),
     Fail(RunError),
     Delay(Duration),
     WaitForStop(Arc<Notify>),
@@ -143,6 +147,12 @@ impl NodeExecutor for SyntheticNode {
                 output: json!({"terminal":true}),
                 transition: NodeTransition::End(TerminalOutcome::Success {
                     output: output.clone(),
+                }),
+            }),
+            Behavior::EndFailure(error) => Ok(NodeOutcome {
+                output: json!({"terminal":true}),
+                transition: NodeTransition::End(TerminalOutcome::Failure {
+                    error: error.clone(),
                 }),
             }),
             Behavior::Fail(error) => Err(error.clone()),
@@ -377,30 +387,29 @@ impl RunRepository for MemoryRepository {
             return Ok(false);
         }
         if let Some(race_update) = self.terminal_race.lock().await.take() {
-            *status = Some(race_update.status);
+            *status = Some(race_update.status());
             self.terminal_updates.lock().await.push(race_update.clone());
             self.operations.lock().await.push(format!(
                 "event:{}:-",
-                terminal_event_type(race_update.status).as_str()
+                terminal_event_type(race_update.status()).as_str()
             ));
             let mut terminal_event = event;
-            terminal_event.event_type = terminal_event_type(race_update.status);
+            terminal_event.event_type = terminal_event_type(race_update.status());
             terminal_event.code = race_update
-                .error_code
-                .clone()
+                .terminal
+                .error_code()
+                .map(str::to_string)
                 .unwrap_or_else(|| "OK".to_string());
             terminal_event.message = race_update
-                .error_message
-                .clone()
+                .terminal
+                .error_message()
+                .map(str::to_string)
                 .unwrap_or_else(|| "ok".to_string());
-            terminal_event.data = race_update.output.as_ref().map_or_else(
-                || json!({}),
-                |output| serde_json::to_value(output).unwrap_or_else(|_| json!({})),
-            );
+            terminal_event.data = terminal_event_data(&race_update.terminal);
             self.events.lock().await.push(terminal_event);
             return Ok(false);
         }
-        *status = Some(update.status);
+        *status = Some(update.status());
         self.terminal_updates.lock().await.push(update);
         self.operations
             .lock()
@@ -443,16 +452,18 @@ impl RunRepository for MemoryRepository {
             agent_id: run.agent_id,
             agent_version: run.agent_version,
             attachment: run.attachment,
-            status,
+            lifecycle: terminal.as_ref().map_or_else(
+                || match status {
+                    RunStatus::Created => RunLifecycle::Created,
+                    RunStatus::Running => RunLifecycle::Running,
+                    _ => panic!("terminal status is missing its typed terminal update"),
+                },
+                |update| lifecycle_from_terminal(&update.terminal),
+            ),
             started_at,
             ended_at: terminal.as_ref().map(|update| update.ended_at),
             updated_at,
             input_summary: run.input_summary,
-            output: terminal.as_ref().and_then(|update| update.output.clone()),
-            error_code: terminal
-                .as_ref()
-                .and_then(|update| update.error_code.clone()),
-            error_message: terminal.and_then(|update| update.error_message),
         }))
     }
 
@@ -475,6 +486,33 @@ impl RunRepository for MemoryRepository {
 
     async fn mark_incomplete_interrupted(&self, _at: DateTime<Utc>) -> Result<u64, HistoryError> {
         Ok(0)
+    }
+}
+
+fn lifecycle_from_terminal(terminal: &RunTerminal) -> RunLifecycle {
+    match terminal {
+        RunTerminal::Completed { output } => RunLifecycle::Completed {
+            output: output.clone(),
+        },
+        RunTerminal::Failed { error } => RunLifecycle::Failed {
+            error: error.clone(),
+        },
+        RunTerminal::Cancelled { error } => RunLifecycle::Cancelled {
+            error: error.clone(),
+        },
+        RunTerminal::Interrupted { error } => RunLifecycle::Interrupted {
+            error: error.clone(),
+        },
+    }
+}
+
+fn terminal_event_data(terminal: &RunTerminal) -> Value {
+    match terminal {
+        RunTerminal::Completed { output } => {
+            serde_json::to_value(output).unwrap_or_else(|_| json!({}))
+        }
+        RunTerminal::Failed { error } => json!({"kind":error.kind}),
+        RunTerminal::Cancelled { .. } | RunTerminal::Interrupted { .. } => json!({}),
     }
 }
 
@@ -655,6 +693,22 @@ fn branch_end_node(id: &str) -> CompiledNode {
     end
 }
 
+fn branch_failure_end_node(id: &str) -> CompiledNode {
+    let mut end = node(
+        id,
+        None,
+        Duration::from_secs(30),
+        Behavior::EndFailure(WorkflowError {
+            code: "WORKFLOW_REJECTED".to_string(),
+            message: "workflow rejected".to_string(),
+        }),
+    );
+    end.control = NodeControl::End {
+        outcome: insight_agent_platform::outcome::EndOutcomeKind::Failure,
+    };
+    end
+}
+
 fn new_run() -> NewRun {
     NewRun {
         run_id: RUN_ID.to_string(),
@@ -781,8 +835,10 @@ async fn coordinator_owns_run_lifecycle_around_scheduler_execution() {
     assert_eq!(*repository.status.lock().await, Some(RunStatus::Completed));
     assert_eq!(repository.terminal_updates.lock().await.len(), 1);
     assert_eq!(
-        repository.terminal_updates.lock().await[0].output,
-        Some(final_output)
+        repository.terminal_updates.lock().await[0].terminal,
+        RunTerminal::Completed {
+            output: final_output
+        }
     );
     assert_eq!(repository.outputs.lock().await.len(), 4);
     assert_eq!(
@@ -813,6 +869,136 @@ async fn coordinator_owns_run_lifecycle_around_scheduler_execution() {
             .unwrap();
         assert!(output < completed);
     }
+}
+
+#[tokio::test]
+async fn authored_main_failure_completes_its_node_then_fails_the_run_as_workflow() {
+    let repository = Arc::new(MemoryRepository::default());
+    let agent = agent(
+        vec![node(
+            "reject",
+            None,
+            Duration::from_secs(1),
+            Behavior::EndFailure(WorkflowError {
+                code: "WORKFLOW_REJECTED".to_string(),
+                message: "workflow rejected".to_string(),
+            }),
+        )],
+        "reject",
+    );
+    let coordinator = coordinator(agent, Arc::clone(&repository), true);
+    let (_, stop) = stop_pair();
+
+    assert_eq!(
+        coordinator
+            .execute(new_run(), json!({}), stop)
+            .await
+            .unwrap(),
+        RunStatus::Failed
+    );
+
+    let events = repository.list_events_after(RUN_ID, 0, 32).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "run.created",
+            "run.started",
+            "node.started",
+            "node.completed",
+            "run.failed",
+        ]
+    );
+    assert_eq!(events[3].node_id.as_deref(), Some("reject"));
+    assert_eq!(events[3].code, "OK");
+    assert_eq!(events[4].data, json!({"kind":"workflow"}));
+    assert!(!events
+        .iter()
+        .any(|event| event.event_type == RunEventType::NodeFailed));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event.event_type,
+                RunEventType::RunCompleted
+                    | RunEventType::RunFailed
+                    | RunEventType::RunCancelled
+                    | RunEventType::RunInterrupted
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn authored_branch_failure_is_terminal_before_the_join_starts() {
+    let repository = Arc::new(MemoryRepository::default());
+    let next = || Behavior::Next {
+        output: json!({}),
+        require_output: None,
+    };
+    let mut agent = parallel_agent(next(), next(), false);
+    Arc::get_mut(&mut agent)
+        .unwrap()
+        .nodes
+        .insert("end_b".to_string(), branch_failure_end_node("end_b"));
+    let coordinator = coordinator(agent, Arc::clone(&repository), true);
+    let (_, stop) = stop_pair();
+
+    assert_eq!(
+        coordinator
+            .execute(new_run(), json!({}), stop)
+            .await
+            .unwrap(),
+        RunStatus::Completed
+    );
+    let events = repository.events.lock().await.clone();
+    let position = |event_type: RunEventType, node_id: Option<&str>| {
+        events
+            .iter()
+            .position(|event| event.event_type == event_type && event.node_id.as_deref() == node_id)
+            .unwrap()
+    };
+    let end_started = position(RunEventType::NodeStarted, Some("end_b"));
+    let end_completed = position(RunEventType::NodeCompleted, Some("end_b"));
+    let branch_failed = events
+        .iter()
+        .position(|event| {
+            event.event_type == RunEventType::BranchFailed && event.data["branch_id"] == "source_b"
+        })
+        .unwrap();
+    let collect_started = position(RunEventType::NodeStarted, Some("collect"));
+    assert!(end_started < end_completed);
+    assert!(end_completed < branch_failed);
+    assert!(branch_failed < collect_started);
+    assert_eq!(events[branch_failed].data["kind"], "workflow");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.event_type,
+                    RunEventType::BranchCompleted | RunEventType::BranchFailed
+                ) && event.data["branch_id"] == "source_b"
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event.event_type,
+                RunEventType::RunCompleted
+                    | RunEventType::RunFailed
+                    | RunEventType::RunCancelled
+                    | RunEventType::RunInterrupted
+            ))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -850,6 +1036,7 @@ async fn node_failure_emits_node_failed_then_run_failed() {
     );
     assert_eq!(events[3].code, "UPSTREAM_FAILURE");
     assert_eq!(events[4].code, "UPSTREAM_FAILURE");
+    assert_eq!(events[4].data, json!({"kind":"node"}));
 }
 
 #[tokio::test]
@@ -1024,6 +1211,7 @@ async fn coordinator_enforces_node_timeout_even_if_executor_ignores_control() {
     assert_eq!(events[3].event_type, RunEventType::NodeFailed);
     assert_eq!(events[3].code, "NODE_TIMEOUT");
     assert_eq!(events[4].event_type, RunEventType::RunFailed);
+    assert_eq!(events[4].data, json!({"kind":"timeout"}));
 }
 
 #[tokio::test]
@@ -1154,20 +1342,20 @@ async fn run_finished_log_uses_durable_failed_terminal_when_completion_loses_rac
     let subscriber = Registry::default().with(RecordingLayer {
         events: Arc::clone(&recorded),
     });
-    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+    tracing::subscriber::set_global_default(subscriber).unwrap();
 
     let repository = Arc::new(MemoryRepository::default());
-    *repository.terminal_race.lock().await = Some(
-        TerminalUpdate::new(
-            RUN_ID,
-            RunStatus::Failed,
-            Utc::now(),
-            None,
-            Some("DURABLE_FAILURE".to_string()),
-            Some("durable failure won terminal race".to_string()),
-        )
-        .unwrap(),
-    );
+    *repository.terminal_race.lock().await = Some(TerminalUpdate::new(
+        RUN_ID,
+        Utc::now(),
+        RunTerminal::Failed {
+            error: RunFailure {
+                kind: FailureKind::Infrastructure,
+                code: "DURABLE_FAILURE".to_string(),
+                message: "durable failure won terminal race".to_string(),
+            },
+        },
+    ));
     let attempted_output = RunOutput {
         content: Some("attempted success output".to_string()),
         format: Some("text".to_string()),
@@ -1196,7 +1384,10 @@ async fn run_finished_log_uses_durable_failed_terminal_when_completion_loses_rac
         RunStatus::Failed
     );
 
-    let finished = recorded_info_logs(&recorded, "run.finished");
+    let finished = recorded_info_logs(&recorded, "run.finished")
+        .into_iter()
+        .filter(|event| event.field("error_code") == Some("DURABLE_FAILURE"))
+        .collect::<Vec<_>>();
     assert_eq!(finished.len(), 1);
     assert_eq!(finished[0].field("status"), Some("failed"));
     assert_eq!(finished[0].field("output_bytes"), Some("0"));
@@ -1238,7 +1429,7 @@ async fn global_external_stop_preserves_reason_after_all_branches_drain() {
         assert_eq!(active.load(Ordering::SeqCst), 0);
         let updates = repository.terminal_updates.lock().await;
         assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].error_code.as_deref(), Some(expected_code));
+        assert_eq!(updates[0].terminal.error_code(), Some(expected_code));
         drop(updates);
         assert!(!repository.events.lock().await.iter().any(|event| {
             event.node_id.as_deref() == Some("collect")
@@ -1329,7 +1520,7 @@ async fn global_failures_recover_exactly_one_durable_infrastructure_terminal() {
         let updates = repository.terminal_updates.lock().await;
         assert_eq!(updates.len(), 1, "{failure:?}");
         assert_eq!(
-            updates[0].error_code.as_deref(),
+            updates[0].terminal.error_code(),
             Some("INFRASTRUCTURE_FAILURE"),
             "{failure:?}"
         );

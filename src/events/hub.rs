@@ -206,6 +206,7 @@ impl EventHub {
         message: impl Into<String>,
         data: Value,
     ) -> Result<Option<RunEvent>, EventError> {
+        validate_terminal_request(&scope, event_type, &update)?;
         let run_id = scope.run_id.clone();
         let state_handle = self.run_state(&run_id).await;
         let mut state = state_handle.lock().await;
@@ -259,6 +260,7 @@ impl EventHub {
         message: impl Into<String>,
         data: Value,
     ) -> Result<Option<RunEvent>, EventError> {
+        validate_terminal_request(&scope, event_type, &update)?;
         let code = code.into();
         let message = message.into();
         match self
@@ -525,6 +527,29 @@ fn is_terminal(event_type: RunEventType) -> bool {
             | RunEventType::RunCancelled
             | RunEventType::RunInterrupted
     )
+}
+
+fn validate_terminal_request(
+    scope: &RunEventScope,
+    event_type: RunEventType,
+    update: &TerminalUpdate,
+) -> Result<(), EventError> {
+    let expected_type = match update.status() {
+        crate::history::types::RunStatus::Completed => RunEventType::RunCompleted,
+        crate::history::types::RunStatus::Failed => RunEventType::RunFailed,
+        crate::history::types::RunStatus::Cancelled => RunEventType::RunCancelled,
+        crate::history::types::RunStatus::Interrupted => RunEventType::RunInterrupted,
+        crate::history::types::RunStatus::Created | crate::history::types::RunStatus::Running => {
+            unreachable!("typed terminal update is terminal")
+        }
+    };
+    if update.run_id != scope.run_id || event_type != expected_type {
+        return Err(EventError::History(HistoryError::new(
+            "HISTORY_EVENT_INVALID",
+            "terminal event does not match its typed update",
+        )));
+    }
+    Ok(())
 }
 
 pub struct EventSubscription {

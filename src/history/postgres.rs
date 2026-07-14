@@ -10,9 +10,12 @@ use crate::{
     events::protocol::{RunEvent, RunEventType, EVENT_SCHEMA_VERSION},
     history::{
         repository::{validate_recovery_event, HistoryError, RunRepository},
-        types::{NewRun, NodeOutputRecord, RunAttachment, RunRecord, RunStatus, TerminalUpdate},
+        types::{
+            NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunRecord, RunStatus, StopError,
+            TerminalUpdate,
+        },
     },
-    outcome::RunOutput,
+    outcome::{FailureKind, RunFailure, RunOutput},
 };
 
 static MIGRATOR: Migrator = sqlx::migrate!("migrations/formal_v1/postgres");
@@ -43,8 +46,9 @@ impl RunRepository for PostgresRunRepository {
         sqlx::query(
             "INSERT INTO runs (
                 run_id, request_id, agent_id, agent_version, attachment, status,
-                started_at, ended_at, updated_at, input_summary, output, error_code, error_message
-             ) VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, $7, $8, NULL, NULL, NULL)",
+                started_at, ended_at, updated_at, input_summary, output,
+                error_kind, error_code, error_message
+             ) VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, $7, $8, NULL, NULL, NULL, NULL)",
         )
         .bind(&run.run_id)
         .bind(&run.request_id)
@@ -132,12 +136,7 @@ impl RunRepository for PostgresRunRepository {
         update: TerminalUpdate,
         event: RunEvent,
     ) -> Result<bool, HistoryError> {
-        let expected_event_type = terminal_event_type(update.status).ok_or_else(|| {
-            HistoryError::new(
-                "HISTORY_EVENT_INVALID",
-                "terminal update must contain a terminal status",
-            )
-        })?;
+        let expected_event_type = terminal_event_type(update.status());
         if update.run_id != event.run_id {
             return Err(HistoryError::new(
                 "HISTORY_EVENT_INVALID",
@@ -150,19 +149,21 @@ impl RunRepository for PostgresRunRepository {
                 "terminal event does not match the terminal status",
             ));
         }
-        let output = update.output.map(Json);
+        let output = update.terminal.output().cloned().map(Json);
+        let error_kind = update.terminal.failure().map(|error| error.kind.as_str());
         let mut transaction = self.pool.begin().await.map_err(write_error)?;
         let result = sqlx::query(
             "UPDATE runs
              SET status = $1, ended_at = $2, updated_at = $2, output = $3,
-                 error_code = $4, error_message = $5
-             WHERE run_id = $6 AND status IN ($7, $8)",
+                 error_kind = $4, error_code = $5, error_message = $6
+             WHERE run_id = $7 AND status IN ($8, $9)",
         )
-        .bind(update.status.as_str())
+        .bind(update.status().as_str())
         .bind(update.ended_at)
         .bind(output)
-        .bind(&update.error_code)
-        .bind(&update.error_message)
+        .bind(error_kind)
+        .bind(update.terminal.error_code())
+        .bind(update.terminal.error_message())
         .bind(&update.run_id)
         .bind(RunStatus::Created.as_str())
         .bind(RunStatus::Running.as_str())
@@ -199,7 +200,7 @@ impl RunRepository for PostgresRunRepository {
         let row = sqlx::query_as::<_, RunRow>(
             "SELECT run_id, request_id, agent_id, agent_version, attachment, status,
                     started_at, ended_at, updated_at, input_summary, output,
-                    error_code, error_message
+                    error_kind, error_code, error_message
              FROM runs WHERE run_id = $1",
         )
         .bind(run_id)
@@ -258,7 +259,7 @@ impl RunRepository for PostgresRunRepository {
             let result = sqlx::query(
                 "UPDATE runs
                  SET status = $1, ended_at = $2, updated_at = $2, output = NULL,
-                     error_code = $3, error_message = $4
+                     error_kind = NULL, error_code = $3, error_message = $4
                  WHERE run_id = $5 AND status IN ($6, $7)",
             )
             .bind(RunStatus::Interrupted.as_str())
@@ -304,7 +305,8 @@ async fn recover_postgres_once(
     update: TerminalUpdate,
     mut terminal: RunEvent,
 ) -> Result<RunEvent, HistoryError> {
-    let output = update.output.as_ref().map(Json);
+    let output = update.terminal.output().map(Json);
+    let error_kind = update.terminal.failure().map(|error| error.kind.as_str());
     let mut transaction = pool.begin().await.map_err(write_error)?;
     let status_value: String =
         sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
@@ -342,14 +344,15 @@ async fn recover_postgres_once(
     sqlx::query(
         "UPDATE runs
          SET status = $1, ended_at = $2, updated_at = $2, output = $3,
-             error_code = $4, error_message = $5
-         WHERE run_id = $6",
+             error_kind = $4, error_code = $5, error_message = $6
+         WHERE run_id = $7",
     )
-    .bind(update.status.as_str())
+    .bind(update.status().as_str())
     .bind(update.ended_at)
     .bind(output)
-    .bind(&update.error_code)
-    .bind(&update.error_message)
+    .bind(error_kind)
+    .bind(update.terminal.error_code())
+    .bind(update.terminal.error_message())
     .bind(&update.run_id)
     .execute(&mut *transaction)
     .await
@@ -387,7 +390,7 @@ async fn load_last_event_postgres(
 }
 
 fn ensure_terminal_matches_status(status: RunStatus, event: &RunEvent) -> Result<(), HistoryError> {
-    if terminal_event_type(status) != Some(event.event_type) || event.node_id.is_some() {
+    if terminal_event_type(status) != event.event_type || event.node_id.is_some() {
         return Err(HistoryError::new(
             "HISTORY_TERMINAL_EVENT_MISMATCH",
             "stored terminal event does not match run status",
@@ -460,6 +463,7 @@ struct RunRow {
     updated_at: DateTime<Utc>,
     input_summary: Json<serde_json::Value>,
     output: Option<Json<RunOutput>>,
+    error_kind: Option<String>,
     error_code: Option<String>,
     error_message: Option<String>,
 }
@@ -476,15 +480,73 @@ fn run_record_from_row(row: RunRow) -> Result<RunRecord, HistoryError> {
                 row.attachment
             ))
         })?,
-        status: RunStatus::parse(&row.status)
-            .ok_or_else(|| invalid_data(format!("invalid stored run status '{}'", row.status)))?,
+        lifecycle: lifecycle_from_columns(
+            RunStatus::parse(&row.status).ok_or_else(|| {
+                invalid_data(format!("invalid stored run status '{}'", row.status))
+            })?,
+            row.output.map(|output| output.0),
+            row.error_kind
+                .as_deref()
+                .map(parse_failure_kind)
+                .transpose()?,
+            row.error_code,
+            row.error_message,
+        )?,
         started_at: row.started_at,
         ended_at: row.ended_at,
         updated_at: row.updated_at,
         input_summary: row.input_summary.0,
-        output: row.output.map(|output| output.0),
-        error_code: row.error_code,
-        error_message: row.error_message,
+    })
+}
+
+fn lifecycle_from_columns(
+    status: RunStatus,
+    output: Option<RunOutput>,
+    error_kind: Option<FailureKind>,
+    error_code: Option<String>,
+    error_message: Option<String>,
+) -> Result<RunLifecycle, HistoryError> {
+    match (status, output, error_kind, error_code, error_message) {
+        (RunStatus::Created, None, None, None, None) => Ok(RunLifecycle::Created),
+        (RunStatus::Running, None, None, None, None) => Ok(RunLifecycle::Running),
+        (RunStatus::Completed, Some(output), None, None, None) => {
+            Ok(RunLifecycle::Completed { output })
+        }
+        (RunStatus::Failed, None, Some(kind), Some(code), Some(message)) => {
+            Ok(RunLifecycle::Failed {
+                error: RunFailure {
+                    kind,
+                    code,
+                    message,
+                },
+            })
+        }
+        (RunStatus::Cancelled, None, None, Some(code), Some(message)) => {
+            Ok(RunLifecycle::Cancelled {
+                error: StopError { code, message },
+            })
+        }
+        (RunStatus::Interrupted, None, None, Some(code), Some(message)) => {
+            Ok(RunLifecycle::Interrupted {
+                error: StopError { code, message },
+            })
+        }
+        (status, _, _, _, _) => Err(HistoryError::new(
+            "HISTORY_TERMINAL_CORRUPT",
+            format!(
+                "run columns are inconsistent with lifecycle status '{}'",
+                status.as_str()
+            ),
+        )),
+    }
+}
+
+fn parse_failure_kind(value: &str) -> Result<FailureKind, HistoryError> {
+    FailureKind::parse(value).ok_or_else(|| {
+        HistoryError::new(
+            "HISTORY_TERMINAL_CORRUPT",
+            format!("stored failure kind '{value}' is invalid"),
+        )
     })
 }
 
@@ -529,13 +591,13 @@ struct IncompleteRunRow {
     max_seq: i64,
 }
 
-fn terminal_event_type(status: RunStatus) -> Option<RunEventType> {
+fn terminal_event_type(status: RunStatus) -> RunEventType {
     match status {
-        RunStatus::Completed => Some(RunEventType::RunCompleted),
-        RunStatus::Failed => Some(RunEventType::RunFailed),
-        RunStatus::Cancelled => Some(RunEventType::RunCancelled),
-        RunStatus::Interrupted => Some(RunEventType::RunInterrupted),
-        RunStatus::Created | RunStatus::Running => None,
+        RunStatus::Completed => RunEventType::RunCompleted,
+        RunStatus::Failed => RunEventType::RunFailed,
+        RunStatus::Cancelled => RunEventType::RunCancelled,
+        RunStatus::Interrupted => RunEventType::RunInterrupted,
+        RunStatus::Created | RunStatus::Running => unreachable!("typed terminal is terminal"),
     }
 }
 

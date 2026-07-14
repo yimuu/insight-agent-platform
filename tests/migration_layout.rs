@@ -38,6 +38,10 @@ fn both_formal_backends_define_equivalent_runtime_tables_and_constraints() {
         assert!(normalized.contains("on delete cascade"));
         assert!(normalized.contains("error_code"));
         assert!(normalized.contains("error_message"));
+        assert!(normalized.contains("error_kind"));
+        assert!(normalized.contains("status = 'completed'"));
+        assert!(normalized.contains("status = 'failed'"));
+        assert!(normalized.contains("status in ('cancelled', 'interrupted')"));
     }
     assert!(SQLITE_V1.contains("json_valid(input_summary)"));
     assert!(SQLITE_V1.contains("json_valid(output)"));

@@ -30,7 +30,7 @@ use insight_agent_platform::{
         default_node_registries,
         registry::{NodeExecutor, NodeType},
     },
-    outcome::{RunOutput, TerminalOutcome},
+    outcome::{RunOutput, TerminalOutcome, WorkflowError},
     runtime::{
         CompiledAgentRegistry, ExecutionControl, RunContext, RunError, RunService, RunServiceConfig,
     },
@@ -43,6 +43,7 @@ const TEST_SSE_KEEP_ALIVE: Duration = Duration::from_millis(10);
 
 enum ApiBehavior {
     Complete,
+    Fail,
     Block,
 }
 
@@ -82,6 +83,15 @@ impl NodeExecutor for ApiNode {
                         content: Some("done".to_string()),
                         format: Some("text".to_string()),
                         data: json!({"answer":"done"}),
+                    },
+                }),
+            }),
+            ApiBehavior::Fail => Ok(NodeOutcome {
+                output: json!({"rejected":true}),
+                transition: NodeTransition::End(TerminalOutcome::Failure {
+                    error: WorkflowError {
+                        code: "WORKFLOW_REJECTED".to_string(),
+                        message: "workflow rejected".to_string(),
                     },
                 }),
             }),
@@ -141,6 +151,7 @@ async fn fixture(auth: ApiAuth, capacity: usize) -> (Router, RunService) {
     );
     let agents = vec![
         agent("fast", ApiBehavior::Complete),
+        agent("failing", ApiBehavior::Fail),
         agent("blocking", ApiBehavior::Block),
     ];
     let agents = CompiledAgentRegistry::new(agents).unwrap();
@@ -186,7 +197,7 @@ async fn json_body(response: axum::response::Response) -> Value {
 
 async fn wait_for_status(service: &RunService, run_id: &str, status: RunStatus) {
     for _ in 0..200 {
-        if service.get_run(run_id).await.unwrap().status == status {
+        if service.get_run(run_id).await.unwrap().status() == status {
             return;
         }
         tokio::task::yield_now().await;
@@ -254,7 +265,7 @@ async fn agent_metadata_omits_runtime_internals_and_unknown_agents_are_hidden() 
 
     assert_eq!(body["code"], "OK");
     assert_eq!(body["message"], "ok");
-    assert_eq!(body["data"].as_array().unwrap().len(), 2);
+    assert_eq!(body["data"].as_array().unwrap().len(), 3);
     let encoded = body.to_string();
     assert!(!encoded.contains("nodes"));
     assert!(!encoded.contains("templates"));
@@ -351,8 +362,50 @@ async fn detached_creation_uses_direct_input_returns_202_and_supports_lookup() {
         .unwrap();
     let lookup = json_body(lookup).await;
     assert_eq!(lookup["data"]["status"], "completed");
+    assert_eq!(
+        lookup["data"]["output"],
+        json!({
+            "content":"done",
+            "format":"text",
+            "data":{"answer":"done"}
+        })
+    );
+    assert!(lookup["data"].get("error").is_none());
     assert_eq!(lookup["data"]["input_summary"]["keys"], json!(["text"]));
     assert!(!lookup.to_string().contains("hello"));
+}
+
+#[tokio::test]
+async fn failed_run_http_shape_exposes_only_the_nested_typed_error() {
+    let (app, service) = fixture(ApiAuth::disabled(), 4).await;
+    let created = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/v1/agents/failing/runs",
+            Some(json!({"text":"hello"})),
+        ))
+        .await
+        .unwrap();
+    let created = json_body(created).await;
+    let run_id = created["data"]["run_id"].as_str().unwrap();
+    wait_for_status(&service, run_id, RunStatus::Failed).await;
+
+    let lookup = app
+        .oneshot(request(Method::GET, &format!("/v1/runs/{run_id}"), None))
+        .await
+        .unwrap();
+    let lookup = json_body(lookup).await;
+    assert_eq!(lookup["data"]["status"], "failed");
+    assert_eq!(
+        lookup["data"]["error"],
+        json!({
+            "kind":"workflow",
+            "code":"WORKFLOW_REJECTED",
+            "message":"workflow rejected"
+        })
+    );
+    assert!(lookup["data"].get("output").is_none());
 }
 
 #[tokio::test]
@@ -512,6 +565,15 @@ async fn cancellation_is_idempotent_and_capacity_maps_to_run_conflict() {
     let first = json_body(first).await;
     let run_id = first["data"]["run_id"].as_str().unwrap();
     wait_for_status(&service, run_id, RunStatus::Running).await;
+    let running = app
+        .clone()
+        .oneshot(request(Method::GET, &format!("/v1/runs/{run_id}"), None))
+        .await
+        .unwrap();
+    let running = json_body(running).await;
+    assert_eq!(running["data"]["status"], "running");
+    assert!(running["data"].get("output").is_none());
+    assert!(running["data"].get("error").is_none());
 
     let conflict = app
         .clone()

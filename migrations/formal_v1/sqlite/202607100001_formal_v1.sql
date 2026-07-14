@@ -12,8 +12,40 @@ CREATE TABLE runs (
     updated_at TEXT NOT NULL,
     input_summary TEXT NOT NULL CHECK (json_valid(input_summary)),
     output TEXT CHECK (output IS NULL OR json_valid(output)),
+    error_kind TEXT CHECK (
+        error_kind IS NULL OR error_kind IN ('workflow', 'node', 'timeout', 'infrastructure')
+    ),
     error_code TEXT,
-    error_message TEXT
+    error_message TEXT,
+    CHECK (
+        (status IN ('created', 'running')
+            AND ended_at IS NULL
+            AND output IS NULL
+            AND error_kind IS NULL
+            AND error_code IS NULL
+            AND error_message IS NULL)
+        OR
+        (status = 'completed'
+            AND ended_at IS NOT NULL
+            AND output IS NOT NULL
+            AND error_kind IS NULL
+            AND error_code IS NULL
+            AND error_message IS NULL)
+        OR
+        (status = 'failed'
+            AND ended_at IS NOT NULL
+            AND output IS NULL
+            AND error_kind IS NOT NULL
+            AND error_code IS NOT NULL
+            AND error_message IS NOT NULL)
+        OR
+        (status IN ('cancelled', 'interrupted')
+            AND ended_at IS NOT NULL
+            AND output IS NULL
+            AND error_kind IS NULL
+            AND error_code IS NOT NULL
+            AND error_message IS NOT NULL)
+    )
 );
 
 CREATE INDEX idx_formal_runs_agent_updated

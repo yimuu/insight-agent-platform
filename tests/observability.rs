@@ -17,7 +17,11 @@ use insight_agent_platform::{
         hub::{EventHub, EventHubConfig},
         protocol::RunEventType,
     },
-    history::{repository::RunRepository, sqlite::SqliteRunRepository, types::RunStatus},
+    history::{
+        repository::RunRepository,
+        sqlite::SqliteRunRepository,
+        types::{RunLifecycle, RunStatus},
+    },
     nodes::default_node_registries,
     resources::{
         actions::{Action, ActionContext, ActionDescriptor, ActionRegistry},
@@ -572,7 +576,7 @@ nodes:
 
 async fn wait_for_status(service: &RunService, run_id: &str, expected: RunStatus) {
     for _ in 0..200 {
-        if service.get_run(run_id).await.unwrap().status == expected {
+        if service.get_run(run_id).await.unwrap().status() == expected {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -742,16 +746,13 @@ async fn authored_end_failure_uses_production_terminal_path_without_info_log_bod
     wait_for_status(&fixture.service, &created.run_id, RunStatus::Failed).await;
 
     let failed = fixture.service.get_run(&created.run_id).await.unwrap();
-    assert_eq!(failed.status, RunStatus::Failed);
-    assert_eq!(
-        failed.error_code.as_deref(),
-        Some("WORKFLOW_OBSERVABILITY_FAILED")
-    );
-    assert_eq!(
-        failed.error_message.as_deref(),
-        Some(WORKFLOW_FAILURE_MESSAGE)
-    );
-    assert_eq!(failed.output, None);
+    assert_eq!(failed.status(), RunStatus::Failed);
+    assert!(matches!(
+        failed.lifecycle,
+        RunLifecycle::Failed { ref error }
+            if error.code == "WORKFLOW_OBSERVABILITY_FAILED"
+                && error.message == WORKFLOW_FAILURE_MESSAGE
+    ));
 
     let events = fixture
         .repository
@@ -955,10 +956,10 @@ async fn message_emptied_by_optional_image_filtering_logs_no_request_or_model_ca
     wait_for_status(&fixture.service, &created.run_id, RunStatus::Failed).await;
 
     let failed = fixture.service.get_run(&created.run_id).await.unwrap();
-    assert_eq!(
-        failed.error_code.as_deref(),
-        Some("CHAT_CONTENT_PARTS_EMPTY")
-    );
+    assert!(matches!(
+        failed.lifecycle,
+        RunLifecycle::Failed { ref error } if error.code == "CHAT_CONTENT_PARTS_EMPTY"
+    ));
     assert_eq!(fixture.model_calls.load(Ordering::Relaxed), 0);
     assert!(info_logs("chat.request").is_empty());
     assert!(info_logs("chat.response").is_empty());
@@ -1025,10 +1026,10 @@ async fn invalid_dynamic_chat_logs_no_request_or_body() {
     wait_for_status(&fixture.service, &created.run_id, RunStatus::Failed).await;
 
     let failed = fixture.service.get_run(&created.run_id).await.unwrap();
-    assert_eq!(
-        failed.error_code.as_deref(),
-        Some("CHAT_DYNAMIC_MESSAGES_INVALID")
-    );
+    assert!(matches!(
+        failed.lifecycle,
+        RunLifecycle::Failed { ref error } if error.code == "CHAT_DYNAMIC_MESSAGES_INVALID"
+    ));
     assert_eq!(fixture.model_calls.load(Ordering::Relaxed), 0);
     assert!(info_logs("chat.request").is_empty());
     assert!(info_logs("chat.response").is_empty());

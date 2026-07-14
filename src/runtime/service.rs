@@ -26,9 +26,13 @@ use crate::{
     },
     history::{
         repository::{HistoryError, RunRepository},
-        types::{summarize_input, NewRun, RunAttachment, RunRecord, RunStatus, TerminalUpdate},
+        types::{
+            summarize_input, NewRun, RunAttachment, RunRecord, RunStatus, RunTerminal, StopError,
+            TerminalUpdate,
+        },
     },
     nodes::registry::NodeExecutorRegistry,
+    outcome::{FailureKind, RunFailure},
 };
 
 use super::{
@@ -340,7 +344,7 @@ impl RunService {
 
     pub async fn cancel(&self, run_id: &str) -> Result<RunRecord, ServiceError> {
         let record = self.get_run(run_id).await?;
-        if record.status.is_terminal() {
+        if record.status().is_terminal() {
             return Ok(record);
         }
         let (stop, mut lifecycle_changed) = {
@@ -353,7 +357,7 @@ impl RunService {
         stop.request(StopReason::Cancelled);
         loop {
             let current = self.get_run(run_id).await?;
-            if current.status.is_terminal() {
+            if current.status().is_terminal() {
                 return Ok(current);
             }
             if !lock_active(&self.inner).contains_key(run_id) {
@@ -689,25 +693,35 @@ fn run_scope(run: &NewRun) -> RunEventScope {
     )
 }
 
-fn terminal_spec(reason: StopReason) -> (RunStatus, RunEventType, &'static str, &'static str) {
+fn terminal_spec(reason: StopReason) -> (RunTerminal, RunEventType) {
     match reason {
         StopReason::Cancelled => (
-            RunStatus::Cancelled,
+            RunTerminal::Cancelled {
+                error: StopError {
+                    code: "RUN_CANCELLED".to_string(),
+                    message: "run cancelled".to_string(),
+                },
+            },
             RunEventType::RunCancelled,
-            "RUN_CANCELLED",
-            "run cancelled",
         ),
         StopReason::Interrupted => (
-            RunStatus::Interrupted,
+            RunTerminal::Interrupted {
+                error: StopError {
+                    code: "RUN_INTERRUPTED".to_string(),
+                    message: "run interrupted".to_string(),
+                },
+            },
             RunEventType::RunInterrupted,
-            "RUN_INTERRUPTED",
-            "run interrupted",
         ),
         StopReason::TimedOut => (
-            RunStatus::Failed,
+            RunTerminal::Failed {
+                error: RunFailure {
+                    kind: FailureKind::Timeout,
+                    code: "RUN_TIMEOUT".to_string(),
+                    message: "run timed out".to_string(),
+                },
+            },
             RunEventType::RunFailed,
-            "RUN_TIMEOUT",
-            "run timed out",
         ),
     }
 }
@@ -729,26 +743,16 @@ async fn publish_prelaunch_terminal(
         )
         .await
         .map_err(|error| ServiceError::new(error.code(), error.to_string()))?;
-    let (status, event_type, code, message) = terminal_spec(reason);
-    let update = TerminalUpdate::new(
-        &run.run_id,
-        status,
-        Utc::now(),
-        None,
-        Some(code.to_string()),
-        Some(message.to_string()),
-    )
-    .map_err(|error| ServiceError::new(error.code(), error.to_string()))?;
+    let (terminal, event_type) = terminal_spec(reason);
+    let code = terminal.error_code().unwrap_or_default().to_string();
+    let message = terminal.error_message().unwrap_or_default().to_string();
+    let data = terminal
+        .failure()
+        .map_or_else(|| json!({}), |error| json!({"kind":error.kind}));
+    let update = TerminalUpdate::new(&run.run_id, Utc::now(), terminal);
     inner
         .events
-        .publish_terminal(
-            run_scope(&run),
-            event_type,
-            update,
-            code,
-            message,
-            json!({}),
-        )
+        .publish_terminal(run_scope(&run), event_type, update, code, message, data)
         .await
         .map_err(|error| ServiceError::new(error.code(), error.to_string()))?;
     Ok(())
@@ -766,7 +770,10 @@ mod tests {
     use chrono::{DateTime, Utc};
     use serde_json::json;
 
-    use crate::{dsl::compiled::ExecutionPlan, history::types::NodeOutputRecord};
+    use crate::{
+        dsl::compiled::ExecutionPlan,
+        history::types::{NodeOutputRecord, RunLifecycle},
+    };
 
     #[derive(Default)]
     struct UnitRepository {
@@ -785,14 +792,11 @@ mod tests {
                     agent_id: run.agent_id,
                     agent_version: run.agent_version,
                     attachment: run.attachment,
-                    status: RunStatus::Created,
+                    lifecycle: RunLifecycle::Created,
                     started_at: None,
                     ended_at: None,
                     updated_at: run.created_at,
                     input_summary: run.input_summary,
-                    output: None,
-                    error_code: None,
-                    error_message: None,
                 },
             );
             Ok(())
@@ -807,7 +811,7 @@ mod tests {
             let run = runs
                 .get_mut(run_id)
                 .ok_or_else(|| HistoryError::new("RUN_NOT_FOUND", "run not found"))?;
-            run.status = RunStatus::Running;
+            run.lifecycle = RunLifecycle::Running;
             run.started_at = Some(started_at);
             run.updated_at = started_at;
             Ok(())
@@ -834,11 +838,14 @@ mod tests {
             let run = runs
                 .get_mut(&update.run_id)
                 .ok_or_else(|| HistoryError::new("RUN_NOT_FOUND", "run not found"))?;
-            run.status = update.status;
+            run.lifecycle = match update.terminal {
+                RunTerminal::Completed { output } => RunLifecycle::Completed { output },
+                RunTerminal::Failed { error } => RunLifecycle::Failed { error },
+                RunTerminal::Cancelled { error } => RunLifecycle::Cancelled { error },
+                RunTerminal::Interrupted { error } => RunLifecycle::Interrupted { error },
+            };
             run.ended_at = Some(update.ended_at);
             run.updated_at = update.ended_at;
-            run.error_code = update.error_code;
-            run.error_message = update.error_message;
             drop(runs);
             self.events.lock().await.push(event);
             Ok(true)
@@ -958,8 +965,11 @@ mod tests {
 
         for _ in 0..200 {
             if let Some(record) = repository.get_run(&new_run.run_id).await.unwrap() {
-                if record.status == RunStatus::Cancelled {
-                    assert_eq!(record.error_code.as_deref(), Some("RUN_CANCELLED"));
+                if record.status() == RunStatus::Cancelled {
+                    assert!(matches!(
+                        record.lifecycle,
+                        RunLifecycle::Cancelled { ref error } if error.code == "RUN_CANCELLED"
+                    ));
                     return;
                 }
             }

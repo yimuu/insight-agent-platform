@@ -107,7 +107,7 @@ pub(crate) fn validate_recovery_event(
     update: &TerminalUpdate,
     terminal: &RunEvent,
 ) -> Result<(), HistoryError> {
-    let expected_type = match update.status {
+    let expected_type = match update.status() {
         super::types::RunStatus::Completed => RunEventType::RunCompleted,
         super::types::RunStatus::Failed => RunEventType::RunFailed,
         super::types::RunStatus::Cancelled => RunEventType::RunCancelled,

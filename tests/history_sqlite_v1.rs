@@ -7,10 +7,11 @@ use insight_agent_platform::{
         repository::RunRepository,
         sqlite::SqliteRunRepository,
         types::{
-            summarize_input, NewRun, NodeOutputRecord, RunAttachment, RunStatus, TerminalUpdate,
+            summarize_input, NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunStatus,
+            RunTerminal, StopError, TerminalUpdate,
         },
     },
-    outcome::RunOutput,
+    outcome::{FailureKind, RunFailure, RunOutput},
 };
 use serde_json::json;
 use sqlx::SqlitePool;
@@ -60,29 +61,29 @@ fn event(run_id: &str, event_type: RunEventType, seq: u64, node_id: Option<&str>
 fn completed_update(run_id: &str) -> TerminalUpdate {
     TerminalUpdate::new(
         run_id,
-        RunStatus::Completed,
         at(10),
-        Some(RunOutput {
-            content: Some("answer".to_string()),
-            format: Some("text".to_string()),
-            data: json!({"answer":"answer"}),
-        }),
-        None,
-        None,
+        RunTerminal::Completed {
+            output: RunOutput {
+                content: Some("answer".to_string()),
+                format: Some("text".to_string()),
+                data: json!({"answer":"answer"}),
+            },
+        },
     )
-    .unwrap()
 }
 
 fn failed_update(run_id: &str) -> TerminalUpdate {
     TerminalUpdate::new(
         run_id,
-        RunStatus::Failed,
         at(10),
-        None,
-        Some("INFRASTRUCTURE_FAILURE".to_string()),
-        Some("runtime infrastructure failed".to_string()),
+        RunTerminal::Failed {
+            error: RunFailure {
+                kind: FailureKind::Infrastructure,
+                code: "INFRASTRUCTURE_FAILURE".to_string(),
+                message: "runtime infrastructure failed".to_string(),
+            },
+        },
     )
-    .unwrap()
 }
 
 #[tokio::test]
@@ -129,13 +130,14 @@ async fn sqlite_repository_persists_lifecycle_events_outputs_and_replay() {
         .unwrap());
     let losing_update = TerminalUpdate::new(
         RUN_ID,
-        RunStatus::Cancelled,
         at(11),
-        None,
-        Some("RUN_CANCELLED".to_string()),
-        Some("run cancelled".to_string()),
-    )
-    .unwrap();
+        RunTerminal::Cancelled {
+            error: StopError {
+                code: "RUN_CANCELLED".to_string(),
+                message: "run cancelled".to_string(),
+            },
+        },
+    );
     assert!(!repo
         .finish_run(
             losing_update,
@@ -153,13 +155,20 @@ async fn sqlite_repository_persists_lifecycle_events_outputs_and_replay() {
         .unwrap());
 
     let record = repo.get_run(RUN_ID).await.unwrap().unwrap();
-    assert_eq!(record.status, RunStatus::Completed);
+    assert_eq!(record.status(), RunStatus::Completed);
     assert_eq!(record.attachment, RunAttachment::Detached);
     assert_eq!(record.agent_version, "sha256:abc");
     assert_eq!(record.started_at, Some(at(1)));
     assert_eq!(record.ended_at, Some(at(10)));
-    assert_eq!(record.output.unwrap().content.as_deref(), Some("answer"));
-    assert_eq!(record.error_code, None);
+    assert!(matches!(
+        record.lifecycle,
+        RunLifecycle::Completed {
+            output: RunOutput {
+                content: Some(ref content),
+                ..
+            }
+        } if content == "answer"
+    ));
     assert_eq!(
         repo.list_events_after(RUN_ID, 0, 100)
             .await
@@ -197,6 +206,72 @@ async fn duplicate_event_sequence_is_rejected_without_partial_batch_insertion() 
 }
 
 #[tokio::test]
+async fn sqlite_schema_rejects_inconsistent_run_lifecycle_columns() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("lifecycle-constraints.db");
+    let url = sqlite_url(&path);
+    let repo = SqliteRunRepository::connect(&url).await.unwrap();
+    repo.create_run(new_run(RUN_ID, RunAttachment::Detached))
+        .await
+        .unwrap();
+    let pool = SqlitePool::connect(&url).await.unwrap();
+
+    let completed_without_output = sqlx::query(
+        "UPDATE runs SET status = 'completed', ended_at = CURRENT_TIMESTAMP WHERE run_id = ?",
+    )
+    .bind(RUN_ID)
+    .execute(&pool)
+    .await;
+    assert!(completed_without_output.is_err());
+
+    let failed_without_error = sqlx::query(
+        "UPDATE runs SET status = 'failed', ended_at = CURRENT_TIMESTAMP WHERE run_id = ?",
+    )
+    .bind(RUN_ID)
+    .execute(&pool)
+    .await;
+    assert!(failed_without_error.is_err());
+
+    let running_with_terminal_error = sqlx::query(
+        "UPDATE runs SET error_kind = 'workflow', error_code = 'WORKFLOW_X', error_message = 'x' WHERE run_id = ?",
+    )
+    .bind(RUN_ID)
+    .execute(&pool)
+    .await;
+    assert!(running_with_terminal_error.is_err());
+}
+
+#[tokio::test]
+async fn sqlite_reconstruction_rejects_corrupt_terminal_column_combinations() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("corrupt-lifecycle.db");
+    let url = sqlite_url(&path);
+    let repo = SqliteRunRepository::connect(&url).await.unwrap();
+    repo.create_run(new_run(RUN_ID, RunAttachment::Detached))
+        .await
+        .unwrap();
+    let pool = SqlitePool::connect(&url).await.unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE runs
+         SET status = 'failed', ended_at = CURRENT_TIMESTAMP,
+             error_kind = NULL, error_code = 'CORRUPT', error_message = 'corrupt'
+         WHERE run_id = ?",
+    )
+    .bind(RUN_ID)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+
+    let error = repo.get_run(RUN_ID).await.unwrap_err();
+    assert_eq!(error.code(), "HISTORY_TERMINAL_CORRUPT");
+}
+
+#[tokio::test]
 async fn recovery_atomically_fills_missing_events_and_terminal_state() {
     let repo = SqliteRunRepository::in_memory().await.unwrap();
     repo.create_run(new_run(RUN_ID, RunAttachment::Detached))
@@ -214,7 +289,7 @@ async fn recovery_atomically_fills_missing_events_and_terminal_state() {
         at(10),
         "INFRASTRUCTURE_FAILURE",
         "runtime infrastructure failed",
-        json!({}),
+        json!({"kind":"infrastructure"}),
     );
 
     let recovered = repo
@@ -223,8 +298,27 @@ async fn recovery_atomically_fills_missing_events_and_terminal_state() {
         .unwrap();
     assert_eq!(recovered.seq, 2);
     assert_eq!(
-        repo.get_run(RUN_ID).await.unwrap().unwrap().status,
+        repo.get_run(RUN_ID).await.unwrap().unwrap().status(),
         RunStatus::Failed
+    );
+    let recovered_record = repo.get_run(RUN_ID).await.unwrap().unwrap();
+    assert!(matches!(
+        recovered_record.lifecycle,
+        RunLifecycle::Failed {
+            error: RunFailure {
+                kind: FailureKind::Infrastructure,
+                ..
+            }
+        }
+    ));
+    assert_eq!(
+        repo.list_events_after(RUN_ID, 0, 100)
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .data,
+        json!({"kind":"infrastructure"})
     );
     assert_eq!(
         repo.list_events_after(RUN_ID, 0, 100)
@@ -257,7 +351,7 @@ async fn recovery_derives_terminal_sequence_from_locked_durable_state() {
         at(10),
         "INFRASTRUCTURE_FAILURE",
         "runtime infrastructure failed",
-        json!({}),
+        json!({"kind":"infrastructure"}),
     );
 
     let terminal = repo
@@ -267,7 +361,7 @@ async fn recovery_derives_terminal_sequence_from_locked_durable_state() {
     assert_eq!(terminal.seq, 3);
     assert_eq!(terminal.event_type, RunEventType::RunFailed);
     assert_eq!(
-        repo.get_run(RUN_ID).await.unwrap().unwrap().status,
+        repo.get_run(RUN_ID).await.unwrap().unwrap().status(),
         RunStatus::Failed
     );
     assert_eq!(
@@ -277,29 +371,11 @@ async fn recovery_derives_terminal_sequence_from_locked_durable_state() {
 }
 
 #[tokio::test]
-async fn repository_rejects_invalid_terminal_updates_before_mutating_the_run() {
+async fn repository_rejects_terminal_event_mismatches_before_mutating_the_run() {
     let repo = SqliteRunRepository::in_memory().await.unwrap();
     repo.create_run(new_run(RUN_ID, RunAttachment::Detached))
         .await
         .unwrap();
-    let nonterminal = TerminalUpdate {
-        run_id: RUN_ID.to_string(),
-        status: RunStatus::Running,
-        ended_at: at(10),
-        output: None,
-        error_code: None,
-        error_message: None,
-    };
-
-    let error = repo
-        .finish_run(
-            nonterminal,
-            event(RUN_ID, RunEventType::RunCompleted, 1, None),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), "HISTORY_EVENT_INVALID");
-
     let error = repo
         .finish_run(
             completed_update(RUN_ID),
@@ -309,7 +385,7 @@ async fn repository_rejects_invalid_terminal_updates_before_mutating_the_run() {
         .unwrap_err();
     assert_eq!(error.code(), "HISTORY_EVENT_INVALID");
     assert_eq!(
-        repo.get_run(RUN_ID).await.unwrap().unwrap().status,
+        repo.get_run(RUN_ID).await.unwrap().unwrap().status(),
         RunStatus::Created
     );
     assert!(repo
@@ -339,9 +415,23 @@ async fn startup_reconciliation_interrupts_created_and_running_runs_with_events(
 
     for (run_id, expected_seq) in [("created_run", 2), ("running_run", 3)] {
         let record = repo.get_run(run_id).await.unwrap().unwrap();
-        assert_eq!(record.status, RunStatus::Interrupted);
+        assert_eq!(record.status(), RunStatus::Interrupted);
         assert_eq!(record.ended_at, Some(at(20)));
-        assert_eq!(record.error_code.as_deref(), Some("RUN_INTERRUPTED"));
+        assert!(matches!(
+            record.lifecycle,
+            RunLifecycle::Interrupted {
+                error: StopError {
+                    ref code,
+                    ..
+                }
+            } if code == "RUN_INTERRUPTED"
+        ));
+        assert!(
+            serde_json::to_value(&record).unwrap()["error"]
+                .get("kind")
+                .is_none(),
+            "startup interruption must not fabricate a failure kind"
+        );
         let events = repo.list_events_after(run_id, 0, 100).await.unwrap();
         assert_eq!(events.last().unwrap().seq, expected_seq);
         assert_eq!(

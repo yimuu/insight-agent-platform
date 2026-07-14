@@ -119,6 +119,7 @@ struct Fixture {
 
 #[derive(Debug)]
 struct RawRun {
+    error_kind: Option<String>,
     error_code: Option<String>,
     error_message: Option<String>,
 }
@@ -359,7 +360,7 @@ async fn wait_for_status(service: &RunService, run_id: &str, expected: RunStatus
     let mut last_observed = None;
     let result = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let observed = service.get_run(run_id).await.unwrap().status;
+            let observed = service.get_run(run_id).await.unwrap().status();
             last_observed = Some(observed);
             if observed == expected {
                 return;
@@ -429,8 +430,8 @@ fn assert_json_failure_event(
 
 async fn raw_history(database_url: &str, run_id: &str) -> RawHistory {
     let pool = SqlitePool::connect(database_url).await.unwrap();
-    let run: (Option<String>, Option<String>) =
-        sqlx::query_as("SELECT error_code, error_message FROM runs WHERE run_id = ?")
+    let run: (Option<String>, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT error_kind, error_code, error_message FROM runs WHERE run_id = ?")
             .bind(run_id)
             .fetch_one(&pool)
             .await
@@ -445,8 +446,9 @@ async fn raw_history(database_url: &str, run_id: &str) -> RawHistory {
     pool.close().await;
     RawHistory {
         run: RawRun {
-            error_code: run.0,
-            error_message: run.1,
+            error_kind: run.0,
+            error_code: run.1,
+            error_message: run.2,
         },
         events: events
             .into_iter()
@@ -475,6 +477,7 @@ fn raw_event<'a>(history: &'a RawHistory, event_type: &str) -> &'a RawEvent {
 }
 
 fn assert_raw_run_failure(history: &RawHistory, code: &str, message: &str, secret: &str) {
+    assert_eq!(history.run.error_kind.as_deref(), Some("node"));
     assert_eq!(history.run.error_code.as_deref(), Some(code));
     assert_eq!(history.run.error_message.as_deref(), Some(message));
     assert!(
@@ -606,8 +609,10 @@ async fn action_validation_instances_never_escape_the_runtime_boundary() {
         .await
         .unwrap();
     let detached = json_body(detached).await;
-    assert_eq!(detached["data"]["error_code"], OUTPUT_CODE);
-    assert_eq!(detached["data"]["error_message"], OUTPUT_MESSAGE);
+    assert_eq!(detached["data"]["error"]["kind"], "node");
+    assert_eq!(detached["data"]["error"]["code"], OUTPUT_CODE);
+    assert_eq!(detached["data"]["error"]["message"], OUTPUT_MESSAGE);
+    assert!(detached["data"].get("output").is_none());
     assert!(
         !detached.to_string().contains(OUTPUT_SECRET),
         "secret leaked in Detached GET: {detached}"

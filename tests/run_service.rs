@@ -25,7 +25,10 @@ use insight_agent_platform::{
     },
     history::{
         repository::{HistoryError, RunRepository},
-        types::{NewRun, NodeOutputRecord, RunRecord, RunStatus, TerminalUpdate},
+        types::{
+            NewRun, NodeOutputRecord, RunLifecycle, RunRecord, RunStatus, RunTerminal, StopError,
+            TerminalUpdate,
+        },
     },
     nodes::registry::{NodeExecutor, NodeExecutorRegistry, NodeType},
     outcome::{RunOutput, TerminalOutcome},
@@ -371,14 +374,11 @@ impl RunRepository for CountingRepository {
                 agent_id: run.agent_id,
                 agent_version: run.agent_version,
                 attachment: run.attachment,
-                status: RunStatus::Created,
+                lifecycle: RunLifecycle::Created,
                 started_at: None,
                 ended_at: None,
                 updated_at: run.created_at,
                 input_summary: run.input_summary,
-                output: None,
-                error_code: None,
-                error_message: None,
             },
         );
         Ok(())
@@ -393,7 +393,7 @@ impl RunRepository for CountingRepository {
         let record = records
             .get_mut(run_id)
             .ok_or_else(|| HistoryError::new("RUN_NOT_FOUND", "run not found"))?;
-        record.status = RunStatus::Running;
+        record.lifecycle = RunLifecycle::Running;
         record.started_at = Some(started_at);
         record.updated_at = started_at;
         Ok(())
@@ -430,15 +430,12 @@ impl RunRepository for CountingRepository {
         let record = records
             .get_mut(&update.run_id)
             .ok_or_else(|| HistoryError::new("RUN_NOT_FOUND", "run not found"))?;
-        if record.status.is_terminal() {
+        if record.status().is_terminal() {
             return Ok(false);
         }
-        record.status = update.status;
+        record.lifecycle = lifecycle_from_terminal(&update.terminal);
         record.ended_at = Some(update.ended_at);
         record.updated_at = update.ended_at;
-        record.output = update.output;
-        record.error_code = update.error_code;
-        record.error_message = update.error_message;
         drop(records);
         self.events
             .lock()
@@ -499,13 +496,15 @@ impl RunRepository for CountingRepository {
         let mut records = self.records.lock().await;
         let mut interrupted = Vec::new();
         for record in records.values_mut() {
-            if matches!(record.status, RunStatus::Created | RunStatus::Running) {
-                record.status = RunStatus::Interrupted;
+            if matches!(record.status(), RunStatus::Created | RunStatus::Running) {
+                record.lifecycle = RunLifecycle::Interrupted {
+                    error: StopError {
+                        code: "RUN_INTERRUPTED".to_string(),
+                        message: "run interrupted during startup reconciliation".to_string(),
+                    },
+                };
                 record.ended_at = Some(at);
                 record.updated_at = at;
-                record.error_code = Some("RUN_INTERRUPTED".to_string());
-                record.error_message =
-                    Some("run interrupted during startup reconciliation".to_string());
                 interrupted.push((
                     record.run_id.clone(),
                     record.request_id.clone(),
@@ -530,6 +529,33 @@ impl RunRepository for CountingRepository {
             ));
         }
         Ok(interrupted.len() as u64)
+    }
+}
+
+fn lifecycle_from_terminal(terminal: &RunTerminal) -> RunLifecycle {
+    match terminal {
+        RunTerminal::Completed { output } => RunLifecycle::Completed {
+            output: output.clone(),
+        },
+        RunTerminal::Failed { error } => RunLifecycle::Failed {
+            error: error.clone(),
+        },
+        RunTerminal::Cancelled { error } => RunLifecycle::Cancelled {
+            error: error.clone(),
+        },
+        RunTerminal::Interrupted { error } => RunLifecycle::Interrupted {
+            error: error.clone(),
+        },
+    }
+}
+
+fn record_error_code(record: &RunRecord) -> Option<&str> {
+    match &record.lifecycle {
+        RunLifecycle::Failed { error } => Some(error.code.as_str()),
+        RunLifecycle::Cancelled { error } | RunLifecycle::Interrupted { error } => {
+            Some(error.code.as_str())
+        }
+        RunLifecycle::Created | RunLifecycle::Running | RunLifecycle::Completed { .. } => None,
     }
 }
 
@@ -609,8 +635,8 @@ async fn wait_for_status(service: &RunService, run_id: &str, expected: RunStatus
     let mut last_status = None;
     for _ in 0..200 {
         let record = service.get_run(run_id).await.unwrap();
-        last_status = Some(record.status);
-        if record.status == expected {
+        last_status = Some(record.status());
+        if record.status() == expected {
             return record;
         }
         tokio::task::yield_now().await;
@@ -668,7 +694,7 @@ async fn attached_run_disconnect_cancels_immediately() {
     )
     .await
     .expect("Attached cancellation must not wait for a reconnect grace period");
-    assert_eq!(cancelled.status, RunStatus::Cancelled);
+    assert_eq!(cancelled.status(), RunStatus::Cancelled);
 }
 
 #[tokio::test]
@@ -756,7 +782,7 @@ async fn attached_terminal_drop_never_reads_history_or_rewrites_completion() {
     tokio::task::yield_now().await;
 
     assert_eq!(
-        service.get_run(&run_id).await.unwrap().status,
+        service.get_run(&run_id).await.unwrap().status(),
         RunStatus::Completed
     );
     assert_eq!(repository.event_history_reads.load(Ordering::SeqCst), 0);
@@ -786,7 +812,15 @@ async fn detached_run_completes_without_any_subscriber() {
         .unwrap();
 
     let completed = wait_for_status(&service, &created.run_id, RunStatus::Completed).await;
-    assert_eq!(completed.output.unwrap().content.as_deref(), Some("done"));
+    assert!(matches!(
+        completed.lifecycle,
+        RunLifecycle::Completed {
+            output: RunOutput {
+                content: Some(ref content),
+                ..
+            }
+        } if content == "done"
+    ));
 }
 
 #[tokio::test]
@@ -848,9 +882,9 @@ async fn shutdown_waits_for_background_recovery_owner() {
     recover_gate.release();
     service.shutdown(Duration::from_secs(1)).await.unwrap();
     let recovered = service.get_run(&created.run_id).await.unwrap();
-    assert_eq!(recovered.status, RunStatus::Failed);
+    assert_eq!(recovered.status(), RunStatus::Failed);
     assert_eq!(
-        recovered.error_code.as_deref(),
+        record_error_code(&recovered),
         Some("INFRASTRUCTURE_FAILURE")
     );
 }
@@ -894,7 +928,7 @@ async fn recovery_handoff_releases_active_ownership_but_keeps_service_unhealthy(
     recover_gate.release();
     service.shutdown(Duration::from_secs(1)).await.unwrap();
     assert_eq!(
-        service.get_run(&created.run_id).await.unwrap().status,
+        service.get_run(&created.run_id).await.unwrap().status(),
         RunStatus::Failed
     );
 }
@@ -913,11 +947,11 @@ async fn cancellation_is_idempotent_and_does_not_rewrite_completed_runs() {
             .await
             .expect("cancellation completion notification must not be lost")
             .unwrap()
-            .status,
+            .status(),
         RunStatus::Cancelled
     );
     assert_eq!(
-        service.cancel(&running.run_id).await.unwrap().status,
+        service.cancel(&running.run_id).await.unwrap().status(),
         RunStatus::Cancelled
     );
 
@@ -927,7 +961,7 @@ async fn cancellation_is_idempotent_and_does_not_rewrite_completed_runs() {
         .unwrap();
     wait_for_status(&service, &fast.run_id, RunStatus::Completed).await;
     assert_eq!(
-        service.cancel(&fast.run_id).await.unwrap().status,
+        service.cancel(&fast.run_id).await.unwrap().status(),
         RunStatus::Completed
     );
 }
@@ -1000,8 +1034,8 @@ async fn shutdown_waits_for_detached_run_blocked_in_create_run() {
         "shutdown completed while create_run was blocked"
     );
     let interrupted = service.get_run(&created.run_id).await.unwrap();
-    assert_eq!(interrupted.status, RunStatus::Interrupted);
-    assert_eq!(interrupted.error_code.as_deref(), Some("RUN_INTERRUPTED"));
+    assert_eq!(interrupted.status(), RunStatus::Interrupted);
+    assert_eq!(record_error_code(&interrupted), Some("RUN_INTERRUPTED"));
     assert_eq!(repository.creates.load(Ordering::SeqCst), 1);
 }
 
@@ -1047,7 +1081,7 @@ async fn shutdown_after_durable_create_finalizes_before_detached_launch() {
     let interrupted = wait_for_status(&service, &created.run_id, RunStatus::Interrupted).await;
 
     assert_eq!(interrupted.started_at, None);
-    assert_eq!(interrupted.error_code.as_deref(), Some("RUN_INTERRUPTED"));
+    assert_eq!(record_error_code(&interrupted), Some("RUN_INTERRUPTED"));
     assert_eq!(
         run_event_types(&repository, &created.run_id).await,
         vec![RunEventType::RunCreated, RunEventType::RunInterrupted]
@@ -1120,7 +1154,7 @@ async fn startup_reconciliation_and_shutdown_use_distinct_terminal_reasons() {
             .await
             .unwrap()
             .unwrap()
-            .status,
+            .status(),
         RunStatus::Interrupted
     );
 
@@ -1145,11 +1179,11 @@ async fn startup_reconciliation_and_shutdown_use_distinct_terminal_reasons() {
     .unwrap();
 
     assert_eq!(
-        service.get_run(&attached_id).await.unwrap().status,
+        service.get_run(&attached_id).await.unwrap().status(),
         RunStatus::Cancelled
     );
     assert_eq!(
-        service.get_run(&detached.run_id).await.unwrap().status,
+        service.get_run(&detached.run_id).await.unwrap().status(),
         RunStatus::Interrupted
     );
 }

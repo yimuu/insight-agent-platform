@@ -5,7 +5,11 @@ use futures::stream;
 use insight_agent_platform::{
     dsl::compiler::{AgentCompiler, CompileLimits},
     events::hub::{EventHub, EventHubConfig},
-    history::{repository::RunRepository, sqlite::SqliteRunRepository, types::RunStatus},
+    history::{
+        repository::RunRepository,
+        sqlite::SqliteRunRepository,
+        types::{RunLifecycle, RunStatus},
+    },
     nodes::default_node_registries,
     resources::{
         actions::ActionRegistry,
@@ -186,7 +190,7 @@ async fn wait_for_status(service: &RunService, run_id: &str, expected: RunStatus
     let result = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let record = service.get_run(run_id).await.unwrap();
-            if record.status == expected {
+            if record.status() == expected {
                 return record;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -207,14 +211,13 @@ async fn bounded_chat_failure_releases_capacity_for_later_runs() {
         .unwrap();
     wait_for_status(service, &failed.run_id, RunStatus::Failed).await;
     let failed_record = service.get_run(&failed.run_id).await.unwrap();
-    assert_eq!(
-        failed_record.error_code.as_deref(),
-        Some("MODEL_RESPONSE_TOO_LARGE")
-    );
-    assert_eq!(
-        failed_record.error_message.as_deref(),
-        Some("chat provider response exceeded the configured size limit")
-    );
+    assert!(matches!(
+        failed_record.lifecycle,
+        RunLifecycle::Failed { ref error }
+            if error.code == "MODEL_RESPONSE_TOO_LARGE"
+                && error.message
+                    == "chat provider response exceeded the configured size limit"
+    ));
     assert!(
         !format!("{failed_record:?}").contains("capacity-release-secret"),
         "bounded failure leaked oversized content: {failed_record:?}"
@@ -226,7 +229,7 @@ async fn bounded_chat_failure_releases_capacity_for_later_runs() {
         .unwrap();
     wait_for_status(service, &success.run_id, RunStatus::Completed).await;
     let success_record = service.get_run(&success.run_id).await.unwrap();
-    assert_eq!(success_record.status, RunStatus::Completed);
+    assert_eq!(success_record.status(), RunStatus::Completed);
 
     fixture
         .service
