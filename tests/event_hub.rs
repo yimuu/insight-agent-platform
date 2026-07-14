@@ -109,8 +109,8 @@ async fn terminal_events_are_projected_only_from_typed_updates() {
                 at(10),
                 RunTerminal::Completed {
                     output: RunOutput {
-                        content: None,
-                        format: None,
+                        content: Some("answer".into()),
+                        format: Some("json".into()),
                         data: json!({"answer": 42}),
                     },
                 },
@@ -118,7 +118,7 @@ async fn terminal_events_are_projected_only_from_typed_updates() {
             RunEventType::RunCompleted,
             "OK",
             "ok",
-            json!({"data":{"answer":42}}),
+            json!({"content":"answer","format":"json","data":{"answer":42}}),
         ),
         (
             TerminalUpdate::new(
@@ -238,6 +238,85 @@ async fn terminal_events_are_projected_only_from_typed_updates() {
         assert_eq!(event.message, message);
         assert_eq!(event.data, data);
     }
+}
+
+#[tokio::test]
+async fn generic_publish_interfaces_reject_all_terminal_event_types_without_side_effects() {
+    for (index, event_type) in [
+        RunEventType::RunCompleted,
+        RunEventType::RunFailed,
+        RunEventType::RunCancelled,
+        RunEventType::RunInterrupted,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for publish_error in [false, true] {
+            let run_id = format!("run_generic_terminal_{index}_{publish_error}");
+            let repository = Arc::new(MemoryRepository::default());
+            let hub = EventHub::new(repository.clone(), config(8));
+            let error = if publish_error {
+                hub.publish_error(
+                    scope_for(&run_id, None),
+                    event_type,
+                    "FORGED_TERMINAL",
+                    "forged terminal event",
+                    json!({"forged":true}),
+                )
+                .await
+                .unwrap_err()
+            } else {
+                hub.publish(scope_for(&run_id, None), event_type, json!({"forged":true}))
+                    .await
+                    .unwrap_err()
+            };
+
+            assert_eq!(error.code(), "HISTORY_EVENT_INVALID");
+            assert!(repository.events.lock().await.is_empty());
+            assert!(repository.terminal_updates.lock().await.is_empty());
+            assert_eq!(hub.retained_run_count().await, 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn same_type_and_timestamp_with_different_terminal_fields_is_authoritative() {
+    let repository = Arc::new(MemoryRepository::default());
+    let hub = EventHub::new(repository, config(8));
+    let ended_at = at(17);
+    let durable = TerminalUpdate::new(
+        RUN_ID,
+        ended_at,
+        RunTerminal::Failed {
+            error: RunFailure {
+                kind: FailureKind::Workflow,
+                code: "DURABLE_WORKFLOW_FAILURE".into(),
+                message: "durable workflow failure".into(),
+            },
+        },
+    );
+    requested_event(hub.publish_terminal(scope(None), durable).await.unwrap());
+
+    let requested = TerminalUpdate::new(
+        RUN_ID,
+        ended_at,
+        RunTerminal::Failed {
+            error: RunFailure {
+                kind: FailureKind::Node,
+                code: "REQUESTED_NODE_FAILURE".into(),
+                message: "requested node failure".into(),
+            },
+        },
+    );
+    let expected_type = RunEventType::RunFailed;
+    let authoritative =
+        authoritative_event(hub.publish_terminal(scope(None), requested).await.unwrap());
+
+    assert_eq!(authoritative.event_type, expected_type);
+    assert_eq!(authoritative.timestamp, ended_at);
+    assert_eq!(authoritative.code, "DURABLE_WORKFLOW_FAILURE");
+    assert_eq!(authoritative.message, "durable workflow failure");
+    assert_eq!(authoritative.data, json!({"kind":"workflow"}));
 }
 
 #[tokio::test]

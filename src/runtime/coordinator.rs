@@ -292,34 +292,22 @@ impl RunCoordinator {
         started: Instant,
     ) -> Result<RunStatus, RunError> {
         let message = "runtime infrastructure failed";
-        let update = TerminalUpdate::new(
-            &run.run_id,
-            Utc::now(),
-            RunTerminal::Failed {
-                error: RunFailure {
-                    kind: FailureKind::Infrastructure,
-                    code: "INFRASTRUCTURE_FAILURE".to_string(),
-                    message: message.to_string(),
-                },
+        let terminal = RunTerminal::Failed {
+            error: RunFailure {
+                kind: FailureKind::Infrastructure,
+                code: "INFRASTRUCTURE_FAILURE".to_string(),
+                message: message.to_string(),
             },
-        );
+        };
+        let attempted = terminal_log_summary_from_terminal(&terminal);
+        let update = TerminalUpdate::new(&run.run_id, Utc::now(), terminal);
         let resolution = self
             .events
             .recover_terminal(run_scope(run), update)
             .await
             .map_err(event_error)?;
         let durable = self
-            .commit_terminal_state(
-                state,
-                run,
-                resolution,
-                TerminalLogSummary {
-                    status: RunStatus::Failed,
-                    output_bytes: 0,
-                    error_code: "INFRASTRUCTURE_FAILURE".to_string(),
-                    failure_kind: Some(FailureKind::Infrastructure),
-                },
-            )
+            .commit_terminal_state(state, run, resolution, attempted)
             .await?;
         tracing::info!(
             event_name = "run.finished",

@@ -1441,6 +1441,52 @@ async fn run_finished_log_uses_durable_failed_terminal_when_completion_loses_rac
         .find(|event| event.field("error_code") == Some("DURABLE_WORKFLOW_FAILURE"))
         .expect("durable workflow run.finished log");
     assert_eq!(finished.field("failure_kind"), Some("workflow"));
+
+    let repository = Arc::new(MemoryRepository::default());
+    repository.fail_next_append.store(true, Ordering::SeqCst);
+    let requested_recovery_coordinator = coordinator(
+        agent(
+            vec![node(
+                "result",
+                None,
+                Duration::from_secs(1),
+                Behavior::Complete(RunOutput {
+                    content: Some("unreached output".into()),
+                    format: Some("text".into()),
+                    data: json!({}),
+                }),
+            )],
+            "result",
+        ),
+        Arc::clone(&repository),
+        true,
+    );
+    let (_, stop) = stop_pair();
+    assert_eq!(
+        requested_recovery_coordinator
+            .execute(new_run(), json!({}), stop)
+            .await
+            .unwrap(),
+        RunStatus::Failed
+    );
+    let updates = repository.terminal_updates.lock().await;
+    let RunTerminal::Failed { error } = &updates
+        .last()
+        .expect("requested recovery terminal update")
+        .terminal
+    else {
+        panic!("requested recovery must persist a failed terminal")
+    };
+    let terminal_code = error.code.clone();
+    let terminal_kind = error.kind.as_str();
+    drop(updates);
+    let finished = recorded_info_logs(&recorded, "run.finished")
+        .into_iter()
+        .find(|event| event.field("error_code") == Some(terminal_code.as_str()))
+        .expect("requested recovery run.finished log");
+    assert_eq!(terminal_code, "INFRASTRUCTURE_FAILURE");
+    assert_eq!(terminal_kind, "infrastructure");
+    assert_eq!(finished.field("failure_kind"), Some(terminal_kind));
 }
 
 #[tokio::test]

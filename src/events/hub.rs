@@ -184,6 +184,7 @@ impl EventHub {
         message: impl Into<String>,
         data: Value,
     ) -> Result<RunEvent, EventError> {
+        validate_nonterminal_event_type(event_type)?;
         let state = self.run_state(&scope.run_id).await;
         let mut state = state.lock().await;
         ensure_sequence_available(&state)?;
@@ -496,6 +497,16 @@ fn is_terminal(event_type: RunEventType) -> bool {
             | RunEventType::RunCancelled
             | RunEventType::RunInterrupted
     )
+}
+
+fn validate_nonterminal_event_type(event_type: RunEventType) -> Result<(), EventError> {
+    if is_terminal(event_type) {
+        return Err(EventError::History(HistoryError::new(
+            "HISTORY_EVENT_INVALID",
+            "terminal events require a typed terminal update",
+        )));
+    }
+    Ok(())
 }
 
 fn validate_terminal_scope(
