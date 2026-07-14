@@ -1,6 +1,6 @@
 use std::{collections::HashMap, error::Error, fmt, sync::Arc, time::Duration};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::{
     sync::{broadcast, watch, Mutex},
     time::timeout,
@@ -8,8 +8,9 @@ use tokio::{
 
 use crate::history::{
     repository::{HistoryError, RunRepository},
-    types::{NodeOutputRecord, TerminalUpdate},
+    types::{NodeOutputRecord, RunTerminal, TerminalUpdate},
 };
+use crate::outcome::RunOutput;
 
 use super::{
     journal::EventJournal,
@@ -82,6 +83,12 @@ impl From<HistoryError> for EventError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum TerminalResolution {
+    Requested(RunEvent),
+    Authoritative(RunEvent),
+}
+
 struct EventRunState {
     next_seq: u64,
     live: broadcast::Sender<RunEvent>,
@@ -90,11 +97,7 @@ struct EventRunState {
 #[derive(Clone)]
 struct RecoveryRequest {
     scope: RunEventScope,
-    event_type: RunEventType,
     update: TerminalUpdate,
-    code: String,
-    message: String,
-    data: Value,
 }
 
 impl RecoveryRequest {
@@ -103,14 +106,7 @@ impl RecoveryRequest {
     }
 
     fn terminal_event(&self, seq: u64) -> RunEvent {
-        RunEvent::error(
-            self.event_type,
-            seq,
-            self.scope.clone(),
-            self.code.clone(),
-            self.message.clone(),
-            self.data.clone(),
-        )
+        terminal_event(self.scope.clone(), seq, &self.update)
     }
 }
 
@@ -200,19 +196,15 @@ impl EventHub {
     pub async fn publish_terminal(
         &self,
         scope: RunEventScope,
-        event_type: RunEventType,
         update: TerminalUpdate,
-        code: impl Into<String>,
-        message: impl Into<String>,
-        data: Value,
-    ) -> Result<Option<RunEvent>, EventError> {
-        validate_terminal_request(&scope, event_type, &update)?;
+    ) -> Result<TerminalResolution, EventError> {
+        validate_terminal_scope(&scope, &update)?;
         let run_id = scope.run_id.clone();
         let state_handle = self.run_state(&run_id).await;
         let mut state = state_handle.lock().await;
         ensure_sequence_available(&state)?;
-        let event = RunEvent::error(event_type, state.next_seq, scope, code, message, data);
-        if !self.inner.journal.finish(update, event.clone()).await? {
+        let requested = terminal_event(scope, state.next_seq, &update);
+        if !self.inner.journal.finish(update, requested.clone()).await? {
             let expected_seq = state.next_seq;
             let existing = timeout(
                 self.inner.operation_timeout,
@@ -227,20 +219,20 @@ impl EventHub {
                 .next()
                 .filter(|existing| existing.seq == expected_seq && is_terminal(existing.event_type))
             {
-                commit_live_event(&mut state, existing);
+                commit_live_event(&mut state, existing.clone());
                 drop(state);
                 self.isolate_run_state(&run_id, &state_handle).await;
-                return Ok(None);
+                return Ok(terminal_resolution(requested, existing));
             }
             return Err(EventError::History(HistoryError::new(
                 "HISTORY_TERMINAL_EVENT_MISSING",
                 "run is terminal but its authoritative terminal event is missing",
             )));
         }
-        commit_live_event(&mut state, event.clone());
+        commit_live_event(&mut state, requested.clone());
         drop(state);
         self.isolate_run_state(&run_id, &state_handle).await;
-        Ok(Some(event))
+        Ok(TerminalResolution::Requested(requested))
     }
 
     pub async fn put_node_output(&self, output: NodeOutputRecord) -> Result<(), EventError> {
@@ -254,41 +246,18 @@ impl EventHub {
     pub async fn recover_terminal(
         &self,
         scope: RunEventScope,
-        event_type: RunEventType,
         update: TerminalUpdate,
-        code: impl Into<String>,
-        message: impl Into<String>,
-        data: Value,
-    ) -> Result<Option<RunEvent>, EventError> {
-        validate_terminal_request(&scope, event_type, &update)?;
-        let code = code.into();
-        let message = message.into();
-        match self
-            .publish_terminal(
-                scope.clone(),
-                event_type,
-                update.clone(),
-                code.clone(),
-                message.clone(),
-                data.clone(),
-            )
-            .await
-        {
-            Ok(event) => return Ok(event),
+    ) -> Result<TerminalResolution, EventError> {
+        validate_terminal_scope(&scope, &update)?;
+        match self.publish_terminal(scope.clone(), update.clone()).await {
+            Ok(resolution) => return Ok(resolution),
             Err(EventError::SequenceExhausted) => return Err(EventError::SequenceExhausted),
             Err(_) => {}
         }
 
         self.inner.journal.close_and_wait().await?;
 
-        let request = RecoveryRequest {
-            scope,
-            event_type,
-            update,
-            code,
-            message,
-            data,
-        };
+        let request = RecoveryRequest { scope, update };
         self.recover_terminal_direct(request).await
     }
 
@@ -399,17 +368,17 @@ impl EventHub {
     async fn recover_terminal_direct(
         &self,
         request: RecoveryRequest,
-    ) -> Result<Option<RunEvent>, EventError> {
+    ) -> Result<TerminalResolution, EventError> {
         let run_id = request.run_id().to_string();
         let state_handle = self.run_state(&run_id).await;
         let mut state = state_handle.lock().await;
         ensure_sequence_available(&state)?;
-        let event = request.terminal_event(state.next_seq);
+        let requested = request.terminal_event(state.next_seq);
         let recovered = timeout(
             self.inner.operation_timeout,
             self.inner
                 .repository
-                .recover_run(request.update.clone(), event),
+                .recover_run(request.update.clone(), requested.clone()),
         )
         .await;
 
@@ -436,7 +405,7 @@ impl EventHub {
             Ok(()) => {
                 drop(state);
                 self.isolate_run_state(&run_id, &state_handle).await;
-                Ok((authoritative.event_type == request.event_type).then_some(authoritative))
+                Ok(terminal_resolution(requested, authoritative))
             }
             Err(error) => {
                 drop(state);
@@ -529,27 +498,76 @@ fn is_terminal(event_type: RunEventType) -> bool {
     )
 }
 
-fn validate_terminal_request(
+fn validate_terminal_scope(
     scope: &RunEventScope,
-    event_type: RunEventType,
     update: &TerminalUpdate,
 ) -> Result<(), EventError> {
-    let expected_type = match update.status() {
-        crate::history::types::RunStatus::Completed => RunEventType::RunCompleted,
-        crate::history::types::RunStatus::Failed => RunEventType::RunFailed,
-        crate::history::types::RunStatus::Cancelled => RunEventType::RunCancelled,
-        crate::history::types::RunStatus::Interrupted => RunEventType::RunInterrupted,
-        crate::history::types::RunStatus::Created | crate::history::types::RunStatus::Running => {
-            unreachable!("typed terminal update is terminal")
-        }
-    };
-    if update.run_id != scope.run_id || event_type != expected_type {
+    if update.run_id != scope.run_id {
         return Err(EventError::History(HistoryError::new(
             "HISTORY_EVENT_INVALID",
-            "terminal event does not match its typed update",
+            "terminal event scope does not match its typed update",
         )));
     }
     Ok(())
+}
+
+fn completed_data(output: &RunOutput) -> Value {
+    let mut data = serde_json::Map::new();
+    data.insert("data".to_string(), output.data.clone());
+    if let Some(content) = &output.content {
+        data.insert("content".to_string(), Value::String(content.clone()));
+    }
+    if let Some(format) = &output.format {
+        data.insert("format".to_string(), Value::String(format.clone()));
+    }
+    Value::Object(data)
+}
+
+fn terminal_event(scope: RunEventScope, seq: u64, update: &TerminalUpdate) -> RunEvent {
+    match &update.terminal {
+        RunTerminal::Completed { output } => RunEvent::ok_at(
+            RunEventType::RunCompleted,
+            seq,
+            scope,
+            update.ended_at,
+            completed_data(output),
+        ),
+        RunTerminal::Failed { error } => RunEvent::error_at(
+            RunEventType::RunFailed,
+            seq,
+            scope,
+            update.ended_at,
+            error.code.clone(),
+            error.message.clone(),
+            json!({"kind": error.kind}),
+        ),
+        RunTerminal::Cancelled { error } => RunEvent::error_at(
+            RunEventType::RunCancelled,
+            seq,
+            scope,
+            update.ended_at,
+            error.code.clone(),
+            error.message.clone(),
+            json!({}),
+        ),
+        RunTerminal::Interrupted { error } => RunEvent::error_at(
+            RunEventType::RunInterrupted,
+            seq,
+            scope,
+            update.ended_at,
+            error.code.clone(),
+            error.message.clone(),
+            json!({}),
+        ),
+    }
+}
+
+fn terminal_resolution(requested: RunEvent, authoritative: RunEvent) -> TerminalResolution {
+    if requested == authoritative {
+        TerminalResolution::Requested(authoritative)
+    } else {
+        TerminalResolution::Authoritative(authoritative)
+    }
 }
 
 pub struct EventSubscription {

@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::{
     dsl::compiled::CompiledAgent,
     events::{
-        hub::{EventError, EventHub},
+        hub::{EventError, EventHub, TerminalResolution},
         protocol::{RunEventScope, RunEventType},
     },
     history::{
@@ -258,66 +258,15 @@ impl RunCoordinator {
         terminal: RunTerminal,
         started: Instant,
     ) -> Result<RunStatus, RunError> {
-        let status = terminal.status();
-        let (event_type, code, message, data, output_bytes, error_code, failure_kind) =
-            match &terminal {
-                RunTerminal::Completed { output } => (
-                    RunEventType::RunCompleted,
-                    "OK".to_string(),
-                    "ok".to_string(),
-                    serde_json::to_value(output).map_err(|_| {
-                        RunError::new("RUN_OUTPUT_INVALID", "failed to serialize run output")
-                    })?,
-                    json_size_bytes(output),
-                    String::new(),
-                    None,
-                ),
-                RunTerminal::Failed { error } => (
-                    RunEventType::RunFailed,
-                    error.code.clone(),
-                    error.message.clone(),
-                    json!({"kind": error.kind}),
-                    0,
-                    error.code.clone(),
-                    Some(error.kind),
-                ),
-                RunTerminal::Cancelled { error } => (
-                    RunEventType::RunCancelled,
-                    error.code.clone(),
-                    error.message.clone(),
-                    json!({}),
-                    0,
-                    error.code.clone(),
-                    None,
-                ),
-                RunTerminal::Interrupted { error } => (
-                    RunEventType::RunInterrupted,
-                    error.code.clone(),
-                    error.message.clone(),
-                    json!({}),
-                    0,
-                    error.code.clone(),
-                    None,
-                ),
-            };
+        let attempted = terminal_log_summary_from_terminal(&terminal);
         let update = TerminalUpdate::new(&run.run_id, Utc::now(), terminal);
-        let published = self
+        let resolution = self
             .events
-            .publish_terminal(run_scope(run), event_type, update, code, message, data)
+            .publish_terminal(run_scope(run), update)
             .await
             .map_err(event_error)?;
         let durable = self
-            .commit_terminal_state(
-                state,
-                run,
-                published,
-                TerminalLogSummary {
-                    status,
-                    output_bytes,
-                    error_code,
-                    failure_kind,
-                },
-            )
+            .commit_terminal_state(state, run, resolution, attempted)
             .await?;
         tracing::info!(
             event_name = "run.finished",
@@ -354,23 +303,16 @@ impl RunCoordinator {
                 },
             },
         );
-        let published = self
+        let resolution = self
             .events
-            .recover_terminal(
-                run_scope(run),
-                RunEventType::RunFailed,
-                update,
-                "INFRASTRUCTURE_FAILURE",
-                message,
-                json!({"kind":FailureKind::Infrastructure}),
-            )
+            .recover_terminal(run_scope(run), update)
             .await
             .map_err(event_error)?;
         let durable = self
             .commit_terminal_state(
                 state,
                 run,
-                published,
+                resolution,
                 TerminalLogSummary {
                     status: RunStatus::Failed,
                     output_bytes: 0,
@@ -400,24 +342,54 @@ impl RunCoordinator {
         &self,
         state: &RunState,
         run: &NewRun,
-        published: Option<crate::events::protocol::RunEvent>,
+        resolution: TerminalResolution,
         attempted: TerminalLogSummary,
     ) -> Result<TerminalLogSummary, RunError> {
-        let durable = if published.is_some() {
-            attempted
-        } else {
-            let record = self
-                .repository
-                .get_run(&run.run_id)
-                .await
-                .map_err(history_error)?
-                .ok_or_else(|| {
-                    RunError::new("RUN_NOT_FOUND", "run not found after terminal race")
-                })?;
-            terminal_log_summary_from_record(&record)
+        let durable = match resolution {
+            TerminalResolution::Requested(_) => attempted,
+            TerminalResolution::Authoritative(_) => {
+                let record = self
+                    .repository
+                    .get_run(&run.run_id)
+                    .await
+                    .map_err(history_error)?
+                    .ok_or_else(|| {
+                        RunError::new("RUN_NOT_FOUND", "run not found after terminal race")
+                    })?;
+                terminal_log_summary_from_record(&record)
+            }
         };
         state.try_terminal(durable.status).await?;
         Ok(durable)
+    }
+}
+
+fn terminal_log_summary_from_terminal(terminal: &RunTerminal) -> TerminalLogSummary {
+    match terminal {
+        RunTerminal::Completed { output } => TerminalLogSummary {
+            status: RunStatus::Completed,
+            output_bytes: json_size_bytes(output),
+            error_code: String::new(),
+            failure_kind: None,
+        },
+        RunTerminal::Failed { error } => TerminalLogSummary {
+            status: RunStatus::Failed,
+            output_bytes: 0,
+            error_code: error.code.clone(),
+            failure_kind: Some(error.kind),
+        },
+        RunTerminal::Cancelled { error } => TerminalLogSummary {
+            status: RunStatus::Cancelled,
+            output_bytes: 0,
+            error_code: error.code.clone(),
+            failure_kind: None,
+        },
+        RunTerminal::Interrupted { error } => TerminalLogSummary {
+            status: RunStatus::Interrupted,
+            output_bytes: 0,
+            error_code: error.code.clone(),
+            failure_kind: None,
+        },
     }
 }
 

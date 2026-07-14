@@ -11,12 +11,14 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use insight_agent_platform::{
     events::{
-        hub::{EventError, EventHub, EventHubConfig},
+        hub::{EventError, EventHub, EventHubConfig, TerminalResolution},
         protocol::{RunEvent, RunEventScope, RunEventType},
     },
     history::{
         repository::{HistoryError, RunRepository},
-        types::{NewRun, NodeOutputRecord, RunRecord, RunStatus, RunTerminal, TerminalUpdate},
+        types::{
+            NewRun, NodeOutputRecord, RunRecord, RunStatus, RunTerminal, StopError, TerminalUpdate,
+        },
     },
     outcome::{FailureKind, RunFailure, RunOutput},
 };
@@ -80,36 +82,174 @@ fn completed_update(run_id: &str, second: u32) -> TerminalUpdate {
     )
 }
 
+fn requested_event(resolution: TerminalResolution) -> RunEvent {
+    match resolution {
+        TerminalResolution::Requested(event) => event,
+        TerminalResolution::Authoritative(event) => {
+            panic!("new terminal unexpectedly lost to {event:?}")
+        }
+    }
+}
+
+fn authoritative_event(resolution: TerminalResolution) -> RunEvent {
+    match resolution {
+        TerminalResolution::Authoritative(event) => event,
+        TerminalResolution::Requested(event) => {
+            panic!("recovery unexpectedly matched local terminal {event:?}")
+        }
+    }
+}
+
+#[tokio::test]
+async fn terminal_events_are_projected_only_from_typed_updates() {
+    let cases = vec![
+        (
+            TerminalUpdate::new(
+                "run_completed",
+                at(10),
+                RunTerminal::Completed {
+                    output: RunOutput {
+                        content: None,
+                        format: None,
+                        data: json!({"answer": 42}),
+                    },
+                },
+            ),
+            RunEventType::RunCompleted,
+            "OK",
+            "ok",
+            json!({"data":{"answer":42}}),
+        ),
+        (
+            TerminalUpdate::new(
+                "run_workflow",
+                at(11),
+                RunTerminal::Failed {
+                    error: RunFailure {
+                        kind: FailureKind::Workflow,
+                        code: "WORKFLOW_REJECTED".into(),
+                        message: "workflow rejected".into(),
+                    },
+                },
+            ),
+            RunEventType::RunFailed,
+            "WORKFLOW_REJECTED",
+            "workflow rejected",
+            json!({"kind":"workflow"}),
+        ),
+        (
+            TerminalUpdate::new(
+                "run_node",
+                at(12),
+                RunTerminal::Failed {
+                    error: RunFailure {
+                        kind: FailureKind::Node,
+                        code: "NODE_FAILED".into(),
+                        message: "node failed".into(),
+                    },
+                },
+            ),
+            RunEventType::RunFailed,
+            "NODE_FAILED",
+            "node failed",
+            json!({"kind":"node"}),
+        ),
+        (
+            TerminalUpdate::new(
+                "run_timeout",
+                at(13),
+                RunTerminal::Failed {
+                    error: RunFailure {
+                        kind: FailureKind::Timeout,
+                        code: "RUN_TIMEOUT".into(),
+                        message: "run timed out".into(),
+                    },
+                },
+            ),
+            RunEventType::RunFailed,
+            "RUN_TIMEOUT",
+            "run timed out",
+            json!({"kind":"timeout"}),
+        ),
+        (
+            TerminalUpdate::new(
+                "run_infrastructure",
+                at(14),
+                RunTerminal::Failed {
+                    error: RunFailure {
+                        kind: FailureKind::Infrastructure,
+                        code: "INFRASTRUCTURE_FAILURE".into(),
+                        message: "runtime infrastructure failed".into(),
+                    },
+                },
+            ),
+            RunEventType::RunFailed,
+            "INFRASTRUCTURE_FAILURE",
+            "runtime infrastructure failed",
+            json!({"kind":"infrastructure"}),
+        ),
+        (
+            TerminalUpdate::new(
+                "run_cancelled",
+                at(15),
+                RunTerminal::Cancelled {
+                    error: StopError {
+                        code: "RUN_CANCELLED".into(),
+                        message: "run cancelled".into(),
+                    },
+                },
+            ),
+            RunEventType::RunCancelled,
+            "RUN_CANCELLED",
+            "run cancelled",
+            json!({}),
+        ),
+        (
+            TerminalUpdate::new(
+                "run_interrupted",
+                at(16),
+                RunTerminal::Interrupted {
+                    error: StopError {
+                        code: "RUN_INTERRUPTED".into(),
+                        message: "run interrupted".into(),
+                    },
+                },
+            ),
+            RunEventType::RunInterrupted,
+            "RUN_INTERRUPTED",
+            "run interrupted",
+            json!({}),
+        ),
+    ];
+
+    for (update, event_type, code, message, data) in cases {
+        let run_id = update.run_id.clone();
+        let ended_at = update.ended_at;
+        let repository = Arc::new(MemoryRepository::default());
+        let hub = EventHub::new(repository, config(8));
+        let event = requested_event(
+            hub.publish_terminal(scope_for(&run_id, None), update)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(event.event_type, event_type);
+        assert_eq!(event.timestamp, ended_at);
+        assert_eq!(event.code, code);
+        assert_eq!(event.message, message);
+        assert_eq!(event.data, data);
+    }
+}
+
 #[tokio::test]
 async fn terminal_publish_rejects_mismatched_typed_request_before_storage() {
     let repository = Arc::new(MemoryRepository::default());
     let hub = EventHub::new(repository.clone(), config(8));
 
     let wrong_run = hub
-        .publish_terminal(
-            scope(None),
-            RunEventType::RunFailed,
-            failed_update("different_run", 10),
-            "INFRASTRUCTURE_FAILURE",
-            "runtime infrastructure failed",
-            json!({}),
-        )
+        .publish_terminal(scope(None), failed_update("different_run", 10))
         .await
         .unwrap_err();
     assert_eq!(wrong_run.code(), "HISTORY_EVENT_INVALID");
-
-    let wrong_type = hub
-        .publish_terminal(
-            scope(None),
-            RunEventType::RunCompleted,
-            failed_update(RUN_ID, 11),
-            "INFRASTRUCTURE_FAILURE",
-            "runtime infrastructure failed",
-            json!({}),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(wrong_type.code(), "HISTORY_EVENT_INVALID");
 
     assert!(repository.terminal_updates.lock().await.is_empty());
     assert!(repository.events.lock().await.is_empty());
@@ -554,16 +694,12 @@ async fn saturated_queue_failure_drops_no_broadcast_and_each_run_can_recover() {
         .enumerate()
     {
         let update = failed_update(run_id, 20 + index as u32);
-        hub.recover_terminal(
-            scope_for(run_id, None),
-            RunEventType::RunFailed,
-            update,
-            "INFRASTRUCTURE_FAILURE",
-            "runtime infrastructure failed",
-            json!({"kind":"infrastructure"}),
-        )
-        .await
-        .unwrap();
+        assert!(matches!(
+            hub.recover_terminal(scope_for(run_id, None), update)
+                .await
+                .unwrap(),
+            TerminalResolution::Requested(_)
+        ));
         assert_eq!(
             subscribers[index].recv().await.unwrap().event_type,
             RunEventType::RunFailed
@@ -588,17 +724,7 @@ async fn journal_operation_timeout_bounds_terminal_persistence_waits() {
     );
     let update = failed_update(RUN_ID, 11);
 
-    let error = hub
-        .publish_terminal(
-            scope(None),
-            RunEventType::RunFailed,
-            update,
-            "INFRASTRUCTURE_FAILURE",
-            "runtime infrastructure failed",
-            json!({"kind":"infrastructure"}),
-        )
-        .await
-        .unwrap_err();
+    let error = hub.publish_terminal(scope(None), update).await.unwrap_err();
     assert_eq!(error.code(), "JOURNAL_OPERATION_TIMEOUT");
 }
 
@@ -633,27 +759,12 @@ async fn recovery_derives_terminal_after_an_uncertain_append_commit() {
     );
 
     let failed = failed_update(RUN_ID, 14);
-    let terminal = hub
-        .recover_terminal(
-            scope(None),
-            RunEventType::RunFailed,
-            failed,
-            "INFRASTRUCTURE_FAILURE",
-            "runtime infrastructure failed",
-            json!({"kind":"infrastructure"}),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    let created_type = RunEventType::RunCreated;
+    let failed_type = RunEventType::RunFailed;
+    let terminal = authoritative_event(hub.recover_terminal(scope(None), failed).await.unwrap());
     assert_eq!(terminal.seq, 2);
-    assert_eq!(
-        subscriber.recv().await.unwrap().event_type,
-        RunEventType::RunCreated
-    );
-    assert_eq!(
-        subscriber.recv().await.unwrap().event_type,
-        RunEventType::RunFailed
-    );
+    assert_eq!(subscriber.recv().await.unwrap().event_type, created_type);
+    assert_eq!(subscriber.recv().await.unwrap().event_type, failed_type);
     assert_eq!(repository.stored_sequences(RUN_ID).await, vec![1, 2]);
     assert!(matches!(
         repository.terminal_updates.lock().await[0].terminal,
@@ -694,14 +805,7 @@ async fn recovery_timeout_isolates_live_state_and_hands_off_one_owner() {
 
     let error = tokio::time::timeout(
         Duration::from_millis(250),
-        hub.recover_terminal(
-            scope(None),
-            RunEventType::RunFailed,
-            failed_update(RUN_ID, 21),
-            "INFRASTRUCTURE_FAILURE",
-            "runtime infrastructure failed",
-            json!({}),
-        ),
+        hub.recover_terminal(scope(None), failed_update(RUN_ID, 21)),
     )
     .await
     .expect("foreground recovery must be bounded")
@@ -754,14 +858,7 @@ async fn duplicate_recovery_timeouts_reuse_the_same_background_owner() {
     for second in [22, 23] {
         let error = tokio::time::timeout(
             Duration::from_millis(250),
-            hub.recover_terminal(
-                scope(None),
-                RunEventType::RunFailed,
-                failed_update(RUN_ID, second),
-                "INFRASTRUCTURE_FAILURE",
-                "runtime infrastructure failed",
-                json!({}),
-            ),
+            hub.recover_terminal(scope(None), failed_update(RUN_ID, second)),
         )
         .await
         .expect("foreground recovery must be bounded")
@@ -815,14 +912,7 @@ async fn authoritative_recovery_terminal_with_blocked_reconciliation_closes_live
     );
 
     let error = hub
-        .recover_terminal(
-            scope(None),
-            RunEventType::RunFailed,
-            failed_update(RUN_ID, 24),
-            "INFRASTRUCTURE_FAILURE",
-            "runtime infrastructure failed",
-            json!({}),
-        )
+        .recover_terminal(scope(None), failed_update(RUN_ID, 24))
         .await
         .unwrap_err();
 
@@ -882,14 +972,7 @@ async fn authoritative_recovery_terminal_with_mismatched_history_closes_without_
         .await;
 
     let error = hub
-        .recover_terminal(
-            scope(None),
-            RunEventType::RunFailed,
-            failed_update(RUN_ID, 25),
-            "INFRASTRUCTURE_FAILURE",
-            "runtime infrastructure failed",
-            json!({}),
-        )
+        .recover_terminal(scope(None), failed_update(RUN_ID, 25))
         .await
         .unwrap_err();
 
@@ -918,34 +1001,19 @@ async fn timed_out_terminal_write_is_cancelled_before_recovery() {
     let mut subscriber = hub.subscribe(RUN_ID).await;
     let completed = completed_update(RUN_ID, 12);
     assert_eq!(
-        hub.publish_terminal(
-            scope(None),
-            RunEventType::RunCompleted,
-            completed,
-            "OK",
-            "ok",
-            json!({}),
-        )
-        .await
-        .unwrap_err()
-        .code(),
+        hub.publish_terminal(scope(None), completed)
+            .await
+            .unwrap_err()
+            .code(),
         "JOURNAL_OPERATION_TIMEOUT"
     );
     repository.block_terminal.store(false, Ordering::SeqCst);
 
     let failed = failed_update(RUN_ID, 13);
-    assert!(hub
-        .recover_terminal(
-            scope(None),
-            RunEventType::RunFailed,
-            failed,
-            "INFRASTRUCTURE_FAILURE",
-            "runtime infrastructure failed",
-            json!({"kind":"infrastructure"}),
-        )
-        .await
-        .unwrap()
-        .is_some());
+    assert!(matches!(
+        hub.recover_terminal(scope(None), failed).await.unwrap(),
+        TerminalResolution::Requested(_)
+    ));
 
     assert_eq!(
         subscriber.recv().await.unwrap().event_type,
@@ -996,17 +1064,7 @@ async fn terminal_event_is_broadcast_only_after_the_repository_commit() {
     let update = completed_update(RUN_ID, 10);
     let publishing = {
         let hub = hub.clone();
-        tokio::spawn(async move {
-            hub.publish_terminal(
-                scope(None),
-                RunEventType::RunCompleted,
-                update,
-                "OK",
-                "ok",
-                json!({"content":"done", "format":"text", "data":{}}),
-            )
-            .await
-        })
+        tokio::spawn(async move { hub.publish_terminal(scope(None), update).await })
     };
 
     repository.terminal_called.notified().await;
@@ -1017,7 +1075,7 @@ async fn terminal_event_is_broadcast_only_after_the_repository_commit() {
     );
     repository.allow_terminal.notify_one();
 
-    let published = publishing.await.unwrap().unwrap().unwrap();
+    let published = requested_event(publishing.await.unwrap().unwrap());
     let received = subscriber.recv().await.unwrap();
     assert_eq!(received, published);
     assert_eq!(received.event_type, RunEventType::RunCompleted);

@@ -693,36 +693,27 @@ fn run_scope(run: &NewRun) -> RunEventScope {
     )
 }
 
-fn terminal_spec(reason: StopReason) -> (RunTerminal, RunEventType) {
+fn terminal_spec(reason: StopReason) -> RunTerminal {
     match reason {
-        StopReason::Cancelled => (
-            RunTerminal::Cancelled {
-                error: StopError {
-                    code: "RUN_CANCELLED".to_string(),
-                    message: "run cancelled".to_string(),
-                },
+        StopReason::Cancelled => RunTerminal::Cancelled {
+            error: StopError {
+                code: "RUN_CANCELLED".to_string(),
+                message: "run cancelled".to_string(),
             },
-            RunEventType::RunCancelled,
-        ),
-        StopReason::Interrupted => (
-            RunTerminal::Interrupted {
-                error: StopError {
-                    code: "RUN_INTERRUPTED".to_string(),
-                    message: "run interrupted".to_string(),
-                },
+        },
+        StopReason::Interrupted => RunTerminal::Interrupted {
+            error: StopError {
+                code: "RUN_INTERRUPTED".to_string(),
+                message: "run interrupted".to_string(),
             },
-            RunEventType::RunInterrupted,
-        ),
-        StopReason::TimedOut => (
-            RunTerminal::Failed {
-                error: RunFailure {
-                    kind: FailureKind::Timeout,
-                    code: "RUN_TIMEOUT".to_string(),
-                    message: "run timed out".to_string(),
-                },
+        },
+        StopReason::TimedOut => RunTerminal::Failed {
+            error: RunFailure {
+                kind: FailureKind::Timeout,
+                code: "RUN_TIMEOUT".to_string(),
+                message: "run timed out".to_string(),
             },
-            RunEventType::RunFailed,
-        ),
+        },
     }
 }
 
@@ -743,16 +734,11 @@ async fn publish_prelaunch_terminal(
         )
         .await
         .map_err(|error| ServiceError::new(error.code(), error.to_string()))?;
-    let (terminal, event_type) = terminal_spec(reason);
-    let code = terminal.error_code().unwrap_or_default().to_string();
-    let message = terminal.error_message().unwrap_or_default().to_string();
-    let data = terminal
-        .failure()
-        .map_or_else(|| json!({}), |error| json!({"kind":error.kind}));
+    let terminal = terminal_spec(reason);
     let update = TerminalUpdate::new(&run.run_id, Utc::now(), terminal);
     inner
         .events
-        .publish_terminal(run_scope(&run), event_type, update, code, message, data)
+        .publish_terminal(run_scope(&run), update)
         .await
         .map_err(|error| ServiceError::new(error.code(), error.to_string()))?;
     Ok(())

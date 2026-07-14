@@ -430,8 +430,13 @@ impl RunRepository for MemoryRepository {
             .await
             .last()
             .map_or(1, |event| event.seq + 1);
-        self.finish_run(update, terminal.clone()).await?;
-        Ok(terminal)
+        self.finish_run(update, terminal).await?;
+        self.events.lock().await.last().cloned().ok_or_else(|| {
+            HistoryError::new(
+                "TEST_TERMINAL_EVENT_MISSING",
+                "synthetic recovery did not store a terminal event",
+            )
+        })
     }
 
     async fn get_run(&self, _run_id: &str) -> Result<Option<RunRecord>, HistoryError> {
@@ -1361,7 +1366,7 @@ async fn run_finished_log_uses_durable_failed_terminal_when_completion_loses_rac
         format: Some("text".to_string()),
         data: json!({"ok": true}),
     };
-    let coordinator = coordinator(
+    let race_coordinator = coordinator(
         agent(
             vec![node(
                 "result",
@@ -1377,7 +1382,7 @@ async fn run_finished_log_uses_durable_failed_terminal_when_completion_loses_rac
     let (_, stop) = stop_pair();
 
     assert_eq!(
-        coordinator
+        race_coordinator
             .execute(new_run(), json!({}), stop)
             .await
             .unwrap(),
@@ -1392,6 +1397,50 @@ async fn run_finished_log_uses_durable_failed_terminal_when_completion_loses_rac
     assert_eq!(finished[0].field("status"), Some("failed"));
     assert_eq!(finished[0].field("output_bytes"), Some("0"));
     assert_eq!(finished[0].field("error_code"), Some("DURABLE_FAILURE"));
+
+    let repository = Arc::new(MemoryRepository::default());
+    repository.fail_next_append.store(true, Ordering::SeqCst);
+    *repository.terminal_race.lock().await = Some(TerminalUpdate::new(
+        RUN_ID,
+        Utc::now(),
+        RunTerminal::Failed {
+            error: RunFailure {
+                kind: FailureKind::Workflow,
+                code: "DURABLE_WORKFLOW_FAILURE".into(),
+                message: "durable workflow failure won recovery".into(),
+            },
+        },
+    ));
+    let recovery_coordinator = coordinator(
+        agent(
+            vec![node(
+                "result",
+                None,
+                Duration::from_secs(1),
+                Behavior::Complete(RunOutput {
+                    content: Some("uncommitted output".into()),
+                    format: Some("text".into()),
+                    data: json!({}),
+                }),
+            )],
+            "result",
+        ),
+        Arc::clone(&repository),
+        true,
+    );
+    let (_, stop) = stop_pair();
+    assert_eq!(
+        recovery_coordinator
+            .execute(new_run(), json!({}), stop)
+            .await
+            .unwrap(),
+        RunStatus::Failed
+    );
+    let finished = recorded_info_logs(&recorded, "run.finished")
+        .into_iter()
+        .find(|event| event.field("error_code") == Some("DURABLE_WORKFLOW_FAILURE"))
+        .expect("durable workflow run.finished log");
+    assert_eq!(finished.field("failure_kind"), Some("workflow"));
 }
 
 #[tokio::test]
