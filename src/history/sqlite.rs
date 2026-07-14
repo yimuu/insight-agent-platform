@@ -505,6 +505,30 @@ struct RunRow {
 }
 
 fn run_record_from_row(row: RunRow) -> Result<RunRecord, HistoryError> {
+    let status = RunStatus::parse(&row.status)
+        .ok_or_else(|| invalid_data(format!("invalid stored run status '{}'", row.status)))?;
+    let output = row
+        .output
+        .map(|value| deserialize_json(&value, "output"))
+        .transpose()?;
+    let error_kind = row
+        .error_kind
+        .as_deref()
+        .map(parse_failure_kind)
+        .transpose()?;
+    let ended_at = row
+        .ended_at
+        .map(|value| parse_timestamp(&value, "ended_at"))
+        .transpose()?;
+    let lifecycle = lifecycle_from_columns(
+        status,
+        ended_at.as_ref(),
+        output,
+        error_kind,
+        row.error_code,
+        row.error_message,
+    )?;
+
     Ok(RunRecord {
         run_id: row.run_id,
         request_id: row.request_id,
@@ -516,28 +540,12 @@ fn run_record_from_row(row: RunRow) -> Result<RunRecord, HistoryError> {
                 row.attachment
             ))
         })?,
-        lifecycle: lifecycle_from_columns(
-            RunStatus::parse(&row.status).ok_or_else(|| {
-                invalid_data(format!("invalid stored run status '{}'", row.status))
-            })?,
-            row.output
-                .map(|value| deserialize_json(&value, "output"))
-                .transpose()?,
-            row.error_kind
-                .as_deref()
-                .map(parse_failure_kind)
-                .transpose()?,
-            row.error_code,
-            row.error_message,
-        )?,
+        lifecycle,
         started_at: row
             .started_at
             .map(|value| parse_timestamp(&value, "started_at"))
             .transpose()?,
-        ended_at: row
-            .ended_at
-            .map(|value| parse_timestamp(&value, "ended_at"))
-            .transpose()?,
+        ended_at,
         updated_at: parse_timestamp(&row.updated_at, "updated_at")?,
         input_summary: deserialize_json(&row.input_summary, "input_summary")?,
     })
@@ -545,18 +553,26 @@ fn run_record_from_row(row: RunRow) -> Result<RunRecord, HistoryError> {
 
 fn lifecycle_from_columns(
     status: RunStatus,
+    ended_at: Option<&DateTime<Utc>>,
     output: Option<RunOutput>,
     error_kind: Option<FailureKind>,
     error_code: Option<String>,
     error_message: Option<String>,
 ) -> Result<RunLifecycle, HistoryError> {
-    match (status, output, error_kind, error_code, error_message) {
-        (RunStatus::Created, None, None, None, None) => Ok(RunLifecycle::Created),
-        (RunStatus::Running, None, None, None, None) => Ok(RunLifecycle::Running),
-        (RunStatus::Completed, Some(output), None, None, None) => {
+    match (
+        status,
+        ended_at,
+        output,
+        error_kind,
+        error_code,
+        error_message,
+    ) {
+        (RunStatus::Created, None, None, None, None, None) => Ok(RunLifecycle::Created),
+        (RunStatus::Running, None, None, None, None, None) => Ok(RunLifecycle::Running),
+        (RunStatus::Completed, Some(_), Some(output), None, None, None) => {
             Ok(RunLifecycle::Completed { output })
         }
-        (RunStatus::Failed, None, Some(kind), Some(code), Some(message)) => {
+        (RunStatus::Failed, Some(_), None, Some(kind), Some(code), Some(message)) => {
             Ok(RunLifecycle::Failed {
                 error: RunFailure {
                     kind,
@@ -565,17 +581,17 @@ fn lifecycle_from_columns(
                 },
             })
         }
-        (RunStatus::Cancelled, None, None, Some(code), Some(message)) => {
+        (RunStatus::Cancelled, Some(_), None, None, Some(code), Some(message)) => {
             Ok(RunLifecycle::Cancelled {
                 error: StopError { code, message },
             })
         }
-        (RunStatus::Interrupted, None, None, Some(code), Some(message)) => {
+        (RunStatus::Interrupted, Some(_), None, None, Some(code), Some(message)) => {
             Ok(RunLifecycle::Interrupted {
                 error: StopError { code, message },
             })
         }
-        (status, _, _, _, _) => Err(HistoryError::new(
+        (status, _, _, _, _, _) => Err(HistoryError::new(
             "HISTORY_TERMINAL_CORRUPT",
             format!(
                 "run columns are inconsistent with lifecycle status '{}'",

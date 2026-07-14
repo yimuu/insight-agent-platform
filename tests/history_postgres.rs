@@ -349,6 +349,107 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
         .await
         .is_err()
     );
+
+    let drop_lifecycle_constraint: String = sqlx::query_scalar(
+        "SELECT format('ALTER TABLE runs DROP CONSTRAINT %I', conname)
+         FROM pg_constraint
+         WHERE conrelid = 'runs'::regclass
+           AND contype = 'c'
+           AND pg_get_constraintdef(oid) LIKE '%ended_at%'",
+    )
+    .fetch_one(&scoped_admin)
+    .await
+    .unwrap();
+    sqlx::query(AssertSqlSafe(drop_lifecycle_constraint))
+        .execute(&scoped_admin)
+        .await
+        .unwrap();
+
+    let corruption_cases = [
+        (
+            "created_with_ended_at",
+            "created",
+            Some(at(10)),
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            "running_with_ended_at",
+            "running",
+            Some(at(10)),
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            "completed_without_ended_at",
+            "completed",
+            None,
+            Some(r#"{"data":{}}"#),
+            None,
+            None,
+            None,
+        ),
+        (
+            "failed_without_ended_at",
+            "failed",
+            None,
+            None,
+            Some("workflow"),
+            Some("WORKFLOW_CORRUPT"),
+            Some("corrupt workflow failure"),
+        ),
+        (
+            "cancelled_without_ended_at",
+            "cancelled",
+            None,
+            None,
+            None,
+            Some("RUN_CANCELLED"),
+            Some("corrupt cancellation"),
+        ),
+        (
+            "interrupted_without_ended_at",
+            "interrupted",
+            None,
+            None,
+            None,
+            Some("RUN_INTERRUPTED"),
+            Some("corrupt interruption"),
+        ),
+    ];
+
+    for (name, status, ended_at, output, error_kind, error_code, error_message) in corruption_cases
+    {
+        let corrupt_id = format!("corrupt_{name}_{suffix}");
+        repo.create_run(new_run(&corrupt_id)).await.unwrap();
+        sqlx::query(
+            "UPDATE runs
+             SET status = $1, ended_at = $2, output = $3::jsonb,
+                 error_kind = $4, error_code = $5, error_message = $6
+             WHERE run_id = $7",
+        )
+        .bind(status)
+        .bind(ended_at)
+        .bind(output)
+        .bind(error_kind)
+        .bind(error_code)
+        .bind(error_message)
+        .bind(&corrupt_id)
+        .execute(&scoped_admin)
+        .await
+        .unwrap();
+
+        let error = repo
+            .get_run(&corrupt_id)
+            .await
+            .expect_err("corrupt ended_at presence must fail reconstruction");
+        assert_eq!(error.code(), "HISTORY_TERMINAL_CORRUPT", "case {name}");
+    }
+
     sqlx::query("DELETE FROM runs WHERE run_id = $1")
         .bind(&run_id)
         .execute(&scoped_admin)

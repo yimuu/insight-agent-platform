@@ -247,28 +247,98 @@ async fn sqlite_reconstruction_rejects_corrupt_terminal_column_combinations() {
     let path = directory.path().join("corrupt-lifecycle.db");
     let url = sqlite_url(&path);
     let repo = SqliteRunRepository::connect(&url).await.unwrap();
-    repo.create_run(new_run(RUN_ID, RunAttachment::Detached))
-        .await
-        .unwrap();
     let pool = SqlitePool::connect(&url).await.unwrap();
     let mut connection = pool.acquire().await.unwrap();
     sqlx::query("PRAGMA ignore_check_constraints = ON")
         .execute(&mut *connection)
         .await
         .unwrap();
-    sqlx::query(
-        "UPDATE runs
-         SET status = 'failed', ended_at = CURRENT_TIMESTAMP,
-             error_kind = NULL, error_code = 'CORRUPT', error_message = 'corrupt'
-         WHERE run_id = ?",
-    )
-    .bind(RUN_ID)
-    .execute(&mut *connection)
-    .await
-    .unwrap();
 
-    let error = repo.get_run(RUN_ID).await.unwrap_err();
-    assert_eq!(error.code(), "HISTORY_TERMINAL_CORRUPT");
+    let cases = [
+        (
+            "created_with_ended_at",
+            "created",
+            Some("2026-07-10T00:00:10+00:00"),
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            "running_with_ended_at",
+            "running",
+            Some("2026-07-10T00:00:10+00:00"),
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            "completed_without_ended_at",
+            "completed",
+            None,
+            Some(r#"{"data":{}}"#),
+            None,
+            None,
+            None,
+        ),
+        (
+            "failed_without_ended_at",
+            "failed",
+            None,
+            None,
+            Some("workflow"),
+            Some("WORKFLOW_CORRUPT"),
+            Some("corrupt workflow failure"),
+        ),
+        (
+            "cancelled_without_ended_at",
+            "cancelled",
+            None,
+            None,
+            None,
+            Some("RUN_CANCELLED"),
+            Some("corrupt cancellation"),
+        ),
+        (
+            "interrupted_without_ended_at",
+            "interrupted",
+            None,
+            None,
+            None,
+            Some("RUN_INTERRUPTED"),
+            Some("corrupt interruption"),
+        ),
+    ];
+
+    for (name, status, ended_at, output, error_kind, error_code, error_message) in cases {
+        let run_id = format!("{RUN_ID}_{name}");
+        repo.create_run(new_run(&run_id, RunAttachment::Detached))
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE runs
+             SET status = ?, ended_at = ?, output = ?,
+                 error_kind = ?, error_code = ?, error_message = ?
+             WHERE run_id = ?",
+        )
+        .bind(status)
+        .bind(ended_at)
+        .bind(output)
+        .bind(error_kind)
+        .bind(error_code)
+        .bind(error_message)
+        .bind(&run_id)
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+        let error = repo
+            .get_run(&run_id)
+            .await
+            .expect_err("corrupt ended_at presence must fail reconstruction");
+        assert_eq!(error.code(), "HISTORY_TERMINAL_CORRUPT", "case {name}");
+    }
 }
 
 #[tokio::test]
