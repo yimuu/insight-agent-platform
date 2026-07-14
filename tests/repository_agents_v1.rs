@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeSet, path::Path};
 
 use insight_agent_platform::{
     catalog::compile_enabled_agents,
@@ -13,8 +13,17 @@ use insight_agent_platform::{
 };
 
 #[test]
-fn enabled_repository_agents_compile_through_production_registries() {
+fn checked_in_repository_agents_compile_through_production_registries() {
     let config = PlatformConfig::load(Path::new("config/platform.yaml")).unwrap();
+    let production_agents = BTreeSet::from([
+        "code_node_demo".to_string(),
+        "medical_report_interpreter".to_string(),
+        "parallel_researcher".to_string(),
+        "researcher".to_string(),
+    ]);
+    assert_eq!(config.agents.enabled, production_agents);
+    assert!(!config.agents.enabled.contains("workflow_failure_demo"));
+
     let models = load_model_registry_with_env(&config.models.config, |name| {
         (name == "OPENAI_API_KEY").then(|| "repository-test-secret".to_string())
     })
@@ -38,9 +47,16 @@ fn enabled_repository_agents_compile_through_production_registries() {
     )
     .unwrap();
     let (node_types, _executors) = default_node_registries().unwrap();
+    let repository_agents = BTreeSet::from([
+        "code_node_demo".to_string(),
+        "medical_report_interpreter".to_string(),
+        "parallel_researcher".to_string(),
+        "researcher".to_string(),
+        "workflow_failure_demo".to_string(),
+    ]);
     let agents = compile_enabled_agents(
         &config.agents.directory,
-        &config.agents.enabled,
+        &repository_agents,
         node_types,
         models,
         actions,
@@ -51,7 +67,7 @@ fn enabled_repository_agents_compile_through_production_registries() {
     )
     .unwrap();
 
-    assert_eq!(agents.list().count(), 4);
+    assert_eq!(agents.list().count(), 5);
 
     let parallel = agents.get("parallel_researcher").unwrap();
     let fork = &parallel.execution_plan.forks["fanout"];
@@ -100,4 +116,8 @@ fn enabled_repository_agents_compile_through_production_registries() {
     assert!(medical.nodes["comprehensive_interpretation"]
         .references
         .contains("abnormal_indicators"));
+
+    let workflow_failure = agents.get("workflow_failure_demo").unwrap();
+    assert_eq!(workflow_failure.nodes.len(), 1);
+    assert_eq!(workflow_failure.nodes["reject"].kind, "core.end");
 }

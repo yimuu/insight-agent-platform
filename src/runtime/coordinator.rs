@@ -37,6 +37,7 @@ struct TerminalLogSummary {
     status: RunStatus,
     output_bytes: usize,
     error_code: String,
+    failure_kind: Option<FailureKind>,
 }
 
 impl RunCoordinator {
@@ -258,42 +259,47 @@ impl RunCoordinator {
         started: Instant,
     ) -> Result<RunStatus, RunError> {
         let status = terminal.status();
-        let (event_type, code, message, data, output_bytes, error_code) = match &terminal {
-            RunTerminal::Completed { output } => (
-                RunEventType::RunCompleted,
-                "OK".to_string(),
-                "ok".to_string(),
-                serde_json::to_value(output).map_err(|_| {
-                    RunError::new("RUN_OUTPUT_INVALID", "failed to serialize run output")
-                })?,
-                json_size_bytes(output),
-                String::new(),
-            ),
-            RunTerminal::Failed { error } => (
-                RunEventType::RunFailed,
-                error.code.clone(),
-                error.message.clone(),
-                json!({"kind": error.kind}),
-                0,
-                error.code.clone(),
-            ),
-            RunTerminal::Cancelled { error } => (
-                RunEventType::RunCancelled,
-                error.code.clone(),
-                error.message.clone(),
-                json!({}),
-                0,
-                error.code.clone(),
-            ),
-            RunTerminal::Interrupted { error } => (
-                RunEventType::RunInterrupted,
-                error.code.clone(),
-                error.message.clone(),
-                json!({}),
-                0,
-                error.code.clone(),
-            ),
-        };
+        let (event_type, code, message, data, output_bytes, error_code, failure_kind) =
+            match &terminal {
+                RunTerminal::Completed { output } => (
+                    RunEventType::RunCompleted,
+                    "OK".to_string(),
+                    "ok".to_string(),
+                    serde_json::to_value(output).map_err(|_| {
+                        RunError::new("RUN_OUTPUT_INVALID", "failed to serialize run output")
+                    })?,
+                    json_size_bytes(output),
+                    String::new(),
+                    None,
+                ),
+                RunTerminal::Failed { error } => (
+                    RunEventType::RunFailed,
+                    error.code.clone(),
+                    error.message.clone(),
+                    json!({"kind": error.kind}),
+                    0,
+                    error.code.clone(),
+                    Some(error.kind),
+                ),
+                RunTerminal::Cancelled { error } => (
+                    RunEventType::RunCancelled,
+                    error.code.clone(),
+                    error.message.clone(),
+                    json!({}),
+                    0,
+                    error.code.clone(),
+                    None,
+                ),
+                RunTerminal::Interrupted { error } => (
+                    RunEventType::RunInterrupted,
+                    error.code.clone(),
+                    error.message.clone(),
+                    json!({}),
+                    0,
+                    error.code.clone(),
+                    None,
+                ),
+            };
         let update = TerminalUpdate::new(&run.run_id, Utc::now(), terminal);
         let published = self
             .events
@@ -309,6 +315,7 @@ impl RunCoordinator {
                     status,
                     output_bytes,
                     error_code,
+                    failure_kind,
                 },
             )
             .await?;
@@ -323,6 +330,7 @@ impl RunCoordinator {
             elapsed_ms = elapsed_ms(started),
             output_bytes = durable.output_bytes,
             error_code = durable.error_code.as_str(),
+            failure_kind = durable.failure_kind.map(FailureKind::as_str).unwrap_or(""),
             "run finished"
         );
         Ok(durable.status)
@@ -367,6 +375,7 @@ impl RunCoordinator {
                     status: RunStatus::Failed,
                     output_bytes: 0,
                     error_code: "INFRASTRUCTURE_FAILURE".to_string(),
+                    failure_kind: Some(FailureKind::Infrastructure),
                 },
             )
             .await?;
@@ -381,6 +390,7 @@ impl RunCoordinator {
             elapsed_ms = elapsed_ms(started),
             output_bytes = durable.output_bytes,
             error_code = durable.error_code.as_str(),
+            failure_kind = durable.failure_kind.map(FailureKind::as_str).unwrap_or(""),
             "run finished"
         );
         Ok(durable.status)
@@ -412,18 +422,19 @@ impl RunCoordinator {
 }
 
 fn terminal_log_summary_from_record(record: &RunRecord) -> TerminalLogSummary {
-    let (output_bytes, error_code) = match &record.lifecycle {
-        RunLifecycle::Completed { output } => (json_size_bytes(output), String::new()),
-        RunLifecycle::Failed { error } => (0, error.code.clone()),
+    let (output_bytes, error_code, failure_kind) = match &record.lifecycle {
+        RunLifecycle::Completed { output } => (json_size_bytes(output), String::new(), None),
+        RunLifecycle::Failed { error } => (0, error.code.clone(), Some(error.kind)),
         RunLifecycle::Cancelled { error } | RunLifecycle::Interrupted { error } => {
-            (0, error.code.clone())
+            (0, error.code.clone(), None)
         }
-        RunLifecycle::Created | RunLifecycle::Running => (0, String::new()),
+        RunLifecycle::Created | RunLifecycle::Running => (0, String::new(), None),
     };
     TerminalLogSummary {
         status: record.status(),
         output_bytes,
         error_code,
+        failure_kind,
     }
 }
 

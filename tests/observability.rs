@@ -53,6 +53,7 @@ const DYNAMIC_MESSAGE_SECRET: &str = "observability-invalid-dynamic-secret";
 const SELECT_SECRET: &str = "observability-select-secret";
 const WORKFLOW_FAILURE_INPUT: &str = "observability-workflow-input-secret";
 const WORKFLOW_FAILURE_MESSAGE: &str = "observability workflow failure message";
+const WORKFLOW_MESSAGE_SECRET: &str = "observability workflow rejection secret";
 
 #[derive(Debug, Clone)]
 struct RecordedEvent {
@@ -359,6 +360,19 @@ nodes:
     );
     write_agent(
         root.path(),
+        "workflow_failure",
+        r#"entry: reject
+nodes:
+  reject:
+    type: core.end
+    config:
+      outcome: failure
+      code: WORKFLOW_OBSERVABILITY_REJECTED
+      message: observability workflow rejection secret
+"#,
+    );
+    write_agent(
+        root.path(),
         "parallel",
         r#"entry: fanout
 nodes:
@@ -574,14 +588,18 @@ nodes:
     }
 }
 
-async fn wait_for_status(service: &RunService, run_id: &str, expected: RunStatus) {
+async fn wait_for_terminal(
+    service: &RunService,
+    run_id: &str,
+) -> insight_agent_platform::history::types::RunRecord {
     for _ in 0..200 {
-        if service.get_run(run_id).await.unwrap().status() == expected {
-            return;
+        let record = service.get_run(run_id).await.unwrap();
+        if record.status().is_terminal() {
+            return record;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    panic!("run {run_id} did not reach {expected:?}");
+    panic!("run {run_id} did not reach a terminal status");
 }
 
 #[tokio::test]
@@ -597,7 +615,12 @@ async fn run_and_node_info_logs_are_body_free_for_linear_success() {
         )
         .await
         .unwrap();
-    wait_for_status(&fixture.service, &created.run_id, RunStatus::Completed).await;
+    assert_eq!(
+        wait_for_terminal(&fixture.service, &created.run_id)
+            .await
+            .status(),
+        RunStatus::Completed
+    );
 
     let started = info_logs("run.started");
     assert_eq!(started.len(), 1);
@@ -608,6 +631,7 @@ async fn run_and_node_info_logs_are_body_free_for_linear_success() {
     assert_eq!(finished.len(), 1);
     assert_eq!(finished[0].field("status"), Some("completed"));
     assert_eq!(finished[0].field("error_code"), Some(""));
+    assert_eq!(finished[0].field("failure_kind"), Some(""));
     assert!(
         finished[0]
             .field("elapsed_ms")
@@ -643,6 +667,7 @@ async fn run_and_node_info_logs_are_body_free_for_linear_success() {
     assert!(node_completed.iter().any(|event| {
         event.field("node_id") == Some("result")
             && event.field("kind") == Some("core.end")
+            && event.field("terminal_outcome") == Some("success")
             && event
                 .field("output_bytes")
                 .unwrap()
@@ -669,7 +694,12 @@ async fn select_info_logs_record_metadata_without_selected_bodies() {
         .create_detached("select", json!({}), RequestMetadata::default())
         .await
         .unwrap();
-    wait_for_status(&fixture.service, &created.run_id, RunStatus::Completed).await;
+    assert_eq!(
+        wait_for_terminal(&fixture.service, &created.run_id)
+            .await
+            .status(),
+        RunStatus::Completed
+    );
 
     let completed = info_logs("node.completed");
     let selected = completed
@@ -701,7 +731,12 @@ async fn run_and_node_info_logs_are_body_free_for_action_failure() {
         )
         .await
         .unwrap();
-    wait_for_status(&fixture.service, &created.run_id, RunStatus::Failed).await;
+    assert_eq!(
+        wait_for_terminal(&fixture.service, &created.run_id)
+            .await
+            .status(),
+        RunStatus::Failed
+    );
 
     let node_failed = info_logs("node.failed");
     assert_eq!(node_failed.len(), 1);
@@ -715,6 +750,7 @@ async fn run_and_node_info_logs_are_body_free_for_action_failure() {
     let finished = info_logs("run.finished");
     assert_eq!(finished.len(), 1);
     assert_eq!(finished[0].field("status"), Some("failed"));
+    assert_eq!(finished[0].field("failure_kind"), Some("node"));
     assert_eq!(
         finished[0].field("error_code"),
         Some("OBSERVABILITY_ACTION_FAILED")
@@ -743,7 +779,12 @@ async fn authored_end_failure_uses_production_terminal_path_without_info_log_bod
         )
         .await
         .unwrap();
-    wait_for_status(&fixture.service, &created.run_id, RunStatus::Failed).await;
+    assert_eq!(
+        wait_for_terminal(&fixture.service, &created.run_id)
+            .await
+            .status(),
+        RunStatus::Failed
+    );
 
     let failed = fixture.service.get_run(&created.run_id).await.unwrap();
     assert_eq!(failed.status(), RunStatus::Failed);
@@ -795,6 +836,37 @@ async fn authored_end_failure_uses_production_terminal_path_without_info_log_bod
 }
 
 #[tokio::test]
+async fn authored_end_failure_logs_metadata_without_message_or_bodies() {
+    let _guard = reset_logs().await;
+    let fixture = fixture(&["workflow_failure"]).await;
+    let record = fixture
+        .service
+        .create_detached(
+            "workflow_failure",
+            json!({"secret": INPUT_SECRET}),
+            RequestMetadata { request_id: None },
+        )
+        .await
+        .unwrap();
+    let terminal = wait_for_terminal(&fixture.service, &record.run_id).await;
+    assert_eq!(terminal.status(), RunStatus::Failed);
+
+    let end = info_logs("node.completed")
+        .into_iter()
+        .find(|event| event.field("kind") == Some("core.end"))
+        .expect("end completion log");
+    assert_eq!(end.field("terminal_outcome"), Some("failure"));
+
+    let finished = info_logs("run.finished").pop().expect("run finish log");
+    assert_eq!(finished.field("failure_kind"), Some("workflow"));
+    assert_eq!(
+        finished.field("error_code"),
+        Some("WORKFLOW_OBSERVABILITY_REJECTED")
+    );
+    assert_logs_exclude(&[INPUT_SECRET, WORKFLOW_MESSAGE_SECRET]);
+}
+
+#[tokio::test]
 async fn action_success_logs_node_bytes_without_action_bodies() {
     let _guard = reset_logs().await;
     let fixture = fixture(&["action_success"]).await;
@@ -807,7 +879,12 @@ async fn action_success_logs_node_bytes_without_action_bodies() {
         )
         .await
         .unwrap();
-    wait_for_status(&fixture.service, &created.run_id, RunStatus::Completed).await;
+    assert_eq!(
+        wait_for_terminal(&fixture.service, &created.run_id)
+            .await
+            .status(),
+        RunStatus::Completed
+    );
 
     let node_completed = info_logs("node.completed");
     let action_log = node_completed
@@ -844,7 +921,12 @@ async fn parallel_nodes_emit_once_and_run_finish_is_once() {
         .create_detached("parallel", json!({}), RequestMetadata::default())
         .await
         .unwrap();
-    wait_for_status(&fixture.service, &created.run_id, RunStatus::Completed).await;
+    assert_eq!(
+        wait_for_terminal(&fixture.service, &created.run_id)
+            .await
+            .status(),
+        RunStatus::Completed
+    );
 
     let completed = info_logs("node.completed");
     for node_id in ["fanout", "branch_a", "branch_b", "collect", "result"] {
@@ -873,7 +955,12 @@ async fn chat_info_logs_counts_and_sizes_without_bodies() {
         )
         .await
         .unwrap();
-    wait_for_status(&fixture.service, &created.run_id, RunStatus::Completed).await;
+    assert_eq!(
+        wait_for_terminal(&fixture.service, &created.run_id)
+            .await
+            .status(),
+        RunStatus::Completed
+    );
 
     let requests = info_logs("chat.request");
     assert_eq!(requests.len(), 1);
@@ -924,7 +1011,12 @@ async fn omitted_optional_image_logs_zero_rendered_image_parts_without_bodies() 
         )
         .await
         .unwrap();
-    wait_for_status(&fixture.service, &created.run_id, RunStatus::Completed).await;
+    assert_eq!(
+        wait_for_terminal(&fixture.service, &created.run_id)
+            .await
+            .status(),
+        RunStatus::Completed
+    );
 
     assert_eq!(fixture.model_calls.load(Ordering::Relaxed), 1);
     let requests = info_logs("chat.request");
@@ -953,7 +1045,12 @@ async fn message_emptied_by_optional_image_filtering_logs_no_request_or_model_ca
         )
         .await
         .unwrap();
-    wait_for_status(&fixture.service, &created.run_id, RunStatus::Failed).await;
+    assert_eq!(
+        wait_for_terminal(&fixture.service, &created.run_id)
+            .await
+            .status(),
+        RunStatus::Failed
+    );
 
     let failed = fixture.service.get_run(&created.run_id).await.unwrap();
     assert!(matches!(
@@ -992,7 +1089,12 @@ async fn dynamic_chat_logs_final_counts_without_bodies() {
         )
         .await
         .unwrap();
-    wait_for_status(&fixture.service, &created.run_id, RunStatus::Completed).await;
+    assert_eq!(
+        wait_for_terminal(&fixture.service, &created.run_id)
+            .await
+            .status(),
+        RunStatus::Completed
+    );
 
     assert_eq!(fixture.model_calls.load(Ordering::Relaxed), 1);
     let requests = info_logs("chat.request");
@@ -1023,7 +1125,12 @@ async fn invalid_dynamic_chat_logs_no_request_or_body() {
         )
         .await
         .unwrap();
-    wait_for_status(&fixture.service, &created.run_id, RunStatus::Failed).await;
+    assert_eq!(
+        wait_for_terminal(&fixture.service, &created.run_id)
+            .await
+            .status(),
+        RunStatus::Failed
+    );
 
     let failed = fixture.service.get_run(&created.run_id).await.unwrap();
     assert!(matches!(

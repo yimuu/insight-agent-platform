@@ -35,7 +35,7 @@ DSL 使用显式 `entry + nodes` DAG，而不是隐式步骤数组。核心理�
 | `core.fork` | 显式启动固定并行分支 |
 | `core.join` | 以 `all_settled` 汇合 fork 分支并输出稳定汇总 |
 | `core.select` | 将互斥条件路径中唯一已执行的结果汇合为稳定输出 |
-| `core.output` | 唯一成功终点，明确最终内容、格式和结构化数据 |
+| `core.end` | Ends the current Run or Fork-branch scope with an explicit success or failure outcome. |
 
 条件节点和其他节点一样通过注册表解析。新增节点是静态链接的 Rust 扩展：实现 `NodeType` 负责编译期 config、envelope、边和引用声明，实现 `NodeExecutor` 负责运行期执行；两者分别注册到编译期和运行期注册表。注册后，自定义节点走同一套 DSL 解析、图校验、调度、事件、节点输出和终态提交路径，核心节点源码、调度器和 HTTP 层不需要增加分支：
 
@@ -112,7 +112,7 @@ cargo run
 
 默认配置只监听 `127.0.0.1:3000`，并显式关闭鉴权。`/health` 始终公开；运行时可接受请求时返回 `200/OK`，journal 永久失败或服务关停后返回 `503/RUNTIME_UNHEALTHY`。`/v1` 可切换到从环境变量读取的 Bearer token：
 
-INFO 日志是结构化且 body-free 的：Run、节点、Chat 和 provider 记录只包含 `run_id`、`request_id`、`agent_id`、`agent_version`、节点 ID/type、状态、耗时、计数和序列化字节数。日志不记录请求输入值、prompt、模型输出、Action 输入/输出、事件 payload、带 query 的完整 URL、请求/响应头或凭据。当前基线只提供结构化日志，不包含 metrics backend 或 exporter。
+INFO 日志是结构化且 body-free 的：Run、节点、Chat 和 provider 记录只包含 `run_id`、`request_id`、`agent_id`、`agent_version`、节点 ID/type、状态、耗时、计数和序列化字节数。End 完成日志可额外记录 `terminal_outcome`；Run 失败日志可记录稳定的 `failure_kind` 和错误码，但不记录工作流失败消息。日志不记录请求输入值、prompt、模型输出、Action 输入/输出、End content/data、分支输出、事件 payload、带 query 的完整 URL、请求/响应头或凭据。当前基线只提供结构化日志，不包含 metrics backend 或 exporter。
 
 ```yaml
 version: 1
@@ -214,12 +214,26 @@ nodes:
           content: {template_ref: answer}
       parameters: {}
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       content:
         template: "{{ nodes.answer.output.text }}"
       format: markdown
 ```
+
+`core.end` 是严格的 success/failure 联合类型，且不能声明 `next`。成功 End 至少声明 `content` 或 `data`；`content` 存在时必须同时声明 `format: text|markdown`，结构化结果继续使用稳定的 `{content?, format?, data}` Run output。失败 End 只接受静态 `WORKFLOW_...` code 和静态单行 message，并禁止 `content`、`format`、`data`、模板和 CEL：
+
+```yaml
+reject:
+  type: core.end
+  config:
+    outcome: failure
+    code: WORKFLOW_POLICY_REJECTED
+    message: workflow policy rejected the run
+```
+
+End 终止的是编译器确定的当前 scope：主流程的成功/失败 End 分别完成/失败整个 Run；Fork 分支的 End 只结算该分支，不能直接终止父 Run。两种 End 都表示节点按声明成功执行，因此先持久化 End envelope 并发布 `node.completed`；失败 End 随后发布 `branch.failed(kind=workflow)` 或 `run.failed(kind=workflow)`，不会发布 `node.failed`。
 
 ### 条件结果汇合
 
@@ -269,8 +283,9 @@ nodes:
       sources: [medical, general]
 
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       data:
         source: "{{ nodes.selected_answer.output.source_node_id }}"
         answer: "{{ nodes.selected_answer.output.value.text }}"
@@ -383,7 +398,7 @@ RUN_HISTORY_POSTGRES_URL='postgres://insight:insight@127.0.0.1:5433/insight_agen
   cargo test --test history_postgres -- --nocapture
 ```
 
-A0 Action 校验错误安全修复不兼容既有 Run 历史；部署前按[正式 V1 破坏性变更中的 A0 重置流程](docs/formal-v1-breaking-changes.md#a0-action-validation-error-containment)停止服务并显式清空历史。A5 会让静态非法 Action input、hyphenated node/branch ID、indexed/computed `nodes` access 在启动编译期失败；迁移理由见[正式 V1 破坏性变更中的 A5 语义编译期校验](docs/formal-v1-breaking-changes.md#a5-semantic-compile-time-validation)。应用不会自动删除数据。
+统一 `core.end` 和类型化 Run lifecycle 会直接改写 Formal V1 initial migration；已有本地 SQLite 数据库和开发 PostgreSQL volume 必须按[正式 V1 历史重置](docs/formal-v1-breaking-changes.md#历史重置)整体重建，应用不会静默升级。A0 Action 校验错误安全修复不兼容既有 Run 历史；部署前按[正式 V1 破坏性变更中的 A0 重置流程](docs/formal-v1-breaking-changes.md#a0-action-validation-error-containment)停止服务并显式清空历史。A5 会让静态非法 Action input、hyphenated node/branch ID、indexed/computed `nodes` access 在启动编译期失败；迁移理由见[正式 V1 破坏性变更中的 A5 语义编译期校验](docs/formal-v1-breaking-changes.md#a5-semantic-compile-time-validation)。
 
 正式 V1 不存储原始输入，只保存顶层键和序列化字节数摘要。journal 只有在数据库确认事件持久化后才向订阅者广播；单次数据库操作受 `journal_operation_timeout` 限制。失败时先停止 journal worker，恢复事务锁定 Run，并基于持久化的 `MAX(seq)` 原子派生终态序号；这也能判定超时发生在 `COMMIT` 附近时的实际结果。journal 永久关闭后拒绝新 Run。进程启动时遗留的 `created/running` 记录会被标记为 `interrupted`，V1 不恢复工作。
 
@@ -393,8 +408,9 @@ A0 Action 校验错误安全修复不兼容既有 Run 历史；部署前按[正�
 - `agents/code_node_demo`：`example.text_metrics` 原生 Action，不调用模型，适合确定性冒烟测试。
 - `agents/medical_report_interpreter`：使用同一个通用 `core.chat` 多模态协议的垂直示例。
 - `agents/parallel_researcher`：两个多节点分支汇聚后再综合：
+- `agents/workflow_failure_demo`：不需要密钥的 authored workflow failure 示例；只用于编译和真实 binary smoke，不在正常或 quickstart 配置中启用。
 
-条件路径结果使用 core.select；以下示例是并行分支，因此继续使用 core.fork/core.join。
+条件路径结果使用 `core.select`；以下示例是并行分支，因此使用 `core.fork`、分支局部 `core.end` 和 `core.join`。分支不再把 `next` 指向 Join；Fork 的 `join` 字段是所有分支结算后才激活的结构化 continuation：
 
 ```yaml
 fanout:
@@ -402,21 +418,100 @@ fanout:
   config:
     branches: {perspective_a: analyze_a, perspective_b: analyze_b}
     join: collect
+
+analyze_a:
+  type: core.chat
+  next: end_a
+  config:
+    model: general_chat
+    messages: [{role: user, content: "Analyze {{ input.question }} from perspective A."}]
+    parameters: {}
+end_a:
+  type: core.end
+  config:
+    outcome: success
+    data: {answer: "{{ nodes.analyze_a.output.text }}"}
+
+analyze_b:
+  type: core.chat
+  next: end_b
+  config:
+    model: general_chat
+    messages: [{role: user, content: "Analyze {{ input.question }} from perspective B."}]
+    parameters: {}
+end_b:
+  type: core.end
+  config:
+    outcome: success
+    data: {answer: "{{ nodes.analyze_b.output.text }}"}
+
 collect:
   type: core.join
-  next: synthesize
+  next: decide
   config: {mode: all_settled}
+
+decide:
+  type: core.condition
+  config:
+    cases:
+      - when: nodes.collect.output.summary.succeeded > 0
+        next: synthesize
+    default: fail_all
+
+synthesize:
+  type: core.template
+  next: finish
+  config:
+    value:
+      failed_branches: "{{ nodes.collect.output.summary.failed }}"
+      branches: "{{ nodes.collect.output.branches }}"
+
+finish:
+  type: core.end
+  config:
+    outcome: success
+    data: "{{ nodes.synthesize.output }}"
+
+fail_all:
+  type: core.end
+  config:
+    outcome: failure
+    code: WORKFLOW_ALL_BRANCHES_FAILED
+    message: all parallel branches failed
 ```
 
-每个分支依次执行 `analyze_* (core.chat) -> normalize_* (core.template) -> collect`；`synthesize` 只允许引用 `nodes.collect.output`。分支就绪并进入执行队列时发布 `branch.started`，完成或失败时分别发布 `branch.completed` / `branch.failed`。事件 `data` 的精确形状为：`branch.started` `{fork_id, branch_id}`；`branch.completed` 在此基础上增加 `terminal_node_id`；`branch.failed` 增加 `terminal_node_id` 和已清理的 `error:{code,message}`。`branch.started` 表示 ready-queue activation，不代表模型已开始返回内容。
+每个静态成功的分支路径都必须到达自己的 End。分支就绪并进入执行队列时发布 `branch.started`；End envelope 和 `node.completed` 持久化之后，才发布 `branch.completed` 或 `branch.failed`。authored End failure 的错误是 `kind: workflow`；普通节点失败和超时分别是 `kind: node` 与 `kind: timeout`。`branch.started` 表示 ready-queue activation，不代表模型已开始返回内容。
 
 `core.join` 的输出是固定聚合对象（不是 Run 终态 envelope）：
 
 ```json
-{"branches":{"perspective_a":{"status":"succeeded","terminal_node_id":"normalize_a","output":{"text":"..."}},"perspective_b":{"status":"failed","terminal_node_id":"analyze_b","error":{"code":"UPSTREAM_FAILURE","message":"..."}}},"summary":{"total":2,"succeeded":1,"failed":1}}
+{
+  "branches": {
+    "perspective_a": {
+      "status": "succeeded",
+      "terminal_node_id": "end_a",
+      "output": {"data": {"answer": "..."}}
+    },
+    "perspective_b": {
+      "status": "failed",
+      "terminal_node_id": "end_b",
+      "error": {
+        "kind": "workflow",
+        "code": "WORKFLOW_LOW_CONFIDENCE",
+        "message": "branch confidence is insufficient"
+      }
+    }
+  },
+  "summary": {
+    "total": 2,
+    "succeeded": 1,
+    "failed": 1,
+    "failures": {"workflow": 1, "node": 0, "timeout": 0}
+  }
+}
 ```
 
-所有分支失败时 join 仍成功并返回 `summary.failed == summary.total`；这与 Run 的 `run.completed`、`run.failed` 或 `run.cancelled` 终态事件分开。`max_concurrent_runs` 和 `max_parallel_node_executions` 是进程范围上限；`max_parallel_branches_per_run` 与 `max_fork_branches` 分别限制单 Run 并发分支和单 fork 分支数。取消会停止整个 Run；单个分支失败只结算该分支，`all_settled` 仍等待其余分支并可产生部分成功。V1 不支持嵌套 fork、resume、新 join 模式，也不允许 post-join 节点直接引用分支节点。
+`total == succeeded + failed`，且 `failed == failures.workflow + failures.node + failures.timeout`。即使所有分支都失败，`all_settled` Join 仍会成功执行并返回汇总；Join 本身不决定 Run 终态。Join 后的 Condition 显式决定策略：至少一个成功时可以生成包含失败计数的 degraded success；零成功时路由到 failure End。取消、interrupted 和 infrastructure failure 会停止整个 Run，不会伪装成可汇合的分支结果。`max_concurrent_runs` 和 `max_parallel_node_executions` 是进程范围上限；`max_parallel_branches_per_run` 与 `max_fork_branches` 分别限制单 Run 并发分支和单 Fork 分支数。V1 不支持嵌套 Fork、resume、新 Join 模式，也不允许 post-Join 节点直接引用分支节点。
 
 ## 验证
 

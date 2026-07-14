@@ -18,7 +18,7 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[tokio::test]
-async fn binary_starts_and_completes_code_node_demo_run() {
+async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
     let temp = TempDir::new().unwrap();
     let bind_addr = reserve_loopback_addr();
     let platform_config = write_temp_configs(temp.path(), bind_addr);
@@ -41,24 +41,17 @@ async fn binary_starts_and_completes_code_node_demo_run() {
     let agents = agents["data"]
         .as_array()
         .expect("agents data must be array");
-    assert_eq!(agents.len(), 1, "quickstart smoke should expose one Agent");
+    assert_eq!(agents.len(), 2, "binary smoke should expose two Agents");
     assert_eq!(agents[0]["id"], "code_node_demo");
+    assert_eq!(agents[1]["id"], "workflow_failure_demo");
 
-    let create_run_url = format!("{base_url}/v1/agents/code_node_demo/runs");
-    let created = expect_json(
-        format!("POST {create_run_url}"),
-        client
-            .post(create_run_url)
-            .json(&json!({"text":"hello rust world"})),
-        StatusCode::ACCEPTED,
+    let completed = create_and_wait(
+        &client,
+        &base_url,
+        "code_node_demo",
+        json!({"text":"hello rust world"}),
     )
     .await;
-    let run_id = created["data"]["run_id"]
-        .as_str()
-        .expect("create response must contain run_id")
-        .to_string();
-
-    let completed = wait_for_completed_run(&client, &base_url, &run_id).await;
     assert_eq!(completed["data"]["agent_id"], "code_node_demo");
     assert_eq!(completed["data"]["status"], "completed");
     assert_eq!(completed["data"]["output"]["format"], "text");
@@ -70,6 +63,13 @@ async fn binary_starts_and_completes_code_node_demo_run() {
     assert!(content.contains("- characters: 16"), "{content}");
     assert!(content.contains("- words: 3"), "{content}");
     assert!(content.contains("- lines: 1"), "{content}");
+
+    let failed = create_and_wait(&client, &base_url, "workflow_failure_demo", json!({})).await;
+    assert_eq!(failed["data"]["agent_id"], "workflow_failure_demo");
+    assert_eq!(failed["data"]["status"], "failed");
+    assert_eq!(failed["data"]["error"]["kind"], "workflow");
+    assert_eq!(failed["data"]["error"]["code"], "WORKFLOW_DEMO_REJECTED");
+    assert!(failed["data"].get("output").is_none());
 
     let output = child.shutdown();
     assert!(
@@ -119,6 +119,7 @@ agents:
   directory: {}
   enabled:
     - code_node_demo
+    - workflow_failure_demo
 
 models:
   config: models.yaml
@@ -319,7 +320,21 @@ async fn expect_json(
     })
 }
 
-async fn wait_for_completed_run(client: &Client, base_url: &str, run_id: &str) -> Value {
+async fn create_and_wait(client: &Client, base_url: &str, agent_id: &str, input: Value) -> Value {
+    let create_run_url = format!("{base_url}/v1/agents/{agent_id}/runs");
+    let created = expect_json(
+        format!("POST {create_run_url}"),
+        client.post(create_run_url).json(&input),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    let run_id = created["data"]["run_id"]
+        .as_str()
+        .expect("create response must contain run_id");
+    wait_for_terminal_run(client, base_url, run_id).await
+}
+
+async fn wait_for_terminal_run(client: &Client, base_url: &str, run_id: &str) -> Value {
     let deadline = Instant::now() + RUN_TIMEOUT;
 
     loop {
@@ -331,10 +346,7 @@ async fn wait_for_completed_run(client: &Client, base_url: &str, run_id: &str) -
         )
         .await;
         let last_record = match record["data"]["status"].as_str() {
-            Some("completed") => return record,
-            Some("failed" | "cancelled" | "interrupted") => {
-                panic!("run reached terminal non-success state:\n{record}")
-            }
+            Some("completed" | "failed" | "cancelled" | "interrupted") => return record,
             Some("created" | "running") => record,
             other => {
                 panic!("run returned unknown status {other:?}:\n{record}");
@@ -342,7 +354,7 @@ async fn wait_for_completed_run(client: &Client, base_url: &str, run_id: &str) -
         };
 
         if Instant::now() >= deadline {
-            panic!("run {run_id} did not complete within {RUN_TIMEOUT:?}:\n{last_record}");
+            panic!("run {run_id} did not terminate within {RUN_TIMEOUT:?}:\n{last_record}");
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }

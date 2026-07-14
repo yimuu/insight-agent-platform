@@ -1,0 +1,16 @@
+version: 1
+id: workflow_failure_demo
+name: Workflow Failure Demo
+description: Demonstrates an authored workflow failure terminal.
+input:
+  schema:
+    type: object
+    additionalProperties: false
+entry: reject
+nodes:
+  reject:
+    type: core.end
+    config:
+      outcome: failure
+      code: WORKFLOW_DEMO_REJECTED
+      message: workflow failure demo rejected the run

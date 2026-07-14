@@ -15,7 +15,7 @@ fork/join 引入的 DSL、调度和事件接口变化是有意的；本次 live-
 | 通用 `llm` step 和 Agent 顶层 model | 命名模型资源 + `core.chat` | chat、embedding、speech、rerank 需要不同合同；不应塞进一个可选字段集合 | `type: llm` → `type: core.chat; config.model: general_chat` |
 | `tool` 与 `code` 两套调用边界 | `core.action` + `ActionRegistry` | 两者本质上都是严格 JSON 能力调用；统一 Schema、取消和错误语义 | `type: code; handler: example.text_metrics` → `type: core.action; config.action: example.text_metrics` |
 | 运行时编译 condition/CEL | `core.condition` 在启动时预编译 | 平台自有工作流的表达式错误不应延迟到用户请求 | `cases[].goto` → `config.cases[].next`，上下文从 `steps.x` 改为 `nodes.x` |
-| 最后一个 step 隐式成为结果 | 必需的终端 `core.output` | 最终显示内容、格式和结构化数据必须确定且可验证 | 添加 `result: {type: core.output, config: {content: {template: ...}, format: markdown}}` |
+| 最后一个 step 隐式成为结果 | 必需的 `core.end` success/failure 终端 | 主流程和 Fork 分支都必须显式返回成功或 authored workflow failure | 添加 `result: {type: core.end, config: {outcome: success, content: {template: ...}, format: markdown}}`；分支使用自己的 End，不再指向 Join |
 | 节点 `stream: true/false` | 公共 envelope 的 `emit: content/none` | 供应商是否使用流传输与内容是否公开给客户端是两件事 | `stream: true` → `emit: content` |
 | Agent `public/default_public/exposure` | 平台 `auth.mode` + `agents.enabled` | 工作流元数据不能决定部署安全；鉴权和启用策略必须分离 | 删除 `public`，在平台配置中显式写 `auth.mode` 和 `agents.enabled` |
 | SSE 连接拥有所有 Run | attached 与 detached 两种创建接口 | 交互式断开取消和后台执行是两种明确意图 | `/runs/stream` 创建 attached；`/runs` 创建 detached 并返回 202 |
@@ -59,13 +59,18 @@ nodes:
         - role: user
           content: "{{ input.question }}"
   result:
-    type: core.output
+    type: core.end
     config:
+      outcome: success
       content: {template: "{{ nodes.answer.output.text }}"}
       format: markdown
 ```
 
 Prompt 文件继续相对 Agent 目录声明，但消息通过 `{template_ref: name}` 引用。所有跨节点模板和 CEL 引用使用 `nodes.<node_id>.output`；编译器只允许引用所有到达路径上都已完成的前驱。
+
+`core.end` 是严格联合类型并禁止 `next`：success 至少提供 `content` 或 `data`，failure 只提供静态 `WORKFLOW_...` code 与静态单行 message。主流程 End 决定 Run 成功或 workflow failure；分支 End 只结算所属分支。failure End 本身仍成功执行，所以事件顺序是 `node.completed(core.end)` 后跟 `branch.failed(kind=workflow)` 或 `run.failed(kind=workflow)`，而不是 `node.failed`。
+
+Fork 分支不再直接进入 Join。每个静态成功路径必须到达分支局部 End；所有分支结算后 `all_settled` Join 才执行。Join 输出的每个失败包含 `error.kind: workflow|node|timeout`，`summary.failures` 分别计数三种来源。即使所有分支失败，Join 也会执行；Join 后的 Condition 显式选择 degraded success 或主流程 failure End。
 
 ## HTTP 与事件迁移
 
@@ -87,7 +92,7 @@ DELETE /v1/runs/{run_id}
 
 attached POST 在构造 SSE 前完成 JSON 与 Schema 校验，先订阅实时广播再启动 Run，并返回 X-Run-Id；终态事件发送后连接立即结束，非终态连接断开会立即取消 Run。正式 V1 不提供 GET /runs/{run_id}/events、after_seq 或 Last-Event-ID 恢复：公开恢复会让并发重连直接查询事件库，而 live-only 的既有 Run 订阅又无法保证创建到订阅之间无缺口。detached POST 返回 202，客户端通过 GET Run 轮询最终状态；DELETE 是唯一显式取消接口且幂等。
 
-事件的 schema_version 仍为 1，seq 和 SSE id 仍表示单 Run 顺序并用于审计关联，但不再表示可恢复游标。事件继续先持久化再广播；数据库事件历史保留给内部终态恢复和审计，不删除表、不执行 migration。
+事件的 schema_version 仍为 1，seq 和 SSE id 仍表示单 Run 顺序并用于审计关联，但不再表示可恢复游标。事件继续先持久化再广播；数据库事件历史保留给内部终态恢复和审计。本次 pre-adoption 终端重写会直接改写 Formal V1 initial migration，不提供旧本地数据库的就地升级。
 
 ## 配置与安全迁移
 
@@ -131,15 +136,27 @@ postgres://user:password@database/private?sslmode=verify-full
 
 ## 历史重置
 
-不执行原型表的就地升级，也不读取原始输入。迁移开发环境：
+不执行原型表或旧 Formal V1 终端表的就地升级，也不读取原始输入。`core.end` 重写增加显式 `error_kind` 和完整终态字段约束，因此已有本地 Formal V1 数据库必须整体重建，不能只清空 runs 表。
+
+停止所有使用目标 history store 的进程后执行以下一种操作。
+
+SQLite：
 
 ```bash
-rm -f data/run_history.sqlite3
+SQLITE_DB=/absolute/path/to/formal_v1.sqlite3
+rm -f "$SQLITE_DB" "$SQLITE_DB-wal" "$SQLITE_DB-shm"
+```
+
+仓库默认开发配置可直接删除 `data/formal_v1.sqlite3`，quickstart 可删除 `data/quickstart.sqlite3`；两者也应同时删除对应的 `-wal`、`-shm` 文件。
+
+PostgreSQL 本地开发 volume：
+
+```bash
 docker compose -f docker-compose.postgres.yml down -v
 docker compose -f docker-compose.postgres.yml up -d
 ```
 
-正式 migration 只位于 `migrations/formal_v1/{sqlite,postgres}`。生产环境如需保留原型审计数据，应先导出到独立只读存储；不要把旧表复制进正式 V1 数据库。
+正式 migration 只位于 `migrations/formal_v1/{sqlite,postgres}`。重启新二进制后由 SQLx 在空数据库上重新应用 initial migration。应用不会自动删除或改写不兼容历史。生产环境如需保留原型审计数据，应先导出到独立只读存储；不要把旧表复制进正式 V1 数据库。
 
 ### A0 Action validation error containment
 

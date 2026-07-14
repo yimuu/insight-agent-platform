@@ -100,47 +100,58 @@ entry: prepare
 nodes:
   prepare:
     type: core.template
-    next: answer
+    next: route
     config:
-      value:
-        messages:
-          - role: user
-            content: "{{ input.question }}"
+      value: "{{ input.question }}"
+  route:
+    type: core.condition
+    config:
+      cases:
+        - when: "input.question == 'medical'"
+          next: answer
+      default: classify
   answer:
     type: core.chat
-    next: classify
+    next: selected
     config:
       model: primary
       messages:
         - role: system
           content: "You are concise."
-        - from:
-            path: nodes.prepare.output.messages
+        - role: user
+          content: "{{ nodes.prepare.output }}"
       parameters: {}
   classify:
     type: core.action
-    next: route
+    next: selected
     config:
       action: classify
       input:
-        text: "{{ nodes.answer.output.text }}"
-  route:
-    type: core.condition
+        text: "{{ nodes.prepare.output }}"
+  selected:
+    type: core.select
+    next: fanout
     config:
-      cases:
-        - when: "nodes.classify.output.kind == 'medical'"
-          next: medical
-      default: general
-  medical:
-    type: core.template
+      sources: [answer, classify]
+  fanout:
+    type: core.fork
+    config:
+      branches: {a: end_a, b: end_b}
+      join: collect
+  end_a:
+    type: core.end
+    config:
+      outcome: success
+      data: {selected: "{{ nodes.selected.output.value }}"}
+  end_b:
+    type: core.end
+    config:
+      outcome: success
+      data: {selected: "{{ nodes.selected.output.value }}"}
+  collect:
+    type: core.join
     next: result
-    config:
-      value: medical
-  general:
-    type: core.template
-    next: result
-    config:
-      value: general
+    config: {mode: all_settled}
   result:
     type: core.end
     config:
@@ -149,7 +160,7 @@ nodes:
         template: "{{ input.question }}"
       format: text
       data:
-        source: complete-formal-agent
+        branches: "{{ nodes.collect.output.summary }}"
 "#,
     )
     .unwrap();
@@ -177,21 +188,54 @@ nodes:
 
     let agent = compiler.compile_dir(directory.path()).unwrap();
 
-    assert_eq!(agent.nodes.len(), 7);
+    assert_eq!(agent.nodes.len(), 10);
     assert!(agent.nodes.contains_key("prepare"));
     assert!(agent.nodes.contains_key("answer"));
     assert!(agent.nodes.contains_key("classify"));
     assert!(agent.nodes.contains_key("route"));
-    assert!(agent.nodes.contains_key("medical"));
-    assert!(agent.nodes.contains_key("general"));
+    assert!(agent.nodes.contains_key("selected"));
+    assert!(agent.nodes.contains_key("fanout"));
+    assert!(agent.nodes.contains_key("end_a"));
+    assert!(agent.nodes.contains_key("end_b"));
+    assert!(agent.nodes.contains_key("collect"));
     assert!(agent.nodes.contains_key("result"));
-    assert!(agent.execution_plan.forks.is_empty());
-    assert!(agent
-        .execution_plan
-        .node_regions
-        .values()
-        .all(|region| region == &NodeRegion::Linear));
+    assert_eq!(
+        agent
+            .nodes
+            .values()
+            .map(|node| node.kind.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "core.action",
+            "core.chat",
+            "core.condition",
+            "core.end",
+            "core.fork",
+            "core.join",
+            "core.select",
+            "core.template",
+        ])
+    );
+    assert_eq!(agent.execution_plan.forks.len(), 1);
+    assert_eq!(
+        agent.execution_plan.node_regions["prepare"],
+        NodeRegion::Linear
+    );
+    assert_eq!(
+        agent.execution_plan.node_regions["end_a"],
+        NodeRegion::Branch {
+            fork_id: "fanout".to_string(),
+            branch_id: "a".to_string(),
+        }
+    );
+    assert_eq!(
+        agent.execution_plan.node_regions["collect"],
+        NodeRegion::Join {
+            fork_id: "fanout".to_string(),
+        }
+    );
     assert!(agent.nodes["answer"].references.contains("prepare"));
+    assert!(agent.nodes["result"].references.contains("collect"));
     assert!(agent.version_hash.starts_with("sha256:"));
 }
 

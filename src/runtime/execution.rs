@@ -9,7 +9,10 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    dsl::{compiled::CompiledNode, EmitPolicy},
+    dsl::{
+        compiled::{CompiledNode, NodeTransition},
+        EmitPolicy,
+    },
     events::{
         hub::{EventError, EventHub},
         protocol::{RunEventScope, RunEventType},
@@ -17,6 +20,7 @@ use crate::{
     history::types::NodeOutputRecord,
     nodes::registry::NodeExecutorRegistry,
     observability::{elapsed_ms, json_size_bytes},
+    outcome::TerminalOutcome,
 };
 
 use super::{ExecutionControl, RunContext, RunError, RunErrorKind, StopReason, StopSignal};
@@ -210,6 +214,11 @@ async fn execute_node_inner(
         )
         .await
         .map_err(|error| NodeExecutionFailure::Infrastructure(event_error(error)))?;
+    let terminal_outcome = match &outcome.transition {
+        NodeTransition::End(TerminalOutcome::Success { .. }) => "success",
+        NodeTransition::End(TerminalOutcome::Failure { .. }) => "failure",
+        _ => "",
+    };
     tracing::info!(
         event_name = "node.completed",
         run_id = context.metadata().run_id.as_str(),
@@ -218,6 +227,7 @@ async fn execute_node_inner(
         agent_version = context.metadata().agent_version.as_str(),
         node_id = node_id.as_str(),
         kind = node_kind.as_str(),
+        terminal_outcome,
         elapsed_ms = elapsed_ms(started),
         output_bytes = json_size_bytes(&outcome.output),
         "node completed"
