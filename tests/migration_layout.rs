@@ -48,3 +48,20 @@ fn both_formal_backends_define_equivalent_runtime_tables_and_constraints() {
     assert!(POSTGRES_V1.contains("JSONB"));
     assert!(POSTGRES_V1.contains("TIMESTAMPTZ"));
 }
+
+#[test]
+fn postgres_alone_defines_the_exclusive_runtime_owner() {
+    let postgres = POSTGRES_V1.to_ascii_lowercase();
+    let sqlite = SQLITE_V1.to_ascii_lowercase();
+
+    assert!(postgres.contains("create table runtime_ownership"));
+    assert!(postgres.contains("singleton smallint primary key check (singleton = 1)"));
+    assert!(postgres.contains("generation bigint not null check (generation >= 0)"));
+    assert!(postgres.contains("owner_id text"));
+    assert!(postgres.contains("claimed_at timestamptz"));
+    assert!(postgres.contains("generation = 0 and owner_id is null and claimed_at is null"));
+    assert!(postgres.contains("generation > 0 and owner_id is not null and claimed_at is not null"));
+    assert!(postgres.contains("values (1, 0, null, null)"));
+
+    assert!(!sqlite.contains("runtime_ownership"));
+}

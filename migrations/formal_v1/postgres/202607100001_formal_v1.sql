@@ -1,3 +1,18 @@
+CREATE TABLE runtime_ownership (
+    singleton SMALLINT PRIMARY KEY CHECK (singleton = 1),
+    generation BIGINT NOT NULL CHECK (generation >= 0),
+    owner_id TEXT,
+    claimed_at TIMESTAMPTZ,
+    CHECK (
+        (generation = 0 AND owner_id IS NULL AND claimed_at IS NULL)
+        OR
+        (generation > 0 AND owner_id IS NOT NULL AND claimed_at IS NOT NULL)
+    )
+);
+
+INSERT INTO runtime_ownership (singleton, generation, owner_id, claimed_at)
+VALUES (1, 0, NULL, NULL);
+
 CREATE TABLE runs (
     run_id TEXT PRIMARY KEY,
     request_id TEXT NOT NULL,

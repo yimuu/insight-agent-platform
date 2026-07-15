@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -20,37 +20,112 @@ use crate::{
 
 static MIGRATOR: Migrator = sqlx::migrate!("migrations/formal_v1/postgres");
 
+mod ownership;
+
+pub use ownership::PostgresStoreOwner;
+
 #[derive(Clone)]
 pub struct PostgresRunRepository {
     pool: PgPool,
+    token: ownership::OwnershipToken,
+    ownership: ownership::OwnershipState,
 }
 
 impl PostgresRunRepository {
-    pub async fn connect(database_url: &str) -> Result<Self, HistoryError> {
-        let pool = PgPoolOptions::new()
+    #[doc(hidden)]
+    pub async fn connect_owned(
+        database_url: &str,
+        operation_timeout: Duration,
+        probe_timeout: Duration,
+    ) -> Result<(Self, PostgresStoreOwner), HistoryError> {
+        let (token, ownership, owner) =
+            ownership::acquire(database_url, &MIGRATOR, operation_timeout, probe_timeout).await?;
+        let expected_schema_oid = token.schema_oid();
+        let pool_ownership = ownership.clone();
+        let pool_result = PgPoolOptions::new()
             .max_connections(5)
+            .after_connect(move |connection, _metadata| {
+                let ownership = pool_ownership.clone();
+                Box::pin(async move {
+                    let schema_oid: Option<i64> = sqlx::query_scalar(
+                        "SELECT oid::bigint FROM pg_namespace WHERE nspname = current_schema()",
+                    )
+                    .fetch_optional(connection)
+                    .await?;
+                    if schema_oid == Some(expected_schema_oid) {
+                        Ok(())
+                    } else {
+                        ownership.mark_lost();
+                        Err(sqlx::Error::Protocol(
+                            "PostgreSQL history schema identity changed".to_string(),
+                        ))
+                    }
+                })
+            })
             .connect(database_url)
-            .await
-            .map_err(|error| init_error("failed to initialize PostgreSQL history", error))?;
-        MIGRATOR
-            .run(&pool)
-            .await
-            .map_err(|error| init_error("failed to migrate PostgreSQL history", error))?;
-        Ok(Self { pool })
+            .await;
+        let pool = match pool_result {
+            Ok(pool) => pool,
+            Err(error) => {
+                let _ = owner.release().await;
+                return Err(init_error("failed to initialize PostgreSQL history", error));
+            }
+        };
+        ownership.ensure_current()?;
+        Ok((
+            Self {
+                pool,
+                token,
+                ownership,
+            },
+            owner,
+        ))
+    }
+
+    async fn begin_owned_write(&self) -> Result<Transaction<'_, Postgres>, HistoryError> {
+        self.ownership.ensure_current()?;
+        let mut transaction = self.pool.begin().await.map_err(write_error)?;
+        let stored = sqlx::query_as::<_, (Option<String>, i64)>(
+            "SELECT owner_id, generation
+             FROM runtime_ownership
+             WHERE singleton = 1
+             FOR SHARE",
+        )
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(read_error)?;
+        if !self.token.matches(stored.as_ref()) {
+            self.ownership.mark_lost();
+            let _ = transaction.rollback().await;
+            return Err(ownership::ownership_lost());
+        }
+        Ok(transaction)
     }
 }
 
 #[async_trait]
 impl RunRepository for PostgresRunRepository {
     async fn check_health(&self) -> Result<(), HistoryError> {
-        sqlx::query("SELECT 1")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(read_error)?;
+        self.ownership.ensure_current()?;
+        let stored = sqlx::query_as::<_, (Option<String>, i64, i64)>(
+            "SELECT ownership.owner_id, ownership.generation, namespace.oid::bigint
+             FROM runtime_ownership ownership
+             JOIN pg_namespace namespace ON namespace.nspname = current_schema()
+             WHERE ownership.singleton = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(read_error)?;
+        if !self.token.matches_health(stored.as_ref()) {
+            self.ownership.mark_lost();
+            return Err(ownership::ownership_lost());
+        }
+        self.ownership.ensure_current()?;
         Ok(())
     }
 
     async fn create_run(&self, run: NewRun) -> Result<(), HistoryError> {
+        let mut transaction = self.begin_owned_write().await?;
         sqlx::query(
             "INSERT INTO runs (
                 run_id, request_id, agent_id, agent_version, attachment, status,
@@ -66,10 +141,10 @@ impl RunRepository for PostgresRunRepository {
         .bind(RunStatus::Created.as_str())
         .bind(run.created_at)
         .bind(Json(run.input_summary))
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(write_error)?;
-        Ok(())
+        transaction.commit().await.map_err(write_error)
     }
 
     async fn mark_running(
@@ -77,6 +152,7 @@ impl RunRepository for PostgresRunRepository {
         run_id: &str,
         started_at: DateTime<Utc>,
     ) -> Result<(), HistoryError> {
+        let mut transaction = self.begin_owned_write().await?;
         let result = sqlx::query(
             "UPDATE runs
              SET status = $1, started_at = $2, updated_at = $2
@@ -86,7 +162,7 @@ impl RunRepository for PostgresRunRepository {
         .bind(started_at)
         .bind(run_id)
         .bind(RunStatus::Created.as_str())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(write_error)?;
         if result.rows_affected() != 1 {
@@ -95,14 +171,14 @@ impl RunRepository for PostgresRunRepository {
                 "run cannot transition to running",
             ));
         }
-        Ok(())
+        transaction.commit().await.map_err(write_error)
     }
 
     async fn append_events(&self, events: &[RunEvent]) -> Result<(), HistoryError> {
+        let mut transaction = self.begin_owned_write().await?;
         if events.is_empty() {
-            return Ok(());
+            return transaction.commit().await.map_err(write_error);
         }
-        let mut transaction = self.pool.begin().await.map_err(write_error)?;
         let run_ids = events
             .iter()
             .map(|event| event.run_id.as_str())
@@ -125,6 +201,7 @@ impl RunRepository for PostgresRunRepository {
     }
 
     async fn put_node_output(&self, output: NodeOutputRecord) -> Result<(), HistoryError> {
+        let mut transaction = self.begin_owned_write().await?;
         sqlx::query(
             "INSERT INTO node_outputs (run_id, node_id, output, completed_at)
              VALUES ($1, $2, $3, $4)",
@@ -133,10 +210,10 @@ impl RunRepository for PostgresRunRepository {
         .bind(&output.node_id)
         .bind(Json(output.output))
         .bind(output.completed_at)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(write_error)?;
-        Ok(())
+        transaction.commit().await.map_err(write_error)
     }
 
     async fn commit_terminal(
@@ -144,13 +221,13 @@ impl RunRepository for PostgresRunRepository {
         proposal: TerminalProposal,
         sequence: TerminalSequence,
     ) -> Result<RunEvent, HistoryError> {
-        match commit_postgres_once(&self.pool, proposal.clone(), sequence).await {
+        match commit_postgres_once(self, proposal.clone(), sequence).await {
             Ok(event) => Ok(event),
             Err(error)
                 if matches!(sequence, TerminalSequence::NextDurable)
                     && matches!(error.code(), "HISTORY_WRITE_FAILED" | "HISTORY_READ_FAILED") =>
             {
-                commit_postgres_once(&self.pool, proposal, sequence).await
+                commit_postgres_once(self, proposal, sequence).await
             }
             Err(error) => Err(error),
         }
@@ -200,7 +277,7 @@ impl RunRepository for PostgresRunRepository {
     }
 
     async fn mark_incomplete_interrupted(&self, at: DateTime<Utc>) -> Result<u64, HistoryError> {
-        let mut transaction = self.pool.begin().await.map_err(write_error)?;
+        let mut transaction = self.begin_owned_write().await?;
         let rows = sqlx::query_as::<_, IncompleteRunRow>(
             "SELECT r.run_id, r.request_id, r.agent_id, r.agent_version,
                     COALESCE(MAX(e.seq), 0) AS max_seq
@@ -270,12 +347,12 @@ impl RunRepository for PostgresRunRepository {
 }
 
 async fn commit_postgres_once(
-    pool: &PgPool,
+    repository: &PostgresRunRepository,
     proposal: TerminalProposal,
     sequence: TerminalSequence,
 ) -> Result<RunEvent, HistoryError> {
     let run_id = proposal.run_id().to_string();
-    let mut transaction = pool.begin().await.map_err(write_error)?;
+    let mut transaction = repository.begin_owned_write().await?;
     let status_value: String =
         sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
             .bind(&run_id)

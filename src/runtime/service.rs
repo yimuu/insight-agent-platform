@@ -554,6 +554,9 @@ impl RunService {
             .create_run(new_run.clone())
             .await
             .map_err(|error| {
+                if error.code() == "HISTORY_OWNERSHIP_LOST" {
+                    self.inner.close_admission();
+                }
                 self.inner.remove_preparing(&run_id);
                 service_history_error(error)
             })?;
@@ -809,7 +812,13 @@ async fn publish_prelaunch_terminal(
 }
 
 fn service_history_error(error: HistoryError) -> ServiceError {
-    ServiceError::new(error.code(), error.to_string())
+    match error.code() {
+        "HISTORY_OWNERSHIP_LOST" | "HISTORY_STORE_ALREADY_OWNED" => ServiceError::new(
+            "RUN_SERVICE_UNAVAILABLE",
+            "history store ownership is unavailable",
+        ),
+        _ => ServiceError::new(error.code(), error.to_string()),
+    }
 }
 
 fn readiness_unavailable() -> ServiceError {
@@ -839,6 +848,7 @@ mod tests {
     struct UnitRepository {
         runs: tokio::sync::Mutex<BTreeMap<String, RunRecord>>,
         events: tokio::sync::Mutex<Vec<crate::events::protocol::RunEvent>>,
+        create_error_code: Option<&'static str>,
     }
 
     #[async_trait]
@@ -848,6 +858,9 @@ mod tests {
         }
 
         async fn create_run(&self, run: NewRun) -> Result<(), HistoryError> {
+            if let Some(code) = self.create_error_code {
+                return Err(HistoryError::new(code, "private ownership failure"));
+            }
             self.runs.lock().await.insert(
                 run.run_id.clone(),
                 RunRecord {
@@ -983,6 +996,82 @@ mod tests {
         ) -> Result<u64, HistoryError> {
             Ok(0)
         }
+    }
+
+    #[test]
+    fn ownership_history_errors_map_to_service_unavailable_without_changing_other_errors() {
+        for code in ["HISTORY_OWNERSHIP_LOST", "HISTORY_STORE_ALREADY_OWNED"] {
+            let error = service_history_error(HistoryError::new(code, "private ownership detail"));
+            assert_eq!(error.code(), "RUN_SERVICE_UNAVAILABLE");
+            assert_eq!(error.to_string(), "history store ownership is unavailable");
+            assert!(!error.to_string().contains("private ownership detail"));
+        }
+
+        let error = service_history_error(HistoryError::new(
+            "HISTORY_WRITE_FAILED",
+            "existing history detail",
+        ));
+        assert_eq!(error.code(), "HISTORY_WRITE_FAILED");
+        assert_eq!(error.to_string(), "existing history detail");
+    }
+
+    #[tokio::test]
+    async fn create_run_ownership_loss_closes_admission_and_cleans_preparing_state() {
+        let repository = Arc::new(UnitRepository {
+            create_error_code: Some("HISTORY_OWNERSHIP_LOST"),
+            ..UnitRepository::default()
+        });
+        let repository_trait: Arc<dyn RunRepository> = repository.clone();
+        let events = EventHub::new(
+            Arc::clone(&repository_trait),
+            crate::events::hub::EventHubConfig {
+                subscriber_capacity: 8,
+                journal_capacity: 32,
+                journal_batch_size: 8,
+                operation_timeout: Duration::from_secs(1),
+            },
+        );
+        let agent = Arc::new(CompiledAgent {
+            id: "ownership-agent".to_string(),
+            name: "ownership-agent".to_string(),
+            description: String::new(),
+            version_hash: "sha256:ownership-agent".to_string(),
+            input_schema: Arc::new(crate::schema::compile_schema(&json!({})).unwrap()),
+            entry: "missing".to_string(),
+            execution_plan: ExecutionPlan::sequential("missing", Vec::<String>::new()),
+            nodes: BTreeMap::new(),
+            templates: Arc::new(handlebars::Handlebars::new()),
+        });
+        let service = RunService::new(
+            CompiledAgentRegistry::new(vec![agent]).unwrap(),
+            NodeExecutorRegistry::default(),
+            repository_trait,
+            events,
+            RunServiceConfig {
+                max_concurrent_runs: 1,
+                max_parallel_node_executions: 1,
+                max_parallel_branches_per_run: 1,
+                run_timeout: Duration::from_secs(1),
+            },
+        )
+        .unwrap();
+
+        let error = service
+            .create_detached("ownership-agent", json!({}), RequestMetadata::default())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "RUN_SERVICE_UNAVAILABLE");
+        assert!(!service.is_healthy());
+        assert!(lock_preparing(&service.inner).is_empty());
+        assert!(lock_active(&service.inner).is_empty());
+        assert!(repository.runs.lock().await.is_empty());
+
+        let rejected = service
+            .create_detached("ownership-agent", json!({}), RequestMetadata::default())
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.code(), "RUN_SERVICE_STOPPING");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -36,9 +36,10 @@ Historical snapshots:
 | Chat optional image and dynamic message sources | Implemented | `3ce4352`, `0b29aa7`, `ef64358` | Direct Chat cancellation and clean-EOF policy remain open. |
 | Condition result convergence | Implemented | `3b995e3`, `912d3cb`, `926d87d` | No additional Select expansion is currently planned. |
 | Unified End and typed terminal model | Implemented | `559bfc8` through `7ef2cee`; terminal suites under `tests/event_hub.rs` and `tests/core_end.rs` | Cross-connection CAS and multi-process ownership remain separate persistence topics. |
-| Canonical repository terminal proposal | Implemented | `7a6865a`; `tests/history_sqlite_v1.rs`, `tests/history_postgres.rs`, `tests/event_hub.rs` | PostgreSQL exclusive-store topology is still open. |
+| Canonical repository terminal proposal | Implemented | `7a6865a`; `tests/history_sqlite_v1.rs`, `tests/history_postgres.rs`, `tests/event_hub.rs` | PostgreSQL exclusive-store topology is handled by the ownership milestone below. |
 | Public Agent input contract | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-public-agent-contract-design.md`; schema, API, compiler, and binary smoke tests | Output schemas and Agent CRUD are intentionally out of scope. |
 | Production lifecycle V1 | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-production-lifecycle-v1-design.md`; `tests/api.rs`, `tests/run_service.rs`, `tests/binary_lifecycle.rs` | Direct SIGINT, unexpected HTTP-server exit, real PostgreSQL disconnect, and deployment trusted-path policy remain separate verification work. |
+| PostgreSQL exclusive-store ownership | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-postgresql-exclusive-store-ownership-design.md`; `tests/history_postgres.rs`; `tests/binary_postgres_ownership.rs` | Real PostgreSQL repository and process gates cover contention, clean release, ownership loss, fencing, and replacement reconciliation. Deployment requires a direct or session-affine PostgreSQL connection; old runtimes cannot participate in a rolling upgrade. |
 
 ## Stable baseline remediation status
 
@@ -48,7 +49,7 @@ Historical snapshots:
 | A1 — Provider memory bounds | `BASE-P1-011` | Implemented | `8593326`, `dcd7d47`, `fa9f878`, `8293d52`, `d7990da`, `e1851a9`; `docs/superpowers/specs/2026-07-11-provider-memory-bounds-design.md` | Broader provider-specific limits remain future design work only if new providers are added. |
 | A2 — Preparing/active lifecycle ownership | `BASE-P1-006` | Implemented | `aba2c18`, `969ff2a`, `19a87d7`, `fca31f2`; `docs/superpowers/specs/2026-07-11-preparing-active-lifecycle-ownership-design.md` | Real-binary signal and recovery behavior is covered by Production Lifecycle V1. |
 | A3 — Authoritative stop semantics | `BASE-P1-007` | Implemented | `0cb6bcb`, `7cc18fa`, `a50e7e6`; `docs/superpowers/specs/2026-07-11-authoritative-stop-semantics-design.md` | Extension runtime coverage is implemented separately by A6. |
-| A4 — Durable recovery and live-state finalization | `BASE-P1-008`, `BASE-P1-009` | Implemented | `fcf245a`, `087102b`, `616d0f4`, `258dc81`; `docs/superpowers/specs/2026-07-11-durable-recovery-finalization-design.md` | Multi-process/PostgreSQL parity remains Needs verification. |
+| A4 — Durable recovery and live-state finalization | `BASE-P1-008`, `BASE-P1-009` | Implemented | `fcf245a`, `087102b`, `616d0f4`, `258dc81`; `docs/superpowers/specs/2026-07-11-durable-recovery-finalization-design.md` | PostgreSQL whole-store ownership and replacement reconciliation are implemented and verified separately. |
 | A5 — Semantic compile-time validation | `BASE-P1-001`, `BASE-P1-002`, `BASE-P1-003` | Implemented | `c62f9b1`, `e38604d`, `934f806`, `da78868`, `675ed90`, `dff6b00`, `659f47d`; `docs/superpowers/specs/2026-07-11-semantic-compile-time-validation-design.md` | Additional CEL language compatibility is covered by dependency work and future verification. |
 | A6 — Extension integration contract | `BASE-P2-005` | Implemented | `3a75440`, `a147f5f`, `3fb7854`, `4e02c9e`; `docs/superpowers/specs/2026-07-12-extension-integration-contract-design.md` | Third-party extension packaging is outside current scope. |
 | A7 — Body-free INFO observability | `BASE-P2-013` | Implemented | `4129a53`, `7feb556`, `7a11634`, `eb86bba`, `865628e`; `docs/superpowers/specs/2026-07-12-body-free-info-observability-design.md` | Metrics backend/export remains outside current scope. |
@@ -87,7 +88,7 @@ These were originally uncertainty-preserving review items, not confirmed defects
 | 2 | Synchronous execution preemption | Open | Large Handlebars/CEL and CPU-bound extension responsiveness has not been dynamically established. |
 | 3 | Direct Chat cancellation | Open | Stream acquisition and between-chunk stop behavior still need a dedicated fake-provider matrix. |
 | 4 | Dropped create-future ownership | Addressed | Preparing ownership and capacity release are covered by `attached_subscription_drop_before_launch_finalizes_cancelled` and `dropped_detached_create_future_releases_capacity_after_durable_create`. |
-| 5 | PostgreSQL exclusive-store topology | Open | Formal V1 still needs an explicit one-runtime-per-store lease or a larger distributed ownership design. |
+| 5 | PostgreSQL exclusive-store topology | Addressed | A dedicated-session advisory lock plus persistent generation fence now enforces fail-before-bind contention and fail-stop ownership loss; real PostgreSQL repository and process gates cover replacement reconciliation and stale-writer rejection. |
 | 6 | Outer Run-task panic cleanup | Open | A panic outside the scheduler task set still needs direct ownership/permit/shutdown verification. |
 | 7 | Repository parity and full-record fidelity | Partial | Both real backends cover lifecycle and canonical terminal proposals; the complete mirrored raw-record matrix remains open. |
 | 8 | End-to-end input-summary privacy | Open | Both real backend rows still need direct secret-bearing raw-row inspection. |
@@ -100,7 +101,7 @@ These were originally uncertainty-preserving review items, not confirmed defects
 | 15 | Real-binary lifecycle | Partial | Real executable coverage includes public probes, in-flight Attached/Detached SIGTERM terminals, restart persistence, crash reconciliation/idempotency, and bounded hard-deadline failure; direct SIGINT and unexpected HTTP-server termination remain unverified. |
 | 16 | Restricted HTTP positive boundary matrix | Open | Allowed TLS, redirects, size, timeout, cancellation, redaction, and socket-close cases need a local test service. |
 | 17 | API/auth/error/SSE boundary matrix | Partial | Core routes, list/detail auth, validation, live-only SSE, cancellation, and typed failures are covered; an exhaustive route/header/lag/error matrix remains open. |
-| 18 | Readiness and deployment paths | Partial | Public liveness/readiness, bounded SQLite/PostgreSQL repository probes, startup-before-bind, and two-phase drain are implemented; real PostgreSQL disconnect and trusted path/deployment policy remain open. |
+| 18 | Readiness and deployment paths | Partial | Public probes, bounded repository checks, startup-before-bind, two-phase drain, and real PostgreSQL ownership-loss fail-stop behavior are verified; trusted path policy remains open. |
 | 19 | Documentation precedence | Open | Historical replay/reconnect designs still need explicit supersession markers. |
 | 20 | Checked-in example execution | Addressed | The real binary smoke compiles and executes checked-in `code_node_demo` and constructs its input from the discovered schema. |
 
@@ -119,7 +120,7 @@ These were originally uncertainty-preserving review items, not confirmed defects
 ## Recommended next actions
 
 1. Treat this document as the current open-work entrypoint and keep the 2026-07-11 reviews as historical evidence.
-2. Make PostgreSQL exclusive-store ownership the next production-hardening milestone.
+2. Keep the PostgreSQL exclusive-store deployment restrictions aligned with the now-enforced ownership contract.
 3. Define the restricted HTTP DNS/private-address/rebinding contract before enabling `http_get` for a production Agent.
 4. Do not repeat A0-A8, R0-R6, or completed terminal-model work unless a regression is found.
 5. Execute R7 only when a concrete future SQLx version is selected; it is not the default next task.

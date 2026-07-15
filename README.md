@@ -420,6 +420,10 @@ history:
 
 Remote PostgreSQL URLs must include `sslmode=verify-full`. Plaintext PostgreSQL is accepted only for exact local development targets (`localhost`, `127.0.0.1`, `[::1]`) or Unix sockets.
 
+每个 Formal V1 PostgreSQL store（同一数据库和当前 schema）只允许一个 active runtime。runtime 会在 migration、启动 reconciliation 和 HTTP bind 之前取得数据库强制的 exclusive ownership；指向同一 store 的 contender 会直接启动失败并非零退出，不会在进程内等待成为 standby。运行期间一旦 ownership 丢失，readiness 与 `/health` 会返回 503，新 Run admission 会关闭，进程会在既有 hard deadline 内尝试 drain，随后无论 drain 是否成功都非零退出。平台不会自动重新取得 ownership；部署 supervisor 负责启动 replacement。
+
+该合同要求 PostgreSQL 连接具有 session affinity：必须直连 PostgreSQL，或使用 session-pooling 模式的连接池代理。PgBouncer transaction pooling 和 statement pooling 不支持 session advisory lock，不能用于这个 history store。旧版本 runtime 不具备相同 ownership/fencing 合同，不能与当前版本做滚动升级；升级 disposable PostgreSQL store 时，必须先停掉所有旧 runtime，再按下方 Formal V1 reset 合同重建整个 schema，然后才能启动新版本。
+
 本地运行 PostgreSQL 合同测试：
 
 ```bash
@@ -428,7 +432,7 @@ RUN_HISTORY_POSTGRES_URL='postgres://insight:insight@127.0.0.1:5433/insight_agen
   cargo test --test history_postgres -- --nocapture
 ```
 
-统一 `core.end` 和类型化 Run lifecycle 会直接改写 Formal V1 initial migration；已有本地 SQLite 数据库和开发 PostgreSQL volume 必须按[正式 V1 历史重置](docs/formal-v1-breaking-changes.md#历史重置)整体重建，应用不会静默升级。A0 Action 校验错误安全修复不兼容既有 Run 历史；部署前按[正式 V1 破坏性变更中的 A0 重置流程](docs/formal-v1-breaking-changes.md#a0-action-validation-error-containment)停止服务并显式清空历史。A5 会让静态非法 Action input、hyphenated node/branch ID、indexed/computed `nodes` access 在启动编译期失败；迁移理由见[正式 V1 破坏性变更中的 A5 语义编译期校验](docs/formal-v1-breaking-changes.md#a5-semantic-compile-time-validation)。
+统一 `core.end`、类型化 Run lifecycle 和 PostgreSQL ownership generation fence 会直接改写 Formal V1 initial migration；已有本地 SQLite 数据库和开发 PostgreSQL volume 必须按[正式 V1 历史重置](docs/formal-v1-breaking-changes.md#历史重置)整体重建，应用不会静默升级。重建 PostgreSQL schema 前必须先停掉所有仍可能连接该 store 的旧 runtime。A0 Action 校验错误安全修复不兼容既有 Run 历史；部署前按[正式 V1 破坏性变更中的 A0 重置流程](docs/formal-v1-breaking-changes.md#a0-action-validation-error-containment)停止服务并显式清空历史。A5 会让静态非法 Action input、hyphenated node/branch ID、indexed/computed `nodes` access 在启动编译期失败；迁移理由见[正式 V1 破坏性变更中的 A5 语义编译期校验](docs/formal-v1-breaking-changes.md#a5-semantic-compile-time-validation)。
 
 正式 V1 不存储原始输入，只保存顶层键和序列化字节数摘要。journal 只有在数据库确认事件持久化后才向订阅者广播；单次数据库操作受 `journal_operation_timeout` 限制。失败时先停止 journal worker，恢复事务锁定 Run，并基于持久化的 `MAX(seq)` 原子派生终态序号；这也能判定超时发生在 `COMMIT` 附近时的实际结果。journal 永久关闭后拒绝新 Run。进程启动时遗留的 `created/running` 记录会被标记为 `interrupted`，V1 不恢复工作。
 

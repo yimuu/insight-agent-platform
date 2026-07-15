@@ -1,9 +1,11 @@
+use std::time::{Duration, Instant};
+
 use chrono::{DateTime, TimeZone, Utc};
 use insight_agent_platform::{
     events::protocol::{RunEvent, RunEventScope, RunEventType},
     history::{
         postgres::PostgresRunRepository,
-        repository::{RunRepository, TerminalProposal, TerminalSequence},
+        repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
         types::{
             summarize_input, NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunStatus,
             RunTerminal, StopError, TerminalUpdate,
@@ -12,8 +14,143 @@ use insight_agent_platform::{
     outcome::{FailureKind, RunFailure, RunOutput},
 };
 use serde_json::json;
-use sqlx::{postgres::PgPoolOptions, AssertSqlSafe};
+use sqlx::{postgres::PgPoolOptions, AssertSqlSafe, PgPool};
 use uuid::Uuid;
+
+const OWNERSHIP_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
+const OWNERSHIP_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+const OWNERSHIP_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn postgres_database_url() -> Option<String> {
+    let database_url = std::env::var("RUN_HISTORY_POSTGRES_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if std::env::var_os("CI").is_some() && database_url.is_none() {
+        panic!("RUN_HISTORY_POSTGRES_URL is required in CI");
+    }
+    if database_url.is_none() {
+        eprintln!("skipping postgres history test: RUN_HISTORY_POSTGRES_URL is not set");
+    }
+    database_url
+}
+
+struct PostgresTestSchema {
+    admin: PgPool,
+    database_url: String,
+    schema: String,
+}
+
+impl PostgresTestSchema {
+    async fn create(database_url: &str, label: &str) -> Self {
+        let schema = format!("formal_v1_{label}_{}", Uuid::new_v4().simple());
+        let admin = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(database_url)
+            .await
+            .unwrap();
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        Self {
+            admin,
+            database_url: database_url.to_string(),
+            schema,
+        }
+    }
+
+    fn url(&self, application_name: &str) -> String {
+        let separator = if self.database_url.contains('?') {
+            '&'
+        } else {
+            '?'
+        };
+        format!(
+            "{}{separator}options=-csearch_path%3D{}&application_name={application_name}",
+            self.database_url, self.schema
+        )
+    }
+
+    async fn scoped_pool(&self, application_name: &str) -> PgPool {
+        PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&self.url(application_name))
+            .await
+            .unwrap()
+    }
+
+    async fn ownership_row(&self) -> OwnershipRow {
+        let scoped = self.scoped_pool("ownership_row_reader").await;
+        let (singleton, generation, owner_id, claimed_at) = sqlx::query_as(
+            "SELECT singleton, generation, owner_id, claimed_at
+             FROM runtime_ownership",
+        )
+        .fetch_one(&scoped)
+        .await
+        .unwrap();
+        scoped.close().await;
+        OwnershipRow {
+            singleton,
+            generation,
+            owner_id,
+            claimed_at,
+        }
+    }
+
+    async fn wait_for_advisory_backend(&self, application_name: &str) -> i32 {
+        let deadline = Instant::now() + OWNERSHIP_WAIT_TIMEOUT;
+        loop {
+            let pid = sqlx::query_scalar(
+                "SELECT DISTINCT activity.pid
+                 FROM pg_stat_activity activity
+                 JOIN pg_locks lock ON lock.pid = activity.pid
+                 WHERE activity.application_name = $1
+                   AND lock.locktype = 'advisory'
+                   AND lock.granted",
+            )
+            .bind(application_name)
+            .fetch_optional(&self.admin)
+            .await
+            .unwrap();
+            if let Some(pid) = pid {
+                return pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "ownership advisory backend was not observed for {application_name}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn terminate_backend(&self, pid: i32) {
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(pid)
+            .fetch_one(&self.admin)
+            .await
+            .unwrap();
+        assert!(terminated, "ownership backend {pid} was not terminated");
+    }
+
+    async fn cleanup(self) {
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP SCHEMA {} CASCADE",
+            self.schema
+        )))
+        .execute(&self.admin)
+        .await
+        .unwrap();
+        self.admin.close().await;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OwnershipRow {
+    singleton: i16,
+    generation: i64,
+    owner_id: Option<String>,
+    claimed_at: Option<DateTime<Utc>>,
+}
 
 fn at(second: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 7, 10, 0, 0, second).unwrap()
@@ -81,31 +218,20 @@ fn failed_update(run_id: &str) -> TerminalUpdate {
 
 #[tokio::test]
 async fn postgres_repository_matches_the_formal_v1_contract() {
-    let database_url = std::env::var("RUN_HISTORY_POSTGRES_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    if std::env::var_os("CI").is_some() && database_url.is_none() {
-        panic!("RUN_HISTORY_POSTGRES_URL is required in CI");
-    }
-    let Some(database_url) = database_url else {
-        eprintln!("skipping postgres history test: RUN_HISTORY_POSTGRES_URL is not set");
+    let Some(database_url) = postgres_database_url() else {
         return;
     };
 
     let suffix = Uuid::new_v4();
-    let schema = format!("formal_v1_{}", suffix.simple());
-    let admin = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&database_url)
-        .await
-        .unwrap();
-    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-        .execute(&admin)
-        .await
-        .unwrap();
-    let separator = if database_url.contains('?') { '&' } else { '?' };
-    let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
-    let repo = PostgresRunRepository::connect(&scoped_url).await.unwrap();
+    let store = PostgresTestSchema::create(&database_url, "contract").await;
+    let scoped_url = store.url(&format!("contract_{}", suffix.simple()));
+    let (repo, owner) = PostgresRunRepository::connect_owned(
+        &scoped_url,
+        OWNERSHIP_OPERATION_TIMEOUT,
+        OWNERSHIP_PROBE_TIMEOUT,
+    )
+    .await
+    .unwrap();
     repo.check_health().await.unwrap();
     let run_id = format!("run_pg_{suffix}");
 
@@ -482,10 +608,436 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
     assert_eq!(event_count, 0);
     assert_eq!(output_count, 0);
 
+    scoped_admin.close().await;
     drop(repo);
-    drop(scoped_admin);
-    sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
-        .execute(&admin)
+    owner.release().await.unwrap();
+    store.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_owner_claims_generation_and_rejects_a_same_store_contender() {
+    let Some(database_url) = postgres_database_url() else {
+        return;
+    };
+    let store = PostgresTestSchema::create(&database_url, "contender").await;
+    let owner_application = format!("owner_{}", Uuid::new_v4().simple());
+    let contender_application = format!("contender_{}", Uuid::new_v4().simple());
+
+    let (repository, owner) = PostgresRunRepository::connect_owned(
+        &store.url(&owner_application),
+        OWNERSHIP_OPERATION_TIMEOUT,
+        OWNERSHIP_PROBE_TIMEOUT,
+    )
+    .await
+    .unwrap();
+    repository.check_health().await.unwrap();
+    let claimed = store.ownership_row().await;
+    assert_eq!(claimed.singleton, 1);
+    assert_eq!(claimed.generation, 1);
+    assert!(claimed.owner_id.is_some());
+    assert!(claimed.claimed_at.is_some());
+
+    let contender_error = PostgresRunRepository::connect_owned(
+        &store.url(&contender_application),
+        OWNERSHIP_OPERATION_TIMEOUT,
+        OWNERSHIP_PROBE_TIMEOUT,
+    )
+    .await
+    .err()
+    .expect("same-store contender unexpectedly acquired ownership");
+    assert_eq!(contender_error.code(), "HISTORY_STORE_ALREADY_OWNED");
+    assert_eq!(store.ownership_row().await, claimed);
+    repository.check_health().await.unwrap();
+
+    drop(repository);
+    owner.release().await.unwrap();
+    store.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_owners_for_different_schemas_can_run_concurrently() {
+    let Some(database_url) = postgres_database_url() else {
+        return;
+    };
+    let first_store = PostgresTestSchema::create(&database_url, "isolated_a").await;
+    let second_store = PostgresTestSchema::create(&database_url, "isolated_b").await;
+    let first_url = first_store.url(&format!("isolated_a_{}", Uuid::new_v4().simple()));
+    let second_url = second_store.url(&format!("isolated_b_{}", Uuid::new_v4().simple()));
+
+    let (first, second) = tokio::join!(
+        PostgresRunRepository::connect_owned(
+            &first_url,
+            OWNERSHIP_OPERATION_TIMEOUT,
+            OWNERSHIP_PROBE_TIMEOUT,
+        ),
+        PostgresRunRepository::connect_owned(
+            &second_url,
+            OWNERSHIP_OPERATION_TIMEOUT,
+            OWNERSHIP_PROBE_TIMEOUT,
+        ),
+    );
+    let (first_repository, first_owner) = first.unwrap();
+    let (second_repository, second_owner) = second.unwrap();
+    let first_claim = first_store.ownership_row().await;
+    let second_claim = second_store.ownership_row().await;
+    assert_eq!(first_claim.generation, 1);
+    assert_eq!(second_claim.generation, 1);
+    assert_ne!(first_claim.owner_id, second_claim.owner_id);
+
+    let shared_run_id = format!("isolated_run_{}", Uuid::new_v4().simple());
+    first_repository
+        .create_run(new_run(&shared_run_id))
         .await
         .unwrap();
+    second_repository
+        .create_run(new_run(&shared_run_id))
+        .await
+        .unwrap();
+    assert!(first_repository
+        .get_run(&shared_run_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(second_repository
+        .get_run(&shared_run_id)
+        .await
+        .unwrap()
+        .is_some());
+
+    drop(first_repository);
+    drop(second_repository);
+    first_owner.release().await.unwrap();
+    second_owner.release().await.unwrap();
+    first_store.cleanup().await;
+    second_store.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_clean_release_allows_exactly_one_generation_takeover() {
+    let Some(database_url) = postgres_database_url() else {
+        return;
+    };
+    let store = PostgresTestSchema::create(&database_url, "release").await;
+    let first_url = store.url(&format!("release_a_{}", Uuid::new_v4().simple()));
+    let second_url = store.url(&format!("release_b_{}", Uuid::new_v4().simple()));
+
+    let (first_repository, first_owner) = PostgresRunRepository::connect_owned(
+        &first_url,
+        OWNERSHIP_OPERATION_TIMEOUT,
+        OWNERSHIP_PROBE_TIMEOUT,
+    )
+    .await
+    .unwrap();
+    let first_claim = store.ownership_row().await;
+    first_owner.release().await.unwrap();
+    assert_ownership_lost(
+        first_repository
+            .create_run(new_run(&format!(
+                "released_writer_{}",
+                Uuid::new_v4().simple()
+            )))
+            .await
+            .unwrap_err(),
+    );
+
+    let (second_repository, second_owner) = PostgresRunRepository::connect_owned(
+        &second_url,
+        OWNERSHIP_OPERATION_TIMEOUT,
+        OWNERSHIP_PROBE_TIMEOUT,
+    )
+    .await
+    .unwrap();
+    let second_claim = store.ownership_row().await;
+    assert_eq!(second_claim.generation, first_claim.generation + 1);
+    assert_ne!(second_claim.owner_id, first_claim.owner_id);
+    second_repository.check_health().await.unwrap();
+
+    drop(first_repository);
+    drop(second_repository);
+    second_owner.release().await.unwrap();
+    store.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_release_rechecks_the_token_and_fails_closed_after_tampering() {
+    let Some(database_url) = postgres_database_url() else {
+        return;
+    };
+    let store = PostgresTestSchema::create(&database_url, "release_fence").await;
+    let application = format!("release_fence_{}", Uuid::new_v4().simple());
+    let (repository, owner) = PostgresRunRepository::connect_owned(
+        &store.url(&application),
+        OWNERSHIP_OPERATION_TIMEOUT,
+        OWNERSHIP_PROBE_TIMEOUT,
+    )
+    .await
+    .unwrap();
+    let mut loss = owner.subscribe_loss();
+    let scoped = store.scoped_pool("release_fence_tamper").await;
+    sqlx::query(
+        "UPDATE runtime_ownership
+         SET generation = generation + 1, owner_id = 'tampered-owner', claimed_at = CURRENT_TIMESTAMP
+         WHERE singleton = 1",
+    )
+    .execute(&scoped)
+    .await
+    .unwrap();
+
+    assert_ownership_lost(owner.release().await.unwrap_err());
+    assert!(*loss.borrow_and_update());
+    assert_ownership_lost(repository.check_health().await.unwrap_err());
+
+    scoped.close().await;
+    drop(repository);
+    store.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_backend_loss_fences_all_old_writes_but_preserves_reads() {
+    let Some(database_url) = postgres_database_url() else {
+        return;
+    };
+    let store = PostgresTestSchema::create(&database_url, "loss").await;
+    let old_application = format!("loss_old_{}", Uuid::new_v4().simple());
+    let replacement_application = format!("loss_new_{}", Uuid::new_v4().simple());
+    let (old_repository, old_owner) = PostgresRunRepository::connect_owned(
+        &store.url(&old_application),
+        OWNERSHIP_OPERATION_TIMEOUT,
+        OWNERSHIP_PROBE_TIMEOUT,
+    )
+    .await
+    .unwrap();
+    let first_claim = store.ownership_row().await;
+    let suffix = Uuid::new_v4();
+    let readable_id = format!("loss_readable_{suffix}");
+    let mark_id = format!("loss_mark_{suffix}");
+    let event_id = format!("loss_event_{suffix}");
+    let output_id = format!("loss_output_{suffix}");
+    let terminal_id = format!("loss_terminal_{suffix}");
+    for run_id in [&readable_id, &mark_id, &event_id, &output_id, &terminal_id] {
+        old_repository.create_run(new_run(run_id)).await.unwrap();
+    }
+    old_repository
+        .append_events(&[event(&readable_id, RunEventType::RunCreated, 1, None)])
+        .await
+        .unwrap();
+    old_repository
+        .append_events(&[event(&event_id, RunEventType::RunCreated, 1, None)])
+        .await
+        .unwrap();
+    old_repository.mark_running(&event_id, at(1)).await.unwrap();
+    old_repository
+        .append_events(&[event(&terminal_id, RunEventType::RunCreated, 1, None)])
+        .await
+        .unwrap();
+    old_repository
+        .mark_running(&terminal_id, at(1))
+        .await
+        .unwrap();
+
+    let mut ownership_loss = old_owner.subscribe_loss();
+    let ownership_backend = store.wait_for_advisory_backend(&old_application).await;
+    store.terminate_backend(ownership_backend).await;
+    tokio::time::timeout(OWNERSHIP_WAIT_TIMEOUT, async {
+        loop {
+            if *ownership_loss.borrow() {
+                break;
+            }
+            ownership_loss
+                .changed()
+                .await
+                .expect("ownership loss sender stopped without publishing loss");
+        }
+    })
+    .await
+    .expect("ownership monitor did not publish backend loss");
+    assert!(old_owner.is_lost());
+    assert_ownership_lost(old_repository.check_health().await.unwrap_err());
+
+    let (replacement, replacement_owner) = PostgresRunRepository::connect_owned(
+        &store.url(&replacement_application),
+        OWNERSHIP_OPERATION_TIMEOUT,
+        OWNERSHIP_PROBE_TIMEOUT,
+    )
+    .await
+    .unwrap();
+    let replacement_claim = store.ownership_row().await;
+    assert_eq!(replacement_claim.generation, first_claim.generation + 1);
+    assert_ne!(replacement_claim.owner_id, first_claim.owner_id);
+
+    assert_ownership_lost(
+        old_repository
+            .create_run(new_run(&format!("loss_create_{suffix}")))
+            .await
+            .unwrap_err(),
+    );
+    assert_ownership_lost(
+        old_repository
+            .mark_running(&mark_id, at(2))
+            .await
+            .unwrap_err(),
+    );
+    assert_ownership_lost(
+        old_repository
+            .append_events(&[event(&event_id, RunEventType::RunStarted, 2, None)])
+            .await
+            .unwrap_err(),
+    );
+    assert_ownership_lost(
+        old_repository
+            .put_node_output(NodeOutputRecord {
+                run_id: output_id.clone(),
+                node_id: "loss_output".to_string(),
+                output: json!({"text":"stale"}),
+                completed_at: at(2),
+            })
+            .await
+            .unwrap_err(),
+    );
+    assert_ownership_lost(
+        old_repository
+            .commit_terminal(
+                TerminalProposal::new(scope(&terminal_id, None), completed_update(&terminal_id))
+                    .unwrap(),
+                TerminalSequence::Expected(2),
+            )
+            .await
+            .unwrap_err(),
+    );
+    assert_ownership_lost(
+        old_repository
+            .mark_incomplete_interrupted(at(20))
+            .await
+            .unwrap_err(),
+    );
+    assert_ownership_lost(old_repository.check_health().await.unwrap_err());
+
+    assert!(old_repository
+        .get_run(&readable_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        old_repository
+            .list_events_after(&readable_id, 0, 100)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let replacement_run = format!("replacement_write_{suffix}");
+    replacement
+        .create_run(new_run(&replacement_run))
+        .await
+        .unwrap();
+    replacement.check_health().await.unwrap();
+    assert!(replacement
+        .get_run(&replacement_run)
+        .await
+        .unwrap()
+        .is_some());
+
+    drop(old_repository);
+    drop(old_owner);
+    drop(replacement);
+    replacement_owner.release().await.unwrap();
+    store.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_claim_timeout_is_bounded_sanitized_and_preserves_the_share_fence() {
+    let Some(database_url) = postgres_database_url() else {
+        return;
+    };
+    let store = PostgresTestSchema::create(&database_url, "barrier").await;
+    let first_application = format!("barrier_a_{}", Uuid::new_v4().simple());
+    let second_application = format!("barrier_b_{}", Uuid::new_v4().simple());
+    let credential_sentinel = format!("credential_sentinel_{}", Uuid::new_v4().simple());
+    let (first_repository, first_owner) = PostgresRunRepository::connect_owned(
+        &store.url(&first_application),
+        OWNERSHIP_OPERATION_TIMEOUT,
+        OWNERSHIP_PROBE_TIMEOUT,
+    )
+    .await
+    .unwrap();
+    let first_claim = store.ownership_row().await;
+    let barrier_pool = store.scoped_pool("ownership_share_barrier").await;
+    let mut barrier = barrier_pool.begin().await.unwrap();
+    let locked_generation: i64 = sqlx::query_scalar(
+        "SELECT generation FROM runtime_ownership WHERE singleton = 1 FOR SHARE",
+    )
+    .fetch_one(&mut *barrier)
+    .await
+    .unwrap();
+    assert_eq!(locked_generation, first_claim.generation);
+    let schema_oid: i64 =
+        sqlx::query_scalar("SELECT oid::bigint FROM pg_namespace WHERE nspname = current_schema()")
+            .fetch_one(&barrier_pool)
+            .await
+            .unwrap();
+    let advisory_key = (0x4941_5001_i64 << 32) | schema_oid;
+
+    drop(first_repository);
+    first_owner.release().await.unwrap();
+    let timeout_url = store.url(&credential_sentinel);
+    let started = Instant::now();
+    let timed_out_claim = tokio::time::timeout(
+        Duration::from_secs(2),
+        PostgresRunRepository::connect_owned(
+            &timeout_url,
+            Duration::from_millis(75),
+            OWNERSHIP_PROBE_TIMEOUT,
+        ),
+    )
+    .await
+    .expect("ownership claim did not respect its configured operation timeout");
+    let claim_error = timed_out_claim
+        .err()
+        .expect("replacement claimed ownership while the previous write fence was held");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(claim_error.code(), "HISTORY_INIT_FAILED");
+    assert_eq!(
+        claim_error.to_string(),
+        "PostgreSQL history ownership claim timed out"
+    );
+    let display = claim_error.to_string();
+    let debug = format!("{claim_error:?}");
+    let first_owner_id = first_claim.owner_id.as_deref().unwrap();
+    let advisory_key = advisory_key.to_string();
+    for forbidden in [
+        timeout_url.as_str(),
+        credential_sentinel.as_str(),
+        first_owner_id,
+        advisory_key.as_str(),
+    ] {
+        assert!(!display.contains(forbidden), "Display leaked {forbidden}");
+        assert!(!debug.contains(forbidden), "Debug leaked {forbidden}");
+    }
+    assert_eq!(store.ownership_row().await, first_claim);
+
+    barrier.rollback().await.unwrap();
+    let second_url = store.url(&second_application);
+    let (second_repository, second_owner) = tokio::time::timeout(
+        OWNERSHIP_WAIT_TIMEOUT,
+        PostgresRunRepository::connect_owned(
+            &second_url,
+            OWNERSHIP_OPERATION_TIMEOUT,
+            OWNERSHIP_PROBE_TIMEOUT,
+        ),
+    )
+    .await
+    .expect("replacement did not complete after the share fence was released")
+    .expect("replacement failed to acquire ownership after the share fence was released");
+    let second_claim = store.ownership_row().await;
+    assert_eq!(second_claim.generation, first_claim.generation + 1);
+    assert_ne!(second_claim.owner_id, first_claim.owner_id);
+
+    barrier_pool.close().await;
+    drop(second_repository);
+    second_owner.release().await.unwrap();
+    store.cleanup().await;
+}
+
+fn assert_ownership_lost(error: HistoryError) {
+    assert_eq!(error.code(), "HISTORY_OWNERSHIP_LOST", "{error:?}");
 }

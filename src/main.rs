@@ -1,4 +1,9 @@
-use std::{error::Error, future::IntoFuture, sync::Arc};
+use std::{
+    error::Error,
+    future::{pending, IntoFuture},
+    sync::Arc,
+    time::Duration,
+};
 
 use insight_agent_platform::{
     api::formal::{build_router, ApiAuth, FormalApiState},
@@ -7,7 +12,9 @@ use insight_agent_platform::{
     dsl::compiler::CompileLimits,
     events::hub::{EventHub, EventHubConfig},
     history::{
-        postgres::PostgresRunRepository, repository::RunRepository, sqlite::SqliteRunRepository,
+        postgres::{PostgresRunRepository, PostgresStoreOwner},
+        repository::{HistoryError, RunRepository},
+        sqlite::SqliteRunRepository,
     },
     nodes::default_node_registries,
     resources::{
@@ -18,6 +25,17 @@ use insight_agent_platform::{
 };
 
 type MainResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+
+struct InitializedRepository {
+    repository: Arc<dyn RunRepository>,
+    owner: Option<PostgresStoreOwner>,
+}
+
+enum ShutdownTrigger {
+    HttpStopped(std::io::Result<()>),
+    Signal,
+    OwnershipLost,
+}
 
 #[tokio::main]
 async fn main() -> MainResult<()> {
@@ -54,7 +72,16 @@ async fn main() -> MainResult<()> {
             max_fork_branches: config.runtime.max_fork_branches,
         },
     )?;
-    let repository = initialize_repository(&config.history).await?;
+    let InitializedRepository {
+        repository,
+        mut owner,
+    } = initialize_repository(
+        &config.history,
+        config.runtime.journal_operation_timeout,
+        config.runtime.readiness_probe_timeout,
+    )
+    .await?;
+    let mut ownership_loss = owner.as_ref().map(PostgresStoreOwner::subscribe_loss);
     let events = EventHub::new(
         Arc::clone(&repository),
         EventHubConfig {
@@ -83,6 +110,7 @@ async fn main() -> MainResult<()> {
             "reconciled incomplete runs from a previous process"
         );
     }
+    ensure_store_ownership(owner.as_ref())?;
 
     let app = build_router(FormalApiState {
         service: service.clone(),
@@ -90,7 +118,16 @@ async fn main() -> MainResult<()> {
         sse_keep_alive_interval: config.runtime.sse_keep_alive_interval,
         readiness_probe_timeout: config.runtime.readiness_probe_timeout,
     });
-    let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
+    let bind = tokio::net::TcpListener::bind(config.bind_addr);
+    tokio::pin!(bind);
+    let listener = tokio::select! {
+        biased;
+        _ = wait_for_ownership_loss(&mut ownership_loss) => {
+            return Err(ownership_lost_error().into());
+        }
+        result = &mut bind => result?,
+    };
+    ensure_store_ownership(owner.as_ref())?;
     tracing::info!(
         bind_addr = %config.bind_addr,
         agents = service.agents().list().count(),
@@ -103,46 +140,69 @@ async fn main() -> MainResult<()> {
         })
         .into_future();
     tokio::pin!(server);
-    tokio::select! {
+    let trigger = tokio::select! {
         result = &mut server => {
             tracing::warn!("HTTP server stopped before a shutdown signal");
-            service.begin_shutdown();
-            tokio::time::timeout(
-                config.runtime.shutdown_hard_deadline,
-                service.shutdown(config.runtime.shutdown_grace_period),
-            )
-            .await
-            .map_err(|_| std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "runtime shutdown exceeded its hard deadline",
-            ))??;
-            result?;
-            return Err(std::io::Error::other(
-                "HTTP server stopped before a shutdown signal",
-            )
-            .into());
+            ShutdownTrigger::HttpStopped(result)
         },
         _ = wait_for_shutdown_signal() => {
             tracing::info!("shutdown signal received");
-            service.begin_shutdown();
-            let drain = async {
-                let runtime = service
-                    .shutdown(config.runtime.shutdown_grace_period)
-                    .await;
-                let _ = http_shutdown.send(());
-                let http = (&mut server).await;
-                runtime?;
-                http?;
-                MainResult::Ok(())
-            };
-            tokio::time::timeout(config.runtime.shutdown_hard_deadline, drain)
-                .await
-                .map_err(|_| std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "server shutdown exceeded its hard deadline",
-                ))??;
+            ShutdownTrigger::Signal
+        },
+        _ = wait_for_ownership_loss(&mut ownership_loss) => {
+            tracing::error!(
+                code = "HISTORY_OWNERSHIP_LOST",
+                "PostgreSQL history store ownership was lost"
+            );
+            ShutdownTrigger::OwnershipLost
         }
-    }
+    };
+    service.begin_shutdown();
+
+    let ownership_loss_triggered = matches!(&trigger, ShutdownTrigger::OwnershipLost);
+    let http_stopped_early = matches!(&trigger, ShutdownTrigger::HttpStopped(_));
+    let drain = async {
+        let runtime = service.shutdown(config.runtime.shutdown_grace_period).await;
+        let http = match trigger {
+            ShutdownTrigger::HttpStopped(result) => result,
+            ShutdownTrigger::Signal | ShutdownTrigger::OwnershipLost => {
+                let _ = http_shutdown.send(());
+                (&mut server).await
+            }
+        };
+        let lost_during_drain = owner.as_ref().is_some_and(PostgresStoreOwner::is_lost);
+
+        if ownership_loss_triggered || lost_during_drain {
+            if let Err(error) = &runtime {
+                tracing::error!(
+                    code = error.code(),
+                    "runtime drain failed after ownership loss"
+                );
+            }
+            if let Err(error) = &http {
+                tracing::error!(%error, "HTTP drain failed after ownership loss");
+            }
+            return Err(ownership_lost_error().into());
+        }
+
+        runtime?;
+        http?;
+        release_store_owner(&mut owner).await?;
+        if http_stopped_early {
+            return Err(
+                std::io::Error::other("HTTP server stopped before a shutdown signal").into(),
+            );
+        }
+        MainResult::Ok(())
+    };
+    tokio::time::timeout(config.runtime.shutdown_hard_deadline, drain)
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "server shutdown exceeded its hard deadline",
+            )
+        })??;
     Ok(())
 }
 
@@ -155,17 +215,70 @@ fn init_tracing() {
         .init();
 }
 
-async fn initialize_repository(config: &HistoryConfig) -> MainResult<Arc<dyn RunRepository>> {
+async fn initialize_repository(
+    config: &HistoryConfig,
+    operation_timeout: Duration,
+    probe_timeout: Duration,
+) -> MainResult<InitializedRepository> {
     match config {
         HistoryConfig::Sqlite { path } => {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            Ok(Arc::new(SqliteRunRepository::connect_path(path).await?))
+            Ok(InitializedRepository {
+                repository: Arc::new(SqliteRunRepository::connect_path(path).await?),
+                owner: None,
+            })
         }
-        HistoryConfig::Postgres { database_url } => Ok(Arc::new(
-            PostgresRunRepository::connect(database_url.expose()).await?,
-        )),
+        HistoryConfig::Postgres { database_url } => {
+            let (repository, owner) = PostgresRunRepository::connect_owned(
+                database_url.expose(),
+                operation_timeout,
+                probe_timeout,
+            )
+            .await?;
+            Ok(InitializedRepository {
+                repository: Arc::new(repository),
+                owner: Some(owner),
+            })
+        }
+    }
+}
+
+fn ensure_store_ownership(owner: Option<&PostgresStoreOwner>) -> Result<(), HistoryError> {
+    if owner.is_some_and(PostgresStoreOwner::is_lost) {
+        Err(ownership_lost_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn ownership_lost_error() -> HistoryError {
+    HistoryError::new(
+        "HISTORY_OWNERSHIP_LOST",
+        "PostgreSQL history store ownership was lost",
+    )
+}
+
+async fn release_store_owner(owner: &mut Option<PostgresStoreOwner>) -> Result<(), HistoryError> {
+    match owner.take() {
+        Some(owner) => owner.release().await,
+        None => Ok(()),
+    }
+}
+
+async fn wait_for_ownership_loss(receiver: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    let Some(receiver) = receiver else {
+        pending::<()>().await;
+        return;
+    };
+    loop {
+        if *receiver.borrow() {
+            return;
+        }
+        if receiver.changed().await.is_err() {
+            return;
+        }
     }
 }
 
@@ -195,5 +308,33 @@ async fn wait_for_shutdown_signal() {
 async fn wait_for_shutdown_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
         tracing::warn!(%error, "Ctrl-C handler failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ownership_loss_waiter_observes_sticky_loss_and_channel_failure() {
+        let (_sender, receiver) = tokio::sync::watch::channel(true);
+        let mut loss = Some(receiver);
+        wait_for_ownership_loss(&mut loss).await;
+
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        let mut closed = Some(receiver);
+        drop(sender);
+        wait_for_ownership_loss(&mut closed).await;
+    }
+
+    #[tokio::test]
+    async fn ownership_loss_waiter_stays_pending_without_a_postgres_owner() {
+        let mut absent = None;
+        assert!(tokio::time::timeout(
+            Duration::from_millis(10),
+            wait_for_ownership_loss(&mut absent),
+        )
+        .await
+        .is_err());
     }
 }
