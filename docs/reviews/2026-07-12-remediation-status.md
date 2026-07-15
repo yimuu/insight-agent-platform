@@ -41,6 +41,7 @@ Historical snapshots:
 | Production lifecycle V1 | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-production-lifecycle-v1-design.md`; `tests/api.rs`, `tests/run_service.rs`, `tests/binary_lifecycle.rs` | Direct SIGINT, unexpected HTTP-server exit, real PostgreSQL disconnect, and deployment trusted-path policy remain separate verification work. |
 | Outer Run-task panic fail-stop | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-outer-run-task-panic-fail-stop-design.md`; direct scheduler/finalizer panic, recovery-failure, start-gate, waiter, sticky-fatal, and shutdown-decision tests in `src/runtime/service.rs` and `src/main.rs` | Production uses a payload-independent global panic hook; deterministic task injection remains private to unit tests rather than becoming a runtime backdoor. |
 | PostgreSQL exclusive-store ownership | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-postgresql-exclusive-store-ownership-design.md`; `tests/history_postgres.rs`; `tests/binary_postgres_ownership.rs` | Real PostgreSQL repository and process gates cover contention, clean release, ownership loss, fencing, and replacement reconciliation. Deployment requires a direct or session-affine PostgreSQL connection; old runtimes cannot participate in a rolling upgrade. |
+| Raw-row input-summary privacy | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-raw-row-input-summary-privacy-design.md`; `sqlite_run_service_persists_only_shape_metadata_in_raw_row`; `postgres_run_service_persists_only_shape_metadata_in_raw_jsonb_row` | The formal `RunService` path persists sorted top-level keys and compact serialized byte count only. Those metadata remain intentionally visible; lower-level repository callers and Agent-authored outputs are outside this guarantee. |
 
 ## Stable baseline remediation status
 
@@ -92,7 +93,7 @@ These were originally uncertainty-preserving review items, not confirmed defects
 | 5 | PostgreSQL exclusive-store topology | Addressed | A dedicated-session advisory lock plus persistent generation fence now enforces fail-before-bind contention and fail-stop ownership loss; real PostgreSQL repository and process gates cover replacement reconciliation and stale-writer rejection. |
 | 6 | Outer Run-task panic cleanup | Addressed | `scheduler_outer_panic_trips_fatal_recovers_terminal_and_releases_ownership`, `prelaunch_finalizer_outer_panic_uses_same_fatal_cleanup_and_recovery`, `panic_recovery_failure_still_releases_local_ownership_and_shutdown_waiters`, and `active_task_start_gate_blocks_work_until_registration` directly cover fatality, terminal recovery, active/permit cleanup, waiter convergence, and shutdown. |
 | 7 | Repository parity and full-record fidelity | Partial | Both real backends cover lifecycle and canonical terminal proposals; the complete mirrored raw-record matrix remains open. |
-| 8 | End-to-end input-summary privacy | Open | Both real backend rows still need direct secret-bearing raw-row inspection. |
+| 8 | End-to-end input-summary privacy | Addressed | `sqlite_run_service_persists_only_shape_metadata_in_raw_row` and `postgres_run_service_persists_only_shape_metadata_in_raw_jsonb_row` send secret-bearing input through the formal `RunService`, then prove native raw rows contain exactly sorted top-level keys and compact serialized byte count with no raw or JSON-escaped values. PostgreSQL inspection is forced read-only and stays inside one owner generation. |
 | 9 | Defensive concurrent terminal CAS | Addressed | `independent_sqlite_connections_choose_one_authoritative_terminal_without_lock_residue` and `postgres_independent_connections_resolve_one_authoritative_terminal` directly prove one requested winner, one exact authoritative loser, one durable terminal, contiguous events, third-proposal idempotency, independent physical connections, and no lock residue. PostgreSQL stays inside one exclusive owner generation. |
 | 10 | EventHub terminal boundary | Addressed | Typed-only projection, generic terminal rejection, authoritative same-type conflicts, recovery, and cleanup are covered in `tests/event_hub.rs`. |
 | 11 | Internal pagination boundaries | Open | Complete SQLite/PostgreSQL cursor and limit parity remains unverified. |
@@ -121,7 +122,7 @@ These were originally uncertainty-preserving review items, not confirmed defects
 ## Recommended next actions
 
 1. Treat this document as the current open-work entrypoint and keep the 2026-07-11 reviews as historical evidence.
-2. Verify secret-bearing input summaries directly against raw SQLite and PostgreSQL rows, then close the remaining real-process SIGINT and unexpected HTTP-server exit boundaries.
+2. Close the remaining real-process SIGINT and unexpected HTTP-server exit boundaries.
 3. Keep restricted HTTP DNS/private-address/rebinding work deferred until before `http_get` is enabled for a production Agent.
 4. Do not repeat A0-A8, R0-R6, or completed terminal-model work unless a regression is found.
 5. Execute R7 only when a concrete future SQLx version is selected; it is not the default next task.
