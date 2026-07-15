@@ -86,6 +86,8 @@ GET    /v1/runs/{run_id}
 DELETE /v1/runs/{run_id}
 ```
 
+`GET /v1/agents` 与 `GET /v1/agents/{agent_id}` 使用相同的公开 Agent 元数据结构：`id`、`name`、`description`、`version`、`input_schema`。`input_schema` 是编译期通过 Draft 7 策略校验、运行期用于校验两个 Run POST 完整 JSON body 的同一份结构化文档；API 不公开 prompt、节点图、模型或 Action 配置。Schema 变化会进入现有 Agent `version`，不另增 `schema_hash`。
+
 `/health` 在运行时可接受新 Run 时返回 `200/OK`；journal 永久失败或服务进入关停后返回 `503/RUNTIME_UNHEALTHY`。原因是存活但无法可靠记录事件的进程不能继续被负载均衡器视为健康实例。
 
 原型的 Run 列表/过滤端点和 `X-Caller-Service/X-Tenant-Id/X-User-Id` 元数据不属于正式 V1。原因是执行合同不应提前绑定多租户管理面；后续查询/管理 API 可以在独立授权与分页合同下增加。`X-Request-Id` 保留用于关联请求。

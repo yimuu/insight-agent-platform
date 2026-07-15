@@ -116,6 +116,10 @@ fn agent(id: &str, behavior: ApiBehavior) -> Arc<CompiledAgent> {
         control: NodeControl::Ordinary,
     };
     let nodes = BTreeMap::from([("work".to_string(), node)]);
+    let mut templates = Handlebars::new();
+    templates
+        .register_template_string("private_prompt", "PRIVATE_PROMPT_SENTINEL")
+        .unwrap();
     Arc::new(CompiledAgent {
         id: id.to_string(),
         name: format!("{id} agent"),
@@ -133,7 +137,22 @@ fn agent(id: &str, behavior: ApiBehavior) -> Arc<CompiledAgent> {
         entry: "work".to_string(),
         execution_plan: ExecutionPlan::sequential("work", nodes.keys().cloned()),
         nodes,
-        templates: Arc::new(Handlebars::new()),
+        templates: Arc::new(templates),
+    })
+}
+
+fn expected_agent_metadata(id: &str) -> Value {
+    json!({
+        "id": id,
+        "name": format!("{id} agent"),
+        "description": "Safe public metadata",
+        "version": format!("sha256:{id}"),
+        "input_schema": {
+            "type": "object",
+            "required": ["text"],
+            "additionalProperties": false,
+            "properties": {"text": {"type": "string"}}
+        }
     })
 }
 
@@ -227,23 +246,33 @@ async fn health_is_public_while_v1_honors_explicit_bearer_auth() {
     assert_eq!(health.status(), StatusCode::OK);
     assert_eq!(json_body(health).await["code"], "OK");
 
-    let unauthorized = app
-        .clone()
-        .oneshot(request(Method::GET, "/v1/agents", None))
-        .await
-        .unwrap();
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(json_body(unauthorized).await["code"], "UNAUTHORIZED");
+    for uri in ["/v1/agents", "/v1/agents/fast"] {
+        let unauthorized = app
+            .clone()
+            .oneshot(request(Method::GET, uri, None))
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json_body(unauthorized).await["code"], "UNAUTHORIZED");
 
-    let mut authorized = request(Method::GET, "/v1/agents", None);
-    authorized.headers_mut().insert(
-        header::AUTHORIZATION,
-        "Bearer super-secret-token".parse().unwrap(),
-    );
-    assert_eq!(
-        app.clone().oneshot(authorized).await.unwrap().status(),
-        StatusCode::OK
-    );
+        let mut wrong_token = request(Method::GET, uri, None);
+        wrong_token
+            .headers_mut()
+            .insert(header::AUTHORIZATION, "Bearer wrong-token".parse().unwrap());
+        let wrong_token = app.clone().oneshot(wrong_token).await.unwrap();
+        assert_eq!(wrong_token.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json_body(wrong_token).await["code"], "UNAUTHORIZED");
+
+        let mut authorized = request(Method::GET, uri, None);
+        authorized.headers_mut().insert(
+            header::AUTHORIZATION,
+            "Bearer super-secret-token".parse().unwrap(),
+        );
+        assert_eq!(
+            app.clone().oneshot(authorized).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
     service.shutdown(Duration::from_secs(1)).await.unwrap();
     let degraded = app
         .oneshot(request(Method::GET, "/health", None))
@@ -254,7 +283,7 @@ async fn health_is_public_while_v1_honors_explicit_bearer_auth() {
 }
 
 #[tokio::test]
-async fn agent_metadata_omits_runtime_internals_and_unknown_agents_are_hidden() {
+async fn agent_discovery_exposes_exact_input_contract_without_runtime_internals() {
     let (app, _) = fixture(ApiAuth::disabled(), 4).await;
     let response = app
         .clone()
@@ -266,10 +295,31 @@ async fn agent_metadata_omits_runtime_internals_and_unknown_agents_are_hidden() 
     assert_eq!(body["code"], "OK");
     assert_eq!(body["message"], "ok");
     assert_eq!(body["data"].as_array().unwrap().len(), 3);
+    let fast = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["id"] == "fast")
+        .expect("enabled Agent must be discoverable");
+    assert_eq!(fast, &expected_agent_metadata("fast"));
+    assert_eq!(
+        fast.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["description", "id", "input_schema", "name", "version"])
+    );
+    let list_item = fast.clone();
+    let detail = app
+        .clone()
+        .oneshot(request(Method::GET, "/v1/agents/fast", None))
+        .await
+        .unwrap();
+    assert_eq!(detail.status(), StatusCode::OK);
+    assert_eq!(json_body(detail).await["data"], list_item);
     let encoded = body.to_string();
-    assert!(!encoded.contains("nodes"));
-    assert!(!encoded.contains("templates"));
-    assert!(!encoded.contains("super-secret-token"));
+    assert!(!encoded.contains("PRIVATE_PROMPT_SENTINEL"));
 
     let missing = app
         .oneshot(request(Method::GET, "/v1/agents/disabled", None))
@@ -289,7 +339,10 @@ async fn formal_v1_path_captures_match_after_axum_upgrade() {
         .await
         .unwrap();
     assert_eq!(agent.status(), StatusCode::OK);
-    assert_eq!(json_body(agent).await["data"]["id"], "fast");
+    assert_eq!(
+        json_body(agent).await["data"],
+        expected_agent_metadata("fast")
+    );
 
     let stream = app
         .clone()

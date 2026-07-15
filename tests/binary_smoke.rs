@@ -44,14 +44,42 @@ async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
     assert_eq!(agents.len(), 2, "binary smoke should expose two Agents");
     assert_eq!(agents[0]["id"], "code_node_demo");
     assert_eq!(agents[1]["id"], "workflow_failure_demo");
-
-    let completed = create_and_wait(
-        &client,
-        &base_url,
-        "code_node_demo",
-        json!({"text":"hello rust world"}),
+    assert_eq!(
+        agents[0]["input_schema"],
+        json!({
+            "type": "object",
+            "required": ["text"],
+            "additionalProperties": false,
+            "properties": {"text": {"type": "string"}}
+        })
+    );
+    let required_field = agents[0]["input_schema"]["required"]
+        .as_array()
+        .and_then(|required| required.first())
+        .and_then(Value::as_str)
+        .expect("code_node_demo discovery contract must identify its required input");
+    let discovered_input = Value::Object(serde_json::Map::from_iter([(
+        required_field.to_string(),
+        Value::String("hello rust world".to_string()),
+    )]));
+    let agent_url = format!("{base_url}/v1/agents/code_node_demo");
+    let detail = expect_json(
+        format!("GET {agent_url}"),
+        client.get(agent_url),
+        StatusCode::OK,
     )
     .await;
+    assert_eq!(detail["data"], agents[0]);
+    let disabled_url = format!("{base_url}/v1/agents/researcher");
+    let disabled = expect_json(
+        format!("GET {disabled_url}"),
+        client.get(disabled_url),
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    assert_eq!(disabled["code"], "AGENT_NOT_FOUND");
+
+    let completed = create_and_wait(&client, &base_url, "code_node_demo", discovered_input).await;
     assert_eq!(completed["data"]["agent_id"], "code_node_demo");
     assert_eq!(completed["data"]["status"], "completed");
     assert_eq!(completed["data"]["output"]["format"], "text");

@@ -296,6 +296,17 @@ fn compiles_valid_graph_and_hashes_prompt_contents() {
         "Agent hash is not stable across repeated compiles"
     );
     assert_eq!(
+        first.input_schema.document(),
+        &serde_json::json!({
+            "type": "object",
+            "required": ["question"]
+        })
+    );
+    assert!(first
+        .input_schema
+        .is_valid(&serde_json::json!({"question": "ok"})));
+    assert!(!first.input_schema.is_valid(&serde_json::json!({})));
+    assert_eq!(
         first.nodes["first"].edges,
         vec![ControlEdge::Direct {
             target: "result".into(),
@@ -308,6 +319,21 @@ fn compiles_valid_graph_and_hashes_prompt_contents() {
         .values()
         .all(|region| region == &NodeRegion::Linear));
 
+    fs::write(
+        root.join("agent.yaml"),
+        valid_yaml().replace(
+            "    required: [question]\n",
+            "    required: [question]\n    additionalProperties: false\n",
+        ),
+    )
+    .unwrap();
+    let schema_changed = compiler().compile_dir(&root).unwrap();
+    assert_ne!(
+        first.version_hash, schema_changed.version_hash,
+        "changing only the public input schema must change the Agent version"
+    );
+
+    fs::write(root.join("agent.yaml"), valid_yaml()).unwrap();
     fs::write(
         root.join("prompts/system.md"),
         "Changed {{ input.question }}",

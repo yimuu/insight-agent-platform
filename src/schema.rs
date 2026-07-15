@@ -2,6 +2,7 @@ use serde_json::Value;
 
 #[derive(Clone, Debug)]
 pub struct JsonSchemaValidator {
+    document: Value,
     inner: jsonschema::Validator,
 }
 
@@ -11,10 +12,17 @@ pub fn compile_schema(schema: &Value) -> Result<JsonSchemaValidator, String> {
         .with_draft(jsonschema::Draft::Draft7)
         .build(schema)
         .map_err(|error| error.to_string())?;
-    Ok(JsonSchemaValidator { inner })
+    Ok(JsonSchemaValidator {
+        document: schema.clone(),
+        inner,
+    })
 }
 
 impl JsonSchemaValidator {
+    pub fn document(&self) -> &Value {
+        &self.document
+    }
+
     pub fn is_valid(&self, value: &Value) -> bool {
         self.inner.is_valid(value)
     }
@@ -73,16 +81,17 @@ mod tests {
 
     #[test]
     fn validates_basic_object_schema() {
-        let validator = compile_schema(&json!({
+        let schema = json!({
             "type": "object",
             "required": ["name"],
             "properties": {
                 "name": {"type": "string", "minLength": 1}
             },
             "additionalProperties": false
-        }))
-        .unwrap();
+        });
+        let validator = compile_schema(&schema).unwrap();
 
+        assert_eq!(validator.document(), &schema);
         assert!(validator.is_valid(&json!({"name": "demo"})));
         assert!(!validator.is_valid(&json!({})));
         assert!(!validator.is_valid(&json!({"name": "demo", "extra": true})));

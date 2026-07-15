@@ -1,6 +1,6 @@
 # Remediation Status
 
-Date: 2026-07-12
+Current through: 2026-07-15
 
 This document is the current operational status entrypoint for the stable-baseline and dependency-governance remediation work. It supersedes the open-work status in the 2026-07-11 reviews, but it does not replace their historical evidence.
 
@@ -11,10 +11,13 @@ Historical snapshots:
 
 ## Repository state
 
-- Branch: `main`.
-- Remote state: `main` is synchronized with `origin/main`.
-- Stable-baseline tag candidate: latest `main` after this status refresh is pushed.
-- Scope of this document: status synchronization only. It does not change runtime code, dependencies, migrations, API behavior, DSL behavior, SSE behavior, or persistence behavior.
+- Primary integration branch: `main`.
+- Historical rollback/reference tag: `stable-baseline-2026-07-12`.
+- This status includes the post-tag quickstart, Chat, Select, unified End, typed terminal,
+  canonical repository terminal proposal, and public Agent discovery work through
+  2026-07-15.
+- Remote synchronization is an operational checkout fact and is intentionally not
+  encoded as a durable source contract in this document.
 
 ## Executive status
 
@@ -22,7 +25,19 @@ Historical snapshots:
 - Dependency-governance groups R0-R6 are implemented.
 - R7 remains a future SQLx upgrade gate and is not required for the current baseline.
 - Residual duplicate dependencies remain where upstream crates still require separate major lines. They are tracked, not suppressed.
-- Needs verification items remain open unless an implemented milestone directly covers them.
+- The original Needs verification list now records `Addressed`, `Partial`, or `Open`
+  dispositions so completed post-baseline work is not presented as untouched.
+
+## Post-baseline contract work
+
+| Area | Current status | Evidence | Remaining note |
+|---|---|---|---|
+| Real binary quickstart | Implemented | `tests/binary_smoke.rs`; `0af0548`, `5bb1d94`, `78475f6` | Full signal, in-flight shutdown, and database-loss lifecycle matrices remain open. |
+| Chat optional image and dynamic message sources | Implemented | `3ce4352`, `0b29aa7`, `ef64358` | Direct Chat cancellation and clean-EOF policy remain open. |
+| Condition result convergence | Implemented | `3b995e3`, `912d3cb`, `926d87d` | No additional Select expansion is currently planned. |
+| Unified End and typed terminal model | Implemented | `559bfc8` through `7ef2cee`; terminal suites under `tests/event_hub.rs` and `tests/core_end.rs` | Cross-connection CAS and multi-process ownership remain separate persistence topics. |
+| Canonical repository terminal proposal | Implemented | `7a6865a`; `tests/history_sqlite_v1.rs`, `tests/history_postgres.rs`, `tests/event_hub.rs` | PostgreSQL exclusive-store topology is still open. |
+| Public Agent input contract | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-public-agent-contract-design.md`; schema, API, compiler, and binary smoke tests | Output schemas and Agent CRUD are intentionally out of scope. |
 
 ## Stable baseline remediation status
 
@@ -59,32 +74,34 @@ Residual duplicate dependencies are tracked as dependency-graph facts, not treat
 - `thiserror 1/2`: direct root `thiserror` was removed; `thiserror 1` remains through CEL and `thiserror 2` remains through Handlebars/SQLx.
 - Other duplicate groups such as `getrandom`, `hashbrown`, `windows-sys`, and Rustls-related splits remain ecosystem-coupled. They need separate value/risk analysis before any future convergence work.
 
-## Open Needs verification
+## Needs verification disposition
 
-The items below remain verification work, not confirmed defects. They should be selected as future engineering/review tasks only when their exact check is valuable.
+These were originally uncertainty-preserving review items, not confirmed defects.
+`Addressed` means the requested decision and direct regression boundary now exist;
+`Partial` retains the unverified remainder.
 
-### Stable-baseline Needs verification still open
-
-1. Type/executor registry parity.
-2. Synchronous execution preemption for large template/CEL work and CPU-bound custom executors.
-3. Direct Chat cancellation during stream acquisition and chunk boundaries.
-4. Dropped create-future ownership at pre-launch awaits.
-5. PostgreSQL exclusive-store topology.
-6. Outer Run-task panic cleanup.
-7. Repository parity and full-record fidelity across SQLite/PostgreSQL.
-8. End-to-end input-summary privacy in raw backend rows.
-9. Defensive concurrent terminal CAS.
-10. EventHub terminal boundary.
-11. Internal pagination boundaries.
-12. Stored event identity policy.
-13. Restricted HTTP DNS/private-address/rebinding policy.
-14. OpenAI clean-EOF semantics.
-15. Real-binary lifecycle.
-16. Restricted HTTP positive boundary matrix.
-17. API/auth/error/SSE boundary matrix.
-18. Readiness and deployment paths.
-19. Documentation precedence across older replay/reconnect-grace designs.
-20. Checked-in example execution policy.
+| # | Original item | Disposition | Current evidence or remaining boundary |
+|---|---|---|---|
+| 1 | Type/executor registry parity | Addressed | Formal V1 intentionally terminalizes a missing executor as infrastructure failure; `custom_node_missing_executor_terminalizes_as_infrastructure_failure`. |
+| 2 | Synchronous execution preemption | Open | Large Handlebars/CEL and CPU-bound extension responsiveness has not been dynamically established. |
+| 3 | Direct Chat cancellation | Open | Stream acquisition and between-chunk stop behavior still need a dedicated fake-provider matrix. |
+| 4 | Dropped create-future ownership | Addressed | Preparing ownership and capacity release are covered by `attached_subscription_drop_before_launch_finalizes_cancelled` and `dropped_detached_create_future_releases_capacity_after_durable_create`. |
+| 5 | PostgreSQL exclusive-store topology | Open | Formal V1 still needs an explicit one-runtime-per-store lease or a larger distributed ownership design. |
+| 6 | Outer Run-task panic cleanup | Open | A panic outside the scheduler task set still needs direct ownership/permit/shutdown verification. |
+| 7 | Repository parity and full-record fidelity | Partial | Both real backends cover lifecycle and canonical terminal proposals; the complete mirrored raw-record matrix remains open. |
+| 8 | End-to-end input-summary privacy | Open | Both real backend rows still need direct secret-bearing raw-row inspection. |
+| 9 | Defensive concurrent terminal CAS | Partial | Canonical proposal, expected sequence, and authoritative-loser semantics are covered; independent-connection races remain open. |
+| 10 | EventHub terminal boundary | Addressed | Typed-only projection, generic terminal rejection, authoritative same-type conflicts, recovery, and cleanup are covered in `tests/event_hub.rs`. |
+| 11 | Internal pagination boundaries | Open | Complete SQLite/PostgreSQL cursor and limit parity remains unverified. |
+| 12 | Stored event identity policy | Open | Nonterminal append identity normalization/rejection still needs an explicit decision. |
+| 13 | Restricted HTTP DNS/private-address/rebinding policy | Open | The action currently validates HTTPS and host allowlisting, not connected peer addresses or rebinding. |
+| 14 | OpenAI clean-EOF semantics | Open | Required provider completion evidence and truncated-stream behavior remain undecided. |
+| 15 | Real-binary lifecycle | Partial | Binary startup, discovery, deterministic success, authored failure, polling, and graceful exit are covered; full signal/in-flight/reconcile/deadline behavior remains open. |
+| 16 | Restricted HTTP positive boundary matrix | Open | Allowed TLS, redirects, size, timeout, cancellation, redaction, and socket-close cases need a local test service. |
+| 17 | API/auth/error/SSE boundary matrix | Partial | Core routes, list/detail auth, validation, live-only SSE, cancellation, and typed failures are covered; an exhaustive route/header/lag/error matrix remains open. |
+| 18 | Readiness and deployment paths | Open | Liveness/readiness separation, database-loss behavior, and trusted path/deployment policy remain undecided. |
+| 19 | Documentation precedence | Open | Historical replay/reconnect designs still need explicit supersession markers. |
+| 20 | Checked-in example execution | Addressed | The real binary smoke compiles and executes checked-in `code_node_demo` and constructs its input from the discovered schema. |
 
 ### Dependency Needs verification status
 
@@ -100,7 +117,8 @@ The items below remain verification work, not confirmed defects. They should be 
 
 ## Recommended next actions
 
-1. Tag the current synchronized `main` as the stable baseline if the team wants an explicit rollback/reference point.
-2. Treat `docs/reviews/2026-07-12-remediation-status.md` as the current open-work entrypoint.
-3. Do not repeat A0-A8 or R0-R6 unless a regression is found.
-4. Choose future work from either R7 or one Needs verification item at a time.
+1. Treat this document as the current open-work entrypoint and keep the 2026-07-11 reviews as historical evidence.
+2. Make PostgreSQL exclusive-store ownership plus real-binary readiness/lifecycle the next production-hardening milestone.
+3. Define the restricted HTTP DNS/private-address/rebinding contract before enabling `http_get` for a production Agent.
+4. Do not repeat A0-A8, R0-R6, or completed terminal-model work unless a regression is found.
+5. Execute R7 only when a concrete future SQLx version is selected; it is not the default next task.

@@ -319,6 +319,29 @@ curl --silent http://127.0.0.1:3000/health
 curl --silent http://127.0.0.1:3000/v1/agents
 ```
 
+列表与 `GET /v1/agents/{agent_id}` 返回同一个公开 Agent 合同：
+
+```json
+{
+  "code": "OK",
+  "message": "ok",
+  "data": [{
+    "id": "code_node_demo",
+    "name": "Action Node Demo",
+    "description": "Demonstrates a typed native Rust action whose JSON output feeds later nodes.",
+    "version": "sha256:...",
+    "input_schema": {
+      "type": "object",
+      "required": ["text"],
+      "additionalProperties": false,
+      "properties": {"text": {"type": "string"}}
+    }
+  }]
+}
+```
+
+`input_schema` 是运行时校验 Run 创建请求完整 JSON body 的同一份 Schema，不存在额外的 `input` 包装层。Schema 固定按 JSON Schema Draft 7 解释；缺少 `$schema` 时 API 不会注入或改写该字段。客户端可按 `(id, version)` 缓存合同，输入 Schema 的任何变化都会改变 `version`。完整 Schema 属于公开元数据，Agent 作者不得在 `description`、`examples`、`default` 等 Schema 注解中放置秘密；prompt、节点图、模型和 Action 配置不会通过发现接口返回。
+
 创建 detached Run 会返回 HTTP 202。它与 SSE 订阅独立，客户端断开后继续执行，直到完成、失败、超时、显式取消或进程关闭：
 
 ```bash

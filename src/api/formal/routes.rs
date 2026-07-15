@@ -89,6 +89,7 @@ struct AgentMetadata {
     name: String,
     description: String,
     version: String,
+    input_schema: Value,
 }
 
 impl From<&CompiledAgent> for AgentMetadata {
@@ -98,6 +99,7 @@ impl From<&CompiledAgent> for AgentMetadata {
             name: agent.name.clone(),
             description: agent.description.clone(),
             version: agent.version_hash.clone(),
+            input_schema: agent.input_schema.document().clone(),
         }
     }
 }
