@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use chrono::{DateTime, TimeZone, Utc};
 use insight_agent_platform::{
@@ -16,6 +16,7 @@ use insight_agent_platform::{
 use serde_json::json;
 use sqlx::SqlitePool;
 use tempfile::tempdir;
+use tokio::sync::Barrier;
 
 const RUN_ID: &str = "run_sqlite_v1";
 
@@ -438,6 +439,243 @@ async fn recovery_derives_terminal_sequence_from_locked_durable_state() {
         .await
         .unwrap();
     assert_eq!(durable_winner, terminal);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn independent_sqlite_connections_choose_one_authoritative_terminal_without_lock_residue() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("terminal-race.db");
+    let url = sqlite_url(&path);
+    let completed_repository = SqliteRunRepository::connect(&url).await.unwrap();
+    let failed_repository = SqliteRunRepository::connect(&url).await.unwrap();
+
+    completed_repository
+        .create_run(new_run(RUN_ID, RunAttachment::Detached))
+        .await
+        .unwrap();
+    completed_repository
+        .mark_running(RUN_ID, at(1))
+        .await
+        .unwrap();
+    completed_repository
+        .append_events(&[
+            event(RUN_ID, RunEventType::RunCreated, 1, None),
+            event(RUN_ID, RunEventType::RunStarted, 2, None),
+        ])
+        .await
+        .unwrap();
+
+    let completed_proposal =
+        TerminalProposal::new(scope(RUN_ID, None), completed_update(RUN_ID)).unwrap();
+    let failed_proposal = TerminalProposal::new(
+        scope(RUN_ID, None),
+        TerminalUpdate::new(
+            RUN_ID,
+            at(11),
+            RunTerminal::Failed {
+                error: RunFailure {
+                    kind: FailureKind::Infrastructure,
+                    code: "RACE_INFRASTRUCTURE_FAILURE".to_string(),
+                    message: "race infrastructure failure".to_string(),
+                },
+            },
+        ),
+    )
+    .unwrap();
+    let completed_candidate = completed_proposal.event_at(3);
+    let failed_candidate = failed_proposal.event_at(3);
+    assert_ne!(completed_candidate, failed_candidate);
+
+    let gate_pool = SqlitePool::connect(&url).await.unwrap();
+    let mut gate = gate_pool.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+
+    let start = Arc::new(Barrier::new(3));
+    let completed_task = {
+        let repository = completed_repository.clone();
+        let start = Arc::clone(&start);
+        tokio::spawn(async move {
+            start.wait().await;
+            repository
+                .commit_terminal(completed_proposal, TerminalSequence::Expected(3))
+                .await
+        })
+    };
+    let failed_task = {
+        let repository = failed_repository.clone();
+        let start = Arc::clone(&start);
+        tokio::spawn(async move {
+            start.wait().await;
+            repository
+                .commit_terminal(failed_proposal, TerminalSequence::Expected(3))
+                .await
+        })
+    };
+
+    start.wait().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !completed_task.is_finished(),
+        "completed proposal bypassed or failed while the independent writer lock was held"
+    );
+    assert!(
+        !failed_task.is_finished(),
+        "failed proposal bypassed or failed while the independent writer lock was held"
+    );
+    sqlx::query("ROLLBACK").execute(&mut *gate).await.unwrap();
+    drop(gate);
+    gate_pool.close().await;
+
+    let (completed_join, failed_join) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(completed_task, failed_task)
+    })
+    .await
+    .expect("independent SQLite terminal race did not converge");
+    let completed_result = completed_join
+        .expect("completed terminal task panicked")
+        .expect("completed terminal proposal failed");
+    let failed_result = failed_join
+        .expect("failed terminal task panicked")
+        .expect("failed terminal proposal failed");
+
+    assert_eq!(completed_result, failed_result);
+    let completed_won = completed_result == completed_candidate;
+    let failed_won = failed_result == failed_candidate;
+    assert_ne!(
+        completed_won, failed_won,
+        "exactly one proposal must equal the authoritative terminal"
+    );
+    let authoritative = completed_result;
+
+    let completed_view = completed_repository.get_run(RUN_ID).await.unwrap().unwrap();
+    let failed_view = failed_repository.get_run(RUN_ID).await.unwrap().unwrap();
+    assert_eq!(completed_view, failed_view);
+    assert_eq!(completed_view.ended_at, Some(authoritative.timestamp));
+    assert_eq!(completed_view.updated_at, authoritative.timestamp);
+    if completed_won {
+        assert_eq!(completed_view.status(), RunStatus::Completed);
+        assert_eq!(
+            completed_view.lifecycle,
+            RunLifecycle::Completed {
+                output: RunOutput {
+                    content: Some("answer".to_string()),
+                    format: Some("text".to_string()),
+                    data: json!({"answer":"answer"}),
+                },
+            }
+        );
+    } else {
+        assert_eq!(completed_view.status(), RunStatus::Failed);
+        assert_eq!(
+            completed_view.lifecycle,
+            RunLifecycle::Failed {
+                error: RunFailure {
+                    kind: FailureKind::Infrastructure,
+                    code: "RACE_INFRASTRUCTURE_FAILURE".to_string(),
+                    message: "race infrastructure failure".to_string(),
+                },
+            }
+        );
+    }
+
+    let completed_events = completed_repository
+        .list_events_after(RUN_ID, 0, 100)
+        .await
+        .unwrap();
+    let failed_events = failed_repository
+        .list_events_after(RUN_ID, 0, 100)
+        .await
+        .unwrap();
+    assert_eq!(completed_events, failed_events);
+    assert_eq!(
+        completed_events
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        completed_events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.event_type,
+                    RunEventType::RunCompleted
+                        | RunEventType::RunFailed
+                        | RunEventType::RunCancelled
+                        | RunEventType::RunInterrupted
+                )
+            })
+            .count(),
+        1
+    );
+    assert_eq!(completed_events.last(), Some(&authoritative));
+
+    let third_repository = SqliteRunRepository::connect(&url).await.unwrap();
+    let third_proposal = TerminalProposal::new(
+        scope(RUN_ID, None),
+        TerminalUpdate::new(
+            RUN_ID,
+            at(12),
+            RunTerminal::Cancelled {
+                error: StopError {
+                    code: "RACE_CANCELLED".to_string(),
+                    message: "later terminal proposal".to_string(),
+                },
+            },
+        ),
+    )
+    .unwrap();
+    assert_ne!(third_proposal.event_at(3), authoritative);
+    let third_result = third_repository
+        .commit_terminal(third_proposal, TerminalSequence::Expected(3))
+        .await
+        .unwrap();
+    assert_eq!(third_result, authoritative);
+    assert_eq!(
+        third_repository.get_run(RUN_ID).await.unwrap().unwrap(),
+        completed_view
+    );
+    assert_eq!(
+        third_repository
+            .list_events_after(RUN_ID, 0, 100)
+            .await
+            .unwrap(),
+        completed_events
+    );
+
+    let probe_pool = SqlitePool::connect(&url).await.unwrap();
+    let terminal_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM run_events
+         WHERE run_id = ?
+           AND event_type IN ('run.completed', 'run.failed', 'run.cancelled', 'run.interrupted')",
+    )
+    .bind(RUN_ID)
+    .fetch_one(&probe_pool)
+    .await
+    .unwrap();
+    assert_eq!(terminal_count, 1);
+
+    let mut probe = probe_pool.acquire().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *probe).await?;
+        let updated = sqlx::query("UPDATE runs SET updated_at = updated_at WHERE run_id = ?")
+            .bind(RUN_ID)
+            .execute(&mut *probe)
+            .await?;
+        assert_eq!(updated.rows_affected(), 1);
+        sqlx::query("COMMIT").execute(&mut *probe).await?;
+        Ok::<(), sqlx::Error>(())
+    })
+    .await
+    .expect("fresh SQLite writer remained blocked after the terminal race")
+    .unwrap();
+    drop(probe);
+    probe_pool.close().await;
 }
 
 #[tokio::test]

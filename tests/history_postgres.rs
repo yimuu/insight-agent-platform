@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use chrono::{DateTime, TimeZone, Utc};
 use insight_agent_platform::{
@@ -119,6 +122,30 @@ impl PostgresTestSchema {
                 Instant::now() < deadline,
                 "ownership advisory backend was not observed for {application_name}"
             );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn wait_for_blocked_terminal_backends(&self, application_name: &str) -> Vec<i32> {
+        let deadline = Instant::now() + OWNERSHIP_WAIT_TIMEOUT;
+        loop {
+            let pids = sqlx::query_scalar(
+                "SELECT DISTINCT pid
+                 FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND application_name = $1
+                   AND state = 'active'
+                   AND wait_event_type = 'Lock'
+                   AND query LIKE '%SELECT status FROM runs WHERE run_id = $1 FOR UPDATE%'
+                 ORDER BY pid",
+            )
+            .bind(application_name)
+            .fetch_all(&self.admin)
+            .await
+            .unwrap();
+            if pids.len() >= 2 || Instant::now() >= deadline {
+                return pids;
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
@@ -610,6 +637,228 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
 
     scoped_admin.close().await;
     drop(repo);
+    owner.release().await.unwrap();
+    store.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_independent_connections_resolve_one_authoritative_terminal() {
+    let Some(database_url) = postgres_database_url() else {
+        return;
+    };
+
+    let store = PostgresTestSchema::create(&database_url, "terminal_race").await;
+    let repository_application = format!("terminal_race_{}", Uuid::new_v4().simple());
+    let (repository, owner) = PostgresRunRepository::connect_owned(
+        &store.url(&repository_application),
+        OWNERSHIP_OPERATION_TIMEOUT,
+        OWNERSHIP_PROBE_TIMEOUT,
+    )
+    .await
+    .unwrap();
+    let run_id = format!("terminal_race_{}", Uuid::new_v4().simple());
+    repository.create_run(new_run(&run_id)).await.unwrap();
+    repository.mark_running(&run_id, at(1)).await.unwrap();
+    repository
+        .append_events(&[
+            event(&run_id, RunEventType::RunCreated, 1, None),
+            event(&run_id, RunEventType::RunStarted, 2, None),
+        ])
+        .await
+        .unwrap();
+
+    let completed = TerminalProposal::new(scope(&run_id, None), completed_update(&run_id)).unwrap();
+    let failed = TerminalProposal::new(scope(&run_id, None), failed_update(&run_id)).unwrap();
+    let completed_requested = completed.event_at(3);
+    let failed_requested = failed.event_at(3);
+
+    let inspector = store.scoped_pool("terminal_race_inspector").await;
+    let mut held_run_lock = inspector.begin().await.unwrap();
+    let locked_run_id: String =
+        sqlx::query_scalar("SELECT run_id FROM runs WHERE run_id = $1 FOR UPDATE")
+            .bind(&run_id)
+            .fetch_one(&mut *held_run_lock)
+            .await
+            .unwrap();
+    assert_eq!(locked_run_id, run_id);
+
+    let start = Arc::new(tokio::sync::Barrier::new(3));
+    let first_repository = repository.clone();
+    let first_start = start.clone();
+    let first = tokio::spawn(async move {
+        first_start.wait().await;
+        first_repository
+            .commit_terminal(completed, TerminalSequence::Expected(3))
+            .await
+    });
+    let second_repository = repository.clone();
+    let second_start = start.clone();
+    let second = tokio::spawn(async move {
+        second_start.wait().await;
+        second_repository
+            .commit_terminal(failed, TerminalSequence::Expected(3))
+            .await
+    });
+    start.wait().await;
+
+    let blocked_pids = store
+        .wait_for_blocked_terminal_backends(&repository_application)
+        .await;
+    held_run_lock.rollback().await.unwrap();
+    assert_eq!(
+        blocked_pids.len(),
+        2,
+        "expected two independent repository backends waiting on the Run row; observed {blocked_pids:?}"
+    );
+    assert_ne!(blocked_pids[0], blocked_pids[1]);
+
+    let (completed_result, failed_result) = tokio::time::timeout(OWNERSHIP_WAIT_TIMEOUT, async {
+        let completed_result = first
+            .await
+            .expect("completed terminal task panicked")
+            .expect("completed terminal proposal failed");
+        let failed_result = second
+            .await
+            .expect("failed terminal task panicked")
+            .expect("failed terminal proposal failed");
+        (completed_result, failed_result)
+    })
+    .await
+    .expect("terminal race did not resolve after releasing the Run row");
+    assert_eq!(completed_result, failed_result);
+    let completed_won = completed_result == completed_requested;
+    let failed_won = failed_result == failed_requested;
+    assert_ne!(completed_won, failed_won, "exactly one proposal must win");
+    let authoritative = completed_result;
+
+    let third = TerminalProposal::new(
+        scope(&run_id, None),
+        TerminalUpdate::new(
+            &run_id,
+            at(12),
+            RunTerminal::Cancelled {
+                error: StopError {
+                    code: "RUN_CANCELLED".to_string(),
+                    message: "run cancelled".to_string(),
+                },
+            },
+        ),
+    )
+    .unwrap();
+    let third_result = repository
+        .commit_terminal(third, TerminalSequence::Expected(3))
+        .await
+        .unwrap();
+    assert_eq!(third_result, authoritative);
+
+    let record = repository.get_run(&run_id).await.unwrap().unwrap();
+    assert_eq!(record.ended_at, Some(authoritative.timestamp));
+    assert_eq!(record.updated_at, authoritative.timestamp);
+    if completed_won {
+        assert_eq!(record.status(), RunStatus::Completed);
+        assert!(matches!(
+            record.lifecycle,
+            RunLifecycle::Completed {
+                output: RunOutput {
+                    content: Some(ref content),
+                    format: Some(ref format),
+                    ref data,
+                },
+            } if content == "answer" && format == "text" && data == &json!({"answer":"answer"})
+        ));
+    } else {
+        assert_eq!(record.status(), RunStatus::Failed);
+        assert!(matches!(
+            record.lifecycle,
+            RunLifecycle::Failed {
+                error: RunFailure {
+                    kind: FailureKind::Infrastructure,
+                    ref code,
+                    ref message,
+                },
+            } if code == "INFRASTRUCTURE_FAILURE" && message == "runtime infrastructure failed"
+        ));
+    }
+
+    let replay = repository.list_events_after(&run_id, 0, 100).await.unwrap();
+    assert_eq!(
+        replay.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(replay.last(), Some(&authoritative));
+    assert_eq!(
+        replay
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.event_type,
+                    RunEventType::RunCompleted
+                        | RunEventType::RunFailed
+                        | RunEventType::RunCancelled
+                        | RunEventType::RunInterrupted
+                )
+            })
+            .count(),
+        1
+    );
+
+    let (event_count, minimum_seq, maximum_seq, terminal_count): (
+        i64,
+        Option<i64>,
+        Option<i64>,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT COUNT(*), MIN(seq), MAX(seq),
+                COUNT(*) FILTER (
+                    WHERE event_type IN (
+                        'run.completed', 'run.failed', 'run.cancelled', 'run.interrupted'
+                    )
+                )
+         FROM run_events
+         WHERE run_id = $1",
+    )
+    .bind(&run_id)
+    .fetch_one(&inspector)
+    .await
+    .unwrap();
+    assert_eq!(
+        (event_count, minimum_seq, maximum_seq, terminal_count),
+        (3, Some(1), Some(3), 1)
+    );
+
+    let mut lock_probe = inspector.begin().await.unwrap();
+    let generation: i64 = sqlx::query_scalar(
+        "SELECT generation FROM runtime_ownership WHERE singleton = 1 FOR UPDATE NOWAIT",
+    )
+    .fetch_one(&mut *lock_probe)
+    .await
+    .unwrap();
+    assert!(generation > 0);
+    let probe_run_id: String =
+        sqlx::query_scalar("SELECT run_id FROM runs WHERE run_id = $1 FOR UPDATE NOWAIT")
+            .bind(&run_id)
+            .fetch_one(&mut *lock_probe)
+            .await
+            .unwrap();
+    assert_eq!(probe_run_id, run_id);
+    lock_probe.rollback().await.unwrap();
+
+    let idle_in_transaction: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM pg_stat_activity
+         WHERE datname = current_database()
+           AND application_name = $1
+           AND state LIKE 'idle in transaction%'",
+    )
+    .bind(&repository_application)
+    .fetch_one(&store.admin)
+    .await
+    .unwrap();
+    assert_eq!(idle_in_transaction, 0);
+    repository.check_health().await.unwrap();
+
+    inspector.close().await;
+    drop(repository);
     owner.release().await.unwrap();
     store.cleanup().await;
 }

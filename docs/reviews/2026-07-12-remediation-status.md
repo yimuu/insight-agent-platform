@@ -35,7 +35,7 @@ Historical snapshots:
 | Real binary quickstart | Implemented | `tests/binary_smoke.rs`; `0af0548`, `5bb1d94`, `78475f6` | Direct real-process SIGINT, unexpected HTTP-server termination, and real PostgreSQL loss remain verification boundaries. |
 | Chat optional image, dynamic message sources, and stream completion | Implemented | `3ce4352`, `0b29aa7`, `ef64358`; `docs/superpowers/specs/2026-07-15-openai-stream-completion-evidence-design.md`; `tests/formal_resources.rs` | Direct Chat cancellation remains open. |
 | Condition result convergence | Implemented | `3b995e3`, `912d3cb`, `926d87d` | No additional Select expansion is currently planned. |
-| Unified End and typed terminal model | Implemented | `559bfc8` through `7ef2cee`; terminal suites under `tests/event_hub.rs` and `tests/core_end.rs` | Cross-connection CAS and multi-process ownership remain separate persistence topics. |
+| Unified End and typed terminal model | Implemented | `559bfc8` through `7ef2cee`; terminal suites under `tests/event_hub.rs` and `tests/core_end.rs`; `docs/superpowers/specs/2026-07-15-independent-connection-terminal-cas-race-design.md`; `independent_sqlite_connections_choose_one_authoritative_terminal_without_lock_residue`; `postgres_independent_connections_resolve_one_authoritative_terminal` | Independent-connection CAS is verified within SQLite and one PostgreSQL owner generation; distributed execution remains out of scope. |
 | Canonical repository terminal proposal | Implemented | `7a6865a`; `tests/history_sqlite_v1.rs`, `tests/history_postgres.rs`, `tests/event_hub.rs` | PostgreSQL exclusive-store topology is handled by the ownership milestone below. |
 | Public Agent input contract | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-public-agent-contract-design.md`; schema, API, compiler, and binary smoke tests | Output schemas and Agent CRUD are intentionally out of scope. |
 | Production lifecycle V1 | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-production-lifecycle-v1-design.md`; `tests/api.rs`, `tests/run_service.rs`, `tests/binary_lifecycle.rs` | Direct SIGINT, unexpected HTTP-server exit, real PostgreSQL disconnect, and deployment trusted-path policy remain separate verification work. |
@@ -93,7 +93,7 @@ These were originally uncertainty-preserving review items, not confirmed defects
 | 6 | Outer Run-task panic cleanup | Addressed | `scheduler_outer_panic_trips_fatal_recovers_terminal_and_releases_ownership`, `prelaunch_finalizer_outer_panic_uses_same_fatal_cleanup_and_recovery`, `panic_recovery_failure_still_releases_local_ownership_and_shutdown_waiters`, and `active_task_start_gate_blocks_work_until_registration` directly cover fatality, terminal recovery, active/permit cleanup, waiter convergence, and shutdown. |
 | 7 | Repository parity and full-record fidelity | Partial | Both real backends cover lifecycle and canonical terminal proposals; the complete mirrored raw-record matrix remains open. |
 | 8 | End-to-end input-summary privacy | Open | Both real backend rows still need direct secret-bearing raw-row inspection. |
-| 9 | Defensive concurrent terminal CAS | Partial | Canonical proposal, expected sequence, and authoritative-loser semantics are covered; independent-connection races remain open. |
+| 9 | Defensive concurrent terminal CAS | Addressed | `independent_sqlite_connections_choose_one_authoritative_terminal_without_lock_residue` and `postgres_independent_connections_resolve_one_authoritative_terminal` directly prove one requested winner, one exact authoritative loser, one durable terminal, contiguous events, third-proposal idempotency, independent physical connections, and no lock residue. PostgreSQL stays inside one exclusive owner generation. |
 | 10 | EventHub terminal boundary | Addressed | Typed-only projection, generic terminal rejection, authoritative same-type conflicts, recovery, and cleanup are covered in `tests/event_hub.rs`. |
 | 11 | Internal pagination boundaries | Open | Complete SQLite/PostgreSQL cursor and limit parity remains unverified. |
 | 12 | Stored event identity policy | Open | Nonterminal append identity normalization/rejection still needs an explicit decision. |
@@ -121,7 +121,7 @@ These were originally uncertainty-preserving review items, not confirmed defects
 ## Recommended next actions
 
 1. Treat this document as the current open-work entrypoint and keep the 2026-07-11 reviews as historical evidence.
-2. Keep the PostgreSQL exclusive-store deployment restrictions aligned with the now-enforced ownership contract.
-3. Define the restricted HTTP DNS/private-address/rebinding contract before enabling `http_get` for a production Agent.
+2. Verify secret-bearing input summaries directly against raw SQLite and PostgreSQL rows, then close the remaining real-process SIGINT and unexpected HTTP-server exit boundaries.
+3. Keep restricted HTTP DNS/private-address/rebinding work deferred until before `http_get` is enabled for a production Agent.
 4. Do not repeat A0-A8, R0-R6, or completed terminal-model work unless a regression is found.
 5. Execute R7 only when a concrete future SQLx version is selected; it is not the default next task.

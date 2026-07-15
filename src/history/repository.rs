@@ -173,6 +173,11 @@ pub trait RunRepository: Send + Sync {
 
     async fn put_node_output(&self, output: NodeOutputRecord) -> Result<(), HistoryError>;
 
+    /// Atomically commits the proposed Run terminal and its event, or returns the
+    /// exact validated durable terminal event when another proposal already won.
+    /// Concurrent losers never overwrite the winner; callers distinguish requested
+    /// from authoritative resolution by comparing the complete returned event with
+    /// the candidate projected from the proposal at the intended sequence.
     async fn commit_terminal(
         &self,
         proposal: TerminalProposal,
