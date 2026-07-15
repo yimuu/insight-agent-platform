@@ -280,7 +280,7 @@ impl ChatModel for OpenAiChatModel {
 
         let stream = stream::try_unfold(
             StreamState {
-                bytes: Box::pin(response.bytes_stream()),
+                bytes: Some(Box::pin(response.bytes_stream())),
                 decoder: SseDecoder::new(self.limits),
                 pending: VecDeque::new(),
                 upstream_bytes: 0,
@@ -289,13 +289,27 @@ impl ChatModel for OpenAiChatModel {
                 started: Instant::now(),
                 chunks_count: 0,
                 usage_bytes: 0,
+                clean_eof: false,
             },
             |mut state| async move {
                 loop {
                     if let Some(chunk) = state.pop_pending_chunk() {
                         return Ok(Some((chunk, state)));
                     }
-                    match state.bytes.next().await {
+                    if state.decoder.is_complete() {
+                        state.log_response_metadata();
+                        return Ok(None);
+                    }
+                    if state.clean_eof {
+                        return Err(incomplete_stream());
+                    }
+                    let next_bytes = state
+                        .bytes
+                        .as_mut()
+                        .expect("response body must exist before stream completion")
+                        .next()
+                        .await;
+                    match next_bytes {
                         Some(Ok(bytes)) => {
                             if state.upstream_bytes.saturating_add(bytes.len())
                                 > state.limits.max_upstream_bytes
@@ -304,6 +318,9 @@ impl ChatModel for OpenAiChatModel {
                             }
                             state.upstream_bytes += bytes.len();
                             state.pending.extend(state.decoder.push(&bytes)?);
+                            if state.decoder.is_complete() {
+                                state.bytes.take();
+                            }
                         }
                         Some(Err(error)) => {
                             return Err(RunError::new(
@@ -315,19 +332,9 @@ impl ChatModel for OpenAiChatModel {
                             ));
                         }
                         None => {
+                            state.bytes.take();
+                            state.clean_eof = true;
                             state.pending.extend(state.decoder.finish()?);
-                            if state.pending.is_empty() {
-                                tracing::info!(
-                                    event_name = "openai.response",
-                                    model = state.model.as_str(),
-                                    upstream_bytes = state.upstream_bytes,
-                                    chunks_count = state.chunks_count,
-                                    usage_bytes = state.usage_bytes,
-                                    elapsed_ms = elapsed_ms(state.started),
-                                    "OpenAI-compatible chat response metadata"
-                                );
-                                return Ok(None);
-                            }
                         }
                     }
                 }
@@ -346,8 +353,11 @@ struct OpenAiRequest<'a> {
     parameters: Map<String, Value>,
 }
 
+type ResponseByteStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
+
 struct StreamState {
-    bytes: std::pin::Pin<Box<dyn futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+    bytes: Option<ResponseByteStream>,
     decoder: SseDecoder,
     pending: VecDeque<ChatChunk>,
     upstream_bytes: usize,
@@ -356,6 +366,7 @@ struct StreamState {
     started: Instant,
     chunks_count: usize,
     usage_bytes: usize,
+    clean_eof: bool,
 }
 
 impl StreamState {
@@ -367,11 +378,24 @@ impl StreamState {
             .saturating_add(chunk.usage.as_ref().map_or(0, json_size_bytes));
         Some(chunk)
     }
+
+    fn log_response_metadata(&self) {
+        tracing::info!(
+            event_name = "openai.response",
+            model = self.model.as_str(),
+            upstream_bytes = self.upstream_bytes,
+            chunks_count = self.chunks_count,
+            usage_bytes = self.usage_bytes,
+            elapsed_ms = elapsed_ms(self.started),
+            "OpenAI-compatible chat response metadata"
+        );
+    }
 }
 
 struct SseDecoder {
     buffer: Vec<u8>,
     limits: OpenAiChatLimits,
+    complete: bool,
 }
 
 impl SseDecoder {
@@ -379,10 +403,14 @@ impl SseDecoder {
         Self {
             buffer: Vec::new(),
             limits,
+            complete: false,
         }
     }
 
     fn push(&mut self, bytes: &[u8]) -> Result<Vec<ChatChunk>, RunError> {
+        if self.complete {
+            return Ok(Vec::new());
+        }
         let mut chunks = Vec::new();
         for segment in bytes.split_inclusive(|byte| *byte == b'\n') {
             let includes_lf = segment.last() == Some(&b'\n');
@@ -396,33 +424,59 @@ impl SseDecoder {
             }
             self.buffer.extend_from_slice(segment);
             chunks.extend(self.drain_complete_lines()?);
+            if self.complete {
+                break;
+            }
         }
         Ok(chunks)
     }
 
     fn finish(&mut self) -> Result<Vec<ChatChunk>, RunError> {
+        if self.complete {
+            return Ok(Vec::new());
+        }
         let mut chunks = self.drain_complete_lines()?;
-        if !self.buffer.is_empty() {
+        if !self.complete && !self.buffer.is_empty() {
             if self.buffer.len() > self.limits.max_buffered_line_bytes {
                 return Err(model_response_too_large());
             }
             let line = std::mem::take(&mut self.buffer);
-            chunks.extend(parse_sse_line(trim_carriage_return(&line), self.limits)?);
+            chunks.extend(self.parse_line(trim_carriage_return(&line))?);
         }
         Ok(chunks)
     }
 
+    fn is_complete(&self) -> bool {
+        self.complete
+    }
+
     fn drain_complete_lines(&mut self) -> Result<Vec<ChatChunk>, RunError> {
         let mut chunks = Vec::new();
-        while let Some(index) = self.buffer.iter().position(|byte| *byte == b'\n') {
+        while !self.complete {
+            let Some(index) = self.buffer.iter().position(|byte| *byte == b'\n') else {
+                break;
+            };
             if index > self.limits.max_buffered_line_bytes {
                 return Err(model_response_too_large());
             }
             let mut line = self.buffer.drain(..=index).collect::<Vec<_>>();
             line.pop();
-            chunks.extend(parse_sse_line(trim_carriage_return(&line), self.limits)?);
+            chunks.extend(self.parse_line(trim_carriage_return(&line))?);
+        }
+        if self.complete {
+            self.buffer.clear();
         }
         Ok(chunks)
+    }
+
+    fn parse_line(&mut self, line: &[u8]) -> Result<Vec<ChatChunk>, RunError> {
+        match parse_sse_line(line, self.limits)? {
+            ParsedSseLine::Chunks(chunks) => Ok(chunks),
+            ParsedSseLine::Done => {
+                self.complete = true;
+                Ok(Vec::new())
+            }
+        }
     }
 }
 
@@ -430,19 +484,24 @@ fn trim_carriage_return(line: &[u8]) -> &[u8] {
     line.strip_suffix(b"\r").unwrap_or(line)
 }
 
-fn parse_sse_line(line: &[u8], limits: OpenAiChatLimits) -> Result<Vec<ChatChunk>, RunError> {
+enum ParsedSseLine {
+    Chunks(Vec<ChatChunk>),
+    Done,
+}
+
+fn parse_sse_line(line: &[u8], limits: OpenAiChatLimits) -> Result<ParsedSseLine, RunError> {
     if line.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ParsedSseLine::Chunks(Vec::new()));
     }
     let Some(payload) = line.strip_prefix(b"data:") else {
-        return Ok(Vec::new());
+        return Ok(ParsedSseLine::Chunks(Vec::new()));
     };
     let payload = trim_ascii_space(payload);
     if payload.len() > limits.max_event_payload_bytes {
         return Err(model_response_too_large());
     }
     if payload == b"[DONE]" {
-        return Ok(Vec::new());
+        return Ok(ParsedSseLine::Done);
     }
     let payload = std::str::from_utf8(payload)
         .map_err(|_| RunError::new("UPSTREAM_STREAM_INVALID", "invalid UTF-8 in chat stream"))?;
@@ -499,7 +558,14 @@ fn parse_sse_line(line: &[u8], limits: OpenAiChatLimits) -> Result<Vec<ChatChunk
             });
         }
     }
-    Ok(chunks)
+    Ok(ParsedSseLine::Chunks(chunks))
+}
+
+fn incomplete_stream() -> RunError {
+    RunError::new(
+        "UPSTREAM_STREAM_INCOMPLETE",
+        "chat provider stream ended without completion evidence",
+    )
 }
 
 fn trim_ascii_space(bytes: &[u8]) -> &[u8] {

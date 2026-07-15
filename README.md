@@ -189,6 +189,8 @@ transport:
 
 `limits` 可省略；省略时使用上述默认字节上限。零值非法，会以 `MODEL_CONFIG_INVALID` 阻止启动。上游响应体、SSE 行、单个 `data:` payload、单个文本 delta、usage JSON 和最终累计文本都会在写入或继续累计前检查。超限 Run 使用稳定错误 `MODEL_RESPONSE_TOO_LARGE`，错误消息为 `chat provider response exceeded the configured size limit`，不会包含 provider body、prompt、API key、URL query、响应头、usage、响应片段或配置的具体限制值。
 
+OpenAI-compatible 流只有收到完整的 `data: [DONE]` 应用层标记才算成功；该标记一经解析就释放 upstream HTTP body，不等待 provider 关闭 socket，此前已解析的 chunk 仍按顺序排空后再结束逻辑流。`finish_reason` 只描述 choice 停止生成，usage-only chunk 也只是统计数据，两者都不能替代 `[DONE]`。如果 HTTP body 干净结束但缺少该标记，Run 使用固定的 `UPSTREAM_STREAM_INCOMPLETE / chat provider stream ended without completion evidence` 失败；残缺 JSON/UTF-8 和显式传输错误继续使用各自的稳定错误，已收到的部分内容不会把失败转换成成功。错误不会回显 provider payload、部分输出、API key 或 endpoint/query。
+
 ## Agent DSL 示例
 
 ```yaml

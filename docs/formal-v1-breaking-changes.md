@@ -109,6 +109,21 @@ attached POST 在构造 SSE 前完成 JSON 与 Schema 校验，先订阅实时�
 - A8 后 `open_ai_chat.base_url` 默认只接受 HTTPS。既有 HTTP 模型服务必须改为 HTTPS，或显式声明 `transport.plaintext_http: loopback` / `trusted_private`。`trusted_private` 是部署方对私有网络明文链路的风险接受，不是运行时自动内网判定。
 - A8 后 Agent 节点 `timeout` 只接受正整数紧跟 `ms`、`s` 或 `m`。把 `1 sec`、`90 seconds`、`1h`、`1s 500ms` 等写法改为 `1s`、`90s`、`60m` 或等价毫秒值。
 
+## OpenAI-compatible 流完成合同收紧
+
+OpenAI-compatible Chat 流现在只有收到完整的 `data: [DONE]` 应用层标记才会成功结束。HTTP body clean EOF 只证明传输正常结束，`finish_reason` 只证明某个 choice 停止生成，usage-only chunk 只携带统计信息；三者都不能替代 `[DONE]`。
+
+这个变化会让省略 `[DONE]` 的非严格兼容端点从原来的静默成功变为固定失败：
+
+```text
+UPSTREAM_STREAM_INCOMPLETE
+chat provider stream ended without completion evidence
+```
+
+迁移时应直接检查 provider 的 raw streaming response，而不是只检查 SDK 是否返回了文本。确保每个成功响应最终发送 `data: [DONE]`；不能用 `finish_reason: "stop"` 后关闭连接来模拟完成。`[DONE]` 一经解析，平台就释放 HTTP body，不要求 provider 随后关闭 socket；此前已解析的 chunk 仍按顺序排空，随后结束逻辑流。残缺 JSON/UTF-8 和显式传输错误继续按原有错误分类失败，已交付的部分文本不会把 Run 转成成功。
+
+如果未来必须接入无法发送 `[DONE]` 的 provider，应先设计显式的 per-model 弱化策略和独立风险接受，不能通过全局容忍 clean EOF 恢复旧语义。本次变化不需要数据库 migration，也不改变模型 YAML、`ChatChunk` 或公共 HTTP/SSE schema。
+
 ## Dependency governance: PostgreSQL TLS transport
 
 Remote PostgreSQL history URLs now require `sslmode=verify-full`. This intentionally breaks remote URLs that relied on SQLx's default `prefer` behavior because that mode can fall back to plaintext. Local development may keep exact loopback or Unix socket URLs.

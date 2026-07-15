@@ -33,7 +33,7 @@ Historical snapshots:
 | Area | Current status | Evidence | Remaining note |
 |---|---|---|---|
 | Real binary quickstart | Implemented | `tests/binary_smoke.rs`; `0af0548`, `5bb1d94`, `78475f6` | Direct real-process SIGINT, unexpected HTTP-server termination, and real PostgreSQL loss remain verification boundaries. |
-| Chat optional image and dynamic message sources | Implemented | `3ce4352`, `0b29aa7`, `ef64358` | Direct Chat cancellation and clean-EOF policy remain open. |
+| Chat optional image, dynamic message sources, and stream completion | Implemented | `3ce4352`, `0b29aa7`, `ef64358`; `docs/superpowers/specs/2026-07-15-openai-stream-completion-evidence-design.md`; `tests/formal_resources.rs` | Direct Chat cancellation remains open. |
 | Condition result convergence | Implemented | `3b995e3`, `912d3cb`, `926d87d` | No additional Select expansion is currently planned. |
 | Unified End and typed terminal model | Implemented | `559bfc8` through `7ef2cee`; terminal suites under `tests/event_hub.rs` and `tests/core_end.rs` | Cross-connection CAS and multi-process ownership remain separate persistence topics. |
 | Canonical repository terminal proposal | Implemented | `7a6865a`; `tests/history_sqlite_v1.rs`, `tests/history_postgres.rs`, `tests/event_hub.rs` | PostgreSQL exclusive-store topology is handled by the ownership milestone below. |
@@ -98,7 +98,7 @@ These were originally uncertainty-preserving review items, not confirmed defects
 | 11 | Internal pagination boundaries | Open | Complete SQLite/PostgreSQL cursor and limit parity remains unverified. |
 | 12 | Stored event identity policy | Open | Nonterminal append identity normalization/rejection still needs an explicit decision. |
 | 13 | Restricted HTTP DNS/private-address/rebinding policy | Open | The action currently validates HTTPS and host allowlisting, not connected peer addresses or rebinding. |
-| 14 | OpenAI clean-EOF semantics | Open | Required provider completion evidence and truncated-stream behavior remain undecided. |
+| 14 | OpenAI clean-EOF semantics | Addressed | `[DONE]` is the only successful application-stream completion evidence; `openai_done_marker_completes_and_closes_an_open_transport`, the clean-EOF matrix, final JSON/UTF-8 truncation cases, and the post-finish transport-error case directly cover completion and failure precedence. |
 | 15 | Real-binary lifecycle | Partial | Real executable coverage includes public probes, in-flight Attached/Detached SIGTERM terminals, restart persistence, crash reconciliation/idempotency, and bounded hard-deadline failure; direct SIGINT and unexpected HTTP-server termination remain unverified. |
 | 16 | Restricted HTTP positive boundary matrix | Open | Allowed TLS, redirects, size, timeout, cancellation, redaction, and socket-close cases need a local test service. |
 | 17 | API/auth/error/SSE boundary matrix | Partial | Core routes, list/detail auth, validation, live-only SSE, cancellation, and typed failures are covered; an exhaustive route/header/lag/error matrix remains open. |

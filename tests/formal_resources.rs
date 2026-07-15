@@ -8,8 +8,8 @@ use insight_agent_platform::{
             builtin_action_registry, CurrentTimeAction, RestrictedHttpGetAction, TextMetricsAction,
         },
         models::{
-            ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest, ChatRole, ImageUrl,
-            ModelCapability,
+            ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest, ChatRole,
+            ChatStream, ImageUrl, ModelCapability,
         },
         openai_chat::{OpenAiChatLimits, OpenAiChatModel, OpenAiTransportPolicy},
     },
@@ -86,6 +86,30 @@ fn default_chat_request() -> ChatRequest {
     }
 }
 
+async fn clean_eof_stream(body: Vec<u8>) -> (ChatStream, tokio::task::JoinHandle<()>) {
+    clean_eof_stream_with_config(body, None, "").await
+}
+
+async fn clean_eof_stream_with_config(
+    body: Vec<u8>,
+    api_key: Option<String>,
+    endpoint_suffix: &str,
+) -> (ChatStream, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_json(&mut socket).await;
+        write_sse_headers(&mut socket).await;
+        socket.write_all(&body).await.unwrap();
+    });
+    let stream = model(format!("http://{address}{endpoint_suffix}"), api_key)
+        .stream_chat(default_chat_request())
+        .await
+        .unwrap();
+    (stream, server)
+}
+
 async fn next_stream_error(model: OpenAiChatModel) -> RunError {
     let mut stream = model.stream_chat(default_chat_request()).await.unwrap();
     stream
@@ -106,6 +130,21 @@ fn assert_too_large(error: &RunError, forbidden: &[&str]) {
         assert!(
             !rendered.contains(value),
             "limit error leaked forbidden value {value}: {rendered}"
+        );
+    }
+}
+
+fn assert_incomplete(error: &RunError, forbidden: &[&str]) {
+    assert_eq!(error.code(), "UPSTREAM_STREAM_INCOMPLETE");
+    assert_eq!(
+        error.message(),
+        "chat provider stream ended without completion evidence"
+    );
+    let rendered = format!("{error:?} {error}");
+    for value in forbidden {
+        assert!(
+            !rendered.contains(value),
+            "incomplete-stream error leaked forbidden value {value}: {rendered}"
         );
     }
 }
@@ -209,6 +248,239 @@ async fn openai_stream_accepts_exact_configured_response_limits() {
     assert_eq!(chunk.finish_reason.as_deref(), Some("stop"));
     assert_eq!(chunk.usage, Some(usage));
     assert!(stream.next().await.is_none());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_done_marker_completes_and_closes_an_open_transport() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_json(&mut socket).await;
+        write_sse_headers(&mut socket).await;
+        socket
+            .write_all(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"complete\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\ndata: malformed-after-done-secret\n\n",
+            )
+            .await
+            .unwrap();
+
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(1), socket.read(&mut byte))
+            .await
+            .expect("the client must close the response body after [DONE]")
+            .unwrap();
+        assert_eq!(read, 0, "the client sent unexpected bytes after [DONE]");
+    });
+    let model = model(format!("http://{address}"), None);
+    let mut stream = model.stream_chat(default_chat_request()).await.unwrap();
+
+    let chunk = stream.next().await.unwrap().unwrap();
+    assert_eq!(chunk.text, "complete");
+    assert_eq!(chunk.finish_reason, None);
+    tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("provider must observe body close before the caller polls again")
+        .unwrap();
+    let completed = tokio::time::timeout(Duration::from_millis(500), stream.next())
+        .await
+        .expect("[DONE] must complete without waiting for transport EOF");
+    assert!(completed.is_none());
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn openai_finish_reason_without_done_is_incomplete_at_clean_eof() {
+    let body = b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+    let (mut stream, server) = clean_eof_stream(body.to_vec()).await;
+
+    let chunk = stream.next().await.unwrap().unwrap();
+    assert_eq!(chunk.text, "");
+    assert_eq!(chunk.finish_reason.as_deref(), Some("stop"));
+    let error = stream
+        .next()
+        .await
+        .expect("clean EOF without [DONE] must yield an error")
+        .expect_err("finish_reason is not protocol completion evidence");
+    assert_incomplete(&error, &[]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_finish_and_usage_without_done_are_incomplete_at_clean_eof() {
+    let response_secret = "finish-usage-response-secret";
+    let usage_secret = "finish-usage-metadata-secret";
+    let body = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{response_secret}\"}},\"finish_reason\":\"stop\"}}]}}\n\n\
+         data: {{\"choices\":[],\"usage\":{{\"detail\":\"{usage_secret}\"}}}}\n\n"
+    );
+    let (mut stream, server) = clean_eof_stream(body.into_bytes()).await;
+
+    let terminal = stream.next().await.unwrap().unwrap();
+    assert_eq!(terminal.text, response_secret);
+    assert_eq!(terminal.finish_reason.as_deref(), Some("stop"));
+    let usage = stream.next().await.unwrap().unwrap();
+    assert_eq!(usage.text, "");
+    assert_eq!(usage.finish_reason, None);
+    assert_eq!(usage.usage, Some(json!({"detail":usage_secret})));
+    let error = stream
+        .next()
+        .await
+        .expect("clean EOF without [DONE] must yield an error")
+        .expect_err("finish_reason plus usage is not protocol completion evidence");
+    assert_incomplete(&error, &[response_secret, usage_secret]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_content_only_clean_eof_is_incomplete() {
+    let response_secret = "content-only-response-secret";
+    let api_key_secret = "incomplete-api-key-secret";
+    let query_secret = "incomplete-query-secret";
+    let body = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{response_secret}\"}},\"finish_reason\":null}}]}}\n\n"
+    );
+    let endpoint_suffix = format!("/v1?token={query_secret}");
+    let (mut stream, server) = clean_eof_stream_with_config(
+        body.into_bytes(),
+        Some(api_key_secret.to_string()),
+        &endpoint_suffix,
+    )
+    .await;
+
+    assert_eq!(stream.next().await.unwrap().unwrap().text, response_secret);
+    let error = stream
+        .next()
+        .await
+        .expect("content-only EOF must yield an error")
+        .expect_err("content is not protocol completion evidence");
+    assert_incomplete(&error, &[response_secret, api_key_secret, query_secret]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_empty_clean_eof_is_incomplete() {
+    let (mut stream, server) = clean_eof_stream(Vec::new()).await;
+
+    let error = stream
+        .next()
+        .await
+        .expect("empty EOF must yield an error")
+        .expect_err("an empty response is not protocol completion evidence");
+    assert_incomplete(&error, &[]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_comment_only_clean_eof_is_incomplete() {
+    let (mut stream, server) = clean_eof_stream(b": keepalive\n\n".to_vec()).await;
+
+    let error = stream
+        .next()
+        .await
+        .expect("comment-only EOF must yield an error")
+        .expect_err("an SSE comment is not protocol completion evidence");
+    assert_incomplete(&error, &[]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_usage_only_clean_eof_is_incomplete() {
+    let usage_secret = "usage-only-metadata-secret";
+    let body = format!("data: {{\"choices\":[],\"usage\":{{\"detail\":\"{usage_secret}\"}}}}\n\n");
+    let (mut stream, server) = clean_eof_stream(body.into_bytes()).await;
+
+    let usage = stream.next().await.unwrap().unwrap();
+    assert_eq!(usage.text, "");
+    assert_eq!(usage.finish_reason, None);
+    assert_eq!(usage.usage, Some(json!({"detail":usage_secret})));
+    let error = stream
+        .next()
+        .await
+        .expect("usage-only EOF must yield an error")
+        .expect_err("usage is not protocol completion evidence");
+    assert_incomplete(&error, &[usage_secret]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_done_without_a_trailing_newline_completes_at_clean_eof() {
+    let (mut stream, server) = clean_eof_stream(b"data: [DONE]".to_vec()).await;
+
+    assert!(stream.next().await.is_none());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_final_malformed_json_stays_invalid_and_body_free() {
+    let payload_secret = "malformed-final-json-secret";
+    let body = format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{payload_secret}");
+    let (mut stream, server) = clean_eof_stream(body.into_bytes()).await;
+
+    let error = stream.next().await.unwrap().unwrap_err();
+    assert_eq!(error.code(), "UPSTREAM_STREAM_INVALID");
+    assert_eq!(error.message(), "invalid chat provider stream payload");
+    assert!(!format!("{error:?} {error}").contains(payload_secret));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_final_truncated_utf8_stays_invalid_and_body_free() {
+    let payload_secret = "truncated-final-utf8-secret";
+    let mut body =
+        format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{payload_secret}").into_bytes();
+    body.extend_from_slice(&[0xE2, 0x82]);
+    let (mut stream, server) = clean_eof_stream(body).await;
+
+    let error = stream.next().await.unwrap().unwrap_err();
+    assert_eq!(error.code(), "UPSTREAM_STREAM_INVALID");
+    assert_eq!(error.message(), "invalid UTF-8 in chat stream");
+    assert!(!format!("{error:?} {error}").contains(payload_secret));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_content_length_truncation_after_finish_reason_stays_transport_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let close_transport = Arc::new(Notify::new());
+    let server_close_transport = Arc::clone(&close_transport);
+    let response_secret = "terminal-before-transport-error-secret";
+    let body = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{response_secret}\"}},\"finish_reason\":\"stop\"}}]}}\n\n"
+    );
+    let declared_length = body.len() + 1;
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_json(&mut socket).await;
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {declared_length}\r\nconnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        socket.write_all(body.as_bytes()).await.unwrap();
+        server_close_transport.notified().await;
+    });
+    let model = model(format!("http://{address}"), None);
+    let mut stream = model.stream_chat(default_chat_request()).await.unwrap();
+
+    let terminal = stream.next().await.unwrap().unwrap();
+    assert_eq!(terminal.text, response_secret);
+    assert_eq!(terminal.finish_reason.as_deref(), Some("stop"));
+    close_transport.notify_one();
+    let error = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("the truncated Content-Length body must terminate")
+        .expect("the truncated Content-Length body must yield an error")
+        .expect_err("transport truncation must not become clean EOF success");
+    assert_eq!(error.code(), "UPSTREAM_STREAM");
+    assert_eq!(error.message(), "chat provider stream failed (transport)");
+    assert!(!format!("{error:?} {error}").contains(response_secret));
     server.await.unwrap();
 }
 

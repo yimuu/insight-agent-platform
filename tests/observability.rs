@@ -1181,7 +1181,9 @@ async fn openai_provider_logs_response_metadata_without_body_or_key() {
     let _guard = reset_logs().await;
     let response_body = format!(
         "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{CHAT_RESPONSE_SECRET}\"}},\"finish_reason\":null}}]}}\n\n\
-         data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"detail\":\"{USAGE_SECRET}\"}}}}\n\n"
+         data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":null}}\n\n\
+         data: {{\"choices\":[],\"usage\":{{\"detail\":\"{USAGE_SECRET}\"}}}}\n\n\
+         data: [DONE]\n\n"
     );
     let model = openai_model_with_response(response_body.clone()).await;
     let mut stream = model
@@ -1216,7 +1218,7 @@ async fn openai_provider_logs_response_metadata_without_body_or_key() {
             .unwrap(),
         response_body.len()
     );
-    assert_eq!(responses[0].field("chunks_count"), Some("2"));
+    assert_eq!(responses[0].field("chunks_count"), Some("3"));
     assert!(
         responses[0]
             .field("usage_bytes")
