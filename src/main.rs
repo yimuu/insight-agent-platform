@@ -1,6 +1,7 @@
 use std::{
     error::Error,
-    future::{pending, IntoFuture},
+    future::{pending, Future, IntoFuture},
+    io,
     sync::Arc,
     time::Duration,
 };
@@ -36,8 +37,9 @@ struct InitializedRepository {
 }
 
 enum ShutdownTrigger {
-    HttpStopped(std::io::Result<()>),
+    HttpStopped(io::Result<()>),
     Signal,
+    SignalFailed,
     OwnershipLost,
     RuntimeFatal,
 }
@@ -47,6 +49,7 @@ enum ShutdownOutcome {
     OwnershipLost,
     RuntimeFatal,
     HttpStopped,
+    SignalFailed,
     Clean,
 }
 
@@ -160,109 +163,164 @@ async fn main() -> MainResult<()> {
             let _ = wait_http_shutdown.await;
         })
         .into_future();
+    supervise_runtime(
+        &service,
+        &mut owner,
+        &mut ownership_loss,
+        &mut runtime_fatal,
+        server,
+        http_shutdown,
+        wait_for_shutdown_signal(),
+        config.runtime.shutdown_grace_period,
+        config.runtime.shutdown_hard_deadline,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn supervise_runtime<Server, ShutdownSignal>(
+    service: &RunService,
+    owner: &mut Option<PostgresStoreOwner>,
+    ownership_loss: &mut Option<tokio::sync::watch::Receiver<bool>>,
+    runtime_fatal: &mut tokio::sync::watch::Receiver<bool>,
+    server: Server,
+    http_shutdown: tokio::sync::oneshot::Sender<()>,
+    shutdown_signal: ShutdownSignal,
+    shutdown_grace_period: Duration,
+    shutdown_hard_deadline: Duration,
+) -> MainResult<()>
+where
+    Server: Future<Output = io::Result<()>>,
+    ShutdownSignal: Future<Output = io::Result<()>>,
+{
     tokio::pin!(server);
+    tokio::pin!(shutdown_signal);
+
     let trigger = tokio::select! {
-        result = &mut server => {
-            tracing::warn!("HTTP server stopped before a shutdown signal");
-            ShutdownTrigger::HttpStopped(result)
-        },
-        _ = wait_for_shutdown_signal() => {
-            tracing::info!("shutdown signal received");
-            ShutdownTrigger::Signal
-        },
-        _ = wait_for_ownership_loss(&mut ownership_loss) => {
+        biased;
+        _ = wait_for_ownership_loss(ownership_loss) => {
             tracing::error!(
                 code = "HISTORY_OWNERSHIP_LOST",
                 "PostgreSQL history store ownership was lost"
             );
             ShutdownTrigger::OwnershipLost
-        },
-        _ = wait_for_runtime_fatal(&mut runtime_fatal) => {
+        }
+        _ = wait_for_runtime_fatal(runtime_fatal) => {
             tracing::error!(
                 code = RUNTIME_TASK_PANICKED_CODE,
                 "a run task panicked; forcing process shutdown"
             );
             ShutdownTrigger::RuntimeFatal
         }
+        result = &mut server => {
+            tracing::warn!("HTTP server stopped before a shutdown signal");
+            ShutdownTrigger::HttpStopped(result)
+        }
+        result = &mut shutdown_signal => match result {
+            Ok(()) => {
+                tracing::info!("shutdown signal received");
+                ShutdownTrigger::Signal
+            }
+            Err(error) => {
+                tracing::error!(%error, "shutdown signal handler failed");
+                ShutdownTrigger::SignalFailed
+            }
+        }
     };
     service.begin_shutdown();
 
-    let ownership_loss_triggered = matches!(&trigger, ShutdownTrigger::OwnershipLost);
-    let runtime_fatal_triggered = matches!(&trigger, ShutdownTrigger::RuntimeFatal);
-    let http_stopped_early = matches!(&trigger, ShutdownTrigger::HttpStopped(_));
     let drain = async {
-        let runtime = service.shutdown(config.runtime.shutdown_grace_period).await;
-        let http = match trigger {
-            ShutdownTrigger::HttpStopped(result) => result,
-            ShutdownTrigger::Signal
-            | ShutdownTrigger::OwnershipLost
-            | ShutdownTrigger::RuntimeFatal => {
-                let _ = http_shutdown.send(());
-                (&mut server).await
+        let (
+            ownership_loss_triggered,
+            runtime_fatal_triggered,
+            signal_failed_triggered,
+            mut http_stopped_early,
+            mut http,
+        ) = match trigger {
+            ShutdownTrigger::OwnershipLost => (true, false, false, false, None),
+            ShutdownTrigger::RuntimeFatal => (false, true, false, false, None),
+            ShutdownTrigger::HttpStopped(result) => (false, false, false, true, Some(result)),
+            ShutdownTrigger::Signal => (false, false, false, false, None),
+            ShutdownTrigger::SignalFailed => (false, false, true, false, None),
+        };
+
+        let runtime = if http.is_some() {
+            service.shutdown(shutdown_grace_period).await
+        } else {
+            let runtime = service.shutdown(shutdown_grace_period);
+            tokio::pin!(runtime);
+            tokio::select! {
+                biased;
+                result = &mut server => {
+                    tracing::warn!("HTTP server stopped while the runtime was draining");
+                    http_stopped_early = true;
+                    http = Some(result);
+                    (&mut runtime).await
+                }
+                result = &mut runtime => {
+                    if http_shutdown.send(()).is_err() {
+                        tracing::error!("HTTP graceful-shutdown channel closed unexpectedly");
+                        http_stopped_early = true;
+                    }
+                    result
+                }
             }
+        };
+
+        let http = match http {
+            Some(result) => result,
+            None => (&mut server).await,
         };
         let lost_during_drain = owner.as_ref().is_some_and(PostgresStoreOwner::is_lost);
         let fatal_during_drain = service.is_fatal();
-
         let decision = shutdown_decision(
             ownership_loss_triggered || lost_during_drain,
             runtime_fatal_triggered || fatal_during_drain,
             http_stopped_early,
+            signal_failed_triggered,
         );
+        let release = if decision.release_store_owner {
+            release_store_owner(owner).await
+        } else {
+            Ok(())
+        };
+        let decision = merge_release_ownership_loss(decision, &release);
+
         match decision.outcome {
             ShutdownOutcome::OwnershipLost => {
                 debug_assert!(!decision.release_store_owner);
-                if let Err(error) = &runtime {
-                    tracing::error!(
-                        code = error.code(),
-                        "runtime drain failed after ownership loss"
-                    );
-                }
-                if let Err(error) = &http {
-                    tracing::error!(%error, "HTTP drain failed after ownership loss");
-                }
+                log_shutdown_failures(&runtime, &http, &release, "ownership loss");
                 Err(ownership_lost_error().into())
             }
             ShutdownOutcome::RuntimeFatal => {
-                if let Err(error) = &runtime {
-                    tracing::error!(
-                        code = error.code(),
-                        "runtime drain failed after a run task panic"
-                    );
-                }
-                if let Err(error) = &http {
-                    tracing::error!(%error, "HTTP drain failed after a run task panic");
-                }
-                if decision.release_store_owner {
-                    release_store_owner(&mut owner).await?;
-                }
+                log_shutdown_failures(&runtime, &http, &release, "a run task panic");
                 Err(runtime_fatal_error().into())
             }
-            ShutdownOutcome::HttpStopped | ShutdownOutcome::Clean => {
+            ShutdownOutcome::HttpStopped => {
+                log_shutdown_failures(&runtime, &http, &release, "an unexpected HTTP stop");
+                Err(http_stopped_error().into())
+            }
+            ShutdownOutcome::SignalFailed => {
+                log_shutdown_failures(&runtime, &http, &release, "a signal handler failure");
+                Err(signal_failed_error().into())
+            }
+            ShutdownOutcome::Clean => {
                 runtime?;
                 http?;
-                if decision.release_store_owner {
-                    release_store_owner(&mut owner).await?;
-                }
-                if http_stopped_early {
-                    return Err(std::io::Error::other(
-                        "HTTP server stopped before a shutdown signal",
-                    )
-                    .into());
-                }
-                MainResult::Ok(())
+                release?;
+                Ok(())
             }
         }
     };
-    tokio::time::timeout(config.runtime.shutdown_hard_deadline, drain)
+
+    tokio::time::timeout(shutdown_hard_deadline, drain)
         .await
         .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
+            io::Error::new(
+                io::ErrorKind::TimedOut,
                 "server shutdown exceeded its hard deadline",
             )
-        })??;
-    Ok(())
+        })?
 }
 
 fn init_tracing() {
@@ -334,10 +392,40 @@ fn runtime_fatal_error() -> std::io::Error {
     std::io::Error::other("a run task panicked; the process was shut down")
 }
 
+fn http_stopped_error() -> io::Error {
+    io::Error::other("HTTP server stopped before a graceful shutdown command")
+}
+
+fn signal_failed_error() -> io::Error {
+    io::Error::other("shutdown signal handler failed")
+}
+
+fn log_shutdown_failures(
+    runtime: &Result<(), insight_agent_platform::runtime::ServiceError>,
+    http: &io::Result<()>,
+    release: &Result<(), HistoryError>,
+    context: &str,
+) {
+    if let Err(error) = runtime {
+        tracing::error!(code = error.code(), context, "runtime drain failed");
+    }
+    if let Err(error) = http {
+        tracing::error!(%error, context, "HTTP drain failed");
+    }
+    if let Err(error) = release {
+        tracing::error!(
+            code = error.code(),
+            context,
+            "history-store owner release failed"
+        );
+    }
+}
+
 fn shutdown_decision(
     ownership_lost: bool,
     runtime_fatal: bool,
     http_stopped: bool,
+    signal_failed: bool,
 ) -> ShutdownDecision {
     let outcome = if ownership_lost {
         ShutdownOutcome::OwnershipLost
@@ -345,12 +433,27 @@ fn shutdown_decision(
         ShutdownOutcome::RuntimeFatal
     } else if http_stopped {
         ShutdownOutcome::HttpStopped
+    } else if signal_failed {
+        ShutdownOutcome::SignalFailed
     } else {
         ShutdownOutcome::Clean
     };
     ShutdownDecision {
         outcome,
         release_store_owner: outcome != ShutdownOutcome::OwnershipLost,
+    }
+}
+
+fn merge_release_ownership_loss(
+    decision: ShutdownDecision,
+    release: &Result<(), HistoryError>,
+) -> ShutdownDecision {
+    match release {
+        Err(error) if error.code() == "HISTORY_OWNERSHIP_LOST" => ShutdownDecision {
+            outcome: ShutdownOutcome::OwnershipLost,
+            release_store_owner: false,
+        },
+        Ok(()) | Err(_) => decision,
     }
 }
 
@@ -388,37 +491,297 @@ async fn wait_for_runtime_fatal(receiver: &mut tokio::sync::watch::Receiver<bool
 }
 
 #[cfg(unix)]
-async fn wait_for_shutdown_signal() {
+async fn wait_for_shutdown_signal() -> io::Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
 
-    let mut terminate = match signal(SignalKind::terminate()) {
-        Ok(signal) => signal,
-        Err(error) => {
-            tracing::warn!(%error, "failed to install SIGTERM handler; waiting for Ctrl-C");
-            let _ = tokio::signal::ctrl_c().await;
-            return;
-        }
-    };
+    let mut terminate = signal(SignalKind::terminate())?;
     tokio::select! {
-        result = tokio::signal::ctrl_c() => {
-            if let Err(error) = result {
-                tracing::warn!(%error, "Ctrl-C handler failed");
-            }
-        }
-        _ = terminate.recv() => {}
+        result = tokio::signal::ctrl_c() => result,
+        received = terminate.recv() => received
+            .map(|_| ())
+            .ok_or_else(|| io::Error::other("SIGTERM signal stream closed")),
     }
 }
 
 #[cfg(not(unix))]
-async fn wait_for_shutdown_signal() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        tracing::warn!(%error, "Ctrl-C handler failed");
-    }
+async fn wait_for_shutdown_signal() -> io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use async_trait::async_trait;
+    use handlebars::Handlebars;
+    use insight_agent_platform::{
+        dsl::{
+            compiled::{
+                CompiledAgent, CompiledNode, ExecutionPlan, NodeCompilation, NodeControl,
+                NodeOutcome,
+            },
+            compiler::CompileContext,
+            CompileError, EmitPolicy,
+        },
+        events::protocol::{RunEvent, RunEventType},
+        history::types::{RunAttachment, RunLifecycle, RunRecord, RunStatus},
+        nodes::registry::{NodeExecutor, NodeExecutorRegistry, NodeType},
+        runtime::{
+            AttachedRun, CompiledAgentRegistry, ExecutionControl, RequestMetadata, RunContext,
+            RunError,
+        },
+        schema::compile_schema,
+    };
+    use serde_json::{json, Value};
+    use tokio::sync::{Notify, Semaphore};
+
     use super::*;
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+    const TEST_HARD_DEADLINE: Duration = Duration::from_secs(5);
+
+    #[derive(Default)]
+    struct BlockingProgress {
+        started: AtomicUsize,
+        started_changed: Notify,
+        stopped: AtomicUsize,
+        stopped_changed: Notify,
+        release_after_stop: Option<Arc<Semaphore>>,
+    }
+
+    impl BlockingProgress {
+        fn held_after_stop() -> Self {
+            Self {
+                release_after_stop: Some(Arc::new(Semaphore::new(0))),
+                ..Self::default()
+            }
+        }
+
+        async fn wait_started(&self, expected: usize) {
+            wait_for_count(&self.started, &self.started_changed, expected, "started").await;
+        }
+
+        async fn wait_stopped(&self, expected: usize) {
+            wait_for_count(&self.stopped, &self.stopped_changed, expected, "stopped").await;
+        }
+
+        fn release_stopped(&self, permits: usize) {
+            self.release_after_stop
+                .as_ref()
+                .expect("test executor is not held after stop")
+                .add_permits(permits);
+        }
+    }
+
+    async fn wait_for_count(count: &AtomicUsize, changed: &Notify, expected: usize, label: &str) {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            loop {
+                let notified = changed.notified();
+                if count.load(Ordering::SeqCst) >= expected {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("test executors did not reach {label} count {expected}"));
+    }
+
+    #[derive(Clone)]
+    struct BlockingTestNode {
+        progress: Arc<BlockingProgress>,
+    }
+
+    impl NodeType for BlockingTestNode {
+        fn kind(&self) -> &'static str {
+            "test.lifecycle_block"
+        }
+
+        fn compile(
+            &self,
+            _node_id: &str,
+            _config: Value,
+            _context: &mut CompileContext<'_>,
+        ) -> Result<NodeCompilation, CompileError> {
+            Err(CompileError::new(
+                "TEST_ONLY",
+                "lifecycle test nodes are constructed directly",
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl NodeExecutor for BlockingTestNode {
+        async fn execute(
+            &self,
+            _node: &CompiledNode,
+            _context: &RunContext,
+            control: &ExecutionControl,
+        ) -> Result<NodeOutcome, RunError> {
+            self.progress.started.fetch_add(1, Ordering::SeqCst);
+            self.progress.started_changed.notify_waiters();
+            control.stopped().await;
+            self.progress.stopped.fetch_add(1, Ordering::SeqCst);
+            self.progress.stopped_changed.notify_waiters();
+            if let Some(release) = &self.progress.release_after_stop {
+                release
+                    .acquire()
+                    .await
+                    .expect("release semaphore closed")
+                    .forget();
+            }
+            Err(RunError::stopped(
+                control
+                    .stop_reason()
+                    .expect("stop notification omitted reason"),
+            ))
+        }
+    }
+
+    struct LifecycleTestRuntime {
+        service: RunService,
+        repository: Arc<SqliteRunRepository>,
+        progress: Arc<BlockingProgress>,
+    }
+
+    async fn lifecycle_test_runtime(hold_after_stop: bool) -> LifecycleTestRuntime {
+        let repository = Arc::new(SqliteRunRepository::in_memory().await.unwrap());
+        let repository_trait: Arc<dyn RunRepository> = repository.clone();
+        let events = EventHub::new(
+            Arc::clone(&repository_trait),
+            EventHubConfig {
+                subscriber_capacity: 8,
+                journal_capacity: 32,
+                journal_batch_size: 8,
+                operation_timeout: TEST_TIMEOUT,
+            },
+        );
+        let progress = Arc::new(if hold_after_stop {
+            BlockingProgress::held_after_stop()
+        } else {
+            BlockingProgress::default()
+        });
+        let node = CompiledNode {
+            id: "block".to_string(),
+            kind: "test.lifecycle_block".to_string(),
+            next: None,
+            emit: EmitPolicy::None,
+            timeout: Duration::from_secs(60),
+            body: Arc::new(()),
+            edges: Vec::new(),
+            references: BTreeSet::new(),
+            control: NodeControl::Ordinary,
+        };
+        let nodes = BTreeMap::from([(node.id.clone(), node)]);
+        let agent = Arc::new(CompiledAgent {
+            id: "lifecycle-test".to_string(),
+            name: "Lifecycle Test".to_string(),
+            description: String::new(),
+            version_hash: "sha256:lifecycle-test".to_string(),
+            input_schema: Arc::new(compile_schema(&json!({"type":"object"})).unwrap()),
+            entry: "block".to_string(),
+            execution_plan: ExecutionPlan::sequential("block", nodes.keys().cloned()),
+            nodes,
+            templates: Arc::new(Handlebars::new()),
+        });
+        let mut executors = NodeExecutorRegistry::default();
+        executors
+            .register(BlockingTestNode {
+                progress: Arc::clone(&progress),
+            })
+            .unwrap();
+        let service = RunService::new(
+            CompiledAgentRegistry::new(vec![agent]).unwrap(),
+            executors,
+            repository_trait,
+            events,
+            RunServiceConfig {
+                max_concurrent_runs: 2,
+                max_parallel_node_executions: 2,
+                max_parallel_branches_per_run: 1,
+                run_timeout: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        LifecycleTestRuntime {
+            service,
+            repository,
+            progress,
+        }
+    }
+
+    async fn start_attached_and_detached(
+        runtime: &LifecycleTestRuntime,
+    ) -> (AttachedRun, RunRecord) {
+        let detached = runtime
+            .service
+            .create_detached("lifecycle-test", json!({}), RequestMetadata::default())
+            .await
+            .unwrap();
+        let attached = runtime
+            .service
+            .create_attached("lifecycle-test", json!({}), RequestMetadata::default())
+            .await
+            .unwrap();
+        runtime.progress.wait_started(2).await;
+        wait_for_run_status(&runtime.service, &detached.run_id, RunStatus::Running).await;
+        wait_for_run_status(&runtime.service, &attached.run_id, RunStatus::Running).await;
+        (attached, detached)
+    }
+
+    async fn wait_for_run_status(service: &RunService, run_id: &str, expected: RunStatus) {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            loop {
+                if service.get_run(run_id).await.unwrap().status() == expected {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("run {run_id} did not reach {expected:?}"));
+    }
+
+    async fn assert_terminal(
+        repository: &SqliteRunRepository,
+        run_id: &str,
+        expected_attachment: RunAttachment,
+        expected_status: RunStatus,
+        expected_code: &str,
+        expected_event: RunEventType,
+    ) {
+        let record = repository.get_run(run_id).await.unwrap().unwrap();
+        assert_eq!(record.attachment, expected_attachment);
+        assert_eq!(record.status(), expected_status);
+        let code = match record.lifecycle {
+            RunLifecycle::Cancelled { error } | RunLifecycle::Interrupted { error } => error.code,
+            lifecycle => panic!("expected stop terminal, got {lifecycle:?}"),
+        };
+        assert_eq!(code, expected_code);
+        let events = repository.list_events_after(run_id, 0, 64).await.unwrap();
+        let terminal = events.iter().filter(is_terminal_event).collect::<Vec<_>>();
+        assert_eq!(terminal.len(), 1, "unexpected events: {events:?}");
+        assert_eq!(terminal[0].event_type, expected_event);
+        assert_eq!(terminal[0].code, expected_code);
+        assert_eq!(terminal[0].data, json!({}));
+        assert_eq!(
+            events.last().map(|event| event.event_type),
+            Some(expected_event)
+        );
+    }
+
+    fn is_terminal_event(event: &&RunEvent) -> bool {
+        matches!(
+            event.event_type,
+            RunEventType::RunCompleted
+                | RunEventType::RunFailed
+                | RunEventType::RunCancelled
+                | RunEventType::RunInterrupted
+        )
+    }
 
     #[tokio::test]
     async fn ownership_loss_waiter_observes_sticky_loss_and_channel_failure() {
@@ -453,6 +816,222 @@ mod tests {
         wait_for_runtime_fatal(&mut closed).await;
     }
 
+    #[tokio::test]
+    async fn finite_http_error_drains_real_runs_to_exact_attachment_terminals() {
+        let runtime = lifecycle_test_runtime(false).await;
+        let (attached, detached) = start_attached_and_detached(&runtime).await;
+        let attached_id = attached.run_id.clone();
+        let detached_id = detached.run_id.clone();
+        let mut owner = None;
+        let mut ownership_loss = None;
+        let mut runtime_fatal = runtime.service.subscribe_fatal();
+        let (http_shutdown, graceful_command) = tokio::sync::oneshot::channel();
+
+        let error = supervise_runtime(
+            &runtime.service,
+            &mut owner,
+            &mut ownership_loss,
+            &mut runtime_fatal,
+            std::future::ready(Err(io::Error::other("private HTTP failure detail"))),
+            http_shutdown,
+            pending::<io::Result<()>>(),
+            TEST_TIMEOUT,
+            TEST_HARD_DEADLINE,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), http_stopped_error().to_string());
+        assert!(
+            graceful_command.await.is_err(),
+            "an already-stopped HTTP server received a graceful command"
+        );
+        assert_terminal(
+            &runtime.repository,
+            &attached_id,
+            RunAttachment::Attached,
+            RunStatus::Cancelled,
+            "RUN_CANCELLED",
+            RunEventType::RunCancelled,
+        )
+        .await;
+        assert_terminal(
+            &runtime.repository,
+            &detached_id,
+            RunAttachment::Detached,
+            RunStatus::Interrupted,
+            "RUN_INTERRUPTED",
+            RunEventType::RunInterrupted,
+        )
+        .await;
+        drop(attached);
+    }
+
+    #[tokio::test]
+    async fn http_completion_during_runtime_drain_is_latched_before_graceful_command() {
+        let runtime = lifecycle_test_runtime(true).await;
+        let (attached, detached) = start_attached_and_detached(&runtime).await;
+        let attached_id = attached.run_id.clone();
+        let detached_id = detached.run_id.clone();
+        let (complete_http, wait_http_completion) =
+            tokio::sync::oneshot::channel::<io::Result<()>>();
+        let (http_observed, wait_http_observed) = tokio::sync::oneshot::channel();
+        let server = async move {
+            let result = wait_http_completion
+                .await
+                .expect("HTTP completion sender dropped");
+            let _ = http_observed.send(());
+            result
+        };
+        let (http_shutdown, graceful_command) = tokio::sync::oneshot::channel();
+        let supervised_service = runtime.service.clone();
+        let supervisor = tokio::spawn(async move {
+            let mut owner = None;
+            let mut ownership_loss = None;
+            let mut runtime_fatal = supervised_service.subscribe_fatal();
+            supervise_runtime(
+                &supervised_service,
+                &mut owner,
+                &mut ownership_loss,
+                &mut runtime_fatal,
+                server,
+                http_shutdown,
+                std::future::ready(Ok(())),
+                TEST_TIMEOUT,
+                TEST_HARD_DEADLINE,
+            )
+            .await
+        });
+
+        runtime.progress.wait_stopped(2).await;
+        complete_http.send(Ok(())).unwrap();
+        tokio::time::timeout(TEST_TIMEOUT, wait_http_observed)
+            .await
+            .expect("supervisor did not poll HTTP during runtime drain")
+            .expect("HTTP observation sender dropped");
+        runtime.progress.release_stopped(2);
+        let error = tokio::time::timeout(TEST_TIMEOUT, supervisor)
+            .await
+            .expect("supervisor did not finish")
+            .expect("supervisor task panicked")
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), http_stopped_error().to_string());
+        assert!(
+            graceful_command.await.is_err(),
+            "early HTTP completion was followed by a graceful command"
+        );
+        assert_terminal(
+            &runtime.repository,
+            &attached_id,
+            RunAttachment::Attached,
+            RunStatus::Cancelled,
+            "RUN_CANCELLED",
+            RunEventType::RunCancelled,
+        )
+        .await;
+        assert_terminal(
+            &runtime.repository,
+            &detached_id,
+            RunAttachment::Detached,
+            RunStatus::Interrupted,
+            "RUN_INTERRUPTED",
+            RunEventType::RunInterrupted,
+        )
+        .await;
+        drop(attached);
+    }
+
+    #[tokio::test]
+    async fn supervisor_preserves_fatal_precedence_and_rejects_signal_failure() {
+        let runtime = lifecycle_test_runtime(false).await;
+        let mut owner = None;
+        let (_ownership_sender, ownership_receiver) = tokio::sync::watch::channel(true);
+        let mut ownership_loss = Some(ownership_receiver);
+        let (_fatal_sender, mut runtime_fatal) = tokio::sync::watch::channel(true);
+        let (http_shutdown, _graceful_command) = tokio::sync::oneshot::channel();
+        let error = supervise_runtime(
+            &runtime.service,
+            &mut owner,
+            &mut ownership_loss,
+            &mut runtime_fatal,
+            std::future::ready(Ok(())),
+            http_shutdown,
+            std::future::ready(Err(io::Error::other("private signal failure"))),
+            TEST_TIMEOUT,
+            TEST_HARD_DEADLINE,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), ownership_lost_error().to_string());
+
+        let runtime = lifecycle_test_runtime(false).await;
+        let mut owner = None;
+        let mut ownership_loss = None;
+        let (_fatal_sender, mut runtime_fatal) = tokio::sync::watch::channel(true);
+        let (http_shutdown, _graceful_command) = tokio::sync::oneshot::channel();
+        let error = supervise_runtime(
+            &runtime.service,
+            &mut owner,
+            &mut ownership_loss,
+            &mut runtime_fatal,
+            std::future::ready(Ok(())),
+            http_shutdown,
+            std::future::ready(Err(io::Error::other("private signal failure"))),
+            TEST_TIMEOUT,
+            TEST_HARD_DEADLINE,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), runtime_fatal_error().to_string());
+
+        let runtime = lifecycle_test_runtime(false).await;
+        let mut owner = None;
+        let mut ownership_loss = None;
+        let mut runtime_fatal = runtime.service.subscribe_fatal();
+        let (http_shutdown, _graceful_command) = tokio::sync::oneshot::channel();
+        let error = supervise_runtime(
+            &runtime.service,
+            &mut owner,
+            &mut ownership_loss,
+            &mut runtime_fatal,
+            std::future::ready(Ok(())),
+            http_shutdown,
+            std::future::ready(Err(io::Error::other("private signal failure"))),
+            TEST_TIMEOUT,
+            TEST_HARD_DEADLINE,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), http_stopped_error().to_string());
+
+        let runtime = lifecycle_test_runtime(false).await;
+        let mut owner = None;
+        let mut ownership_loss = None;
+        let mut runtime_fatal = runtime.service.subscribe_fatal();
+        let (http_shutdown, wait_http_shutdown) = tokio::sync::oneshot::channel();
+        let server = async move {
+            wait_http_shutdown
+                .await
+                .map_err(|_| io::Error::other("graceful command sender dropped"))?;
+            Ok(())
+        };
+        let error = supervise_runtime(
+            &runtime.service,
+            &mut owner,
+            &mut ownership_loss,
+            &mut runtime_fatal,
+            server,
+            http_shutdown,
+            std::future::ready(Err(io::Error::other("private signal failure"))),
+            TEST_TIMEOUT,
+            TEST_HARD_DEADLINE,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), signal_failed_error().to_string());
+    }
+
     #[test]
     fn runtime_fatal_error_has_a_stable_sanitized_message() {
         assert_eq!(
@@ -464,29 +1043,68 @@ mod tests {
     #[test]
     fn shutdown_outcome_preserves_fatal_and_ownership_precedence() {
         assert_eq!(
-            shutdown_decision(false, true, false).outcome,
+            shutdown_decision(false, true, false, false).outcome,
             ShutdownOutcome::RuntimeFatal
         );
         assert_eq!(
-            shutdown_decision(false, true, true).outcome,
+            shutdown_decision(false, true, true, true).outcome,
             ShutdownOutcome::RuntimeFatal
         );
         assert_eq!(
-            shutdown_decision(true, true, true).outcome,
+            shutdown_decision(true, true, true, true).outcome,
             ShutdownOutcome::OwnershipLost
         );
         assert_eq!(
-            shutdown_decision(false, false, true).outcome,
+            shutdown_decision(false, false, true, true).outcome,
             ShutdownOutcome::HttpStopped
         );
         assert_eq!(
-            shutdown_decision(false, false, false).outcome,
+            shutdown_decision(false, false, false, true).outcome,
+            ShutdownOutcome::SignalFailed
+        );
+        assert_eq!(
+            shutdown_decision(false, false, false, false).outcome,
             ShutdownOutcome::Clean
         );
-        assert!(!shutdown_decision(true, true, true).release_store_owner);
-        assert!(shutdown_decision(false, true, true).release_store_owner);
-        assert!(shutdown_decision(false, false, true).release_store_owner);
-        assert!(shutdown_decision(false, false, false).release_store_owner);
+        assert!(!shutdown_decision(true, true, true, true).release_store_owner);
+        assert!(shutdown_decision(false, true, true, true).release_store_owner);
+        assert!(shutdown_decision(false, false, true, true).release_store_owner);
+        assert!(shutdown_decision(false, false, false, true).release_store_owner);
+        assert!(shutdown_decision(false, false, false, false).release_store_owner);
+    }
+
+    #[test]
+    fn owner_release_ownership_loss_promotes_every_lower_shutdown_outcome() {
+        let lower_decisions = [
+            shutdown_decision(false, true, false, false),
+            shutdown_decision(false, false, true, false),
+            shutdown_decision(false, false, false, true),
+            shutdown_decision(false, false, false, false),
+        ];
+
+        for decision in lower_decisions {
+            let ownership_loss = Err(HistoryError::new(
+                "HISTORY_OWNERSHIP_LOST",
+                "private ownership detail",
+            ));
+            assert_eq!(
+                merge_release_ownership_loss(decision, &ownership_loss),
+                ShutdownDecision {
+                    outcome: ShutdownOutcome::OwnershipLost,
+                    release_store_owner: false,
+                }
+            );
+
+            let other_release_error = Err(HistoryError::new(
+                "HISTORY_RELEASE_FAILED",
+                "private release detail",
+            ));
+            assert_eq!(
+                merge_release_ownership_loss(decision, &other_release_error),
+                decision,
+                "non-ownership release errors must preserve {decision:?}"
+            );
+        }
     }
 
     #[test]

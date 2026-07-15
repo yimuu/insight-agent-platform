@@ -36,8 +36,43 @@ const PROCESS_TIMEOUT: Duration = Duration::from_secs(8);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+#[derive(Clone, Copy)]
+enum UnixSignal {
+    Int,
+    Term,
+}
+
+impl UnixSignal {
+    fn kill_arg(self) -> &'static str {
+        match self {
+            Self::Int => "-INT",
+            Self::Term => "-TERM",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Int => "SIGINT",
+            Self::Term => "SIGTERM",
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sigterm_terminalizes_attached_and_detached_runs_and_restart_preserves_them() {
+    signal_terminalizes_attached_and_detached_runs_and_restart_preserves_them(UnixSignal::Term)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sigint_terminalizes_attached_and_detached_runs_and_restart_preserves_them() {
+    signal_terminalizes_attached_and_detached_runs_and_restart_preserves_them(UnixSignal::Int)
+        .await;
+}
+
+async fn signal_terminalizes_attached_and_detached_runs_and_restart_preserves_them(
+    signal: UnixSignal,
+) {
     let temp = TempDir::new().unwrap();
     let mut model = BlockingModelServer::spawn(2).await;
     let files = LifecycleFiles::new(temp.path(), model.address());
@@ -58,18 +93,19 @@ async fn sigterm_terminalizes_attached_and_detached_runs_and_restart_preserves_t
     model.wait_for_accepted(1).await;
     wait_for_status(&client, &first_base_url, &attached_id, RunStatus::Running).await;
 
-    child.signal_term();
+    child.signal(signal);
     model.wait_for_closed(2).await;
     let output = child.wait_for_exit(PROCESS_TIMEOUT);
     assert!(
         output.status.success(),
-        "SIGTERM drain must exit zero\n{}",
+        "{} drain must exit zero\n{}",
+        signal.name(),
         format_output(&output)
     );
 
     let attached_sse = tokio::time::timeout(PROCESS_TIMEOUT, attached_stream)
         .await
-        .expect("Attached SSE did not close after SIGTERM")
+        .unwrap_or_else(|_| panic!("Attached SSE did not close after {}", signal.name()))
         .expect("Attached SSE reader panicked")
         .expect("Attached SSE body failed");
     assert!(
@@ -100,8 +136,16 @@ async fn sigterm_terminalizes_attached_and_detached_runs_and_restart_preserves_t
     );
     let attached_events_before = events(&repository, &attached_id).await;
     let detached_events_before = events(&repository, &detached_id).await;
-    assert_single_terminal(&attached_events_before, RunEventType::RunCancelled);
-    assert_single_terminal(&detached_events_before, RunEventType::RunInterrupted);
+    assert_single_terminal(
+        &attached_events_before,
+        RunEventType::RunCancelled,
+        "RUN_CANCELLED",
+    );
+    assert_single_terminal(
+        &detached_events_before,
+        RunEventType::RunInterrupted,
+        "RUN_INTERRUPTED",
+    );
     drop(repository);
 
     let restart_addr = reserve_loopback_addr();
@@ -223,7 +267,11 @@ async fn killed_running_run_is_reconciled_before_first_ready_and_second_restart_
         "RUN_INTERRUPTED",
     );
     let recovered_events = events(&repository, &run_id).await;
-    assert_single_terminal(&recovered_events, RunEventType::RunInterrupted);
+    assert_single_terminal(
+        &recovered_events,
+        RunEventType::RunInterrupted,
+        "RUN_INTERRUPTED",
+    );
     drop(repository);
 
     let second_restart_addr = reserve_loopback_addr();
@@ -624,16 +672,24 @@ impl ChildGuard {
         Self { child: Some(child) }
     }
 
-    fn signal_term(&mut self) {
+    fn signal(&mut self, signal: UnixSignal) {
         let child = self.child.as_ref().expect("child already collected");
         let status = Command::new("kill")
-            .arg("-TERM")
+            .arg(signal.kill_arg())
             .arg(child.id().to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .expect("failed to invoke kill -TERM");
-        assert!(status.success(), "kill -TERM failed with status {status}");
+            .unwrap_or_else(|_| panic!("failed to invoke kill for {}", signal.name()));
+        assert!(
+            status.success(),
+            "kill for {} failed with status {status}",
+            signal.name()
+        );
+    }
+
+    fn signal_term(&mut self) {
+        self.signal(UnixSignal::Term);
     }
 
     fn try_wait(&mut self) -> Option<ExitStatus> {
@@ -847,10 +903,11 @@ fn terminal_events(events: &[RunEvent]) -> Vec<&RunEvent> {
         .collect()
 }
 
-fn assert_single_terminal(events: &[RunEvent], expected: RunEventType) {
+fn assert_single_terminal(events: &[RunEvent], expected: RunEventType, expected_error_code: &str) {
     let terminal = terminal_events(events);
     assert_eq!(terminal.len(), 1, "unexpected terminal events: {events:?}");
     assert_eq!(terminal[0].event_type, expected);
+    assert_eq!(terminal[0].code, expected_error_code);
     assert_eq!(events.last().unwrap().event_type, expected);
 }
 
