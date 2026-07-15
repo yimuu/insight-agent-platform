@@ -32,3 +32,6 @@ runtime:
   journal_capacity: 128
   journal_batch_size: 16
   journal_operation_timeout: 5s
+  readiness_probe_timeout: 2s
+  shutdown_grace_period: 30s
+  shutdown_hard_deadline: 35s

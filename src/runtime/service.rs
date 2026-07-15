@@ -12,7 +12,7 @@ use std::{
 use chrono::Utc;
 use serde_json::{json, Value};
 use tokio::{
-    sync::{watch, OwnedSemaphorePermit, Semaphore},
+    sync::{watch, Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore},
     task::JoinHandle,
     time::{sleep, timeout},
 };
@@ -39,6 +39,8 @@ use super::{
     attachment::{AttachedRun, LeaseOwner, RunSubscription, SubscriptionLease},
     stop_pair, ExecutionLimiter, RunCoordinator, RunState, StopController, StopReason, StopSignal,
 };
+
+const READINESS_PROBE_CACHE_TTL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Default)]
 pub struct CompiledAgentRegistry {
@@ -140,6 +142,13 @@ struct RunServiceInner {
     active: Mutex<BTreeMap<String, ActiveRun>>,
     lifecycle_changed: watch::Sender<u64>,
     accepting: AtomicBool,
+    readiness_probe: AsyncMutex<ReadinessProbeCache>,
+}
+
+#[derive(Default)]
+struct ReadinessProbeCache {
+    checked_at: Option<Instant>,
+    available: bool,
 }
 
 #[derive(Clone)]
@@ -198,6 +207,15 @@ impl RunServiceInner {
     fn notify_lifecycle(&self) {
         self.lifecycle_changed
             .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    fn close_admission(&self) {
+        let _preparing = lock_preparing(self);
+        self.close_admission_locked();
+    }
+
+    fn close_admission_locked(&self) {
+        self.accepting.store(false, Ordering::Release);
     }
 
     fn lifecycle_is_empty(&self) -> bool {
@@ -285,6 +303,7 @@ impl RunService {
                 active: Mutex::new(BTreeMap::new()),
                 lifecycle_changed: watch::channel(0).0,
                 accepting: AtomicBool::new(true),
+                readiness_probe: AsyncMutex::new(ReadinessProbeCache::default()),
             }),
         })
     }
@@ -295,6 +314,35 @@ impl RunService {
 
     pub fn is_healthy(&self) -> bool {
         self.inner.accepting.load(Ordering::Acquire) && self.inner.events.is_healthy()
+    }
+
+    pub async fn check_readiness(&self, deadline: Duration) -> Result<(), ServiceError> {
+        if !self.is_healthy() {
+            return Err(readiness_unavailable());
+        }
+        let probe = async {
+            let mut cached = self.inner.readiness_probe.lock().await;
+            if cached
+                .checked_at
+                .is_some_and(|checked_at| checked_at.elapsed() < READINESS_PROBE_CACHE_TTL)
+            {
+                return cached.available;
+            }
+            let available = self.inner.repository.check_health().await.is_ok();
+            cached.checked_at = Some(Instant::now());
+            cached.available = available;
+            available
+        };
+        match timeout(deadline, probe).await {
+            Ok(true) if self.is_healthy() => Ok(()),
+            Ok(_) | Err(_) => Err(readiness_unavailable()),
+        }
+    }
+
+    pub fn begin_shutdown(&self) {
+        // Linearize admission closure with preparing ownership registration. A create
+        // request is therefore either visible to shutdown or rejected after this store.
+        self.inner.close_admission();
     }
 
     pub async fn create_attached(
@@ -382,7 +430,7 @@ impl RunService {
     }
 
     pub async fn shutdown(&self, deadline: Duration) -> Result<(), ServiceError> {
-        self.inner.accepting.store(false, Ordering::Release);
+        self.begin_shutdown();
         let started = Instant::now();
         let mut lifecycle_changed = self.inner.lifecycle_changed.subscribe();
         let stops = self.inner.lifecycle_stops();
@@ -427,7 +475,7 @@ impl RunService {
         attachment: RunAttachment,
     ) -> Result<PreparedRun, ServiceError> {
         if !self.inner.events.is_healthy() {
-            self.inner.accepting.store(false, Ordering::Release);
+            self.inner.close_admission();
             return Err(ServiceError::new(
                 "RUN_SERVICE_UNAVAILABLE",
                 "event journal is unavailable",
@@ -468,20 +516,36 @@ impl RunService {
             input_summary: summarize_input(&input),
         };
         let (stop, signal) = stop_pair();
-        lock_preparing(&self.inner).insert(
-            run_id.clone(),
-            PreparingRun {
-                agent,
-                new_run: new_run.clone(),
-                input,
-                attachment,
-                stop,
-                signal,
-                state: Arc::new(RunState::new()),
-                permit,
-                durable: false,
-            },
-        );
+        {
+            let mut preparing = lock_preparing(&self.inner);
+            if !self.inner.events.is_healthy() {
+                self.inner.close_admission_locked();
+                return Err(ServiceError::new(
+                    "RUN_SERVICE_UNAVAILABLE",
+                    "event journal is unavailable",
+                ));
+            }
+            if !self.inner.accepting.load(Ordering::Acquire) {
+                return Err(ServiceError::new(
+                    "RUN_SERVICE_STOPPING",
+                    "run service is stopping",
+                ));
+            }
+            preparing.insert(
+                run_id.clone(),
+                PreparingRun {
+                    agent,
+                    new_run: new_run.clone(),
+                    input,
+                    attachment,
+                    stop,
+                    signal,
+                    state: Arc::new(RunState::new()),
+                    permit,
+                    durable: false,
+                },
+            );
+        }
         self.inner.notify_lifecycle();
         let guard = PreparingGuard::new(Arc::clone(&self.inner), run_id.clone());
 
@@ -576,7 +640,7 @@ impl RunService {
                 }
             };
             if let Err(error) = result {
-                inner.accepting.store(false, Ordering::Release);
+                inner.close_admission();
                 tracing::error!(
                     run_id = task_run_id,
                     code = error.code(),
@@ -584,7 +648,7 @@ impl RunService {
                 );
             }
             if !inner.events.is_healthy() {
-                inner.accepting.store(false, Ordering::Release);
+                inner.close_admission();
             }
             let removed = lock_active(&inner).remove(&task_run_id);
             drop(removed);
@@ -615,7 +679,7 @@ impl RunService {
                 if let Err(error) =
                     publish_prelaunch_terminal(Arc::clone(&inner), new_run, reason).await
                 {
-                    inner.accepting.store(false, Ordering::Release);
+                    inner.close_admission();
                     tracing::error!(
                         run_id = task_run_id,
                         code = error.code(),
@@ -748,6 +812,13 @@ fn service_history_error(error: HistoryError) -> ServiceError {
     ServiceError::new(error.code(), error.to_string())
 }
 
+fn readiness_unavailable() -> ServiceError {
+    ServiceError::new(
+        "RUN_SERVICE_UNAVAILABLE",
+        "runtime dependencies are unavailable",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -772,6 +843,10 @@ mod tests {
 
     #[async_trait]
     impl RunRepository for UnitRepository {
+        async fn check_health(&self) -> Result<(), HistoryError> {
+            Ok(())
+        }
+
         async fn create_run(&self, run: NewRun) -> Result<(), HistoryError> {
             self.runs.lock().await.insert(
                 run.run_id.clone(),
@@ -908,6 +983,55 @@ mod tests {
         ) -> Result<u64, HistoryError> {
             Ok(0)
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admission_closure_linearizes_with_preparing_registration() {
+        let repository: Arc<dyn RunRepository> = Arc::new(UnitRepository::default());
+        let events = EventHub::new(
+            Arc::clone(&repository),
+            crate::events::hub::EventHubConfig {
+                subscriber_capacity: 8,
+                journal_capacity: 32,
+                journal_batch_size: 8,
+                operation_timeout: Duration::from_secs(1),
+            },
+        );
+        let service = RunService::new(
+            CompiledAgentRegistry::new(Vec::new()).unwrap(),
+            NodeExecutorRegistry::default(),
+            repository,
+            events,
+            RunServiceConfig {
+                max_concurrent_runs: 1,
+                max_parallel_node_executions: 1,
+                max_parallel_branches_per_run: 1,
+                run_timeout: Duration::from_secs(1),
+            },
+        )
+        .unwrap();
+
+        let preparing = lock_preparing(&service.inner);
+        let contender = service.clone();
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let (done_sender, done_receiver) = std::sync::mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            started_sender.send(()).unwrap();
+            contender.inner.close_admission();
+            done_sender.send(()).unwrap();
+        });
+        started_receiver.recv().unwrap();
+        assert!(
+            done_receiver
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "shutdown must wait for the preparing admission boundary"
+        );
+
+        drop(preparing);
+        done_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        shutdown.join().unwrap();
+        assert!(!service.is_healthy());
     }
 
     #[tokio::test]

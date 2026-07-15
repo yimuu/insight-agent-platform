@@ -32,12 +32,13 @@ Historical snapshots:
 
 | Area | Current status | Evidence | Remaining note |
 |---|---|---|---|
-| Real binary quickstart | Implemented | `tests/binary_smoke.rs`; `0af0548`, `5bb1d94`, `78475f6` | Full signal, in-flight shutdown, and database-loss lifecycle matrices remain open. |
+| Real binary quickstart | Implemented | `tests/binary_smoke.rs`; `0af0548`, `5bb1d94`, `78475f6` | Direct real-process SIGINT, unexpected HTTP-server termination, and real PostgreSQL loss remain verification boundaries. |
 | Chat optional image and dynamic message sources | Implemented | `3ce4352`, `0b29aa7`, `ef64358` | Direct Chat cancellation and clean-EOF policy remain open. |
 | Condition result convergence | Implemented | `3b995e3`, `912d3cb`, `926d87d` | No additional Select expansion is currently planned. |
 | Unified End and typed terminal model | Implemented | `559bfc8` through `7ef2cee`; terminal suites under `tests/event_hub.rs` and `tests/core_end.rs` | Cross-connection CAS and multi-process ownership remain separate persistence topics. |
 | Canonical repository terminal proposal | Implemented | `7a6865a`; `tests/history_sqlite_v1.rs`, `tests/history_postgres.rs`, `tests/event_hub.rs` | PostgreSQL exclusive-store topology is still open. |
 | Public Agent input contract | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-public-agent-contract-design.md`; schema, API, compiler, and binary smoke tests | Output schemas and Agent CRUD are intentionally out of scope. |
+| Production lifecycle V1 | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-production-lifecycle-v1-design.md`; `tests/api.rs`, `tests/run_service.rs`, `tests/binary_lifecycle.rs` | Direct SIGINT, unexpected HTTP-server exit, real PostgreSQL disconnect, and deployment trusted-path policy remain separate verification work. |
 
 ## Stable baseline remediation status
 
@@ -45,7 +46,7 @@ Historical snapshots:
 |---|---|---|---|---|
 | A0 — Sensitive error containment | `BASE-P1-010` | Implemented | `7740cfd`, `5d37fde`, `62bb41f`, `f39ac47`; `docs/superpowers/plans/2026-07-11-action-error-containment.md` | Historical stored messages were reset/covered by the history reset note. |
 | A1 — Provider memory bounds | `BASE-P1-011` | Implemented | `8593326`, `dcd7d47`, `fa9f878`, `8293d52`, `d7990da`, `e1851a9`; `docs/superpowers/specs/2026-07-11-provider-memory-bounds-design.md` | Broader provider-specific limits remain future design work only if new providers are added. |
-| A2 — Preparing/active lifecycle ownership | `BASE-P1-006` | Implemented | `aba2c18`, `969ff2a`, `19a87d7`, `fca31f2`; `docs/superpowers/specs/2026-07-11-preparing-active-lifecycle-ownership-design.md` | Real-binary lifecycle remains under Needs verification. |
+| A2 — Preparing/active lifecycle ownership | `BASE-P1-006` | Implemented | `aba2c18`, `969ff2a`, `19a87d7`, `fca31f2`; `docs/superpowers/specs/2026-07-11-preparing-active-lifecycle-ownership-design.md` | Real-binary signal and recovery behavior is covered by Production Lifecycle V1. |
 | A3 — Authoritative stop semantics | `BASE-P1-007` | Implemented | `0cb6bcb`, `7cc18fa`, `a50e7e6`; `docs/superpowers/specs/2026-07-11-authoritative-stop-semantics-design.md` | Extension runtime coverage is implemented separately by A6. |
 | A4 — Durable recovery and live-state finalization | `BASE-P1-008`, `BASE-P1-009` | Implemented | `fcf245a`, `087102b`, `616d0f4`, `258dc81`; `docs/superpowers/specs/2026-07-11-durable-recovery-finalization-design.md` | Multi-process/PostgreSQL parity remains Needs verification. |
 | A5 — Semantic compile-time validation | `BASE-P1-001`, `BASE-P1-002`, `BASE-P1-003` | Implemented | `c62f9b1`, `e38604d`, `934f806`, `da78868`, `675ed90`, `dff6b00`, `659f47d`; `docs/superpowers/specs/2026-07-11-semantic-compile-time-validation-design.md` | Additional CEL language compatibility is covered by dependency work and future verification. |
@@ -96,10 +97,10 @@ These were originally uncertainty-preserving review items, not confirmed defects
 | 12 | Stored event identity policy | Open | Nonterminal append identity normalization/rejection still needs an explicit decision. |
 | 13 | Restricted HTTP DNS/private-address/rebinding policy | Open | The action currently validates HTTPS and host allowlisting, not connected peer addresses or rebinding. |
 | 14 | OpenAI clean-EOF semantics | Open | Required provider completion evidence and truncated-stream behavior remain undecided. |
-| 15 | Real-binary lifecycle | Partial | Binary startup, discovery, deterministic success, authored failure, polling, and graceful exit are covered; full signal/in-flight/reconcile/deadline behavior remains open. |
+| 15 | Real-binary lifecycle | Partial | Real executable coverage includes public probes, in-flight Attached/Detached SIGTERM terminals, restart persistence, crash reconciliation/idempotency, and bounded hard-deadline failure; direct SIGINT and unexpected HTTP-server termination remain unverified. |
 | 16 | Restricted HTTP positive boundary matrix | Open | Allowed TLS, redirects, size, timeout, cancellation, redaction, and socket-close cases need a local test service. |
 | 17 | API/auth/error/SSE boundary matrix | Partial | Core routes, list/detail auth, validation, live-only SSE, cancellation, and typed failures are covered; an exhaustive route/header/lag/error matrix remains open. |
-| 18 | Readiness and deployment paths | Open | Liveness/readiness separation, database-loss behavior, and trusted path/deployment policy remain undecided. |
+| 18 | Readiness and deployment paths | Partial | Public liveness/readiness, bounded SQLite/PostgreSQL repository probes, startup-before-bind, and two-phase drain are implemented; real PostgreSQL disconnect and trusted path/deployment policy remain open. |
 | 19 | Documentation precedence | Open | Historical replay/reconnect designs still need explicit supersession markers. |
 | 20 | Checked-in example execution | Addressed | The real binary smoke compiles and executes checked-in `code_node_demo` and constructs its input from the discovered schema. |
 
@@ -118,7 +119,7 @@ These were originally uncertainty-preserving review items, not confirmed defects
 ## Recommended next actions
 
 1. Treat this document as the current open-work entrypoint and keep the 2026-07-11 reviews as historical evidence.
-2. Make PostgreSQL exclusive-store ownership plus real-binary readiness/lifecycle the next production-hardening milestone.
+2. Make PostgreSQL exclusive-store ownership the next production-hardening milestone.
 3. Define the restricted HTTP DNS/private-address/rebinding contract before enabling `http_get` for a production Agent.
 4. Do not repeat A0-A8, R0-R6, or completed terminal-model work unless a regression is found.
 5. Execute R7 only when a concrete future SQLx version is selected; it is not the default next task.

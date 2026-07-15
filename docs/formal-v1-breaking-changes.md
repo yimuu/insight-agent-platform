@@ -78,6 +78,8 @@ Fork 分支不再直接进入 Join。每个静态成功路径必须到达分支�
 
 ```text
 GET    /health
+GET    /health/live
+GET    /health/ready
 GET    /v1/agents
 GET    /v1/agents/{agent_id}
 POST   /v1/agents/{agent_id}/runs/stream
@@ -88,7 +90,7 @@ DELETE /v1/runs/{run_id}
 
 `GET /v1/agents` 与 `GET /v1/agents/{agent_id}` 使用相同的公开 Agent 元数据结构：`id`、`name`、`description`、`version`、`input_schema`。`input_schema` 是编译期通过 Draft 7 策略校验、运行期用于校验两个 Run POST 完整 JSON body 的同一份结构化文档；API 不公开 prompt、节点图、模型或 Action 配置。Schema 变化会进入现有 Agent `version`，不另增 `schema_hash`。
 
-`/health` 在运行时可接受新 Run 时返回 `200/OK`；journal 永久失败或服务进入关停后返回 `503/RUNTIME_UNHEALTHY`。原因是存活但无法可靠记录事件的进程不能继续被负载均衡器视为健康实例。
+`/health/live` 是不查询 history 或 journal 的公开 liveness；handler 可响应时返回 `200/OK`。`/health/ready` 是公开 readiness，要求 Run admission 开放、journal 健康且有界 history probe 成功；并发请求通过 single-flight 合并，成功与失败最多缓存 250ms。`/health` 保留为 `/health/ready` 的直接兼容别名，两者在所有状态下返回完全相同的状态码和 JSON；失败统一为经清理的 `503/RUNTIME_UNHEALTHY`。三个探针都返回 `Cache-Control: no-store`。关停先关闭 admission 并保持 HTTP 提供探针与查询，运行时 drain 完成或失败后才关闭 HTTP；关停期间的新 Run 返回 `503/RUN_SERVICE_UNAVAILABLE`。新增可选 runtime 字段 `readiness_probe_timeout`、`shutdown_grace_period` 和 `shutdown_hard_deadline`，默认分别为 `2s`、`30s` 和 `35s`，且 hard deadline 必须严格大于 grace period。
 
 原型的 Run 列表/过滤端点和 `X-Caller-Service/X-Tenant-Id/X-User-Id` 元数据不属于正式 V1。原因是执行合同不应提前绑定多租户管理面；后续查询/管理 API 可以在独立授权与分页合同下增加。`X-Request-Id` 保留用于关联请求。
 
@@ -190,7 +192,7 @@ SQL
 
 不要删除 SQLx migration metadata。应用不会自动删除历史，也不提供 reset API/CLI。删除后的历史不能通过回滚旧二进制恢复；不要把 A0 前的 Run/Event 数据重新导入运行库。
 
-部署顺序：停止服务、重置历史、部署新二进制、启动并完成 migration check、运行 `cargo test --test action_error_containment -- --nocapture --test-threads=1`、检查 `/health`，然后恢复流量。
+部署顺序：停止服务、重置历史、部署新二进制、启动并完成 migration check、运行 `cargo test --test action_error_containment -- --nocapture --test-threads=1`、检查 `/health/ready`，然后恢复流量。
 
 ### A5 Semantic compile-time validation
 

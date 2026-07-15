@@ -287,6 +287,10 @@ impl ExtensionRepository {
 
 #[async_trait]
 impl RunRepository for ExtensionRepository {
+    async fn check_health(&self) -> Result<(), HistoryError> {
+        Ok(())
+    }
+
     async fn create_run(&self, run: NewRun) -> Result<(), HistoryError> {
         self.records.lock().await.insert(
             run.run_id.clone(),

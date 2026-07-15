@@ -89,6 +89,7 @@ fn failed_update(run_id: &str) -> TerminalUpdate {
 #[tokio::test]
 async fn sqlite_repository_persists_lifecycle_events_outputs_and_replay() {
     let repo = SqliteRunRepository::in_memory().await.unwrap();
+    repo.check_health().await.unwrap();
     repo.create_run(new_run(RUN_ID, RunAttachment::Detached))
         .await
         .unwrap();

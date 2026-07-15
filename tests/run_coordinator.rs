@@ -313,6 +313,10 @@ struct MemoryRepository {
 
 #[async_trait]
 impl RunRepository for MemoryRepository {
+    async fn check_health(&self) -> Result<(), HistoryError> {
+        Ok(())
+    }
+
     async fn create_run(&self, run: NewRun) -> Result<(), HistoryError> {
         *self.run.lock().await = Some(run);
         *self.status.lock().await = Some(RunStatus::Created);

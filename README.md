@@ -73,10 +73,10 @@ PLATFORM_CONFIG=config/platform.quickstart.yaml cargo run
 
 该配置只启用 `code_node_demo`，使用 SQLite 本地历史和内置 `example.text_metrics` Action。它引用 `config/models.quickstart.yaml` 中的未使用 dummy 模型别名，因此不需要 `OPENAI_API_KEY`，也不会调用外部模型服务。
 
-另开一个终端验证健康状态和 Agent 列表：
+另开一个终端验证 readiness 和 Agent 列表：
 
 ```bash
-curl --silent http://127.0.0.1:3000/health
+curl --silent http://127.0.0.1:3000/health/ready
 curl --silent http://127.0.0.1:3000/v1/agents
 ```
 
@@ -110,7 +110,7 @@ cp .env.example .env
 cargo run
 ```
 
-默认配置只监听 `127.0.0.1:3000`，并显式关闭鉴权。`/health` 始终公开；运行时可接受请求时返回 `200/OK`，journal 永久失败或服务关停后返回 `503/RUNTIME_UNHEALTHY`。`/v1` 可切换到从环境变量读取的 Bearer token：
+默认配置只监听 `127.0.0.1:3000`，并显式关闭鉴权。`/health/live`、`/health/ready` 和 `/health` 始终公开且返回 `Cache-Control: no-store`；`/health/live` 在 HTTP handler 可响应时固定返回 `200/OK`，`/health/ready` 会有界检查 Run admission、journal 和 history backend。并发 readiness 请求共享一次探测，成功和失败结果只缓存 250ms，避免探针流量争用 history 连接池。`/health` 是 readiness 的直接兼容别名，两者的状态码和 JSON 完全一致。未 ready 时返回 `503/RUNTIME_UNHEALTHY`，且不会暴露底层数据库错误。`/v1` 可切换到从环境变量读取的 Bearer token：
 
 INFO 日志是结构化且 body-free 的：Run、节点、Chat 和 provider 记录只包含 `run_id`、`request_id`、`agent_id`、`agent_version`、节点 ID/type、状态、耗时、计数和序列化字节数。End 完成日志可额外记录 `terminal_outcome`；Run 失败日志可记录稳定的 `failure_kind` 和错误码，但不记录工作流失败消息。日志不记录请求输入值、prompt、模型输出、Action 输入/输出、End content/data、分支输出、事件 payload、带 query 的完整 URL、请求/响应头或凭据。当前基线只提供结构化日志，不包含 metrics backend 或 exporter。
 
@@ -142,9 +142,12 @@ runtime:
   journal_capacity: 1024
   journal_batch_size: 32
   journal_operation_timeout: 30s
+  readiness_probe_timeout: 2s
+  shutdown_grace_period: 30s
+  shutdown_hard_deadline: 35s
 ```
 
-`agents.enabled` 默认是空集合，不会意外暴露目录中的 Agent。相对路径从平台配置文件所在目录解析。未知字段、零容量、零超时、缺失文件和缺失/空密钥都会阻止启动。
+`agents.enabled` 默认是空集合，不会意外暴露目录中的 Agent。相对路径从平台配置文件所在目录解析。未知字段、零容量、零超时、缺失文件和缺失/空密钥都会阻止启动；`shutdown_hard_deadline` 必须严格大于 `shutdown_grace_period`。
 
 Agent 只引用模型别名，不感知供应商分组：
 
@@ -307,11 +310,15 @@ JSON 响应统一使用字符串码：
 {"code":"OK","message":"ok","data":{}}
 ```
 
-公开健康检查：
+公开 liveness、readiness 和兼容健康检查：
 
 ```bash
+curl --silent http://127.0.0.1:3000/health/live
+curl --silent http://127.0.0.1:3000/health/ready
 curl --silent http://127.0.0.1:3000/health
 ```
+
+进程只有在配置、Agent 编译、history 初始化和遗留 Run 恢复全部成功后才绑定 HTTP。收到 SIGINT/SIGTERM 后，进程先关闭新 Run admission；此时 liveness 仍为 200，readiness 与 `/health` 为 503。运行时随后尝试在 grace period 内终态化并持久化活动 Run（Attached 为 `cancelled`，Detached 为 `interrupted`），再关闭 HTTP。只有 runtime 与 HTTP 都成功 drain 才干净退出；失败或 hard deadline 会非零退出，并由下次启动 reconciliation 收敛遗留 Run。
 
 列出 Agent：
 
@@ -389,7 +396,7 @@ curl --silent --request DELETE http://127.0.0.1:3000/v1/runs/run_xxx
 以下命令可在默认开发配置下完整验证确定性 action-only 路径（需要 `jq`）：
 
 ```bash
-curl --fail --silent http://127.0.0.1:3000/health | jq
+curl --fail --silent http://127.0.0.1:3000/health/ready | jq
 curl --fail --silent http://127.0.0.1:3000/v1/agents | jq
 CREATED=$(curl --fail --silent --request POST \
   --header 'content-type: application/json' \

@@ -159,6 +159,8 @@ fn completed_data(output: &RunOutput) -> Value {
 
 #[async_trait]
 pub trait RunRepository: Send + Sync {
+    async fn check_health(&self) -> Result<(), HistoryError>;
+
     async fn create_run(&self, run: NewRun) -> Result<(), HistoryError>;
 
     async fn mark_running(

@@ -458,6 +458,10 @@ struct SchedulerRepository {
 
 #[async_trait]
 impl RunRepository for SchedulerRepository {
+    async fn check_health(&self) -> Result<(), HistoryError> {
+        Ok(())
+    }
+
     async fn create_run(&self, _run: NewRun) -> Result<(), HistoryError> {
         Ok(())
     }

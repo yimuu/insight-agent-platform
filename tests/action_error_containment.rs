@@ -327,6 +327,7 @@ async fn fixture() -> Fixture {
         service: service.clone(),
         auth: ApiAuth::disabled(),
         sse_keep_alive_interval: Duration::from_millis(10),
+        readiness_probe_timeout: Duration::from_secs(1),
     });
 
     Fixture {

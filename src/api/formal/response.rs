@@ -80,12 +80,12 @@ impl From<ServiceError> for ApiError {
                 Self::new(StatusCode::NOT_FOUND, "AGENT_NOT_FOUND", "agent not found")
             }
             "RUN_NOT_FOUND" => Self::new(StatusCode::NOT_FOUND, "RUN_NOT_FOUND", "run not found"),
-            "RUN_CONFLICT" | "RUN_CAPACITY_EXCEEDED" | "RUN_SERVICE_STOPPING" => Self::new(
+            "RUN_CONFLICT" | "RUN_CAPACITY_EXCEEDED" => Self::new(
                 StatusCode::CONFLICT,
                 "RUN_CONFLICT",
                 "run request conflicts with current runtime state",
             ),
-            "RUN_SERVICE_UNAVAILABLE" => Self::new(
+            "RUN_SERVICE_STOPPING" | "RUN_SERVICE_UNAVAILABLE" => Self::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "RUN_SERVICE_UNAVAILABLE",
                 "run service is unavailable",

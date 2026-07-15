@@ -193,6 +193,7 @@ async fn fixture(auth: ApiAuth, capacity: usize) -> (Router, RunService) {
         service: service.clone(),
         auth,
         sse_keep_alive_interval: TEST_SSE_KEEP_ALIVE,
+        readiness_probe_timeout: Duration::from_secs(1),
     });
     (router, service)
 }
@@ -233,18 +234,38 @@ fn sse_data(body: &[u8]) -> Vec<Value> {
 }
 
 #[tokio::test]
-async fn health_is_public_while_v1_honors_explicit_bearer_auth() {
+async fn lifecycle_probes_are_public_and_draining_closes_run_admission() {
     let auth = ApiAuth::bearer_token("super-secret-token");
     assert!(!format!("{auth:?}").contains("super-secret-token"));
     let (app, service) = fixture(auth, 4).await;
 
+    let live = app
+        .clone()
+        .oneshot(request(Method::GET, "/health/live", None))
+        .await
+        .unwrap();
+    assert_eq!(live.status(), StatusCode::OK);
+    assert_eq!(live.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        json_body(live).await,
+        json!({"code":"OK", "message":"ok", "data":{"status":"live"}})
+    );
+    let ready = app
+        .clone()
+        .oneshot(request(Method::GET, "/health/ready", None))
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), StatusCode::OK);
+    assert_eq!(ready.headers()[header::CACHE_CONTROL], "no-store");
+    let ready = json_body(ready).await;
     let health = app
         .clone()
         .oneshot(request(Method::GET, "/health", None))
         .await
         .unwrap();
     assert_eq!(health.status(), StatusCode::OK);
-    assert_eq!(json_body(health).await["code"], "OK");
+    assert_eq!(health.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(json_body(health).await, ready);
 
     for uri in ["/v1/agents", "/v1/agents/fast"] {
         let unauthorized = app
@@ -273,13 +294,48 @@ async fn health_is_public_while_v1_honors_explicit_bearer_auth() {
             StatusCode::OK
         );
     }
-    service.shutdown(Duration::from_secs(1)).await.unwrap();
-    let degraded = app
+    service.begin_shutdown();
+    let draining_live = app
+        .clone()
+        .oneshot(request(Method::GET, "/health/live", None))
+        .await
+        .unwrap();
+    assert_eq!(draining_live.status(), StatusCode::OK);
+    assert_eq!(draining_live.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(json_body(draining_live).await["data"]["status"], "live");
+
+    let degraded_ready = app
+        .clone()
+        .oneshot(request(Method::GET, "/health/ready", None))
+        .await
+        .unwrap();
+    assert_eq!(degraded_ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(degraded_ready.headers()[header::CACHE_CONTROL], "no-store");
+    let degraded_ready = json_body(degraded_ready).await;
+    assert_eq!(degraded_ready["code"], "RUNTIME_UNHEALTHY");
+    let degraded_health = app
+        .clone()
         .oneshot(request(Method::GET, "/health", None))
         .await
         .unwrap();
-    assert_eq!(degraded.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(json_body(degraded).await["code"], "RUNTIME_UNHEALTHY");
+    assert_eq!(degraded_health.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(degraded_health.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(json_body(degraded_health).await, degraded_ready);
+
+    let mut rejected_request = request(
+        Method::POST,
+        "/v1/agents/fast/runs",
+        Some(json!({"text":"hello"})),
+    );
+    rejected_request.headers_mut().insert(
+        header::AUTHORIZATION,
+        "Bearer super-secret-token".parse().unwrap(),
+    );
+    let rejected = app.oneshot(rejected_request).await.unwrap();
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json_body(rejected).await["code"], "RUN_SERVICE_UNAVAILABLE");
+
+    service.shutdown(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]

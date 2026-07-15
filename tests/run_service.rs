@@ -272,6 +272,7 @@ fn parallel_blocking_agent(
 struct RepositoryHooks {
     create_run: Option<Arc<RepositoryGate>>,
     get_run: Option<Arc<RepositoryGate>>,
+    health_check: Option<Arc<RepositoryGate>>,
     terminal_recovery: Option<Arc<RecoveryGate>>,
 }
 
@@ -355,12 +356,28 @@ struct CountingRepository {
     outputs: Mutex<Vec<NodeOutputRecord>>,
     creates: AtomicUsize,
     event_history_reads: AtomicUsize,
+    health_checks: AtomicUsize,
     fail_appends: AtomicBool,
+    fail_health_checks: AtomicBool,
     hooks: RepositoryHooks,
 }
 
 #[async_trait]
 impl RunRepository for CountingRepository {
+    async fn check_health(&self) -> Result<(), HistoryError> {
+        self.health_checks.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = self.hooks.health_check.as_ref() {
+            gate.block_once().await;
+        }
+        if self.fail_health_checks.load(Ordering::SeqCst) {
+            return Err(HistoryError::new(
+                "HISTORY_READ_FAILED",
+                "synthetic health check failure",
+            ));
+        }
+        Ok(())
+    }
+
     async fn create_run(&self, run: NewRun) -> Result<(), HistoryError> {
         if let Some(gate) = self.hooks.create_run.as_ref() {
             gate.block_once().await;
@@ -619,7 +636,9 @@ async fn service_with_repository_hooks_and_event_timeout(
         outputs: Mutex::new(Vec::new()),
         creates: AtomicUsize::new(0),
         event_history_reads: AtomicUsize::new(0),
+        health_checks: AtomicUsize::new(0),
         fail_appends: AtomicBool::new(false),
+        fail_health_checks: AtomicBool::new(false),
         hooks,
     });
     let repository_trait: Arc<dyn RunRepository> = repository.clone();
@@ -862,6 +881,87 @@ async fn permanent_journal_failure_rejects_later_runs_and_marks_service_unhealth
 }
 
 #[tokio::test]
+async fn readiness_is_bounded_sanitized_and_recovers_after_transient_history_failure() {
+    let health_gate = RepositoryGate::new();
+    let (service, repository) = service_with_repository_hooks(
+        RunServiceConfig {
+            max_concurrent_runs: 1,
+            max_parallel_node_executions: 1,
+            max_parallel_branches_per_run: 1,
+            run_timeout: Duration::from_secs(1),
+        },
+        vec![agent("fast", ServiceBehavior::Complete)],
+        RepositoryHooks {
+            health_check: Some(Arc::clone(&health_gate)),
+            ..RepositoryHooks::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let timeout = service
+        .check_readiness(Duration::from_millis(20))
+        .await
+        .unwrap_err();
+    assert_eq!(timeout.code(), "RUN_SERVICE_UNAVAILABLE");
+
+    repository.fail_health_checks.store(true, Ordering::SeqCst);
+    let failed = service
+        .check_readiness(Duration::from_secs(1))
+        .await
+        .unwrap_err();
+    assert_eq!(failed.code(), "RUN_SERVICE_UNAVAILABLE");
+    assert!(!failed.to_string().contains("synthetic"));
+    assert!(service.is_healthy());
+
+    repository.fail_health_checks.store(false, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    service
+        .check_readiness(Duration::from_secs(1))
+        .await
+        .unwrap();
+    service.shutdown(Duration::from_secs(1)).await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_readiness_calls_share_one_bounded_repository_probe() {
+    let health_gate = RepositoryGate::new();
+    let (service, repository) = service_with_repository_hooks(
+        RunServiceConfig {
+            max_concurrent_runs: 1,
+            max_parallel_node_executions: 1,
+            max_parallel_branches_per_run: 1,
+            run_timeout: Duration::from_secs(1),
+        },
+        vec![agent("fast", ServiceBehavior::Complete)],
+        RepositoryHooks {
+            health_check: Some(Arc::clone(&health_gate)),
+            ..RepositoryHooks::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut probes = Vec::new();
+    for _ in 0..32 {
+        let service = service.clone();
+        probes.push(tokio::spawn(async move {
+            service.check_readiness(Duration::from_secs(1)).await
+        }));
+    }
+    health_gate.wait_entered().await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(repository.health_checks.load(Ordering::SeqCst), 1);
+    health_gate.release();
+
+    for probe in probes {
+        probe.await.unwrap().unwrap();
+    }
+    assert_eq!(repository.health_checks.load(Ordering::SeqCst), 1);
+    service.shutdown(Duration::from_secs(1)).await.unwrap();
+}
+
+#[tokio::test]
 async fn shutdown_waits_for_background_recovery_owner() {
     let recover_gate = RecoveryGate::new();
     let (service, repository) = service_with_repository_hooks_and_event_timeout(
@@ -875,6 +975,7 @@ async fn shutdown_waits_for_background_recovery_owner() {
         RepositoryHooks {
             create_run: None,
             get_run: None,
+            health_check: None,
             terminal_recovery: Some(Arc::clone(&recover_gate)),
         },
         Duration::from_millis(20),
@@ -922,6 +1023,7 @@ async fn recovery_handoff_releases_active_ownership_but_keeps_service_unhealthy(
         RepositoryHooks {
             create_run: None,
             get_run: None,
+            health_check: None,
             terminal_recovery: Some(Arc::clone(&recover_gate)),
         },
         Duration::from_millis(20),
@@ -1018,6 +1120,7 @@ async fn shutdown_waits_for_detached_run_blocked_in_create_run() {
         RepositoryHooks {
             create_run: Some(Arc::clone(&create_gate)),
             get_run: None,
+            health_check: None,
             terminal_recovery: None,
         },
     )
@@ -1072,6 +1175,7 @@ async fn shutdown_after_durable_create_finalizes_before_detached_launch() {
         RepositoryHooks {
             create_run: None,
             get_run: Some(Arc::clone(&get_gate)),
+            health_check: None,
             terminal_recovery: None,
         },
     )
@@ -1121,6 +1225,7 @@ async fn dropped_detached_create_future_releases_capacity_after_durable_create()
         RepositoryHooks {
             create_run: None,
             get_run: Some(Arc::clone(&get_gate)),
+            health_check: None,
             terminal_recovery: None,
         },
     )

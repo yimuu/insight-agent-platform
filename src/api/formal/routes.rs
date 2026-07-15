@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use axum::{
     body::Body,
     extract::{rejection::JsonRejection, Path, State},
-    http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -31,6 +31,7 @@ pub struct FormalApiState {
     pub service: RunService,
     pub auth: ApiAuth,
     pub sse_keep_alive_interval: Duration,
+    pub readiness_probe_timeout: Duration,
 }
 
 pub fn build_router(state: FormalApiState) -> Router {
@@ -59,28 +60,45 @@ pub fn build_router(state: FormalApiState) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        .route("/health/live", get(live))
+        .route("/health/ready", get(health))
         .merge(v1)
         .with_state(state)
 }
 
+async fn live() -> Response {
+    no_store(Json(ApiResponse::ok(json!({"status":"live"}))))
+}
+
 async fn health(State(state): State<Arc<FormalApiState>>) -> Response {
-    if state.service.is_healthy() {
-        (
+    if state
+        .service
+        .check_readiness(state.readiness_probe_timeout)
+        .await
+        .is_ok()
+    {
+        no_store((
             StatusCode::OK,
             Json(ApiResponse::ok(json!({"status":"ok"}))),
-        )
-            .into_response()
+        ))
     } else {
-        (
+        no_store((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ApiResponse {
                 code: "RUNTIME_UNHEALTHY",
                 message: "runtime is unhealthy",
                 data: json!({"status":"degraded"}),
             }),
-        )
-            .into_response()
+        ))
     }
+}
+
+fn no_store(response: impl IntoResponse) -> Response {
+    let mut response = response.into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 #[derive(Debug, Serialize)]

@@ -94,6 +94,18 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
         config.runtime.sse_keep_alive_interval,
         Duration::from_secs(5)
     );
+    assert_eq!(
+        config.runtime.readiness_probe_timeout,
+        Duration::from_secs(2)
+    );
+    assert_eq!(
+        config.runtime.shutdown_grace_period,
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        config.runtime.shutdown_hard_deadline,
+        Duration::from_secs(35)
+    );
     assert_eq!(config.agents.directory, directory.path().join("agents"));
     assert_eq!(
         config.models.config,
@@ -105,6 +117,41 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
             path: directory.path().join("data/history.sqlite3")
         }
     );
+}
+
+#[test]
+fn lifecycle_durations_are_configurable_and_hard_deadline_exceeds_grace_period() {
+    let yaml = base_yaml("  mode: disabled").replace(
+        "  journal_operation_timeout: 5s",
+        "  journal_operation_timeout: 5s\n  readiness_probe_timeout: 250ms\n  shutdown_grace_period: 2s\n  shutdown_hard_deadline: 3s",
+    );
+    let (_directory, path) = write_config(&yaml);
+    let config = load(&path, BTreeMap::new()).unwrap();
+    assert_eq!(
+        config.runtime.readiness_probe_timeout,
+        Duration::from_millis(250)
+    );
+    assert_eq!(config.runtime.shutdown_grace_period, Duration::from_secs(2));
+    assert_eq!(
+        config.runtime.shutdown_hard_deadline,
+        Duration::from_secs(3)
+    );
+
+    for invalid in [
+        "  readiness_probe_timeout: 0s\n  shutdown_grace_period: 2s\n  shutdown_hard_deadline: 3s",
+        "  readiness_probe_timeout: 1s\n  shutdown_grace_period: 3s\n  shutdown_hard_deadline: 3s",
+        "  readiness_probe_timeout: 1s\n  shutdown_grace_period: 4s\n  shutdown_hard_deadline: 3s",
+    ] {
+        let yaml = base_yaml("  mode: disabled").replace(
+            "  journal_operation_timeout: 5s",
+            &format!("  journal_operation_timeout: 5s\n{invalid}"),
+        );
+        let (_directory, path) = write_config(&yaml);
+        assert_eq!(
+            load(&path, BTreeMap::new()).unwrap_err().code(),
+            "PLATFORM_RUNTIME_INVALID"
+        );
+    }
 }
 
 #[test]

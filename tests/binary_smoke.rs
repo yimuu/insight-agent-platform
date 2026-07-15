@@ -31,6 +31,30 @@ async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
     let mut child = ChildGuard::spawn(&platform_config);
     wait_for_health(&client, &base_url, &mut child).await;
 
+    let ready_url = format!("{base_url}/health/ready");
+    let ready = expect_json(
+        format!("GET {ready_url}"),
+        client.get(ready_url),
+        StatusCode::OK,
+    )
+    .await;
+    let health_url = format!("{base_url}/health");
+    let health = expect_json(
+        format!("GET {health_url}"),
+        client.get(health_url),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(health, ready, "/health must remain the readiness alias");
+    let live_url = format!("{base_url}/health/live");
+    let live = expect_json(
+        format!("GET {live_url}"),
+        client.get(live_url),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(live["data"]["status"], "live");
+
     let agents_url = format!("{base_url}/v1/agents");
     let agents = expect_json(
         format!("GET {agents_url}"),
@@ -338,7 +362,7 @@ async fn wait_for_health(client: &Client, base_url: &str, child: &mut ChildGuard
             );
         }
 
-        match client.get(format!("{base_url}/health")).send().await {
+        match client.get(format!("{base_url}/health/ready")).send().await {
             Ok(response) => {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_else(|error| {
@@ -470,7 +494,7 @@ fn http_diagnostic_message(label: &str, detail: &str, body: Option<&str>) -> Str
 }
 
 fn health_diagnostic_message(base_url: &str, detail: &str, body: Option<&str>) -> String {
-    http_diagnostic_message(&format!("GET {base_url}/health"), detail, body)
+    http_diagnostic_message(&format!("GET {base_url}/health/ready"), detail, body)
 }
 
 fn format_output(output: &Output) -> String {
@@ -541,7 +565,7 @@ fn shutdown_step_panic_keeps_child_guard_armed_for_drop() {
 }
 
 #[test]
-fn health_diagnostic_includes_exact_get_health_request() {
+fn health_diagnostic_includes_exact_get_readiness_request() {
     let message = health_diagnostic_message(
         "http://127.0.0.1:3000",
         "unexpected HTTP status 503 Service Unavailable; expected 200 OK",
@@ -550,6 +574,6 @@ fn health_diagnostic_includes_exact_get_health_request() {
 
     assert_eq!(
         message,
-        "GET http://127.0.0.1:3000/health: unexpected HTTP status 503 Service Unavailable; expected 200 OK\nbody:\n{\"code\":\"STARTING\"}"
+        "GET http://127.0.0.1:3000/health/ready: unexpected HTTP status 503 Service Unavailable; expected 200 OK\nbody:\n{\"code\":\"STARTING\"}"
     );
 }

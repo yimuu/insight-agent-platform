@@ -1,4 +1,4 @@
-use std::{error::Error, future::IntoFuture, sync::Arc, time::Duration};
+use std::{error::Error, future::IntoFuture, sync::Arc};
 
 use insight_agent_platform::{
     api::formal::{build_router, ApiAuth, FormalApiState},
@@ -88,6 +88,7 @@ async fn main() -> MainResult<()> {
         service: service.clone(),
         auth: ApiAuth::from(&config.auth),
         sse_keep_alive_interval: config.runtime.sse_keep_alive_interval,
+        readiness_probe_timeout: config.runtime.readiness_probe_timeout,
     });
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     tracing::info!(
@@ -105,9 +106,10 @@ async fn main() -> MainResult<()> {
     tokio::select! {
         result = &mut server => {
             tracing::warn!("HTTP server stopped before a shutdown signal");
+            service.begin_shutdown();
             tokio::time::timeout(
-                Duration::from_secs(35),
-                service.shutdown(Duration::from_secs(30)),
+                config.runtime.shutdown_hard_deadline,
+                service.shutdown(config.runtime.shutdown_grace_period),
             )
             .await
             .map_err(|_| std::io::Error::new(
@@ -115,20 +117,25 @@ async fn main() -> MainResult<()> {
                 "runtime shutdown exceeded its hard deadline",
             ))??;
             result?;
+            return Err(std::io::Error::other(
+                "HTTP server stopped before a shutdown signal",
+            )
+            .into());
         },
         _ = wait_for_shutdown_signal() => {
             tracing::info!("shutdown signal received");
-            let _ = http_shutdown.send(());
+            service.begin_shutdown();
             let drain = async {
-                let (runtime, http) = tokio::join!(
-                    service.shutdown(Duration::from_secs(30)),
-                    &mut server,
-                );
+                let runtime = service
+                    .shutdown(config.runtime.shutdown_grace_period)
+                    .await;
+                let _ = http_shutdown.send(());
+                let http = (&mut server).await;
                 runtime?;
                 http?;
                 MainResult::Ok(())
             };
-            tokio::time::timeout(Duration::from_secs(35), drain)
+            tokio::time::timeout(config.runtime.shutdown_hard_deadline, drain)
                 .await
                 .map_err(|_| std::io::Error::new(
                     std::io::ErrorKind::TimedOut,

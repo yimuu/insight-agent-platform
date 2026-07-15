@@ -70,6 +70,14 @@ impl SqliteRunRepository {
 
 #[async_trait]
 impl RunRepository for SqliteRunRepository {
+    async fn check_health(&self) -> Result<(), HistoryError> {
+        sqlx::query("SELECT 1")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(read_error)?;
+        Ok(())
+    }
+
     async fn create_run(&self, run: NewRun) -> Result<(), HistoryError> {
         let input_summary = serialize_json(&run.input_summary, "input summary")?;
         sqlx::query(

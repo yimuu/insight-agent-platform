@@ -106,6 +106,7 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
     let repo = PostgresRunRepository::connect(&scoped_url).await.unwrap();
+    repo.check_health().await.unwrap();
     let run_id = format!("run_pg_{suffix}");
 
     repo.create_run(new_run(&run_id)).await.unwrap();

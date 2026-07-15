@@ -42,6 +42,14 @@ impl PostgresRunRepository {
 
 #[async_trait]
 impl RunRepository for PostgresRunRepository {
+    async fn check_health(&self) -> Result<(), HistoryError> {
+        sqlx::query("SELECT 1")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(read_error)?;
+        Ok(())
+    }
+
     async fn create_run(&self, run: NewRun) -> Result<(), HistoryError> {
         sqlx::query(
             "INSERT INTO runs (

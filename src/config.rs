@@ -94,6 +94,9 @@ pub struct RuntimeConfig {
     pub journal_capacity: usize,
     pub journal_batch_size: usize,
     pub journal_operation_timeout: Duration,
+    pub readiness_probe_timeout: Duration,
+    pub shutdown_grace_period: Duration,
+    pub shutdown_hard_deadline: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,6 +288,9 @@ struct RuntimeYaml {
     journal_capacity: usize,
     journal_batch_size: usize,
     journal_operation_timeout: String,
+    readiness_probe_timeout: Option<String>,
+    shutdown_grace_period: Option<String>,
+    shutdown_hard_deadline: Option<String>,
 }
 
 fn resolve_auth(
@@ -487,6 +493,26 @@ fn resolve_runtime(raw: RuntimeYaml) -> Result<RuntimeConfig, PlatformConfigErro
             "runtime capacities must be positive and batch size must not exceed journal capacity",
         ));
     }
+    let readiness_probe_timeout = optional_positive_duration(
+        raw.readiness_probe_timeout.as_deref(),
+        Duration::from_secs(2),
+        "runtime.readiness_probe_timeout",
+    )?;
+    let shutdown_grace_period = optional_positive_duration(
+        raw.shutdown_grace_period.as_deref(),
+        Duration::from_secs(30),
+        "runtime.shutdown_grace_period",
+    )?;
+    let shutdown_hard_deadline = optional_positive_duration(
+        raw.shutdown_hard_deadline.as_deref(),
+        Duration::from_secs(35),
+        "runtime.shutdown_hard_deadline",
+    )?;
+    if shutdown_hard_deadline <= shutdown_grace_period {
+        return Err(runtime_error(
+            "runtime.shutdown_hard_deadline must be greater than runtime.shutdown_grace_period",
+        ));
+    }
     Ok(RuntimeConfig {
         max_concurrent_runs: raw.max_concurrent_runs,
         max_fork_branches: raw.max_fork_branches,
@@ -508,7 +534,18 @@ fn resolve_runtime(raw: RuntimeYaml) -> Result<RuntimeConfig, PlatformConfigErro
             &raw.journal_operation_timeout,
             "runtime.journal_operation_timeout",
         )?,
+        readiness_probe_timeout,
+        shutdown_grace_period,
+        shutdown_hard_deadline,
     })
+}
+
+fn optional_positive_duration(
+    value: Option<&str>,
+    default: Duration,
+    field: &str,
+) -> Result<Duration, PlatformConfigError> {
+    value.map_or(Ok(default), |value| positive_duration(value, field))
 }
 
 fn positive_duration(value: &str, field: &str) -> Result<Duration, PlatformConfigError> {
