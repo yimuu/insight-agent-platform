@@ -26,6 +26,10 @@ use insight_agent_platform::{
 
 type MainResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
+const PROCESS_PANICKED_CODE: &str = "PROCESS_PANICKED";
+const PROCESS_PANICKED_MESSAGE: &str = "process panic captured";
+const RUNTIME_TASK_PANICKED_CODE: &str = "RUNTIME_TASK_PANICKED";
+
 struct InitializedRepository {
     repository: Arc<dyn RunRepository>,
     owner: Option<PostgresStoreOwner>,
@@ -35,12 +39,28 @@ enum ShutdownTrigger {
     HttpStopped(std::io::Result<()>),
     Signal,
     OwnershipLost,
+    RuntimeFatal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownOutcome {
+    OwnershipLost,
+    RuntimeFatal,
+    HttpStopped,
+    Clean,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShutdownDecision {
+    outcome: ShutdownOutcome,
+    release_store_owner: bool,
 }
 
 #[tokio::main]
 async fn main() -> MainResult<()> {
     let _ = dotenvy::dotenv();
     init_tracing();
+    install_sanitized_panic_hook();
 
     let config = PlatformConfig::from_env()?;
     let models = load_model_registry(&config.models.config)?;
@@ -103,6 +123,7 @@ async fn main() -> MainResult<()> {
             run_timeout: config.runtime.run_timeout,
         },
     )?;
+    let mut runtime_fatal = service.subscribe_fatal();
     let interrupted = service.reconcile_startup().await?;
     if interrupted > 0 {
         tracing::warn!(
@@ -155,45 +176,83 @@ async fn main() -> MainResult<()> {
                 "PostgreSQL history store ownership was lost"
             );
             ShutdownTrigger::OwnershipLost
+        },
+        _ = wait_for_runtime_fatal(&mut runtime_fatal) => {
+            tracing::error!(
+                code = RUNTIME_TASK_PANICKED_CODE,
+                "a run task panicked; forcing process shutdown"
+            );
+            ShutdownTrigger::RuntimeFatal
         }
     };
     service.begin_shutdown();
 
     let ownership_loss_triggered = matches!(&trigger, ShutdownTrigger::OwnershipLost);
+    let runtime_fatal_triggered = matches!(&trigger, ShutdownTrigger::RuntimeFatal);
     let http_stopped_early = matches!(&trigger, ShutdownTrigger::HttpStopped(_));
     let drain = async {
         let runtime = service.shutdown(config.runtime.shutdown_grace_period).await;
         let http = match trigger {
             ShutdownTrigger::HttpStopped(result) => result,
-            ShutdownTrigger::Signal | ShutdownTrigger::OwnershipLost => {
+            ShutdownTrigger::Signal
+            | ShutdownTrigger::OwnershipLost
+            | ShutdownTrigger::RuntimeFatal => {
                 let _ = http_shutdown.send(());
                 (&mut server).await
             }
         };
         let lost_during_drain = owner.as_ref().is_some_and(PostgresStoreOwner::is_lost);
+        let fatal_during_drain = service.is_fatal();
 
-        if ownership_loss_triggered || lost_during_drain {
-            if let Err(error) = &runtime {
-                tracing::error!(
-                    code = error.code(),
-                    "runtime drain failed after ownership loss"
-                );
+        let decision = shutdown_decision(
+            ownership_loss_triggered || lost_during_drain,
+            runtime_fatal_triggered || fatal_during_drain,
+            http_stopped_early,
+        );
+        match decision.outcome {
+            ShutdownOutcome::OwnershipLost => {
+                debug_assert!(!decision.release_store_owner);
+                if let Err(error) = &runtime {
+                    tracing::error!(
+                        code = error.code(),
+                        "runtime drain failed after ownership loss"
+                    );
+                }
+                if let Err(error) = &http {
+                    tracing::error!(%error, "HTTP drain failed after ownership loss");
+                }
+                Err(ownership_lost_error().into())
             }
-            if let Err(error) = &http {
-                tracing::error!(%error, "HTTP drain failed after ownership loss");
+            ShutdownOutcome::RuntimeFatal => {
+                if let Err(error) = &runtime {
+                    tracing::error!(
+                        code = error.code(),
+                        "runtime drain failed after a run task panic"
+                    );
+                }
+                if let Err(error) = &http {
+                    tracing::error!(%error, "HTTP drain failed after a run task panic");
+                }
+                if decision.release_store_owner {
+                    release_store_owner(&mut owner).await?;
+                }
+                Err(runtime_fatal_error().into())
             }
-            return Err(ownership_lost_error().into());
+            ShutdownOutcome::HttpStopped | ShutdownOutcome::Clean => {
+                runtime?;
+                http?;
+                if decision.release_store_owner {
+                    release_store_owner(&mut owner).await?;
+                }
+                if http_stopped_early {
+                    return Err(std::io::Error::other(
+                        "HTTP server stopped before a shutdown signal",
+                    )
+                    .into());
+                }
+                MainResult::Ok(())
+            }
         }
-
-        runtime?;
-        http?;
-        release_store_owner(&mut owner).await?;
-        if http_stopped_early {
-            return Err(
-                std::io::Error::other("HTTP server stopped before a shutdown signal").into(),
-            );
-        }
-        MainResult::Ok(())
     };
     tokio::time::timeout(config.runtime.shutdown_hard_deadline, drain)
         .await
@@ -213,6 +272,17 @@ fn init_tracing() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+}
+
+fn install_sanitized_panic_hook() {
+    std::panic::set_hook(Box::new(|_| {
+        let (code, message) = sanitized_panic_event();
+        tracing::error!(code, "{message}");
+    }));
+}
+
+fn sanitized_panic_event() -> (&'static str, &'static str) {
+    (PROCESS_PANICKED_CODE, PROCESS_PANICKED_MESSAGE)
 }
 
 async fn initialize_repository(
@@ -260,6 +330,30 @@ fn ownership_lost_error() -> HistoryError {
     )
 }
 
+fn runtime_fatal_error() -> std::io::Error {
+    std::io::Error::other("a run task panicked; the process was shut down")
+}
+
+fn shutdown_decision(
+    ownership_lost: bool,
+    runtime_fatal: bool,
+    http_stopped: bool,
+) -> ShutdownDecision {
+    let outcome = if ownership_lost {
+        ShutdownOutcome::OwnershipLost
+    } else if runtime_fatal {
+        ShutdownOutcome::RuntimeFatal
+    } else if http_stopped {
+        ShutdownOutcome::HttpStopped
+    } else {
+        ShutdownOutcome::Clean
+    };
+    ShutdownDecision {
+        outcome,
+        release_store_owner: outcome != ShutdownOutcome::OwnershipLost,
+    }
+}
+
 async fn release_store_owner(owner: &mut Option<PostgresStoreOwner>) -> Result<(), HistoryError> {
     match owner.take() {
         Some(owner) => owner.release().await,
@@ -272,6 +366,17 @@ async fn wait_for_ownership_loss(receiver: &mut Option<tokio::sync::watch::Recei
         pending::<()>().await;
         return;
     };
+    loop {
+        if *receiver.borrow() {
+            return;
+        }
+        if receiver.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn wait_for_runtime_fatal(receiver: &mut tokio::sync::watch::Receiver<bool>) {
     loop {
         if *receiver.borrow() {
             return;
@@ -336,5 +441,61 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn runtime_fatal_waiter_observes_sticky_fatal_and_channel_failure() {
+        let (_sender, mut fatal) = tokio::sync::watch::channel(true);
+        wait_for_runtime_fatal(&mut fatal).await;
+
+        let (sender, mut closed) = tokio::sync::watch::channel(false);
+        drop(sender);
+        wait_for_runtime_fatal(&mut closed).await;
+    }
+
+    #[test]
+    fn runtime_fatal_error_has_a_stable_sanitized_message() {
+        assert_eq!(
+            runtime_fatal_error().to_string(),
+            "a run task panicked; the process was shut down"
+        );
+    }
+
+    #[test]
+    fn shutdown_outcome_preserves_fatal_and_ownership_precedence() {
+        assert_eq!(
+            shutdown_decision(false, true, false).outcome,
+            ShutdownOutcome::RuntimeFatal
+        );
+        assert_eq!(
+            shutdown_decision(false, true, true).outcome,
+            ShutdownOutcome::RuntimeFatal
+        );
+        assert_eq!(
+            shutdown_decision(true, true, true).outcome,
+            ShutdownOutcome::OwnershipLost
+        );
+        assert_eq!(
+            shutdown_decision(false, false, true).outcome,
+            ShutdownOutcome::HttpStopped
+        );
+        assert_eq!(
+            shutdown_decision(false, false, false).outcome,
+            ShutdownOutcome::Clean
+        );
+        assert!(!shutdown_decision(true, true, true).release_store_owner);
+        assert!(shutdown_decision(false, true, true).release_store_owner);
+        assert!(shutdown_decision(false, false, true).release_store_owner);
+        assert!(shutdown_decision(false, false, false).release_store_owner);
+    }
+
+    #[test]
+    fn panic_hook_event_is_fixed_and_payload_independent() {
+        let private_payload = "panic payload with private input";
+        let (code, message) = sanitized_panic_event();
+        assert_eq!(code, "PROCESS_PANICKED");
+        assert_eq!(message, "process panic captured");
+        assert!(!code.contains(private_payload));
+        assert!(!message.contains(private_payload));
     }
 }

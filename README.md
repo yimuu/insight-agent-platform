@@ -320,6 +320,8 @@ curl --silent http://127.0.0.1:3000/health
 
 进程只有在配置、Agent 编译、history 初始化和遗留 Run 恢复全部成功后才绑定 HTTP。收到 SIGINT/SIGTERM 后，进程先关闭新 Run admission；此时 liveness 仍为 200，readiness 与 `/health` 为 503。运行时随后尝试在 grace period 内终态化并持久化活动 Run（Attached 为 `cancelled`，Detached 为 `interrupted`），再关闭 HTTP。只有 runtime 与 HTTP 都成功 drain 才干净退出；失败或 hard deadline 会非零退出，并由下次启动 reconciliation 收敛遗留 Run。
 
+如果 scheduler 或 prelaunch finalizer 的最外层 Run task 发生 panic，runtime 会立即关闭 admission 并进入不可恢复的 fail-stop 状态。受影响的 durable Run 会尽力以脱敏的 `failed/infrastructure/INFRASTRUCTURE_FAILURE` 终态收敛；无论终态恢复是否成功，active ownership、并发 permit 与 lifecycle waiter 都会释放。进程随后按同一 runtime-first、HTTP-second 顺序 drain，并固定非零退出；部署 supervisor 负责启动干净的 replacement。生产 panic hook 只记录固定分类和消息，不记录 panic payload。
+
 列出 Agent：
 
 ```bash

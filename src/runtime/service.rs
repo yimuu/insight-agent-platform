@@ -10,9 +10,10 @@ use std::{
 };
 
 use chrono::Utc;
+use futures::FutureExt;
 use serde_json::{json, Value};
 use tokio::{
-    sync::{watch, Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore},
+    sync::{oneshot, watch, Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore},
     task::JoinHandle,
     time::{sleep, timeout},
 };
@@ -118,6 +119,11 @@ struct ActiveRun {
     _permit: OwnedSemaphorePermit,
 }
 
+struct PendingActiveRun {
+    active: ActiveRun,
+    start: oneshot::Sender<()>,
+}
+
 struct PreparingRun {
     agent: Arc<CompiledAgent>,
     new_run: NewRun,
@@ -128,6 +134,8 @@ struct PreparingRun {
     state: Arc<RunState>,
     permit: OwnedSemaphorePermit,
     durable: bool,
+    #[cfg(test)]
+    panic_active_task: Option<Arc<tokio::sync::Notify>>,
 }
 
 struct RunServiceInner {
@@ -142,6 +150,8 @@ struct RunServiceInner {
     active: Mutex<BTreeMap<String, ActiveRun>>,
     lifecycle_changed: watch::Sender<u64>,
     accepting: AtomicBool,
+    runtime_fatal: AtomicBool,
+    runtime_fatal_changed: watch::Sender<bool>,
     readiness_probe: AsyncMutex<ReadinessProbeCache>,
 }
 
@@ -181,6 +191,42 @@ struct PreparingGuard {
     armed: bool,
 }
 
+struct ActiveCleanupGuard {
+    inner: Arc<RunServiceInner>,
+    run_id: String,
+    fatal_on_drop: bool,
+}
+
+impl ActiveCleanupGuard {
+    fn new(inner: Arc<RunServiceInner>, run_id: String) -> Self {
+        Self {
+            inner,
+            run_id,
+            fatal_on_drop: true,
+        }
+    }
+
+    fn complete(mut self) {
+        self.fatal_on_drop = false;
+    }
+}
+
+impl Drop for ActiveCleanupGuard {
+    fn drop(&mut self) {
+        if self.fatal_on_drop {
+            self.inner.trip_runtime_fatal();
+            tracing::error!(
+                run_id = self.run_id,
+                code = "RUNTIME_TASK_PANICKED",
+                "run task ended outside its containment boundary"
+            );
+        }
+        let removed = lock_active(&self.inner).remove(&self.run_id);
+        drop(removed);
+        self.inner.notify_lifecycle();
+    }
+}
+
 impl PreparingGuard {
     fn new(inner: Arc<RunServiceInner>, run_id: String) -> Self {
         Self {
@@ -216,6 +262,19 @@ impl RunServiceInner {
 
     fn close_admission_locked(&self) {
         self.accepting.store(false, Ordering::Release);
+    }
+
+    fn trip_runtime_fatal(&self) {
+        // Admission closure must become visible before the fatal notification so
+        // observers can never receive fatal while readiness still reports healthy.
+        self.close_admission();
+        if self
+            .runtime_fatal
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.runtime_fatal_changed.send_replace(true);
+        }
     }
 
     fn lifecycle_is_empty(&self) -> bool {
@@ -264,11 +323,12 @@ impl RunServiceInner {
         let service = RunService {
             inner: Arc::clone(self),
         };
-        let active_run = service.spawn_finalizer_active(preparing_run, reason);
-        active.insert(run_id.to_string(), active_run);
+        let pending = service.spawn_finalizer_active(preparing_run, reason);
+        active.insert(run_id.to_string(), pending.active);
         drop(active);
         drop(preparing);
         self.notify_lifecycle();
+        service.start_active_task(run_id, pending.start);
     }
 }
 
@@ -303,6 +363,8 @@ impl RunService {
                 active: Mutex::new(BTreeMap::new()),
                 lifecycle_changed: watch::channel(0).0,
                 accepting: AtomicBool::new(true),
+                runtime_fatal: AtomicBool::new(false),
+                runtime_fatal_changed: watch::channel(false).0,
                 readiness_probe: AsyncMutex::new(ReadinessProbeCache::default()),
             }),
         })
@@ -314,6 +376,16 @@ impl RunService {
 
     pub fn is_healthy(&self) -> bool {
         self.inner.accepting.load(Ordering::Acquire) && self.inner.events.is_healthy()
+    }
+
+    #[doc(hidden)]
+    pub fn is_fatal(&self) -> bool {
+        self.inner.runtime_fatal.load(Ordering::Acquire)
+    }
+
+    #[doc(hidden)]
+    pub fn subscribe_fatal(&self) -> watch::Receiver<bool> {
+        self.inner.runtime_fatal_changed.subscribe()
     }
 
     pub async fn check_readiness(&self, deadline: Duration) -> Result<(), ServiceError> {
@@ -543,6 +615,8 @@ impl RunService {
                     state: Arc::new(RunState::new()),
                     permit,
                     durable: false,
+                    #[cfg(test)]
+                    panic_active_task: None,
                 },
             );
         }
@@ -587,7 +661,7 @@ impl RunService {
         let mut active = lock_active(&self.inner);
         let should_run =
             self.inner.accepting.load(Ordering::Acquire) && preparing_run.signal.reason().is_none();
-        let active_run = if should_run {
+        let pending = if should_run {
             self.spawn_scheduler_active(preparing_run)
         } else {
             let reason = preparing_run
@@ -597,14 +671,30 @@ impl RunService {
             preparing_run.stop.request(reason);
             self.spawn_finalizer_active(preparing_run, reason)
         };
-        active.insert(run_id.to_string(), active_run);
+        active.insert(run_id.to_string(), pending.active);
         drop(active);
         drop(preparing);
         self.inner.notify_lifecycle();
+        self.start_active_task(run_id, pending.start);
         true
     }
 
-    fn spawn_scheduler_active(&self, preparing: PreparingRun) -> ActiveRun {
+    fn start_active_task(&self, run_id: &str, start: oneshot::Sender<()>) {
+        if start.send(()).is_ok() {
+            return;
+        }
+        self.inner.trip_runtime_fatal();
+        tracing::error!(
+            run_id,
+            code = "RUN_TASK_START_FAILED",
+            "registered run task could not be started"
+        );
+        let removed = lock_active(&self.inner).remove(run_id);
+        drop(removed);
+        self.inner.notify_lifecycle();
+    }
+
+    fn spawn_scheduler_active(&self, preparing: PreparingRun) -> PendingActiveRun {
         let PreparingRun {
             agent,
             new_run,
@@ -615,90 +705,186 @@ impl RunService {
             state,
             permit,
             durable: _,
+            #[cfg(test)]
+            panic_active_task,
         } = preparing;
         let run_id = new_run.run_id.clone();
         let task_stop = stop.clone();
         let task_state = Arc::clone(&state);
         let inner = Arc::clone(&self.inner);
         let task_run_id = run_id.clone();
+        let (start, started) = oneshot::channel();
         let task = tokio::spawn(async move {
-            let coordinator = RunCoordinator::new(
-                agent,
-                inner.executors.clone(),
-                inner.events.clone(),
-                Arc::clone(&inner.repository),
-                ExecutionLimiter::new(
-                    Arc::clone(&inner.node_capacity),
-                    Arc::new(Semaphore::new(inner.config.max_parallel_branches_per_run)),
-                ),
-            );
-            let execution =
-                coordinator.execute_existing(new_run, input, signal, Arc::clone(&task_state));
-            tokio::pin!(execution);
-            let result = tokio::select! {
-                result = &mut execution => result,
-                _ = sleep(inner.config.run_timeout) => {
-                    task_stop.request(StopReason::TimedOut);
-                    execution.await
-                }
-            };
-            if let Err(error) = result {
-                inner.close_admission();
+            let cleanup = ActiveCleanupGuard::new(Arc::clone(&inner), task_run_id.clone());
+            if started.await.is_err() {
+                inner.trip_runtime_fatal();
                 tracing::error!(
                     run_id = task_run_id,
-                    code = error.code(),
-                    "run coordinator failed"
+                    code = "RUN_TASK_START_FAILED",
+                    "registered run task start gate closed"
                 );
+                cleanup.complete();
+                return;
             }
-            if !inner.events.is_healthy() {
-                inner.close_admission();
+            let execution_started = Instant::now();
+            let recovery_agent = Arc::clone(&agent);
+            let recovery_run = new_run.clone();
+            let recovery_state = Arc::clone(&task_state);
+            let task_inner = Arc::clone(&inner);
+            let body_run_id = task_run_id.clone();
+            let outcome = std::panic::AssertUnwindSafe(async move {
+                #[cfg(test)]
+                if let Some(gate) = panic_active_task {
+                    gate.notified().await;
+                    panic!("private scheduler panic payload");
+                }
+                let coordinator = active_task_coordinator(&task_inner, agent);
+                let result = {
+                    let execution =
+                        coordinator.execute_existing(new_run, input, signal, task_state);
+                    tokio::pin!(execution);
+                    tokio::select! {
+                        result = &mut execution => result,
+                        _ = sleep(task_inner.config.run_timeout) => {
+                            task_stop.request(StopReason::TimedOut);
+                            execution.await
+                        }
+                    }
+                };
+                if let Err(error) = result {
+                    task_inner.close_admission();
+                    tracing::error!(
+                        run_id = body_run_id,
+                        code = error.code(),
+                        "run coordinator failed"
+                    );
+                }
+                if !task_inner.events.is_healthy() {
+                    task_inner.close_admission();
+                }
+            })
+            .catch_unwind()
+            .await;
+            if let Err(payload) = outcome {
+                drop(payload);
+                inner.trip_runtime_fatal();
+                tracing::error!(
+                    run_id = task_run_id,
+                    code = "RUNTIME_TASK_PANICKED",
+                    "run task panicked"
+                );
+                recover_task_panic(
+                    Arc::clone(&inner),
+                    recovery_agent,
+                    recovery_state,
+                    recovery_run,
+                    execution_started,
+                    task_run_id.clone(),
+                )
+                .await;
             }
-            let removed = lock_active(&inner).remove(&task_run_id);
-            drop(removed);
-            inner.notify_lifecycle();
+            cleanup.complete();
         });
-        ActiveRun {
-            attachment,
-            stop,
-            task,
-            _permit: permit,
+        PendingActiveRun {
+            active: ActiveRun {
+                attachment,
+                stop,
+                task,
+                _permit: permit,
+            },
+            start,
         }
     }
 
-    fn spawn_finalizer_active(&self, preparing: PreparingRun, reason: StopReason) -> ActiveRun {
+    fn spawn_finalizer_active(
+        &self,
+        preparing: PreparingRun,
+        reason: StopReason,
+    ) -> PendingActiveRun {
         let PreparingRun {
+            agent,
             new_run,
             attachment,
             stop,
+            state,
             permit,
             durable,
+            #[cfg(test)]
+            panic_active_task,
             ..
         } = preparing;
         let inner = Arc::clone(&self.inner);
         let run_id = new_run.run_id.clone();
         let task_run_id = run_id.clone();
+        let (start, started) = oneshot::channel();
         let task = tokio::spawn(async move {
-            if durable {
-                if let Err(error) =
-                    publish_prelaunch_terminal(Arc::clone(&inner), new_run, reason).await
-                {
-                    inner.close_admission();
-                    tracing::error!(
-                        run_id = task_run_id,
-                        code = error.code(),
-                        "prelaunch finalizer failed"
-                    );
+            let cleanup = ActiveCleanupGuard::new(Arc::clone(&inner), task_run_id.clone());
+            if started.await.is_err() {
+                inner.trip_runtime_fatal();
+                tracing::error!(
+                    run_id = task_run_id,
+                    code = "RUN_TASK_START_FAILED",
+                    "registered run task start gate closed"
+                );
+                cleanup.complete();
+                return;
+            }
+            let recovery_agent = Arc::clone(&agent);
+            let recovery_run = new_run.clone();
+            let recovery_state = Arc::clone(&state);
+            let task_inner = Arc::clone(&inner);
+            let body_run_id = task_run_id.clone();
+            let outcome = std::panic::AssertUnwindSafe(async move {
+                #[cfg(test)]
+                if let Some(gate) = panic_active_task {
+                    gate.notified().await;
+                    panic!("private finalizer panic payload");
+                }
+                if durable {
+                    if let Err(error) =
+                        publish_prelaunch_terminal(Arc::clone(&task_inner), new_run, reason).await
+                    {
+                        task_inner.close_admission();
+                        tracing::error!(
+                            run_id = body_run_id,
+                            code = error.code(),
+                            "prelaunch finalizer failed"
+                        );
+                    }
+                }
+            })
+            .catch_unwind()
+            .await;
+            if let Err(payload) = outcome {
+                drop(payload);
+                inner.trip_runtime_fatal();
+                tracing::error!(
+                    run_id = task_run_id,
+                    code = "RUNTIME_TASK_PANICKED",
+                    "run task panicked"
+                );
+                if durable {
+                    recover_task_panic(
+                        Arc::clone(&inner),
+                        recovery_agent,
+                        recovery_state,
+                        recovery_run,
+                        Instant::now(),
+                        task_run_id.clone(),
+                    )
+                    .await;
                 }
             }
-            let removed = lock_active(&inner).remove(&task_run_id);
-            drop(removed);
-            inner.notify_lifecycle();
+            cleanup.complete();
         });
-        ActiveRun {
-            attachment,
-            stop,
-            task,
-            _permit: permit,
+        PendingActiveRun {
+            active: ActiveRun {
+                attachment,
+                stop,
+                task,
+                _permit: permit,
+            },
+            start,
         }
     }
 }
@@ -811,6 +997,51 @@ async fn publish_prelaunch_terminal(
     Ok(())
 }
 
+fn active_task_coordinator(inner: &RunServiceInner, agent: Arc<CompiledAgent>) -> RunCoordinator {
+    RunCoordinator::new(
+        agent,
+        inner.executors.clone(),
+        inner.events.clone(),
+        Arc::clone(&inner.repository),
+        ExecutionLimiter::new(
+            Arc::clone(&inner.node_capacity),
+            Arc::new(Semaphore::new(inner.config.max_parallel_branches_per_run)),
+        ),
+    )
+}
+
+async fn recover_task_panic(
+    inner: Arc<RunServiceInner>,
+    agent: Arc<CompiledAgent>,
+    state: Arc<RunState>,
+    run: NewRun,
+    started: Instant,
+    run_id: String,
+) {
+    let recovery = std::panic::AssertUnwindSafe(async move {
+        let coordinator = active_task_coordinator(&inner, agent);
+        coordinator.recover_task_panic(&state, &run, started).await
+    })
+    .catch_unwind()
+    .await;
+    match recovery {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => tracing::error!(
+            run_id = run_id,
+            code = error.code(),
+            "panicked run terminal recovery failed"
+        ),
+        Err(payload) => {
+            drop(payload);
+            tracing::error!(
+                run_id = run_id,
+                code = "RUN_TASK_RECOVERY_PANICKED",
+                "panicked run terminal recovery panicked"
+            );
+        }
+    }
+}
+
 fn service_history_error(error: HistoryError) -> ServiceError {
     match error.code() {
         "HISTORY_OWNERSHIP_LOST" | "HISTORY_STORE_ALREADY_OWNED" => ServiceError::new(
@@ -849,6 +1080,7 @@ mod tests {
         runs: tokio::sync::Mutex<BTreeMap<String, RunRecord>>,
         events: tokio::sync::Mutex<Vec<crate::events::protocol::RunEvent>>,
         create_error_code: Option<&'static str>,
+        commit_error_code: Option<&'static str>,
     }
 
     #[async_trait]
@@ -911,6 +1143,9 @@ mod tests {
             proposal: TerminalProposal,
             sequence: TerminalSequence,
         ) -> Result<crate::events::protocol::RunEvent, HistoryError> {
+            if let Some(code) = self.commit_error_code {
+                return Err(HistoryError::new(code, "private terminal failure"));
+            }
             let run_id = proposal.run_id().to_string();
             let mut runs = self.runs.lock().await;
             let run = runs
@@ -1185,6 +1420,7 @@ mod tests {
                 state: Arc::new(RunState::new()),
                 permit,
                 durable: true,
+                panic_active_task: None,
             },
         );
         service.inner.notify_lifecycle();
@@ -1210,5 +1446,281 @@ mod tests {
             tokio::task::yield_now().await;
         }
         panic!("attached preparing run did not become cancelled");
+    }
+
+    fn panic_test_agent() -> Arc<CompiledAgent> {
+        Arc::new(CompiledAgent {
+            id: "panic-agent".to_string(),
+            name: "panic-agent".to_string(),
+            description: String::new(),
+            version_hash: "sha256:panic-agent".to_string(),
+            input_schema: Arc::new(crate::schema::compile_schema(&json!({})).unwrap()),
+            entry: "missing".to_string(),
+            execution_plan: ExecutionPlan::sequential("missing", Vec::<String>::new()),
+            nodes: BTreeMap::new(),
+            templates: Arc::new(handlebars::Handlebars::new()),
+        })
+    }
+
+    fn panic_test_service(repository: Arc<UnitRepository>) -> RunService {
+        let repository_trait: Arc<dyn RunRepository> = repository;
+        let events = EventHub::new(
+            Arc::clone(&repository_trait),
+            crate::events::hub::EventHubConfig {
+                subscriber_capacity: 8,
+                journal_capacity: 32,
+                journal_batch_size: 8,
+                operation_timeout: Duration::from_millis(100),
+            },
+        );
+        RunService::new(
+            CompiledAgentRegistry::new(vec![panic_test_agent()]).unwrap(),
+            NodeExecutorRegistry::default(),
+            repository_trait,
+            events,
+            RunServiceConfig {
+                max_concurrent_runs: 1,
+                max_parallel_node_executions: 1,
+                max_parallel_branches_per_run: 1,
+                run_timeout: Duration::from_secs(1),
+            },
+        )
+        .unwrap()
+    }
+
+    async fn prepare_gated_panicking_run(
+        service: &RunService,
+    ) -> (PreparedRun, Arc<tokio::sync::Notify>, StopSignal) {
+        let prepared = service
+            .prepare_run(
+                "panic-agent",
+                json!({}),
+                RequestMetadata::default(),
+                RunAttachment::Detached,
+            )
+            .await
+            .unwrap();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let signal = {
+            let mut preparing = lock_preparing(&service.inner);
+            let run = preparing.get_mut(&prepared.run_id).unwrap();
+            run.panic_active_task = Some(Arc::clone(&gate));
+            run.signal.clone()
+        };
+        (prepared, gate, signal)
+    }
+
+    async fn prepare_panicking_run(service: &RunService) -> PreparedRun {
+        let (prepared, gate, _) = prepare_gated_panicking_run(service).await;
+        gate.notify_one();
+        prepared
+    }
+
+    async fn observe_runtime_fatal(receiver: &mut watch::Receiver<bool>) {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if *receiver.borrow() {
+                    return;
+                }
+                receiver.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("runtime fatal notification timed out");
+    }
+
+    fn assert_run_ownership_cleaned(service: &RunService) {
+        assert!(lock_preparing(&service.inner).is_empty());
+        assert!(lock_active(&service.inner).is_empty());
+        assert_eq!(service.inner.capacity.available_permits(), 1);
+    }
+
+    async fn assert_infrastructure_failed(
+        repository: &UnitRepository,
+        run_id: &str,
+        private_payload: &str,
+    ) {
+        let record = repository.get_run(run_id).await.unwrap().unwrap();
+        assert!(matches!(
+            record.lifecycle,
+            RunLifecycle::Failed { ref error }
+                if error.kind == FailureKind::Infrastructure
+                    && error.code == "INFRASTRUCTURE_FAILURE"
+                    && error.message == "runtime infrastructure failed"
+        ));
+        assert!(!serde_json::to_string(&record)
+            .unwrap()
+            .contains(private_payload));
+
+        let events = repository.events.lock().await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event_type, RunEventType::RunFailed))
+                .count(),
+            1
+        );
+        assert!(!serde_json::to_string(&*events)
+            .unwrap()
+            .contains(private_payload));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduler_outer_panic_trips_fatal_recovers_terminal_and_releases_ownership() {
+        const PRIVATE_PAYLOAD: &str = "private scheduler panic payload";
+
+        let repository = Arc::new(UnitRepository::default());
+        let service = panic_test_service(Arc::clone(&repository));
+        let mut fatal = service.subscribe_fatal();
+        let (prepared, panic_gate, stop_signal) = prepare_gated_panicking_run(&service).await;
+        let run_id = prepared.run_id.clone();
+        service.launch(prepared);
+
+        let cancel_service = service.clone();
+        let cancel_run_id = run_id.clone();
+        let cancel = tokio::spawn(async move { cancel_service.cancel(&cancel_run_id).await });
+
+        timeout(Duration::from_secs(1), async {
+            while stop_signal.reason() != Some(StopReason::Cancelled) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancel waiter did not subscribe and request stop");
+        panic_gate.notify_one();
+
+        observe_runtime_fatal(&mut fatal).await;
+        assert!(service.is_fatal());
+        assert!(*service.subscribe_fatal().borrow());
+        assert!(!service.is_healthy());
+        assert_eq!(
+            service
+                .check_readiness(Duration::from_millis(20))
+                .await
+                .unwrap_err()
+                .code(),
+            "RUN_SERVICE_UNAVAILABLE"
+        );
+        assert_eq!(
+            service
+                .create_detached("panic-agent", json!({}), RequestMetadata::default(),)
+                .await
+                .unwrap_err()
+                .code(),
+            "RUN_SERVICE_STOPPING"
+        );
+
+        let cancelled = timeout(Duration::from_secs(1), cancel)
+            .await
+            .expect("cancel waiter timed out")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled.status(), RunStatus::Failed);
+        timeout(
+            Duration::from_secs(1),
+            service.shutdown(Duration::from_millis(500)),
+        )
+        .await
+        .expect("shutdown waiter timed out")
+        .unwrap();
+
+        assert_run_ownership_cleaned(&service);
+        assert_infrastructure_failed(&repository, &run_id, PRIVATE_PAYLOAD).await;
+        assert_eq!(repository.runs.lock().await.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prelaunch_finalizer_outer_panic_uses_same_fatal_cleanup_and_recovery() {
+        const PRIVATE_PAYLOAD: &str = "private finalizer panic payload";
+
+        let repository = Arc::new(UnitRepository::default());
+        let service = panic_test_service(Arc::clone(&repository));
+        let mut fatal = service.subscribe_fatal();
+        let prepared = prepare_panicking_run(&service).await;
+        let run_id = prepared.run_id.clone();
+        service.begin_shutdown();
+        service.launch(prepared);
+
+        observe_runtime_fatal(&mut fatal).await;
+        timeout(
+            Duration::from_secs(1),
+            service.shutdown(Duration::from_millis(500)),
+        )
+        .await
+        .expect("shutdown waiter timed out")
+        .unwrap();
+
+        assert!(service.is_fatal());
+        assert!(!service.is_healthy());
+        assert_run_ownership_cleaned(&service);
+        assert_infrastructure_failed(&repository, &run_id, PRIVATE_PAYLOAD).await;
+        assert!(repository
+            .events
+            .lock()
+            .await
+            .iter()
+            .all(|event| event.event_type != RunEventType::RunStarted));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn panic_recovery_failure_still_releases_local_ownership_and_shutdown_waiters() {
+        let repository = Arc::new(UnitRepository {
+            commit_error_code: Some("HISTORY_WRITE_FAILED"),
+            ..UnitRepository::default()
+        });
+        let service = panic_test_service(Arc::clone(&repository));
+        let mut fatal = service.subscribe_fatal();
+        let prepared = prepare_panicking_run(&service).await;
+        let run_id = prepared.run_id.clone();
+        service.launch(prepared);
+
+        observe_runtime_fatal(&mut fatal).await;
+        timeout(
+            Duration::from_secs(1),
+            service.shutdown(Duration::from_millis(500)),
+        )
+        .await
+        .expect("shutdown waiter timed out")
+        .unwrap();
+
+        assert!(service.is_fatal());
+        assert_run_ownership_cleaned(&service);
+        assert_eq!(
+            repository.get_run(&run_id).await.unwrap().unwrap().status(),
+            RunStatus::Created
+        );
+        assert!(repository.events.lock().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn active_task_start_gate_blocks_work_until_registration() {
+        let repository = Arc::new(UnitRepository::default());
+        let service = panic_test_service(Arc::clone(&repository));
+        let prepared = prepare_panicking_run(&service).await;
+        let run_id = prepared.run_id.clone();
+        let preparing = lock_preparing(&service.inner).remove(&run_id).unwrap();
+        prepared.guard.disarm();
+
+        let pending = service.spawn_scheduler_active(preparing);
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!service.is_fatal());
+        assert!(lock_active(&service.inner).is_empty());
+        assert_eq!(service.inner.capacity.available_permits(), 0);
+
+        lock_active(&service.inner).insert(run_id.clone(), pending.active);
+        service.inner.notify_lifecycle();
+        pending.start.send(()).unwrap();
+        let mut fatal = service.subscribe_fatal();
+        observe_runtime_fatal(&mut fatal).await;
+        timeout(
+            Duration::from_secs(1),
+            service.shutdown(Duration::from_millis(500)),
+        )
+        .await
+        .expect("shutdown waiter timed out")
+        .unwrap();
+        assert_run_ownership_cleaned(&service);
     }
 }

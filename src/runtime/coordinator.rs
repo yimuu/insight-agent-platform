@@ -326,6 +326,16 @@ impl RunCoordinator {
         Ok(durable.status)
     }
 
+    pub(crate) async fn recover_task_panic(
+        &self,
+        state: &RunState,
+        run: &NewRun,
+        started: Instant,
+    ) -> Result<RunStatus, RunError> {
+        self.recover_infrastructure_failure(state, run, started)
+            .await
+    }
+
     async fn commit_terminal_state(
         &self,
         state: &RunState,
