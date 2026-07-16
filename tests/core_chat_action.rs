@@ -22,7 +22,8 @@ use insight_agent_platform::{
     resources::{
         actions::{Action, ActionContext, ActionDescriptor, ActionRegistry},
         models::{
-            ChatChunk, ChatModel, ChatRequest, ChatRole, ChatStream, ModelCapability, ModelRegistry,
+            ChatChunk, ChatContent, ChatContentPart, ChatModel, ChatRequest, ChatRole, ChatStream,
+            ModelCapability, ModelRegistry,
         },
     },
     runtime::{stop_pair, ExecutionControl, RunContext, RunError, RunMetadata, StopReason},
@@ -492,6 +493,184 @@ async fn dynamic_messages_keep_empty_text_for_compatibility() {
 }
 
 #[tokio::test]
+async fn json_content_parts_serialize_node_outputs_as_bounded_compact_text() {
+    let (node, templates, requests) = compile_chat_with_messages(
+        json!([{
+            "role":"user",
+            "content":[
+                {"type":"text", "text":"settled envelope follows"},
+                {"type":"json", "json":{
+                    "path":"nodes.collect.output",
+                    "max_bytes":262144
+                }}
+            ]
+        }]),
+        BTreeSet::new(),
+    );
+    assert!(node.references.contains("collect"));
+
+    let envelope = json!({
+        "branches": {
+            "perspective_a": {
+                "status": "succeeded",
+                "output": {"data": {"value": "A_SENTINEL\nquoted: \"yes\""}}
+            },
+            "perspective_b": {
+                "status": "failed",
+                "error": {"kind": "node", "code": "B_FAILED", "message": "unavailable"}
+            }
+        },
+        "summary": {"total": 2, "succeeded": 1, "failed": 1}
+    });
+    let mut context = context(json!({})).with_templates(templates);
+    context.set_node_output("collect", envelope.clone());
+    let (control, _) = capturing_control();
+
+    ChatNode.execute(&node, &context, &control).await.unwrap();
+
+    let request = requests.lock().unwrap().pop().unwrap();
+    let ChatContent::Text(content) = &request.messages[0].content else {
+        panic!("text-only JSON content must become one provider text message")
+    };
+    let (instruction, json_text) = content.rsplit_once("\n\n").unwrap();
+    assert_eq!(instruction, "settled envelope follows");
+    assert_eq!(serde_json::from_str::<Value>(json_text).unwrap(), envelope);
+    assert!(!content.contains("[object]"));
+    assert!(!json_text.contains('\n'));
+}
+
+#[tokio::test]
+async fn json_content_parts_enforce_exact_byte_limits_before_model_invocation() {
+    for (max_bytes, expected_error) in [(5, None), (4, Some("CHAT_JSON_CONTENT_TOO_LARGE"))] {
+        let (node, templates, requests) = compile_chat_with_messages(
+            json!([{
+                "role":"user",
+                "content":[{"type":"json", "json":{
+                    "path":"nodes.collect.output",
+                    "max_bytes":max_bytes
+                }}]
+            }]),
+            BTreeSet::new(),
+        );
+        let mut context = context(json!({})).with_templates(templates);
+        context.set_node_output("collect", json!("abc"));
+        let (control, _) = capturing_control();
+
+        let result = ChatNode.execute(&node, &context, &control).await;
+
+        match expected_error {
+            Some(code) => {
+                let error = result.unwrap_err();
+                assert_eq!(error.code(), code);
+                assert!(requests.lock().unwrap().is_empty());
+            }
+            None => {
+                result.unwrap();
+                let request = requests.lock().unwrap().pop().unwrap();
+                assert_eq!(
+                    request.messages[0].content,
+                    ChatContent::Text("\"abc\"".to_string())
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn json_content_parts_preserve_all_json_value_kinds() {
+    for source in [
+        Value::Null,
+        json!(true),
+        json!(42),
+        json!(["text", {"nested": 1}]),
+        json!({"object": [null, false]}),
+    ] {
+        let (node, templates, requests) = compile_chat_with_messages(
+            json!([{
+                "role":"user",
+                "content":[{"type":"json", "json":{
+                    "path":"nodes.collect.output",
+                    "max_bytes":262144
+                }}]
+            }]),
+            BTreeSet::new(),
+        );
+        let mut context = context(json!({})).with_templates(templates);
+        context.set_node_output("collect", source.clone());
+        let (control, _) = capturing_control();
+
+        ChatNode.execute(&node, &context, &control).await.unwrap();
+
+        let request = requests.lock().unwrap().pop().unwrap();
+        let ChatContent::Text(text) = &request.messages[0].content else {
+            panic!("JSON content must become provider text")
+        };
+        assert_eq!(serde_json::from_str::<Value>(text).unwrap(), source);
+    }
+}
+
+#[tokio::test]
+async fn json_content_with_an_image_keeps_standard_provider_parts() {
+    let (node, templates, requests) = compile_chat_with_parts(json!([
+        {"type":"json", "json":{
+            "path":"nodes.collect.output",
+            "max_bytes":262144
+        }},
+        {"type":"image_url", "image_url":{"url":"https://example.test/image.png"}}
+    ]));
+    let mut context = context(json!({})).with_templates(templates);
+    context.set_node_output("collect", json!({"value":"structured"}));
+    let (control, _) = capturing_control();
+
+    ChatNode.execute(&node, &context, &control).await.unwrap();
+
+    let request = requests.lock().unwrap().pop().unwrap();
+    let ChatContent::Parts(parts) = &request.messages[0].content else {
+        panic!("multimodal JSON content must remain provider parts")
+    };
+    assert_eq!(
+        parts,
+        &[
+            ChatContentPart::Text {
+                text: "{\"value\":\"structured\"}".to_string()
+            },
+            ChatContentPart::ImageUrl {
+                image_url: insight_agent_platform::resources::models::ImageUrl {
+                    url: "https://example.test/image.png".to_string()
+                }
+            }
+        ]
+    );
+}
+
+#[tokio::test]
+async fn json_content_parts_reject_missing_sources_without_leaking_values() {
+    const SECRET: &str = "json-content-secret-never-log";
+    let (node, templates, requests) = compile_chat_with_messages(
+        json!([{
+            "role":"user",
+            "content":[{"type":"json", "json":{
+                "path":"nodes.collect.output.missing",
+                "max_bytes":262144
+            }}]
+        }]),
+        BTreeSet::new(),
+    );
+    let mut context = context(json!({})).with_templates(templates);
+    context.set_node_output("collect", json!({"present": SECRET}));
+    let (control, _) = capturing_control();
+
+    let error = ChatNode
+        .execute(&node, &context, &control)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "CHAT_JSON_CONTENT_SOURCE_MISSING");
+    assert!(!format!("{error:?} {error}").contains(SECRET));
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn optional_image_parts_omit_missing_empty_and_blank_values() {
     for input in [
         json!({}),
@@ -823,6 +1002,97 @@ fn dynamic_message_sources_validate_paths_configuration_and_capabilities() {
             BTreeSet::new(),
         ),
         "NODE_CONFIG_INVALID",
+    );
+}
+
+#[test]
+fn json_content_parts_validate_role_paths_limits_and_references() {
+    let compilation = compile_messages_result(
+        json!([{
+            "role":"user",
+            "content":[{"type":"json", "json":{
+                "path":"nodes.collect.output.branches",
+                "max_bytes":262144
+            }}]
+        }]),
+        BTreeSet::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        compilation.references,
+        BTreeSet::from(["collect".to_string()])
+    );
+
+    for path in [
+        "nodes",
+        "nodes.collect",
+        "nodes.collect.input",
+        "nodes.collect.output.items[0]",
+        "input.payload",
+    ] {
+        assert_compile_error(
+            compile_messages_result(
+                json!([{
+                    "role":"user",
+                    "content":[{"type":"json", "json":{
+                        "path":path,
+                        "max_bytes":262144
+                    }}]
+                }]),
+                BTreeSet::new(),
+            ),
+            "CHAT_JSON_CONTENT_PATH_INVALID",
+        );
+    }
+
+    for max_bytes in [0, 262145] {
+        assert_compile_error(
+            compile_messages_result(
+                json!([{
+                    "role":"user",
+                    "content":[{"type":"json", "json":{
+                        "path":"nodes.collect.output",
+                        "max_bytes":max_bytes
+                    }}]
+                }]),
+                BTreeSet::new(),
+            ),
+            "CHAT_JSON_CONTENT_CONFIG_INVALID",
+        );
+    }
+
+    for json_config in [
+        json!({"path":"nodes.collect.output"}),
+        json!({"max_bytes":1}),
+        json!({"path":7, "max_bytes":1}),
+        json!({"path":"nodes.collect.output", "max_bytes":"1"}),
+        json!({"path":"nodes.collect.output", "max_bytes":-1}),
+        json!({"path":"nodes.collect.output", "max_bytes":1, "extra":true}),
+    ] {
+        assert_compile_error(
+            compile_messages_result(
+                json!([{
+                    "role":"user",
+                    "content":[{"type":"json", "json":json_config}]
+                }]),
+                BTreeSet::new(),
+            ),
+            "CHAT_JSON_CONTENT_CONFIG_INVALID",
+        );
+    }
+
+    assert_compile_error(
+        compile_messages_result(
+            json!([{
+                "role":"system",
+                "content":[{"type":"json", "json":{
+                    "path":"nodes.collect.output",
+                    "max_bytes":262144
+                }}]
+            }]),
+            BTreeSet::new(),
+        ),
+        "CHAT_JSON_CONTENT_CONFIG_INVALID",
     );
 }
 

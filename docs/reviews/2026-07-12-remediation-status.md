@@ -1,6 +1,6 @@
 # Remediation Status
 
-Current through: 2026-07-15
+Current through: 2026-07-16
 
 This document is the current operational status entrypoint for the stable-baseline and dependency-governance remediation work. It supersedes the open-work status in the 2026-07-11 reviews, but it does not replace their historical evidence.
 
@@ -15,8 +15,8 @@ Historical snapshots:
 - Historical rollback/reference tag: `stable-baseline-2026-07-12`.
 - This status includes the post-tag quickstart, Chat, Select, unified End, typed terminal,
   canonical repository terminal proposal, public Agent discovery, production lifecycle
-  hardening, PostgreSQL exclusive-store ownership, and raw-row input-summary privacy
-  through 2026-07-15.
+  hardening, PostgreSQL exclusive-store ownership, raw-row input-summary privacy,
+  and bounded structured Join-to-Chat synthesis through 2026-07-16.
 - Remote synchronization is an operational checkout fact and is intentionally not
   encoded as a durable source contract in this document.
 
@@ -43,6 +43,7 @@ Historical snapshots:
 | Outer Run-task panic fail-stop | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-outer-run-task-panic-fail-stop-design.md`; direct scheduler/finalizer panic, recovery-failure, start-gate, waiter, sticky-fatal, and shutdown-decision tests in `src/runtime/service.rs` and `src/main.rs` | Production uses a payload-independent global panic hook; deterministic task injection remains private to unit tests rather than becoming a runtime backdoor. |
 | PostgreSQL exclusive-store ownership | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-postgresql-exclusive-store-ownership-design.md`; `tests/history_postgres.rs`; `tests/binary_postgres_ownership.rs` | Real PostgreSQL repository and process gates cover contention, clean release, ownership loss, fencing, and replacement reconciliation. Deployment requires a direct or session-affine PostgreSQL connection; old runtimes cannot participate in a rolling upgrade. |
 | Raw-row input-summary privacy | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-raw-row-input-summary-privacy-design.md`; `sqlite_run_service_persists_only_shape_metadata_in_raw_row`; `postgres_run_service_persists_only_shape_metadata_in_raw_jsonb_row` | The formal `RunService` path persists sorted top-level keys and compact serialized byte count only. Those metadata remain intentionally visible; lower-level repository callers and Agent-authored outputs are outside this guarantee. |
+| Structured Chat JSON content and Join-to-Chat synthesis | Implemented and verified in the 2026-07-16 change | `docs/superpowers/specs/2026-07-16-structured-chat-json-content-design.md`; `tests/parallel_researcher.rs`; JSON content tests in `tests/core_chat_action.rs`, `tests/dsl_parallel.rs`, and `tests/observability.rs` | Partial synthesis excludes free-form branch failure messages. The 256 KiB bound applies per JSON content part; an aggregate rendered Chat request limit remains future work. |
 
 ## Stable baseline remediation status
 

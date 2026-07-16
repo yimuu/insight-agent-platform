@@ -8,8 +8,10 @@ use serde_json::{json, Value};
 use tokio::time::sleep;
 
 mod dynamic;
+mod json_content;
 
 use dynamic::{CompiledDynamicMessages, DynamicMessageEntryConfig};
+use json_content::CompiledJsonContent;
 
 use crate::{
     dsl::{
@@ -81,6 +83,9 @@ enum MessagePartConfig {
         #[serde(default)]
         optional: bool,
     },
+    Json {
+        json: Value,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +107,7 @@ enum CompiledMessagePart {
         template: TemplateProgram,
         optional: bool,
     },
+    Json(CompiledJsonContent),
 }
 
 #[derive(Debug)]
@@ -288,6 +294,20 @@ fn compile_static_message(
                         has_images = true;
                         compiled_parts.push(CompiledMessagePart::ImageUrl { template, optional });
                     }
+                    MessagePartConfig::Json { json } => {
+                        if message.role != ChatRole::User {
+                            return Err(CompileError::new(
+                                "CHAT_JSON_CONTENT_CONFIG_INVALID",
+                                format!(
+                                    "chat node '{node_id}' message {message_index} part {part_index} JSON content is allowed only for user messages"
+                                ),
+                            ));
+                        }
+                        let json =
+                            CompiledJsonContent::compile(json, node_id, message_index, part_index)?;
+                        references.insert(json.reference().to_string());
+                        compiled_parts.push(CompiledMessagePart::Json(json));
+                    }
                 }
             }
             CompiledMessageContent::Parts(compiled_parts)
@@ -454,6 +474,9 @@ impl CompiledMessage {
             }
             CompiledMessageContent::Parts(parts) => {
                 let mut rendered = Vec::with_capacity(parts.len());
+                let contains_json = parts
+                    .iter()
+                    .any(|part| matches!(part, CompiledMessagePart::Json(_)));
                 for part in parts {
                     match part {
                         CompiledMessagePart::Text(template) => {
@@ -476,6 +499,11 @@ impl CompiledMessage {
                                 Err(error) => return Err(template_render_error(template, error)),
                             }
                         }
+                        CompiledMessagePart::Json(json) => {
+                            rendered.push(ChatContentPart::Text {
+                                text: json.render(context)?,
+                            });
+                        }
                     }
                 }
                 if rendered.is_empty() {
@@ -484,7 +512,26 @@ impl CompiledMessage {
                         "chat message has no content parts after optional parts were omitted",
                     ));
                 }
-                ChatContent::Parts(rendered)
+                if contains_json
+                    && rendered
+                        .iter()
+                        .all(|part| matches!(part, ChatContentPart::Text { .. }))
+                {
+                    ChatContent::Text(
+                        rendered
+                            .into_iter()
+                            .map(|part| match part {
+                                ChatContentPart::Text { text } => text,
+                                ChatContentPart::ImageUrl { .. } => unreachable!(
+                                    "JSON-only text content was checked before flattening"
+                                ),
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n"),
+                    )
+                } else {
+                    ChatContent::Parts(rendered)
+                }
             }
         };
         Ok(ChatMessage {

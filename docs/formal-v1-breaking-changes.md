@@ -68,6 +68,16 @@ nodes:
 
 Prompt 文件继续相对 Agent 目录声明，但消息通过 `{template_ref: name}` 引用。所有跨节点模板和 CEL 引用使用 `nodes.<node_id>.output`；编译器只允许引用所有到达路径上都已完成的前驱。
 
+结构化 JSON 值不能裸插入字符串模板；对象的既有 Handlebars 显示仍是 `[object]`。Chat 需要消费节点 JSON 时必须显式使用 user message JSON content part：
+
+```yaml
+content:
+  - type: json
+    json: {path: nodes.collect.output.branches.perspective_a.output, max_bytes: 262144}
+```
+
+新 part 只接受 canonical `nodes.<node_id>.output[.<field>...]`，参与现有图引用校验，并以不超过 256 KiB 的 compact JSON 映射成 provider text content。纯文本/JSON parts 会合并成一个 string；含图片时保持标准 part array。它不改变全局模板语义，不允许 system role，也不构成完整 Chat request 的总大小合同。旧 Agent 若依赖裸对象插值，应显式迁移。把 Join 失败数据发送给另一个 provider 时还必须排除自由文本 `error.message`，只投影所需成功 output 和受控 failure kind/code。本次只改变 Agent 编译/执行合同和相应 Agent version，不需要数据库 migration 或历史 reset。
+
 `core.end` 是严格联合类型并禁止 `next`：success 至少提供 `content` 或 `data`，failure 只提供静态 `WORKFLOW_...` code 与静态单行 message。主流程 End 决定 Run 成功或 workflow failure；分支 End 只结算所属分支。failure End 本身仍成功执行，所以事件顺序是 `node.completed(core.end)` 后跟 `branch.failed(kind=workflow)` 或 `run.failed(kind=workflow)`，而不是 `node.failed`。
 
 Fork 分支不再直接进入 Join。每个静态成功路径必须到达分支局部 End；所有分支结算后 `all_settled` Join 才执行。Join 输出的每个失败包含 `error.kind: workflow|node|timeout`，`summary.failures` 分别计数三种来源。即使所有分支失败，Join 也会执行；Join 后的 Condition 显式选择 degraded success 或主流程 failure End。

@@ -95,14 +95,21 @@ fn checked_in_repository_agents_compile_through_production_registries() {
         .references
         .contains("analyze_text"));
 
-    assert!(parallel.nodes["synthesize"].references.contains("collect"));
-    assert!(!parallel.nodes["synthesize"]
-        .references
-        .contains("analyze_a"));
-    assert!(!parallel.nodes["synthesize"]
-        .references
-        .contains("normalize_a"));
-
+    assert_eq!(parallel.nodes["decide"].kind, "core.condition");
+    for node_id in ["synthesize_full", "synthesize_a_only", "synthesize_b_only"] {
+        assert_eq!(parallel.nodes[node_id].kind, "core.chat");
+        assert_eq!(
+            parallel.nodes[node_id].references,
+            BTreeSet::from(["collect".to_string()])
+        );
+        assert!(!parallel.nodes[node_id].references.contains("analyze_a"));
+        assert!(!parallel.nodes[node_id].references.contains("normalize_a"));
+    }
+    assert_eq!(parallel.nodes["selected_synthesis"].kind, "core.select");
+    assert_eq!(parallel.nodes["result_policy"].kind, "core.condition");
+    assert_eq!(parallel.nodes["result_full"].kind, "core.end");
+    assert_eq!(parallel.nodes["result_degraded"].kind, "core.end");
+    assert_eq!(parallel.nodes["fail_all"].kind, "core.end");
     let medical = agents.get("medical_report_interpreter").unwrap();
     for node_id in [
         "abnormal_indicators",

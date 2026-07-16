@@ -50,6 +50,7 @@ const USAGE_SECRET: &str = "observability-usage-secret";
 const DYNAMIC_TEXT_SECRET: &str = "observability-dynamic-text-secret";
 const DYNAMIC_IMAGE_SECRET: &str = "observability-dynamic-image-secret";
 const DYNAMIC_MESSAGE_SECRET: &str = "observability-invalid-dynamic-secret";
+const JSON_CONTENT_SECRET: &str = "observability-json-content-secret";
 const SELECT_SECRET: &str = "observability-select-secret";
 const WORKFLOW_FAILURE_INPUT: &str = "observability-workflow-input-secret";
 const WORKFLOW_FAILURE_MESSAGE: &str = "observability workflow failure message";
@@ -430,6 +431,33 @@ nodes:
       outcome: success
       data:
         text: "{{ nodes.answer.output.text }}"
+"#,
+    );
+    write_agent(
+        root.path(),
+        "chat_json_content",
+        r#"entry: prepare
+nodes:
+  prepare:
+    type: core.template
+    next: answer
+    config:
+      value: {secret: "{{ input.secret }}"}
+  answer:
+    type: core.chat
+    next: result
+    config:
+      model: obs
+      messages:
+        - role: user
+          content:
+            - type: text
+              text: settled data
+            - type: json
+              json: {path: nodes.prepare.output, max_bytes: 262144}
+  result:
+    type: core.end
+    config: {outcome: success, data: {ok: true}}
 "#,
     );
     write_agent(
@@ -1030,6 +1058,35 @@ async fn omitted_optional_image_logs_zero_rendered_image_parts_without_bodies() 
         IMAGE_SECRET,
         USAGE_SECRET,
     ]);
+}
+
+#[tokio::test]
+async fn json_content_info_logs_exclude_serialized_source_bodies() {
+    let _guard = reset_logs().await;
+    let fixture = fixture(&["chat_json_content"]).await;
+    let created = fixture
+        .service
+        .create_detached(
+            "chat_json_content",
+            json!({"secret": JSON_CONTENT_SECRET}),
+            RequestMetadata::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&fixture.service, &created.run_id)
+            .await
+            .status(),
+        RunStatus::Completed
+    );
+
+    assert_eq!(fixture.model_calls.load(Ordering::Relaxed), 1);
+    let requests = info_logs("chat.request");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].field("node_id"), Some("answer"));
+    assert_eq!(requests[0].field("messages_count"), Some("1"));
+    assert_eq!(requests[0].field("image_parts_count"), Some("0"));
+    assert_logs_exclude(&[JSON_CONTENT_SECRET, CHAT_RESPONSE_SECRET, USAGE_SECRET]);
 }
 
 #[tokio::test]

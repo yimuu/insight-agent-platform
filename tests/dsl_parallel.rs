@@ -212,6 +212,37 @@ fn valid_parallel_yaml_with(node_id: &str, reference: &str) -> String {
     }
 }
 
+fn parallel_yaml_with_json_source(node_id: &str, source: &str) -> String {
+    let chat = |next: &str| {
+        format!(
+            "    type: core.chat\n    next: {next}\n    config:\n      model: graph\n      messages:\n        - role: user\n          content:\n            - type: json\n              json: {{path: \"{source}\", max_bytes: 262144}}\n      parameters: {{}}"
+        )
+    };
+    match node_id {
+        "prepare" => parallel_yaml().replace(
+            "    type: core.template\n    next: fanout\n    config:\n      value: prepared",
+            &chat("fanout"),
+        ),
+        "summarize_a" => parallel_yaml().replace(
+            "    type: core.template\n    next: end_a\n    config:\n      value: summary-a",
+            &chat("end_a"),
+        ),
+        "result" => parallel_yaml()
+            .replace(
+                "  collect:\n    type: core.join\n    next: result",
+                "  collect:\n    type: core.join\n    next: synthesize",
+            )
+            .replace(
+                "  result:\n    type: core.end\n    config:\n      outcome: success\n      data: {ok: true}",
+                &format!(
+                    "  synthesize:\n{}\n  result:\n    type: core.end\n    config:\n      outcome: success\n      data: {{ok: true}}",
+                    chat("result")
+                ),
+            ),
+        _ => panic!("unsupported JSON source target '{node_id}'"),
+    }
+}
+
 #[test]
 fn reference_rejects_future_branch_output_before_fork_as_generic_invalid() {
     assert_compile_error(
@@ -258,6 +289,26 @@ fn reference_allows_join_aggregate_after_join() {
         "result",
         "{{ nodes.collect.output.branches.source_a.output.text }}",
     ));
+}
+
+#[test]
+fn json_content_reference_uses_existing_parallel_graph_validation() {
+    assert_compile_ok(&parallel_yaml_with_json_source(
+        "result",
+        "nodes.collect.output",
+    ));
+    assert_compile_error(
+        &parallel_yaml_with_json_source("prepare", "nodes.search_a.output"),
+        "INVALID_NODE_REFERENCE",
+    );
+    assert_compile_error(
+        &parallel_yaml_with_json_source("summarize_a", "nodes.search_b.output"),
+        "CROSS_BRANCH_REFERENCE",
+    );
+    assert_compile_error(
+        &parallel_yaml_with_json_source("result", "nodes.summarize_a.output"),
+        "POST_JOIN_BRANCH_REFERENCE",
+    );
 }
 
 #[test]
