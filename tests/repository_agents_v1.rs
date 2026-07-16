@@ -107,6 +107,8 @@ fn checked_in_repository_agents_compile_through_production_registries() {
     }
     assert_eq!(parallel.nodes["selected_synthesis"].kind, "core.select");
     assert_eq!(parallel.nodes["result_policy"].kind, "core.condition");
+    assert_eq!(parallel.nodes["end_a"].kind, "core.branch_end");
+    assert_eq!(parallel.nodes["end_b"].kind, "core.branch_end");
     assert_eq!(parallel.nodes["result_full"].kind, "core.end");
     assert_eq!(parallel.nodes["result_degraded"].kind, "core.end");
     assert_eq!(parallel.nodes["fail_all"].kind, "core.end");

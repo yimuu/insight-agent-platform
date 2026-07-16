@@ -404,14 +404,14 @@ nodes:
     next: end_choice
     config: {sources: [left, right]}
   end_choice:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.branch_select.output }}"}}
   fixed:
     type: core.template
     next: end_fixed
     config: {value: fixed}
   end_fixed:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.fixed.output }}"}}
   collect:
     type: core.join
@@ -461,7 +461,7 @@ nodes:
     next: end_selected
     config: {sources: [a, b]}
   end_selected:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.selected.output }}"}}
   collect:
     type: core.join
@@ -501,14 +501,14 @@ nodes:
     next: end_a
     config: {value: a}
   end_a:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.a.output }}"}}
   b:
     type: core.template
     next: end_b
     config: {value: b}
   end_b:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.b.output }}"}}
   collect:
     type: core.join

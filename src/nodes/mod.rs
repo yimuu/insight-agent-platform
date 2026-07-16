@@ -14,7 +14,7 @@ use self::{
     action::ActionNode,
     chat::ChatNode,
     condition::ConditionNode,
-    end::EndNode,
+    end::{BranchEndNode, EndNode},
     fork::ForkNode,
     join::JoinNode,
     registry::{NodeExecutorRegistry, NodeTypeRegistry},
@@ -28,6 +28,7 @@ pub fn default_node_registries() -> Result<(NodeTypeRegistry, NodeExecutorRegist
     types.register(ChatNode)?;
     types.register(ActionNode)?;
     types.register(ConditionNode)?;
+    types.register(BranchEndNode)?;
     types.register(EndNode)?;
     types.register(ForkNode)?;
     types.register(JoinNode)?;
@@ -38,6 +39,7 @@ pub fn default_node_registries() -> Result<(NodeTypeRegistry, NodeExecutorRegist
     executors.register(ChatNode)?;
     executors.register(ActionNode)?;
     executors.register(ConditionNode)?;
+    executors.register(BranchEndNode)?;
     executors.register(EndNode)?;
     executors.register(ForkNode)?;
     executors.register(JoinNode)?;

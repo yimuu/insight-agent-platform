@@ -614,6 +614,16 @@ fn content_node(id: &str) -> CompiledNode {
 }
 
 fn scheduler_node(id: &str, next: Option<&str>, behavior: SchedulerBehavior) -> CompiledNode {
+    let control = if matches!(
+        &behavior,
+        SchedulerBehavior::Complete { .. } | SchedulerBehavior::CompleteAfter { .. }
+    ) {
+        NodeControl::End {
+            outcome: insight_agent_platform::outcome::EndOutcomeKind::Success,
+        }
+    } else {
+        NodeControl::Ordinary
+    };
     CompiledNode {
         id: id.to_string(),
         kind: "test.scheduler".to_string(),
@@ -628,7 +638,7 @@ fn scheduler_node(id: &str, next: Option<&str>, behavior: SchedulerBehavior) -> 
             })
             .collect(),
         references: BTreeSet::new(),
-        control: NodeControl::Ordinary,
+        control,
     }
 }
 
@@ -727,7 +737,7 @@ nodes:
     next: end_a
     config: {value: {text: summary-a}}
   end_a:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {text: "{{ nodes.summarize_a.output.text }}"}}
   search_b:
     type: core.template
@@ -738,7 +748,7 @@ nodes:
     next: end_b
     config: {value: {text: summary-b}}
   end_b:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {text: "{{ nodes.summarize_b.output.text }}"}}
   collect:
     type: core.join
@@ -1025,14 +1035,14 @@ nodes:
     next: end_choice
     config: {sources: [left, right]}
   end_choice:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.branch_select.output }}"}}
   fixed:
     type: core.template
     next: end_fixed
     config: {value: fixed}
   end_fixed:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.fixed.output }}"}}
   collect:
     type: core.join
@@ -1315,6 +1325,194 @@ async fn sequential_scheduler_preserves_path_context_output_and_node_event_order
 }
 
 #[tokio::test]
+async fn scheduler_fails_closed_when_terminal_control_and_transition_disagree() {
+    const OUTPUT_SECRET: &str = "TERMINAL_CONTRACT_OUTPUT_MUST_NOT_PERSIST";
+    let output = RunOutput {
+        content: None,
+        format: None,
+        data: json!({"secret":OUTPUT_SECRET}),
+    };
+    let ordinary_executions = Arc::new(AtomicUsize::new(0));
+    let mut ordinary_end = scheduler_node(
+        "ordinary_end",
+        None,
+        SchedulerBehavior::Complete {
+            output: output.clone(),
+            executions: Arc::clone(&ordinary_executions),
+        },
+    );
+    ordinary_end.control = NodeControl::Ordinary;
+    let next_executions = Arc::new(AtomicUsize::new(0));
+    let mut terminal_next = scheduler_node(
+        "terminal_next",
+        None,
+        SchedulerBehavior::Next {
+            output: json!({"secret":OUTPUT_SECRET}),
+            require_output: None,
+            executions: Arc::clone(&next_executions),
+        },
+    );
+    terminal_next.control = NodeControl::End {
+        outcome: insight_agent_platform::outcome::EndOutcomeKind::Success,
+    };
+    let outcome_executions = Arc::new(AtomicUsize::new(0));
+    let mut outcome_mismatch = scheduler_node(
+        "outcome_mismatch",
+        None,
+        SchedulerBehavior::Complete {
+            output,
+            executions: Arc::clone(&outcome_executions),
+        },
+    );
+    outcome_mismatch.control = NodeControl::End {
+        outcome: insight_agent_platform::outcome::EndOutcomeKind::Failure,
+    };
+
+    for (run_id, node_id, node, executions) in [
+        (
+            "run_ordinary_end_mismatch",
+            "ordinary_end",
+            ordinary_end,
+            ordinary_executions,
+        ),
+        (
+            "run_terminal_next_mismatch",
+            "terminal_next",
+            terminal_next,
+            next_executions,
+        ),
+        (
+            "run_terminal_outcome_mismatch",
+            "outcome_mismatch",
+            outcome_mismatch,
+            outcome_executions,
+        ),
+    ] {
+        let repository = Arc::new(SchedulerRepository::default());
+        let scheduler = scheduler(
+            scheduler_agent(vec![node], node_id),
+            Arc::clone(&repository),
+        );
+        let (_, stop) = stop_pair();
+
+        let error = scheduler.run(context(run_id), stop).await.unwrap_err();
+
+        assert_eq!(error.code(), "INFRASTRUCTURE_FAILURE");
+        assert_eq!(error.kind(), RunErrorKind::Infrastructure);
+        assert!(!error.to_string().contains(OUTPUT_SECRET));
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert!(!repository
+            .outputs
+            .lock()
+            .await
+            .iter()
+            .any(|output| output.node_id == node_id));
+        let events = repository.events.lock().await;
+        assert!(events.iter().any(|event| {
+            event.event_type == RunEventType::NodeStarted
+                && event.node_id.as_deref() == Some(node_id)
+        }));
+        assert!(!events.iter().any(|event| {
+            event.event_type == RunEventType::NodeCompleted
+                && event.node_id.as_deref() == Some(node_id)
+        }));
+        assert!(!format!("{events:?}").contains(OUTPUT_SECRET));
+    }
+}
+
+#[tokio::test]
+async fn scheduler_rejects_main_branch_end_before_node_execution() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut node = scheduler_node(
+        "wrong_scope",
+        None,
+        SchedulerBehavior::Complete {
+            output: RunOutput {
+                content: None,
+                format: None,
+                data: json!({"secret":"MAIN_SCOPE_BODY_MUST_NOT_EXECUTE"}),
+            },
+            executions: Arc::clone(&executions),
+        },
+    );
+    node.control = NodeControl::BranchEnd {
+        outcome: insight_agent_platform::outcome::EndOutcomeKind::Success,
+    };
+    let repository = Arc::new(SchedulerRepository::default());
+    let scheduler = scheduler(
+        scheduler_agent(vec![node], "wrong_scope"),
+        Arc::clone(&repository),
+    );
+    let (_, stop) = stop_pair();
+
+    let error = scheduler
+        .run(context("run_main_branch_end_mismatch"), stop)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "INFRASTRUCTURE_FAILURE");
+    assert_eq!(error.kind(), RunErrorKind::Infrastructure);
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert!(repository.outputs.lock().await.is_empty());
+    assert!(repository.events.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn scheduler_rejects_branch_main_end_before_node_execution() {
+    let mut agent = compile_parallel_agent(two_branch_yaml());
+    let executions = Arc::new(AtomicUsize::new(0));
+    replace_behavior(
+        &mut agent,
+        "end_a",
+        SchedulerBehavior::Complete {
+            output: RunOutput {
+                content: None,
+                format: None,
+                data: json!({"secret":"BRANCH_SCOPE_BODY_MUST_NOT_EXECUTE"}),
+            },
+            executions: Arc::clone(&executions),
+        },
+    );
+    agent.nodes.get_mut("end_a").unwrap().control = NodeControl::End {
+        outcome: insight_agent_platform::outcome::EndOutcomeKind::Success,
+    };
+    let run_context = context_with_agent_input(&agent, "run_branch_main_end_mismatch", json!({}));
+    let repository = Arc::new(SchedulerRepository::default());
+    let scheduler = parallel_scheduler(Arc::new(agent), Arc::clone(&repository), 4);
+    let (_, stop) = stop_pair();
+
+    let error = scheduler.run(run_context, stop).await.unwrap_err();
+
+    assert_eq!(error.code(), "INFRASTRUCTURE_FAILURE");
+    assert_eq!(error.kind(), RunErrorKind::Infrastructure);
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert!(!repository.events.lock().await.iter().any(|event| {
+        matches!(
+            event.event_type,
+            RunEventType::NodeStarted | RunEventType::NodeCompleted
+        ) && event.node_id.as_deref() == Some("end_a")
+    }));
+    assert!(!repository
+        .outputs
+        .lock()
+        .await
+        .iter()
+        .any(|output| output.node_id == "end_a"));
+    assert!(!repository.events.lock().await.iter().any(|event| {
+        matches!(
+            event.event_type,
+            RunEventType::BranchCompleted | RunEventType::BranchFailed
+        ) && event.data["branch_id"] == "source_a"
+    }));
+    assert!(!repository
+        .outputs
+        .lock()
+        .await
+        .iter()
+        .any(|output| output.node_id == "collect"));
+}
+
+#[tokio::test]
 async fn sequential_scheduler_goto_never_executes_unselected_path() {
     let route_runs = Arc::new(AtomicUsize::new(0));
     let selected_runs = Arc::new(AtomicUsize::new(0));
@@ -1585,7 +1783,7 @@ async fn parallel_scheduler_limits_ten_compiled_branches_to_three_and_drains_all
         .map(|i| format!("branch_{i}: work_{i}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let workers = (0..10).map(|i| format!("  work_{i}:\n    type: core.template\n    next: end_{i}\n    config: {{value: {i}}}\n  end_{i}:\n    type: core.end\n    config: {{outcome: success, data: {{value: \"{{{{ nodes.work_{i}.output }}}}\"}}}}"))
+    let workers = (0..10).map(|i| format!("  work_{i}:\n    type: core.template\n    next: end_{i}\n    config: {{value: {i}}}\n  end_{i}:\n    type: core.branch_end\n    config: {{outcome: success, data: {{value: \"{{{{ nodes.work_{i}.output }}}}\"}}}}"))
         .collect::<Vec<_>>().join("\n");
     let yaml = format!(
         r#"
@@ -1671,7 +1869,7 @@ async fn parallel_branch_goto_executes_only_selected_successor() {
     let yaml = two_branch_yaml()
         .replace("type: core.template\n    next: summarize_a\n    config: {value: search-a}",
             "type: core.condition\n    config:\n      cases: [{when: \"true\", next: summarize_a}]\n      default: unused_a")
-        .replace("  summarize_a:", "  unused_a:\n    type: core.template\n    next: unused_end_a\n    config: {value: unused}\n  unused_end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.unused_a.output }}\"}}\n  summarize_a:");
+        .replace("  summarize_a:", "  unused_a:\n    type: core.template\n    next: unused_end_a\n    config: {value: unused}\n  unused_end_a:\n    type: core.branch_end\n    config: {outcome: success, data: {value: \"{{ nodes.unused_a.output }}\"}}\n  summarize_a:");
     let mut agent = compile_parallel_agent(&yaml);
     let route = Arc::new(AtomicUsize::new(0));
     let selected = Arc::new(AtomicUsize::new(0));
@@ -1883,14 +2081,14 @@ nodes:
     next: end_a1
     config: {value: a1}
   end_a1:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.a1.output }}"}}
   a2:
     type: core.template
     next: end_a2
     config: {value: a2}
   end_a2:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.a2.output }}"}}
   join_a:
     type: core.join
@@ -1906,14 +2104,14 @@ nodes:
     next: end_b1
     config: {value: b1}
   end_b1:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.b1.output }}"}}
   b2:
     type: core.template
     next: end_b2
     config: {value: b2}
   end_b2:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.b2.output }}"}}
   join_b:
     type: core.join

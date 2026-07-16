@@ -212,7 +212,7 @@ nodes:
         mode: invalid_output
         payload: {secret: "{{ input.secret }}"}
   end_bad:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.bad_action.output }}"}}
   good_action:
     type: core.action
@@ -223,7 +223,7 @@ nodes:
         mode: valid
         payload: {secret: "{{ input.secret }}"}
   end_good:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.good_action.output }}"}}
   collect:
     type: core.join

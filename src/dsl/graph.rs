@@ -47,14 +47,17 @@ pub fn validate_graph_structure(
         .iter()
         .filter(|(node_id, _)| reachable.contains(*node_id))
     {
-        let is_end = matches!(node.control, NodeControl::End { .. });
-        if is_end && !node.edges.is_empty() {
+        let is_terminal = matches!(
+            node.control,
+            NodeControl::End { .. } | NodeControl::BranchEnd { .. }
+        );
+        if is_terminal && !node.edges.is_empty() {
             return Err(CompileError::new(
                 "END_HAS_SUCCESSOR",
                 format!("end node '{node_id}' cannot have outgoing edges"),
             ));
         }
-        if !is_end && node.edges.is_empty() {
+        if !is_terminal && node.edges.is_empty() {
             return Err(CompileError::new(
                 "END_REQUIRED",
                 format!("reachable path ends at non-end node '{node_id}'"),

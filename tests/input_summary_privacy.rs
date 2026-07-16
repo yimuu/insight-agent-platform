@@ -23,7 +23,7 @@ use insight_agent_platform::{
         types::{RunRecord, RunStatus},
     },
     nodes::registry::{NodeExecutor, NodeExecutorRegistry, NodeType},
-    outcome::{RunOutput, TerminalOutcome},
+    outcome::{EndOutcomeKind, RunOutput, TerminalOutcome},
     runtime::{
         CompiledAgentRegistry, ExecutionControl, RequestMetadata, RunContext, RunError, RunService,
         RunServiceConfig,
@@ -149,7 +149,9 @@ fn privacy_agent() -> Arc<CompiledAgent> {
         body: Arc::new(()),
         edges: Vec::new(),
         references: BTreeSet::new(),
-        control: NodeControl::Ordinary,
+        control: NodeControl::End {
+            outcome: EndOutcomeKind::Success,
+        },
     };
     let nodes = BTreeMap::from([(node.id.clone(), node)]);
 

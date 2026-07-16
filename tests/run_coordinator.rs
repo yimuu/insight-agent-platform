@@ -504,6 +504,15 @@ fn lifecycle_from_terminal(terminal: &RunTerminal) -> RunLifecycle {
 }
 
 fn node(id: &str, next: Option<&str>, timeout: Duration, behavior: Behavior) -> CompiledNode {
+    let control = match &behavior {
+        Behavior::Complete(_) => NodeControl::End {
+            outcome: insight_agent_platform::outcome::EndOutcomeKind::Success,
+        },
+        Behavior::EndFailure(_) => NodeControl::End {
+            outcome: insight_agent_platform::outcome::EndOutcomeKind::Failure,
+        },
+        _ => NodeControl::Ordinary,
+    };
     CompiledNode {
         id: id.to_string(),
         kind: "test.synthetic".to_string(),
@@ -518,7 +527,7 @@ fn node(id: &str, next: Option<&str>, timeout: Duration, behavior: Behavior) -> 
             })
             .collect(),
         references: BTreeSet::new(),
-        control: NodeControl::Ordinary,
+        control,
     }
 }
 
@@ -662,7 +671,7 @@ fn branch_end_node(id: &str) -> CompiledNode {
             data: json!({"branch":id}),
         }),
     );
-    end.control = NodeControl::End {
+    end.control = NodeControl::BranchEnd {
         outcome: insight_agent_platform::outcome::EndOutcomeKind::Success,
     };
     end
@@ -678,7 +687,7 @@ fn branch_failure_end_node(id: &str) -> CompiledNode {
             message: "workflow rejected".to_string(),
         }),
     );
-    end.control = NodeControl::End {
+    end.control = NodeControl::BranchEnd {
         outcome: insight_agent_platform::outcome::EndOutcomeKind::Failure,
     };
     end

@@ -70,6 +70,9 @@ enum CompiledEnd {
 #[derive(Debug, Clone, Copy)]
 pub struct EndNode;
 
+#[derive(Debug, Clone, Copy)]
+pub struct BranchEndNode;
+
 impl NodeType for EndNode {
     fn kind(&self) -> &'static str {
         "core.end"
@@ -81,95 +84,122 @@ impl NodeType for EndNode {
         config: Value,
         context: &mut CompileContext<'_>,
     ) -> Result<NodeCompilation, CompileError> {
-        let config: EndConfig = serde_json::from_value(config).map_err(|error| {
-            CompileError::new(
-                "NODE_CONFIG_INVALID",
-                format!("invalid core.end config for node '{node_id}': {error}"),
-            )
-        })?;
-
-        let (compiled, references, outcome) = match config {
-            EndConfig::Success {
-                content,
-                format,
-                data,
-            } => {
-                if content.is_none() && data.is_none() {
-                    return Err(CompileError::new(
-                        "END_VALUE_REQUIRED",
-                        format!("end node '{node_id}' requires content or data for success"),
-                    ));
-                }
-                if content.is_some() && format.is_none() {
-                    return Err(CompileError::new(
-                        "END_FORMAT_REQUIRED",
-                        format!("end node '{node_id}' requires format when content is present"),
-                    ));
-                }
-                if content.is_none() && format.is_some() {
-                    return Err(CompileError::new(
-                        "END_FORMAT_WITHOUT_CONTENT",
-                        format!("end node '{node_id}' cannot define format without content"),
-                    ));
-                }
-
-                let content = content
-                    .map(|source| {
-                        context.compile_inline_template(node_id, "content", &source.template)
-                    })
-                    .transpose()?;
-                let data = data
-                    .map(|value| CompiledTemplateValue::compile(value, node_id, "data", context))
-                    .transpose()?;
-                let mut references = BTreeSet::new();
-                if let Some(content) = &content {
-                    references.extend(content.references.iter().cloned());
-                }
-                if let Some(data) = &data {
-                    references.extend(data.references());
-                }
-                (
-                    CompiledEnd::Success {
-                        content,
-                        format,
-                        data,
-                    },
-                    references,
-                    EndOutcomeKind::Success,
-                )
-            }
-            EndConfig::Failure { code, message } => {
-                if !valid_workflow_code(&code) {
-                    return Err(CompileError::new(
-                        "END_FAILURE_CODE_INVALID",
-                        format!("end node '{node_id}' has an invalid workflow failure code"),
-                    ));
-                }
-                if !valid_workflow_message(&message) {
-                    return Err(CompileError::new(
-                        "END_FAILURE_MESSAGE_INVALID",
-                        format!("end node '{node_id}' has an invalid workflow failure message"),
-                    ));
-                }
-                (
-                    CompiledEnd::Failure(WorkflowError { code, message }),
-                    BTreeSet::new(),
-                    EndOutcomeKind::Failure,
-                )
-            }
-        };
-
-        Ok(NodeCompilation {
-            body: Arc::new(compiled),
-            edges: Vec::new(),
-            references,
-            control: NodeControl::End { outcome },
-            envelope: NodeEnvelopeRules {
-                next: NextPolicy::Forbidden,
-                allows_content_emit: false,
-            },
+        compile_end(self.kind(), node_id, config, context, |outcome| {
+            NodeControl::End { outcome }
         })
     }
+}
+
+impl NodeType for BranchEndNode {
+    fn kind(&self) -> &'static str {
+        "core.branch_end"
+    }
+
+    fn compile(
+        &self,
+        node_id: &str,
+        config: Value,
+        context: &mut CompileContext<'_>,
+    ) -> Result<NodeCompilation, CompileError> {
+        compile_end(self.kind(), node_id, config, context, |outcome| {
+            NodeControl::BranchEnd { outcome }
+        })
+    }
+}
+
+fn compile_end(
+    kind: &str,
+    node_id: &str,
+    config: Value,
+    context: &mut CompileContext<'_>,
+    control: impl FnOnce(EndOutcomeKind) -> NodeControl,
+) -> Result<NodeCompilation, CompileError> {
+    let config: EndConfig = serde_json::from_value(config).map_err(|error| {
+        CompileError::new(
+            "NODE_CONFIG_INVALID",
+            format!("invalid {kind} config for node '{node_id}': {error}"),
+        )
+    })?;
+
+    let (compiled, references, outcome) = match config {
+        EndConfig::Success {
+            content,
+            format,
+            data,
+        } => {
+            if content.is_none() && data.is_none() {
+                return Err(CompileError::new(
+                    "END_VALUE_REQUIRED",
+                    format!("end node '{node_id}' requires content or data for success"),
+                ));
+            }
+            if content.is_some() && format.is_none() {
+                return Err(CompileError::new(
+                    "END_FORMAT_REQUIRED",
+                    format!("end node '{node_id}' requires format when content is present"),
+                ));
+            }
+            if content.is_none() && format.is_some() {
+                return Err(CompileError::new(
+                    "END_FORMAT_WITHOUT_CONTENT",
+                    format!("end node '{node_id}' cannot define format without content"),
+                ));
+            }
+
+            let content = content
+                .map(|source| context.compile_inline_template(node_id, "content", &source.template))
+                .transpose()?;
+            let data = data
+                .map(|value| CompiledTemplateValue::compile(value, node_id, "data", context))
+                .transpose()?;
+            let mut references = BTreeSet::new();
+            if let Some(content) = &content {
+                references.extend(content.references.iter().cloned());
+            }
+            if let Some(data) = &data {
+                references.extend(data.references());
+            }
+            (
+                CompiledEnd::Success {
+                    content,
+                    format,
+                    data,
+                },
+                references,
+                EndOutcomeKind::Success,
+            )
+        }
+        EndConfig::Failure { code, message } => {
+            if !valid_workflow_code(&code) {
+                return Err(CompileError::new(
+                    "END_FAILURE_CODE_INVALID",
+                    format!("end node '{node_id}' has an invalid workflow failure code"),
+                ));
+            }
+            if !valid_workflow_message(&message) {
+                return Err(CompileError::new(
+                    "END_FAILURE_MESSAGE_INVALID",
+                    format!("end node '{node_id}' has an invalid workflow failure message"),
+                ));
+            }
+            (
+                CompiledEnd::Failure(WorkflowError { code, message }),
+                BTreeSet::new(),
+                EndOutcomeKind::Failure,
+            )
+        }
+    };
+
+    Ok(NodeCompilation {
+        body: Arc::new(compiled),
+        edges: Vec::new(),
+        references,
+        control: control(outcome),
+        envelope: NodeEnvelopeRules {
+            next: NextPolicy::Forbidden,
+            allows_content_emit: false,
+        },
+    })
 }
 
 fn valid_workflow_code(code: &str) -> bool {
@@ -230,29 +260,49 @@ impl NodeExecutor for EndNode {
         context: &RunContext,
         control: &ExecutionControl,
     ) -> Result<NodeOutcome, RunError> {
-        if let Some(reason) = control.stop_reason() {
-            return Err(RunError::stopped(reason));
+        execute_end(node, context, control)
+    }
+}
+
+#[async_trait]
+impl NodeExecutor for BranchEndNode {
+    async fn execute(
+        &self,
+        node: &CompiledNode,
+        context: &RunContext,
+        control: &ExecutionControl,
+    ) -> Result<NodeOutcome, RunError> {
+        execute_end(node, context, control)
+    }
+}
+
+fn execute_end(
+    node: &CompiledNode,
+    context: &RunContext,
+    control: &ExecutionControl,
+) -> Result<NodeOutcome, RunError> {
+    if let Some(reason) = control.stop_reason() {
+        return Err(RunError::stopped(reason));
+    }
+    match node.body::<CompiledEnd>()? {
+        CompiledEnd::Success {
+            content,
+            format,
+            data,
+        } => {
+            let output = render_run_output(content, *format, data.as_ref(), context)?;
+            Ok(NodeOutcome {
+                output: json!({"outcome":"success", "output":&output}),
+                transition: NodeTransition::End(TerminalOutcome::Success { output }),
+            })
         }
-        match node.body::<CompiledEnd>()? {
-            CompiledEnd::Success {
-                content,
-                format,
-                data,
-            } => {
-                let output = render_run_output(content, *format, data.as_ref(), context)?;
-                Ok(NodeOutcome {
-                    output: json!({"outcome":"success", "output":&output}),
-                    transition: NodeTransition::End(TerminalOutcome::Success { output }),
-                })
-            }
-            CompiledEnd::Failure(error) => Ok(NodeOutcome {
-                output: json!({"outcome":"failure", "error":{
-                    "kind":"workflow", "code":&error.code, "message":&error.message
-                }}),
-                transition: NodeTransition::End(TerminalOutcome::Failure {
-                    error: error.clone(),
-                }),
+        CompiledEnd::Failure(error) => Ok(NodeOutcome {
+            output: json!({"outcome":"failure", "error":{
+                "kind":"workflow", "code":&error.code, "message":&error.message
+            }}),
+            transition: NodeTransition::End(TerminalOutcome::Failure {
+                error: error.clone(),
             }),
-        }
+        }),
     }
 }

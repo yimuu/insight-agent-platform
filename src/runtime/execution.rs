@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     dsl::{
-        compiled::{CompiledNode, NodeTransition},
+        compiled::{CompiledNode, NodeControl, NodeTransition},
         EmitPolicy,
     },
     events::{
@@ -197,6 +197,8 @@ async fn execute_node_inner(
             return Err(classify_failure(&node_id, error));
         }
     };
+    validate_control_transition_contract(&node_id, &node.control, &outcome.transition)
+        .map_err(NodeExecutionFailure::Infrastructure)?;
     events
         .put_node_output(NodeOutputRecord {
             run_id: context.metadata().run_id.clone(),
@@ -279,6 +281,29 @@ fn classify_failure(node_id: &str, error: RunError) -> NodeExecutionFailure {
         },
         RunErrorKind::Infrastructure => NodeExecutionFailure::Infrastructure(error),
     }
+}
+
+pub(super) fn validate_control_transition_contract(
+    node_id: &str,
+    control: &NodeControl,
+    transition: &NodeTransition,
+) -> Result<(), RunError> {
+    let control_outcome = match control {
+        NodeControl::End { outcome } | NodeControl::BranchEnd { outcome } => Some(*outcome),
+        _ => None,
+    };
+    let transition_outcome = match transition {
+        NodeTransition::End(outcome) => Some(outcome.kind()),
+        _ => None,
+    };
+
+    if control_outcome != transition_outcome {
+        return Err(RunError::infrastructure(
+            "SCHEDULER_INVARIANT_VIOLATION",
+            format!("node '{node_id}' terminal control and executor transition disagree"),
+        ));
+    }
+    Ok(())
 }
 
 fn run_error_kind(kind: RunErrorKind) -> &'static str {

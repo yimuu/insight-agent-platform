@@ -15,7 +15,7 @@ fork/join 引入的 DSL、调度和事件接口变化是有意的；本次 live-
 | 通用 `llm` step 和 Agent 顶层 model | 命名模型资源 + `core.chat` | chat、embedding、speech、rerank 需要不同合同；不应塞进一个可选字段集合 | `type: llm` → `type: core.chat; config.model: general_chat` |
 | `tool` 与 `code` 两套调用边界 | `core.action` + `ActionRegistry` | 两者本质上都是严格 JSON 能力调用；统一 Schema、取消和错误语义 | `type: code; handler: example.text_metrics` → `type: core.action; config.action: example.text_metrics` |
 | 运行时编译 condition/CEL | `core.condition` 在启动时预编译 | 平台自有工作流的表达式错误不应延迟到用户请求 | `cases[].goto` → `config.cases[].next`，上下文从 `steps.x` 改为 `nodes.x` |
-| 最后一个 step 隐式成为结果 | 必需的 `core.end` success/failure 终端 | 主流程和 Fork 分支都必须显式返回成功或 authored workflow failure | 添加 `result: {type: core.end, config: {outcome: success, content: {template: ...}, format: markdown}}`；分支使用自己的 End，不再指向 Join |
+| 最后一个 step 隐式成为结果 | 主流程必需 `core.end`，Fork 分支必需 `core.branch_end` | workflow termination 与 branch settlement 必须由 authored kind 明确区分 | 主流程添加 `result: {type: core.end, ...}`；每个分支添加自己的 `core.branch_end`，不再指向 Join |
 | 节点 `stream: true/false` | 公共 envelope 的 `emit: content/none` | 供应商是否使用流传输与内容是否公开给客户端是两件事 | `stream: true` → `emit: content` |
 | Agent `public/default_public/exposure` | 平台 `auth.mode` + `agents.enabled` | 工作流元数据不能决定部署安全；鉴权和启用策略必须分离 | 删除 `public`，在平台配置中显式写 `auth.mode` 和 `agents.enabled` |
 | SSE 连接拥有所有 Run | attached 与 detached 两种创建接口 | 交互式断开取消和后台执行是两种明确意图 | `/runs/stream` 创建 attached；`/runs` 创建 detached 并返回 202 |
@@ -78,9 +78,11 @@ content:
 
 新 part 只接受 canonical `nodes.<node_id>.output[.<field>...]`，参与现有图引用校验，并以不超过 256 KiB 的 compact JSON 映射成 provider text content。纯文本/JSON parts 会合并成一个 string；含图片时保持标准 part array。它不改变全局模板语义，不允许 system role，也不构成完整 Chat request 的总大小合同。旧 Agent 若依赖裸对象插值，应显式迁移。把 Join 失败数据发送给另一个 provider 时还必须排除自由文本 `error.message`，只投影所需成功 output 和受控 failure kind/code。本次只改变 Agent 编译/执行合同和相应 Agent version，不需要数据库 migration 或历史 reset。
 
-`core.end` 是严格联合类型并禁止 `next`：success 至少提供 `content` 或 `data`，failure 只提供静态 `WORKFLOW_...` code 与静态单行 message。主流程 End 决定 Run 成功或 workflow failure；分支 End 只结算所属分支。failure End 本身仍成功执行，所以事件顺序是 `node.completed(core.end)` 后跟 `branch.failed(kind=workflow)` 或 `run.failed(kind=workflow)`，而不是 `node.failed`。
+`core.end` 与 `core.branch_end` 共享严格联合类型并禁止 `next`：success 至少提供 `content` 或 `data`，failure 只提供静态 `WORKFLOW_...` code 与静态单行 message。`core.end` 只允许在主流程（包括 Join 后）并决定 Run 成功或 workflow failure；`core.branch_end` 只允许在 Fork 分支并只结算所属分支。作用域不匹配固定以 `TERMINAL_SCOPE_INVALID` 编译失败。failure terminal 本身仍成功执行，所以事件顺序是 `node.completed(core.branch_end)` 后跟 `branch.failed(kind=workflow)`，或 `node.completed(core.end)` 后跟 `run.failed(kind=workflow)`，而不是 `node.failed`。
 
-Fork 分支不再直接进入 Join。每个静态成功路径必须到达分支局部 End；所有分支结算后 `all_settled` Join 才执行。Join 输出的每个失败包含 `error.kind: workflow|node|timeout`，`summary.failures` 分别计数三种来源。即使所有分支失败，Join 也会执行；Join 后的 Condition 显式选择 degraded success 或主流程 failure End。
+Fork 分支不再直接进入 Join。每个静态路径必须到达分支局部 `core.branch_end`；所有分支结算后 `all_settled` Join 才执行。Join 输出的每个失败包含 `error.kind: workflow|node|timeout`，`summary.failures` 分别计数三种来源。即使所有分支失败，Join 也会执行；Join 后的 Condition 显式选择 degraded success 或主流程 failure End。
+
+这是 authored DSL 的 hard cutover，不提供 `core.end` 的 branch alias。它不修改数据库或历史格式，但 binary 和 Agent YAML 必须原子部署：旧 binary 不认识 `core.branch_end`，新 binary 会拒绝分支内的旧式 `core.end`。迁移时不能全局替换；主流程和 Join 后的 terminal 必须继续使用 `core.end`。
 
 ## HTTP 与事件迁移
 

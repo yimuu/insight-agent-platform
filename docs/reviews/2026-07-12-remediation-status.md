@@ -13,10 +13,11 @@ Historical snapshots:
 
 - Primary integration branch: `main`.
 - Historical rollback/reference tag: `stable-baseline-2026-07-12`.
-- This status includes the post-tag quickstart, Chat, Select, unified End, typed terminal,
-  canonical repository terminal proposal, public Agent discovery, production lifecycle
-  hardening, PostgreSQL exclusive-store ownership, raw-row input-summary privacy,
-  and bounded structured Join-to-Chat synthesis through 2026-07-16.
+- This status includes the post-tag quickstart, Chat, Select, explicit workflow/branch
+  terminals, typed terminal outcomes, canonical repository terminal proposal, public
+  Agent discovery, production lifecycle hardening, PostgreSQL exclusive-store
+  ownership, raw-row input-summary privacy, and bounded structured Join-to-Chat
+  synthesis through 2026-07-16.
 - Remote synchronization is an operational checkout fact and is intentionally not
   encoded as a durable source contract in this document.
 
@@ -36,7 +37,7 @@ Historical snapshots:
 | Real binary quickstart | Implemented | `tests/binary_smoke.rs`; `0af0548`, `5bb1d94`, `78475f6` | No quickstart-specific verification boundary remains; lifecycle verification is recorded under Production lifecycle V1. |
 | Chat optional image, dynamic message sources, and stream completion | Implemented | `3ce4352`, `0b29aa7`, `ef64358`; `docs/superpowers/specs/2026-07-15-openai-stream-completion-evidence-design.md`; `tests/formal_resources.rs` | Direct Chat cancellation remains open. |
 | Condition result convergence | Implemented | `3b995e3`, `912d3cb`, `926d87d` | No additional Select expansion is currently planned. |
-| Unified End and typed terminal model | Implemented | `559bfc8` through `7ef2cee`; terminal suites under `tests/event_hub.rs` and `tests/core_end.rs`; `docs/superpowers/specs/2026-07-15-independent-connection-terminal-cas-race-design.md`; `independent_sqlite_connections_choose_one_authoritative_terminal_without_lock_residue`; `postgres_independent_connections_resolve_one_authoritative_terminal` | Independent-connection CAS is verified within SQLite and one PostgreSQL owner generation; distributed execution remains out of scope. |
+| Explicit End/Branch End and typed terminal model | Implemented and verified in the 2026-07-16 change | `docs/superpowers/specs/2026-07-16-explicit-branch-terminal-design.md`; terminal suites under `tests/core_end.rs`, `tests/dsl_parallel.rs`, `tests/run_scheduler.rs`, and `tests/event_hub.rs`; independent SQLite/PostgreSQL terminal CAS tests | `core.end` is main-only and `core.branch_end` is branch-only. The hard cutover changes Agent versions but not history schemas; binary and Agent YAML require atomic deployment. Distributed execution remains out of scope. |
 | Canonical repository terminal proposal | Implemented | `7a6865a`; `tests/history_sqlite_v1.rs`, `tests/history_postgres.rs`, `tests/event_hub.rs` | PostgreSQL exclusive-store topology is handled by the ownership milestone below. |
 | Public Agent input contract | Implemented in the 2026-07-15 change | `docs/superpowers/specs/2026-07-15-public-agent-contract-design.md`; schema, API, compiler, and binary smoke tests | Output schemas and Agent CRUD are intentionally out of scope. |
 | Production lifecycle V1 | Implemented and verified | `docs/superpowers/specs/2026-07-15-production-lifecycle-v1-design.md`; `docs/superpowers/specs/2026-07-15-real-process-sigint-http-supervisor-design.md`; `sigterm_terminalizes_attached_and_detached_runs_and_restart_preserves_them`; `sigint_terminalizes_attached_and_detached_runs_and_restart_preserves_them`; `finite_http_error_drains_real_runs_to_exact_attachment_terminals`; `http_completion_during_runtime_drain_is_latched_before_graceful_command`; `supervisor_preserves_fatal_precedence_and_rejects_signal_failure`; `owner_release_ownership_loss_promotes_every_lower_shutdown_outcome` | Unix SIGTERM and SIGINT are verified against the production binary, and real PostgreSQL ownership-loss fail-stop is covered by the exclusive-store milestone. Axum 0.8.9 retries `TcpListener` accept errors indefinitely and `WithGracefulShutdown` returns only after its shutdown future completes, so unexpected early HTTP completion is verified at the private production-supervisor future boundary without a runtime fault-injection surface. Windows console-control behavior and deployment trusted-path policy remain outside this verification. |

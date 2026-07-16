@@ -387,14 +387,14 @@ nodes:
     next: end_a
     config: {value: a}
   end_a:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.branch_a.output }}"}}
   branch_b:
     type: core.template
     next: end_b
     config: {value: b}
   end_b:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.branch_b.output }}"}}
   collect:
     type: core.join
@@ -957,7 +957,9 @@ async fn parallel_nodes_emit_once_and_run_finish_is_once() {
     );
 
     let completed = info_logs("node.completed");
-    for node_id in ["fanout", "branch_a", "branch_b", "collect", "result"] {
+    for node_id in [
+        "fanout", "branch_a", "end_a", "branch_b", "end_b", "collect", "result",
+    ] {
         assert_eq!(
             completed
                 .iter()
@@ -967,6 +969,19 @@ async fn parallel_nodes_emit_once_and_run_finish_is_once() {
             "node {node_id} should have one completion log"
         );
     }
+    for node_id in ["end_a", "end_b"] {
+        let event = completed
+            .iter()
+            .find(|event| event.field("node_id") == Some(node_id))
+            .expect("branch terminal completion log");
+        assert_eq!(event.field("kind"), Some("core.branch_end"));
+        assert_eq!(event.field("terminal_outcome"), Some("success"));
+    }
+    let result = completed
+        .iter()
+        .find(|event| event.field("node_id") == Some("result"))
+        .expect("main terminal completion log");
+    assert_eq!(result.field("kind"), Some("core.end"));
     assert_eq!(info_logs("run.finished").len(), 1);
 }
 

@@ -139,12 +139,12 @@ nodes:
       branches: {a: end_a, b: end_b}
       join: collect
   end_a:
-    type: core.end
+    type: core.branch_end
     config:
       outcome: success
       data: {selected: "{{ nodes.selected.output.value }}"}
   end_b:
-    type: core.end
+    type: core.branch_end
     config:
       outcome: success
       data: {selected: "{{ nodes.selected.output.value }}"}
@@ -207,6 +207,7 @@ nodes:
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
             "core.action",
+            "core.branch_end",
             "core.chat",
             "core.condition",
             "core.end",

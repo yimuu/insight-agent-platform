@@ -77,6 +77,9 @@ pub enum NodeControl {
     End {
         outcome: EndOutcomeKind,
     },
+    BranchEnd {
+        outcome: EndOutcomeKind,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

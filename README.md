@@ -24,7 +24,7 @@ RunService → RunCoordinator → EventHub/Journal → RunRepository
 
 DSL 使用显式 `entry + nodes` DAG，而不是隐式步骤数组。核心理由是：执行顺序、条件跳转和数据依赖本质上属于图语义；显式 DAG 可以在启动前统一发现缺边、环、不可达节点和非法前驱引用，也让新增节点类型无需修改调度器。
 
-正式 V1 内置八种节点：
+正式 V1 内置九种节点：
 
 | 节点 | 作用 |
 |---|---|
@@ -35,7 +35,8 @@ DSL 使用显式 `entry + nodes` DAG，而不是隐式步骤数组。核心理�
 | `core.fork` | 显式启动固定并行分支 |
 | `core.join` | 以 `all_settled` 汇合 fork 分支并输出稳定汇总 |
 | `core.select` | 将互斥条件路径中唯一已执行的结果汇合为稳定输出 |
-| `core.end` | Ends the current Run or Fork-branch scope with an explicit success or failure outcome. |
+| `core.branch_end` | 以显式 success/failure outcome 结算当前 Fork 分支 |
+| `core.end` | 以显式 success/failure outcome 终止当前 Run |
 
 条件节点和其他节点一样通过注册表解析。新增节点是静态链接的 Rust 扩展：实现 `NodeType` 负责编译期 config、envelope、边和引用声明，实现 `NodeExecutor` 负责运行期执行；两者分别注册到编译期和运行期注册表。注册后，自定义节点走同一套 DSL 解析、图校验、调度、事件、节点输出和终态提交路径，核心节点源码、调度器和 HTTP 层不需要增加分支：
 
@@ -227,7 +228,7 @@ nodes:
       format: markdown
 ```
 
-`core.end` 是严格的 success/failure 联合类型，且不能声明 `next`。成功 End 至少声明 `content` 或 `data`；`content` 存在时必须同时声明 `format: text|markdown`，结构化结果继续使用稳定的 `{content?, format?, data}` Run output。失败 End 只接受静态 `WORKFLOW_...` code 和静态单行 message，并禁止 `content`、`format`、`data`、模板和 CEL：
+`core.end` 与 `core.branch_end` 共享严格的 success/failure 联合类型，且都不能声明 `next`。成功 terminal 至少声明 `content` 或 `data`；`content` 存在时必须同时声明 `format: text|markdown`，结构化结果继续使用稳定的 `{content?, format?, data}` output。失败 terminal 只接受静态 `WORKFLOW_...` code 和静态单行 message，并禁止 `content`、`format`、`data`、模板和 CEL：
 
 ```yaml
 reject:
@@ -238,7 +239,7 @@ reject:
     message: workflow policy rejected the run
 ```
 
-End 终止的是编译器确定的当前 scope：主流程的成功/失败 End 分别完成/失败整个 Run；Fork 分支的 End 只结算该分支，不能直接终止父 Run。两种 End 都表示节点按声明成功执行，因此先持久化 End envelope 并发布 `node.completed`；失败 End 随后发布 `branch.failed(kind=workflow)` 或 `run.failed(kind=workflow)`，不会发布 `node.failed`。
+作用域由节点类型显式声明：`core.end` 只允许出现在主流程（包括 Join 之后），其成功/失败分别完成/失败整个 Run；`core.branch_end` 只允许出现在 Fork 分支内，只结算所属分支，不能直接终止父 Run。用错作用域会在启动编译时以 `TERMINAL_SCOPE_INVALID` 拒绝。两种 terminal 都表示节点按声明成功执行，因此先持久化 terminal envelope 并发布 `node.completed`；失败 terminal 随后发布 `branch.failed(kind=workflow)` 或 `run.failed(kind=workflow)`，不会发布 `node.failed`。
 
 ### 条件结果汇合
 
@@ -453,6 +454,8 @@ RUN_HISTORY_POSTGRES_URL='postgres://insight:insight@127.0.0.1:5433/insight_agen
 
 统一 `core.end`、类型化 Run lifecycle 和 PostgreSQL ownership generation fence 会直接改写 Formal V1 initial migration；已有本地 SQLite 数据库和开发 PostgreSQL volume 必须按[正式 V1 历史重置](docs/formal-v1-breaking-changes.md#历史重置)整体重建，应用不会静默升级。重建 PostgreSQL schema 前必须先停掉所有仍可能连接该 store 的旧 runtime。A0 Action 校验错误安全修复不兼容既有 Run 历史；部署前按[正式 V1 破坏性变更中的 A0 重置流程](docs/formal-v1-breaking-changes.md#a0-action-validation-error-containment)停止服务并显式清空历史。A5 会让静态非法 Action input、hyphenated node/branch ID、indexed/computed `nodes` access 在启动编译期失败；迁移理由见[正式 V1 破坏性变更中的 A5 语义编译期校验](docs/formal-v1-breaking-changes.md#a5-semantic-compile-time-validation)。
 
+显式 `core.branch_end` hard cutover 不修改数据库或历史格式，但 binary 与 Agent YAML 必须原子部署：旧 binary 不认识 `core.branch_end`，新 binary 会以 `TERMINAL_SCOPE_INVALID` 拒绝分支内旧式 `core.end`。迁移时只改真实分支 terminal；主流程及 Join 后的 terminal 继续使用 `core.end`。
+
 正式 V1 不存储原始输入，只保存顶层键和序列化字节数摘要。journal 只有在数据库确认事件持久化后才向订阅者广播；单次数据库操作受 `journal_operation_timeout` 限制。失败时先停止 journal worker，恢复事务锁定 Run，并基于持久化的 `MAX(seq)` 原子派生终态序号；这也能判定超时发生在 `COMMIT` 附近时的实际结果。journal 永久关闭后拒绝新 Run。进程启动时遗留的 `created/running` 记录会被标记为 `interrupted`，V1 不恢复工作。
 
 ## 示例
@@ -463,7 +466,7 @@ RUN_HISTORY_POSTGRES_URL='postgres://insight:insight@127.0.0.1:5433/insight_agen
 - `agents/parallel_researcher`：两个多节点分支汇聚后再综合：
 - `agents/workflow_failure_demo`：不需要密钥的 authored workflow failure 示例；只用于编译和真实 binary smoke，不在正常或 quickstart 配置中启用。
 
-条件路径结果使用 `core.select`；以下示例是并行分支，因此使用 `core.fork`、分支局部 `core.end` 和 `core.join`。分支不再把 `next` 指向 Join；Fork 的 `join` 字段是所有分支结算后才激活的结构化 continuation：
+条件路径结果使用 `core.select`；以下示例是并行分支，因此使用 `core.fork`、显式 `core.branch_end` 和 `core.join`。分支 terminal 不声明 `next`；Fork 的 `join` 字段是所有分支结算后才激活的结构化 continuation：
 
 ```yaml
 fanout:
@@ -480,7 +483,7 @@ analyze_a:
     messages: [{role: user, content: "Analyze {{ input.question }} from perspective A."}]
     parameters: {}
 end_a:
-  type: core.end
+  type: core.branch_end
   config:
     outcome: success
     data: {answer: "{{ nodes.analyze_a.output.text }}"}
@@ -493,7 +496,7 @@ analyze_b:
     messages: [{role: user, content: "Analyze {{ input.question }} from perspective B."}]
     parameters: {}
 end_b:
-  type: core.end
+  type: core.branch_end
   config:
     outcome: success
     data: {answer: "{{ nodes.analyze_b.output.text }}"}
@@ -607,7 +610,7 @@ fail_all:
     message: all parallel branches failed
 ```
 
-每个静态成功的分支路径都必须到达自己的 End。分支就绪并进入执行队列时发布 `branch.started`；End envelope 和 `node.completed` 持久化之后，才发布 `branch.completed` 或 `branch.failed`。authored End failure 的错误是 `kind: workflow`；普通节点失败和超时分别是 `kind: node` 与 `kind: timeout`。`branch.started` 表示 ready-queue activation，不代表模型已开始返回内容。
+每个静态分支路径都必须到达自己的 `core.branch_end`；分支中的 `core.end`、主流程或 Join 后的 `core.branch_end` 都会以 `TERMINAL_SCOPE_INVALID` 编译失败。分支就绪并进入执行队列时发布 `branch.started`；Branch End envelope 和 `node.completed` 持久化之后，才发布 `branch.completed` 或 `branch.failed`。authored Branch End failure 的错误是 `kind: workflow`；普通节点失败和超时分别是 `kind: node` 与 `kind: timeout`。`branch.started` 表示 ready-queue activation，不代表模型已开始返回内容。
 
 `core.join` 的输出是固定聚合对象（不是 Run 终态 envelope）：
 

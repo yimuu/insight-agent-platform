@@ -124,6 +124,13 @@ impl NodeExecutor for ServiceNode {
 }
 
 fn agent(id: &str, behavior: ServiceBehavior) -> Arc<CompiledAgent> {
+    let control = if matches!(&behavior, ServiceBehavior::Complete) {
+        NodeControl::End {
+            outcome: insight_agent_platform::outcome::EndOutcomeKind::Success,
+        }
+    } else {
+        NodeControl::Ordinary
+    };
     let node = CompiledNode {
         id: "work".to_string(),
         kind: "test.service".to_string(),
@@ -133,7 +140,7 @@ fn agent(id: &str, behavior: ServiceBehavior) -> Arc<CompiledAgent> {
         body: Arc::new(behavior),
         edges: Vec::new(),
         references: BTreeSet::new(),
-        control: NodeControl::Ordinary,
+        control,
     };
     let nodes = BTreeMap::from([("work".to_string(), node)]);
     Arc::new(CompiledAgent {
@@ -174,6 +181,10 @@ fn parallel_blocking_agent(
             .collect(),
         references: BTreeSet::new(),
         control: if id.starts_with("end_") {
+            NodeControl::BranchEnd {
+                outcome: insight_agent_platform::outcome::EndOutcomeKind::Success,
+            }
+        } else if id == "collect" {
             NodeControl::End {
                 outcome: insight_agent_platform::outcome::EndOutcomeKind::Success,
             }

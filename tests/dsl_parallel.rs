@@ -114,7 +114,7 @@ nodes:
     config:
       value: summary-a
   end_a:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.summarize_a.output }}"}}
   search_b:
     type: core.condition
@@ -124,7 +124,7 @@ nodes:
           next: summarize_b
       default: end_b_default
   end_b_default:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: default-b}}
   summarize_b:
     type: core.template
@@ -132,7 +132,7 @@ nodes:
     config:
       value: summary-b
   end_b:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.summarize_b.output }}"}}
   collect:
     type: core.join
@@ -153,14 +153,14 @@ fn structured_end_yaml() -> &'static str {
 
 fn branch_directly_targets_join_yaml() -> String {
     structured_end_yaml().replace(
-        "  make_a:\n    type: core.template\n    next: end_a\n    config: {value: a}\n  end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.make_a.output }}\"}}",
+        "  make_a:\n    type: core.template\n    next: end_a\n    config: {value: a}\n  end_a:\n    type: core.branch_end\n    config: {outcome: success, data: {value: \"{{ nodes.make_a.output }}\"}}",
         "  make_a:\n    type: core.template\n    next: collect\n    config: {value: a}",
     )
 }
 
 fn branch_dead_ends_without_end_yaml() -> String {
     structured_end_yaml().replace(
-        "  make_a:\n    type: core.template\n    next: end_a\n    config: {value: a}\n  end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.make_a.output }}\"}}",
+        "  make_a:\n    type: core.template\n    next: end_a\n    config: {value: a}\n  end_a:\n    type: core.branch_end\n    config: {outcome: success, data: {value: \"{{ nodes.make_a.output }}\"}}",
         "  make_a:\n    type: core.template\n    config: {value: a}",
     )
 }
@@ -174,8 +174,24 @@ fn ordinary_node_targets_join_yaml() -> String {
         )
 }
 
+fn branch_end_on_main_path_before_fork_yaml() -> String {
+    structured_end_yaml()
+        .replace("entry: fanout", "entry: route")
+        .replace(
+            "nodes:\n  fanout:",
+            "nodes:\n  route:\n    type: core.condition\n    config:\n      cases: [{when: \"true\", next: fanout}]\n      default: main_stop\n  main_stop:\n    type: core.branch_end\n    config: {outcome: success, data: {stopped: true}}\n  fanout:",
+        )
+}
+
+fn mixed_branch_terminal_yaml() -> String {
+    structured_end_yaml().replace(
+        "  make_a:\n    type: core.template\n    next: end_a\n    config: {value: a}\n  end_a:",
+        "  make_a:\n    type: core.condition\n    config:\n      cases: [{when: \"true\", next: end_a}]\n      default: wrong_end_a\n  wrong_end_a:\n    type: core.end\n    config: {outcome: success, data: {value: wrong}}\n  end_a:",
+    )
+}
+
 #[test]
-fn branches_must_return_through_end_without_executable_join_edges() {
+fn branches_must_return_through_branch_end_without_executable_join_edges() {
     assert_compile_ok(structured_end_yaml());
     assert_compile_error(
         &branch_directly_targets_join_yaml(),
@@ -186,6 +202,48 @@ fn branches_must_return_through_end_without_executable_join_edges() {
         &ordinary_node_targets_join_yaml(),
         "JOIN_DIRECT_PREDECESSOR_FORBIDDEN",
     );
+}
+
+#[test]
+fn rejects_branch_end_outside_a_fork_branch() {
+    assert_compile_error(
+        r#"
+version: 1
+id: branch-end-without-fork
+name: Branch End Without Fork
+input:
+  schema: {type: object}
+entry: result
+nodes:
+  result:
+    type: core.branch_end
+    config: {outcome: success, data: {ok: true}}
+"#,
+        "TERMINAL_SCOPE_INVALID",
+    );
+    assert_compile_error(
+        &branch_end_on_main_path_before_fork_yaml(),
+        "TERMINAL_SCOPE_INVALID",
+    );
+    assert_compile_error(
+        &structured_end_yaml().replace(
+            "  result:\n    type: core.end",
+            "  result:\n    type: core.branch_end",
+        ),
+        "TERMINAL_SCOPE_INVALID",
+    );
+}
+
+#[test]
+fn rejects_end_inside_a_fork_branch() {
+    assert_compile_error(
+        &structured_end_yaml().replace(
+            "  end_a:\n    type: core.branch_end",
+            "  end_a:\n    type: core.end",
+        ),
+        "TERMINAL_SCOPE_INVALID",
+    );
+    assert_compile_error(&mixed_branch_terminal_yaml(), "TERMINAL_SCOPE_INVALID");
 }
 
 fn valid_parallel_yaml_with(node_id: &str, reference: &str) -> String {
@@ -432,7 +490,7 @@ fn rejects_branch_that_escapes_to_output() {
                 "  summarize_a:\n    type: core.template\n    next: result",
             )
             .replace(
-                "  end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.summarize_a.output }}\"}}\n",
+                "  end_a:\n    type: core.branch_end\n    config: {outcome: success, data: {value: \"{{ nodes.summarize_a.output }}\"}}\n",
                 "",
             ),
         "BRANCH_CROSS_REGION_EDGE",
@@ -460,7 +518,7 @@ nodes:
     next: end_shared
     config: {value: shared}
   end_shared:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.shared.output }}"}}
   collect:
     type: core.join
@@ -485,7 +543,7 @@ fn rejects_branch_edge_into_sibling_region() {
                 "  summarize_a:\n    type: core.template\n    next: search_b",
             )
             .replace(
-                "  end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.summarize_a.output }}\"}}\n",
+                "  end_a:\n    type: core.branch_end\n    config: {outcome: success, data: {value: \"{{ nodes.summarize_a.output }}\"}}\n",
                 "",
             ),
         "BRANCH_CROSS_REGION_EDGE",
@@ -501,7 +559,7 @@ fn rejects_branch_edge_into_sibling_interior() {
                 "  summarize_a:\n    type: core.template\n    next: summarize_b",
             )
             .replace(
-                "  end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.summarize_a.output }}\"}}\n",
+                "  end_a:\n    type: core.branch_end\n    config: {outcome: success, data: {value: \"{{ nodes.summarize_a.output }}\"}}\n",
                 "",
             ),
         "BRANCH_CROSS_REGION_EDGE",
@@ -532,7 +590,7 @@ fn rejects_direct_fork_to_join_bypass() {
             "branches: {a: collect, b: make_b}",
         )
         .replace(
-            "  make_a:\n    type: core.template\n    next: end_a\n    config: {value: a}\n  end_a:\n    type: core.end\n    config: {outcome: success, data: {value: \"{{ nodes.make_a.output }}\"}}\n",
+            "  make_a:\n    type: core.template\n    next: end_a\n    config: {value: a}\n  end_a:\n    type: core.branch_end\n    config: {outcome: success, data: {value: \"{{ nodes.make_a.output }}\"}}\n",
             "",
         );
     assert_compile_error(&yaml, "BRANCH_DIRECT_JOIN_FORBIDDEN");
@@ -564,28 +622,28 @@ nodes:
     next: end_x
     config: {value: x}
   end_x:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.x.output }}"}}
   y:
     type: core.template
     next: end_y
     config: {value: y}
   end_y:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.y.output }}"}}
   nested_join:
     type: core.join
     next: end_nested
     config: {mode: all_settled}
   end_nested:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.nested_join.output }}"}}
   plain:
     type: core.template
     next: end_plain
     config: {value: plain}
   end_plain:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.plain.output }}"}}
   outer_join:
     type: core.join
@@ -607,7 +665,7 @@ fn rejects_condition_path_that_bypasses_join() {
         &parallel_yaml()
             .replace("      default: end_b_default", "      default: result")
             .replace(
-                "  end_b_default:\n    type: core.end\n    config: {outcome: success, data: {value: default-b}}\n",
+                "  end_b_default:\n    type: core.branch_end\n    config: {outcome: success, data: {value: default-b}}\n",
                 "",
             ),
         "BRANCH_CROSS_REGION_EDGE",
@@ -650,14 +708,14 @@ nodes:
     next: end_a1
     config: {value: a1}
   end_a1:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.a1.output }}"}}
   a2:
     type: core.template
     next: end_a2
     config: {value: a2}
   end_a2:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.a2.output }}"}}
   fork_b:
     type: core.fork
@@ -669,14 +727,14 @@ nodes:
     next: end_b1
     config: {value: b1}
   end_b1:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.b1.output }}"}}
   b2:
     type: core.template
     next: end_b2
     config: {value: b2}
   end_b2:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.b2.output }}"}}
   collect:
     type: core.join
@@ -744,14 +802,14 @@ nodes:
     next: end_a1
     config: {value: a1}
   end_a1:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.a1.output }}"}}
   a2:
     type: core.template
     next: end_a2
     config: {value: a2}
   end_a2:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.a2.output }}"}}
   join_a:
     type: core.join
@@ -767,14 +825,14 @@ nodes:
     next: end_b1
     config: {value: b1}
   end_b1:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.b1.output }}"}}
   b2:
     type: core.template
     next: end_b2
     config: {value: b2}
   end_b2:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.b2.output }}"}}
   join_b:
     type: core.join
@@ -829,7 +887,7 @@ nodes:
     next: end_work
     config: {value: work}
   end_work:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.work.output }}"}}
   collect:
     type: core.join
@@ -854,7 +912,7 @@ fn rejects_fork_over_configured_branch_limit() {
     let branch_nodes = (0..33)
         .map(|index| {
             format!(
-                "  n{index:02}:\n    type: core.template\n    next: end_{index:02}\n    config: {{value: {index}}}\n  end_{index:02}:\n    type: core.end\n    config: {{outcome: success, data: {{value: \"{{{{ nodes.n{index:02}.output }}}}\"}}}}"
+                "  n{index:02}:\n    type: core.template\n    next: end_{index:02}\n    config: {{value: {index}}}\n  end_{index:02}:\n    type: core.branch_end\n    config: {{outcome: success, data: {{value: \"{{{{ nodes.n{index:02}.output }}}}\"}}}}"
             )
         })
         .collect::<Vec<_>>()
@@ -914,7 +972,7 @@ nodes:
       messages:
         - from: {path: nodes.prepare.output}
   end_answer:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.answer.output }}"}}
   prepare:
     type: core.template
@@ -923,7 +981,7 @@ nodes:
       value:
         - {role: user, content: sibling}
   end_prepare:
-    type: core.end
+    type: core.branch_end
     config: {outcome: success, data: {value: "{{ nodes.prepare.output }}"}}
   collect:
     type: core.join

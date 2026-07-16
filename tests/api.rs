@@ -30,7 +30,7 @@ use insight_agent_platform::{
         default_node_registries,
         registry::{NodeExecutor, NodeType},
     },
-    outcome::{RunOutput, TerminalOutcome, WorkflowError},
+    outcome::{EndOutcomeKind, RunOutput, TerminalOutcome, WorkflowError},
     runtime::{
         CompiledAgentRegistry, ExecutionControl, RunContext, RunError, RunService, RunServiceConfig,
     },
@@ -104,6 +104,15 @@ impl NodeExecutor for ApiNode {
 }
 
 fn agent(id: &str, behavior: ApiBehavior) -> Arc<CompiledAgent> {
+    let control = match &behavior {
+        ApiBehavior::Complete => NodeControl::End {
+            outcome: EndOutcomeKind::Success,
+        },
+        ApiBehavior::Fail => NodeControl::End {
+            outcome: EndOutcomeKind::Failure,
+        },
+        ApiBehavior::Block => NodeControl::Ordinary,
+    };
     let node = CompiledNode {
         id: "work".to_string(),
         kind: "test.api".to_string(),
@@ -113,7 +122,7 @@ fn agent(id: &str, behavior: ApiBehavior) -> Arc<CompiledAgent> {
         body: Arc::new(behavior),
         edges: Vec::new(),
         references: BTreeSet::new(),
-        control: NodeControl::Ordinary,
+        control,
     };
     let nodes = BTreeMap::from([("work".to_string(), node)]);
     let mut templates = Handlebars::new();

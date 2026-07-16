@@ -21,6 +21,7 @@ pub fn compile_execution_plan(
     let topologies = collect_fork_topologies(nodes)?;
     let branch_owners = validate_branch_regions(nodes, &join_claims, &topologies)?;
     validate_join_predecessors(nodes)?;
+    validate_terminal_scopes(nodes, &branch_owners)?;
 
     let mut plan = ExecutionPlan::sequential(entry, nodes.keys().cloned());
     for (node_id, (fork_id, branch_id)) in branch_owners {
@@ -179,7 +180,12 @@ fn collect_branch_nodes(
                 ),
             ));
         }
+        if matches!(node.control, NodeControl::BranchEnd { .. }) {
+            continue;
+        }
         if matches!(node.control, NodeControl::End { .. }) {
+            // Bound the region so topology validation can finish first. The
+            // terminal-scope pass below rejects this node after those errors.
             continue;
         }
         let direct_targets = node.direct_executable_targets().collect::<Vec<_>>();
@@ -354,6 +360,37 @@ fn validate_join_predecessors(nodes: &BTreeMap<String, CompiledNode>) -> Result<
                 ));
             }
         }
+    }
+
+    Ok(())
+}
+
+fn validate_terminal_scopes(
+    nodes: &BTreeMap<String, CompiledNode>,
+    branch_owners: &BTreeMap<String, (String, String)>,
+) -> Result<(), CompileError> {
+    for (node_id, (fork_id, branch_id)) in branch_owners {
+        if matches!(nodes[node_id].control, NodeControl::End { .. }) {
+            return Err(CompileError::new(
+                "TERMINAL_SCOPE_INVALID",
+                format!(
+                    "end node '{node_id}' cannot terminate fork node '{fork_id}' branch '{branch_id}'; use core.branch_end"
+                ),
+            ));
+        }
+    }
+
+    if let Some(node_id) = nodes.iter().find_map(|(node_id, node)| {
+        matches!(node.control, NodeControl::BranchEnd { .. })
+            .then_some(node_id)
+            .filter(|node_id| !branch_owners.contains_key(*node_id))
+    }) {
+        return Err(CompileError::new(
+            "TERMINAL_SCOPE_INVALID",
+            format!(
+                "branch end node '{node_id}' is outside a fork branch; use core.end for the main flow"
+            ),
+        ));
     }
 
     Ok(())

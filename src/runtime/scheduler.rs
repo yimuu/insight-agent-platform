@@ -7,7 +7,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    dsl::compiled::{CompiledAgent, ForkPlan, NodeTransition},
+    dsl::compiled::{CompiledAgent, ForkPlan, NodeControl, NodeTransition},
     events::hub::EventHub,
     events::protocol::{RunEventScope, RunEventType},
     nodes::registry::NodeExecutorRegistry,
@@ -131,7 +131,6 @@ impl Scheduler {
                 let Some(ready) = state.ready.pop_front() else {
                     break;
                 };
-                state.start(&ready.node_id)?;
                 let node = self
                     .agent
                     .nodes
@@ -143,6 +142,8 @@ impl Scheduler {
                             ready.node_id
                         ))
                     })?;
+                validate_terminal_scope_contract(&ready.scope, &node.id, &node.control)?;
+                state.start(&ready.node_id)?;
                 let executors = self.executors.clone();
                 let events = self.events.clone();
                 let task_stop = stop.clone();
@@ -218,13 +219,13 @@ impl Scheduler {
                     return Err(error);
                 }
             };
-            state.succeed(&scheduled_node_id, &result)?;
-
             let node = self
                 .agent
                 .nodes
                 .get(&scheduled_node_id)
                 .expect("scheduled nodes are checked before execution");
+            state.succeed(&scheduled_node_id, &result)?;
+
             let mut context = result.context;
             context.set_node_output(&result.node_id, result.outcome.output.clone());
             if let WorkScope::Branch { fork_id, branch_id } = &scope {
@@ -673,6 +674,23 @@ fn invariant(message: impl Into<String>) -> RunError {
     RunError::infrastructure("SCHEDULER_INVARIANT_VIOLATION", message)
 }
 
+fn validate_terminal_scope_contract(
+    scope: &WorkScope,
+    node_id: &str,
+    control: &NodeControl,
+) -> Result<(), RunError> {
+    if matches!(
+        (scope, control),
+        (WorkScope::Main, NodeControl::BranchEnd { .. })
+            | (WorkScope::Branch { .. }, NodeControl::End { .. })
+    ) {
+        return Err(invariant(format!(
+            "node '{node_id}' terminal control is invalid for its work scope"
+        )));
+    }
+    Ok(())
+}
+
 fn global_failure() -> RunError {
     RunError::infrastructure("INFRASTRUCTURE_FAILURE", "runtime infrastructure failed")
 }
@@ -699,7 +717,101 @@ fn event_error(error: crate::events::hub::EventError) -> RunError {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use crate::{
+        outcome::{EndOutcomeKind, RunOutput, WorkflowError},
+        runtime::execution::validate_control_transition_contract,
+    };
+
     use super::*;
+
+    fn success_transition() -> NodeTransition {
+        NodeTransition::End(TerminalOutcome::Success {
+            output: RunOutput {
+                content: None,
+                format: None,
+                data: json!({}),
+            },
+        })
+    }
+
+    fn failure_transition() -> NodeTransition {
+        NodeTransition::End(TerminalOutcome::Failure {
+            error: WorkflowError {
+                code: "WORKFLOW_REJECTED".to_string(),
+                message: "workflow rejected".to_string(),
+            },
+        })
+    }
+
+    #[test]
+    fn terminal_scope_contract_accepts_only_matching_terminal_controls() {
+        let branch = WorkScope::Branch {
+            fork_id: "fork".to_string(),
+            branch_id: "branch".to_string(),
+        };
+        let end = NodeControl::End {
+            outcome: EndOutcomeKind::Success,
+        };
+        let branch_end = NodeControl::BranchEnd {
+            outcome: EndOutcomeKind::Success,
+        };
+        for (scope, control) in [
+            (&WorkScope::Main, &end),
+            (&branch, &branch_end),
+            (&WorkScope::Main, &NodeControl::Ordinary),
+            (&branch, &NodeControl::Ordinary),
+        ] {
+            validate_terminal_scope_contract(scope, "valid", control).unwrap();
+        }
+
+        for (scope, control) in [(&WorkScope::Main, &branch_end), (&branch, &end)] {
+            let error = validate_terminal_scope_contract(scope, "invalid", control).unwrap_err();
+            assert_eq!(error.code(), "SCHEDULER_INVARIANT_VIOLATION");
+            assert_eq!(error.kind(), RunErrorKind::Infrastructure);
+        }
+    }
+
+    #[test]
+    fn terminal_transition_contract_accepts_only_matching_control_and_outcome() {
+        let end = NodeControl::End {
+            outcome: EndOutcomeKind::Success,
+        };
+        let branch_end = NodeControl::BranchEnd {
+            outcome: EndOutcomeKind::Success,
+        };
+        let failure_end = NodeControl::End {
+            outcome: EndOutcomeKind::Failure,
+        };
+        let failure_branch_end = NodeControl::BranchEnd {
+            outcome: EndOutcomeKind::Failure,
+        };
+        let terminal = success_transition();
+        let failure_terminal = failure_transition();
+
+        for (control, transition) in [
+            (&end, &terminal),
+            (&branch_end, &terminal),
+            (&failure_end, &failure_terminal),
+            (&failure_branch_end, &failure_terminal),
+            (&NodeControl::Ordinary, &NodeTransition::Next),
+        ] {
+            validate_control_transition_contract("valid", control, transition).unwrap();
+        }
+
+        for (control, transition) in [
+            (&NodeControl::Ordinary, &terminal),
+            (&end, &NodeTransition::Next),
+            (&end, &failure_terminal),
+            (&branch_end, &failure_terminal),
+            (&failure_end, &terminal),
+            (&failure_branch_end, &terminal),
+        ] {
+            let error =
+                validate_control_transition_contract("invalid", control, transition).unwrap_err();
+            assert_eq!(error.code(), "SCHEDULER_INVARIANT_VIOLATION");
+            assert_eq!(error.kind(), RunErrorKind::Infrastructure);
+        }
+    }
 
     #[tokio::test]
     async fn external_drain_reports_task_panic_after_draining_every_task() {

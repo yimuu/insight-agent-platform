@@ -39,7 +39,7 @@ nodes:
     next: end_a
     config: {value: "{{ nodes.analyze_a.output.text }}"}
   end_a:
-    type: core.end
+    type: core.branch_end
     config:
       outcome: success
       data: {value: "{{ nodes.normalize_a.output }}"}
@@ -59,7 +59,7 @@ nodes:
     next: end_b
     config: {value: "{{ nodes.analyze_b.output.text }}"}
   end_b:
-    type: core.end
+    type: core.branch_end
     config:
       outcome: success
       data: {value: "{{ nodes.normalize_b.output }}"}
