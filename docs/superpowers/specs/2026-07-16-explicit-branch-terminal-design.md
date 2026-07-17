@@ -1,6 +1,6 @@
 # Explicit Branch Terminal Design
 
-> **Historical / superseded:** `core.branch_end`, explicit Fork/Join nodes, and the flat graph were removed. Structured branch results now lower to RegionYield and internal Phi under [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+> **Historical / superseded:** `core.branch_end`, explicit Fork/Join nodes, and the flat graph were removed. The current authored `parallel`/`switch` contract is [DSL Authoring Surface Redesign](./2026-07-17-dsl-authoring-surface-redesign.md); structured branch results still lower under [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
 
 **Status:** Superseded by DSL vNext
 

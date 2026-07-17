@@ -139,12 +139,6 @@ impl ValueEvaluator {
                 .map(|value| self.evaluate(value, environment))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Array),
-            ValueExpr::Prompt(name) => environment
-                .prompts
-                .get(name)
-                .cloned()
-                .map(Value::String)
-                .ok_or_else(|| EvalError::new(EvalErrorCode::PromptMissing)),
             ValueExpr::Template(template) => self.render_template(template, environment),
         }
     }
@@ -443,24 +437,6 @@ mod tests {
                 .evaluate(&from(path), &fixture.environment())
                 .is_err());
         }
-    }
-
-    #[test]
-    fn prompt_lookup_returns_raw_text_and_missing_prompt_is_stable() {
-        let fixture = fixture();
-        let evaluator = ValueEvaluator::default();
-
-        assert_eq!(
-            evaluator
-                .evaluate(&ValueExpr::Prompt(id("system")), &fixture.environment())
-                .unwrap(),
-            json!("system prompt")
-        );
-        let error = evaluator
-            .evaluate(&ValueExpr::Prompt(id("missing")), &fixture.environment())
-            .unwrap_err();
-        assert_eq!(error.code(), "EVAL_PROMPT_MISSING");
-        assert_eq!(error.message(), "prompt is not defined");
     }
 
     #[test]

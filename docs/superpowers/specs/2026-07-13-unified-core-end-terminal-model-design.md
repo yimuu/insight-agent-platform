@@ -1,6 +1,6 @@
 # Unified `core.end` Terminal Model Design
 
-> **Historical / superseded:** authored `core.end` and graph terminals were removed in favor of lexical block `return`/`raise`. The canonical contract is [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+> **Historical / superseded:** authored `core.end` and graph terminals were removed in favor of lexical block `return`/`raise`. The current authored contract is [DSL Authoring Surface Redesign](./2026-07-17-dsl-authoring-surface-redesign.md); Region/SSA terminal semantics remain in [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
 
 **Date:** 2026-07-13
 **Status:** Superseded by DSL vNext

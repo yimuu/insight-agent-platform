@@ -1,5 +1,7 @@
 # Parallel Synthesis Data Transfer Implementation Plan
 
+> **Historical / superseded authored syntax:** the successful-data/failure-metadata separation remains a requirement, but the `core.chat` and graph-era examples below are not accepted. Current `all_settled` synthesis and LLM messages/content contracts are defined by [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md).
+
 **Status:** Implemented and verified on 2026-07-16
 
 **Goal:** Deliver structured successful branch results and only safe failure

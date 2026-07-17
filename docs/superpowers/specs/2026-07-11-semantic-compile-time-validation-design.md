@@ -1,6 +1,6 @@
 # A5 Semantic Compile-Time Validation Design
 
-> **Historical / superseded:** this document targets the removed graph/reference scanner. vNext validation is defined by [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md) and the current compiler tests.
+> **Historical / superseded:** this document targets the removed graph/reference scanner. Current typed authored validation is defined by [DSL Authoring Surface Redesign](./2026-07-17-dsl-authoring-surface-redesign.md) and executable compiler tests; retained Region/SSA verification remains in [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
 
 **Status:** Superseded by DSL vNext
 

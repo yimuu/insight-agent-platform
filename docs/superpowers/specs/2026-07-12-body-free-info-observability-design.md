@@ -1,6 +1,6 @@
 # A7 — Body-free INFO observability design
 
-> **Historical implementation record:** the body-free logging principle remains current; node-era names and event examples are superseded by [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+> **Historical implementation record:** the body-free logging principle remains current; node-era names and event examples are superseded. Current LLM/Action authoring and privacy contracts are defined by [DSL Authoring Surface Redesign](./2026-07-17-dsl-authoring-surface-redesign.md), with retained runtime semantics in [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
 
 Date: 2026-07-12
 

@@ -8,7 +8,10 @@ use serde_json::{Map, Value};
 
 use crate::schema::{compile_schema_2020, JsonSchemaValidator};
 
-use super::value::Identifier;
+use super::{
+    shape::{SchemaShape, ShapeError},
+    value::Identifier,
+};
 
 pub const SCHEMA_DEFS_CONFLICT: &str = "VNEXT_SCHEMA_DEFS_CONFLICT";
 pub const SCHEMA_REF_INVALID: &str = "VNEXT_SCHEMA_REF_INVALID";
@@ -97,6 +100,12 @@ impl ContractSchemaBundle {
 
     pub fn expanded_schema(&self) -> &Value {
         &self.expanded_schema
+    }
+
+    /// Returns the value-refinement-free structural view used for contracts
+    /// such as dynamic message list assignability.
+    pub fn shape(&self) -> Result<SchemaShape, ShapeError> {
+        SchemaShape::compile(&self.expanded_schema)
     }
 
     pub fn into_parts(self) -> (JsonSchemaValidator, Value) {
@@ -389,6 +398,7 @@ mod tests {
 
     use serde_json::{json, Value};
 
+    use super::super::shape::SchemaShape;
     use super::super::types::{SchemaType, ValueType};
     use super::{
         compile_contract_schema, ContractSchemaBundle, ContractSchemaError, SCHEMA_DEFS_CONFLICT,
@@ -468,6 +478,7 @@ mod tests {
             definitions[&identifier("DisplayName")]
         );
         assert!(!contains_ref(bundle.expanded_schema()));
+        assert!(matches!(bundle.shape().unwrap(), SchemaShape::Object(_)));
         let static_type = SchemaType::compile(bundle.expanded_schema())
             .unwrap()
             .into_value_type();

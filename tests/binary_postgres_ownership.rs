@@ -496,18 +496,14 @@ output:
   data_schema: {type: string}
 workflow:
   steps:
-    - kind: operation
+    - kind: llm
       id: block
-      uses: ai.chat
-      config:
-        model: blocking_chat
-        messages:
-          - role: user
-            parts:
-              - kind: text
-                text: wait until this process is stopped
-        parameters: {}
-        response: {format: text}
+      model: blocking_chat
+      messages:
+        - role: user
+          content: {text: wait until this process is stopped}
+      parameters: {}
+      response: {format: text}
   result:
     return:
       content: {from: steps.block.output.data}

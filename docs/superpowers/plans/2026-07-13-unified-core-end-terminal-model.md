@@ -1,6 +1,6 @@
 # Unified `core.end` Terminal Model Implementation Plan
 
-> **Historical / superseded:** authored `core.end` was removed in favor of lexical block `return`/`raise`. See [DSL vNext Region/SSA Design](../specs/2026-07-16-dsl-vnext-region-ssa-design.md).
+> **Historical / superseded:** authored `core.end` was removed in favor of lexical block `return`/`raise`. See [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md) for current syntax and [DSL vNext Region/SSA Design](../specs/2026-07-16-dsl-vnext-region-ssa-design.md) for retained terminal lowering.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

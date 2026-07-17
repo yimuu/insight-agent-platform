@@ -1,5 +1,7 @@
 # Semantic Compile-Time Validation Implementation Plan
 
+> **Historical / superseded:** this plan targets the removed graph/reference scanner and its YAML fixtures. Current typed authored validation is defined by [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md) and executable compiler tests.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close `BASE-P1-001`, `BASE-P1-002`, and `BASE-P1-003` by making Action static input validation and DSL node-reference discovery fail before serving traffic.

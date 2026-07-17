@@ -1,6 +1,6 @@
 # Structured Chat JSON Content Design
 
-> **Historical / superseded:** this fix targeted Join envelopes rendered through `core.chat`. vNext uses typed ValueExpr bindings and labelled `ai.chat` data parts; see [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+> **Historical / superseded:** this fix targeted Join envelopes rendered through `core.chat`. Current synthesis input separation and LLM messages/content syntax are defined by [DSL Authoring Surface Redesign](./2026-07-17-dsl-authoring-surface-redesign.md).
 
 **Status:** Superseded by DSL vNext
 

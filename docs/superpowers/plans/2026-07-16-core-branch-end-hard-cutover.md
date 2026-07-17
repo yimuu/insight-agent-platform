@@ -1,5 +1,7 @@
 # Core Branch End Hard-Cutover Implementation Plan
 
+> **Historical / superseded:** `core.branch_end` and explicit Fork/Join authoring were subsequently removed. Current lexical branch results and `parallel` ownership are defined by [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md).
+
 **Status:** Implemented and verified on 2026-07-16
 
 **Goal:** Make branch settlement explicit in authored DSL without changing Join,

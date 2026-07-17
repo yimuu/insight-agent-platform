@@ -1,5 +1,7 @@
 # Body-free INFO Observability Implementation Plan
 
+> **Historical implementation record:** the privacy principle remains current, but node-era names and authored examples below are superseded. Current LLM/Action authoring and privacy contracts are defined by [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add body-free structured INFO logs for Run, node, chat, and OpenAI-compatible provider lifecycle metadata.

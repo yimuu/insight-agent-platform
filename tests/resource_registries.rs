@@ -5,7 +5,10 @@ use futures::stream;
 use insight_agent_platform::{
     dsl::CompileError,
     resources::{
-        actions::{Action, ActionContext, ActionDescriptor, ActionRegistry},
+        actions::{
+            Action, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass,
+            EffectClass, IdempotencyClass,
+        },
         models::{ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability, ModelRegistry},
     },
     runtime::{stop_pair, ExecutionControl, RunError, StopReason},
@@ -51,7 +54,8 @@ struct EchoAction;
 impl Action for EchoAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            name: "echo",
+            id: "echo",
+            version: "1.0.0",
             input_schema: json!({
                 "type": "object",
                 "required": ["text"],
@@ -64,7 +68,10 @@ impl Action for EchoAction {
                 "additionalProperties": false,
                 "properties": {"text": {"type": "string"}}
             }),
-            idempotent: true,
+            effect: EffectClass::Pure,
+            idempotency: IdempotencyClass::Idempotent,
+            cancellation: CancellationClass::NotSupported,
+            required_capabilities: BTreeSet::new(),
         }
     }
 
@@ -79,10 +86,14 @@ struct InvalidOutputAction;
 impl Action for InvalidOutputAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            name: "invalid_output",
-            input_schema: json!({"type":"object"}),
+            id: "invalid_output",
+            version: "1.0.0",
+            input_schema: json!({"type":"object", "additionalProperties":false}),
             output_schema: json!({"type":"string"}),
-            idempotent: false,
+            effect: EffectClass::Pure,
+            idempotency: IdempotencyClass::NonIdempotent,
+            cancellation: CancellationClass::NotSupported,
+            required_capabilities: BTreeSet::new(),
         }
     }
 
@@ -97,7 +108,8 @@ struct SchemaMatrixAction;
 impl Action for SchemaMatrixAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            name: "schema_matrix",
+            id: "schema_matrix",
+            version: "1.0.0",
             input_schema: json!({
                 "type":"object",
                 "required":["typed","sized","patterned","selected","choice"],
@@ -111,7 +123,10 @@ impl Action for SchemaMatrixAction {
                 }
             }),
             output_schema: json!({"type":"object"}),
-            idempotent: true,
+            effect: EffectClass::Pure,
+            idempotency: IdempotencyClass::Idempotent,
+            cancellation: CancellationClass::NotSupported,
+            required_capabilities: BTreeSet::new(),
         }
     }
 
@@ -159,13 +174,13 @@ async fn action_registry_validates_input_and_output_without_exposing_instances()
     registry.register(InvalidOutputAction).unwrap();
 
     let echo = registry.resolve("echo").unwrap();
-    assert_eq!(echo.descriptor().name, "echo");
-    assert!(echo.descriptor().idempotent);
+    assert_eq!(echo.descriptor().id, "echo");
+    assert!(echo.descriptor().idempotency.is_idempotent());
 
     let input_error = echo
         .validate_input(&json!({"text":{"secret":INPUT_SECRET}}))
         .unwrap_err();
-    assert_eq!(input_error.code(), "ACTION_INPUT_INVALID");
+    assert_eq!(input_error.code(), "VNEXT_ACTION_INPUT_CONTRACT_INVALID");
     assert_eq!(input_error.message(), "action input validation failed");
     assert!(!input_error.to_string().contains(INPUT_SECRET));
     assert!(!format!("{input_error:?}").contains(INPUT_SECRET));
@@ -182,7 +197,7 @@ async fn action_registry_validates_input_and_output_without_exposing_instances()
         .call(json!({}), test_action_context())
         .await
         .unwrap_err();
-    assert_eq!(output_error.code(), "ACTION_OUTPUT_INVALID");
+    assert_eq!(output_error.code(), "VNEXT_ACTION_OUTPUT_CONTRACT_INVALID");
     assert_eq!(output_error.message(), "action output validation failed");
     assert!(!output_error.to_string().contains(OUTPUT_SECRET));
     assert!(!format!("{output_error:?}").contains(OUTPUT_SECRET));
@@ -205,7 +220,7 @@ fn action_validation_keyword_matrix_never_exposes_values() {
 
     for input in cases {
         let error = action.validate_input(&input).unwrap_err();
-        assert_eq!(error.code(), "ACTION_INPUT_INVALID");
+        assert_eq!(error.code(), "VNEXT_ACTION_INPUT_CONTRACT_INVALID");
         assert_eq!(error.message(), "action input validation failed");
         assert!(!format!("{error:?}").contains(SECRET));
     }
@@ -253,10 +268,14 @@ struct SchemaPolicyAction {
 impl Action for SchemaPolicyAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            name: "schema_policy",
+            id: "schema_policy",
+            version: "1.0.0",
             input_schema: (self.input_schema)(),
             output_schema: (self.output_schema)(),
-            idempotent: true,
+            effect: EffectClass::Pure,
+            idempotency: IdempotencyClass::Idempotent,
+            cancellation: CancellationClass::NotSupported,
+            required_capabilities: BTreeSet::new(),
         }
     }
 
@@ -266,20 +285,22 @@ impl Action for SchemaPolicyAction {
 }
 
 fn empty_object_schema() -> serde_json::Value {
-    json!({"type": "object"})
+    json!({"type": "object", "additionalProperties": false})
 }
 
 fn draft202012_schema() -> serde_json::Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object"
+        "type": "object",
+        "additionalProperties": false
     })
 }
 
 fn draft7_schema() -> serde_json::Value {
     json!({
         "$schema": "https://json-schema.org/draft-07/schema",
-        "type": "object"
+        "type": "object",
+        "additionalProperties": false
     })
 }
 
@@ -309,7 +330,11 @@ fn action_registry_rejects_draft7_input_schema_uri() {
         .unwrap_err();
 
     assert_eq!(error.code(), "ACTION_INPUT_SCHEMA_INVALID");
-    assert!(error.to_string().contains("unsupported JSON Schema draft"));
+    assert_eq!(
+        error.message(),
+        "action 'schema_policy' input schema is invalid: contract schema is not a valid Draft 2020-12 schema"
+    );
+    assert!(!error.message().contains("draft-07"));
 }
 
 #[test]
@@ -323,7 +348,9 @@ fn action_registry_rejects_external_output_schema_ref() {
         .unwrap_err();
 
     assert_eq!(error.code(), "ACTION_OUTPUT_SCHEMA_INVALID");
-    assert!(error
-        .to_string()
-        .contains("external JSON Schema references are not supported"));
+    assert_eq!(
+        error.message(),
+        "action 'schema_policy' output schema is invalid: schema reference must be exactly #/$defs/<Identifier>"
+    );
+    assert!(!error.message().contains("file:///tmp"));
 }

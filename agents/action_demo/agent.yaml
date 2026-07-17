@@ -28,15 +28,11 @@ output:
 
 workflow:
   steps:
-    - kind: operation
+    - kind: action
       id: analyze_text
-      uses: action.call
-      with:
-        input:
-          object:
-            text: {from: input.text}
-      config:
-        action: example.text_metrics
+      call: example.text_metrics
+      inputs:
+        text: {from: input.text}
 
   result:
     return:

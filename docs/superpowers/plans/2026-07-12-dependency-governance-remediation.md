@@ -1,5 +1,7 @@
 # Dependency Governance Remediation Implementation Plan
 
+> **Historical implementation record for DSL references:** dependency-policy outcomes may remain relevant, but graph/`core.*` authored examples are superseded by [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close the approved dependency-governance remediation scope `R0 + R1 + R3 + R4` in one delivery wave while keeping each dependency-policy change independently reviewable.

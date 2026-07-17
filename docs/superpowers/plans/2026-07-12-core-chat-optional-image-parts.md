@@ -1,5 +1,7 @@
 # Core Chat Optional Image Parts Implementation Plan
 
+> **Historical / superseded:** `core.chat`, `image_url` parts, and `optional: true` were removed. Current nullable-image omission and `llm` content syntax are defined by [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add opt-in omission for missing or blank `core.chat` image parts, then migrate the medical report agent to optional HTTP/HTTPS/data-image input.

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::BTreeSet,
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -17,15 +17,7 @@ use axum::{
 use insight_agent_platform::{
     api::formal::{build_router, ApiAuth, FormalApiState},
     catalog::AgentCatalog,
-    dsl::vnext::{
-        compiler::WorkflowCompiler,
-        operation::{
-            CompiledOperationContract, Operation, OperationContext, OperationEffect,
-            OperationError, OperationRegistry,
-        },
-        types::{SchemaType, ValueType},
-        value::Identifier,
-    },
+    dsl::vnext::compiler::WorkflowCompiler,
     events::{
         hub::{EventHub, EventHubConfig},
         protocol::RunEventType,
@@ -37,7 +29,10 @@ use insight_agent_platform::{
     },
     outcome::FailureKind,
     resources::{
-        actions::{Action, ActionContext, ActionDescriptor, ActionRegistry},
+        actions::{
+            Action, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass,
+            EffectClass, IdempotencyClass,
+        },
         models::ModelRegistry,
     },
     runtime::{RequestMetadata, RunError, RunService, RunServiceConfig, StopReason},
@@ -93,7 +88,8 @@ struct CooperativeCancelAction {
 impl Action for CooperativeCancelAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            name: "test.cooperative_cancel",
+            id: "test.cooperative_cancel",
+            version: "1.0.0",
             input_schema: json!({
                 "type": "object",
                 "required": ["text"],
@@ -106,7 +102,10 @@ impl Action for CooperativeCancelAction {
                 "properties": {"ok": {"type": "boolean"}},
                 "additionalProperties": false
             }),
-            idempotent: false,
+            effect: EffectClass::Mutating,
+            idempotency: IdempotencyClass::NonIdempotent,
+            cancellation: CancellationClass::Cooperative,
+            required_capabilities: BTreeSet::new(),
         }
     }
 
@@ -124,54 +123,37 @@ impl Action for CooperativeCancelAction {
     }
 }
 
-struct DeliveryOperation {
+struct DeliveryAction {
     tracker: Arc<OperationTracker>,
 }
 
 #[async_trait]
-impl Operation for DeliveryOperation {
-    fn uses(&self) -> &'static str {
-        "test.delivery"
-    }
-
-    fn compile(
-        &self,
-        config: &Value,
-        _inputs: &BTreeMap<Identifier, ValueType>,
-    ) -> Result<CompiledOperationContract, OperationError> {
-        match config.get("mode").and_then(Value::as_str) {
-            Some("complete" | "block" | "fail") => {}
-            _ => {
-                return Err(OperationError::new(
-                    "TEST_DELIVERY_CONFIG_INVALID",
-                    "test delivery operation config is invalid",
-                ));
-            }
+impl Action for DeliveryAction {
+    fn descriptor(&self) -> ActionDescriptor {
+        ActionDescriptor {
+            id: "test.delivery",
+            version: "1.0.0",
+            input_schema: json!({
+                "type": "object",
+                "required": ["mode"],
+                "properties": {"mode": {"type": "string"}},
+                "additionalProperties": false
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["ok"],
+                "properties": {"ok": {"type": "boolean"}},
+                "additionalProperties": false
+            }),
+            effect: EffectClass::Pure,
+            idempotency: IdempotencyClass::Idempotent,
+            cancellation: CancellationClass::Cooperative,
+            required_capabilities: BTreeSet::new(),
         }
-        let output_schema = json!({
-            "type": "object",
-            "required": ["ok"],
-            "properties": {"ok": {"type": "boolean"}},
-            "additionalProperties": false
-        });
-        let output_type = SchemaType::compile(&output_schema)
-            .expect("static delivery output schema must compile")
-            .into_value_type();
-        Ok(CompiledOperationContract {
-            output_schema,
-            output_type,
-            effect: OperationEffect::Pure,
-            idempotent: true,
-        })
     }
 
-    async fn execute(
-        &self,
-        config: &Value,
-        _inputs: BTreeMap<Identifier, Value>,
-        context: OperationContext,
-    ) -> Result<Value, RunError> {
-        match config.get("mode").and_then(Value::as_str) {
+    async fn call(&self, input: Value, context: ActionContext) -> Result<Value, RunError> {
+        match input.get("mode").and_then(Value::as_str) {
             Some("complete") => Ok(json!({"ok": true})),
             Some("block") => {
                 self.tracker.blocking_started.fetch_add(1, Ordering::SeqCst);
@@ -223,20 +205,18 @@ impl Fixture {
         );
 
         let tracker = Arc::new(OperationTracker::default());
-        let mut extensions = OperationRegistry::default();
-        extensions
-            .register(DeliveryOperation {
+        let mut actions = ActionRegistry::default();
+        actions
+            .register(DeliveryAction {
                 tracker: Arc::clone(&tracker),
             })
             .unwrap();
-        let mut actions = ActionRegistry::default();
         actions
             .register(CooperativeCancelAction {
                 tracker: Arc::clone(&tracker),
             })
             .unwrap();
-        let compiler =
-            WorkflowCompiler::with_extensions(ModelRegistry::default(), actions, extensions);
+        let compiler = WorkflowCompiler::new(ModelRegistry::default(), actions);
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut agents = [
             ("complete_agent", "complete"),
@@ -324,10 +304,13 @@ output:
     additionalProperties: false
 workflow:
   steps:
-    - kind: operation
+    - kind: action
       id: work
-      uses: test.delivery
-      config: {{mode: {mode}}}
+      call: test.delivery
+      inputs:
+        mode:
+          template:
+            text: {mode}
   result:
     return:
       content: {{literal: done}}
@@ -362,15 +345,11 @@ output:
     additionalProperties: false
 workflow:
   steps:
-    - kind: operation
+    - kind: action
       id: work
-      uses: action.call
-      with:
-        input:
-          object:
-            text: {from: input.text}
-      config:
-        action: test.cooperative_cancel
+      call: test.cooperative_cancel
+      inputs:
+        text: {from: input.text}
   result:
     return:
       content: {literal: done}

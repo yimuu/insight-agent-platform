@@ -1,6 +1,6 @@
 # A6 — Extension integration contract design
 
-> **Historical / superseded:** the node registry and transition contract below were removed. vNext extensions are typed leaf Operations and cannot own control flow; see [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+> **Historical / superseded:** the node registry and public generic-operation extension contract below were removed. The current authored surface has no generic extension escape hatch; use typed Actions defined by [DSL Authoring Surface Redesign](./2026-07-17-dsl-authoring-surface-redesign.md).
 
 Date: 2026-07-12
 

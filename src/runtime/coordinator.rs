@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use tokio::{sync::Semaphore, time::Instant as TokioInstant};
 
 use crate::{
-    dsl::vnext::compiler::CompiledWorkflow,
+    dsl::vnext::{compiler::CompiledWorkflow, raw::is_valid_error_code},
     events::{
         hub::{EventError, EventHub, TerminalResolution},
         protocol::{RunEventScope, RunEventType},
@@ -19,6 +19,10 @@ use crate::{
     observability::{elapsed_ms, json_size_bytes},
     outcome::{FailureKind, RunFailure, TerminalOutcome},
 };
+
+const INFRASTRUCTURE_FAILURE_CODE: &str = "INFRASTRUCTURE_FAILURE";
+const INFRASTRUCTURE_FAILURE_MESSAGE: &str = "runtime infrastructure failed";
+const OPERATION_TIMEOUT_CODE: &str = "OPERATION_TIMEOUT";
 
 use super::{
     scope_scheduler::{ScopeScheduler, ScopeSchedulerConfig},
@@ -293,13 +297,8 @@ impl RunCoordinator {
         run: &NewRun,
         started: Instant,
     ) -> Result<RunStatus, RunError> {
-        let message = "runtime infrastructure failed";
         let terminal = RunTerminal::Failed {
-            error: RunFailure {
-                kind: FailureKind::Infrastructure,
-                code: "INFRASTRUCTURE_FAILURE".to_string(),
-                message: message.to_string(),
-            },
+            error: public_infrastructure_failure(),
         };
         let attempted = terminal_log_summary_from_terminal(&terminal);
         let update = TerminalUpdate::new(&run.run_id, Utc::now(), terminal);
@@ -443,33 +442,48 @@ fn event_error(error: EventError) -> RunError {
 }
 
 fn public_run_failure(run_id: &str, error: &RunError) -> Result<RunFailure, RunError> {
-    let (kind, public_message) = match error.kind() {
+    let (kind, code, public_message) = match error.kind() {
         RunErrorKind::Operation => {
+            if !is_valid_error_code(error.code()) {
+                tracing::error!(
+                    run_id,
+                    failure_kind = "infrastructure",
+                    "root operation returned an invalid public error code"
+                );
+                return Ok(public_infrastructure_failure());
+            }
             tracing::warn!(
                 run_id,
                 code = error.code(),
                 failure_kind = "operation",
                 "root operation failed"
             );
-            (FailureKind::Operation, "operation failed")
+            (FailureKind::Operation, error.code(), "operation failed")
         }
         RunErrorKind::Timeout => {
+            if error.code() != OPERATION_TIMEOUT_CODE {
+                tracing::error!(
+                    run_id,
+                    failure_kind = "infrastructure",
+                    "root operation returned an invalid timeout error code"
+                );
+                return Ok(public_infrastructure_failure());
+            }
             tracing::warn!(
                 run_id,
                 code = error.code(),
                 failure_kind = "timeout",
                 "root operation timed out"
             );
-            (FailureKind::Timeout, "operation timed out")
+            (FailureKind::Timeout, error.code(), "operation timed out")
         }
         RunErrorKind::Infrastructure => {
             tracing::error!(
                 run_id,
-                code = error.code(),
                 failure_kind = "infrastructure",
                 "root operation reported an infrastructure failure"
             );
-            (FailureKind::Infrastructure, "runtime infrastructure failed")
+            return Ok(public_infrastructure_failure());
         }
         RunErrorKind::Stop => {
             return Err(RunError::infrastructure(
@@ -480,9 +494,17 @@ fn public_run_failure(run_id: &str, error: &RunError) -> Result<RunFailure, RunE
     };
     Ok(RunFailure {
         kind,
-        code: error.code().to_string(),
+        code: code.to_string(),
         message: public_message.to_string(),
     })
+}
+
+fn public_infrastructure_failure() -> RunFailure {
+    RunFailure {
+        kind: FailureKind::Infrastructure,
+        code: INFRASTRUCTURE_FAILURE_CODE.to_string(),
+        message: INFRASTRUCTURE_FAILURE_MESSAGE.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -542,6 +564,37 @@ mod tests {
         assert_eq!(failure.message, "operation failed");
         assert!(!failure.message.contains("password"));
         assert!(!failure.message.contains("provider"));
+    }
+
+    #[test]
+    fn invalid_or_internal_run_error_codes_become_one_public_infrastructure_failure() {
+        for error in [
+            RunError::operation(
+                "invalid-private-code",
+                "private operation payload must not escape",
+            ),
+            RunError::infrastructure(
+                "PRIVATE_INTERNAL_FAILURE",
+                "private infrastructure payload must not escape",
+            ),
+        ] {
+            let failure = public_run_failure("run_invalid_code", &error).unwrap();
+            assert_eq!(failure.kind, FailureKind::Infrastructure);
+            assert_eq!(failure.code, INFRASTRUCTURE_FAILURE_CODE);
+            assert_eq!(failure.message, INFRASTRUCTURE_FAILURE_MESSAGE);
+            assert!(!failure.message.contains("private"));
+            assert!(is_valid_error_code(&failure.code));
+        }
+    }
+
+    #[test]
+    fn operation_timeout_keeps_only_the_frozen_public_timeout_code() {
+        let failure =
+            public_run_failure("run_operation_timeout", &RunError::operation_timeout()).unwrap();
+
+        assert_eq!(failure.kind, FailureKind::Timeout);
+        assert_eq!(failure.code, OPERATION_TIMEOUT_CODE);
+        assert_eq!(failure.message, "operation timed out");
     }
 
     #[test]

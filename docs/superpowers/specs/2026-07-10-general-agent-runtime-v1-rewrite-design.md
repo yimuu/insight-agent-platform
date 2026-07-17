@@ -1,6 +1,6 @@
 # General Agent Runtime V1 Rewrite Design
 
-> **Historical / superseded:** the graph/node DSL and runtime in this document were removed. The canonical contract is [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+> **Historical / superseded:** the graph/node DSL and runtime in this document were removed. The current authored contract is [DSL Authoring Surface Redesign](./2026-07-17-dsl-authoring-surface-redesign.md), with retained Region/SSA runtime contracts in [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
 
 Date: 2026-07-10
 Status: Superseded by DSL vNext

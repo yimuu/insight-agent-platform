@@ -6,7 +6,11 @@
 //! reads only statically safe fields. Equality checks on scalar discriminators
 //! in an `&&` chain narrow captured union values for that switch arm.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 use cel::common::ast::{operators, CallExpr, Expr, IdedExpr, LiteralValue, SelectExpr};
 use serde_json::{Number, Value};
@@ -76,6 +80,51 @@ pub(crate) fn analyze_predicate(
     let mut narrowed_scope = scope.clone();
     apply_conjunctive_narrowings(program.expression(), &mut narrowed_scope);
     Ok(PredicateAnalysis { narrowed_scope })
+}
+
+/// Returns the top-level `scope.<binding>` names read by a CEL predicate.
+///
+/// This syntactic pass is intentionally separate from typed predicate
+/// analysis. Semantic validation uses it only to prove that a switch capture
+/// is consumed; lowering remains responsible for rejecting expressions that
+/// are outside the typed CEL profile.
+pub(crate) fn referenced_scope_bindings(
+    source: &str,
+) -> Result<BTreeSet<Identifier>, PredicateError> {
+    if source.trim().is_empty() {
+        return Err(PredicateError::new("CEL predicate must not be empty"));
+    }
+    let program = cel::Program::compile(source)
+        .map_err(|_| PredicateError::new("CEL predicate contains invalid syntax"))?;
+    let mut bindings = BTreeSet::new();
+    collect_scope_bindings(program.expression(), &mut bindings);
+    Ok(bindings)
+}
+
+fn collect_scope_bindings(expression: &IdedExpr, bindings: &mut BTreeSet<Identifier>) {
+    if let Some(path) = scope_path(expression) {
+        if let Some(binding) = path.first().and_then(|name| Identifier::parse(name).ok()) {
+            bindings.insert(binding);
+        }
+    }
+    match &expression.expr {
+        Expr::Select(select) => collect_scope_bindings(&select.operand, bindings),
+        Expr::Call(call) => {
+            if let Some(target) = &call.target {
+                collect_scope_bindings(target, bindings);
+            }
+            for argument in &call.args {
+                collect_scope_bindings(argument, bindings);
+            }
+        }
+        Expr::Ident(_)
+        | Expr::Literal(_)
+        | Expr::Unspecified
+        | Expr::Comprehension(_)
+        | Expr::List(_)
+        | Expr::Map(_)
+        | Expr::Struct(_) => {}
+    }
 }
 
 fn infer_type(expression: &IdedExpr, scope: &ValueType) -> Result<ValueType, PredicateError> {

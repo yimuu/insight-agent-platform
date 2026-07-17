@@ -1,6 +1,6 @@
 # Core Chat Dynamic Message Sources Design
 
-> **Historical / superseded:** `core.chat` and implicit dynamic message sources were removed. Canonical `ai.chat` instruction/data provenance is defined by [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+> **Historical / superseded:** `core.chat` and its configured dynamic-source syntax were removed. Current true `Message[]` inputs, automatic in-place expansion, and instruction/data provenance are defined by [DSL Authoring Surface Redesign](./2026-07-17-dsl-authoring-surface-redesign.md).
 
 ## Goal
 

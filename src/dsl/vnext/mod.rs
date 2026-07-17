@@ -1,13 +1,18 @@
-pub mod chat;
+pub(crate) mod chat;
 pub mod compiler;
 pub mod eval;
 pub mod ir;
 pub mod lower;
-pub mod operation;
+pub mod message;
+pub(crate) mod operation;
+pub mod plan;
 mod predicate;
 pub mod raw;
+pub mod runtime_message;
 pub mod schema;
 pub mod semantics;
+pub mod shape;
+pub mod template;
 pub mod types;
 pub mod value;
 

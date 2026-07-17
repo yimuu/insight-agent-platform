@@ -219,6 +219,124 @@ impl Serialize for ValuePath {
     }
 }
 
+/// A canonical path rooted in one LLM node's explicitly authored `inputs`.
+///
+/// This is intentionally separate from [`ValuePath`]: local LLM references
+/// cannot escape into the workflow expression language or read ambient scope.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LocalInputPath {
+    canonical: String,
+    binding: Identifier,
+    fields: Vec<String>,
+}
+
+impl LocalInputPath {
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.is_empty() || value.len() > 512 {
+            return Err("local input path must contain between 1 and 512 bytes".to_string());
+        }
+        if value.trim() != value {
+            return Err(
+                "local input path must not contain leading or trailing whitespace".to_string(),
+            );
+        }
+
+        let (dot_path, pointer) = match value.split_once('#') {
+            Some((dot_path, pointer)) if pointer.starts_with('/') => (dot_path, Some(pointer)),
+            Some(_) => {
+                return Err(
+                    "local input path JSON Pointer suffix must start with '/' after '#'"
+                        .to_string(),
+                )
+            }
+            None => (value.as_str(), None),
+        };
+        let segments = dot_path.split('.').collect::<Vec<_>>();
+        let ["inputs", binding, field_segments @ ..] = segments.as_slice() else {
+            return Err(
+                "local input path must use inputs.<binding> followed by optional fields"
+                    .to_string(),
+            );
+        };
+        let binding = Identifier::parse(*binding)?;
+        let mut fields = field_segments
+            .iter()
+            .map(|field| Identifier::parse(*field).map(|field| field.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(pointer) = pointer {
+            let pointer_fields = parse_json_pointer(pointer)?;
+            if pointer_fields
+                .first()
+                .is_some_and(|field| Identifier::parse(field).is_ok())
+            {
+                return Err(
+                    "local input path must keep the longest identifier-shaped prefix in dot notation"
+                        .to_string(),
+                );
+            }
+            fields.extend(pointer_fields);
+        }
+
+        Ok(Self {
+            canonical: value,
+            binding,
+            fields,
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.canonical
+    }
+
+    pub fn binding(&self) -> &Identifier {
+        &self.binding
+    }
+
+    pub fn fields(&self) -> &[String] {
+        &self.fields
+    }
+}
+
+impl fmt::Display for LocalInputPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.canonical)
+    }
+}
+
+impl FromStr for LocalInputPath {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for LocalInputPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(D::Error::custom)
+    }
+}
+
+impl Serialize for LocalInputPath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.canonical)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LocalInputRef {
+    pub from: LocalInputPath,
+}
+
 /// An explicitly bound string template. Templates never receive the global
 /// workflow context implicitly.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -238,7 +356,6 @@ pub enum ValueExpr {
     Object(BTreeMap<String, ValueExpr>),
     Array(Vec<ValueExpr>),
     Template(TemplateExpr),
-    Prompt(Identifier),
 }
 
 impl<'de> Deserialize<'de> for ValueExpr {
@@ -249,7 +366,7 @@ impl<'de> Deserialize<'de> for ValueExpr {
         let raw = Value::deserialize(deserializer)?;
         let object = raw.as_object().ok_or_else(|| {
             D::Error::custom(
-                "value expression must be an object with exactly one of literal, from, object, array, template, or prompt",
+                "value expression must be an object with exactly one of literal, from, object, array, or template",
             )
         })?;
         if object.len() != 1 {
@@ -272,9 +389,6 @@ impl<'de> Deserialize<'de> for ValueExpr {
             "template" => serde_json::from_value(value.clone())
                 .map(Self::Template)
                 .map_err(D::Error::custom),
-            "prompt" => serde_json::from_value(value.clone())
-                .map(Self::Prompt)
-                .map_err(D::Error::custom),
             _ => Err(D::Error::custom(format!(
                 "unknown value expression kind '{kind}'"
             ))),
@@ -296,7 +410,6 @@ impl Serialize for ValueExpr {
             Self::Object(value) => map.serialize_entry("object", value)?,
             Self::Array(value) => map.serialize_entry("array", value)?,
             Self::Template(value) => map.serialize_entry("template", value)?,
-            Self::Prompt(value) => map.serialize_entry("prompt", value)?,
         }
         map.end()
     }
@@ -304,7 +417,7 @@ impl Serialize for ValueExpr {
 
 #[cfg(test)]
 mod tests {
-    use super::{Identifier, ValueExpr, ValuePath, ValuePathRoot};
+    use super::{Identifier, LocalInputPath, LocalInputRef, ValueExpr, ValuePath, ValuePathRoot};
     use serde_json::json;
 
     #[test]
@@ -318,7 +431,7 @@ object:
   values:
     array:
       - {literal: null}
-      - {prompt: system}
+      - {literal: complete}
   label:
     template:
       text: "Result {{ name }}"
@@ -390,6 +503,43 @@ object:
     }
 
     #[test]
+    fn local_input_path_is_a_distinct_canonical_namespace() {
+        let path = LocalInputPath::parse("inputs.history#/0/content/1/text").unwrap();
+        assert_eq!(path.binding().as_str(), "history");
+        assert_eq!(path.fields(), ["0", "content", "1", "text"]);
+        assert_eq!(path.as_str(), "inputs.history#/0/content/1/text");
+
+        let reference: LocalInputRef = yaml_serde::from_str("from: inputs.report.details").unwrap();
+        assert_eq!(reference.from.binding().as_str(), "report");
+        assert_eq!(reference.from.fields(), ["details"]);
+    }
+
+    #[test]
+    fn local_input_path_rejects_ambient_and_noncanonical_access() {
+        for path in [
+            "inputs",
+            "input.question",
+            "scope.question",
+            "steps.answer.output",
+            "run.id",
+            "inputs.bad-name",
+            "inputs.items.0",
+            "inputs.items#0",
+            "inputs.items#/field",
+            "inputs.items#/bad~2escape",
+            " inputs.question",
+        ] {
+            assert!(
+                LocalInputPath::parse(path).is_err(),
+                "path '{path}' should be rejected"
+            );
+        }
+        assert!(
+            yaml_serde::from_str::<LocalInputRef>("from: inputs.question\nunknown: true").is_err()
+        );
+    }
+
+    #[test]
     fn rejects_unknown_fields_and_implicit_shapes() {
         for source in [
             "template: {text: hello, unknown: true}",
@@ -397,6 +547,7 @@ object:
             "{from: input.question, literal: fallback}",
             "input.question",
             "object: {question: input.question}",
+            "prompt: system",
         ] {
             assert!(
                 yaml_serde::from_str::<ValueExpr>(source).is_err(),

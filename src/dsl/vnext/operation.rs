@@ -10,7 +10,8 @@ use crate::{
 };
 
 use super::{
-    ir::OperationId,
+    ir::{OperationId, ValueId},
+    plan::{CallPlan, CallTarget},
     types::{SchemaType, ValueType},
     value::Identifier,
 };
@@ -19,10 +20,12 @@ pub const OPERATION_USES_INVALID: &str = "VNEXT_OPERATION_USES_INVALID";
 pub const OPERATION_DUPLICATE: &str = "VNEXT_OPERATION_DUPLICATE";
 pub const OPERATION_NOT_FOUND: &str = "VNEXT_OPERATION_NOT_FOUND";
 pub const ACTION_CALL_CONFIG_INVALID: &str = "VNEXT_ACTION_CALL_CONFIG_INVALID";
-pub const ACTION_CALL_INPUT_CONTRACT_INVALID: &str = "VNEXT_ACTION_CALL_INPUT_CONTRACT_INVALID";
-pub const ACTION_CALL_ACTION_NOT_FOUND: &str = "VNEXT_ACTION_CALL_ACTION_NOT_FOUND";
+pub const ACTION_CALL_INPUT_CONTRACT_INVALID: &str = "VNEXT_ACTION_INPUT_CONTRACT_INVALID";
+pub const ACTION_CALL_ACTION_NOT_FOUND: &str = "VNEXT_ACTION_NOT_FOUND";
 pub const ACTION_CALL_SCHEMA_INVALID: &str = "VNEXT_ACTION_CALL_SCHEMA_INVALID";
-pub const ACTION_CALL_INPUT_TYPE_MISMATCH: &str = "VNEXT_ACTION_CALL_INPUT_TYPE_MISMATCH";
+pub const ACTION_CALL_INPUT_TYPE_MISMATCH: &str = "VNEXT_ACTION_INPUT_CONTRACT_INVALID";
+pub const ACTION_DESCRIPTOR_MISMATCH: &str = "VNEXT_ACTION_DESCRIPTOR_MISMATCH";
+pub const OPERATION_PLAN_INVALID: &str = "VNEXT_OPERATION_PLAN_INVALID";
 
 const OPERATION_USES_INVALID_MESSAGE: &str = "operation uses must not be empty";
 const OPERATION_DUPLICATE_MESSAGE: &str = "operation uses is already registered";
@@ -34,6 +37,9 @@ const ACTION_CALL_ACTION_NOT_FOUND_MESSAGE: &str = "action.call action is not re
 const ACTION_CALL_SCHEMA_INVALID_MESSAGE: &str = "action.call action schema is invalid";
 const ACTION_CALL_INPUT_TYPE_MISMATCH_MESSAGE: &str =
     "action.call input type is not assignable to the action input schema";
+const ACTION_DESCRIPTOR_MISMATCH_MESSAGE: &str =
+    "registered action descriptor differs from the compiled action plan";
+const OPERATION_PLAN_INVALID_MESSAGE: &str = "operation received an invalid typed call plan";
 
 /// A stable, data-free compile or registration failure at the operation boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +73,6 @@ impl Error for OperationError {}
 /// The externally visible side-effect class used by the scheduler and policy layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationEffect {
-    Pure,
     ExternalModel,
     ExternalAction,
 }
@@ -88,6 +93,12 @@ pub struct OperationContext {
     pub operation_id: OperationId,
     pub attempt: u32,
     pub control: ExecutionControl,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvaluatedCall {
+    pub inputs: BTreeMap<Identifier, Value>,
+    pub dependencies: BTreeMap<ValueId, Value>,
 }
 
 impl OperationContext {
@@ -123,6 +134,35 @@ pub trait Operation: Send + Sync {
         inputs: BTreeMap<Identifier, Value>,
         context: OperationContext,
     ) -> Result<Value, RunError>;
+
+    fn preflight_plan(
+        &self,
+        plan: &CallPlan,
+        inputs: &BTreeMap<Identifier, ValueType>,
+    ) -> Result<(), OperationError> {
+        let config = legacy_action_config(plan)?;
+        self.compile(&config, inputs).map(|_| ())
+    }
+
+    async fn execute_plan(
+        &self,
+        plan: &CallPlan,
+        call: EvaluatedCall,
+        context: OperationContext,
+    ) -> Result<Value, RunError> {
+        let config = legacy_action_config(plan).map_err(operation_error_to_run_error)?;
+        self.execute(&config, call.inputs, context).await
+    }
+}
+
+fn legacy_action_config(plan: &CallPlan) -> Result<Value, OperationError> {
+    match plan {
+        CallPlan::Action(plan) => Ok(serde_json::json!({"action": plan.action_id})),
+        CallPlan::Llm(_) => Err(OperationError::new(
+            OPERATION_PLAN_INVALID,
+            OPERATION_PLAN_INVALID_MESSAGE,
+        )),
+    }
 }
 
 /// Registry for leaf operations only. Structured control never enters this registry.
@@ -165,6 +205,24 @@ impl OperationRegistry {
             .get(uses)
             .cloned()
             .ok_or_else(|| OperationError::new(OPERATION_NOT_FOUND, OPERATION_NOT_FOUND_MESSAGE))
+    }
+
+    pub fn resolve_target(&self, target: CallTarget) -> Result<Arc<dyn Operation>, OperationError> {
+        self.resolve(target.operation_type())
+    }
+
+    pub fn resolve_plan(
+        &self,
+        target: CallTarget,
+        _plan: &CallPlan,
+    ) -> Result<Arc<dyn Operation>, OperationError> {
+        #[cfg(test)]
+        if let CallPlan::Action(plan) = _plan {
+            if let Some(operation) = self.operations.get(&plan.action_id) {
+                return Ok(Arc::clone(operation));
+            }
+        }
+        self.resolve_target(target)
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
@@ -275,8 +333,39 @@ impl Operation for ActionCallOperation {
             output_schema: descriptor.output_schema.clone(),
             output_type,
             effect: OperationEffect::ExternalAction,
-            idempotent: descriptor.idempotent,
+            idempotent: descriptor.idempotency.is_idempotent(),
         })
+    }
+
+    fn preflight_plan(
+        &self,
+        plan: &CallPlan,
+        inputs: &BTreeMap<Identifier, ValueType>,
+    ) -> Result<(), OperationError> {
+        let CallPlan::Action(plan) = plan else {
+            return Err(OperationError::new(
+                OPERATION_PLAN_INVALID,
+                OPERATION_PLAN_INVALID_MESSAGE,
+            ));
+        };
+        let action = self.actions.resolve(&plan.action_id).map_err(|_| {
+            OperationError::new(
+                ACTION_CALL_ACTION_NOT_FOUND,
+                ACTION_CALL_ACTION_NOT_FOUND_MESSAGE,
+            )
+        })?;
+        let identity = action.identity();
+        if identity.id != plan.action_id
+            || identity.version != plan.descriptor_version
+            || identity.descriptor_hash != plan.descriptor_hash
+        {
+            return Err(OperationError::new(
+                ACTION_DESCRIPTOR_MISMATCH,
+                ACTION_DESCRIPTOR_MISMATCH_MESSAGE,
+            ));
+        }
+        self.compile(&serde_json::json!({"action": plan.action_id}), inputs)
+            .map(|_| ())
     }
 
     async fn execute(
@@ -328,7 +417,7 @@ fn operation_error_to_run_error(error: OperationError) -> RunError {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, BTreeSet},
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -337,7 +426,10 @@ mod tests {
     use serde_json::{json, Value};
 
     use crate::{
-        resources::actions::{Action, ActionContext, ActionDescriptor, ActionRegistry},
+        resources::actions::{
+            Action, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass,
+            EffectClass, IdempotencyClass,
+        },
         runtime::{stop_pair, ExecutionControl, RunError},
     };
 
@@ -356,10 +448,14 @@ mod tests {
     impl Action for EchoAction {
         fn descriptor(&self) -> ActionDescriptor {
             ActionDescriptor {
-                name: ECHO_ACTION,
+                id: ECHO_ACTION,
+                version: "1.0.0",
                 input_schema: input_schema(),
                 output_schema: output_schema(),
-                idempotent: true,
+                effect: EffectClass::Pure,
+                idempotency: IdempotencyClass::Idempotent,
+                cancellation: CancellationClass::NotSupported,
+                required_capabilities: BTreeSet::new(),
             }
         }
 
@@ -390,7 +486,7 @@ mod tests {
             Ok(CompiledOperationContract {
                 output_schema: Value::Bool(true),
                 output_type: ValueType::Any,
-                effect: OperationEffect::Pure,
+                effect: OperationEffect::ExternalAction,
                 idempotent: true,
             })
         }
@@ -408,6 +504,13 @@ mod tests {
     #[test]
     fn action_call_compile_maps_action_contract_metadata() {
         let (operation, _) = action_call_operation();
+        let normalized_output_schema = operation
+            .actions
+            .resolve(ECHO_ACTION)
+            .unwrap()
+            .descriptor()
+            .output_schema
+            .clone();
         let contract = operation
             .compile(
                 &json!({"action": ECHO_ACTION}),
@@ -420,15 +523,52 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(contract.output_schema, output_schema());
+        assert_eq!(contract.output_schema, normalized_output_schema);
         assert_eq!(
             contract.output_type,
-            SchemaType::compile(&output_schema())
+            SchemaType::compile(&contract.output_schema)
                 .unwrap()
                 .into_value_type()
         );
         assert_eq!(contract.effect, OperationEffect::ExternalAction);
         assert!(contract.idempotent);
+    }
+
+    #[test]
+    fn action_descriptor_mismatch_fails_preflight_before_the_action_is_called() {
+        let (operation, calls) = action_call_operation();
+        let action = operation.actions.resolve(ECHO_ACTION).unwrap();
+        let identity = action.identity().clone();
+        let input_type = SchemaType::compile(&input_schema())
+            .unwrap()
+            .into_value_type();
+        let output_type = SchemaType::compile(&output_schema())
+            .unwrap()
+            .into_value_type();
+        let mut plan = CallPlan::Action(super::super::plan::CompiledActionPlan {
+            action_id: identity.id,
+            descriptor_version: identity.version,
+            descriptor_hash: identity.descriptor_hash,
+            input_object: ValueId::expression("/workflow/action", 0).unwrap(),
+            input_contract: super::super::ir::TypedContract {
+                schema: input_schema(),
+                value_type: input_type.clone(),
+            },
+            output_contract: super::super::ir::TypedContract {
+                schema: output_schema(),
+                value_type: output_type,
+            },
+        });
+        let inputs = BTreeMap::from([(identifier("input"), input_type)]);
+        operation.preflight_plan(&plan, &inputs).unwrap();
+
+        let CallPlan::Action(compiled) = &mut plan else {
+            unreachable!()
+        };
+        compiled.descriptor_hash = "00".repeat(32);
+        let error = operation.preflight_plan(&plan, &inputs).unwrap_err();
+        assert_eq!(error.code(), ACTION_DESCRIPTOR_MISMATCH);
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -471,7 +611,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(error.code(), "ACTION_INPUT_INVALID");
+        assert_eq!(error.code(), "VNEXT_ACTION_INPUT_CONTRACT_INVALID");
 
         let mut actions = ActionRegistry::default();
         actions
@@ -485,7 +625,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(error.code(), "ACTION_OUTPUT_INVALID");
+        assert_eq!(error.code(), "VNEXT_ACTION_OUTPUT_CONTRACT_INVALID");
     }
 
     #[test]
@@ -554,10 +694,14 @@ mod tests {
     impl Action for InvalidOutputAction {
         fn descriptor(&self) -> ActionDescriptor {
             ActionDescriptor {
-                name: "test.invalid_output",
+                id: "test.invalid_output",
+                version: "1.0.0",
                 input_schema: input_schema(),
                 output_schema: output_schema(),
-                idempotent: false,
+                effect: EffectClass::Pure,
+                idempotency: IdempotencyClass::NonIdempotent,
+                cancellation: CancellationClass::NotSupported,
+                required_capabilities: BTreeSet::new(),
             }
         }
 

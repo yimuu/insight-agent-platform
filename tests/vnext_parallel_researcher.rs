@@ -118,11 +118,12 @@ impl ChatModel for ScenarioModel {
 
     async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, RunError> {
         let rendered = self.tracker.record(&request);
+        let is_synthesis = rendered.contains("supplied successful perspective values");
         let mode = if rendered.contains("Act as the technical-feasibility analyst") {
             self.scenario.technical
         } else if rendered.contains("Act as the risk-and-compliance analyst") {
             self.scenario.risk
-        } else if rendered.contains("supplied successful perspective values") {
+        } else if is_synthesis {
             self.scenario.synthesis
         } else {
             return Err(RunError::operation(
@@ -134,10 +135,19 @@ impl ChatModel for ScenarioModel {
         match mode {
             ResponseMode::Success(text) => {
                 self.tracker.stream_started();
+                let text = if is_synthesis {
+                    json!({
+                        "content": text,
+                        "degraded": rendered.contains("<failure>"),
+                    })
+                    .to_string()
+                } else {
+                    text.to_string()
+                };
                 Ok(Box::pin(SuccessfulChatStream {
                     tracker: Arc::clone(&self.tracker),
                     inner: stream::iter([Ok(ChatChunk {
-                        text: text.to_string(),
+                        text,
                         finish_reason: Some("stop".to_string()),
                         usage: Some(json!({"total_tokens": 1})),
                     })]),
@@ -397,22 +407,33 @@ async fn full_success_uses_distinct_perspectives_and_complete_synthesis() {
     let synthesis = synthesis_request(&requests);
     assert!(synthesis.contains("technical evidence"));
     assert!(synthesis.contains("risk evidence"));
+    assert!(!synthesis.contains("<failure>"));
     assert!(!synthesis.contains("\"status\":\"ok\""));
 }
 
 #[tokio::test]
-async fn each_partial_success_is_degraded_and_excludes_failure_metadata() {
-    for scenario in [
-        Scenario {
-            technical: ResponseMode::Fail("PRIVATE_TECHNICAL_FAILURE"),
-            risk: ResponseMode::Success("risk-only evidence"),
-            synthesis: ResponseMode::Success("risk-only synthesis"),
-        },
-        Scenario {
-            technical: ResponseMode::Success("technical-only evidence"),
-            risk: ResponseMode::Fail("PRIVATE_RISK_FAILURE"),
-            synthesis: ResponseMode::Success("technical-only synthesis"),
-        },
+async fn each_partial_success_uses_only_success_values_and_closed_failure_metadata() {
+    for (scenario, successful_value, failed_branch, failure_code) in [
+        (
+            Scenario {
+                technical: ResponseMode::Fail("PRIVATE_TECHNICAL_FAILURE"),
+                risk: ResponseMode::Success("risk-only evidence"),
+                synthesis: ResponseMode::Success("risk-only synthesis"),
+            },
+            "risk-only evidence",
+            "technical",
+            "PRIVATE_TECHNICAL_FAILURE",
+        ),
+        (
+            Scenario {
+                technical: ResponseMode::Success("technical-only evidence"),
+                risk: ResponseMode::Fail("PRIVATE_RISK_FAILURE"),
+                synthesis: ResponseMode::Success("technical-only synthesis"),
+            },
+            "technical-only evidence",
+            "risk",
+            "PRIVATE_RISK_FAILURE",
+        ),
     ] {
         let (result, tracker) = run(scenario).await;
         let RunExecutionResult::Ended(TerminalOutcome::Success { output }) = result else {
@@ -422,8 +443,13 @@ async fn each_partial_success_is_degraded_and_excludes_failure_metadata() {
         let requests = tracker.requests();
         assert_eq!(requests.len(), 3);
         let synthesis = synthesis_request(&requests);
-        assert!(!synthesis.contains("PRIVATE_TECHNICAL_FAILURE"));
-        assert!(!synthesis.contains("PRIVATE_RISK_FAILURE"));
+        assert!(synthesis.contains(successful_value));
+        assert!(synthesis.contains("<failure>"));
+        assert!(synthesis.contains(&format!("branch: {failed_branch}")));
+        assert!(synthesis.contains(&format!("code: {failure_code}")));
+        assert!(synthesis.contains("category: operation"));
+        assert!(synthesis.contains("retryable: false"));
+        assert!(synthesis.contains("origin:"));
         assert!(!synthesis.contains("PRIVATE_MODEL_DIAGNOSTIC"));
         assert!(!synthesis.contains("\"status\":\"error\""));
         assert!(!synthesis.contains("\"status\":\"ok\""));
@@ -488,7 +514,7 @@ async fn zero_success_raises_declared_workflow_error_without_synthesis() {
 }
 
 #[tokio::test]
-async fn switch_region_output_schema_rejects_empty_synthesis() {
+async fn llm_response_contract_rejects_empty_synthesis() {
     let (result, _) = run(Scenario {
         technical: ResponseMode::Success("technical evidence"),
         risk: ResponseMode::Success("risk evidence"),
@@ -497,9 +523,9 @@ async fn switch_region_output_schema_rejects_empty_synthesis() {
     .await;
 
     let RunExecutionResult::Failed(error) = result else {
-        panic!("expected region output contract failure")
+        panic!("expected LLM response contract failure")
     };
-    assert_eq!(error.code(), "VNEXT_REGION_OUTPUT_INVALID");
+    assert_eq!(error.code(), "VNEXT_LLM_RESPONSE_CONTRACT_INVALID");
 }
 
 #[tokio::test]
@@ -608,7 +634,7 @@ fn render_request(request: &ChatRequest) -> String {
                 .iter()
                 .filter_map(|part| match part {
                     ChatContentPart::Text { text } => Some(text.as_str()),
-                    ChatContentPart::ImageUrl { .. } => None,
+                    ChatContentPart::Image { .. } => None,
                 })
                 .collect(),
         })

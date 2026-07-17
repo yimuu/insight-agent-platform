@@ -19,7 +19,8 @@ use crate::{
 };
 
 use super::models::{
-    model_response_too_large, ChatChunk, ChatMessage, ChatModel, ChatRequest, ChatStream,
+    model_response_too_large, serialized_json_within_limit, validate_chat_request, ChatChunk,
+    ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest, ChatRole, ChatStream,
     ModelCapability, DEFAULT_MAX_ACCUMULATED_TEXT_BYTES,
 };
 
@@ -220,7 +221,39 @@ impl ChatModel for OpenAiChatModel {
         self.limits.max_accumulated_text_bytes
     }
 
+    fn request_body_within_limit(&self, request: &ChatRequest, max_bytes: usize) -> bool {
+        let Some(parameters) = request.parameters.as_object().cloned() else {
+            return false;
+        };
+        let messages = request
+            .messages
+            .iter()
+            .map(OpenAiMessage::from)
+            .collect::<Vec<_>>();
+        serialized_json_within_limit(
+            &OpenAiRequest {
+                model: &self.model,
+                messages: &messages,
+                stream: true,
+                parameters,
+            },
+            max_bytes,
+        )
+    }
+
     async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, RunError> {
+        validate_chat_request(&request)?;
+        if request
+            .messages
+            .iter()
+            .any(|message| !message.image_urls().is_empty())
+            && !self.capabilities.contains(&ModelCapability::Vision)
+        {
+            return Err(RunError::operation(
+                "VNEXT_LLM_VISION_REQUIRED",
+                "chat provider request requires a vision-capable model",
+            ));
+        }
         self.validate_parameters(&request.parameters)
             .map_err(|error| RunError::operation(error.code(), error.to_string()))?;
         let parameters = request.parameters.as_object().cloned().ok_or_else(|| {
@@ -244,9 +277,14 @@ impl ChatModel for OpenAiChatModel {
             parameters_keys_count,
             "sending OpenAI-compatible chat request"
         );
+        let messages = request
+            .messages
+            .iter()
+            .map(OpenAiMessage::from)
+            .collect::<Vec<_>>();
         let body = OpenAiRequest {
             model: &self.model,
-            messages: &request.messages,
+            messages: &messages,
             stream: true,
             parameters,
         };
@@ -347,10 +385,58 @@ impl ChatModel for OpenAiChatModel {
 #[derive(Serialize)]
 struct OpenAiRequest<'a> {
     model: &'a str,
-    messages: &'a [ChatMessage],
+    messages: &'a [OpenAiMessage<'a>],
     stream: bool,
     #[serde(flatten)]
     parameters: Map<String, Value>,
+}
+
+#[derive(Serialize)]
+struct OpenAiMessage<'a> {
+    role: ChatRole,
+    content: OpenAiContent<'a>,
+}
+
+impl<'a> From<&'a ChatMessage> for OpenAiMessage<'a> {
+    fn from(message: &'a ChatMessage) -> Self {
+        let content = match &message.content {
+            ChatContent::Text(text) => OpenAiContent::Text(text),
+            ChatContent::Parts(parts) => OpenAiContent::Parts(
+                parts
+                    .iter()
+                    .map(|part| match part {
+                        ChatContentPart::Text { text } => OpenAiContentPart::Text { text },
+                        ChatContentPart::Image { image } => OpenAiContentPart::ImageUrl {
+                            image_url: OpenAiImageUrl { url: image },
+                        },
+                    })
+                    .collect(),
+            ),
+        };
+        Self {
+            role: message.role,
+            content,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum OpenAiContent<'a> {
+    Text(&'a str),
+    Parts(Vec<OpenAiContentPart<'a>>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenAiContentPart<'a> {
+    Text { text: &'a str },
+    ImageUrl { image_url: OpenAiImageUrl<'a> },
+}
+
+#[derive(Serialize)]
+struct OpenAiImageUrl<'a> {
+    url: &'a str,
 }
 
 type ResponseByteStream =

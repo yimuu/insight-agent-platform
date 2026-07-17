@@ -18,7 +18,7 @@ use insight_agent_platform::{
     resources::{
         actions::ActionRegistry,
         models::{
-            ChatChunk, ChatContent, ChatContentPart, ChatModel, ChatRequest, ChatStream,
+            ChatChunk, ChatContent, ChatContentPart, ChatModel, ChatRequest, ChatRole, ChatStream,
             ModelCapability, ModelRegistry,
         },
     },
@@ -35,6 +35,7 @@ const FOLLOW_UP_RESULT: &str = "FOLLOW_UP_RESULT_SENTINEL";
 struct CapturedRequest {
     text: String,
     image_urls: Vec<String>,
+    messages: Vec<(ChatRole, String)>,
 }
 
 #[derive(Debug, Default)]
@@ -46,24 +47,31 @@ impl MedicalTracker {
     fn record(&self, request: &ChatRequest) -> CapturedRequest {
         let mut text = Vec::new();
         let mut image_urls = Vec::new();
+        let mut messages = Vec::new();
         for message in &request.messages {
+            let mut message_text = Vec::new();
             match &message.content {
-                ChatContent::Text(value) => text.push(value.clone()),
+                ChatContent::Text(value) => message_text.push(value.clone()),
                 ChatContent::Parts(parts) => {
                     for part in parts {
                         match part {
-                            ChatContentPart::Text { text: value } => text.push(value.clone()),
-                            ChatContentPart::ImageUrl { image_url } => {
-                                image_urls.push(image_url.url.clone());
+                            ChatContentPart::Text { text: value } => {
+                                message_text.push(value.clone());
+                            }
+                            ChatContentPart::Image { image } => {
+                                image_urls.push(image.clone());
                             }
                         }
                     }
                 }
             }
+            text.extend(message_text.iter().cloned());
+            messages.push((message.role, message_text.join("\n")));
         }
         let captured = CapturedRequest {
             text: text.join("\n"),
             image_urls,
+            messages,
         };
         self.requests.lock().unwrap().push(captured.clone());
         captured
@@ -227,6 +235,14 @@ async fn initial_route_runs_three_steps_and_transfers_each_prior_result() {
         assert!(requests[2].text.contains(COMPREHENSIVE_RESULT));
         for request in requests {
             assert_eq!(request.image_urls, expected_images);
+            assert_eq!(
+                request
+                    .messages
+                    .iter()
+                    .map(|(role, _)| *role)
+                    .collect::<Vec<_>>(),
+                vec![ChatRole::System, ChatRole::User]
+            );
         }
     }
 }
@@ -258,6 +274,22 @@ async fn follow_up_route_runs_only_the_follow_up_chat() {
     );
     assert!(requests[0].text.contains("需要多久复查"));
     assert!(requests[0].text.contains("此前已经说明 ALT 升高"));
+    assert_eq!(
+        requests[0]
+            .messages
+            .iter()
+            .map(|(role, _)| *role)
+            .collect::<Vec<_>>(),
+        vec![
+            ChatRole::System,
+            ChatRole::User,
+            ChatRole::Assistant,
+            ChatRole::User,
+        ]
+    );
+    assert_eq!(requests[0].messages[1].1, "请先解读肝功能");
+    assert_eq!(requests[0].messages[2].1, "此前已经说明 ALT 升高");
+    assert!(requests[0].messages[3].1.contains("需要多久复查"));
     assert!(requests[0].image_urls.is_empty());
     assert!(!requests[0].text.contains(ABNORMAL_RESULT));
     assert!(!requests[0].text.contains(COMPREHENSIVE_RESULT));

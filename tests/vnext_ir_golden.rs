@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, path::Path};
 
+use async_trait::async_trait;
 use insight_agent_platform::{
     dsl::vnext::{
         compiler::WorkflowCompiler,
@@ -8,11 +9,20 @@ use insight_agent_platform::{
             Parallel, ParameterSource, Phi, Region, RegionKind, RootReturn, Terminator,
             TypedContract, ValueDefinition, ValueId, ValueRole, WorkflowIr,
         },
+        plan::{
+            CallPlan, CompiledContentAtom, MessageSourcePlan, PlannedRole, PlannedTemplate,
+            TemplateProfileVersion, TemplateProvenance, ValidatedResponseContract,
+        },
         raw::{ErrorCategory, OutputFormat, ParallelSettle},
         types::ValueType,
         value::Identifier,
     },
-    resources::{actions::ActionRegistry, models::ModelRegistry},
+    resources::{
+        actions::ActionRegistry,
+        builtin_actions::TextMetricsAction,
+        models::{ChatModel, ChatRequest, ChatStream, ModelCapability, ModelRegistry},
+    },
+    runtime::RunError,
 };
 use serde_json::{json, Map, Value};
 
@@ -38,12 +48,33 @@ output:
     properties:
       answer: {type: string}
     additionalProperties: false
+prompts:
+  system:
+    inline: You are a concise analysis assistant.
 workflow:
   steps:
+    - kind: llm
+      id: analyze
+      model: golden_chat
+      inputs:
+        question: {from: input.question}
+      messages:
+        - role: system
+          content: system
+        - role: user
+          content: {from: inputs.question}
+      response: {format: text}
+
+    - kind: action
+      id: metrics
+      call: example.text_metrics
+      inputs:
+        text: {from: steps.analyze.output.data}
+
     - kind: parallel
       id: candidates
-      with:
-        question: {from: input.question}
+      inputs:
+        question: {from: steps.analyze.output.data}
       settle: all
       max_concurrency: 2
       branches:
@@ -58,7 +89,7 @@ workflow:
 
     - kind: switch
       id: selected
-      with:
+      inputs:
         candidates: {from: steps.candidates.output}
       output_schema: {type: string}
       cases:
@@ -78,9 +109,41 @@ workflow:
           answer: {from: steps.selected.output}
 "#;
 
+#[derive(Debug, Clone, Copy)]
+struct GoldenChatModel;
+
+#[async_trait]
+impl ChatModel for GoldenChatModel {
+    fn capabilities(&self) -> std::collections::BTreeSet<ModelCapability> {
+        std::collections::BTreeSet::new()
+    }
+
+    fn validate_parameters(
+        &self,
+        parameters: &Value,
+    ) -> Result<(), insight_agent_platform::dsl::CompileError> {
+        if parameters.is_object() {
+            Ok(())
+        } else {
+            Err(insight_agent_platform::dsl::CompileError::new(
+                "GOLDEN_MODEL_PARAMETERS_INVALID",
+                "golden model parameters must be an object",
+            ))
+        }
+    }
+
+    async fn stream_chat(&self, _request: ChatRequest) -> Result<ChatStream, RunError> {
+        panic!("golden IR compilation must not invoke the model")
+    }
+}
+
 #[test]
 fn normalized_region_ssa_has_a_stable_test_owned_serialization() {
-    let compiler = WorkflowCompiler::new(ModelRegistry::default(), ActionRegistry::default());
+    let mut models = ModelRegistry::default();
+    models.register("golden_chat", GoldenChatModel).unwrap();
+    let mut actions = ActionRegistry::default();
+    actions.register(TextMetricsAction).unwrap();
+    let compiler = WorkflowCompiler::new(models, actions);
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let first = compiler.compile_source(root, SOURCE).unwrap();
     let second = compiler.compile_source(root, SOURCE).unwrap();
@@ -91,10 +154,11 @@ fn normalized_region_ssa_has_a_stable_test_owned_serialization() {
         first, second,
         "repeated lowering must normalize identically"
     );
-    assert_eq!(
-        first,
-        include_str!("fixtures/vnext_normalized_ir.golden.json").trim_end()
-    );
+    let golden = root.join("tests/fixtures/vnext_normalized_ir.golden.json");
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&golden, format!("{first}\n")).unwrap();
+    }
+    assert_eq!(first, std::fs::read_to_string(golden).unwrap().trim_end());
 }
 
 /// Test-only serialization deliberately spells out every IR enum. This keeps the
@@ -109,7 +173,12 @@ fn workflow_snapshot(ir: &WorkflowIr) -> Value {
         "input": contract_snapshot(&ir.input),
         "output": contract_snapshot(&ir.output),
         "prompts": Value::Object(ir.prompts.iter().map(|(name, prompt)| {
-            (name.as_str().to_string(), json!({"text": prompt.text}))
+            (name.as_str().to_string(), json!({
+                "provenance": template_provenance_snapshot(&prompt.provenance),
+                "profile": template_profile(prompt.profile_version),
+                "source": prompt.compiled.source(),
+                "slots": prompt.compiled.slots().iter().map(Identifier::as_str).collect::<Vec<_>>(),
+            }))
         }).collect()),
         "errors": Value::Object(ir.errors.iter().map(|(name, error)| {
             let category = match error.category {
@@ -197,9 +266,6 @@ fn operation_kind_snapshot(kind: &OperationKind) -> Value {
             "text": text,
             "bindings": value_id_identifier_map(bindings),
         }),
-        OperationKind::Prompt { prompt } => {
-            json!({"kind": "prompt", "prompt": prompt.as_str()})
-        }
         OperationKind::Call(call) => call_snapshot(call),
         OperationKind::Parallel(parallel) => parallel_snapshot(parallel),
         OperationKind::Branch(branch) => branch_snapshot(branch),
@@ -210,10 +276,149 @@ fn operation_kind_snapshot(kind: &OperationKind) -> Value {
 fn call_snapshot(call: &Call) -> Value {
     json!({
         "kind": "call",
-        "uses": call.uses,
+        "target": call.target.operation_type(),
         "inputs": value_id_identifier_map(&call.inputs),
-        "config": call.config,
+        "plan": call_plan_snapshot(&call.plan),
     })
+}
+
+fn call_plan_snapshot(plan: &CallPlan) -> Value {
+    match plan {
+        CallPlan::Llm(plan) => json!({
+            "kind": "llm",
+            "model": plan.model.as_str(),
+            "local_inputs": value_id_identifier_map(&plan.local_inputs),
+            "message_sources": plan.message_sources.iter().map(message_source_snapshot).collect::<Vec<_>>(),
+            "templates": Value::Object(plan.templates.iter().map(|(id, template)| {
+                (id.as_str().to_string(), planned_template_snapshot(template))
+            }).collect()),
+            "parameters": plan.parameters.value(),
+            "response": response_snapshot(&plan.response),
+            "output_contract": contract_snapshot(&plan.output_contract),
+            "capabilities": plan.capabilities.iter().map(model_capability).collect::<Vec<_>>(),
+            "limits": {
+                "max_messages": plan.limits.max_messages,
+                "max_message_bytes": plan.limits.max_message_bytes,
+                "max_image_url_bytes": plan.limits.max_image_url_bytes,
+                "max_request_bytes": plan.limits.max_request_bytes,
+                "max_template_context_bytes": plan.limits.max_template_context_bytes,
+                "max_template_output_bytes": plan.limits.max_template_output_bytes,
+            },
+        }),
+        CallPlan::Action(plan) => json!({
+            "kind": "action",
+            "identity": {
+                "id": plan.action_id,
+                "version": plan.descriptor_version.to_string(),
+                "descriptor_hash": plan.descriptor_hash,
+            },
+            "input_object": value_id(&plan.input_object),
+            "input_contract": contract_snapshot(&plan.input_contract),
+            "output_contract": contract_snapshot(&plan.output_contract),
+        }),
+    }
+}
+
+fn message_source_snapshot(source: &MessageSourcePlan) -> Value {
+    match source {
+        MessageSourcePlan::Authored { role, content } => json!({
+            "kind": "authored",
+            "role": planned_role(*role),
+            "content": content.iter().map(content_atom_snapshot).collect::<Vec<_>>(),
+        }),
+        MessageSourcePlan::Dynamic {
+            source,
+            value,
+            proven_shape,
+        } => json!({
+            "kind": "dynamic",
+            "source": source.as_str(),
+            "value": value_id(value),
+            "proof": {"requires_vision": proven_shape.requires_vision},
+        }),
+    }
+}
+
+fn planned_role(role: PlannedRole) -> &'static str {
+    match role {
+        PlannedRole::System => "system",
+        PlannedRole::User => "user",
+        PlannedRole::Assistant => "assistant",
+    }
+}
+
+fn content_atom_snapshot(atom: &CompiledContentAtom) -> Value {
+    match atom {
+        CompiledContentAtom::Template {
+            template_id,
+            bindings,
+        } => json!({
+            "kind": "template",
+            "template_id": template_id.as_str(),
+            "bindings": value_id_identifier_map(bindings),
+        }),
+        CompiledContentAtom::RuntimeText { value } => json!({
+            "kind": "runtime_text",
+            "value": value_id(value),
+        }),
+        CompiledContentAtom::Image { value } => json!({
+            "kind": "image",
+            "value": value_id(value),
+        }),
+    }
+}
+
+fn planned_template_snapshot(template: &PlannedTemplate) -> Value {
+    json!({
+        "provenance": template_provenance_snapshot(&template.provenance),
+        "profile": template_profile(template.profile_version),
+        "source": template.compiled.source(),
+        "slots": template.compiled.slots().iter().map(Identifier::as_str).collect::<Vec<_>>(),
+        "slot_signature": Value::Object(template.slot_signature.iter().map(|(name, value_type)| {
+            (name.as_str().to_string(), value_type_snapshot(value_type))
+        }).collect()),
+    })
+}
+
+fn template_provenance_snapshot(provenance: &TemplateProvenance) -> Value {
+    match provenance {
+        TemplateProvenance::Catalog {
+            prompt_id,
+            asset_hash,
+        } => json!({
+            "kind": "catalog",
+            "prompt_id": prompt_id.as_str(),
+            "asset_hash": asset_hash,
+        }),
+        TemplateProvenance::Inline {
+            dsl_path,
+            source_hash,
+        } => json!({
+            "kind": "inline",
+            "dsl_path": dsl_path.to_string(),
+            "source_hash": source_hash,
+        }),
+    }
+}
+
+fn template_profile(profile: TemplateProfileVersion) -> &'static str {
+    profile.as_str()
+}
+
+fn response_snapshot(response: &ValidatedResponseContract) -> Value {
+    match response {
+        ValidatedResponseContract::Text => json!({"format": "text"}),
+        ValidatedResponseContract::Json { data } => json!({
+            "format": "json",
+            "data": contract_snapshot(data),
+        }),
+    }
+}
+
+fn model_capability(capability: &ModelCapability) -> &'static str {
+    match capability {
+        ModelCapability::Vision => "vision",
+    }
 }
 
 fn parallel_snapshot(parallel: &Parallel) -> Value {

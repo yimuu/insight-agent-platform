@@ -1,5 +1,7 @@
 # Medical Report Agent Implementation Plan
 
+> **Historical / superseded:** this plan predates the structured v2 DSL; its config/node and multimodal syntax is not accepted. The current `llm`/messages/content/image contract is [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an OpenAI-compatible multimodal medical report interpretation agent with text/image inputs, multi-turn context, non-report refusal prompts, and a three-step interpretation flow.

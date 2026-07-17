@@ -1,6 +1,6 @@
 # Core Chat Optional Image Parts Design
 
-> **Historical syntax:** optional-image behavior was migrated to the vNext `ai.chat` operation; the `core.chat` examples below are not accepted. See [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+> **Historical / superseded syntax:** `core.chat`, image parts, and `optional: true` are not accepted. Current nullable-image omission and `llm` content syntax are defined by [DSL Authoring Surface Redesign](./2026-07-17-dsl-authoring-surface-redesign.md).
 
 ## Goal
 

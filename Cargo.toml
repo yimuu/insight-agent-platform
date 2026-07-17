@@ -17,9 +17,10 @@ handlebars = "6"
 humantime = "2"
 jsonschema = { version = "0.47", default-features = false }
 reqwest = { version = "0.13", features = ["json", "stream", "rustls"], default-features = false }
+semver = "1"
 serde = { version = "1", features = ["derive"] }
+serde_jcs = "0.2"
 serde_json = "1"
-yaml_serde = "0.10.4"
 sha2 = "0.11"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "postgres", "chrono", "json", "migrate", "macros", "tls-rustls-ring-webpki"], default-features = false }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
@@ -28,6 +29,8 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+yaml-rust2 = { version = "0.11", default-features = false }
+yaml_serde = "0.10.4"
 
 [dev-dependencies]
 tower = "0.5"

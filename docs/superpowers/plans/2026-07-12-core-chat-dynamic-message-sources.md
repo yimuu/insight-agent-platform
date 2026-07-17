@@ -1,5 +1,7 @@
 # Core Chat Dynamic Message Sources Implementation Plan
 
+> **Historical / superseded:** `core.chat` and its configured dynamic-source syntax were removed. Current true `Message[]` inputs and automatic in-place expansion are defined by [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let `core.chat.messages` interleave static messages with bounded, strictly validated runtime message arrays from `input.*` or `nodes.<id>.output.*` paths.

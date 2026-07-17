@@ -1,6 +1,6 @@
 # Core Select Condition Convergence Design
 
-> **Historical / superseded:** authored `core.select` was removed; structured `switch` lowers to internal Branch/Phi. The canonical contract is [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+> **Historical / superseded:** authored `core.select` was removed; the current authored `switch` contract is [DSL Authoring Surface Redesign](./2026-07-17-dsl-authoring-surface-redesign.md), and its internal Branch/Phi lowering remains described by [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
 
 **Date:** 2026-07-13
 

@@ -1,6 +1,6 @@
 # Parallel Fork/Join Scheduler Implementation Plan
 
-> **Historical / superseded:** authored Fork/Join nodes and the flat scheduler were removed. See [DSL vNext Region/SSA Design](../specs/2026-07-16-dsl-vnext-region-ssa-design.md).
+> **Historical / superseded:** authored Fork/Join nodes and the flat scheduler were removed. See [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md) for current `parallel` syntax and [DSL vNext Region/SSA Design](../specs/2026-07-16-dsl-vnext-region-ssa-design.md) for retained runtime semantics.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

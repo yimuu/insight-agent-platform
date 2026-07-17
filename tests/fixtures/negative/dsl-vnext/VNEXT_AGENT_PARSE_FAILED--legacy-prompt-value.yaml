@@ -1,0 +1,18 @@
+api_version: insight.agent/v2
+kind: agent
+metadata: {id: legacy_prompt_value, name: Legacy Prompt Value, description: Negative fixture.}
+schema_dialect: https://json-schema.org/draft/2020-12/schema
+input:
+  schema: {type: object}
+output:
+  data_schema: {type: "null"}
+workflow:
+  steps:
+    - kind: action
+      id: now
+      call: current_time
+      inputs:
+        timezone: {prompt: timezone_prompt}
+  result:
+    return:
+      data: {literal: null}

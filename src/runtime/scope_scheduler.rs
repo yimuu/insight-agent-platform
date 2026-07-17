@@ -17,6 +17,7 @@ use std::{
 use cel::{Context as CelContext, Program as CelProgram, Value as CelValue};
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
 use handlebars::{no_escape, Handlebars, Template};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tokio::{
     sync::Semaphore,
@@ -31,8 +32,8 @@ use crate::{
             self, Branch, Operation as IrOperation, OperationKind, Parallel, ParameterSource, Phi,
             Region, RegionId, RootReturn as IrRootReturn, Terminator, ValueId, WorkflowIr,
         },
-        operation::{OperationContext, OperationRegistry},
-        raw::{OutputFormat, ParallelSettle},
+        operation::{EvaluatedCall, OperationContext, OperationRegistry},
+        raw::{is_valid_error_code, OutputFormat, ParallelSettle},
         types::ValueType,
         value::Identifier,
     },
@@ -70,6 +71,7 @@ const TEMPLATE_FAILED: &str = "VNEXT_TEMPLATE_FAILED";
 const TEMPLATE_OUTPUT_TOO_LARGE: &str = "VNEXT_TEMPLATE_OUTPUT_TOO_LARGE";
 const SWITCH_PROGRAM_INVALID: &str = "VNEXT_SWITCH_PROGRAM_INVALID";
 const SWITCH_EVALUATION_FAILED: &str = "VNEXT_SWITCH_EVALUATION_FAILED";
+const INFRASTRUCTURE_FAILURE: &str = "INFRASTRUCTURE_FAILURE";
 
 #[derive(Debug, Clone)]
 pub struct ScopeSchedulerConfig {
@@ -280,6 +282,41 @@ enum ScopeFailure {
     InternalCancelled,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SafeBranchErrorCategory {
+    Workflow,
+    Operation,
+    Timeout,
+}
+
+#[derive(Debug, Serialize)]
+struct SafeBranchErrorRecord<'a> {
+    category: SafeBranchErrorCategory,
+    code: &'a str,
+    retryable: bool,
+    origin: &'a str,
+}
+
+fn safe_branch_error_value(
+    category: SafeBranchErrorCategory,
+    code: &str,
+    origin: &str,
+) -> Option<Value> {
+    if !is_valid_error_code(code) || !ir::is_safe_branch_origin(origin) {
+        return None;
+    }
+    Some(
+        serde_json::to_value(SafeBranchErrorRecord {
+            category,
+            code,
+            retryable: false,
+            origin,
+        })
+        .expect("SafeBranchError contains only infallibly serializable scalar fields"),
+    )
+}
+
 type BranchFuture<'a> = BoxFuture<'a, (Identifier, Result<Value, ScopeFailure>)>;
 
 struct ScopeRuntime<'a> {
@@ -405,19 +442,6 @@ impl<'a> ScopeRuntime<'a> {
             OperationKind::Template { text, bindings } => RuntimeValue::Json(Value::String(
                 self.render_template(region, operation, text, bindings, values)?,
             )),
-            OperationKind::Prompt { prompt } => RuntimeValue::Json(Value::String(
-                self.scheduler
-                    .ir
-                    .prompts
-                    .get(prompt)
-                    .ok_or_else(|| {
-                        ScopeFailure::Infrastructure(infrastructure(
-                            "verified Prompt referenced a missing compiled prompt",
-                        ))
-                    })?
-                    .text
-                    .clone(),
-            )),
             OperationKind::Call(call) => RuntimeValue::Json(
                 self.execute_call(region, operation, call, values, cancel)
                     .await?,
@@ -507,6 +531,17 @@ impl<'a> ScopeRuntime<'a> {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, ScopeFailure>>()?;
+        let evaluated_dependencies = call
+            .plan
+            .dependencies()
+            .into_iter()
+            .map(|value| {
+                Ok((
+                    value.clone(),
+                    self.json_value(region, operation, values, &value)?.clone(),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, ScopeFailure>>()?;
         let input_types = call
             .inputs
             .iter()
@@ -522,32 +557,39 @@ impl<'a> ScopeRuntime<'a> {
                     })
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let executor = self.scheduler.operations.resolve(&call.uses).map_err(|_| {
-            ScopeFailure::Infrastructure(RunError::infrastructure(
-                OPERATION_REGISTRY_INVALID,
-                "verified Call uses an unregistered operation",
-            ))
-        })?;
-        let contract = executor.compile(&call.config, &input_types).map_err(|_| {
-            ScopeFailure::Infrastructure(RunError::infrastructure(
-                OPERATION_CONTRACT_INVALID,
-                "registered operation rejected its compiled Call contract",
-            ))
-        })?;
+        let executor = self
+            .scheduler
+            .operations
+            .resolve_plan(call.target, &call.plan)
+            .map_err(|_| {
+                ScopeFailure::Infrastructure(RunError::infrastructure(
+                    OPERATION_REGISTRY_INVALID,
+                    "verified Call target has no registered executor",
+                ))
+            })?;
+        executor
+            .preflight_plan(&call.plan, &input_types)
+            .map_err(|error| {
+                ScopeFailure::Infrastructure(RunError::infrastructure(
+                    error.code(),
+                    error.message(),
+                ))
+            })?;
+        let contract = call.plan.output_contract();
         let expected_output = self.value_types.get(&operation.output.id).ok_or_else(|| {
             ScopeFailure::Infrastructure(infrastructure(
                 "verified Call output did not have a static data type",
             ))
         })?;
-        if !contract.output_type.is_assignable_to(expected_output)
-            || !expected_output.is_assignable_to(&contract.output_type)
+        if !contract.value_type.is_assignable_to(expected_output)
+            || !expected_output.is_assignable_to(&contract.value_type)
         {
             return Err(ScopeFailure::Infrastructure(RunError::infrastructure(
                 OPERATION_CONTRACT_INVALID,
                 "registered operation output type differs from verified IR",
             )));
         }
-        let output_validator = compile_schema_2020(&contract.output_schema).map_err(|_| {
+        let output_validator = compile_schema_2020(&contract.schema).map_err(|_| {
             ScopeFailure::Infrastructure(RunError::infrastructure(
                 OPERATION_CONTRACT_INVALID,
                 "registered operation output schema is invalid",
@@ -584,7 +626,7 @@ impl<'a> ScopeRuntime<'a> {
                 &self.metadata.agent_version,
             ),
             operation.id.to_string(),
-            call.uses.clone(),
+            call.target.operation_type(),
             1,
         );
         let attempt_started = Instant::now();
@@ -607,9 +649,15 @@ impl<'a> ScopeRuntime<'a> {
         let result = {
             // Keep the attempt future inside this scope so every exit path drops it
             // before releasing either concurrency permit.
-            let execution =
-                AssertUnwindSafe(executor.execute(&call.config, evaluated_inputs, context))
-                    .catch_unwind();
+            let execution = AssertUnwindSafe(executor.execute_plan(
+                &call.plan,
+                EvaluatedCall {
+                    inputs: evaluated_inputs,
+                    dependencies: evaluated_dependencies,
+                },
+                context,
+            ))
+            .catch_unwind();
             tokio::pin!(execution);
             tokio::select! {
                 biased;
@@ -1015,13 +1063,10 @@ impl<'a> ScopeRuntime<'a> {
                     ))
                 })?;
                 if !validator.is_valid(value) {
-                    return Err(ScopeFailure::region_operation(
-                        region,
-                        RunError::operation(
-                            REGION_OUTPUT_INVALID,
-                            "region result does not satisfy its Draft 2020-12 contract",
-                        ),
-                    ));
+                    return Err(ScopeFailure::Infrastructure(RunError::infrastructure(
+                        REGION_OUTPUT_INVALID,
+                        "region result does not satisfy its Draft 2020-12 contract",
+                    )));
                 }
                 Ok(ScopeCompletion::Yield(value.clone()))
             }
@@ -1128,30 +1173,19 @@ impl<'a> ScopeRuntime<'a> {
         match failure {
             ScopeFailure::Authored { error, origin } => {
                 let declaration = self.scheduler.ir.errors.get(error)?;
-                Some(json!({
-                    "category": "workflow",
-                    "code": declaration.code,
-                    "retryable": false,
-                    "origin": origin,
-                }))
+                safe_branch_error_value(
+                    SafeBranchErrorCategory::Workflow,
+                    &declaration.code,
+                    origin,
+                )
             }
             ScopeFailure::Operation { error, origin }
                 if error.kind() == RunErrorKind::Operation =>
             {
-                Some(json!({
-                    "category": "operation",
-                    "code": error.code(),
-                    "retryable": false,
-                    "origin": origin,
-                }))
+                safe_branch_error_value(SafeBranchErrorCategory::Operation, error.code(), origin)
             }
             ScopeFailure::Operation { error, origin } if error.kind() == RunErrorKind::Timeout => {
-                Some(json!({
-                    "category": "timeout",
-                    "code": error.code(),
-                    "retryable": false,
-                    "origin": origin,
-                }))
+                safe_branch_error_value(SafeBranchErrorCategory::Timeout, error.code(), origin)
             }
             ScopeFailure::Operation { .. }
             | ScopeFailure::Stop(_)
@@ -1161,6 +1195,12 @@ impl<'a> ScopeRuntime<'a> {
     }
 
     fn classify_operation_error(&self, operation: &IrOperation, error: RunError) -> ScopeFailure {
+        if !is_valid_error_code(error.code()) {
+            return ScopeFailure::Infrastructure(RunError::infrastructure(
+                INFRASTRUCTURE_FAILURE,
+                "operation returned an invalid stable error code",
+            ));
+        }
         match error.kind() {
             RunErrorKind::Timeout if Instant::now() >= self.metadata.execution_deadline => {
                 ScopeFailure::Stop(RunError::stopped(StopReason::TimedOut))
@@ -1401,7 +1441,6 @@ fn compile_region_validators(
                 | OperationKind::Object { .. }
                 | OperationKind::Array { .. }
                 | OperationKind::Template { .. }
-                | OperationKind::Prompt { .. }
                 | OperationKind::Call(_)
                 | OperationKind::Phi(_) => {}
             }
@@ -1441,7 +1480,6 @@ fn collect_data_types(region: &Region, output: &mut BTreeMap<ValueId, ValueType>
             | OperationKind::Object { .. }
             | OperationKind::Array { .. }
             | OperationKind::Template { .. }
-            | OperationKind::Prompt { .. }
             | OperationKind::Call(_)
             | OperationKind::Phi(_) => {}
         }
@@ -1457,6 +1495,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
+    use semver::Version;
     use serde_json::json;
     use tokio::sync::Notify;
 
@@ -1468,6 +1507,7 @@ mod tests {
                 ValueDefinition,
             },
             operation::{CompiledOperationContract, Operation, OperationEffect, OperationError},
+            plan::{CallPlan, CallTarget, CompiledActionPlan},
             raw::{ErrorCategory, ErrorDeclaration, Metadata},
             types::{ObjectType, PropertyType},
         },
@@ -1518,6 +1558,7 @@ mod tests {
     enum FakeBehavior {
         Return(&'static str),
         Fail,
+        FailWithCode(&'static str),
         FailAfterStarted { other: Arc<Tracker> },
         PanicAfterStarted { other: Arc<Tracker> },
         PanicAfterStop { delay: Duration },
@@ -1546,7 +1587,7 @@ mod tests {
             Ok(CompiledOperationContract {
                 output_schema: json!({"type": "string"}),
                 output_type: ValueType::String,
-                effect: OperationEffect::Pure,
+                effect: OperationEffect::ExternalAction,
                 idempotent: true,
             })
         }
@@ -1563,6 +1604,10 @@ mod tests {
                 FakeBehavior::Fail => Err(RunError::operation(
                     "FAKE_OPERATION_FAILED",
                     "diagnostic that must not enter a settled envelope",
+                )),
+                FakeBehavior::FailWithCode(code) => Err(RunError::operation(
+                    code,
+                    "invalid-code diagnostic that must not enter a settled envelope",
                 )),
                 FakeBehavior::FailAfterStarted { other } => {
                     other.wait_started().await;
@@ -1654,26 +1699,8 @@ mod tests {
         })
     }
 
-    fn safe_error_type() -> ValueType {
-        object_type([
-            ("category", ValueType::String),
-            ("code", ValueType::String),
-            ("retryable", ValueType::Boolean),
-            ("origin", ValueType::String),
-        ])
-    }
-
     fn settled_type(value_type: ValueType) -> ValueType {
-        ValueType::Union(vec![
-            object_type([
-                ("status", ValueType::Literal(json!("ok"))),
-                ("value", value_type),
-            ]),
-            object_type([
-                ("status", ValueType::Literal(json!("error"))),
-                ("error", safe_error_type()),
-            ]),
-        ])
+        ir::settled_type(value_type)
     }
 
     fn schema_for_type(value_type: &ValueType) -> Value {
@@ -1825,16 +1852,42 @@ mod tests {
         }
     }
 
-    fn call_operation(path: &str, uses: &'static str) -> IrOperation {
-        IrOperation {
-            id: OperationId::authored(path).unwrap(),
-            output: data(ValueId::output(path).unwrap(), ValueType::String),
-            kind: OperationKind::Call(Call {
-                uses: uses.to_string(),
-                inputs: BTreeMap::new(),
-                config: json!({}),
-            }),
-        }
+    fn call_operations(path: &str, uses: &'static str) -> Vec<IrOperation> {
+        let input_object = ValueId::expression(path, 0).unwrap();
+        let input_type = object_type([]);
+        let input_contract = TypedContract {
+            schema: schema_for_type(&input_type),
+            value_type: input_type.clone(),
+        };
+        let output_contract = TypedContract {
+            schema: json!({"type":"string"}),
+            value_type: ValueType::String,
+        };
+        vec![
+            IrOperation {
+                id: OperationId::expression(path, 0).unwrap(),
+                output: data(input_object.clone(), input_type),
+                kind: OperationKind::Object {
+                    fields: BTreeMap::new(),
+                },
+            },
+            IrOperation {
+                id: OperationId::authored(path).unwrap(),
+                output: data(ValueId::output(path).unwrap(), ValueType::String),
+                kind: OperationKind::Call(Box::new(Call {
+                    target: CallTarget::ActionCall,
+                    inputs: BTreeMap::from([(identifier("input"), input_object.clone())]),
+                    plan: CallPlan::Action(CompiledActionPlan {
+                        action_id: uses.to_string(),
+                        descriptor_version: Version::new(1, 0, 0),
+                        descriptor_hash: "ab".repeat(32),
+                        input_object,
+                        input_contract,
+                        output_contract,
+                    }),
+                })),
+            },
+        ]
     }
 
     fn call_branch(
@@ -1850,7 +1903,7 @@ mod tests {
             id: region_id(path),
             kind,
             parameters: vec![capture_parameter(path, name, source)],
-            operations: vec![call_operation(&call_path, uses)],
+            operations: call_operations(&call_path, uses),
             result: TypedContract {
                 schema: json!({"type": "string"}),
                 value_type: ValueType::String,
@@ -2051,7 +2104,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nested_region_schema_failure_is_safely_collected_with_qualified_origin() {
+    async fn nested_region_schema_failure_escapes_all_settled_as_infrastructure() {
         let mut registry = OperationRegistry::default();
         register(
             &mut registry,
@@ -2072,32 +2125,14 @@ mod tests {
         );
         let (_, stop) = stop_pair();
 
-        let result = scheduler
+        let error = scheduler
             .run(metadata(), json!("question"), stop)
             .await
-            .unwrap();
+            .unwrap_err();
 
-        let RunExecutionResult::Ended(TerminalOutcome::Success { output }) = result else {
-            panic!("expected all_settled result")
-        };
-        assert_eq!(
-            output.data,
-            json!({
-                "nested": {
-                    "status": "error",
-                    "error": {
-                        "category": "operation",
-                        "code": REGION_OUTPUT_INVALID,
-                        "retryable": false,
-                        "origin": "/workflow/outer/branches/nested/select/cases/first"
-                    }
-                },
-                "plain": {"status": "ok", "value": "plain"}
-            })
-        );
-        let serialized = output.data.to_string();
-        assert!(!serialized.contains("message"));
-        assert!(!serialized.contains("PRIVATE_INVALID_VALUE"));
+        assert_eq!(error.kind(), RunErrorKind::Infrastructure);
+        assert_eq!(error.code(), REGION_OUTPUT_INVALID);
+        assert!(!error.to_string().contains("PRIVATE_INVALID_VALUE"));
         assert_eq!(second.started.load(Ordering::SeqCst), 0);
         assert_eq!(fallback.started.load(Ordering::SeqCst), 0);
     }
@@ -2106,7 +2141,7 @@ mod tests {
     async fn publishes_only_operation_lifecycle_metadata_without_output() {
         let output = ValueId::output("/workflow/emit").unwrap();
         let ir = workflow(
-            vec![call_operation("/workflow/emit", "test.emit")],
+            call_operations("/workflow/emit", "test.emit"),
             output,
             ValueType::String,
             json!({"type": "string"}),
@@ -2171,7 +2206,7 @@ mod tests {
             ]
         );
         let completed = &stored[1];
-        assert_eq!(completed.data["operation_type"], json!("test.emit"));
+        assert_eq!(completed.data["operation_type"], json!("action.call"));
         assert!(completed.data.get("output_bytes").is_some());
         assert!(!serde_json::to_string(completed)
             .unwrap()
@@ -2313,10 +2348,7 @@ mod tests {
     async fn external_stop_cleanup_panic_becomes_infrastructure_before_permit_release() {
         let output = ValueId::output("/workflow/external_cleanup_panic").unwrap();
         let ir = Arc::new(workflow(
-            vec![call_operation(
-                "/workflow/external_cleanup_panic",
-                "test.cleanup_panic",
-            )],
+            call_operations("/workflow/external_cleanup_panic", "test.cleanup_panic"),
             output,
             ValueType::String,
             json!({"type": "string"}),
@@ -2355,10 +2387,10 @@ mod tests {
     async fn external_stop_cleanup_infrastructure_failure_is_preserved() {
         let output = ValueId::output("/workflow/external_cleanup_infrastructure").unwrap();
         let ir = workflow(
-            vec![call_operation(
+            call_operations(
                 "/workflow/external_cleanup_infrastructure",
                 "test.cleanup_infrastructure",
-            )],
+            ),
             output,
             ValueType::String,
             json!({"type": "string"}),
@@ -2433,10 +2465,7 @@ mod tests {
     async fn operation_timeout_cleanup_panic_becomes_infrastructure() {
         let output = ValueId::output("/workflow/timeout_cleanup_panic").unwrap();
         let ir = workflow(
-            vec![call_operation(
-                "/workflow/timeout_cleanup_panic",
-                "test.cleanup_panic",
-            )],
+            call_operations("/workflow/timeout_cleanup_panic", "test.cleanup_panic"),
             output,
             ValueType::String,
             json!({"type": "string"}),
@@ -2468,10 +2497,7 @@ mod tests {
     async fn cleanup_panic_after_grace_is_dropped_and_preserves_timeout() {
         let output = ValueId::output("/workflow/late_cleanup_panic").unwrap();
         let ir = workflow(
-            vec![call_operation(
-                "/workflow/late_cleanup_panic",
-                "test.late_cleanup_panic",
-            )],
+            call_operations("/workflow/late_cleanup_panic", "test.late_cleanup_panic"),
             output,
             ValueType::String,
             json!({"type": "string"}),
@@ -2634,10 +2660,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_operation_error_code_is_not_collected_as_safe_branch_data() {
+        let mut registry = OperationRegistry::default();
+        register(&mut registry, "test.ok", FakeBehavior::Return("ok"));
+        register(
+            &mut registry,
+            "test.operation",
+            FakeBehavior::FailWithCode("invalid-private-code"),
+        );
+        register(
+            &mut registry,
+            "test.timeout",
+            FakeBehavior::WaitForStop {
+                cleanup: Duration::ZERO,
+            },
+        );
+        let scheduler =
+            ScopeScheduler::for_test(Arc::new(all_settled_workflow()), registry, config());
+        let (_, stop) = stop_pair();
+
+        let error = scheduler
+            .run(metadata(), json!("question"), stop)
+            .await
+            .expect_err("invalid operation codes must become infrastructure failures");
+        assert_eq!(error.code(), INFRASTRUCTURE_FAILURE);
+        assert_eq!(error.kind(), RunErrorKind::Infrastructure);
+        assert_eq!(
+            error.message(),
+            "operation returned an invalid stable error code"
+        );
+    }
+
+    #[tokio::test]
     async fn run_deadline_caps_attempt_remaining_and_still_drains_cleanup_after_expiry() {
         let output = ValueId::output("/workflow/deadline").unwrap();
         let ir = workflow(
-            vec![call_operation("/workflow/deadline", "test.deadline")],
+            call_operations("/workflow/deadline", "test.deadline"),
             output,
             ValueType::String,
             json!({"type": "string"}),
@@ -2765,7 +2823,7 @@ mod tests {
     async fn process_operation_capacity_is_shared_across_runs() {
         let output = ValueId::output("/workflow/wait").unwrap();
         let ir = Arc::new(workflow(
-            vec![call_operation("/workflow/wait", "test.wait")],
+            call_operations("/workflow/wait", "test.wait"),
             output,
             ValueType::String,
             json!({"type": "string"}),

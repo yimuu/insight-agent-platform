@@ -1,5 +1,7 @@
 # Extension Integration Contract Implementation Plan
 
+> **Historical / superseded:** this plan targets the removed public node/generic-operation extension surface. The current authored surface has no generic extension escape hatch; use typed Actions as defined by [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Prove the statically linked custom-node extension contract end to end through YAML compilation, runtime dispatch, durable events, node output persistence, and terminal Run state.

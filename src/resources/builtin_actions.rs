@@ -10,7 +10,10 @@ use tokio::time::sleep;
 
 use crate::{dsl::CompileError, runtime::RunError};
 
-use super::actions::{Action, ActionContext, ActionDescriptor, ActionRegistry};
+use super::actions::{
+    Action, ActionCapability, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass,
+    EffectClass, IdempotencyClass,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct CurrentTimeAction;
@@ -19,7 +22,8 @@ pub struct CurrentTimeAction;
 impl Action for CurrentTimeAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            name: "current_time",
+            id: "current_time",
+            version: "1.0.0",
             input_schema: json!({
                 "type":"object",
                 "properties":{"timezone":{"type":"string"}},
@@ -34,7 +38,10 @@ impl Action for CurrentTimeAction {
                 },
                 "additionalProperties":false
             }),
-            idempotent: false,
+            effect: EffectClass::ReadOnly,
+            idempotency: IdempotencyClass::NonIdempotent,
+            cancellation: CancellationClass::NotSupported,
+            required_capabilities: BTreeSet::from([ActionCapability::new("clock")]),
         }
     }
 
@@ -61,7 +68,8 @@ pub struct TextMetricsAction;
 impl Action for TextMetricsAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            name: "example.text_metrics",
+            id: "example.text_metrics",
+            version: "1.0.0",
             input_schema: json!({
                 "type":"object",
                 "required":["text"],
@@ -78,7 +86,10 @@ impl Action for TextMetricsAction {
                 },
                 "additionalProperties":false
             }),
-            idempotent: true,
+            effect: EffectClass::Pure,
+            idempotency: IdempotencyClass::Idempotent,
+            cancellation: CancellationClass::NotSupported,
+            required_capabilities: BTreeSet::new(),
         }
     }
 
@@ -170,7 +181,8 @@ impl RestrictedHttpGetAction {
 impl Action for RestrictedHttpGetAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            name: "http_get",
+            id: "http_get",
+            version: "1.0.0",
             input_schema: json!({
                 "type":"object",
                 "required":["url"],
@@ -186,7 +198,10 @@ impl Action for RestrictedHttpGetAction {
                 },
                 "additionalProperties":false
             }),
-            idempotent: true,
+            effect: EffectClass::ReadOnly,
+            idempotency: IdempotencyClass::Idempotent,
+            cancellation: CancellationClass::Cooperative,
+            required_capabilities: BTreeSet::from([ActionCapability::new("network.https")]),
         }
     }
 

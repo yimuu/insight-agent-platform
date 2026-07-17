@@ -1,5 +1,7 @@
 # Stable Baseline Review Implementation Plan
 
+> **Historical / superseded for DSL references:** this plan audits the removed graph/node baseline. Current authored syntax is defined by [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Produce an evidence-backed whole-repository stability review and an independent dependency-governance review for the fixed `main@af414de` code baseline without changing product code or dependencies.

@@ -1,0 +1,18 @@
+api_version: insight.agent/v2
+kind: agent
+metadata: {id: legacy_operation, name: Legacy Operation, description: Negative fixture.}
+schema_dialect: https://json-schema.org/draft/2020-12/schema
+input:
+  schema: {type: object}
+output:
+  data_schema: {type: "null"}
+workflow:
+  steps:
+    - kind: operation
+      id: answer
+      uses: ai.chat
+      with: {}
+      config: {}
+  result:
+    return:
+      data: {literal: null}

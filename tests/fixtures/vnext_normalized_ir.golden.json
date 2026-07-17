@@ -58,7 +58,18 @@
       "additional_properties": null
     }
   },
-  "prompts": {},
+  "prompts": {
+    "system": {
+      "provenance": {
+        "kind": "catalog",
+        "prompt_id": "system",
+        "asset_hash": "sha256:821997787da9467c70669e4106a67badfba2b3261b3230aff12c85db767d2420"
+      },
+      "profile": "llm-template/v1",
+      "source": "You are a concise analysis assistant.",
+      "slots": []
+    }
+  },
   "errors": {},
   "root": {
     "id": "/workflow",
@@ -141,6 +152,353 @@
     ],
     "operations": [
       {
+        "id": "/workflow/analyze#expression:0",
+        "output": {
+          "id": "/workflow/analyze#expression_output:0",
+          "type": {
+            "kind": "data",
+            "value_type": {
+              "kind": "string"
+            }
+          }
+        },
+        "operation": {
+          "kind": "project",
+          "source": "/workflow#parameter:0",
+          "path": "question"
+        }
+      },
+      {
+        "id": "/workflow/analyze#authored",
+        "output": {
+          "id": "/workflow/analyze#authored_output",
+          "type": {
+            "kind": "data",
+            "value_type": {
+              "kind": "object",
+              "properties": {
+                "data": {
+                  "required": true,
+                  "value_type": {
+                    "kind": "string"
+                  }
+                },
+                "finish_reason": {
+                  "required": true,
+                  "value_type": {
+                    "kind": "union",
+                    "variants": [
+                      {
+                        "kind": "string"
+                      },
+                      {
+                        "kind": "null"
+                      }
+                    ]
+                  }
+                },
+                "usage": {
+                  "required": true,
+                  "value_type": {
+                    "kind": "any"
+                  }
+                }
+              },
+              "additional_properties": null
+            }
+          }
+        },
+        "operation": {
+          "kind": "call",
+          "target": "ai.chat",
+          "inputs": {
+            "question": "/workflow/analyze#expression_output:0"
+          },
+          "plan": {
+            "kind": "llm",
+            "model": "golden_chat",
+            "local_inputs": {
+              "question": "/workflow/analyze#expression_output:0"
+            },
+            "message_sources": [
+              {
+                "kind": "authored",
+                "role": "system",
+                "content": [
+                  {
+                    "kind": "template",
+                    "template_id": "catalog:system",
+                    "bindings": {}
+                  }
+                ]
+              },
+              {
+                "kind": "authored",
+                "role": "user",
+                "content": [
+                  {
+                    "kind": "runtime_text",
+                    "value": "/workflow/analyze#expression_output:0"
+                  }
+                ]
+              }
+            ],
+            "templates": {
+              "catalog:system": {
+                "provenance": {
+                  "kind": "catalog",
+                  "prompt_id": "system",
+                  "asset_hash": "sha256:821997787da9467c70669e4106a67badfba2b3261b3230aff12c85db767d2420"
+                },
+                "profile": "llm-template/v1",
+                "source": "You are a concise analysis assistant.",
+                "slots": [],
+                "slot_signature": {}
+              }
+            },
+            "parameters": {},
+            "response": {
+              "format": "text"
+            },
+            "output_contract": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "data",
+                  "finish_reason",
+                  "usage"
+                ],
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "finish_reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "usage": true
+                },
+                "additionalProperties": false,
+                "$defs": {}
+              },
+              "value_type": {
+                "kind": "object",
+                "properties": {
+                  "data": {
+                    "required": true,
+                    "value_type": {
+                      "kind": "string"
+                    }
+                  },
+                  "finish_reason": {
+                    "required": true,
+                    "value_type": {
+                      "kind": "union",
+                      "variants": [
+                        {
+                          "kind": "string"
+                        },
+                        {
+                          "kind": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "usage": {
+                    "required": true,
+                    "value_type": {
+                      "kind": "any"
+                    }
+                  }
+                },
+                "additional_properties": null
+              }
+            },
+            "capabilities": [],
+            "limits": {
+              "max_messages": 128,
+              "max_message_bytes": 65536,
+              "max_image_url_bytes": 32768,
+              "max_request_bytes": 262144,
+              "max_template_context_bytes": 262144,
+              "max_template_output_bytes": 262144
+            }
+          }
+        }
+      },
+      {
+        "id": "/workflow/metrics#expression:0",
+        "output": {
+          "id": "/workflow/metrics#expression_output:0",
+          "type": {
+            "kind": "data",
+            "value_type": {
+              "kind": "string"
+            }
+          }
+        },
+        "operation": {
+          "kind": "project",
+          "source": "/workflow/analyze#authored_output",
+          "path": "data"
+        }
+      },
+      {
+        "id": "/workflow/metrics#expression:1",
+        "output": {
+          "id": "/workflow/metrics#expression_output:1",
+          "type": {
+            "kind": "data",
+            "value_type": {
+              "kind": "object",
+              "properties": {
+                "text": {
+                  "required": true,
+                  "value_type": {
+                    "kind": "string"
+                  }
+                }
+              },
+              "additional_properties": null
+            }
+          }
+        },
+        "operation": {
+          "kind": "object",
+          "fields": {
+            "text": "/workflow/metrics#expression_output:0"
+          }
+        }
+      },
+      {
+        "id": "/workflow/metrics#authored",
+        "output": {
+          "id": "/workflow/metrics#authored_output",
+          "type": {
+            "kind": "data",
+            "value_type": {
+              "kind": "object",
+              "properties": {
+                "characters": {
+                  "required": true,
+                  "value_type": {
+                    "kind": "integer"
+                  }
+                },
+                "lines": {
+                  "required": true,
+                  "value_type": {
+                    "kind": "integer"
+                  }
+                },
+                "words": {
+                  "required": true,
+                  "value_type": {
+                    "kind": "integer"
+                  }
+                }
+              },
+              "additional_properties": null
+            }
+          }
+        },
+        "operation": {
+          "kind": "call",
+          "target": "action.call",
+          "inputs": {
+            "input": "/workflow/metrics#expression_output:1"
+          },
+          "plan": {
+            "kind": "action",
+            "identity": {
+              "id": "example.text_metrics",
+              "version": "1.0.0",
+              "descriptor_hash": "7f97abe6a8b39dbcd933c4e063f6f716869aae10aa0a6753975ec52a33f3dda1"
+            },
+            "input_object": "/workflow/metrics#expression_output:1",
+            "input_contract": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "$defs": {}
+              },
+              "value_type": {
+                "kind": "object",
+                "properties": {
+                  "text": {
+                    "required": true,
+                    "value_type": {
+                      "kind": "string"
+                    }
+                  }
+                },
+                "additional_properties": null
+              }
+            },
+            "output_contract": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "characters",
+                  "words",
+                  "lines"
+                ],
+                "properties": {
+                  "characters": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "words": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "lines": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false,
+                "$defs": {}
+              },
+              "value_type": {
+                "kind": "object",
+                "properties": {
+                  "characters": {
+                    "required": true,
+                    "value_type": {
+                      "kind": "integer"
+                    }
+                  },
+                  "lines": {
+                    "required": true,
+                    "value_type": {
+                      "kind": "integer"
+                    }
+                  },
+                  "words": {
+                    "required": true,
+                    "value_type": {
+                      "kind": "integer"
+                    }
+                  }
+                },
+                "additional_properties": null
+              }
+            }
+          }
+        }
+      },
+      {
         "id": "/workflow/candidates#expression:0",
         "output": {
           "id": "/workflow/candidates#expression_output:0",
@@ -153,8 +511,8 @@
         },
         "operation": {
           "kind": "project",
-          "source": "/workflow#parameter:0",
-          "path": "question"
+          "source": "/workflow/analyze#authored_output",
+          "path": "data"
         }
       },
       {

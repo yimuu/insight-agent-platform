@@ -27,6 +27,27 @@ $defs:
         type: string
     additionalProperties: false
 
+  UserMessage:
+    type: object
+    required: [role, content]
+    properties:
+      role: {const: user}
+      content: {type: string}
+    additionalProperties: false
+
+  AssistantMessage:
+    type: object
+    required: [role, content]
+    properties:
+      role: {const: assistant}
+      content: {type: string}
+    additionalProperties: false
+
+  DynamicMessage:
+    oneOf:
+      - {$ref: "#/$defs/UserMessage"}
+      - {$ref: "#/$defs/AssistantMessage"}
+
 prompts:
   system:
     file: prompts/system.md
@@ -53,16 +74,7 @@ input:
           - type: "null"
       messages:
         type: array
-        items:
-          type: object
-          required: [role, content]
-          properties:
-            role:
-              type: string
-              enum: [user, assistant]
-            content:
-              type: string
-          additionalProperties: false
+        items: {$ref: "#/$defs/DynamicMessage"}
       question:
         type: string
     additionalProperties: false
@@ -74,7 +86,7 @@ workflow:
   steps:
     - kind: switch
       id: route
-      with:
+      inputs:
         report_text: {from: input.report_text}
         image_url: {from: input.image_url}
         messages: {from: input.messages}
@@ -85,42 +97,23 @@ workflow:
           when:
             cel: size(scope.messages) > 0
           steps:
-            - kind: operation
+            - kind: llm
               id: answer
-              uses: ai.chat
-              with:
+              model: vision_chat
+              inputs:
                 report_text: {from: scope.report_text}
                 image_url: {from: scope.image_url}
                 messages: {from: scope.messages}
                 question: {from: scope.question}
-              config:
-                model: vision_chat
-                messages:
-                  - role: system
-                    parts:
-                      - kind: prompt
-                        prompt: system
-                  - role: user
-                    parts:
-                      - kind: prompt
-                        prompt: follow_up
-                      - kind: text
-                        text: The report text follows.
-                      - kind: data
-                        input: report_text
-                      - kind: text
-                        text: The prior conversation follows.
-                      - kind: data
-                        input: messages
-                      - kind: text
-                        text: The current question follows.
-                      - kind: data
-                        input: question
-                      - kind: image_url
-                        input: image_url
-                        optional: true
-                parameters: {temperature: 0.2}
-                response: {format: text}
+              messages:
+                - {role: system, content: system}
+                - {from: inputs.messages}
+                - role: user
+                  content:
+                    - follow_up
+                    - image: {from: inputs.image_url}
+              parameters: {temperature: 0.2}
+              response: {format: text}
           result:
             return:
               object:
@@ -130,131 +123,62 @@ workflow:
       default:
         id: initial
         steps:
-          - kind: operation
+          - kind: llm
             id: abnormal_indicators
-            uses: ai.chat
-            with:
+            model: vision_chat
+            inputs:
               report_text: {from: scope.report_text}
               image_url: {from: scope.image_url}
               messages: {from: scope.messages}
               question: {from: scope.question}
-            config:
-              model: vision_chat
-              messages:
-                - role: system
-                  parts:
-                    - kind: prompt
-                      prompt: system
-                - role: user
-                  parts:
-                    - kind: prompt
-                      prompt: abnormal_indicators
-                    - kind: text
-                      text: The report text follows.
-                    - kind: data
-                      input: report_text
-                    - kind: text
-                      text: The prior conversation follows.
-                    - kind: data
-                      input: messages
-                    - kind: text
-                      text: The current question follows.
-                    - kind: data
-                      input: question
-                    - kind: image_url
-                      input: image_url
-                      optional: true
-              parameters: {temperature: 0.2}
-              response: {format: text}
+            messages:
+              - {role: system, content: system}
+              - {from: inputs.messages}
+              - role: user
+                content:
+                  - abnormal_indicators
+                  - image: {from: inputs.image_url}
+            parameters: {temperature: 0.2}
+            response: {format: text}
 
-          - kind: operation
+          - kind: llm
             id: comprehensive_interpretation
-            uses: ai.chat
-            with:
+            model: vision_chat
+            inputs:
               report_text: {from: scope.report_text}
               image_url: {from: scope.image_url}
               messages: {from: scope.messages}
               question: {from: scope.question}
               abnormal_indicators: {from: steps.abnormal_indicators.output.data}
-            config:
-              model: vision_chat
-              messages:
-                - role: system
-                  parts:
-                    - kind: prompt
-                      prompt: system
-                - role: user
-                  parts:
-                    - kind: prompt
-                      prompt: comprehensive_interpretation
-                    - kind: text
-                      text: The report text follows.
-                    - kind: data
-                      input: report_text
-                    - kind: text
-                      text: The prior conversation follows.
-                    - kind: data
-                      input: messages
-                    - kind: text
-                      text: The current question follows.
-                    - kind: data
-                      input: question
-                    - kind: text
-                      text: The completed abnormal-indicator interpretation follows.
-                    - kind: data
-                      input: abnormal_indicators
-                    - kind: image_url
-                      input: image_url
-                      optional: true
-              parameters: {temperature: 0.2}
-              response: {format: text}
+            messages:
+              - {role: system, content: system}
+              - {from: inputs.messages}
+              - role: user
+                content:
+                  - comprehensive_interpretation
+                  - image: {from: inputs.image_url}
+            parameters: {temperature: 0.2}
+            response: {format: text}
 
-          - kind: operation
+          - kind: llm
             id: health_advice
-            uses: ai.chat
-            with:
+            model: vision_chat
+            inputs:
               report_text: {from: scope.report_text}
               image_url: {from: scope.image_url}
               messages: {from: scope.messages}
               question: {from: scope.question}
               abnormal_indicators: {from: steps.abnormal_indicators.output.data}
               comprehensive_interpretation: {from: steps.comprehensive_interpretation.output.data}
-            config:
-              model: vision_chat
-              messages:
-                - role: system
-                  parts:
-                    - kind: prompt
-                      prompt: system
-                - role: user
-                  parts:
-                    - kind: prompt
-                      prompt: health_advice
-                    - kind: text
-                      text: The report text follows.
-                    - kind: data
-                      input: report_text
-                    - kind: text
-                      text: The prior conversation follows.
-                    - kind: data
-                      input: messages
-                    - kind: text
-                      text: The current question follows.
-                    - kind: data
-                      input: question
-                    - kind: text
-                      text: The completed abnormal-indicator interpretation follows.
-                    - kind: data
-                      input: abnormal_indicators
-                    - kind: text
-                      text: The completed comprehensive interpretation follows.
-                    - kind: data
-                      input: comprehensive_interpretation
-                    - kind: image_url
-                      input: image_url
-                      optional: true
-              parameters: {temperature: 0.2}
-              response: {format: text}
+            messages:
+              - {role: system, content: system}
+              - {from: inputs.messages}
+              - role: user
+                content:
+                  - health_advice
+                  - image: {from: inputs.image_url}
+            parameters: {temperature: 0.2}
+            response: {format: text}
         result:
           return:
             object:

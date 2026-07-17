@@ -1,6 +1,6 @@
 # Medical Report Follow-up Routing Design
 
-> **Historical syntax:** the product behavior is retained by the checked-in vNext Agent, but the condition/node graph below is not accepted. See [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+> **Historical / superseded syntax:** the product behavior is retained by the checked-in vNext Agent, but the condition/node graph below is not accepted. See [DSL Authoring Surface Redesign](./2026-07-17-dsl-authoring-surface-redesign.md) for current LLM/messages/switch syntax.
 
 ## Goal
 

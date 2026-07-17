@@ -1,6 +1,6 @@
 # Stable Baseline Review
 
-> Historical snapshot. DSL and scheduler references describe the retired graph runtime; the current authored/runtime contract is `insight.agent/v2` structured DSL lowered to Region/SSA, as documented in the README and vNext design specification.
+> Historical snapshot. DSL and scheduler references describe the retired graph runtime; the current authored contract is [DSL Authoring Surface Redesign](../superpowers/specs/2026-07-17-dsl-authoring-surface-redesign.md), lowered to the retained Region/SSA runtime described by the README and vNext design.
 >
 > Current remediation status: see `docs/reviews/2026-07-12-remediation-status.md`.
 > This document remains a dated audit snapshot and should not be read as the current open-work list.

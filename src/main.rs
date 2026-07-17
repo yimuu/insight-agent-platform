@@ -503,25 +503,23 @@ async fn wait_for_shutdown_signal() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeMap,
+        collections::BTreeSet,
         sync::atomic::{AtomicUsize, Ordering},
     };
 
     use async_trait::async_trait;
     use insight_agent_platform::{
         catalog::AgentCatalog,
-        dsl::vnext::{
-            compiler::WorkflowCompiler,
-            operation::{
-                CompiledOperationContract, Operation, OperationContext, OperationEffect,
-                OperationRegistry,
-            },
-            types::ValueType,
-            value::Identifier,
-        },
+        dsl::vnext::compiler::WorkflowCompiler,
         events::protocol::{RunEvent, RunEventType},
         history::types::{RunAttachment, RunLifecycle, RunRecord, RunStatus},
-        resources::{actions::ActionRegistry, models::ModelRegistry},
+        resources::{
+            actions::{
+                Action, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass,
+                EffectClass, IdempotencyClass,
+            },
+            models::ModelRegistry,
+        },
         runtime::{AttachedRun, RequestMetadata, RunError},
     };
     use serde_json::{json, Value};
@@ -581,40 +579,31 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct BlockingTestOperation {
+    struct BlockingTestAction {
         progress: Arc<BlockingProgress>,
     }
 
     #[async_trait]
-    impl Operation for BlockingTestOperation {
-        fn uses(&self) -> &'static str {
-            "test.lifecycle_block"
-        }
-
-        fn compile(
-            &self,
-            _config: &Value,
-            inputs: &BTreeMap<Identifier, ValueType>,
-        ) -> Result<
-            CompiledOperationContract,
-            insight_agent_platform::dsl::vnext::operation::OperationError,
-        > {
-            assert!(inputs.is_empty());
-            Ok(CompiledOperationContract {
+    impl Action for BlockingTestAction {
+        fn descriptor(&self) -> ActionDescriptor {
+            ActionDescriptor {
+                id: "test.lifecycle_block",
+                version: "1.0.0",
+                input_schema: json!({
+                    "type":"object",
+                    "properties":{},
+                    "additionalProperties":false
+                }),
                 output_schema: json!({"type":"null"}),
-                output_type: ValueType::Null,
-                effect: OperationEffect::Pure,
-                idempotent: true,
-            })
+                effect: EffectClass::Pure,
+                idempotency: IdempotencyClass::Idempotent,
+                cancellation: CancellationClass::Cooperative,
+                required_capabilities: BTreeSet::new(),
+            }
         }
 
-        async fn execute(
-            &self,
-            _config: &Value,
-            inputs: BTreeMap<Identifier, Value>,
-            context: OperationContext,
-        ) -> Result<Value, RunError> {
-            assert!(inputs.is_empty());
+        async fn call(&self, input: Value, context: ActionContext) -> Result<Value, RunError> {
+            assert_eq!(input, json!({}));
             self.progress.started.fetch_add(1, Ordering::SeqCst);
             self.progress.started_changed.notify_waiters();
             context.control.stopped().await;
@@ -659,9 +648,9 @@ mod tests {
         } else {
             BlockingProgress::default()
         });
-        let mut operations = OperationRegistry::default();
-        operations
-            .register(BlockingTestOperation {
+        let mut actions = ActionRegistry::default();
+        actions
+            .register(BlockingTestAction {
                 progress: Arc::clone(&progress),
             })
             .unwrap();
@@ -680,21 +669,17 @@ output:
   data_schema: {type: "null"}
 workflow:
   steps:
-    - kind: operation
+    - kind: action
       id: block
-      uses: test.lifecycle_block
+      call: test.lifecycle_block
   result:
     return:
       data: {literal: null}
 "#;
         let root = tempdir().unwrap();
-        let workflow = WorkflowCompiler::with_extensions(
-            ModelRegistry::default(),
-            ActionRegistry::default(),
-            operations,
-        )
-        .compile_source(root.path(), source)
-        .unwrap();
+        let workflow = WorkflowCompiler::new(ModelRegistry::default(), actions)
+            .compile_source(root.path(), source)
+            .unwrap();
         let service = RunService::new(
             AgentCatalog::new(vec![Arc::new(workflow)]).unwrap(),
             repository_trait,

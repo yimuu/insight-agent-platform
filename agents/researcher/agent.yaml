@@ -38,69 +38,35 @@ output:
 
 workflow:
   steps:
-    - kind: operation
+    - kind: llm
       id: plan
-      uses: ai.chat
-      with:
+      model: general_chat
+      inputs:
         question: {from: input.question}
-      config:
-        model: general_chat
-        messages:
-          - role: system
-            parts:
-              - kind: prompt
-                prompt: system
-          - role: user
-            parts:
-              - kind: prompt
-                prompt: planner
-              - kind: data
-                input: question
-        parameters: {temperature: 0.3}
-        response: {format: text}
+      messages:
+        - {role: system, content: system}
+        - {role: user, content: planner}
+      parameters: {temperature: 0.3}
+      response: {format: text}
 
-    - kind: operation
+    - kind: action
       id: now
-      uses: action.call
-      with:
-        input:
-          object:
-            timezone: {literal: Asia/Shanghai}
-      config:
-        action: current_time
+      call: current_time
+      inputs:
+        timezone: {literal: Asia/Shanghai}
 
-    - kind: operation
+    - kind: llm
       id: answer
-      uses: ai.chat
-      with:
+      model: general_chat
+      inputs:
         question: {from: input.question}
         plan: {from: steps.plan.output.data}
         current_time: {from: steps.now.output}
-      config:
-        model: general_chat
-        messages:
-          - role: system
-            parts:
-              - kind: prompt
-                prompt: system
-          - role: user
-            parts:
-              - kind: prompt
-                prompt: final
-              - kind: text
-                text: The original question follows.
-              - kind: data
-                input: question
-              - kind: text
-                text: The private answer plan follows.
-              - kind: data
-                input: plan
-              - kind: text
-                text: The current time record follows.
-              - kind: data
-                input: current_time
-        parameters: {temperature: 0.3}
-        response: {format: text}
+      messages:
+        - {role: system, content: system}
+        - {role: user, content: final}
+      parameters: {temperature: 0.3}
+      response: {format: text}
 
   result:
     return:

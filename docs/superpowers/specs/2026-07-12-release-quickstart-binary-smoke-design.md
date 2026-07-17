@@ -1,6 +1,6 @@
 # Release Quickstart and Binary Smoke Design
 
-> **Historical implementation record:** the quickstart outcome remains current, but the Agent ID and graph/node examples below were replaced by vNext `action_demo`. Use README and [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md) as current contracts.
+> **Historical implementation record:** the quickstart outcome remains current, but the Agent ID and graph/node examples below were replaced by vNext `action_demo`. Use README and [DSL Authoring Surface Redesign](./2026-07-17-dsl-authoring-surface-redesign.md) for current authored syntax; retained runtime semantics remain in [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
 
 Date: 2026-07-12
 

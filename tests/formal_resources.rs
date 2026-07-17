@@ -9,7 +9,7 @@ use insight_agent_platform::{
         },
         models::{
             ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest, ChatRole,
-            ChatStream, ImageUrl, ModelCapability,
+            ChatStream, ModelCapability,
         },
         openai_chat::{OpenAiChatLimits, OpenAiChatModel, OpenAiTransportPolicy},
     },
@@ -84,6 +84,99 @@ fn default_chat_request() -> ChatRequest {
         messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
         parameters: json!({}),
     }
+}
+
+#[test]
+fn openai_request_budget_matches_the_exact_provider_wire_envelope() {
+    let model = loopback_model("http://127.0.0.1:9".to_string(), None);
+    let request = ChatRequest {
+        messages: vec![ChatMessage {
+            role: ChatRole::User,
+            content: ChatContent::Parts(vec![
+                ChatContentPart::Text {
+                    text: "Interpret this.".to_string(),
+                },
+                ChatContentPart::Image {
+                    image: "https://example.test/report.png".to_string(),
+                },
+            ]),
+        }],
+        parameters: json!({"temperature":0.2, "max_tokens":64}),
+    };
+    let expected_wire_bytes = serde_json::to_vec(&json!({
+        "model": "fallback-model",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Interpret this."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.test/report.png"}
+                }
+            ]
+        }],
+        "stream": true,
+        "temperature": 0.2,
+        "max_tokens": 64
+    }))
+    .unwrap()
+    .len();
+
+    assert!(model.request_body_within_limit(&request, expected_wire_bytes));
+    assert!(!model.request_body_within_limit(&request, expected_wire_bytes - 1));
+}
+
+#[tokio::test]
+async fn direct_openai_boundary_rejects_invalid_provider_neutral_messages() {
+    let model = loopback_model("http://127.0.0.1:9".to_string(), None);
+    let result = model
+        .stream_chat(ChatRequest {
+            messages: vec![ChatMessage::from_text(ChatRole::Assistant, "prefill")],
+            parameters: json!({}),
+        })
+        .await;
+    let error = match result {
+        Ok(_) => panic!("an assistant-prefill request must fail before network I/O"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.code(), "VNEXT_LLM_MESSAGE_ORDER_INVALID");
+    assert_eq!(
+        error.message(),
+        "chat provider request must end with a user message"
+    );
+}
+
+#[tokio::test]
+async fn direct_openai_boundary_rechecks_vision_capability() {
+    let model = OpenAiChatModel::new_with_limits_and_transport_policy(
+        None,
+        "http://127.0.0.1:9".to_string(),
+        "text-only-model".to_string(),
+        BTreeSet::new(),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        OpenAiChatLimits::default(),
+        OpenAiTransportPolicy::AllowLoopbackHttp,
+    )
+    .unwrap();
+    let result = model
+        .stream_chat(ChatRequest {
+            messages: vec![ChatMessage {
+                role: ChatRole::User,
+                content: ChatContent::Parts(vec![ChatContentPart::Image {
+                    image: "https://example.test/report.png".to_string(),
+                }]),
+            }],
+            parameters: json!({}),
+        })
+        .await;
+    let error = match result {
+        Ok(_) => panic!("a non-Vision adapter must reject image content before network I/O"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.code(), "VNEXT_LLM_VISION_REQUIRED");
 }
 
 async fn clean_eof_stream(body: Vec<u8>) -> (ChatStream, tokio::task::JoinHandle<()>) {
@@ -192,10 +285,8 @@ async fn openai_adapter_serializes_formal_messages_and_allowed_parameters() {
                     ChatContentPart::Text {
                         text: "Interpret this.".to_string(),
                     },
-                    ChatContentPart::ImageUrl {
-                        image_url: ImageUrl {
-                            url: "https://example.test/report.png".to_string(),
-                        },
+                    ChatContentPart::Image {
+                        image: "https://example.test/report.png".to_string(),
                     },
                 ]),
             },
@@ -1031,8 +1122,8 @@ async fn dropping_openai_stream_closes_the_in_flight_http_body() {
 #[test]
 fn builtin_action_descriptors_define_strict_contracts() {
     let current_time = CurrentTimeAction.descriptor();
-    assert_eq!(current_time.name, "current_time");
-    assert!(!current_time.idempotent);
+    assert_eq!(current_time.id, "current_time");
+    assert!(!current_time.idempotency.is_idempotent());
     assert_eq!(current_time.input_schema["additionalProperties"], false);
 
     let http = RestrictedHttpGetAction::new(
@@ -1042,13 +1133,13 @@ fn builtin_action_descriptors_define_strict_contracts() {
     )
     .unwrap()
     .descriptor();
-    assert_eq!(http.name, "http_get");
-    assert!(http.idempotent);
+    assert_eq!(http.id, "http_get");
+    assert!(http.idempotency.is_idempotent());
     assert_eq!(http.output_schema["required"], json!(["status", "body"]));
 
     let metrics = TextMetricsAction.descriptor();
-    assert_eq!(metrics.name, "example.text_metrics");
-    assert!(metrics.idempotent);
+    assert_eq!(metrics.id, "example.text_metrics");
+    assert!(metrics.idempotency.is_idempotent());
     assert_eq!(
         metrics.output_schema["required"],
         json!(["characters", "words", "lines"])

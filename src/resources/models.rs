@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, collections::BTreeSet, fmt, pin::Pin, sync::Arc};
+use std::{collections::BTreeMap, collections::BTreeSet, fmt, io::Write, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 use futures::Stream;
@@ -31,12 +31,7 @@ pub enum ChatContent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatContentPart {
     Text { text: String },
-    ImageUrl { image_url: ImageUrl },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ImageUrl {
-    pub url: String,
+    Image { image: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -62,7 +57,7 @@ impl ChatMessage {
             ChatContent::Text(text) => Some(text),
             ChatContent::Parts(parts) => parts.iter().find_map(|part| match part {
                 ChatContentPart::Text { text } => Some(text.as_str()),
-                ChatContentPart::ImageUrl { .. } => None,
+                ChatContentPart::Image { .. } => None,
             }),
         }
     }
@@ -74,7 +69,7 @@ impl ChatMessage {
                 .iter()
                 .filter_map(|part| match part {
                     ChatContentPart::Text { .. } => None,
-                    ChatContentPart::ImageUrl { image_url } => Some(image_url.url.as_str()),
+                    ChatContentPart::Image { image } => Some(image.as_str()),
                 })
                 .collect(),
         }
@@ -85,6 +80,12 @@ impl ChatMessage {
 pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     pub parameters: Value,
+}
+
+#[derive(Serialize)]
+struct ProviderNeutralRequest<'a> {
+    messages: &'a [ChatMessage],
+    parameters: &'a Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -100,12 +101,87 @@ pub const DEFAULT_MAX_ACCUMULATED_TEXT_BYTES: usize = 1024 * 1024;
 pub const MODEL_RESPONSE_TOO_LARGE_CODE: &str = "MODEL_RESPONSE_TOO_LARGE";
 pub const MODEL_RESPONSE_TOO_LARGE_MESSAGE: &str =
     "chat provider response exceeded the configured size limit";
+const LLM_CONTENT_INVALID: &str = "VNEXT_LLM_CONTENT_INVALID";
+const LLM_MESSAGE_ORDER_INVALID: &str = "VNEXT_LLM_MESSAGE_ORDER_INVALID";
 
 pub fn model_response_too_large() -> RunError {
     RunError::operation(
         MODEL_RESPONSE_TOO_LARGE_CODE,
         MODEL_RESPONSE_TOO_LARGE_MESSAGE,
     )
+}
+
+pub(crate) fn validate_chat_request(request: &ChatRequest) -> Result<(), RunError> {
+    if request.messages.is_empty() {
+        return Err(invalid_chat_request(
+            LLM_CONTENT_INVALID,
+            "chat provider request has no messages",
+        ));
+    }
+
+    let mut system_prefix = true;
+    for message in &request.messages {
+        if message.role == ChatRole::System {
+            if !system_prefix {
+                return Err(invalid_chat_request(
+                    LLM_MESSAGE_ORDER_INVALID,
+                    "chat provider request has a system message outside its prefix",
+                ));
+            }
+        } else {
+            system_prefix = false;
+        }
+
+        match &message.content {
+            ChatContent::Text(text) if text.trim().is_empty() => {
+                return Err(invalid_chat_request(
+                    LLM_CONTENT_INVALID,
+                    "chat provider request contains empty text",
+                ));
+            }
+            ChatContent::Text(_) => {}
+            ChatContent::Parts(parts) if parts.is_empty() => {
+                return Err(invalid_chat_request(
+                    LLM_CONTENT_INVALID,
+                    "chat provider request contains an empty content list",
+                ));
+            }
+            ChatContent::Parts(parts) => {
+                for part in parts {
+                    match part {
+                        ChatContentPart::Text { text } if text.trim().is_empty() => {
+                            return Err(invalid_chat_request(
+                                LLM_CONTENT_INVALID,
+                                "chat provider request contains an empty text part",
+                            ));
+                        }
+                        ChatContentPart::Text { .. } => {}
+                        ChatContentPart::Image { image }
+                            if message.role != ChatRole::User || image.trim().is_empty() =>
+                        {
+                            return Err(invalid_chat_request(
+                                LLM_CONTENT_INVALID,
+                                "chat provider request contains an invalid image part",
+                            ));
+                        }
+                        ChatContentPart::Image { .. } => {}
+                    }
+                }
+            }
+        }
+    }
+
+    if request.messages.last().map(|message| message.role) != Some(ChatRole::User) {
+        return Err(invalid_chat_request(
+            LLM_MESSAGE_ORDER_INVALID,
+            "chat provider request must end with a user message",
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_chat_request(code: &'static str, message: &'static str) -> RunError {
+    RunError::operation(code, message)
 }
 
 #[async_trait]
@@ -115,7 +191,55 @@ pub trait ChatModel: Send + Sync + fmt::Debug {
     fn max_accumulated_text_bytes(&self) -> usize {
         DEFAULT_MAX_ACCUMULATED_TEXT_BYTES
     }
+    /// Verifies the exact request representation emitted by this adapter.
+    ///
+    /// Adapters with a provider-specific envelope must override this method;
+    /// the default is suitable only for models whose wire body is the
+    /// provider-neutral messages/parameters pair.
+    fn request_body_within_limit(&self, request: &ChatRequest, max_bytes: usize) -> bool {
+        serialized_json_within_limit(
+            &ProviderNeutralRequest {
+                messages: &request.messages,
+                parameters: &request.parameters,
+            },
+            max_bytes,
+        )
+    }
     async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, RunError>;
+}
+
+pub(crate) fn serialized_json_within_limit(value: &impl Serialize, max_bytes: usize) -> bool {
+    serde_json::to_writer(LimitWriter::new(max_bytes), value).is_ok()
+}
+
+struct LimitWriter {
+    written: usize,
+    max_bytes: usize,
+}
+
+impl LimitWriter {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            written: 0,
+            max_bytes,
+        }
+    }
+}
+
+impl Write for LimitWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if buffer.len() > self.max_bytes.saturating_sub(self.written) {
+            return Err(std::io::Error::other(
+                "provider request exceeds configured limit",
+            ));
+        }
+        self.written += buffer.len();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default)]

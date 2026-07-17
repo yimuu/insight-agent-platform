@@ -12,13 +12,28 @@ use std::{
 
 use handlebars::Template;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
-use crate::schema::compile_schema_2020;
+use crate::{
+    dsl::{DslPath, DslPathSegment},
+    resources::models::ModelCapability,
+    schema::compile_schema_2020,
+};
 
 use super::{
+    plan::{
+        CallPlan, CallTarget, CompiledContentAtom, CompiledLlmPlan, CompiledTemplateId,
+        MessageSourcePlan, PlannedRole, PlannedTemplate, TemplateProfileVersion,
+        TemplateProvenance, ValidatedResponseContract,
+    },
     predicate::analyze_predicate,
-    raw::{ErrorDeclaration, Metadata, OutputFormat, ParallelSettle},
+    raw::{
+        is_valid_error_code, is_valid_error_public_message, ErrorDeclaration, Metadata,
+        OutputFormat, ParallelSettle, ERROR_CODE_MAX_CHARS,
+    },
     schema::compile_contract_schema,
+    shape::{prove_dynamic_message_array, SchemaShape},
+    template::{CompiledTemplate, TemplateAccessKind, TemplatePathSegment},
     types::{
         safe_run_metadata_type, ArrayType, ObjectType, PropertyType, SchemaType, StaticPath,
         ValueType,
@@ -26,13 +41,19 @@ use super::{
     value::Identifier,
 };
 
+pub const SAFE_BRANCH_ORIGIN_MAX_BYTES: usize = 512;
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StablePath(String);
 
 impl StablePath {
     pub fn parse(value: impl Into<String>) -> Result<Self, String> {
         let value = value.into();
-        if value.len() < 2 || !value.starts_with('/') || value.ends_with('/') {
+        if value.len() < 2
+            || value.len() > SAFE_BRANCH_ORIGIN_MAX_BYTES
+            || !value.starts_with('/')
+            || value.ends_with('/')
+        {
             return Err("stable path must be a non-root slash-qualified path".to_string());
         }
         for segment in value[1..].split('/') {
@@ -106,10 +127,14 @@ impl OperationId {
     }
 
     pub fn new(path: impl Into<String>, role: OperationRole) -> Result<Self, String> {
-        Ok(Self {
+        let operation = Self {
             path: StablePath::parse(path)?,
             role,
-        })
+        };
+        if operation.to_string().len() > SAFE_BRANCH_ORIGIN_MAX_BYTES {
+            return Err("stable operation origin exceeds its byte limit".to_string());
+        }
+        Ok(operation)
     }
 
     pub fn path(&self) -> &StablePath {
@@ -124,6 +149,29 @@ impl OperationId {
 impl fmt::Display for OperationId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}#{:?}", self.path, self.role)
+    }
+}
+
+pub(crate) fn is_safe_branch_origin(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > SAFE_BRANCH_ORIGIN_MAX_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return false;
+    }
+    let (path, role) = value
+        .rsplit_once('#')
+        .map_or((value, None), |(path, role)| (path, Some(role)));
+    if StablePath::parse(path).is_err() {
+        return false;
+    }
+    match role {
+        None | Some("Authored" | "Phi") => true,
+        Some(role) => role
+            .strip_prefix("Expression(")
+            .and_then(|value| value.strip_suffix(')'))
+            .and_then(|value| value.parse::<u16>().ok())
+            .is_some(),
     }
 }
 
@@ -211,8 +259,11 @@ pub struct TypedContract {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledPrompt {
-    /// File-backed prompts are resolved before IR construction.
-    pub text: String,
+    /// Catalog identity and content hash are retained across persistence.
+    pub provenance: TemplateProvenance,
+    /// Restricted template AST compiled once before IR construction.
+    pub compiled: CompiledTemplate,
+    pub profile_version: TemplateProfileVersion,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -283,10 +334,7 @@ pub enum OperationKind {
         text: String,
         bindings: BTreeMap<Identifier, ValueId>,
     },
-    Prompt {
-        prompt: Identifier,
-    },
-    Call(Call),
+    Call(Box<Call>),
     Parallel(Parallel),
     Branch(Box<Branch>),
     Phi(Phi),
@@ -294,9 +342,9 @@ pub enum OperationKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Call {
-    pub uses: String,
+    pub target: CallTarget,
     pub inputs: BTreeMap<Identifier, ValueId>,
-    pub config: Value,
+    pub plan: CallPlan,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -383,8 +431,9 @@ pub enum ValidationCode {
     InvalidPhi,
     InvalidContract,
     InvalidTemplate,
+    InvalidCallPlan,
+    InvalidErrorDeclaration,
     UndeclaredError,
-    UndeclaredPrompt,
     InvalidRootReturn,
 }
 
@@ -447,6 +496,8 @@ pub fn validate(ir: &WorkflowIr) -> Result<(), Vec<ValidationError>> {
     }
     validator.validate_contract(&ir.input, "workflow input", Some(ir.root.id.clone()));
     validator.validate_contract(&ir.output, "workflow output", Some(ir.root.id.clone()));
+    validator.validate_error_declarations();
+    validator.validate_prompts();
     if ir.root.result.schema != ir.output.schema
         || !types_equivalent(&ir.root.result.value_type, &ir.output.value_type)
     {
@@ -548,6 +599,57 @@ impl<'a> Validator<'a> {
         }
     }
 
+    fn validate_prompts(&mut self) {
+        for (prompt_id, prompt) in &self.ir.prompts {
+            let valid_provenance = matches!(
+                &prompt.provenance,
+                TemplateProvenance::Catalog {
+                    prompt_id: provenance_id,
+                    asset_hash,
+                } if provenance_id == prompt_id
+                    && asset_hash == &sha256_label(prompt.compiled.source().as_bytes())
+            );
+            if !valid_provenance {
+                self.error(
+                    ValidationCode::InvalidTemplate,
+                    format!(
+                        "compiled prompt '{prompt_id}' must retain matching catalog provenance"
+                    ),
+                    Some(self.ir.root.id.clone()),
+                    None,
+                    None,
+                );
+            }
+            if prompt.compiled.source().trim().is_empty()
+                || !matches!(prompt.profile_version, TemplateProfileVersion::V1)
+            {
+                self.error(
+                    ValidationCode::InvalidTemplate,
+                    format!("compiled prompt '{prompt_id}' has invalid template metadata"),
+                    Some(self.ir.root.id.clone()),
+                    None,
+                    None,
+                );
+            }
+        }
+    }
+
+    fn validate_error_declarations(&mut self) {
+        for declaration in self.ir.errors.values() {
+            if !is_valid_error_code(&declaration.code)
+                || !is_valid_error_public_message(&declaration.public_message)
+            {
+                self.error(
+                    ValidationCode::InvalidErrorDeclaration,
+                    "workflow error declaration does not satisfy its bounded closed profile",
+                    Some(self.ir.root.id.clone()),
+                    None,
+                    None,
+                );
+            }
+        }
+    }
+
     fn collect_region(&mut self, region: &Region) {
         if !self.regions.insert(region.id.clone()) {
             self.error(
@@ -589,7 +691,6 @@ impl<'a> Validator<'a> {
                 | OperationKind::Object { .. }
                 | OperationKind::Array { .. }
                 | OperationKind::Template { .. }
-                | OperationKind::Prompt { .. }
                 | OperationKind::Call(_)
                 | OperationKind::Phi(_) => {}
             }
@@ -719,7 +820,10 @@ impl<'a> Validator<'a> {
         }
 
         let mut branches = BTreeMap::<OperationId, BranchInfo>::new();
-        for operation in &region.operations {
+        for (operation_index, operation) in region.operations.iter().enumerate() {
+            let previous_operation = operation_index
+                .checked_sub(1)
+                .and_then(|index| region.operations.get(index));
             if !operation.id.path().is_descendant_of(region.id.path()) {
                 self.error(
                     ValidationCode::InvalidStableIdentity,
@@ -747,11 +851,8 @@ impl<'a> Validator<'a> {
                 OperationKind::Template { text, bindings } => {
                     self.validate_template(region, operation, text, bindings, &visible);
                 }
-                OperationKind::Prompt { prompt } => {
-                    self.validate_prompt(region, operation, prompt);
-                }
                 OperationKind::Call(call) => {
-                    self.validate_call(region, operation, call, &visible);
+                    self.validate_call(region, operation, call, previous_operation, &visible);
                 }
                 OperationKind::Parallel(parallel) => {
                     self.validate_parallel(region, operation, parallel, &visible);
@@ -794,8 +895,7 @@ impl<'a> Validator<'a> {
                 | OperationKind::Project { .. }
                 | OperationKind::Object { .. }
                 | OperationKind::Array { .. }
-                | OperationKind::Template { .. }
-                | OperationKind::Prompt { .. },
+                | OperationKind::Template { .. },
                 OperationRole::Expression(ordinal),
             ) => Some(ValueRole::ExpressionOutput(ordinal)),
             (OperationKind::Call(_) | OperationKind::Parallel(_), OperationRole::Authored) => {
@@ -833,6 +933,16 @@ impl<'a> Validator<'a> {
             return;
         };
         let actual = infer_json_type(value);
+        if empty_array_bottom_was_widened(&actual, output) {
+            self.error(
+                ValidationCode::TypeMismatch,
+                "empty constant array output must retain the never item type",
+                Some(region.id.clone()),
+                Some(operation.id.clone()),
+                Some(operation.output.id.clone()),
+            );
+            return;
+        }
         self.require_assignable(region, operation, &actual, output, "constant output");
     }
 
@@ -911,7 +1021,7 @@ impl<'a> Validator<'a> {
         }
         if item_types.len() == items.len() {
             let item_type = if item_types.is_empty() {
-                ValueType::Any
+                ValueType::Never
             } else {
                 ValueType::unify(item_types).expect("non-empty types were supplied")
             };
@@ -920,6 +1030,16 @@ impl<'a> Validator<'a> {
                 min_items: items.len(),
             });
             if let Some(output) = self.output_data(region, operation) {
+                if empty_array_bottom_was_widened(&actual, output) {
+                    self.error(
+                        ValidationCode::TypeMismatch,
+                        "empty array output must retain the never item type",
+                        Some(region.id.clone()),
+                        Some(operation.id.clone()),
+                        Some(operation.output.id.clone()),
+                    );
+                    return;
+                }
                 self.require_assignable(region, operation, &actual, output, "array output");
             }
         }
@@ -956,47 +1076,683 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_prompt(&mut self, region: &Region, operation: &Operation, prompt: &Identifier) {
-        if !self.ir.prompts.contains_key(prompt) {
-            self.error(
-                ValidationCode::UndeclaredPrompt,
-                format!("prompt '{prompt}' is not present in the compiled prompt table"),
-                Some(region.id.clone()),
-                Some(operation.id.clone()),
-                Some(operation.output.id.clone()),
-            );
-        }
-        if let Some(output) = self.output_data(region, operation) {
-            self.require_assignable(
-                region,
-                operation,
-                &ValueType::String,
-                output,
-                "prompt output",
-            );
-        }
-    }
-
     fn validate_call(
         &mut self,
         region: &Region,
         operation: &Operation,
         call: &Call,
+        previous_operation: Option<&Operation>,
         visible: &BTreeMap<ValueId, IrValueType>,
     ) {
-        if call.uses.trim().is_empty() {
-            self.error(
-                ValidationCode::InvalidOperationRole,
-                "Call.uses must not be empty",
-                Some(region.id.clone()),
-                Some(operation.id.clone()),
+        if call.target != call.plan.target() {
+            self.invalid_call(
+                region,
+                operation,
+                "Call target does not match its typed plan variant",
                 None,
             );
         }
-        for value in call.inputs.values() {
-            self.require_data_use(region, operation, value, visible);
+
+        let mut dependencies = call.plan.dependencies();
+        dependencies.extend(call.inputs.values().cloned());
+        let mut dependency_types = BTreeMap::new();
+        for value in dependencies {
+            if let Some(value_type) = self.require_data_use(region, operation, &value, visible) {
+                dependency_types.insert(value, value_type.clone());
+            }
         }
-        self.output_data(region, operation);
+
+        self.validate_contract(
+            call.plan.output_contract(),
+            "Call plan output",
+            Some(region.id.clone()),
+        );
+        let operation_output = self.output_data(region, operation).cloned();
+        if let Some(operation_output) = operation_output {
+            if !types_equivalent(&call.plan.output_contract().value_type, &operation_output) {
+                self.invalid_call(
+                    region,
+                    operation,
+                    "Call plan output contract must equal the operation output type",
+                    Some(operation.output.id.clone()),
+                );
+            }
+        }
+
+        match &call.plan {
+            CallPlan::Action(plan) => self.validate_action_call(
+                region,
+                operation,
+                call,
+                plan,
+                previous_operation,
+                visible,
+            ),
+            CallPlan::Llm(plan) => {
+                self.validate_llm_call(region, operation, call, plan, &dependency_types)
+            }
+        }
+    }
+
+    fn validate_action_call(
+        &mut self,
+        region: &Region,
+        operation: &Operation,
+        call: &Call,
+        plan: &super::plan::CompiledActionPlan,
+        previous_operation: Option<&Operation>,
+        visible: &BTreeMap<ValueId, IrValueType>,
+    ) {
+        let input_name = Identifier::parse("input").expect("input is a stable identifier");
+        if call.inputs.len() != 1
+            || call.inputs.get(&input_name) != Some(&plan.input_object)
+            || !matches!(
+                &plan.input_contract.value_type,
+                ValueType::Object(object) if object.additional_properties.is_none()
+            )
+        {
+            self.invalid_call(
+                region,
+                operation,
+                "Action Call.inputs must contain exactly the typed input object",
+                Some(plan.input_object.clone()),
+            );
+        }
+
+        let input_producer_fields = previous_operation.and_then(|producer| {
+            let same_step = producer.id.path() == operation.id.path();
+            let is_expression = matches!(producer.id.role(), OperationRole::Expression(_));
+            match &producer.kind {
+                OperationKind::Object { fields }
+                    if producer.output.id == plan.input_object
+                        && same_step
+                        && is_expression =>
+                {
+                    Some((producer, fields))
+                }
+                _ => {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "Action input_object must be the immediately preceding same-step SSA Object output",
+                        Some(plan.input_object.clone()),
+                    );
+                    None
+                }
+            }
+        });
+
+        if previous_operation.is_none() {
+            self.invalid_call(
+                region,
+                operation,
+                "Action input_object must be the immediately preceding same-step SSA Object output",
+                Some(plan.input_object.clone()),
+            );
+        }
+
+        if let Some((producer, fields)) = input_producer_fields {
+            let mut properties = BTreeMap::new();
+            let mut complete = true;
+            for (name, value) in fields {
+                match visible.get(value) {
+                    Some(IrValueType::Data(value_type)) => {
+                        properties.insert(
+                            name.clone(),
+                            PropertyType {
+                                value_type: value_type.clone(),
+                                required: true,
+                            },
+                        );
+                    }
+                    _ => complete = false,
+                }
+            }
+
+            if complete {
+                let constructed_type = ValueType::Object(ObjectType {
+                    properties,
+                    additional_properties: None,
+                });
+                match &producer.output.value_type {
+                    IrValueType::Data(declared_type)
+                        if types_equivalent(&constructed_type, declared_type) => {}
+                    _ => self.invalid_call(
+                        region,
+                        operation,
+                        "Action input Object output type must exactly describe its constructed fields",
+                        Some(plan.input_object.clone()),
+                    ),
+                }
+                if !constructed_type.is_assignable_to(&plan.input_contract.value_type) {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "Action input Object fields must satisfy the frozen input contract",
+                        Some(plan.input_object.clone()),
+                    );
+                }
+            }
+        }
+
+        if plan.action_id.trim().is_empty()
+            || plan.action_id.trim() != plan.action_id
+            || plan.descriptor_version.to_string().trim().is_empty()
+            || !valid_sha256_hex(&plan.descriptor_hash)
+        {
+            self.invalid_call(
+                region,
+                operation,
+                "Action plan must retain a canonical id, SemVer, and descriptor hash",
+                None,
+            );
+        }
+
+        self.validate_contract(
+            &plan.input_contract,
+            "Action plan input",
+            Some(region.id.clone()),
+        );
+        self.validate_contract(
+            &plan.output_contract,
+            "Action plan output",
+            Some(region.id.clone()),
+        );
+        if let Some(IrValueType::Data(actual)) = visible.get(&plan.input_object) {
+            if !actual.is_assignable_to(&plan.input_contract.value_type) {
+                self.invalid_call(
+                    region,
+                    operation,
+                    "Action input object type must be assignable to its frozen input contract",
+                    Some(plan.input_object.clone()),
+                );
+            }
+        }
+    }
+
+    fn validate_llm_call(
+        &mut self,
+        region: &Region,
+        operation: &Operation,
+        call: &Call,
+        plan: &CompiledLlmPlan,
+        dependency_types: &BTreeMap<ValueId, ValueType>,
+    ) {
+        if call.inputs != plan.local_inputs {
+            self.invalid_call(
+                region,
+                operation,
+                "LLM Call.inputs must exactly equal its local input capture map",
+                None,
+            );
+        }
+        if plan.message_sources.is_empty() {
+            self.invalid_call(
+                region,
+                operation,
+                "LLM plan must contain at least one ordered message source",
+                None,
+            );
+        }
+        if !plan.parameters.value().is_object() || !plan.limits.is_valid() {
+            self.invalid_call(
+                region,
+                operation,
+                "LLM parameters and resolved request limits are invalid",
+                None,
+            );
+        }
+        let authored_message_count = plan
+            .message_sources
+            .iter()
+            .filter(|source| matches!(source, MessageSourcePlan::Authored { .. }))
+            .count();
+        if authored_message_count > plan.limits.max_messages {
+            self.invalid_call(
+                region,
+                operation,
+                "static authored messages exceed the resolved message-count limit",
+                None,
+            );
+        }
+
+        let response_data_type = match &plan.response {
+            ValidatedResponseContract::Text => ValueType::String,
+            ValidatedResponseContract::Json { data } => {
+                self.validate_contract(data, "LLM JSON response", Some(region.id.clone()));
+                data.value_type.clone()
+            }
+        };
+        if !llm_envelope_matches(&plan.output_contract.value_type, &response_data_type) {
+            self.invalid_call(
+                region,
+                operation,
+                "LLM output contract must be the closed data/finish_reason/usage envelope",
+                Some(operation.output.id.clone()),
+            );
+        }
+
+        for (template_id, template) in &plan.templates {
+            self.validate_planned_template(region, operation, template_id, template);
+        }
+
+        let mut system_prefix = true;
+        let mut has_dynamic_source = false;
+        let mut has_authored_user = false;
+        for source in &plan.message_sources {
+            match source {
+                MessageSourcePlan::Authored { role, content } => {
+                    if content.is_empty() {
+                        self.invalid_call(
+                            region,
+                            operation,
+                            "authored LLM message content must not be empty",
+                            None,
+                        );
+                    }
+                    if matches!(role, PlannedRole::System) {
+                        if !system_prefix {
+                            self.invalid_call(
+                                region,
+                                operation,
+                                "authored system messages must form one static prefix",
+                                None,
+                            );
+                        }
+                    } else {
+                        system_prefix = false;
+                    }
+                    if matches!(role, PlannedRole::User) {
+                        has_authored_user = true;
+                    }
+
+                    for atom in content {
+                        self.validate_content_atom(
+                            region,
+                            operation,
+                            *role,
+                            atom,
+                            plan,
+                            dependency_types,
+                        );
+                    }
+                }
+                MessageSourcePlan::Dynamic {
+                    source,
+                    value,
+                    proven_shape,
+                } => {
+                    system_prefix = false;
+                    has_dynamic_source = true;
+                    let Some(base) = plan.local_inputs.get(source.binding()) else {
+                        self.invalid_call(
+                            region,
+                            operation,
+                            "dynamic message source must originate from a declared local input",
+                            Some(value.clone()),
+                        );
+                        continue;
+                    };
+                    if !self.is_exact_local_projection(
+                        region,
+                        operation,
+                        value,
+                        base,
+                        source.fields(),
+                    ) {
+                        self.invalid_call(
+                            region,
+                            operation,
+                            "dynamic message source path does not match its SSA projection",
+                            Some(value.clone()),
+                        );
+                    }
+                    let Some(value_type) = dependency_types.get(value) else {
+                        continue;
+                    };
+                    match prove_dynamic_message_array(&SchemaShape::from_value_type(value_type)) {
+                        Ok(recomputed) => {
+                            if &recomputed != proven_shape {
+                                self.invalid_call(
+                                    region,
+                                    operation,
+                                    "dynamic message shape proof does not match its SSA type",
+                                    Some(value.clone()),
+                                );
+                            }
+                            if recomputed.requires_vision
+                                && !plan.capabilities.contains(&ModelCapability::Vision)
+                            {
+                                self.invalid_call(
+                                    region,
+                                    operation,
+                                    "dynamic image messages require model Vision capability",
+                                    Some(value.clone()),
+                                );
+                            }
+                        }
+                        Err(_) => self.invalid_call(
+                            region,
+                            operation,
+                            "dynamic message source is not a closed role-correlated Message array",
+                            Some(value.clone()),
+                        ),
+                    }
+                }
+            }
+        }
+
+        if !has_dynamic_source && !has_authored_user {
+            self.invalid_call(
+                region,
+                operation,
+                "fully static LLM messages must contain a user message",
+                None,
+            );
+        }
+        if !matches!(
+            plan.message_sources.last(),
+            Some(MessageSourcePlan::Dynamic { .. })
+                | Some(MessageSourcePlan::Authored {
+                    role: PlannedRole::User,
+                    ..
+                })
+        ) {
+            self.invalid_call(
+                region,
+                operation,
+                "LLM message plan must end with a user message or runtime-validated dynamic source",
+                None,
+            );
+        }
+    }
+
+    fn validate_planned_template(
+        &mut self,
+        region: &Region,
+        operation: &Operation,
+        template_id: &CompiledTemplateId,
+        template: &PlannedTemplate,
+    ) {
+        if !matches!(template.profile_version, TemplateProfileVersion::V1)
+            || !template
+                .compiled
+                .slots()
+                .iter()
+                .eq(template.slot_signature.keys())
+            || !template_accesses_match_signature(template)
+        {
+            self.invalid_call(
+                region,
+                operation,
+                "planned template slots do not match its compiled restricted AST",
+                None,
+            );
+        }
+        for value_type in template.slot_signature.values() {
+            if prove_dynamic_message_array(&SchemaShape::from_value_type(value_type)).is_ok() {
+                self.invalid_call(
+                    region,
+                    operation,
+                    "dynamic Message arrays cannot enter ordinary template slots",
+                    None,
+                );
+            }
+        }
+
+        let valid_provenance = match &template.provenance {
+            TemplateProvenance::Catalog {
+                prompt_id,
+                asset_hash,
+            } => {
+                let expected_id = CompiledTemplateId::catalog(prompt_id);
+                let catalog_matches = self.ir.prompts.get(prompt_id).is_some_and(|prompt| {
+                    prompt.provenance == template.provenance
+                        && prompt.compiled == template.compiled
+                        && prompt.profile_version == template.profile_version
+                });
+                asset_hash == &sha256_label(template.compiled.source().as_bytes())
+                    && template_id == &expected_id
+                    && catalog_matches
+            }
+            TemplateProvenance::Inline {
+                dsl_path,
+                source_hash,
+            } => {
+                let prefix = format!("inline:{dsl_path}:");
+                let canonical_ordinal = template_id
+                    .as_str()
+                    .strip_prefix(&prefix)
+                    .and_then(|ordinal| ordinal.parse::<usize>().ok())
+                    .is_some_and(|ordinal| template_id.as_str() == format!("{prefix}{ordinal}"));
+                source_hash == &sha256_label(template.compiled.source().as_bytes())
+                    && canonical_ordinal
+                    && is_authored_inline_template_path(dsl_path)
+            }
+        };
+        if !valid_provenance {
+            self.invalid_call(
+                region,
+                operation,
+                "planned template provenance is missing or does not match the prompt catalog",
+                None,
+            );
+        }
+    }
+
+    fn validate_content_atom(
+        &mut self,
+        region: &Region,
+        operation: &Operation,
+        role: PlannedRole,
+        atom: &CompiledContentAtom,
+        plan: &CompiledLlmPlan,
+        dependency_types: &BTreeMap<ValueId, ValueType>,
+    ) {
+        match atom {
+            CompiledContentAtom::Template {
+                template_id,
+                bindings,
+            } => {
+                let Some(template) = plan.templates.get(template_id) else {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "content references a template absent from the typed plan",
+                        None,
+                    );
+                    return;
+                };
+                if !bindings.keys().eq(template.slot_signature.keys()) {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "template bindings must exactly match the compiled slot signature",
+                        None,
+                    );
+                }
+                for (slot, expected) in &template.slot_signature {
+                    let Some(value) = bindings.get(slot) else {
+                        continue;
+                    };
+                    if dependency_types
+                        .get(value)
+                        .is_some_and(|actual| !types_equivalent(actual, expected))
+                    {
+                        self.invalid_call(
+                            region,
+                            operation,
+                            "template binding type differs from its frozen slot signature",
+                            Some(value.clone()),
+                        );
+                    }
+                    match plan.local_inputs.get(slot) {
+                        Some(base)
+                            if self
+                                .is_local_value_or_projection(region, operation, value, base) => {}
+                        _ => self.invalid_call(
+                            region,
+                            operation,
+                            "template binding must originate from its named local input",
+                            Some(value.clone()),
+                        ),
+                    }
+                }
+                if matches!(role, PlannedRole::System | PlannedRole::Assistant)
+                    && !bindings.is_empty()
+                {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "system and assistant authored messages must be static",
+                        None,
+                    );
+                }
+            }
+            CompiledContentAtom::RuntimeText { value } => {
+                if matches!(role, PlannedRole::System | PlannedRole::Assistant) {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "system and assistant authored messages cannot read runtime text",
+                        Some(value.clone()),
+                    );
+                }
+                if dependency_types
+                    .get(value)
+                    .is_some_and(|actual| !actual.is_assignable_to(&ValueType::String))
+                {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "runtime text content must have string type",
+                        Some(value.clone()),
+                    );
+                }
+                if !self.is_from_any_local_input(region, operation, value, &plan.local_inputs) {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "runtime text content must originate from an LLM local input",
+                        Some(value.clone()),
+                    );
+                }
+            }
+            CompiledContentAtom::Image { value } => {
+                if !matches!(role, PlannedRole::User) {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "only authored user messages may contain images",
+                        Some(value.clone()),
+                    );
+                }
+                let image_type = ValueType::Union(vec![ValueType::String, ValueType::Null]);
+                if dependency_types
+                    .get(value)
+                    .is_some_and(|actual| !actual.is_assignable_to(&image_type))
+                {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "image content must have string or nullable string type",
+                        Some(value.clone()),
+                    );
+                }
+                if !plan.capabilities.contains(&ModelCapability::Vision) {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "authored image content requires model Vision capability",
+                        Some(value.clone()),
+                    );
+                }
+                if !self.is_from_any_local_input(region, operation, value, &plan.local_inputs) {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "image content must originate from an LLM local input",
+                        Some(value.clone()),
+                    );
+                }
+            }
+        }
+    }
+
+    fn is_from_any_local_input(
+        &self,
+        region: &Region,
+        operation: &Operation,
+        value: &ValueId,
+        local_inputs: &BTreeMap<Identifier, ValueId>,
+    ) -> bool {
+        local_inputs
+            .values()
+            .any(|base| self.is_local_value_or_projection(region, operation, value, base))
+    }
+
+    fn is_local_value_or_projection(
+        &self,
+        region: &Region,
+        operation: &Operation,
+        value: &ValueId,
+        base: &ValueId,
+    ) -> bool {
+        if value == base {
+            return true;
+        }
+        region
+            .operations
+            .iter()
+            .take_while(|candidate| candidate.id != operation.id)
+            .find(|candidate| &candidate.output.id == value)
+            .is_some_and(|producer| {
+                matches!(
+                    &producer.kind,
+                    OperationKind::Project { source, .. } if source == base
+                )
+            })
+    }
+
+    fn is_exact_local_projection(
+        &self,
+        region: &Region,
+        operation: &Operation,
+        value: &ValueId,
+        base: &ValueId,
+        fields: &[String],
+    ) -> bool {
+        if fields.is_empty() {
+            return value == base;
+        }
+        region
+            .operations
+            .iter()
+            .take_while(|candidate| candidate.id != operation.id)
+            .find(|candidate| &candidate.output.id == value)
+            .is_some_and(|producer| {
+                matches!(
+                    &producer.kind,
+                    OperationKind::Project { source, path }
+                        if source == base && path.segments() == fields
+                )
+            })
+    }
+
+    fn invalid_call(
+        &mut self,
+        region: &Region,
+        operation: &Operation,
+        message: impl Into<String>,
+        value: Option<ValueId>,
+    ) {
+        self.error(
+            ValidationCode::InvalidCallPlan,
+            message,
+            Some(region.id.clone()),
+            Some(operation.id.clone()),
+            value,
+        );
     }
 
     fn validate_parallel(
@@ -1711,6 +2467,164 @@ fn types_equivalent(left: &ValueType, right: &ValueType) -> bool {
     left.is_assignable_to(right) && right.is_assignable_to(left)
 }
 
+fn valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn sha256_label(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity("sha256:".len() + digest.len() * 2);
+    encoded.push_str("sha256:");
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    encoded
+}
+
+fn llm_envelope_matches(value_type: &ValueType, data_type: &ValueType) -> bool {
+    let ValueType::Object(envelope) = value_type else {
+        return false;
+    };
+    if envelope.additional_properties.is_some() || envelope.properties.len() != 3 {
+        return false;
+    }
+    let Some(data) = envelope.properties.get("data") else {
+        return false;
+    };
+    let Some(finish_reason) = envelope.properties.get("finish_reason") else {
+        return false;
+    };
+    let Some(usage) = envelope.properties.get("usage") else {
+        return false;
+    };
+    let nullable_string = ValueType::Union(vec![ValueType::String, ValueType::Null]);
+    data.required
+        && finish_reason.required
+        && usage.required
+        && types_equivalent(&data.value_type, data_type)
+        && types_equivalent(&finish_reason.value_type, &nullable_string)
+        && types_equivalent(&usage.value_type, &ValueType::Any)
+}
+
+fn is_authored_inline_template_path(path: &DslPath) -> bool {
+    let [DslPathSegment::Key(workflow), DslPathSegment::Key(steps), DslPathSegment::Index(_), rest @ ..] =
+        path.segments()
+    else {
+        return false;
+    };
+    if workflow != "workflow" || steps != "steps" {
+        return false;
+    }
+
+    let mut remaining = rest;
+    loop {
+        match remaining {
+            [DslPathSegment::Key(messages), DslPathSegment::Index(_), DslPathSegment::Key(content)]
+                if messages == "messages" && content == "content" =>
+            {
+                return true;
+            }
+            [DslPathSegment::Key(messages), DslPathSegment::Index(_), DslPathSegment::Key(content), DslPathSegment::Index(_)]
+                if messages == "messages" && content == "content" =>
+            {
+                return true;
+            }
+            [DslPathSegment::Key(branches), DslPathSegment::Key(_), DslPathSegment::Key(steps), DslPathSegment::Index(_), rest @ ..]
+                if branches == "branches" && steps == "steps" =>
+            {
+                remaining = rest;
+            }
+            [DslPathSegment::Key(cases), DslPathSegment::Index(_), DslPathSegment::Key(steps), DslPathSegment::Index(_), rest @ ..]
+                if cases == "cases" && steps == "steps" =>
+            {
+                remaining = rest;
+            }
+            [DslPathSegment::Key(default), DslPathSegment::Key(steps), DslPathSegment::Index(_), rest @ ..]
+                if default == "default" && steps == "steps" =>
+            {
+                remaining = rest;
+            }
+            _ => return false,
+        }
+    }
+}
+
+fn template_accesses_match_signature(template: &PlannedTemplate) -> bool {
+    template.compiled.accesses().iter().all(|access| {
+        let Some(mut value_type) = template.slot_signature.get(&access.path.root).cloned() else {
+            return false;
+        };
+        for segment in &access.path.segments {
+            value_type = match segment {
+                TemplatePathSegment::Field(field) => {
+                    let Ok(resolved) = value_type.require_decoded_segments([field.as_str()]) else {
+                        return false;
+                    };
+                    resolved
+                }
+                TemplatePathSegment::EachItem => {
+                    let Some(item) = template_array_item_type(&value_type) else {
+                        return false;
+                    };
+                    item
+                }
+            };
+        }
+        match access.kind {
+            TemplateAccessKind::Scalar => template_scalar_type(&value_type),
+            TemplateAccessKind::Json => !matches!(value_type, ValueType::Any | ValueType::Never),
+            TemplateAccessKind::Each => template_array_item_type(&value_type).is_some(),
+        }
+    })
+}
+
+fn template_array_item_type(value_type: &ValueType) -> Option<ValueType> {
+    match value_type {
+        ValueType::Array(array) => Some(array.items.as_ref().clone()),
+        ValueType::Union(variants) => {
+            let items = variants
+                .iter()
+                .map(template_array_item_type)
+                .collect::<Option<Vec<_>>>()?;
+            ValueType::unify(items).ok()
+        }
+        _ => None,
+    }
+}
+
+fn template_scalar_type(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::Boolean | ValueType::Integer | ValueType::Number | ValueType::String => true,
+        ValueType::Literal(Value::Bool(_) | Value::Number(_) | Value::String(_)) => true,
+        ValueType::Literal(Value::Null | Value::Array(_) | Value::Object(_)) => false,
+        ValueType::Union(variants) => variants.iter().all(template_scalar_type),
+        ValueType::Never
+        | ValueType::Any
+        | ValueType::Null
+        | ValueType::Array(_)
+        | ValueType::Object(_) => false,
+    }
+}
+
+fn empty_array_bottom_was_widened(actual: &ValueType, declared: &ValueType) -> bool {
+    let ValueType::Array(actual) = actual else {
+        return false;
+    };
+    if actual.min_items != 0 || !matches!(actual.items.as_ref(), ValueType::Never) {
+        return false;
+    }
+    !matches!(
+        declared,
+        ValueType::Array(array)
+            if array.min_items == 0 && matches!(array.items.as_ref(), ValueType::Never)
+    )
+}
+
 fn infer_json_type(value: &Value) -> ValueType {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
@@ -1718,7 +2632,7 @@ fn infer_json_type(value: &Value) -> ValueType {
         }
         Value::Array(values) => {
             let item_type = if values.is_empty() {
-                ValueType::Any
+                ValueType::Never
             } else {
                 ValueType::unify(values.iter().map(infer_json_type))
                     .expect("non-empty JSON array was supplied")
@@ -1747,7 +2661,39 @@ fn infer_json_type(value: &Value) -> ValueType {
     }
 }
 
-fn settled_type(value_type: ValueType) -> ValueType {
+pub(crate) fn safe_branch_error_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["category", "code", "retryable", "origin"],
+        "properties": {
+            "category": {
+                "type": "string",
+                "enum": ["workflow", "operation", "timeout"]
+            },
+            "code": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": ERROR_CODE_MAX_CHARS,
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+            },
+            "retryable": {"type": "boolean"},
+            "origin": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": SAFE_BRANCH_ORIGIN_MAX_BYTES
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+pub(crate) fn safe_branch_error_type() -> ValueType {
+    SchemaType::compile(&safe_branch_error_schema())
+        .expect("the frozen SafeBranchError schema is inside the static type profile")
+        .into_value_type()
+}
+
+pub(crate) fn settled_type(value_type: ValueType) -> ValueType {
     let ok = object_type([
         (
             "status",
@@ -1755,18 +2701,12 @@ fn settled_type(value_type: ValueType) -> ValueType {
         ),
         ("value", value_type),
     ]);
-    let safe_error = object_type([
-        ("category", ValueType::String),
-        ("code", ValueType::String),
-        ("retryable", ValueType::Boolean),
-        ("origin", ValueType::String),
-    ]);
     let error = object_type([
         (
             "status",
             ValueType::Literal(Value::String("error".to_string())),
         ),
-        ("error", safe_error),
+        ("error", safe_branch_error_type()),
     ]);
     ValueType::Union(vec![ok, error])
 }
@@ -1794,7 +2734,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::dsl::vnext::raw::ErrorCategory;
+    use crate::dsl::vnext::{raw::ErrorCategory, template::compile_template};
+
+    const SYSTEM_PROMPT_SOURCE: &str = "Analyze the question.";
 
     fn identifier(value: &str) -> Identifier {
         Identifier::parse(value).unwrap()
@@ -1821,6 +2763,87 @@ mod tests {
 
     fn expression_value(path: &str, ordinal: u16, value_type: ValueType) -> ValueDefinition {
         data(ValueId::expression(path, ordinal).unwrap(), value_type)
+    }
+
+    fn string_contract() -> TypedContract {
+        TypedContract {
+            schema: json!({"type":"string"}),
+            value_type: ValueType::String,
+        }
+    }
+
+    fn text_llm_envelope_contract() -> TypedContract {
+        let schema = json!({
+            "type":"object",
+            "required":["data", "finish_reason", "usage"],
+            "properties":{
+                "data":{"type":"string"},
+                "finish_reason":{"type":["string", "null"]},
+                "usage":true
+            },
+            "additionalProperties":false
+        });
+        TypedContract {
+            value_type: SchemaType::compile(&schema).unwrap().into_value_type(),
+            schema,
+        }
+    }
+
+    fn system_provenance() -> TemplateProvenance {
+        TemplateProvenance::Catalog {
+            prompt_id: identifier("system"),
+            asset_hash: sha256_label(SYSTEM_PROMPT_SOURCE.as_bytes()),
+        }
+    }
+
+    fn compiled_system_prompt() -> CompiledPrompt {
+        CompiledPrompt {
+            provenance: system_provenance(),
+            compiled: compile_template(SYSTEM_PROMPT_SOURCE).unwrap(),
+            profile_version: TemplateProfileVersion::V1,
+        }
+    }
+
+    fn llm_plan(question: ValueId) -> CompiledLlmPlan {
+        let template_id = CompiledTemplateId::catalog(&identifier("system"));
+        CompiledLlmPlan {
+            model: super::super::plan::ResolvedModelId::parse("general_chat").unwrap(),
+            local_inputs: BTreeMap::from([(identifier("question"), question.clone())]),
+            message_sources: vec![
+                MessageSourcePlan::Authored {
+                    role: PlannedRole::System,
+                    content: vec![CompiledContentAtom::Template {
+                        template_id: template_id.clone(),
+                        bindings: BTreeMap::new(),
+                    }],
+                },
+                MessageSourcePlan::Authored {
+                    role: PlannedRole::User,
+                    content: vec![CompiledContentAtom::RuntimeText { value: question }],
+                },
+            ],
+            templates: BTreeMap::from([(
+                template_id,
+                PlannedTemplate {
+                    provenance: system_provenance(),
+                    compiled: compile_template(SYSTEM_PROMPT_SOURCE).unwrap(),
+                    slot_signature: BTreeMap::new(),
+                    profile_version: TemplateProfileVersion::V1,
+                },
+            )]),
+            parameters: super::super::plan::ValidatedModelParameters::new(json!({})).unwrap(),
+            response: ValidatedResponseContract::Text,
+            output_contract: text_llm_envelope_contract(),
+            capabilities: BTreeSet::new(),
+            limits: super::super::plan::ResolvedRequestLimits {
+                max_messages: 32,
+                max_message_bytes: 16 * 1024,
+                max_image_url_bytes: 4 * 1024,
+                max_request_bytes: 64 * 1024,
+                max_template_context_bytes: 64 * 1024,
+                max_template_output_bytes: 16 * 1024,
+            },
+        }
     }
 
     fn capture_region(
@@ -1875,9 +2898,8 @@ mod tests {
         let input_value = ValueId::parameter("/workflow", 0).unwrap();
         let run_value = ValueId::parameter("/workflow", 1).unwrap();
         let question = ValueId::expression("/workflow/analyze", 0).unwrap();
-        let prompt = ValueId::expression("/workflow/analyze", 1).unwrap();
-        let message = ValueId::expression("/workflow/analyze", 2).unwrap();
-        let answer = ValueId::output("/workflow/analyze").unwrap();
+        let chat_result = ValueId::output("/workflow/analyze").unwrap();
+        let answer = ValueId::expression("/workflow/analyze_data", 0).unwrap();
         let branch_token = ValueId::control("/workflow/selected").unwrap();
         let selected = ValueId::phi("/workflow/selected").unwrap();
         let evidence = ValueId::expression("/workflow/result", 0).unwrap();
@@ -1971,12 +2993,7 @@ mod tests {
                 schema: output_schema.clone(),
                 value_type: output_type.clone(),
             },
-            prompts: BTreeMap::from([(
-                identifier("system"),
-                CompiledPrompt {
-                    text: "Analyze the question.".to_string(),
-                },
-            )]),
+            prompts: BTreeMap::from([(identifier("system"), compiled_system_prompt())]),
             errors: BTreeMap::from([(
                 identifier("unavailable"),
                 ErrorDeclaration {
@@ -2012,29 +3029,27 @@ mod tests {
                     Operation {
                         id: expression_operation("/workflow/analyze", 1),
                         output: expression_value("/workflow/analyze", 1, ValueType::String),
-                        kind: OperationKind::Prompt {
-                            prompt: identifier("system"),
-                        },
-                    },
-                    Operation {
-                        id: expression_operation("/workflow/analyze", 2),
-                        output: expression_value("/workflow/analyze", 2, ValueType::String),
                         kind: OperationKind::Template {
-                            text: "{{ system }} {{ question }}".to_string(),
-                            bindings: BTreeMap::from([
-                                (identifier("question"), question.clone()),
-                                (identifier("system"), prompt),
-                            ]),
+                            text: "{{ question }}".to_string(),
+                            bindings: BTreeMap::from([(identifier("question"), question.clone())]),
                         },
                     },
                     Operation {
                         id: authored_operation("/workflow/analyze"),
-                        output: data(answer.clone(), ValueType::String),
-                        kind: OperationKind::Call(Call {
-                            uses: "ai.chat".to_string(),
-                            inputs: BTreeMap::from([(identifier("message"), message)]),
-                            config: json!({"model": "general_chat"}),
-                        }),
+                        output: data(chat_result.clone(), text_llm_envelope_contract().value_type),
+                        kind: OperationKind::Call(Box::new(Call {
+                            target: CallTarget::AiChat,
+                            inputs: BTreeMap::from([(identifier("question"), question.clone())]),
+                            plan: CallPlan::Llm(llm_plan(question)),
+                        })),
+                    },
+                    Operation {
+                        id: expression_operation("/workflow/analyze_data", 0),
+                        output: expression_value("/workflow/analyze_data", 0, ValueType::String),
+                        kind: OperationKind::Project {
+                            source: chat_result,
+                            path: StaticPath::parse("data").unwrap(),
+                        },
                     },
                     Operation {
                         id: expression_operation("/workflow/constants", 0),
@@ -2126,6 +3141,58 @@ mod tests {
         }
     }
 
+    fn call_mut(ir: &mut WorkflowIr) -> &mut Call {
+        ir.root
+            .operations
+            .iter_mut()
+            .find_map(|operation| match &mut operation.kind {
+                OperationKind::Call(call) => Some(call),
+                _ => None,
+            })
+            .expect("fixture contains a Call")
+    }
+
+    fn action_ir() -> WorkflowIr {
+        let mut ir = valid_ir();
+        let input_contract = ir.input.clone();
+        let input_object = ValueId::expression("/workflow/analyze", 1).unwrap();
+        ir.root.operations[1].output.value_type =
+            IrValueType::Data(input_contract.value_type.clone());
+        ir.root.operations[1].kind = OperationKind::Object {
+            fields: BTreeMap::from([(
+                "question".to_string(),
+                ValueId::expression("/workflow/analyze", 0).unwrap(),
+            )]),
+        };
+        let call_operation = ir
+            .root
+            .operations
+            .iter_mut()
+            .find(|operation| matches!(operation.kind, OperationKind::Call(_)))
+            .unwrap();
+        call_operation.output.value_type = IrValueType::Data(ValueType::String);
+        let OperationKind::Call(call) = &mut call_operation.kind else {
+            unreachable!()
+        };
+        **call = Call {
+            target: CallTarget::ActionCall,
+            inputs: BTreeMap::from([(identifier("input"), input_object.clone())]),
+            plan: CallPlan::Action(super::super::plan::CompiledActionPlan {
+                action_id: "example.action".to_string(),
+                descriptor_version: semver::Version::parse("1.2.3").unwrap(),
+                descriptor_hash: "ab".repeat(32),
+                input_object,
+                input_contract,
+                output_contract: string_contract(),
+            }),
+        };
+        let OperationKind::Project { path, .. } = &mut ir.root.operations[3].kind else {
+            unreachable!()
+        };
+        *path = StaticPath::parse("").unwrap();
+        ir
+    }
+
     fn error_codes(result: Result<(), Vec<ValidationError>>) -> BTreeSet<ValidationCode> {
         result
             .expect_err("IR should be rejected")
@@ -2137,6 +3204,430 @@ mod tests {
     #[test]
     fn accepts_complete_typed_ir_and_arbitrary_object_keys() {
         assert_eq!(validate(&valid_ir()), Ok(()));
+        assert_eq!(validate(&action_ir()), Ok(()));
+    }
+
+    #[test]
+    fn safe_branch_error_schema_is_closed_refined_and_matches_the_ir_type() {
+        let schema = safe_branch_error_schema();
+        let schema_type = SchemaType::compile(&schema).unwrap().into_value_type();
+        assert!(types_equivalent(&schema_type, &safe_branch_error_type()));
+
+        let validator = compile_schema_2020(&schema).unwrap();
+        for category in ["workflow", "operation", "timeout"] {
+            assert!(validator.is_valid(&json!({
+                "category": category,
+                "code": "OPERATION_TIMEOUT",
+                "retryable": false,
+                "origin": "/workflow/parallel/branches/technical/call#Authored"
+            })));
+        }
+        for invalid in [
+            json!({
+                "category":"internal",
+                "code":"VALID",
+                "retryable":false,
+                "origin":"/workflow/call#Authored"
+            }),
+            json!({
+                "category":"operation",
+                "code":"lowercase",
+                "retryable":false,
+                "origin":"/workflow/call#Authored"
+            }),
+            json!({
+                "category":"operation",
+                "code":"VALID",
+                "retryable":false,
+                "origin":"x".repeat(SAFE_BRANCH_ORIGIN_MAX_BYTES + 1)
+            }),
+            json!({
+                "category":"operation",
+                "code":"VALID",
+                "retryable":false,
+                "origin":"/workflow/call#Authored",
+                "message":"must stay private"
+            }),
+        ] {
+            assert!(!validator.is_valid(&invalid));
+        }
+    }
+
+    #[test]
+    fn rejects_forged_error_declarations_and_oversized_stable_origins() {
+        let mut invalid_code = valid_ir();
+        invalid_code
+            .errors
+            .get_mut(&identifier("unavailable"))
+            .unwrap()
+            .code = "lowercase".to_string();
+        assert!(
+            error_codes(validate(&invalid_code)).contains(&ValidationCode::InvalidErrorDeclaration)
+        );
+
+        let mut invalid_message = valid_ir();
+        invalid_message
+            .errors
+            .get_mut(&identifier("unavailable"))
+            .unwrap()
+            .public_message = "x".repeat(super::super::raw::ERROR_PUBLIC_MESSAGE_MAX_CHARS + 1);
+        assert!(error_codes(validate(&invalid_message))
+            .contains(&ValidationCode::InvalidErrorDeclaration));
+
+        let oversized = format!("/{}", "a".repeat(SAFE_BRANCH_ORIGIN_MAX_BYTES));
+        assert!(RegionId::new(&oversized).is_err());
+        assert!(!is_safe_branch_origin(&oversized));
+        assert!(is_safe_branch_origin(
+            "/workflow/parallel/branches/technical/call#Expression(12)"
+        ));
+    }
+
+    #[test]
+    fn rejects_call_target_input_output_and_dependency_forgery() {
+        let mut wrong_target = valid_ir();
+        call_mut(&mut wrong_target).target = CallTarget::ActionCall;
+        assert!(error_codes(validate(&wrong_target)).contains(&ValidationCode::InvalidCallPlan));
+
+        let mut wrong_inputs = valid_ir();
+        call_mut(&mut wrong_inputs).inputs.clear();
+        assert!(error_codes(validate(&wrong_inputs)).contains(&ValidationCode::InvalidCallPlan));
+
+        let mut wrong_output = valid_ir();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut wrong_output).plan else {
+            unreachable!()
+        };
+        plan.output_contract = TypedContract {
+            schema: json!({"type":"number"}),
+            value_type: ValueType::Number,
+        };
+        assert!(error_codes(validate(&wrong_output)).contains(&ValidationCode::InvalidCallPlan));
+
+        let mut unknown_dependency = valid_ir();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut unknown_dependency).plan else {
+            unreachable!()
+        };
+        let MessageSourcePlan::Authored { content, .. } = &mut plan.message_sources[1] else {
+            unreachable!()
+        };
+        content[0] = CompiledContentAtom::RuntimeText {
+            value: ValueId::output("/workflow/missing").unwrap(),
+        };
+        assert!(error_codes(validate(&unknown_dependency)).contains(&ValidationCode::UnknownValue));
+    }
+
+    #[test]
+    fn rejects_forged_llm_message_template_and_capability_contracts() {
+        let mut valid_template_binding = valid_ir();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut valid_template_binding).plan else {
+            unreachable!()
+        };
+        let template_path = crate::dsl::DslPath::root()
+            .child_key("workflow")
+            .child_key("steps")
+            .child_index(0)
+            .child_key("messages")
+            .child_index(1)
+            .child_key("content");
+        let inline_id = CompiledTemplateId::inline(&template_path, 0);
+        plan.templates.insert(
+            inline_id.clone(),
+            PlannedTemplate {
+                provenance: TemplateProvenance::Inline {
+                    dsl_path: template_path,
+                    source_hash: sha256_label("{{ question }}".as_bytes()),
+                },
+                compiled: compile_template("{{ question }}").unwrap(),
+                slot_signature: BTreeMap::from([(identifier("question"), ValueType::String)]),
+                profile_version: TemplateProfileVersion::V1,
+            },
+        );
+        let MessageSourcePlan::Authored { content, .. } = &mut plan.message_sources[1] else {
+            unreachable!()
+        };
+        content[0] = CompiledContentAtom::Template {
+            template_id: inline_id.clone(),
+            bindings: BTreeMap::from([(
+                identifier("question"),
+                ValueId::expression("/workflow/analyze", 0).unwrap(),
+            )]),
+        };
+        assert_eq!(validate(&valid_template_binding), Ok(()));
+
+        let mut stable_id_pseudo_path = valid_template_binding.clone();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut stable_id_pseudo_path).plan else {
+            unreachable!()
+        };
+        let mut template = plan.templates.remove(&inline_id).unwrap();
+        let pseudo_path = crate::dsl::DslPath::root()
+            .child_key("workflow")
+            .child_key("analyze")
+            .child_key("messages")
+            .child_index(1)
+            .child_key("content");
+        let pseudo_id = CompiledTemplateId::inline(&pseudo_path, 0);
+        let TemplateProvenance::Inline { dsl_path, .. } = &mut template.provenance else {
+            unreachable!()
+        };
+        *dsl_path = pseudo_path;
+        plan.templates.insert(pseudo_id.clone(), template);
+        let MessageSourcePlan::Authored { content, .. } = &mut plan.message_sources[1] else {
+            unreachable!()
+        };
+        let CompiledContentAtom::Template { template_id, .. } = &mut content[0] else {
+            unreachable!()
+        };
+        *template_id = pseudo_id;
+        assert!(error_codes(validate(&stable_id_pseudo_path))
+            .contains(&ValidationCode::InvalidCallPlan));
+
+        let mut forged_source_hash = valid_template_binding.clone();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut forged_source_hash).plan else {
+            unreachable!()
+        };
+        let TemplateProvenance::Inline { source_hash, .. } =
+            &mut plan.templates.get_mut(&inline_id).unwrap().provenance
+        else {
+            unreachable!()
+        };
+        *source_hash = "sha256:forged".to_string();
+        assert!(
+            error_codes(validate(&forged_source_hash)).contains(&ValidationCode::InvalidCallPlan)
+        );
+
+        let mut missing_binding = valid_template_binding.clone();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut missing_binding).plan else {
+            unreachable!()
+        };
+        let MessageSourcePlan::Authored { content, .. } = &mut plan.message_sources[1] else {
+            unreachable!()
+        };
+        let CompiledContentAtom::Template { bindings, .. } = &mut content[0] else {
+            unreachable!()
+        };
+        bindings.clear();
+        assert!(error_codes(validate(&missing_binding)).contains(&ValidationCode::InvalidCallPlan));
+
+        let mut empty_messages = valid_ir();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut empty_messages).plan else {
+            unreachable!()
+        };
+        plan.message_sources.clear();
+        assert!(error_codes(validate(&empty_messages)).contains(&ValidationCode::InvalidCallPlan));
+
+        let mut invalid_limits = valid_ir();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut invalid_limits).plan else {
+            unreachable!()
+        };
+        plan.limits.max_messages = 0;
+        assert!(error_codes(validate(&invalid_limits)).contains(&ValidationCode::InvalidCallPlan));
+
+        let mut too_many_static_messages = valid_ir();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut too_many_static_messages).plan else {
+            unreachable!()
+        };
+        plan.limits.max_messages = 1;
+        assert!(error_codes(validate(&too_many_static_messages))
+            .contains(&ValidationCode::InvalidCallPlan));
+
+        let mut late_system = valid_ir();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut late_system).plan else {
+            unreachable!()
+        };
+        let user = plan.message_sources[1].clone();
+        plan.message_sources.push(MessageSourcePlan::Authored {
+            role: PlannedRole::System,
+            content: vec![CompiledContentAtom::Template {
+                template_id: CompiledTemplateId::catalog(&identifier("system")),
+                bindings: BTreeMap::new(),
+            }],
+        });
+        plan.message_sources.push(user);
+        assert!(error_codes(validate(&late_system)).contains(&ValidationCode::InvalidCallPlan));
+
+        let mut missing_template = valid_ir();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut missing_template).plan else {
+            unreachable!()
+        };
+        plan.templates.clear();
+        assert!(error_codes(validate(&missing_template)).contains(&ValidationCode::InvalidCallPlan));
+
+        let mut image_without_vision = valid_ir();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut image_without_vision).plan else {
+            unreachable!()
+        };
+        let MessageSourcePlan::Authored { content, .. } = &mut plan.message_sources[1] else {
+            unreachable!()
+        };
+        content.push(CompiledContentAtom::Image {
+            value: ValueId::expression("/workflow/analyze", 0).unwrap(),
+        });
+        assert!(
+            error_codes(validate(&image_without_vision)).contains(&ValidationCode::InvalidCallPlan)
+        );
+        assert!(!template_scalar_type(&ValueType::Null));
+        assert!(!template_scalar_type(&ValueType::Literal(Value::Null)));
+    }
+
+    #[test]
+    fn rejects_forged_dynamic_message_proofs_and_non_local_content() {
+        let history_json = json!([{"role":"user", "content":"prior context"}]);
+        let history_type = infer_json_type(&history_json);
+        let history = ValueId::expression("/workflow/history", 0).unwrap();
+        let mut valid_dynamic = valid_ir();
+        valid_dynamic.root.operations.insert(
+            2,
+            Operation {
+                id: expression_operation("/workflow/history", 0),
+                output: expression_value("/workflow/history", 0, history_type.clone()),
+                kind: OperationKind::Const {
+                    value: history_json,
+                },
+            },
+        );
+        let call = call_mut(&mut valid_dynamic);
+        call.inputs.insert(identifier("history"), history.clone());
+        let CallPlan::Llm(plan) = &mut call.plan else {
+            unreachable!()
+        };
+        plan.local_inputs
+            .insert(identifier("history"), history.clone());
+        plan.message_sources.push(MessageSourcePlan::Dynamic {
+            source: super::super::value::LocalInputPath::parse("inputs.history").unwrap(),
+            value: history,
+            proven_shape: prove_dynamic_message_array(&SchemaShape::from_value_type(&history_type))
+                .unwrap(),
+        });
+        assert_eq!(validate(&valid_dynamic), Ok(()));
+
+        let mut forged_proof = valid_dynamic.clone();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut forged_proof).plan else {
+            unreachable!()
+        };
+        let MessageSourcePlan::Dynamic { proven_shape, .. } =
+            plan.message_sources.last_mut().unwrap()
+        else {
+            unreachable!()
+        };
+        proven_shape.requires_vision = true;
+        assert!(error_codes(validate(&forged_proof)).contains(&ValidationCode::InvalidCallPlan));
+
+        let mut invalid_dynamic = valid_ir();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut invalid_dynamic).plan else {
+            unreachable!()
+        };
+        plan.message_sources.push(MessageSourcePlan::Dynamic {
+            source: super::super::value::LocalInputPath::parse("inputs.question").unwrap(),
+            value: ValueId::expression("/workflow/analyze", 0).unwrap(),
+            proven_shape: super::super::shape::DynamicMessageShapeProof {
+                requires_vision: false,
+            },
+        });
+        assert!(error_codes(validate(&invalid_dynamic)).contains(&ValidationCode::InvalidCallPlan));
+
+        let mut non_local = valid_ir();
+        let foreign = ValueId::expression("/workflow/analyze", 1).unwrap();
+        let CallPlan::Llm(plan) = &mut call_mut(&mut non_local).plan else {
+            unreachable!()
+        };
+        let MessageSourcePlan::Authored { content, .. } = &mut plan.message_sources[1] else {
+            unreachable!()
+        };
+        content[0] = CompiledContentAtom::RuntimeText { value: foreign };
+        assert!(error_codes(validate(&non_local)).contains(&ValidationCode::InvalidCallPlan));
+    }
+
+    #[test]
+    fn rejects_forged_action_identity_object_and_contracts() {
+        let mut bad_hash = action_ir();
+        let CallPlan::Action(plan) = &mut call_mut(&mut bad_hash).plan else {
+            unreachable!()
+        };
+        plan.descriptor_hash = "not-a-sha256".to_string();
+        assert!(error_codes(validate(&bad_hash)).contains(&ValidationCode::InvalidCallPlan));
+
+        let mut wrong_input_name = action_ir();
+        let call = call_mut(&mut wrong_input_name);
+        let value = call.inputs.remove(&identifier("input")).unwrap();
+        call.inputs.insert(identifier("payload"), value);
+        assert!(error_codes(validate(&wrong_input_name)).contains(&ValidationCode::InvalidCallPlan));
+
+        let mut wrong_contract = action_ir();
+        let CallPlan::Action(plan) = &mut call_mut(&mut wrong_contract).plan else {
+            unreachable!()
+        };
+        plan.input_contract = string_contract();
+        assert!(error_codes(validate(&wrong_contract)).contains(&ValidationCode::InvalidCallPlan));
+    }
+
+    #[test]
+    fn rejects_action_plan_that_borrows_an_earlier_compatible_object() {
+        let mut ir = action_ir();
+        let borrowed_input = ValueId::expression("/workflow/borrowed_input", 0).unwrap();
+        ir.root.operations.insert(
+            1,
+            Operation {
+                id: expression_operation("/workflow/borrowed_input", 0),
+                output: data(borrowed_input.clone(), ir.input.value_type.clone()),
+                kind: OperationKind::Object {
+                    fields: BTreeMap::from([(
+                        "question".to_string(),
+                        ValueId::expression("/workflow/analyze", 0).unwrap(),
+                    )]),
+                },
+            },
+        );
+        let call = call_mut(&mut ir);
+        call.inputs
+            .insert(identifier("input"), borrowed_input.clone());
+        let CallPlan::Action(plan) = &mut call.plan else {
+            unreachable!()
+        };
+        plan.input_object = borrowed_input;
+
+        assert!(error_codes(validate(&ir)).contains(&ValidationCode::InvalidCallPlan));
+    }
+
+    #[test]
+    fn rejects_action_input_object_with_a_widened_declared_field_type() {
+        let mut ir = action_ir();
+        ir.root.operations[0].output.value_type = IrValueType::Data(ValueType::Integer);
+        ir.root.operations[0].kind = OperationKind::Const { value: json!(1) };
+        ir.root.operations[1].output.value_type =
+            IrValueType::Data(object_type([("question", ValueType::Number)]));
+        let CallPlan::Action(plan) = &mut call_mut(&mut ir).plan else {
+            unreachable!()
+        };
+        plan.input_contract = TypedContract {
+            schema: json!({
+                "type": "object",
+                "properties": {"question": {"type": "number"}},
+                "required": ["question"],
+                "additionalProperties": false
+            }),
+            value_type: object_type([("question", ValueType::Number)]),
+        };
+
+        assert!(error_codes(validate(&ir)).contains(&ValidationCode::InvalidCallPlan));
+    }
+
+    #[test]
+    fn rejects_forged_request_limits_above_every_absolute_platform_ceiling() {
+        for dimension in 0..6 {
+            let mut ir = valid_ir();
+            let CallPlan::Llm(plan) = &mut call_mut(&mut ir).plan else {
+                unreachable!()
+            };
+            match dimension {
+                0 => plan.limits.max_messages = usize::MAX,
+                1 => plan.limits.max_message_bytes = usize::MAX,
+                2 => plan.limits.max_image_url_bytes = usize::MAX,
+                3 => plan.limits.max_request_bytes = usize::MAX,
+                4 => plan.limits.max_template_context_bytes = usize::MAX,
+                5 => plan.limits.max_template_output_bytes = usize::MAX,
+                _ => unreachable!(),
+            }
+            assert!(error_codes(validate(&ir)).contains(&ValidationCode::InvalidCallPlan));
+        }
     }
 
     #[test]
@@ -2172,7 +3663,7 @@ mod tests {
     #[test]
     fn rejects_use_before_definition() {
         let mut ir = valid_ir();
-        ir.root.operations.swap(2, 3);
+        ir.root.operations.swap(0, 3);
 
         assert!(error_codes(validate(&ir)).contains(&ValidationCode::UseBeforeDefinition));
     }
@@ -2180,7 +3671,7 @@ mod tests {
     #[test]
     fn rejects_invalid_template_text_in_forged_ir() {
         let mut ir = valid_ir();
-        let OperationKind::Template { text, .. } = &mut ir.root.operations[2].kind else {
+        let OperationKind::Template { text, .. } = &mut ir.root.operations[1].kind else {
             panic!("expected Template")
         };
         *text = "{{#if broken}}".to_string();
@@ -2358,5 +3849,61 @@ mod tests {
         parallel.max_concurrency = Some(3);
 
         assert!(error_codes(validate(&ir)).contains(&ValidationCode::InvalidParallel));
+    }
+
+    #[test]
+    fn verifier_requires_bottom_items_for_empty_arrays() {
+        let mut ir = valid_ir();
+        ir.root.operations.push(Operation {
+            id: expression_operation("/workflow/empty", 0),
+            output: expression_value(
+                "/workflow/empty",
+                0,
+                ValueType::Array(ArrayType {
+                    items: Box::new(ValueType::Never),
+                    min_items: 0,
+                }),
+            ),
+            kind: OperationKind::Array { items: Vec::new() },
+        });
+        assert_eq!(validate(&ir), Ok(()));
+
+        {
+            let IrValueType::Data(ValueType::Array(array)) =
+                &mut ir.root.operations.last_mut().unwrap().output.value_type
+            else {
+                unreachable!()
+            };
+            *array.items = ValueType::Any;
+        }
+        assert!(error_codes(validate(&ir)).contains(&ValidationCode::TypeMismatch));
+
+        let IrValueType::Data(ValueType::Array(array)) =
+            &mut ir.root.operations.last_mut().unwrap().output.value_type
+        else {
+            unreachable!()
+        };
+        *array.items = ValueType::Never;
+        ir.root.operations.push(Operation {
+            id: expression_operation("/workflow/empty_literal", 0),
+            output: expression_value(
+                "/workflow/empty_literal",
+                0,
+                ValueType::Array(ArrayType {
+                    items: Box::new(ValueType::Any),
+                    min_items: 0,
+                }),
+            ),
+            kind: OperationKind::Const { value: json!([]) },
+        });
+        assert!(error_codes(validate(&ir)).contains(&ValidationCode::TypeMismatch));
+
+        assert_eq!(
+            infer_json_type(&json!([])),
+            ValueType::Array(ArrayType {
+                items: Box::new(ValueType::Never),
+                min_items: 0,
+            })
+        );
     }
 }

@@ -1,5 +1,7 @@
 # DSL vNext Region-SSA Design
 
+> **Historical / superseded for the authored surface:** 本文的 Region/SSA、结构化 `parallel`/`switch`、词法作用域、child/root result、取消与 drain 合同仍然有效；其中 public `kind: operation`、`uses/config`、step `with`、通用 `{prompt: ...}` ValueExpr、Chat `parts[]` 及 generic extension 作者语法已被 [DSL 作者层 LLM、Action 与消息模型重设计规范](./2026-07-17-dsl-authoring-surface-redesign.md) 覆盖。下文相关示例按历史原文保留，不是 canonical positive DSL input。
+
 **Status:** Implemented
 
 ## Objective

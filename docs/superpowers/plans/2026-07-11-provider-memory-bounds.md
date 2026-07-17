@@ -1,5 +1,7 @@
 # Provider Memory Bounds Implementation Plan
 
+> **Historical implementation record:** provider response bounds remain relevant, but `core.chat`/generic-operation YAML below is superseded. Current LLM authoring and request-budget contracts are defined by [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close `BASE-P1-011` by bounding OpenAI-compatible provider response memory and accumulated chat output memory.

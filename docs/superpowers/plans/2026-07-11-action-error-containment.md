@@ -1,5 +1,7 @@
 # Action Error Containment Implementation Plan
 
+> **Historical implementation record:** Action error containment remains applicable, but graph/generic-operation YAML below is superseded. Current typed `kind: action` authoring and privacy contracts are defined by [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close `BASE-P1-010` by ensuring Action JSON Schema validation never places raw input or output values into runtime errors, events, history, HTTP responses, SSE, or default tracing.

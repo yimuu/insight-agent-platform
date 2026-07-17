@@ -1,5 +1,7 @@
 # Medical Report Follow-up Routing Implementation Plan
 
+> **Historical / superseded:** this plan uses the removed graph/`core.chat` authoring syntax. The retained product behavior is implemented by the checked-in Agent; current `llm`/messages/switch syntax is defined by [DSL Authoring Surface Redesign](../specs/2026-07-17-dsl-authoring-surface-redesign.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Route medical-report follow-up turns through one dedicated prompt and model call while preserving the existing three-step initial-turn flow.
