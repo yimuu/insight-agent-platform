@@ -4,13 +4,15 @@ use std::{
     fmt,
 };
 
-use handlebars::Template;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
     dsl::{DslPath, SourceSpan},
-    resources::{actions::ActionDescriptorIdentity, models::ModelCapability},
+    resources::{
+        actions::ActionDescriptorIdentity,
+        models::{select_structured_output_capability, ModelCapability},
+    },
 };
 
 use super::{
@@ -68,6 +70,7 @@ pub const LLM_TEMPLATE_BINDING_INVALID: &str = "VNEXT_LLM_TEMPLATE_BINDING_INVAL
 pub const LLM_SYSTEM_RUNTIME_INPUT_FORBIDDEN: &str = "VNEXT_LLM_SYSTEM_RUNTIME_INPUT_FORBIDDEN";
 pub const LLM_MESSAGE_SOURCE_TYPE_INVALID: &str = "VNEXT_LLM_MESSAGE_SOURCE_TYPE_INVALID";
 pub const LLM_VISION_REQUIRED: &str = "VNEXT_LLM_VISION_REQUIRED";
+pub const LLM_STRUCTURED_OUTPUT_REQUIRED: &str = "VNEXT_LLM_STRUCTURED_OUTPUT_REQUIRED";
 pub const LLM_RESPONSE_CONFIG_INVALID: &str = "VNEXT_LLM_RESPONSE_CONFIG_INVALID";
 pub const ACTION_NOT_FOUND: &str = "VNEXT_ACTION_NOT_FOUND";
 pub const ACTION_INPUT_CONTRACT_INVALID: &str = "VNEXT_ACTION_INPUT_CONTRACT_INVALID";
@@ -609,6 +612,28 @@ impl<R: ResourceResolver> Lowerer<'_, R> {
             ));
         }
         let (response, output_contract) = self.compile_llm_response(response, step_path)?;
+        let requires_structured_output = matches!(response, ValidatedResponseContract::Json { .. });
+        let structured_output_capability = select_structured_output_capability(
+            &resolved_model.capabilities,
+            matches!(&output_contract.value_type, ValueType::Object(_)),
+        );
+        if requires_structured_output && structured_output_capability.is_none() {
+            return Err(LowerError::new(
+                LLM_STRUCTURED_OUTPUT_REQUIRED,
+                "LLM structured response requires json_schema_output, or json_object_output for a top-level object",
+                step_path,
+            ));
+        }
+        let mut required_capabilities = BTreeSet::new();
+        if requires_vision {
+            required_capabilities.insert(ModelCapability::Vision);
+        }
+        if requires_structured_output {
+            required_capabilities.insert(
+                structured_output_capability
+                    .expect("structured output capability was checked above"),
+            );
+        }
         let output = TypedValue {
             id: self.authored_output_id(step_path)?,
             value_type: output_contract.value_type.clone(),
@@ -628,7 +653,7 @@ impl<R: ResourceResolver> Lowerer<'_, R> {
                     parameters,
                     response,
                     output_contract,
-                    capabilities: resolved_model.capabilities,
+                    capabilities: required_capabilities,
                     limits: ResolvedRequestLimits::new(
                         128, 65_536, 32_768, 262_144, 262_144, 262_144,
                     )
@@ -965,7 +990,7 @@ impl<R: ResourceResolver> Lowerer<'_, R> {
                     .caused_by(cause)
                 })?;
             match access.kind {
-                TemplateAccessKind::Scalar if is_template_scalar(&value_type) => {}
+                TemplateAccessKind::Scalar if value_type.is_assignable_to(&ValueType::String) => {}
                 TemplateAccessKind::Json => {
                     if prove_dynamic_message_array(&SchemaShape::from_value_type(&value_type))
                         .is_ok()
@@ -1056,8 +1081,49 @@ impl<R: ResourceResolver> Lowerer<'_, R> {
         response: &ResponseConfig,
         step_path: &str,
     ) -> OneResult<(ValidatedResponseContract, TypedContract)> {
-        let (response, data_schema) = match response {
-            ResponseConfig::Text => (ValidatedResponseContract::Text, json!({"type":"string"})),
+        match response {
+            ResponseConfig::Text => Ok((
+                ValidatedResponseContract::Text,
+                TypedContract {
+                    schema: json!({"type":"string"}),
+                    value_type: ValueType::String,
+                },
+            )),
+            ResponseConfig::TextSchema { schema } => {
+                let bundle = compile_contract_schema(&self.workflow.definitions, schema).map_err(
+                    |error| {
+                        LowerError::new(
+                            LLM_RESPONSE_CONFIG_INVALID,
+                            "LLM text response schema could not be compiled",
+                            step_path,
+                        )
+                        .caused_by(error.code())
+                    },
+                )?;
+                let schema_type =
+                    SchemaType::compile(bundle.expanded_schema()).map_err(|error| {
+                        LowerError::new(
+                            LLM_RESPONSE_CONFIG_INVALID,
+                            "LLM text response schema is outside the static schema profile",
+                            step_path,
+                        )
+                        .caused_by(error.code())
+                    })?;
+                if !matches!(schema_type.value_type(), ValueType::String) {
+                    return Err(LowerError::new(
+                        LLM_RESPONSE_CONFIG_INVALID,
+                        "LLM text response schema must resolve to string",
+                        step_path,
+                    ));
+                }
+                Ok((
+                    ValidatedResponseContract::Text,
+                    TypedContract {
+                        schema: bundle.validator_document().clone(),
+                        value_type: schema_type.into_value_type(),
+                    },
+                ))
+            }
             ResponseConfig::Json { schema } => {
                 let bundle = compile_contract_schema(&self.workflow.definitions, schema).map_err(
                     |error| {
@@ -1089,24 +1155,9 @@ impl<R: ResourceResolver> Lowerer<'_, R> {
                     schema: bundle.validator_document().clone(),
                     value_type: schema_type.into_value_type(),
                 };
-                (
-                    ValidatedResponseContract::Json { data },
-                    bundle.expanded_schema().clone(),
-                )
+                Ok((ValidatedResponseContract::Json { data: data.clone() }, data))
             }
-        };
-        let output_schema = json!({
-            "type":"object",
-            "required":["data", "finish_reason", "usage"],
-            "properties":{
-                "data":data_schema,
-                "finish_reason":{"type":["string", "null"]},
-                "usage":true
-            },
-            "additionalProperties":false
-        });
-        let output = self.compile_contract(&output_schema, step_path)?;
-        Ok((response, output))
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1589,14 +1640,24 @@ impl<R: ResourceResolver> Lowerer<'_, R> {
         operations: &mut Vec<Operation>,
         environment: &RegionEnvironment,
     ) -> OneResult<TypedValue> {
-        Template::compile(&template.text).map_err(|_| {
+        let compiled = compile_template(&template.text).map_err(|error| {
             LowerError::new(
                 LOWER_TEMPLATE_INVALID,
-                "template contains invalid Handlebars syntax",
+                "template does not satisfy the restricted template profile",
                 expression_path,
             )
+            .caused_by(error.code())
+            .with_decoded_template_span(error.decoded_span())
         })?;
-        let mut bindings = BTreeMap::new();
+        let declared = template.bindings.keys().cloned().collect::<BTreeSet<_>>();
+        if declared != *compiled.slots() {
+            return Err(LowerError::new(
+                LOWER_TEMPLATE_INVALID,
+                "template bindings must exactly match its syntactic slots",
+                expression_path,
+            ));
+        }
+        let mut lowered_bindings = BTreeMap::new();
         for (name, expression) in &template.bindings {
             let value = self.lower_expression(
                 expression,
@@ -1605,8 +1666,42 @@ impl<R: ResourceResolver> Lowerer<'_, R> {
                 operations,
                 environment,
             )?;
-            bindings.insert(name.clone(), value.id);
+            lowered_bindings.insert(name.clone(), value);
         }
+        for access in compiled.accesses() {
+            let root = lowered_bindings.get(&access.path.root).ok_or_else(|| {
+                LowerError::new(
+                    LOWER_TEMPLATE_INVALID,
+                    "template references an undeclared lexical slot",
+                    expression_path,
+                )
+            })?;
+            let value_type = template_access_type(&root.value_type, &access.path.segments)
+                .map_err(|cause| {
+                    LowerError::new(
+                        LOWER_TEMPLATE_INVALID,
+                        "template access is not guaranteed by its value type",
+                        expression_path,
+                    )
+                    .caused_by(cause)
+                })?;
+            match access.kind {
+                TemplateAccessKind::Scalar if value_type.is_assignable_to(&ValueType::String) => {}
+                TemplateAccessKind::Json => {}
+                TemplateAccessKind::Each if is_static_array(&value_type) => {}
+                TemplateAccessKind::Scalar | TemplateAccessKind::Each => {
+                    return Err(LowerError::new(
+                        LOWER_TEMPLATE_INVALID,
+                        "template interpolation must be statically string-typed",
+                        expression_path,
+                    ));
+                }
+            }
+        }
+        let bindings = lowered_bindings
+            .into_iter()
+            .map(|(name, value)| (name, value.id))
+            .collect();
         self.emit_expression(
             expression_path,
             ordinal,
@@ -1880,14 +1975,6 @@ fn is_static_array(value_type: &ValueType) -> bool {
     template_array_item(value_type).is_ok()
 }
 
-fn is_template_scalar(value_type: &ValueType) -> bool {
-    value_type.is_assignable_to(&ValueType::Union(vec![
-        ValueType::String,
-        ValueType::Number,
-        ValueType::Boolean,
-    ]))
-}
-
 fn step_id(step: &Step) -> &Identifier {
     match step {
         Step::Llm { id, .. }
@@ -1955,8 +2042,8 @@ mod tests {
 
     use super::{
         lower_workflow, ResolvedActionContract, ResolvedModelContract, ResourceResolver,
-        LOWER_CEL_INVALID, LOWER_SCHEMA_DIALECT_INVALID, LOWER_SCHEMA_INVALID,
-        LOWER_SEMANTIC_INVALID, LOWER_TEMPLATE_INVALID, LOWER_TYPE_MISMATCH,
+        LLM_STRUCTURED_OUTPUT_REQUIRED, LOWER_CEL_INVALID, LOWER_SCHEMA_DIALECT_INVALID,
+        LOWER_SCHEMA_INVALID, LOWER_SEMANTIC_INVALID, LOWER_TEMPLATE_INVALID, LOWER_TYPE_MISMATCH,
     };
     use crate::{
         dsl::vnext::{
@@ -2090,6 +2177,41 @@ mod tests {
             parameters: serde_json::Map::new(),
             response: ResponseConfig::Text,
         }
+    }
+
+    #[test]
+    fn rejects_structured_response_when_model_lacks_declared_capability() {
+        let response_schema = json!({"$ref":"#/$defs/ScopeValue"});
+        let structured = Step::Llm {
+            id: id("answer"),
+            model: "test.model".to_string(),
+            inputs: BTreeMap::new(),
+            messages: MessageListExpr::Sources(vec![MessageSource::Authored(
+                AuthoredMessageTemplate {
+                    role: AuthoredRole::User,
+                    content: AuthoredContentExpr::Single(AuthoredContentAtom::InlineText(
+                        "answer with JSON".to_string(),
+                    )),
+                },
+            )]),
+            parameters: serde_json::Map::new(),
+            response: ResponseConfig::Json {
+                schema: response_schema.clone(),
+            },
+        };
+        let workflow = workflow(
+            vec![structured],
+            RootResult::Return(RootReturn {
+                content: None,
+                format: None,
+                data: from("steps.answer.output"),
+            }),
+            response_schema,
+        );
+
+        let errors = lower_workflow(&workflow, &EchoResolver).unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code(), LLM_STRUCTURED_OUTPUT_REQUIRED);
     }
 
     fn collect_inline_template_paths(region: &Region, paths: &mut Vec<String>) {
@@ -2395,7 +2517,7 @@ mod tests {
             RootResult::Return(RootReturn {
                 content: None,
                 format: None,
-                data: from("steps.answer.output.data"),
+                data: from("steps.answer.output"),
             }),
             json!({"$ref":"#/$defs/Text"}),
         );
@@ -2423,7 +2545,7 @@ mod tests {
         );
         cases[0].result = returning(ValueExpr::Object(BTreeMap::from([(
             "value".to_string(),
-            from("steps.echo.output.data"),
+            from("steps.echo.output"),
         )])));
         default.steps.push(inline_llm(
             "fallback_message",

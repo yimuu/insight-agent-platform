@@ -538,7 +538,10 @@ impl RunService {
             .agents
             .get(agent_id)
             .ok_or_else(|| ServiceError::new("AGENT_NOT_FOUND", "agent not found"))?;
-        if !agent.input_validator().is_valid(&input) {
+        let input = agent.normalize_input(input).map_err(|_| {
+            ServiceError::new("INPUT_INVALID", "input does not match the agent schema")
+        })?;
+        if !agent.normalized_input_validator().is_valid(&input) {
             return Err(ServiceError::new(
                 "INPUT_INVALID",
                 "input does not match the agent schema",
@@ -1061,15 +1064,14 @@ kind: agent
 metadata:
   id: {id}
   name: Test Agent
-schema_dialect: https://json-schema.org/draft/2020-12/schema
-input:
-  schema: {{type: object, additionalProperties: false}}
-output:
-  data_schema: {{type: object, additionalProperties: false}}
+types:
+  Empty:
+    fields: {{}}
+inputs: {{}}
+output: Empty
 workflow:
   result:
-    return:
-      data: {{literal: {{}}}}
+    return: {{}}
 "#
         );
         Arc::new(

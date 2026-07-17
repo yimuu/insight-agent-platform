@@ -215,7 +215,7 @@ async fn initial_route_runs_three_steps_and_transfers_each_prior_result() {
         let (record, tracker) = run_medical(initial_input(image_url)).await;
         let output = completed_output(&record);
         let combined = format!("{ABNORMAL_RESULT}\n\n{COMPREHENSIVE_RESULT}\n\n{HEALTH_RESULT}");
-        assert_eq!(output.content.as_deref(), Some(combined.as_str()));
+        assert_eq!(output.content, None);
         assert_eq!(
             output.data,
             json!({
@@ -253,17 +253,23 @@ async fn follow_up_route_runs_only_the_follow_up_chat() {
         "report_text": "ALT 80 U/L, reference range 7-40 U/L",
         "image_url": null,
         "messages": [
-            {"role": "user", "content": "请先解读肝功能"},
-            {"role": "assistant", "content": "此前已经说明 ALT 升高"}
+            {"role": "user", "content": [{"text": "请先解读肝功能"}]},
+            {"role": "assistant", "content": [{"text": "此前已经说明 ALT 升高"}]}
         ],
         "question": "需要多久复查？"
     }))
     .await;
     let output = completed_output(&record);
-    assert_eq!(output.content.as_deref(), Some(FOLLOW_UP_RESULT));
+    assert_eq!(output.content, None);
     assert_eq!(
         output.data,
-        json!({"mode": "follow_up", "answer": FOLLOW_UP_RESULT})
+        json!({
+            "mode": "follow_up",
+            "answer": FOLLOW_UP_RESULT,
+            "abnormal_indicators": "",
+            "comprehensive_interpretation": "",
+            "health_advice": "",
+        })
     );
 
     let requests = tracker.requests();

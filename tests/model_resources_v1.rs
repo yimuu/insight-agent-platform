@@ -14,7 +14,7 @@ models:
     base_url: https://models.example.test/v1
     model: example-chat
     api_key_env: MODEL_API_KEY
-    capabilities: [vision]
+    capabilities: [json_schema_output, vision]
     connect_timeout: 2s
     request_timeout: 30s
 {extra}"#
@@ -38,6 +38,9 @@ fn strict_model_resources_resolve_alias_capability_and_redacted_secret() {
     let model = registry.resolve("primary").unwrap();
 
     assert!(model.capabilities().contains(&ModelCapability::Vision));
+    assert!(model
+        .capabilities()
+        .contains(&ModelCapability::JsonSchemaOutput));
     assert!(!format!("{model:?}").contains("never-log-this-key"));
 }
 

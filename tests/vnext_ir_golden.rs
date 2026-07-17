@@ -5,15 +5,15 @@ use insight_agent_platform::{
     dsl::vnext::{
         compiler::WorkflowCompiler,
         ir::{
-            Branch, Call, IrValueType, Operation, OperationId, OperationKind, OperationRole,
-            Parallel, ParameterSource, Phi, Region, RegionKind, RootReturn, Terminator,
-            TypedContract, ValueDefinition, ValueId, ValueRole, WorkflowIr,
+            Branch, Call, ErrorCategory, IrValueType, Operation, OperationId, OperationKind,
+            OperationRole, OutputFormat, Parallel, ParallelSettle, ParameterSource, Phi, Region,
+            RegionKind, RootReturn, Terminator, TypedContract, ValueDefinition, ValueId, ValueRole,
+            WorkflowIr,
         },
         plan::{
             CallPlan, CompiledContentAtom, MessageSourcePlan, PlannedRole, PlannedTemplate,
             TemplateProfileVersion, TemplateProvenance, ValidatedResponseContract,
         },
-        raw::{ErrorCategory, OutputFormat, ParallelSettle},
         types::ValueType,
         value::Identifier,
     },
@@ -33,80 +33,70 @@ metadata:
   id: normalized_fixture
   name: Normalized Fixture
   description: Deterministic Region SSA snapshot.
-schema_dialect: https://json-schema.org/draft/2020-12/schema
-input:
-  schema:
-    type: object
-    required: [question]
-    properties:
-      question: {type: string}
-    additionalProperties: false
-output:
-  data_schema:
-    type: object
-    required: [answer]
-    properties:
-      answer: {type: string}
-    additionalProperties: false
+types:
+  Answer:
+    fields:
+      answer: string
+inputs:
+  question: string
+output: Answer
 prompts:
   system:
     inline: You are a concise analysis assistant.
 workflow:
   steps:
-    - kind: llm
+    - type: llm
       id: analyze
       model: golden_chat
-      inputs:
-        question: {from: input.question}
       messages:
         - role: system
-          content: system
+          content:
+            - text: system
         - role: user
-          content: {from: inputs.question}
-      response: {format: text}
+          content:
+            - text: $question
+      response: string
 
-    - kind: action
+    - type: action
       id: metrics
       call: example.text_metrics
       inputs:
-        text: {from: steps.analyze.output.data}
+        text: $analyze
 
-    - kind: parallel
+    - type: parallel
       id: candidates
       inputs:
-        question: {from: steps.analyze.output.data}
+        question: $analyze
       settle: all
       max_concurrency: 2
       branches:
         left:
-          output_schema: {type: string}
+          output: string
           result:
-            return: {from: scope.question}
+            return: $question
         right:
-          output_schema: {type: string}
+          output: string
           result:
-            return: {literal: fallback}
+            return: fallback
 
-    - kind: switch
+    - type: switch
       id: selected
       inputs:
-        candidates: {from: steps.candidates.output}
-      output_schema: {type: string}
+        candidates: $candidates
+      output: string
       cases:
         - id: left_nonempty
           when:
             cel: "scope.candidates.left != ''"
           result:
-            return: {from: scope.candidates.left}
+            return: $candidates.left
       default:
         id: fallback
         result:
-          return: {from: scope.candidates.right}
+          return: $candidates.right
   result:
     return:
-      data:
-        object:
-          answer: {from: steps.selected.output}
+      answer: $selected
 "#;
 
 #[derive(Debug, Clone, Copy)]
@@ -417,6 +407,8 @@ fn response_snapshot(response: &ValidatedResponseContract) -> Value {
 
 fn model_capability(capability: &ModelCapability) -> &'static str {
     match capability {
+        ModelCapability::JsonObjectOutput => "json_object_output",
+        ModelCapability::JsonSchemaOutput => "json_schema_output",
         ModelCapability::Vision => "vision",
     }
 }

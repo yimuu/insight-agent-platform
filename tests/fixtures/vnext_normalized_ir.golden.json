@@ -33,17 +33,21 @@
   },
   "output": {
     "schema": {
-      "type": "object",
-      "required": [
-        "answer"
-      ],
-      "properties": {
-        "answer": {
-          "type": "string"
+      "$ref": "#/$defs/Answer",
+      "$defs": {
+        "Answer": {
+          "type": "object",
+          "required": [
+            "answer"
+          ],
+          "properties": {
+            "answer": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
         }
-      },
-      "additionalProperties": false,
-      "$defs": {}
+      }
     },
     "value_type": {
       "kind": "object",
@@ -175,36 +179,7 @@
           "type": {
             "kind": "data",
             "value_type": {
-              "kind": "object",
-              "properties": {
-                "data": {
-                  "required": true,
-                  "value_type": {
-                    "kind": "string"
-                  }
-                },
-                "finish_reason": {
-                  "required": true,
-                  "value_type": {
-                    "kind": "union",
-                    "variants": [
-                      {
-                        "kind": "string"
-                      },
-                      {
-                        "kind": "null"
-                      }
-                    ]
-                  }
-                },
-                "usage": {
-                  "required": true,
-                  "value_type": {
-                    "kind": "any"
-                  }
-                }
-              },
-              "additional_properties": null
+              "kind": "string"
             }
           }
         },
@@ -212,13 +187,13 @@
           "kind": "call",
           "target": "ai.chat",
           "inputs": {
-            "question": "/workflow/analyze#expression_output:0"
+            "__value_0": "/workflow/analyze#expression_output:0"
           },
           "plan": {
             "kind": "llm",
             "model": "golden_chat",
             "local_inputs": {
-              "question": "/workflow/analyze#expression_output:0"
+              "__value_0": "/workflow/analyze#expression_output:0"
             },
             "message_sources": [
               {
@@ -262,58 +237,10 @@
             },
             "output_contract": {
               "schema": {
-                "type": "object",
-                "required": [
-                  "data",
-                  "finish_reason",
-                  "usage"
-                ],
-                "properties": {
-                  "data": {
-                    "type": "string"
-                  },
-                  "finish_reason": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "usage": true
-                },
-                "additionalProperties": false,
-                "$defs": {}
+                "type": "string"
               },
               "value_type": {
-                "kind": "object",
-                "properties": {
-                  "data": {
-                    "required": true,
-                    "value_type": {
-                      "kind": "string"
-                    }
-                  },
-                  "finish_reason": {
-                    "required": true,
-                    "value_type": {
-                      "kind": "union",
-                      "variants": [
-                        {
-                          "kind": "string"
-                        },
-                        {
-                          "kind": "null"
-                        }
-                      ]
-                    }
-                  },
-                  "usage": {
-                    "required": true,
-                    "value_type": {
-                      "kind": "any"
-                    }
-                  }
-                },
-                "additional_properties": null
+                "kind": "string"
               }
             },
             "capabilities": [],
@@ -342,7 +269,7 @@
         "operation": {
           "kind": "project",
           "source": "/workflow/analyze#authored_output",
-          "path": "data"
+          "path": ""
         }
       },
       {
@@ -512,7 +439,7 @@
         "operation": {
           "kind": "project",
           "source": "/workflow/analyze#authored_output",
-          "path": "data"
+          "path": ""
         }
       },
       {
@@ -939,17 +866,21 @@
     ],
     "result": {
       "schema": {
-        "type": "object",
-        "required": [
-          "answer"
-        ],
-        "properties": {
-          "answer": {
-            "type": "string"
+        "$ref": "#/$defs/Answer",
+        "$defs": {
+          "Answer": {
+            "type": "object",
+            "required": [
+              "answer"
+            ],
+            "properties": {
+              "answer": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
           }
-        },
-        "additionalProperties": false,
-        "$defs": {}
+        }
       },
       "value_type": {
         "kind": "object",

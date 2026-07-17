@@ -6,47 +6,21 @@ metadata:
   name: Medical Report Interpreter
   description: A structured multimodal medical-report interpretation workflow with separate first-turn and follow-up paths.
 
-schema_dialect: https://json-schema.org/draft/2020-12/schema
-
-$defs:
+types:
   MedicalResult:
-    type: object
-    required: [mode, answer]
-    properties:
+    fields:
       mode:
         type: string
         enum: [initial, follow_up]
       answer:
         type: string
-        minLength: 1
+        min_length: 1
       abnormal_indicators:
         type: string
       comprehensive_interpretation:
         type: string
       health_advice:
         type: string
-    additionalProperties: false
-
-  UserMessage:
-    type: object
-    required: [role, content]
-    properties:
-      role: {const: user}
-      content: {type: string}
-    additionalProperties: false
-
-  AssistantMessage:
-    type: object
-    required: [role, content]
-    properties:
-      role: {const: assistant}
-      content: {type: string}
-    additionalProperties: false
-
-  DynamicMessage:
-    oneOf:
-      - {$ref: "#/$defs/UserMessage"}
-      - {$ref: "#/$defs/AssistantMessage"}
 
 prompts:
   system:
@@ -60,147 +34,115 @@ prompts:
   follow_up:
     file: prompts/follow_up.md
 
-input:
-  schema:
-    type: object
-    required: [report_text, image_url, messages, question]
-    properties:
-      report_text:
-        type: string
-      image_url:
-        oneOf:
-          - type: string
-            pattern: "^(http://|https://|data:image/|$)"
-          - type: "null"
-      messages:
-        type: array
-        items: {$ref: "#/$defs/DynamicMessage"}
-      question:
-        type: string
-    additionalProperties: false
+inputs:
+  report_text: string
+  image_url:
+    type: string
+    optional: true
+    pattern: "^(http://|https://|data:image/|$)"
+  messages:
+    type: Message[]
+    default: []
+  question: string
 
-output:
-  data_schema: {$ref: "#/$defs/MedicalResult"}
+output: MedicalResult
 
 workflow:
   steps:
-    - kind: switch
+    - type: switch
       id: route
       inputs:
-        report_text: {from: input.report_text}
-        image_url: {from: input.image_url}
-        messages: {from: input.messages}
-        question: {from: input.question}
-      output_schema: {$ref: "#/$defs/MedicalResult"}
+        report_text: $report_text
+        image_url: $image_url
+        messages: $messages
+        question: $question
+      output: MedicalResult
       cases:
         - id: follow_up
           when:
             cel: size(scope.messages) > 0
           steps:
-            - kind: llm
+            - type: llm
               id: answer
               model: vision_chat
-              inputs:
-                report_text: {from: scope.report_text}
-                image_url: {from: scope.image_url}
-                messages: {from: scope.messages}
-                question: {from: scope.question}
               messages:
-                - {role: system, content: system}
-                - {from: inputs.messages}
+                - role: system
+                  content:
+                    - text: system
+                - $messages
                 - role: user
                   content:
-                    - follow_up
-                    - image: {from: inputs.image_url}
+                    - text: follow_up
+                    - image_url: $image_url
               parameters: {temperature: 0.2}
-              response: {format: text}
+              response: string
           result:
             return:
-              object:
-                mode: {literal: follow_up}
-                answer: {from: steps.answer.output.data}
+              mode: follow_up
+              answer: $answer
+              abnormal_indicators: ""
+              comprehensive_interpretation: ""
+              health_advice: ""
 
       default:
         id: initial
         steps:
-          - kind: llm
+          - type: llm
             id: abnormal_indicators
             model: vision_chat
-            inputs:
-              report_text: {from: scope.report_text}
-              image_url: {from: scope.image_url}
-              messages: {from: scope.messages}
-              question: {from: scope.question}
             messages:
-              - {role: system, content: system}
-              - {from: inputs.messages}
+              - role: system
+                content:
+                  - text: system
+              - $messages
               - role: user
                 content:
-                  - abnormal_indicators
-                  - image: {from: inputs.image_url}
+                  - text: abnormal_indicators
+                  - image_url: $image_url
             parameters: {temperature: 0.2}
-            response: {format: text}
+            response: string
 
-          - kind: llm
+          - type: llm
             id: comprehensive_interpretation
             model: vision_chat
-            inputs:
-              report_text: {from: scope.report_text}
-              image_url: {from: scope.image_url}
-              messages: {from: scope.messages}
-              question: {from: scope.question}
-              abnormal_indicators: {from: steps.abnormal_indicators.output.data}
             messages:
-              - {role: system, content: system}
-              - {from: inputs.messages}
+              - role: system
+                content:
+                  - text: system
+              - $messages
               - role: user
                 content:
-                  - comprehensive_interpretation
-                  - image: {from: inputs.image_url}
+                  - text: comprehensive_interpretation
+                  - image_url: $image_url
             parameters: {temperature: 0.2}
-            response: {format: text}
+            response: string
 
-          - kind: llm
+          - type: llm
             id: health_advice
             model: vision_chat
-            inputs:
-              report_text: {from: scope.report_text}
-              image_url: {from: scope.image_url}
-              messages: {from: scope.messages}
-              question: {from: scope.question}
-              abnormal_indicators: {from: steps.abnormal_indicators.output.data}
-              comprehensive_interpretation: {from: steps.comprehensive_interpretation.output.data}
             messages:
-              - {role: system, content: system}
-              - {from: inputs.messages}
+              - role: system
+                content:
+                  - text: system
+              - $messages
               - role: user
                 content:
-                  - health_advice
-                  - image: {from: inputs.image_url}
+                  - text: health_advice
+                  - image_url: $image_url
             parameters: {temperature: 0.2}
-            response: {format: text}
+            response: string
         result:
           return:
-            object:
-              mode: {literal: initial}
-              answer:
-                template:
-                  text: |-
-                    {{ abnormal_indicators }}
+            mode: initial
+            answer: |-
+              {{ abnormal_indicators }}
 
-                    {{ comprehensive_interpretation }}
+              {{ comprehensive_interpretation }}
 
-                    {{ health_advice }}
-                  bindings:
-                    abnormal_indicators: {from: steps.abnormal_indicators.output.data}
-                    comprehensive_interpretation: {from: steps.comprehensive_interpretation.output.data}
-                    health_advice: {from: steps.health_advice.output.data}
-              abnormal_indicators: {from: steps.abnormal_indicators.output.data}
-              comprehensive_interpretation: {from: steps.comprehensive_interpretation.output.data}
-              health_advice: {from: steps.health_advice.output.data}
+              {{ health_advice }}
+            abnormal_indicators: $abnormal_indicators
+            comprehensive_interpretation: $comprehensive_interpretation
+            health_advice: $health_advice
 
   result:
-    return:
-      content: {from: steps.route.output.answer}
-      format: markdown
-      data: {from: steps.route.output}
+    return: $route

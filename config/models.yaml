@@ -6,7 +6,7 @@ models:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: OPENAI_API_KEY
     model: qwen3.6-flash
-    capabilities: []
+    capabilities: [json_object_output]
     connect_timeout: 5s
     request_timeout: 2m
 
@@ -15,6 +15,6 @@ models:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: OPENAI_API_KEY
     model: qwen-vl-plus
-    capabilities: [vision]
+    capabilities: [json_object_output, vision]
     connect_timeout: 5s
     request_timeout: 2m

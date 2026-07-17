@@ -231,7 +231,7 @@ async fn researcher_executes_llm_action_llm_and_consumes_the_typed_action_output
     let RunLifecycle::Completed { output } = &record.lifecycle else {
         panic!("expected researcher workflow to complete")
     };
-    assert_eq!(output.content.as_deref(), Some(FINAL_RESULT));
+    assert_eq!(output.content, None);
     assert_eq!(output.data, json!({"answer": FINAL_RESULT}));
 
     assert_eq!(

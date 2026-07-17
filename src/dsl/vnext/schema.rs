@@ -138,13 +138,15 @@ pub fn compile_contract_schema(
     }
     reject_reference_cycles(&graph)?;
 
+    let reachable_definitions = reachable_definitions(definitions, &graph, &contract_targets);
+
     let expanded_schema = expand_schema(
         contract_schema,
         definitions,
         &mut BTreeMap::new(),
         &mut BTreeSet::new(),
     )?;
-    let validator_document = inject_definitions(definitions, contract_schema);
+    let validator_document = inject_definitions(&reachable_definitions, contract_schema);
     let validator = compile_schema_2020(&validator_document).map_err(|_| {
         ContractSchemaError::new(
             SCHEMA_VALIDATOR_INVALID,
@@ -156,6 +158,29 @@ pub fn compile_contract_schema(
         validator,
         expanded_schema,
     })
+}
+
+fn reachable_definitions(
+    definitions: &BTreeMap<Identifier, Value>,
+    graph: &BTreeMap<Identifier, BTreeSet<Identifier>>,
+    roots: &BTreeSet<Identifier>,
+) -> BTreeMap<Identifier, Value> {
+    let mut reachable = BTreeSet::new();
+    let mut pending = roots.iter().cloned().collect::<Vec<_>>();
+    while let Some(definition) = pending.pop() {
+        if !reachable.insert(definition.clone()) {
+            continue;
+        }
+        if let Some(targets) = graph.get(&definition) {
+            pending.extend(targets.iter().cloned());
+        }
+    }
+
+    definitions
+        .iter()
+        .filter(|(name, _)| reachable.contains(*name))
+        .map(|(name, schema)| (name.clone(), schema.clone()))
+        .collect()
 }
 
 fn collect_schema_references(
@@ -208,7 +233,19 @@ fn reference_target(
     let Some(reference) = object.get("$ref") else {
         return Ok(None);
     };
-    if object.len() != 1 {
+    if object.keys().any(|keyword| {
+        !matches!(
+            keyword.as_str(),
+            "$ref"
+                | "default"
+                | "minItems"
+                | "maxItems"
+                | "minLength"
+                | "maxLength"
+                | "pattern"
+                | "enum"
+        )
+    }) {
         return Err(ContractSchemaError::new(
             SCHEMA_REF_SIBLINGS,
             "schema $ref objects cannot contain sibling keywords",
@@ -286,7 +323,8 @@ fn expand_schema(
         return Ok(schema.clone());
     };
     if let Some(target) = reference_target(object, definitions)? {
-        return expand_definition(&target, definitions, memoized, active);
+        let expanded = expand_definition(&target, definitions, memoized, active)?;
+        return Ok(merge_reference_refinements(expanded, object));
     }
 
     let mut expanded = object.clone();
@@ -340,6 +378,61 @@ fn expand_schema(
         expanded.insert("dependencies".to_string(), Value::Object(dependencies));
     }
     Ok(Value::Object(expanded))
+}
+
+fn merge_reference_refinements(expanded: Value, reference: &Map<String, Value>) -> Value {
+    let Value::Object(mut expanded) = expanded else {
+        return expanded;
+    };
+    for (keyword, value) in reference {
+        match keyword.as_str() {
+            "$ref" | "default" => {}
+            "minItems" | "minLength" => {
+                let merged = expanded
+                    .get(keyword)
+                    .and_then(Value::as_u64)
+                    .zip(value.as_u64())
+                    .map_or_else(
+                        || value.clone(),
+                        |(left, right)| Value::from(left.max(right)),
+                    );
+                expanded.insert(keyword.clone(), merged);
+            }
+            "maxItems" | "maxLength" => {
+                let merged = expanded
+                    .get(keyword)
+                    .and_then(Value::as_u64)
+                    .zip(value.as_u64())
+                    .map_or_else(
+                        || value.clone(),
+                        |(left, right)| Value::from(left.min(right)),
+                    );
+                expanded.insert(keyword.clone(), merged);
+            }
+            "enum" => {
+                let merged = match (
+                    expanded.get("enum").and_then(Value::as_array),
+                    value.as_array(),
+                ) {
+                    (Some(left), Some(right)) => Value::Array(
+                        left.iter()
+                            .filter(|candidate| right.contains(candidate))
+                            .cloned()
+                            .collect(),
+                    ),
+                    _ => value.clone(),
+                };
+                expanded.insert(keyword.clone(), merged);
+            }
+            "pattern" => {
+                expanded
+                    .entry(keyword.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            _ => unreachable!("reference siblings are allowlisted before expansion"),
+        }
+    }
+    Value::Object(expanded)
 }
 
 fn expand_definition(
@@ -519,6 +612,29 @@ mod tests {
     }
 
     #[test]
+    fn validator_document_injects_only_definitions_reachable_from_the_contract() {
+        let definitions = definitions(&[
+            ("Name", json!({"type":"string"})),
+            ("Unused", json!({"type":"integer"})),
+        ]);
+        let bundle = compile_contract_schema(
+            &definitions,
+            &json!({
+                "type":"object",
+                "required":["name"],
+                "properties":{"name":{"$ref":"#/$defs/Name"}},
+                "additionalProperties":false
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            bundle.validator_document()["$defs"],
+            json!({"Name":{"type":"string"}})
+        );
+    }
+
+    #[test]
     fn rejects_unknown_external_and_arbitrary_internal_references() {
         let definitions = definitions(&[("Known", json!({"type":"string"}))]);
         assert_code(
@@ -559,6 +675,50 @@ mod tests {
             SCHEMA_REF_SIBLINGS,
         );
         assert!(!error.message().contains("sensitive marker"));
+    }
+
+    #[test]
+    fn allows_default_annotation_next_to_a_local_ref() {
+        let definitions = definitions(&[(
+            "Config",
+            json!({
+                "type":"object",
+                "required":["mode"],
+                "properties":{"mode":{"type":"string"}},
+                "additionalProperties":false
+            }),
+        )]);
+        let default = json!({"mode":"safe"});
+        let bundle = compile_contract_schema(
+            &definitions,
+            &json!({"$ref":"#/$defs/Config","default":default}),
+        )
+        .unwrap();
+
+        assert!(bundle.validator().is_valid(&json!({"mode":"safe"})));
+        assert_eq!(bundle.validator_document()["default"], default);
+        assert_eq!(
+            bundle.expanded_schema(),
+            &definitions[&identifier("Config")]
+        );
+    }
+
+    #[test]
+    fn allows_typed_refinements_next_to_a_local_ref() {
+        let definitions = definitions(&[(
+            "Names",
+            json!({"type":"array","items":{"type":"string"},"minItems":1}),
+        )]);
+        let bundle = compile_contract_schema(
+            &definitions,
+            &json!({"$ref":"#/$defs/Names","minItems":2,"maxItems":3}),
+        )
+        .unwrap();
+
+        assert!(!bundle.validator().is_valid(&json!(["one"])));
+        assert!(bundle.validator().is_valid(&json!(["one", "two"])));
+        assert_eq!(bundle.expanded_schema()["minItems"], json!(2));
+        assert_eq!(bundle.expanded_schema()["maxItems"], json!(3));
     }
 
     #[test]

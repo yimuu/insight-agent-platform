@@ -8,8 +8,8 @@ use insight_agent_platform::{
             builtin_action_registry, CurrentTimeAction, RestrictedHttpGetAction, TextMetricsAction,
         },
         models::{
-            ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest, ChatRole,
-            ChatStream, ModelCapability,
+            ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest, ChatResponseFormat,
+            ChatRole, ChatStream, ModelCapability,
         },
         openai_chat::{OpenAiChatLimits, OpenAiChatModel, OpenAiTransportPolicy},
     },
@@ -56,10 +56,24 @@ fn loopback_model_with_limits(
         api_key,
         base_url,
         "fallback-model".to_string(),
-        BTreeSet::from([ModelCapability::Vision]),
+        BTreeSet::from([ModelCapability::JsonSchemaOutput, ModelCapability::Vision]),
         Duration::from_secs(1),
         Duration::from_secs(2),
         limits,
+        OpenAiTransportPolicy::AllowLoopbackHttp,
+    )
+    .unwrap()
+}
+
+fn loopback_json_object_model(base_url: String) -> OpenAiChatModel {
+    OpenAiChatModel::new_with_limits_and_transport_policy(
+        None,
+        base_url,
+        "fallback-model".to_string(),
+        BTreeSet::from([ModelCapability::JsonObjectOutput]),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        OpenAiChatLimits::default(),
         OpenAiTransportPolicy::AllowLoopbackHttp,
     )
     .unwrap()
@@ -70,7 +84,7 @@ fn trusted_private_model(base_url: String, api_key: Option<String>) -> OpenAiCha
         api_key,
         base_url,
         "fallback-model".to_string(),
-        BTreeSet::from([ModelCapability::Vision]),
+        BTreeSet::from([ModelCapability::JsonSchemaOutput, ModelCapability::Vision]),
         Duration::from_secs(1),
         Duration::from_secs(2),
         OpenAiChatLimits::default(),
@@ -83,6 +97,7 @@ fn default_chat_request() -> ChatRequest {
     ChatRequest {
         messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
         parameters: json!({}),
+        response_format: None,
     }
 }
 
@@ -102,6 +117,10 @@ fn openai_request_budget_matches_the_exact_provider_wire_envelope() {
             ]),
         }],
         parameters: json!({"temperature":0.2, "max_tokens":64}),
+        response_format: Some(ChatResponseFormat::JsonSchema {
+            name: "response".to_string(),
+            schema: json!({"type":"object", "additionalProperties":false}),
+        }),
     };
     let expected_wire_bytes = serde_json::to_vec(&json!({
         "model": "fallback-model",
@@ -116,8 +135,50 @@ fn openai_request_budget_matches_the_exact_provider_wire_envelope() {
             ]
         }],
         "stream": true,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "response",
+                "strict": true,
+                "schema": {"type":"object", "additionalProperties":false}
+            }
+        },
         "temperature": 0.2,
         "max_tokens": 64
+    }))
+    .unwrap()
+    .len();
+
+    assert!(model.request_body_within_limit(&request, expected_wire_bytes));
+    assert!(!model.request_body_within_limit(&request, expected_wire_bytes - 1));
+}
+
+#[test]
+fn json_object_request_budget_counts_the_injected_schema_instruction() {
+    let model = loopback_json_object_model("http://127.0.0.1:9".to_string());
+    let schema = json!({
+        "type":"object",
+        "required":["answer"],
+        "properties":{"answer":{"type":"string"}},
+        "additionalProperties":false
+    });
+    let instruction = format!(
+        "\n\nReturn only a valid JSON object matching this JSON Schema:\n{}",
+        serde_json::to_string(&schema).unwrap()
+    );
+    let request = ChatRequest {
+        messages: vec![ChatMessage::from_text(ChatRole::User, "Analyze this.")],
+        parameters: json!({}),
+        response_format: Some(ChatResponseFormat::JsonObject {
+            name: "response".to_string(),
+            schema,
+        }),
+    };
+    let expected_wire_bytes = serde_json::to_vec(&json!({
+        "model":"fallback-model",
+        "messages":[{"role":"user", "content":format!("Analyze this.{instruction}")}],
+        "stream":true,
+        "response_format":{"type":"json_object"}
     }))
     .unwrap()
     .len();
@@ -133,6 +194,7 @@ async fn direct_openai_boundary_rejects_invalid_provider_neutral_messages() {
         .stream_chat(ChatRequest {
             messages: vec![ChatMessage::from_text(ChatRole::Assistant, "prefill")],
             parameters: json!({}),
+            response_format: None,
         })
         .await;
     let error = match result {
@@ -169,6 +231,7 @@ async fn direct_openai_boundary_rechecks_vision_capability() {
                 }]),
             }],
             parameters: json!({}),
+            response_format: None,
         })
         .await;
     let error = match result {
@@ -177,6 +240,94 @@ async fn direct_openai_boundary_rechecks_vision_capability() {
     };
 
     assert_eq!(error.code(), "VNEXT_LLM_VISION_REQUIRED");
+}
+
+#[tokio::test]
+async fn direct_openai_boundary_rechecks_image_url_contracts() {
+    let model = loopback_model("http://127.0.0.1:9".to_string(), None);
+    for image in ["image://bad", "data:image/png;base64,***"] {
+        let result = model
+            .stream_chat(ChatRequest {
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: ChatContent::Parts(vec![ChatContentPart::Image {
+                        image: image.to_string(),
+                    }]),
+                }],
+                parameters: json!({}),
+                response_format: None,
+            })
+            .await;
+        let error = match result {
+            Ok(_) => panic!("an invalid image URL must fail before network I/O"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "VNEXT_LLM_CONTENT_INVALID");
+    }
+}
+
+#[tokio::test]
+async fn direct_openai_boundary_rechecks_structured_output_capability() {
+    let model = OpenAiChatModel::new_with_limits_and_transport_policy(
+        None,
+        "http://127.0.0.1:9".to_string(),
+        "text-only-model".to_string(),
+        BTreeSet::new(),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        OpenAiChatLimits::default(),
+        OpenAiTransportPolicy::AllowLoopbackHttp,
+    )
+    .unwrap();
+    let result = model
+        .stream_chat(ChatRequest {
+            messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
+            parameters: json!({}),
+            response_format: Some(ChatResponseFormat::JsonSchema {
+                name: "response".to_string(),
+                schema: json!({"type":"object", "additionalProperties":false}),
+            }),
+        })
+        .await;
+    let error = match result {
+        Ok(_) => panic!("a text-only adapter must reject structured output before network I/O"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.code(), "VNEXT_LLM_STRUCTURED_OUTPUT_REQUIRED");
+
+    let object_only = loopback_json_object_model("http://127.0.0.1:9".to_string());
+    let error = match object_only
+        .stream_chat(ChatRequest {
+            messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
+            parameters: json!({}),
+            response_format: Some(ChatResponseFormat::JsonSchema {
+                name: "response".to_string(),
+                schema: json!({"type":"object", "additionalProperties":false}),
+            }),
+        })
+        .await
+    {
+        Ok(_) => panic!("json_object_output must not satisfy a json_schema request"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "VNEXT_LLM_STRUCTURED_OUTPUT_REQUIRED");
+
+    let error = match object_only
+        .stream_chat(ChatRequest {
+            messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
+            parameters: json!({}),
+            response_format: Some(ChatResponseFormat::JsonObject {
+                name: "response".to_string(),
+                schema: json!({"type":"array", "items":{"type":"string"}}),
+            }),
+        })
+        .await
+    {
+        Ok(_) => panic!("json_object mode must reject a non-object schema before network I/O"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "VNEXT_LLM_RESPONSE_CONFIG_INVALID");
 }
 
 async fn clean_eof_stream(body: Vec<u8>) -> (ChatStream, tokio::task::JoinHandle<()>) {
@@ -253,6 +404,16 @@ async fn openai_adapter_serializes_formal_messages_and_allowed_parameters() {
         assert_eq!(request["stream"], true);
         assert_eq!(request["temperature"], 0.2);
         assert_eq!(request["max_tokens"], 64);
+        assert_eq!(request["response_format"]["type"], "json_schema");
+        assert_eq!(
+            request["response_format"]["json_schema"]["name"],
+            "response"
+        );
+        assert_eq!(request["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(
+            request["response_format"]["json_schema"]["schema"],
+            json!({"type":"object", "additionalProperties":false})
+        );
         assert_eq!(request["messages"][0]["role"], "system");
         assert_eq!(request["messages"][0]["content"], "Be concise.");
         assert_eq!(request["messages"][1]["content"][0]["type"], "text");
@@ -292,6 +453,10 @@ async fn openai_adapter_serializes_formal_messages_and_allowed_parameters() {
             },
         ],
         parameters: json!({"temperature":0.2, "max_tokens":64}),
+        response_format: Some(ChatResponseFormat::JsonSchema {
+            name: "response".to_string(),
+            schema: json!({"type":"object", "additionalProperties":false}),
+        }),
     };
 
     let mut stream = model.stream_chat(request).await.unwrap();
@@ -302,6 +467,51 @@ async fn openai_adapter_serializes_formal_messages_and_allowed_parameters() {
     assert_eq!(second.text, "");
     assert_eq!(second.finish_reason.as_deref(), Some("stop"));
     assert_eq!(second.usage, Some(json!({"completion_tokens":1})));
+    assert!(stream.next().await.is_none());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_adapter_serializes_json_object_mode_and_injects_schema_instruction() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let schema = json!({
+        "$ref":"#/$defs/Answer",
+        "$defs":{
+            "Answer":{
+                "type":"object",
+                "required":["answer"],
+                "properties":{"answer":{"type":"string"}},
+                "additionalProperties":false
+            }
+        }
+    });
+    let expected_schema = schema.clone();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_request_json(&mut socket).await;
+        assert_eq!(request["response_format"], json!({"type":"json_object"}));
+        let content = request["messages"][0]["content"].as_str().unwrap();
+        assert!(content.starts_with("Analyze this."));
+        assert!(content.contains("valid JSON object"));
+        assert!(content.contains("JSON Schema"));
+        assert!(content.contains(&serde_json::to_string(&expected_schema).unwrap()));
+        write_sse_headers(&mut socket).await;
+        socket.write_all(b"data: [DONE]\n\n").await.unwrap();
+    });
+    let request = ChatRequest {
+        messages: vec![ChatMessage::from_text(ChatRole::User, "Analyze this.")],
+        parameters: json!({}),
+        response_format: Some(ChatResponseFormat::JsonObject {
+            name: "response".to_string(),
+            schema,
+        }),
+    };
+
+    let mut stream = loopback_json_object_model(format!("http://{address}"))
+        .stream_chat(request)
+        .await
+        .unwrap();
     assert!(stream.next().await.is_none());
     server.await.unwrap();
 }
@@ -963,6 +1173,7 @@ async fn openai_sse_decoder_handles_fragmented_multibyte_utf8() {
         .stream_chat(ChatRequest {
             messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
             parameters: json!({}),
+            response_format: None,
         })
         .await
         .unwrap();
@@ -1004,6 +1215,7 @@ async fn openai_errors_and_debug_never_expose_api_key_or_response_body() {
         .stream_chat(ChatRequest {
             messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
             parameters: json!({}),
+            response_format: None,
         })
         .await
     {
@@ -1063,6 +1275,7 @@ async fn openai_client_does_not_follow_redirects_or_leak_authorization_to_locati
         .stream_chat(ChatRequest {
             messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
             parameters: json!({}),
+            response_format: None,
         })
         .await
     {
@@ -1106,6 +1319,7 @@ async fn dropping_openai_stream_closes_the_in_flight_http_body() {
         .stream_chat(ChatRequest {
             messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
             parameters: json!({}),
+            response_format: None,
         })
         .await
         .unwrap();

@@ -36,8 +36,7 @@ pub enum DocumentKind {
 }
 
 /// The root authored vNext workflow document.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RawWorkflow {
     pub api_version: ApiVersion,
     pub kind: DocumentKind,
@@ -52,6 +51,15 @@ pub struct RawWorkflow {
     pub input: InputContract,
     pub output: OutputContract,
     pub workflow: WorkflowBody,
+}
+
+impl<'de> Deserialize<'de> for RawWorkflow {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        super::author::deserialize_workflow(deserializer)
+    }
 }
 
 /// A parsed workflow plus authored source locations. The source map is kept out
@@ -516,12 +524,16 @@ fn parse_error(source: &str, error: yaml_serde::Error, syntax: &SpannedSyntax) -
                 )
         }
     } else if message.contains("unknown variant `") {
-        let discriminator = if base_path.segments().last().is_some_and(
-            |segment| matches!(segment, crate::dsl::DslPathSegment::Key(key) if key == "kind"),
-        ) {
+        let discriminator = if base_path.segments().last().is_some_and(|segment| {
+            matches!(segment, crate::dsl::DslPathSegment::Key(key) if key == "kind" || key == "type")
+        }) {
             base_path.clone()
         } else {
-            base_path.child_key("kind")
+            ["type", "kind"]
+                .into_iter()
+                .map(|key| base_path.child_key(key))
+                .find(|path| syntax.source_map.contains_key(path))
+                .unwrap_or_else(|| base_path.child_key("type"))
         };
         if let Some(span) = syntax.source_map.get(&discriminator).copied() {
             (discriminator, Some(span))
@@ -545,7 +557,7 @@ fn parse_error(source: &str, error: yaml_serde::Error, syntax: &SpannedSyntax) -
         (base_path, span)
     };
 
-    if let Some(response_path) = invalid_llm_response_path(source) {
+    if let Some(response_path) = invalid_authored_llm_response_path(source) {
         let response_span = nearest_syntax_span(syntax, &response_path).or(span);
         return DslParseError::new(
             LLM_RESPONSE_CONFIG_INVALID,
@@ -582,39 +594,29 @@ fn nearest_syntax_span(syntax: &SpannedSyntax, path: &DslPath) -> Option<SourceS
     })
 }
 
-fn invalid_llm_response_path(source: &str) -> Option<DslPath> {
+fn invalid_authored_llm_response_path(source: &str) -> Option<DslPath> {
     let document = yaml_serde::from_str::<Value>(source).ok()?;
     let steps = document.get("workflow")?.get("steps")?.as_array()?;
-    invalid_response_in_steps(
+    invalid_authored_response_in_steps(
         steps,
         &DslPath::root().child_key("workflow").child_key("steps"),
     )
 }
 
-fn invalid_response_in_steps(steps: &[Value], base: &DslPath) -> Option<DslPath> {
+fn invalid_authored_response_in_steps(steps: &[Value], base: &DslPath) -> Option<DslPath> {
     for (index, step) in steps.iter().enumerate() {
         let step_path = base.child_index(index);
         let Some(step) = step.as_object() else {
             continue;
         };
-        match step.get("kind").and_then(Value::as_str) {
+        match step.get("type").and_then(Value::as_str) {
             Some("llm") => {
                 let response_path = step_path.child_key("response");
-                let Some(response) = step.get("response").and_then(Value::as_object) else {
-                    return Some(response_path);
-                };
-                let format = response.get("format").and_then(Value::as_str);
-                let valid = matches!(format, Some("text")) && response.len() == 1
-                    || matches!(format, Some("json"))
-                        && response.len() == 2
-                        && response.contains_key("schema");
-                if !valid {
-                    if let Some(unknown) = response
-                        .keys()
-                        .find(|key| !matches!(key.as_str(), "format" | "schema"))
-                    {
-                        return Some(response_path.child_key(unknown));
-                    }
+                if !step
+                    .get("response")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_authored_type_expression)
+                {
                     return Some(response_path);
                 }
             }
@@ -628,7 +630,9 @@ fn invalid_response_in_steps(steps: &[Value], base: &DslPath) -> Option<DslPath>
                             .child_key("branches")
                             .child_key(branch)
                             .child_key("steps");
-                        if let Some(path) = invalid_response_in_steps(children, &children_path) {
+                        if let Some(path) =
+                            invalid_authored_response_in_steps(children, &children_path)
+                        {
                             return Some(path);
                         }
                     }
@@ -644,7 +648,9 @@ fn invalid_response_in_steps(steps: &[Value], base: &DslPath) -> Option<DslPath>
                             .child_key("cases")
                             .child_index(case_index)
                             .child_key("steps");
-                        if let Some(path) = invalid_response_in_steps(children, &children_path) {
+                        if let Some(path) =
+                            invalid_authored_response_in_steps(children, &children_path)
+                        {
                             return Some(path);
                         }
                     }
@@ -655,7 +661,8 @@ fn invalid_response_in_steps(steps: &[Value], base: &DslPath) -> Option<DslPath>
                     .and_then(Value::as_array)
                 {
                     let children_path = step_path.child_key("default").child_key("steps");
-                    if let Some(path) = invalid_response_in_steps(children, &children_path) {
+                    if let Some(path) = invalid_authored_response_in_steps(children, &children_path)
+                    {
                         return Some(path);
                     }
                 }
@@ -664,6 +671,24 @@ fn invalid_response_in_steps(steps: &[Value], base: &DslPath) -> Option<DslPath>
         }
     }
     None
+}
+
+fn is_authored_type_expression(source: &str) -> bool {
+    if source.is_empty() || source.trim() != source {
+        return false;
+    }
+    if let Some(item) = source.strip_suffix("[]") {
+        return is_authored_type_expression(item);
+    }
+    if matches!(source, "string" | "number" | "integer" | "boolean") {
+        return true;
+    }
+    Identifier::parse(source).is_ok()
+        && source
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_uppercase())
+        && !source.contains('_')
 }
 
 fn basic_parse_error(source: &str, error: yaml_serde::Error) -> DslParseError {
@@ -1295,113 +1320,164 @@ fn safe_syntax_error(source: &str, path: DslPath, byte: usize) -> DslParseError 
 
 #[cfg(test)]
 mod tests {
-    use super::super::value::{Identifier, ValueExpr};
-    use super::{parse_workflow, ParallelSettle, RootResult, Step};
+    use serde_json::{json, Value};
 
-    fn source_slice(source: &str, span: crate::dsl::SourceSpan) -> &str {
+    use super::super::{
+        message::{AuthoredContentAtom, MessageSource, ResponseConfig},
+        value::{Identifier, ValueExpr},
+    };
+    use super::{parse_workflow, ParallelSettle, RootResult, Step};
+    use crate::dsl::{DslPath, SourceSpan};
+
+    fn source_slice(source: &str, span: SourceSpan) -> &str {
         &source[span.byte_start() as usize..span.byte_end() as usize]
+    }
+
+    fn identifier(source: &str) -> Identifier {
+        Identifier::parse(source).unwrap()
+    }
+
+    fn path(segments: &[&str]) -> DslPath {
+        segments
+            .iter()
+            .fold(DslPath::root(), |path, segment| path.child_key(*segment))
     }
 
     const VALID: &str = r#"
 api_version: insight.agent/v2
 kind: agent
 metadata:
-  id: parallel_researcher
-  name: Parallel Researcher
+  id: syntax_fixture
+  name: Syntax Fixture
   description: Typed vNext fixture.
-schema_dialect: https://json-schema.org/draft/2020-12/schema
-$defs:
-  Perspective: {type: object}
+
+types:
+  Analysis:
+    fields:
+      answer: string
+      score: number
+      tags: string[]
+  AnalysisList:
+    type: Analysis[]
+    min_items: 1
+    max_items: 4
+
 prompts:
   system:
     inline: You are concise.
+  analyze:
+    inline: |-
+      Question:
+      {{ question }}
+
 errors:
   all_failed:
     category: workflow
     code: WORKFLOW_ALL_FAILED
     public_message: Every branch failed.
-input:
-  schema:
-    type: object
-    required: [question]
-output:
-  data_schema: {type: object}
+
+inputs:
+  question:
+    type: string
+    min_length: 1
+  messages:
+    type: Message[]
+    default: []
+  image_url:
+    type: string
+    optional: true
+
+output: Analysis
+
 workflow:
   steps:
-    - kind: llm
-      id: prepare
-      model: general_chat
-      inputs:
-        question: {from: input.question}
+    - type: llm
+      id: draft
+      model: vision_chat
       messages:
-        - {role: system, content: system}
-        - {role: user, content: {from: inputs.question}}
+        - role: system
+          content:
+            - text: system
+        - $messages
+        - role: user
+          content:
+            - text: analyze
+            - image_url: $image_url
       parameters: {temperature: 0.2}
-      response: {format: text}
+      response: Analysis
 
-    - kind: action
+    - type: action
       id: measure
       call: example.text_metrics
       inputs:
-        text: {from: steps.prepare.output.data}
+        text: $draft.answer
+        mode: initial
+        tags: [one, two]
+        metadata:
+          question: $question
+        label: "Question: {{ question }}"
 
-    - kind: parallel
+    - type: parallel
       id: perspectives
       inputs:
-        question: {from: steps.prepare.output.data}
+        question: $question
       settle: all_settled
       max_concurrency: 2
       branches:
         technical:
-          output_schema: {type: object}
+          output: string
           steps:
-            - kind: llm
-              id: analyze
+            - type: llm
+              id: analyze_technical
               model: general_chat
-              inputs:
-                question: {from: scope.question}
               messages:
-                - {role: system, content: system}
-                - {role: user, content: {from: inputs.question}}
-              response: {format: text}
+                - role: user
+                  content:
+                    - text: "Technical review: {{ question }}"
+              response: string
           result:
-            return: {from: steps.analyze.output.data}
+            return: $analyze_technical
         risk:
-          output_schema: {type: object}
+          output: string
           result:
             raise: all_failed
 
-    - kind: switch
+    - type: switch
       id: selected
       inputs:
-        results: {from: steps.perspectives.output}
-      output_schema: {}
+        results: $perspectives
+      output: Analysis
       cases:
         - id: available
           when:
-            cel: "scope.results.summary.ok > 0"
+            cel: "scope.results.technical.status == 'ok'"
           result:
-            return: {from: scope.results}
+            return:
+              answer: $results.technical.value
+              score: 1
+              tags: [technical]
       default:
         id: fallback
         result:
-          return: {literal: null}
+          return:
+            answer: fallback
+            score: 0
+            tags: []
+
   result:
-    return:
-      content: {from: steps.selected.output.answer}
-      format: markdown
-      data:
-        object:
-          answer: {from: steps.selected.output.answer}
-          count: {literal: 2}
+    return: $selected
 "#;
 
     #[test]
-    fn parses_complete_workflow_with_all_step_variants() {
+    fn parses_new_author_surface_and_normalizes_internal_contracts() {
         let document = parse_workflow(VALID).unwrap();
-        let workflow = document.raw_ast;
+        let workflow = &document.raw_ast;
 
-        assert_eq!(workflow.metadata.id.as_str(), "parallel_researcher");
+        assert_eq!(workflow.metadata.id.as_str(), "syntax_fixture");
+        assert_eq!(
+            workflow.schema_dialect,
+            "https://json-schema.org/draft/2020-12/schema"
+        );
         assert_eq!(workflow.workflow.steps.len(), 4);
         assert!(matches!(workflow.workflow.steps[0], Step::Llm { .. }));
         assert!(matches!(workflow.workflow.steps[1], Step::Action { .. }));
@@ -1415,125 +1491,488 @@ workflow:
         assert!(matches!(workflow.workflow.steps[3], Step::Switch { .. }));
         assert!(matches!(workflow.workflow.result, RootResult::Return(_)));
 
-        let Step::Llm { inputs, .. } = &workflow.workflow.steps[0] else {
-            unreachable!();
+        let message = &workflow.definitions[&identifier("Message")];
+        assert!(message.get("oneOf").is_some());
+        assert_eq!(
+            workflow.definitions[&identifier("AnalysisList")],
+            json!({
+                "type": "array",
+                "items": {"$ref": "#/$defs/Analysis"},
+                "minItems": 1,
+                "maxItems": 4
+            })
+        );
+        assert_eq!(
+            workflow.output.data_schema,
+            json!({"$ref": "#/$defs/Analysis"})
+        );
+
+        let input = workflow.input.schema.as_object().unwrap();
+        assert_eq!(input["required"], json!(["question"]));
+        let properties = input["properties"].as_object().unwrap();
+        assert_eq!(properties["messages"]["default"], Value::Array(Vec::new()));
+        assert!(properties["image_url"].get("anyOf").is_some());
+
+        let Step::Llm {
+            inputs, response, ..
+        } = &workflow.workflow.steps[0]
+        else {
+            unreachable!()
         };
-        assert!(matches!(
-            inputs[&Identifier::parse("question").unwrap()],
-            ValueExpr::From(_)
-        ));
-        let document_span = document.source_map[&crate::dsl::DslPath::root()];
+        assert!(inputs.contains_key(&identifier("question")));
+        assert!(inputs
+            .values()
+            .any(|value| matches!(value, ValueExpr::From(_))));
+        assert!(
+            matches!(response, ResponseConfig::Json { schema } if schema == &json!({"$ref": "#/$defs/Analysis"}))
+        );
+
+        let RootResult::Return(result) = &workflow.workflow.result else {
+            unreachable!()
+        };
+        assert!(result.content.is_none());
+        assert!(result.format.is_none());
+        assert!(matches!(result.data, ValueExpr::From(_)));
+
+        let document_span = document.source_map[&DslPath::root()];
         assert_eq!(document_span.byte_start(), 0);
         assert_eq!(document_span.byte_end(), VALID.len() as u64);
     }
 
     #[test]
-    fn records_value_and_sequence_item_spans_through_the_complete_tree() {
-        let document = parse_workflow(VALID).unwrap();
-        let paths = [
-            crate::dsl::DslPath::root()
-                .child_key("metadata")
-                .child_key("id"),
-            crate::dsl::DslPath::root()
-                .child_key("workflow")
-                .child_key("steps")
-                .child_index(0),
-            crate::dsl::DslPath::root()
-                .child_key("workflow")
-                .child_key("steps")
-                .child_index(0)
-                .child_key("messages")
-                .child_index(1)
-                .child_key("content")
-                .child_key("from"),
-            crate::dsl::DslPath::root()
-                .child_key("workflow")
-                .child_key("steps")
-                .child_index(2)
-                .child_key("branches")
-                .child_key("technical")
-                .child_key("steps")
-                .child_index(0)
-                .child_key("id"),
-        ];
-        for path in &paths {
-            let span = document
-                .source_map
-                .get(path)
-                .unwrap_or_else(|| panic!("missing source span for {path}"));
-            assert!(span.byte_end() > span.byte_start(), "empty span for {path}");
-        }
-        assert_eq!(
-            source_slice(VALID, document.source_map[&paths[0]]),
-            "parallel_researcher"
-        );
-        assert_eq!(
-            source_slice(VALID, document.source_map[&paths[2]]),
-            "inputs.question"
-        );
-        assert_eq!(
-            source_slice(VALID, document.source_map[&paths[3]]),
-            "analyze"
-        );
+    fn natural_values_and_runtime_references_need_no_expression_wrappers() {
+        let workflow = parse_workflow(VALID).unwrap().raw_ast;
+        let Step::Action { inputs, .. } = &workflow.workflow.steps[1] else {
+            unreachable!()
+        };
 
-        let unicode = VALID.replace("Parallel Researcher", "并行研究员");
-        let document = parse_workflow(&unicode).unwrap();
-        let name = crate::dsl::DslPath::root()
-            .child_key("metadata")
-            .child_key("name");
-        let span = document.source_map[&name];
-        assert_eq!(source_slice(&unicode, span), "并行研究员");
-        assert_eq!(
-            span.byte_end() - span.byte_start(),
-            "并行研究员".len() as u64
-        );
+        assert!(matches!(
+            &inputs[&identifier("text")],
+            ValueExpr::From(value) if value.to_string() == "steps.draft.output.answer"
+        ));
+        assert!(matches!(
+            &inputs[&identifier("mode")],
+            ValueExpr::Literal(Value::String(value)) if value == "initial"
+        ));
+        assert!(matches!(
+            &inputs[&identifier("tags")],
+            ValueExpr::Array(values) if values.len() == 2
+        ));
+        let ValueExpr::Object(metadata) = &inputs[&identifier("metadata")] else {
+            unreachable!()
+        };
+        assert!(matches!(metadata["question"], ValueExpr::From(_)));
+        let ValueExpr::Template(label) = &inputs[&identifier("label")] else {
+            unreachable!()
+        };
+        assert_eq!(label.text, "Question: {{ question }}");
+        assert!(matches!(
+            label.bindings[&identifier("question")],
+            ValueExpr::From(_)
+        ));
+
+        let source = VALID.replacen("$draft.answer", "$missing", 1);
+        let error = parse_workflow(&source).unwrap_err();
+        assert_eq!(error.code(), super::PARSE_ERROR_CODE);
+        assert_eq!(error.message(), super::PARSE_ERROR_MESSAGE);
+        assert!(!error.to_string().contains("$missing"));
+
+        for literal in ["$draft[chosen]", "$5", "$question follows"] {
+            let source = VALID.replacen("$draft.answer", &format!("\"{literal}\""), 1);
+            let workflow = parse_workflow(&source).unwrap().raw_ast;
+            let Step::Action { inputs, .. } = &workflow.workflow.steps[1] else {
+                unreachable!()
+            };
+            assert!(matches!(
+                &inputs[&identifier("text")],
+                ValueExpr::Literal(Value::String(value)) if value == literal
+            ));
+        }
+
+        for legacy_wrapper in [
+            "{from: $question}",
+            "{literal: initial}",
+            "{object: {value: initial}}",
+            "{array: [initial]}",
+            "{template: initial}",
+        ] {
+            let source = VALID.replacen("mode: initial", &format!("mode: {legacy_wrapper}"), 1);
+            assert!(
+                parse_workflow(&source).is_err(),
+                "legacy value wrapper {legacy_wrapper} must be rejected"
+            );
+        }
     }
 
     #[test]
-    fn records_exact_authored_span_for_unicode_block_scalars() {
+    fn text_parts_reserve_only_complete_lexical_references() {
+        for (source_text, runtime_reference) in [
+            ("$5", false),
+            ("$question follows", false),
+            ("$question", true),
+        ] {
+            let source =
+                VALID.replacen("- text: analyze", &format!("- text: \"{source_text}\""), 1);
+            let workflow = parse_workflow(&source).unwrap().raw_ast;
+            let Step::Llm { messages, .. } = &workflow.workflow.steps[0] else {
+                unreachable!()
+            };
+            let sources = messages.sources().unwrap();
+            let MessageSource::Authored(message) = &sources[2] else {
+                unreachable!()
+            };
+            let atom = &message.content.atoms()[0];
+            assert_eq!(
+                matches!(atom, AuthoredContentAtom::RuntimeText(_)),
+                runtime_reference
+            );
+            if !runtime_reference {
+                assert!(matches!(
+                    atom,
+                    AuthoredContentAtom::InlineText(value) if value == source_text
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn defaults_preserve_explicit_null_and_reject_forbidden_combinations() {
+        let explicit_null = VALID.replacen(
+            "  question:\n    type: string\n    min_length: 1",
+            "  question:\n    type: string\n    default: null",
+            1,
+        );
+        let workflow = parse_workflow(&explicit_null).unwrap().raw_ast;
+        assert_eq!(
+            workflow.input.schema["properties"]["question"]["default"],
+            Value::Null
+        );
+        assert!(!workflow.input.schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "question"));
+
+        let optional_and_default = explicit_null.replacen(
+            "    default: null",
+            "    default: null\n    optional: true",
+            1,
+        );
+        assert!(parse_workflow(&optional_and_default).is_err());
+
+        let nested_default = VALID.replacen(
+            "      answer: string",
+            "      answer:\n        type: string\n        default: null",
+            1,
+        );
+        assert!(parse_workflow(&nested_default).is_err());
+    }
+
+    #[test]
+    fn string_alias_response_preserves_its_schema_in_the_text_response_contract() {
+        let source = VALID
+            .replacen(
+                "types:\n  Analysis:",
+                "types:\n  PlainText:\n    type: string\n    min_length: 2\n    pattern: \"^[A-Z]\"\n  AnswerText:\n    type: PlainText\n    max_length: 80\n\n  Analysis:",
+                1,
+            )
+            .replacen("response: Analysis", "response: AnswerText", 1);
+        let workflow = parse_workflow(&source).unwrap().raw_ast;
+        let Step::Llm { response, .. } = &workflow.workflow.steps[0] else {
+            unreachable!()
+        };
+        assert!(matches!(
+            response,
+            ResponseConfig::TextSchema { schema }
+                if schema == &json!({"$ref": "#/$defs/AnswerText"})
+        ));
+        assert_eq!(
+            workflow.definitions[&identifier("PlainText")],
+            json!({"type": "string", "minLength": 2, "pattern": "^[A-Z]"})
+        );
+        assert_eq!(
+            workflow.definitions[&identifier("AnswerText")],
+            json!({"$ref": "#/$defs/PlainText", "maxLength": 80})
+        );
+
+        let primitive = source.replacen("response: AnswerText", "response: string", 1);
+        let primitive = parse_workflow(&primitive).unwrap().raw_ast;
+        let Step::Llm { response, .. } = &primitive.workflow.steps[0] else {
+            unreachable!()
+        };
+        assert!(matches!(response, ResponseConfig::Text));
+
+        for structured in ["Analysis", "AnalysisList"] {
+            let source = source.replacen(
+                "response: AnswerText",
+                &format!("response: {structured}"),
+                1,
+            );
+            let workflow = parse_workflow(&source).unwrap().raw_ast;
+            let Step::Llm { response, .. } = &workflow.workflow.steps[0] else {
+                unreachable!()
+            };
+            assert!(matches!(response, ResponseConfig::Json { .. }));
+        }
+    }
+
+    #[test]
+    fn constraints_are_rejected_when_the_declared_type_cannot_use_them() {
+        let named_array_constraint = VALID.replacen(
+            "  AnalysisList:\n    type: Analysis[]\n    min_items: 1\n    max_items: 4",
+            "  AnalysisList:\n    type: Analysis[]\n    min_items: 1\n    max_items: 4\n\n  RefinedAnalysisList:\n    type: AnalysisList\n    min_items: 2",
+            1,
+        );
+        parse_workflow(&named_array_constraint)
+            .expect("constraints may refine a named type of the matching actual kind");
+
+        let invalid = [
+            VALID.replacen("    min_length: 1", "    min_items: 1", 1),
+            VALID.replacen("    min_items: 1", "    min_length: 1", 1),
+            VALID.replacen(
+                "      tags: string[]",
+                "      tags:\n        type: string[]\n        enum: [one]",
+                1,
+            ),
+            VALID.replacen(
+                "      answer: string",
+                "      answer:\n        type: Analysis\n        min_items: 1",
+                1,
+            ),
+        ];
+
+        for source in invalid {
+            assert!(parse_workflow(&source).is_err());
+        }
+    }
+
+    #[test]
+    fn root_and_child_results_are_closed_single_key_unions() {
+        let invalid = [
+            VALID.replacen(
+                "  result:\n    return: $selected",
+                "  result:\n    return: $selected\n    raise: all_failed",
+                1,
+            ),
+            VALID.replacen(
+                "  result:\n    return: $selected",
+                "  result:\n    return: $selected\n    ignored: true",
+                1,
+            ),
+            VALID.replacen(
+                "          result:\n            return: $analyze_technical",
+                "          result:\n            return: $analyze_technical\n            raise: all_failed",
+                1,
+            ),
+            VALID.replacen(
+                "          result:\n            raise: all_failed",
+                "          result:\n            raise: all_failed\n            ignored: true",
+                1,
+            ),
+        ];
+
+        for source in invalid {
+            assert!(parse_workflow(&source).is_err());
+        }
+    }
+
+    #[test]
+    fn source_map_tracks_new_fields_single_key_parts_and_unicode_exactly() {
+        let document = parse_workflow(VALID).unwrap();
+        let answer_type = path(&["types", "Analysis", "fields", "answer"]);
+        let image_optional = path(&["inputs", "image_url", "optional"]);
+        let step_type = path(&["workflow", "steps"])
+            .child_index(0)
+            .child_key("type");
+        let image_part = path(&["workflow", "steps"])
+            .child_index(0)
+            .child_key("messages")
+            .child_index(2)
+            .child_key("content")
+            .child_index(1)
+            .child_key("image_url");
+        let nested_id = path(&["workflow", "steps"])
+            .child_index(2)
+            .child_key("branches")
+            .child_key("technical")
+            .child_key("steps")
+            .child_index(0)
+            .child_key("id");
+
+        for expected in [
+            (&answer_type, "string"),
+            (&image_optional, "true"),
+            (&step_type, "llm"),
+            (&image_part, "$image_url"),
+            (&nested_id, "analyze_technical"),
+        ] {
+            let span = document.source_map[expected.0];
+            assert_eq!(source_slice(VALID, span), expected.1);
+        }
+
         let source = VALID.replace(
-            "    inline: You are concise.",
-            "    inline: |\n      第一行\n      第二行 {{ question }}",
+            "    inline: |-\n      Question:\n      {{ question }}",
+            "    inline: |-\n      问题如下：\n      {{ question }}",
         );
         let document = parse_workflow(&source).unwrap();
-        let inline = crate::dsl::DslPath::root()
-            .child_key("prompts")
-            .child_key("system")
-            .child_key("inline");
+        let inline = path(&["prompts", "analyze", "inline"]);
         let span = document.source_map[&inline];
-
         assert_eq!(
             source_slice(&source, span),
-            "|\n      第一行\n      第二行 {{ question }}"
+            "|-\n      问题如下：\n      {{ question }}"
         );
         assert_eq!(
-            span.byte_start(),
-            source.find("|\n      第一行").unwrap() as u64
+            span.byte_end() - span.byte_start(),
+            "|-\n      问题如下：\n      {{ question }}".len() as u64
         );
     }
 
     #[test]
-    fn parses_both_parallel_settle_policies() {
-        assert_eq!(
-            yaml_serde::from_str::<ParallelSettle>("all").unwrap(),
-            ParallelSettle::All
-        );
-        assert_eq!(
-            yaml_serde::from_str::<ParallelSettle>("all_settled").unwrap(),
-            ParallelSettle::AllSettled
-        );
-    }
+    fn content_parts_are_closed_single_key_objects() {
+        parse_workflow(VALID).expect("text and image_url single-key parts must parse");
 
-    #[test]
-    fn response_union_shape_errors_use_the_stable_llm_configuration_code() {
-        for invalid_response in [
-            "response: {format: text, schema: {type: string}}",
-            "response: {format: json}",
-            "response: {format: text, unknown: do-not-render}",
-        ] {
-            let source = VALID.replacen("response: {format: text}", invalid_response, 1);
+        let invalid_parts = [
+            VALID.replacen("- text: analyze", "- analyze", 1),
+            VALID.replacen(
+                "- text: analyze",
+                "- type: text\n              text: analyze",
+                1,
+            ),
+            VALID.replacen(
+                "- text: analyze",
+                "- text: analyze\n              image_url: $image_url",
+                1,
+            ),
+            VALID.replacen("- text: analyze", "- prompt: analyze", 1),
+            VALID.replacen("- text: analyze", "- text: {value: analyze}", 1),
+        ];
+
+        for source in invalid_parts {
             let error = parse_workflow(&source).unwrap_err();
+            assert_eq!(error.code(), super::PARSE_ERROR_CODE);
+            assert_eq!(error.message(), super::PARSE_ERROR_MESSAGE);
+        }
+    }
 
+    #[test]
+    fn rejects_deleted_top_level_step_and_value_grammar() {
+        let removed = [
+            (
+                "schema_dialect",
+                VALID.replacen(
+                    "kind: agent",
+                    "kind: agent\nschema_dialect: https://json-schema.org/draft/2020-12/schema",
+                    1,
+                ),
+            ),
+            (
+                "$defs",
+                VALID.replacen(
+                    "kind: agent",
+                    "kind: agent\n$defs: {Legacy: {type: string}}",
+                    1,
+                ),
+            ),
+            (
+                "input.schema",
+                VALID.replacen("inputs:", "input: {schema: {type: object}}\ninputs:", 1),
+            ),
+            (
+                "output.data_schema",
+                VALID.replacen(
+                    "output: Analysis",
+                    "output: {data_schema: {type: object}}",
+                    1,
+                ),
+            ),
+            ("step kind", VALID.replacen("type: llm", "kind: llm", 1)),
+            (
+                "LLM inputs",
+                VALID.replacen(
+                    "model: vision_chat",
+                    "model: vision_chat\n      inputs: {question: $question}",
+                    1,
+                ),
+            ),
+            (
+                "response object",
+                VALID.replacen("response: Analysis", "response: {format: json}", 1),
+            ),
+            (
+                "parallel output_schema",
+                VALID.replacen(
+                    "          output: string",
+                    "          output_schema: string",
+                    1,
+                ),
+            ),
+            (
+                "operation",
+                VALID.replacen("type: llm", "type: operation", 1),
+            ),
+            (
+                "uses",
+                VALID.replacen(
+                    "model: vision_chat",
+                    "model: vision_chat\n      uses: ai.chat",
+                    1,
+                ),
+            ),
+            (
+                "config",
+                VALID.replacen(
+                    "parameters: {temperature: 0.2}",
+                    "parameters: {temperature: 0.2}\n      config: {}",
+                    1,
+                ),
+            ),
+            (
+                "with",
+                VALID.replacen(
+                    "      inputs:\n        text: $draft.answer",
+                    "      with:\n        text: $draft.answer",
+                    1,
+                ),
+            ),
+            (
+                "spread",
+                VALID.replacen("- $messages", "- {spread: $messages}", 1),
+            ),
+            (
+                "concat",
+                VALID.replacen("- $messages", "- {concat: [$messages]}", 1),
+            ),
+            (
+                "entry",
+                VALID.replacen("workflow:", "entry: draft\nworkflow:", 1),
+            ),
+            (
+                "nodes",
+                VALID.replacen("workflow:", "nodes: {}\nworkflow:", 1),
+            ),
+            (
+                "legacy control node",
+                VALID.replacen("type: llm", "type: core.end", 1),
+            ),
+        ];
+
+        for (feature, source) in removed {
+            assert!(
+                parse_workflow(&source).is_err(),
+                "deleted authored feature {feature} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn response_type_errors_use_the_stable_llm_configuration_code() {
+        for invalid_response in ["invalid_name", "{format: text}", "[]"] {
+            let source = VALID.replacen(
+                "response: Analysis",
+                &format!("response: {invalid_response}"),
+                1,
+            );
+            let error = parse_workflow(&source).unwrap_err();
             assert_eq!(
                 error.code(),
                 super::LLM_RESPONSE_CONFIG_INVALID,
@@ -1541,21 +1980,124 @@ workflow:
                 error.path()
             );
             assert_eq!(error.message(), super::LLM_RESPONSE_CONFIG_INVALID_MESSAGE);
-            assert!(error
-                .path()
-                .is_some_and(|path| super::path_contains_key(path, "response")));
-            assert!(!error.to_string().contains("do-not-render"));
+            assert!(
+                error
+                    .path()
+                    .is_some_and(|path| super::path_contains_key(path, "response")),
+                "response={invalid_response}, path={:?}",
+                error.path()
+            );
+            assert!(!error.to_string().contains(invalid_response));
         }
     }
 
     #[test]
-    fn workflow_error_codes_and_public_messages_use_bounded_closed_profiles() {
+    fn discriminator_and_unknown_field_errors_have_exact_safe_spans() {
+        let invalid_type = VALID.replacen("type: llm", "type: mystery", 1);
+        let error = parse_workflow(&invalid_type).unwrap_err();
+        assert_eq!(
+            error.path().map(ToString::to_string).as_deref(),
+            Some("$.workflow.steps[0].type")
+        );
+        assert_eq!(
+            source_slice(&invalid_type, error.span().unwrap()),
+            "mystery"
+        );
+        assert_eq!(error.to_string(), super::PARSE_ERROR_MESSAGE);
+        assert!(!error.to_string().contains("mystery"));
+
+        let invalid_kind = VALID.replacen("kind: agent", "kind: mystery", 1);
+        let error = parse_workflow(&invalid_kind).unwrap_err();
+        assert_eq!(
+            error.path().map(ToString::to_string).as_deref(),
+            Some("$.kind")
+        );
+        assert_eq!(
+            source_slice(&invalid_kind, error.span().unwrap()),
+            "mystery"
+        );
+
+        let unknown = VALID.replacen(
+            "model: vision_chat",
+            "model: vision_chat\n      secret_unknown_field: do-not-render",
+            1,
+        );
+        let error = parse_workflow(&unknown).unwrap_err();
+        assert_eq!(
+            error.path().map(ToString::to_string).as_deref(),
+            Some("$.workflow.steps[0].secret_unknown_field")
+        );
+        assert_eq!(
+            source_slice(&unknown, error.span().unwrap()),
+            "secret_unknown_field"
+        );
+        assert_eq!(error.to_string(), super::PARSE_ERROR_MESSAGE);
+        assert!(!error.to_string().contains("do-not-render"));
+    }
+
+    #[test]
+    fn yaml_and_json_duplicate_keys_point_to_the_second_key() {
+        let yaml = VALID.replacen("kind: agent", "kind: agent\nkind: agent", 1);
+        let error = parse_workflow(&yaml).unwrap_err();
+        assert_eq!(
+            error.path().map(ToString::to_string).as_deref(),
+            Some("$.kind")
+        );
+        assert_eq!(source_slice(&yaml, error.span().unwrap()), "kind");
+
+        let authored: Value = yaml_serde::from_str(VALID).unwrap();
+        let json = serde_json::to_string(&authored).unwrap();
+        let duplicate = json.replacen(
+            "\"kind\":\"agent\"",
+            "\"kind\":\"agent\",\"kind\":\"agent\"",
+            1,
+        );
+        let error = parse_workflow(&duplicate).unwrap_err();
+        assert_eq!(
+            error.path().map(ToString::to_string).as_deref(),
+            Some("$.kind")
+        );
+        assert_eq!(source_slice(&duplicate, error.span().unwrap()), "\"kind\"");
+        assert_eq!(error.to_string(), super::PARSE_ERROR_MESSAGE);
+    }
+
+    #[test]
+    fn authored_yaml_and_json_have_parser_and_normalization_parity() {
+        let yaml_document = parse_workflow(VALID).unwrap();
+        let authored: Value = yaml_serde::from_str(VALID).unwrap();
+        let json = serde_json::to_string(&authored).unwrap();
+        let json_document = parse_workflow(&json).unwrap();
+
+        assert_eq!(json_document.raw_ast, yaml_document.raw_ast);
+        assert_eq!(
+            json_document.source_map[&DslPath::root()].byte_end(),
+            json.len() as u64
+        );
+
+        let nested = path(&["workflow", "steps"]).child_index(0).child_key("id");
+        assert_eq!(
+            source_slice(&json, json_document.source_map[&nested]),
+            "\"draft\""
+        );
+
+        let invalid = json.replacen("\"type\":\"llm\"", "\"type\":\"mystery\"", 1);
+        let error = parse_workflow(&invalid).unwrap_err();
+        assert_eq!(
+            error.path().map(ToString::to_string).as_deref(),
+            Some("$.workflow.steps[0].type")
+        );
+        assert_eq!(source_slice(&invalid, error.span().unwrap()), "\"mystery\"");
+        assert!(!error.to_string().contains("mystery"));
+    }
+
+    #[test]
+    fn workflow_error_declarations_keep_their_bounded_closed_profiles() {
         let exact_code = format!("A{}", "B".repeat(super::ERROR_CODE_MAX_CHARS - 1));
         let exact_message = "界".repeat(super::ERROR_PUBLIC_MESSAGE_MAX_CHARS);
         let exact = VALID
             .replace("WORKFLOW_ALL_FAILED", &exact_code)
             .replace("Every branch failed.", &exact_message);
-        parse_workflow(&exact).expect("exact error declaration limits must remain accepted");
+        parse_workflow(&exact).expect("exact declaration limits must remain accepted");
 
         for invalid_code in [
             "\"\"".to_string(),
@@ -1589,319 +2131,14 @@ workflow:
     }
 
     #[test]
-    fn rejects_unknown_fields_at_root_step_and_child_boundaries() {
-        let root_unknown = VALID.replace("kind: agent", "kind: agent\nunknown_root_contract: true");
-        assert!(parse_workflow(&root_unknown).is_err());
-
-        let step_unknown = VALID.replace(
-            "model: general_chat",
-            "model: general_chat\n      next: forbidden",
-        );
-        assert!(parse_workflow(&step_unknown).is_err());
-
-        let child_unknown = VALID.replace(
-            "output_schema: {type: object}",
-            "output_schema: {type: object}\n          next: forbidden",
-        );
-        assert!(parse_workflow(&child_unknown).is_err());
-
-        let mixed_business_policy = VALID.replace(
-            "settle: all_settled",
-            "settle: all_settled\n      require: {min_ok: 1}",
-        );
-        assert!(parse_workflow(&mixed_business_policy).is_err());
-    }
-
-    #[test]
-    fn rejects_the_complete_legacy_authored_control_flow_grammar() {
-        let mut legacy_documents = vec![
-            (
-                "entry",
-                VALID.replacen("workflow:\n", "entry: prepare\nworkflow:\n", 1),
-            ),
-            (
-                "nodes",
-                VALID.replacen("workflow:\n", "nodes: {}\nworkflow:\n", 1),
-            ),
-            (
-                "next",
-                VALID.replacen(
-                    "model: general_chat",
-                    "model: general_chat\n      next: selected",
-                    1,
-                ),
-            ),
-        ];
-        for legacy_type in [
-            "core.fork",
-            "core.join",
-            "core.branch_end",
-            "core.condition",
-            "core.select",
-            "core.end",
-        ] {
-            legacy_documents.push((
-                legacy_type,
-                VALID.replacen("model: general_chat", &format!("type: {legacy_type}"), 1),
-            ));
-        }
-
-        for (legacy_feature, document) in legacy_documents {
-            assert!(
-                parse_workflow(&document).is_err(),
-                "legacy authored feature '{legacy_feature}' must not enter the v2 AST"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_removed_generic_calls_aliases_and_message_pseudo_operators() {
-        let removed = [
-            (
-                "operation",
-                VALID.replacen("kind: llm", "kind: operation", 1),
-            ),
-            (
-                "uses",
-                VALID.replacen(
-                    "model: general_chat",
-                    "model: general_chat\n      uses: ai.chat",
-                    1,
-                ),
-            ),
-            (
-                "config",
-                VALID.replacen(
-                    "parameters: {temperature: 0.2}",
-                    "parameters: {temperature: 0.2}\n      config: {}",
-                    1,
-                ),
-            ),
-            (
-                "with",
-                VALID.replacen("      inputs:\n", "      with:\n", 1),
-            ),
-            (
-                "parts",
-                VALID.replacen(
-                    "- {role: system, content: system}",
-                    "- {role: system, content: system, parts: []}",
-                    1,
-                ),
-            ),
-            (
-                "spread",
-                VALID.replacen(
-                    "      messages:\n",
-                    "      messages:\n        - {spread: history}\n",
-                    1,
-                ),
-            ),
-            (
-                "concat",
-                VALID.replacen(
-                    "      messages:\n",
-                    "      messages:\n        - {concat: []}\n",
-                    1,
-                ),
-            ),
-            (
-                "prompt expression",
-                VALID.replacen(
-                    "text: {from: steps.prepare.output.data}",
-                    "text: {prompt: system}",
-                    1,
-                ),
-            ),
-        ];
-
-        for (feature, document) in removed {
-            assert!(
-                parse_workflow(&document).is_err(),
-                "removed authored feature '{feature}' must not enter the v2 AST"
-            );
-        }
-    }
-
-    #[test]
-    fn requires_an_explicit_schema_dialect() {
-        let missing = VALID.replace(
-            "schema_dialect: https://json-schema.org/draft/2020-12/schema\n",
-            "",
-        );
-        let error = parse_workflow(&missing).unwrap_err();
-        assert_eq!(error.code(), super::PARSE_ERROR_CODE);
-        assert!(error.path().is_some_and(crate::dsl::DslPath::is_root));
-        assert!(error.span().is_some());
-        assert_eq!(error.to_string(), super::PARSE_ERROR_MESSAGE);
-    }
-
-    #[test]
-    fn rejects_dynamic_paths_through_the_full_document_parser() {
-        let dynamic = VALID.replace("{from: input.question}", "{from: 'steps[chosen].output'}");
-        let error = parse_workflow(&dynamic).unwrap_err();
-        assert_eq!(error.code(), super::PARSE_ERROR_CODE);
-        assert!(error.path().is_some_and(|path| !path.is_root()));
-        assert!(error.span().is_some());
-        assert!(!error.to_string().contains("steps[chosen]"));
-    }
-
-    #[test]
-    fn rejects_implicit_value_and_missing_block_result_shapes() {
-        let implicit = VALID.replace(
-            "question: {from: input.question}",
-            "question: input.question",
-        );
-        assert!(parse_workflow(&implicit).is_err());
-
-        let missing_result =
-            VALID.replace("          result:\n            raise: all_failed\n", "");
-        assert!(parse_workflow(&missing_result).is_err());
-    }
-
-    #[test]
-    fn parse_errors_carry_safe_structured_paths_and_minimal_spans() {
-        let source = VALID.replace(
-            "model: general_chat",
-            "model: general_chat\n      secret_unknown_field: do-not-render",
-        );
-        let error = parse_workflow(&source).unwrap_err();
-
+    fn parses_both_parallel_settle_policies() {
         assert_eq!(
-            error.path().map(ToString::to_string).as_deref(),
-            Some("$.workflow.steps")
-        );
-        let span = error.span().unwrap();
-        assert!(span.byte_end() - span.byte_start() <= 4);
-        assert!(span.line_start() > 1);
-        assert_eq!(error.to_string(), super::PARSE_ERROR_MESSAGE);
-        assert!(!error.to_string().contains("do-not-render"));
-        assert!(!error.to_string().contains("secret_unknown_field"));
-    }
-
-    #[test]
-    fn unknown_fields_and_union_discriminators_use_the_smallest_authored_span() {
-        let unknown = VALID.replacen(
-            "model: general_chat",
-            "model: general_chat\n      secret_unknown_field: do-not-render",
-            1,
-        );
-        let error = parse_workflow(&unknown).unwrap_err();
-        assert_eq!(
-            error.path().map(ToString::to_string).as_deref(),
-            Some("$.workflow.steps[0].secret_unknown_field")
+            yaml_serde::from_str::<ParallelSettle>("all").unwrap(),
+            ParallelSettle::All
         );
         assert_eq!(
-            source_slice(&unknown, error.span().unwrap()),
-            "secret_unknown_field"
-        );
-        assert_eq!(error.to_string(), super::PARSE_ERROR_MESSAGE);
-        assert!(!error.to_string().contains("do-not-render"));
-
-        let invalid_kind = VALID.replacen("kind: llm", "kind: mystery", 1);
-        let error = parse_workflow(&invalid_kind).unwrap_err();
-        assert_eq!(
-            error.path().map(ToString::to_string).as_deref(),
-            Some("$.workflow.steps[0].kind")
-        );
-        assert_eq!(
-            source_slice(&invalid_kind, error.span().unwrap()),
-            "mystery"
-        );
-        assert!(!error.to_string().contains("mystery"));
-
-        let invalid_union = VALID.replacen(
-            "    inline: You are concise.",
-            "    inline: You are concise.\n    file: prompts/secret.md",
-            1,
-        );
-        let error = parse_workflow(&invalid_union).unwrap_err();
-        assert_eq!(
-            error.path().map(ToString::to_string).as_deref(),
-            Some("$.prompts.system")
-        );
-        assert!(error.span().unwrap().byte_end() > error.span().unwrap().byte_start());
-        assert!(!error.to_string().contains("secret.md"));
-    }
-
-    #[test]
-    fn rejects_yaml_and_json_duplicate_keys_at_the_second_key_span() {
-        let yaml = VALID.replacen("kind: agent", "kind: agent\nkind: agent", 1);
-        let error = parse_workflow(&yaml).unwrap_err();
-        assert_eq!(
-            error.path().map(ToString::to_string).as_deref(),
-            Some("$.kind")
-        );
-        assert_eq!(source_slice(&yaml, error.span().unwrap()), "kind");
-
-        let raw = parse_workflow(VALID).unwrap().raw_ast;
-        let json = serde_json::to_string(&raw).unwrap();
-        let duplicate = json.replacen(
-            "\"kind\":\"agent\"",
-            "\"kind\":\"agent\",\"kind\":\"agent\"",
-            1,
-        );
-        let error = parse_workflow(&duplicate).unwrap_err();
-        assert_eq!(
-            error.path().map(ToString::to_string).as_deref(),
-            Some("$.kind")
-        );
-        assert_eq!(source_slice(&duplicate, error.span().unwrap()), "\"kind\"");
-        assert_eq!(error.to_string(), super::PARSE_ERROR_MESSAGE);
-    }
-
-    #[test]
-    fn json_unknown_fields_and_union_discriminators_have_exact_safe_locations() {
-        let raw = parse_workflow(VALID).unwrap().raw_ast;
-        let json = serde_json::to_string(&raw).unwrap();
-        let unknown = json.replacen(
-            "\"description\":",
-            "\"secret_unknown\":\"do-not-render\",\"description\":",
-            1,
-        );
-        let error = parse_workflow(&unknown).unwrap_err();
-        assert_eq!(
-            error.path().map(ToString::to_string).as_deref(),
-            Some("$.metadata.secret_unknown")
-        );
-        assert_eq!(
-            source_slice(&unknown, error.span().unwrap()),
-            "\"secret_unknown\""
-        );
-        assert!(!error.to_string().contains("do-not-render"));
-
-        let invalid_kind = json.replacen("\"kind\":\"llm\"", "\"kind\":\"mystery\"", 1);
-        let error = parse_workflow(&invalid_kind).unwrap_err();
-        assert_eq!(
-            error.path().map(ToString::to_string).as_deref(),
-            Some("$.workflow.steps[0].kind")
-        );
-        assert_eq!(
-            source_slice(&invalid_kind, error.span().unwrap()),
-            "\"mystery\""
-        );
-        assert!(!error.to_string().contains("mystery"));
-    }
-
-    #[test]
-    fn the_same_parser_accepts_json_and_records_its_document_span() {
-        let raw = parse_workflow(VALID).unwrap().raw_ast;
-        let json = serde_json::to_string(&raw).unwrap();
-        let document = parse_workflow(&json).unwrap();
-
-        assert_eq!(document.raw_ast, raw);
-        assert_eq!(
-            document.source_map[&crate::dsl::DslPath::root()].byte_end(),
-            json.len() as u64
-        );
-        let nested = crate::dsl::DslPath::root()
-            .child_key("workflow")
-            .child_key("steps")
-            .child_index(0)
-            .child_key("id");
-        assert_eq!(
-            source_slice(&json, document.source_map[&nested]),
-            "\"prepare\""
+            yaml_serde::from_str::<ParallelSettle>("all_settled").unwrap(),
+            ParallelSettle::AllSettled
         );
     }
 }

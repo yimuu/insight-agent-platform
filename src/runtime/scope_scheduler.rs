@@ -7,7 +7,6 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     future::Future,
-    io::Write,
     panic::AssertUnwindSafe,
     pin::Pin,
     sync::Arc,
@@ -16,7 +15,6 @@ use std::{
 
 use cel::{Context as CelContext, Program as CelProgram, Value as CelValue};
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
-use handlebars::{no_escape, Handlebars, Template};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tokio::{
@@ -34,6 +32,7 @@ use crate::{
         },
         operation::{EvaluatedCall, OperationContext, OperationRegistry},
         raw::{is_valid_error_code, OutputFormat, ParallelSettle},
+        template::{compile_template, TEMPLATE_OUTPUT_TOO_LARGE as PROFILE_OUTPUT_TOO_LARGE},
         types::ValueType,
         value::Identifier,
     },
@@ -117,7 +116,7 @@ impl ScopeScheduler {
         Self {
             ir: Arc::clone(&workflow.ir),
             operations: workflow.operations().clone(),
-            input_validator: workflow.input_validator_arc(),
+            input_validator: workflow.normalized_input_validator_arc(),
             output_validator: workflow.output_validator_arc(),
             global_operation_permits,
             config,
@@ -476,40 +475,28 @@ impl<'a> ScopeRuntime<'a> {
                 ))
             })
             .collect::<Result<Map<_, _>, ScopeFailure>>()?;
-        let template = Template::compile(text).map_err(|_| {
+        let template = compile_template(text).map_err(|_| {
             ScopeFailure::operation(
                 operation,
                 RunError::operation(TEMPLATE_FAILED, "vNext template could not be compiled"),
             )
         })?;
-        let mut handlebars = Handlebars::new();
-        handlebars.set_strict_mode(true);
-        handlebars.register_escape_fn(no_escape);
-        handlebars.register_template("value", template);
-        let mut output =
-            BoundedTemplateWriter::new(self.scheduler.config.max_template_output_bytes);
-        let rendered = handlebars.render_to_write("value", &Value::Object(data), &mut output);
-        if output.exceeded() {
-            return Err(ScopeFailure::operation(
-                operation,
-                RunError::operation(
-                    TEMPLATE_OUTPUT_TOO_LARGE,
-                    "vNext template output exceeds the configured byte limit",
-                ),
-            ));
-        }
-        rendered.map_err(|_| {
-            ScopeFailure::operation(
-                operation,
-                RunError::operation(TEMPLATE_FAILED, "vNext template could not be rendered"),
+        template
+            .render_bounded(
+                &Value::Object(data),
+                self.scheduler.config.max_template_output_bytes,
             )
-        })?;
-        String::from_utf8(output.into_bytes()).map_err(|_| {
-            ScopeFailure::operation(
-                operation,
-                RunError::operation(TEMPLATE_FAILED, "vNext template output was not valid UTF-8"),
-            )
-        })
+            .map_err(|error| {
+                let (code, message) = if error.code() == PROFILE_OUTPUT_TOO_LARGE {
+                    (
+                        TEMPLATE_OUTPUT_TOO_LARGE,
+                        "vNext template output exceeds the configured byte limit",
+                    )
+                } else {
+                    (TEMPLATE_FAILED, "vNext template could not be rendered")
+                };
+                ScopeFailure::operation(operation, RunError::operation(code, message))
+            })
     }
 
     async fn execute_call(
@@ -1279,47 +1266,6 @@ fn cleanup_infrastructure(
         }
         Some(Ok(Err(error))) if error.kind() == RunErrorKind::Infrastructure => Some(error),
         Some(Ok(Ok(_))) | Some(Ok(Err(_))) | None => None,
-    }
-}
-
-struct BoundedTemplateWriter {
-    bytes: Vec<u8>,
-    max_bytes: usize,
-    exceeded: bool,
-}
-
-impl BoundedTemplateWriter {
-    fn new(max_bytes: usize) -> Self {
-        Self {
-            bytes: Vec::with_capacity(max_bytes.min(4_096)),
-            max_bytes,
-            exceeded: false,
-        }
-    }
-
-    fn exceeded(&self) -> bool {
-        self.exceeded
-    }
-
-    fn into_bytes(self) -> Vec<u8> {
-        self.bytes
-    }
-}
-
-impl Write for BoundedTemplateWriter {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        if buffer.len() > self.max_bytes.saturating_sub(self.bytes.len()) {
-            self.exceeded = true;
-            return Err(std::io::Error::other(
-                "template output exceeds configured limit",
-            ));
-        }
-        self.bytes.extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
 

@@ -10,7 +10,6 @@ use std::{
     fmt,
 };
 
-use handlebars::Template;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -29,17 +28,19 @@ use super::{
     predicate::analyze_predicate,
     raw::{
         is_valid_error_code, is_valid_error_public_message, ErrorDeclaration, Metadata,
-        OutputFormat, ParallelSettle, ERROR_CODE_MAX_CHARS,
+        ERROR_CODE_MAX_CHARS,
     },
     schema::compile_contract_schema,
     shape::{prove_dynamic_message_array, SchemaShape},
-    template::{CompiledTemplate, TemplateAccessKind, TemplatePathSegment},
+    template::{compile_template, CompiledTemplate, TemplateAccessKind, TemplatePathSegment},
     types::{
         safe_run_metadata_type, ArrayType, ObjectType, PropertyType, SchemaType, StaticPath,
         ValueType,
     },
     value::Identifier,
 };
+
+pub use super::raw::{ErrorCategory, OutputFormat, ParallelSettle};
 
 pub const SAFE_BRANCH_ORIGIN_MAX_BYTES: usize = 512;
 
@@ -1053,17 +1054,25 @@ impl<'a> Validator<'a> {
         bindings: &BTreeMap<Identifier, ValueId>,
         visible: &BTreeMap<ValueId, IrValueType>,
     ) {
-        if Template::compile(text).is_err() {
+        let compiled = compile_template(text).ok();
+        let mut signature = BTreeMap::new();
+        for (name, value) in bindings {
+            if let Some(value_type) = self.require_data_use(region, operation, value, visible) {
+                signature.insert(name.clone(), value_type.clone());
+            }
+        }
+        let valid = compiled.as_ref().is_some_and(|compiled| {
+            compiled.slots().iter().eq(bindings.keys())
+                && template_accesses_match_types(compiled, &signature)
+        });
+        if !valid {
             self.error(
                 ValidationCode::InvalidTemplate,
-                "Template text must compile as Handlebars before execution",
+                "Template must use the restricted profile with exact string-typed bindings",
                 Some(region.id.clone()),
                 Some(operation.id.clone()),
                 Some(operation.output.id.clone()),
             );
-        }
-        for value in bindings.values() {
-            self.require_data_use(region, operation, value, visible);
         }
         if let Some(output) = self.output_data(region, operation) {
             self.require_assignable(
@@ -1316,18 +1325,44 @@ impl<'a> Validator<'a> {
             );
         }
 
-        let response_data_type = match &plan.response {
-            ValidatedResponseContract::Text => ValueType::String,
+        match &plan.response {
+            ValidatedResponseContract::Text => {
+                self.validate_contract(
+                    &plan.output_contract,
+                    "LLM text response",
+                    Some(region.id.clone()),
+                );
+            }
             ValidatedResponseContract::Json { data } => {
                 self.validate_contract(data, "LLM JSON response", Some(region.id.clone()));
-                data.value_type.clone()
+                let capability = crate::resources::models::planned_structured_output_capability(
+                    &plan.capabilities,
+                );
+                if capability.is_none() {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "structured LLM responses must select exactly one output capability",
+                        Some(operation.output.id.clone()),
+                    );
+                }
+                if capability == Some(ModelCapability::JsonObjectOutput)
+                    && !matches!(&data.value_type, ValueType::Object(_))
+                {
+                    self.invalid_call(
+                        region,
+                        operation,
+                        "json_object_output requires a top-level object response",
+                        Some(operation.output.id.clone()),
+                    );
+                }
             }
-        };
-        if !llm_envelope_matches(&plan.output_contract.value_type, &response_data_type) {
+        }
+        if !llm_output_contract_matches(&plan.response, &plan.output_contract) {
             self.invalid_call(
                 region,
                 operation,
-                "LLM output contract must be the closed data/finish_reason/usage envelope",
+                "LLM output contract must equal its direct business response contract",
                 Some(operation.output.id.clone()),
             );
         }
@@ -2467,6 +2502,16 @@ fn types_equivalent(left: &ValueType, right: &ValueType) -> bool {
     left.is_assignable_to(right) && right.is_assignable_to(left)
 }
 
+fn llm_output_contract_matches(
+    response: &ValidatedResponseContract,
+    output: &TypedContract,
+) -> bool {
+    match response {
+        ValidatedResponseContract::Text => types_equivalent(&output.value_type, &ValueType::String),
+        ValidatedResponseContract::Json { data } => output == data,
+    }
+}
+
 fn valid_sha256_hex(value: &str) -> bool {
     value.len() == 64
         && value
@@ -2484,31 +2529,6 @@ fn sha256_label(bytes: &[u8]) -> String {
         write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
     }
     encoded
-}
-
-fn llm_envelope_matches(value_type: &ValueType, data_type: &ValueType) -> bool {
-    let ValueType::Object(envelope) = value_type else {
-        return false;
-    };
-    if envelope.additional_properties.is_some() || envelope.properties.len() != 3 {
-        return false;
-    }
-    let Some(data) = envelope.properties.get("data") else {
-        return false;
-    };
-    let Some(finish_reason) = envelope.properties.get("finish_reason") else {
-        return false;
-    };
-    let Some(usage) = envelope.properties.get("usage") else {
-        return false;
-    };
-    let nullable_string = ValueType::Union(vec![ValueType::String, ValueType::Null]);
-    data.required
-        && finish_reason.required
-        && usage.required
-        && types_equivalent(&data.value_type, data_type)
-        && types_equivalent(&finish_reason.value_type, &nullable_string)
-        && types_equivalent(&usage.value_type, &ValueType::Any)
 }
 
 fn is_authored_inline_template_path(path: &DslPath) -> bool {
@@ -2555,8 +2575,15 @@ fn is_authored_inline_template_path(path: &DslPath) -> bool {
 }
 
 fn template_accesses_match_signature(template: &PlannedTemplate) -> bool {
-    template.compiled.accesses().iter().all(|access| {
-        let Some(mut value_type) = template.slot_signature.get(&access.path.root).cloned() else {
+    template_accesses_match_types(&template.compiled, &template.slot_signature)
+}
+
+fn template_accesses_match_types(
+    template: &CompiledTemplate,
+    signature: &BTreeMap<Identifier, ValueType>,
+) -> bool {
+    template.accesses().iter().all(|access| {
+        let Some(mut value_type) = signature.get(&access.path.root).cloned() else {
             return false;
         };
         for segment in &access.path.segments {
@@ -2599,13 +2626,17 @@ fn template_array_item_type(value_type: &ValueType) -> Option<ValueType> {
 
 fn template_scalar_type(value_type: &ValueType) -> bool {
     match value_type {
-        ValueType::Boolean | ValueType::Integer | ValueType::Number | ValueType::String => true,
-        ValueType::Literal(Value::Bool(_) | Value::Number(_) | Value::String(_)) => true,
-        ValueType::Literal(Value::Null | Value::Array(_) | Value::Object(_)) => false,
+        ValueType::String | ValueType::Literal(Value::String(_)) => true,
+        ValueType::Literal(
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_),
+        ) => false,
         ValueType::Union(variants) => variants.iter().all(template_scalar_type),
         ValueType::Never
         | ValueType::Any
         | ValueType::Null
+        | ValueType::Boolean
+        | ValueType::Integer
+        | ValueType::Number
         | ValueType::Array(_)
         | ValueType::Object(_) => false,
     }
@@ -2772,21 +2803,8 @@ mod tests {
         }
     }
 
-    fn text_llm_envelope_contract() -> TypedContract {
-        let schema = json!({
-            "type":"object",
-            "required":["data", "finish_reason", "usage"],
-            "properties":{
-                "data":{"type":"string"},
-                "finish_reason":{"type":["string", "null"]},
-                "usage":true
-            },
-            "additionalProperties":false
-        });
-        TypedContract {
-            value_type: SchemaType::compile(&schema).unwrap().into_value_type(),
-            schema,
-        }
+    fn text_llm_contract() -> TypedContract {
+        string_contract()
     }
 
     fn system_provenance() -> TemplateProvenance {
@@ -2833,7 +2851,7 @@ mod tests {
             )]),
             parameters: super::super::plan::ValidatedModelParameters::new(json!({})).unwrap(),
             response: ValidatedResponseContract::Text,
-            output_contract: text_llm_envelope_contract(),
+            output_contract: text_llm_contract(),
             capabilities: BTreeSet::new(),
             limits: super::super::plan::ResolvedRequestLimits {
                 max_messages: 32,
@@ -2899,7 +2917,7 @@ mod tests {
         let run_value = ValueId::parameter("/workflow", 1).unwrap();
         let question = ValueId::expression("/workflow/analyze", 0).unwrap();
         let chat_result = ValueId::output("/workflow/analyze").unwrap();
-        let answer = ValueId::expression("/workflow/analyze_data", 0).unwrap();
+        let answer = chat_result.clone();
         let branch_token = ValueId::control("/workflow/selected").unwrap();
         let selected = ValueId::phi("/workflow/selected").unwrap();
         let evidence = ValueId::expression("/workflow/result", 0).unwrap();
@@ -3036,20 +3054,12 @@ mod tests {
                     },
                     Operation {
                         id: authored_operation("/workflow/analyze"),
-                        output: data(chat_result.clone(), text_llm_envelope_contract().value_type),
+                        output: data(chat_result.clone(), text_llm_contract().value_type),
                         kind: OperationKind::Call(Box::new(Call {
                             target: CallTarget::AiChat,
                             inputs: BTreeMap::from([(identifier("question"), question.clone())]),
                             plan: CallPlan::Llm(llm_plan(question)),
                         })),
-                    },
-                    Operation {
-                        id: expression_operation("/workflow/analyze_data", 0),
-                        output: expression_value("/workflow/analyze_data", 0, ValueType::String),
-                        kind: OperationKind::Project {
-                            source: chat_result,
-                            path: StaticPath::parse("data").unwrap(),
-                        },
                     },
                     Operation {
                         id: expression_operation("/workflow/constants", 0),
@@ -3186,10 +3196,6 @@ mod tests {
                 output_contract: string_contract(),
             }),
         };
-        let OperationKind::Project { path, .. } = &mut ir.root.operations[3].kind else {
-            unreachable!()
-        };
-        *path = StaticPath::parse("").unwrap();
         ir
     }
 
@@ -3205,6 +3211,48 @@ mod tests {
     fn accepts_complete_typed_ir_and_arbitrary_object_keys() {
         assert_eq!(validate(&valid_ir()), Ok(()));
         assert_eq!(validate(&action_ir()), Ok(()));
+    }
+
+    #[test]
+    fn llm_output_contract_is_the_exact_direct_response_contract() {
+        let text = ValidatedResponseContract::Text;
+        assert!(llm_output_contract_matches(&text, &string_contract()));
+        assert!(llm_output_contract_matches(
+            &text,
+            &TypedContract {
+                schema: json!({"type":"string", "minLength":1}),
+                value_type: ValueType::String,
+            },
+        ));
+        assert!(!llm_output_contract_matches(
+            &text,
+            &TypedContract {
+                schema: json!({"type":"number"}),
+                value_type: ValueType::Number,
+            },
+        ));
+
+        let schema = json!({
+            "type":"object",
+            "properties":{"answer":{"type":"string"}},
+            "required":["answer"],
+            "additionalProperties":false
+        });
+        let data = TypedContract {
+            value_type: SchemaType::compile(&schema).unwrap().into_value_type(),
+            schema,
+        };
+        let structured = ValidatedResponseContract::Json { data: data.clone() };
+        assert!(llm_output_contract_matches(&structured, &data));
+
+        let widened_schema = json!({"type":"object"});
+        let widened = TypedContract {
+            value_type: SchemaType::compile(&widened_schema)
+                .unwrap()
+                .into_value_type(),
+            schema: widened_schema,
+        };
+        assert!(!llm_output_contract_matches(&structured, &widened));
     }
 
     #[test]
@@ -3470,7 +3518,10 @@ mod tests {
 
     #[test]
     fn rejects_forged_dynamic_message_proofs_and_non_local_content() {
-        let history_json = json!([{"role":"user", "content":"prior context"}]);
+        let history_json = json!([{
+            "role":"user",
+            "content":[{"text":"prior context"}]
+        }]);
         let history_type = infer_json_type(&history_json);
         let history = ValueId::expression("/workflow/history", 0).unwrap();
         let mut valid_dynamic = valid_ir();
@@ -3633,14 +3684,14 @@ mod tests {
     #[test]
     fn validates_region_schema_constraints_and_rejects_forged_static_types() {
         let mut ir = valid_ir();
-        let OperationKind::Parallel(parallel) = &mut ir.root.operations[6].kind else {
+        let OperationKind::Parallel(parallel) = &mut ir.root.operations[5].kind else {
             panic!("expected Parallel")
         };
         let risk = parallel.branches.get_mut(&identifier("risk")).unwrap();
         risk.result.schema = json!({"type": "string", "minLength": 8});
         assert_eq!(validate(&ir), Ok(()));
 
-        let OperationKind::Parallel(parallel) = &mut ir.root.operations[6].kind else {
+        let OperationKind::Parallel(parallel) = &mut ir.root.operations[5].kind else {
             unreachable!()
         };
         parallel
@@ -3691,7 +3742,7 @@ mod tests {
     fn rejects_non_boolean_and_unknown_field_predicates_in_forged_ir() {
         for source in ["scope.answer", "scope.missing == 'yes'"] {
             let mut ir = valid_ir();
-            let OperationKind::Branch(branch) = &mut ir.root.operations[7].kind else {
+            let OperationKind::Branch(branch) = &mut ir.root.operations[6].kind else {
                 panic!("expected Branch")
             };
             branch.cases[0].predicate.source = source.to_string();
@@ -3703,7 +3754,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_region_operation_and_value_identities() {
         let mut duplicate_region = valid_ir();
-        let OperationKind::Parallel(parallel) = &mut duplicate_region.root.operations[6].kind
+        let OperationKind::Parallel(parallel) = &mut duplicate_region.root.operations[5].kind
         else {
             panic!("expected Parallel")
         };
@@ -3729,7 +3780,7 @@ mod tests {
     fn rejects_value_that_escapes_its_lexical_region() {
         let mut ir = valid_ir();
         let root_answer = ValueId::output("/workflow/analyze").unwrap();
-        let OperationKind::Parallel(parallel) = &mut ir.root.operations[6].kind else {
+        let OperationKind::Parallel(parallel) = &mut ir.root.operations[5].kind else {
             panic!("expected Parallel")
         };
         parallel
@@ -3745,7 +3796,7 @@ mod tests {
     fn rejects_child_capture_bound_to_a_different_parent_value() {
         let mut ir = valid_ir();
         let wrong_parent_value = ValueId::expression("/workflow/analyze", 0).unwrap();
-        let OperationKind::Parallel(parallel) = &mut ir.root.operations[6].kind else {
+        let OperationKind::Parallel(parallel) = &mut ir.root.operations[5].kind else {
             panic!("expected Parallel")
         };
         parallel
@@ -3772,7 +3823,7 @@ mod tests {
     #[test]
     fn rejects_undeclared_raise() {
         let mut ir = valid_ir();
-        let OperationKind::Parallel(parallel) = &mut ir.root.operations[6].kind else {
+        let OperationKind::Parallel(parallel) = &mut ir.root.operations[5].kind else {
             panic!("expected Parallel")
         };
         parallel
@@ -3790,7 +3841,7 @@ mod tests {
     fn rejects_control_token_as_object_data() {
         let mut ir = valid_ir();
         let control = ValueId::control("/workflow/selected").unwrap();
-        let OperationKind::Object { fields } = &mut ir.root.operations[10].kind else {
+        let OperationKind::Object { fields } = &mut ir.root.operations[9].kind else {
             panic!("expected Object")
         };
         fields.insert("answer".to_string(), control);
@@ -3801,7 +3852,7 @@ mod tests {
     #[test]
     fn rejects_phi_with_reordered_incomings() {
         let mut ir = valid_ir();
-        let OperationKind::Phi(phi) = &mut ir.root.operations[8].kind else {
+        let OperationKind::Phi(phi) = &mut ir.root.operations[7].kind else {
             panic!("expected Phi")
         };
         phi.incomings.reverse();
@@ -3812,28 +3863,28 @@ mod tests {
     #[test]
     fn rejects_malformed_branch_and_phi_shapes() {
         let mut empty_branch = valid_ir();
-        let OperationKind::Branch(branch) = &mut empty_branch.root.operations[7].kind else {
+        let OperationKind::Branch(branch) = &mut empty_branch.root.operations[6].kind else {
             panic!("expected Branch")
         };
         branch.cases.clear();
         assert!(error_codes(validate(&empty_branch)).contains(&ValidationCode::InvalidBranch));
 
         let mut duplicate_arm = valid_ir();
-        let OperationKind::Branch(branch) = &mut duplicate_arm.root.operations[7].kind else {
+        let OperationKind::Branch(branch) = &mut duplicate_arm.root.operations[6].kind else {
             unreachable!()
         };
         branch.default.id = branch.cases[0].id.clone();
         assert!(error_codes(validate(&duplicate_arm)).contains(&ValidationCode::InvalidBranch));
 
         let mut foreign_branch = valid_ir();
-        let OperationKind::Phi(phi) = &mut foreign_branch.root.operations[8].kind else {
+        let OperationKind::Phi(phi) = &mut foreign_branch.root.operations[7].kind else {
             unreachable!()
         };
         phi.branch = authored_operation("/workflow/analyze");
         assert!(error_codes(validate(&foreign_branch)).contains(&ValidationCode::InvalidPhi));
 
         let mut foreign_token = valid_ir();
-        let OperationKind::Phi(phi) = &mut foreign_token.root.operations[8].kind else {
+        let OperationKind::Phi(phi) = &mut foreign_token.root.operations[7].kind else {
             unreachable!()
         };
         phi.token = ValueId::control("/workflow/foreign").unwrap();
@@ -3843,7 +3894,7 @@ mod tests {
     #[test]
     fn rejects_parallel_concurrency_above_branch_count() {
         let mut ir = valid_ir();
-        let OperationKind::Parallel(parallel) = &mut ir.root.operations[6].kind else {
+        let OperationKind::Parallel(parallel) = &mut ir.root.operations[5].kind else {
             panic!("expected Parallel")
         };
         parallel.max_concurrency = Some(3);

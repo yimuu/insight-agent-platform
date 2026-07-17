@@ -6,7 +6,12 @@ metadata:
   name: Research Assistant
   description: Research and answer questions with a private plan-first flow.
 
-schema_dialect: https://json-schema.org/draft/2020-12/schema
+types:
+  ResearchResult:
+    fields:
+      answer:
+        type: string
+        min_length: 1
 
 prompts:
   system:
@@ -16,62 +21,47 @@ prompts:
   final:
     file: prompts/final.md
 
-input:
-  schema:
-    type: object
-    required: [question]
-    properties:
-      question:
-        type: string
-        minLength: 1
-    additionalProperties: false
+inputs:
+  question:
+    type: string
+    min_length: 1
 
-output:
-  data_schema:
-    type: object
-    required: [answer]
-    properties:
-      answer:
-        type: string
-        minLength: 1
-    additionalProperties: false
+output: ResearchResult
 
 workflow:
   steps:
-    - kind: llm
+    - type: llm
       id: plan
       model: general_chat
-      inputs:
-        question: {from: input.question}
       messages:
-        - {role: system, content: system}
-        - {role: user, content: planner}
+        - role: system
+          content:
+            - text: system
+        - role: user
+          content:
+            - text: planner
       parameters: {temperature: 0.3}
-      response: {format: text}
+      response: string
 
-    - kind: action
-      id: now
+    - type: action
+      id: current_time
       call: current_time
       inputs:
-        timezone: {literal: Asia/Shanghai}
+        timezone: Asia/Shanghai
 
-    - kind: llm
+    - type: llm
       id: answer
       model: general_chat
-      inputs:
-        question: {from: input.question}
-        plan: {from: steps.plan.output.data}
-        current_time: {from: steps.now.output}
       messages:
-        - {role: system, content: system}
-        - {role: user, content: final}
+        - role: system
+          content:
+            - text: system
+        - role: user
+          content:
+            - text: final
       parameters: {temperature: 0.3}
-      response: {format: text}
+      response: string
 
   result:
     return:
-      content: {from: steps.answer.output.data}
-      format: markdown
-      data:
-        object:
-          answer: {from: steps.answer.output.data}
+      answer: $answer

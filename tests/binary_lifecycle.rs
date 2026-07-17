@@ -394,28 +394,21 @@ metadata:
   id: lifecycle_blocker
   name: Lifecycle Blocker
   description: Keeps a real model stream in flight for process lifecycle tests.
-schema_dialect: https://json-schema.org/draft/2020-12/schema
-input:
-  schema:
-    type: object
-    additionalProperties: false
-output:
-  data_schema: {type: string}
+inputs: {}
+output: string
 workflow:
   steps:
-    - kind: llm
+    - type: llm
       id: block
       model: blocking_chat
       messages:
         - role: user
-          content: {text: wait until the process asks this Run to stop}
+          content:
+            - text: wait until the process asks this Run to stop
       parameters: {}
-      response: {format: text}
+      response: string
   result:
-    return:
-      content: {from: steps.block.output.data}
-      format: text
-      data: {from: steps.block.output.data}
+    return: $block
 "#,
         )
         .unwrap();

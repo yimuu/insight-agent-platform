@@ -6,60 +6,47 @@ metadata:
   name: Parallel Researcher
   description: Compare independent technical and risk perspectives, then synthesize the available evidence.
 
-schema_dialect: https://json-schema.org/draft/2020-12/schema
-
-$defs:
+types:
   Perspective:
     type: string
-    minLength: 1
+    min_length: 1
 
   SafeBranchError:
-    type: object
-    required: [category, code, retryable, origin]
-    properties:
+    fields:
       category:
         type: string
         enum: [workflow, operation, timeout]
       code:
         type: string
-        minLength: 1
-        maxLength: 128
+        min_length: 1
+        max_length: 128
         pattern: "^[A-Z][A-Z0-9_]*$"
-      retryable: {type: boolean}
+      retryable: boolean
       origin:
         type: string
-        minLength: 1
-        maxLength: 512
-    additionalProperties: false
+        min_length: 1
+        max_length: 512
 
   SynthesisFailure:
-    type: object
-    required: [branch, error]
-    properties:
-      branch: {type: string, enum: [technical, risk]}
-      error: {$ref: "#/$defs/SafeBranchError"}
-    additionalProperties: false
+    fields:
+      branch:
+        type: string
+        enum: [technical, risk]
+      error: SafeBranchError
 
   SynthesisInput:
-    type: object
-    required: [perspectives, failed_branches]
-    properties:
+    fields:
       perspectives:
-        type: array
-        minItems: 1
-        items: {$ref: "#/$defs/Perspective"}
-      failed_branches:
-        type: array
-        items: {$ref: "#/$defs/SynthesisFailure"}
-    additionalProperties: false
+        type: Perspective[]
+        min_items: 1
+      failed_branches: SynthesisFailure[]
 
   SynthesisResult:
-    type: object
-    required: [content, degraded]
-    properties:
-      content: {type: string, minLength: 1}
-      degraded: {type: boolean}
-    additionalProperties: false
+    fields:
+      content:
+        type: string
+        min_length: 1
+      degraded: boolean
 
 prompts:
   system:
@@ -77,68 +64,63 @@ errors:
     code: WORKFLOW_ALL_BRANCHES_FAILED
     public_message: No analysis perspective was available.
 
-input:
-  schema:
-    type: object
-    required: [question]
-    properties:
-      question: {type: string, minLength: 1}
-    additionalProperties: false
+inputs:
+  question:
+    type: string
+    min_length: 1
 
-output:
-  data_schema:
-    type: object
-    required: [degraded]
-    properties:
-      degraded: {type: boolean}
-    additionalProperties: false
+output: SynthesisResult
 
 workflow:
   steps:
-    - kind: parallel
+    - type: parallel
       id: analyses
       inputs:
-        question: {from: input.question}
+        question: $question
       settle: all_settled
       max_concurrency: 2
       branches:
         technical:
-          output_schema: {$ref: "#/$defs/Perspective"}
+          output: Perspective
           steps:
-            - kind: llm
+            - type: llm
               id: analyze
               model: general_chat
-              inputs:
-                question: {from: scope.question}
               messages:
-                - {role: system, content: system}
-                - {role: user, content: perspective_a}
+                - role: system
+                  content:
+                    - text: system
+                - role: user
+                  content:
+                    - text: perspective_a
               parameters: {temperature: 0.2}
-              response: {format: text}
+              response: Perspective
           result:
-            return: {from: steps.analyze.output.data}
+            return: $analyze
 
         risk:
-          output_schema: {$ref: "#/$defs/Perspective"}
+          output: Perspective
           steps:
-            - kind: llm
+            - type: llm
               id: analyze
               model: general_chat
-              inputs:
-                question: {from: scope.question}
               messages:
-                - {role: system, content: system}
-                - {role: user, content: perspective_b}
+                - role: system
+                  content:
+                    - text: system
+                - role: user
+                  content:
+                    - text: perspective_b
               parameters: {temperature: 0.2}
-              response: {format: text}
+              response: Perspective
           result:
-            return: {from: steps.analyze.output.data}
+            return: $analyze
 
-    - kind: switch
+    - type: switch
       id: synthesis_input
       inputs:
-        results: {from: steps.analyses.output}
-      output_schema: {$ref: "#/$defs/SynthesisInput"}
+        results: $analyses
+      output: SynthesisInput
       cases:
         - id: complete
           when:
@@ -147,12 +129,10 @@ workflow:
               scope.results.risk.status == 'ok'
           result:
             return:
-              object:
-                perspectives:
-                  array:
-                    - {from: scope.results.technical.value}
-                    - {from: scope.results.risk.value}
-                failed_branches: {array: []}
+              perspectives:
+                - $results.technical.value
+                - $results.risk.value
+              failed_branches: []
 
         - id: technical_only
           when:
@@ -161,15 +141,11 @@ workflow:
               scope.results.risk.status == 'error'
           result:
             return:
-              object:
-                perspectives:
-                  array:
-                    - {from: scope.results.technical.value}
-                failed_branches:
-                  array:
-                    - object:
-                        branch: {literal: risk}
-                        error: {from: scope.results.risk.error}
+              perspectives:
+                - $results.technical.value
+              failed_branches:
+                - branch: risk
+                  error: $results.risk.error
 
         - id: risk_only
           when:
@@ -178,40 +154,29 @@ workflow:
               scope.results.risk.status == 'ok'
           result:
             return:
-              object:
-                perspectives:
-                  array:
-                    - {from: scope.results.risk.value}
-                failed_branches:
-                  array:
-                    - object:
-                        branch: {literal: technical}
-                        error: {from: scope.results.technical.error}
+              perspectives:
+                - $results.risk.value
+              failed_branches:
+                - branch: technical
+                  error: $results.technical.error
 
       default:
         id: all_failed
         result:
           raise: all_failed
 
-    - kind: llm
+    - type: llm
       id: synthesize
       model: general_chat
-      inputs:
-        question: {from: input.question}
-        perspectives: {from: steps.synthesis_input.output.perspectives}
-        failed_branches: {from: steps.synthesis_input.output.failed_branches}
       messages:
-        - {role: system, content: system}
-        - {role: user, content: synthesize}
+        - role: system
+          content:
+            - text: system
+        - role: user
+          content:
+            - text: synthesize
       parameters: {temperature: 0.2}
-      response:
-        format: json
-        schema: {$ref: "#/$defs/SynthesisResult"}
+      response: SynthesisResult
 
   result:
-    return:
-      content: {from: steps.synthesize.output.data.content}
-      format: markdown
-      data:
-        object:
-          degraded: {from: steps.synthesize.output.data.degraded}
+    return: $synthesize

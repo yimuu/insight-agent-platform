@@ -20,8 +20,8 @@ use crate::{
 
 use super::models::{
     model_response_too_large, serialized_json_within_limit, validate_chat_request, ChatChunk,
-    ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest, ChatRole, ChatStream,
-    ModelCapability, DEFAULT_MAX_ACCUMULATED_TEXT_BYTES,
+    ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest, ChatResponseFormat,
+    ChatRole, ChatStream, ModelCapability, DEFAULT_MAX_ACCUMULATED_TEXT_BYTES,
 };
 
 pub const DEFAULT_MAX_UPSTREAM_BYTES: usize = 8 * 1024 * 1024;
@@ -225,16 +225,20 @@ impl ChatModel for OpenAiChatModel {
         let Some(parameters) = request.parameters.as_object().cloned() else {
             return false;
         };
-        let messages = request
-            .messages
+        let Some(wire_messages) = openai_wire_messages(request) else {
+            return false;
+        };
+        let messages = wire_messages
             .iter()
             .map(OpenAiMessage::from)
             .collect::<Vec<_>>();
+        let response_format = openai_response_format(request.response_format.as_ref());
         serialized_json_within_limit(
             &OpenAiRequest {
                 model: &self.model,
                 messages: &messages,
                 stream: true,
+                response_format,
                 parameters,
             },
             max_bytes,
@@ -254,6 +258,17 @@ impl ChatModel for OpenAiChatModel {
                 "chat provider request requires a vision-capable model",
             ));
         }
+        if let Some(response_format) = &request.response_format {
+            if !self
+                .capabilities
+                .contains(&response_format.required_capability())
+            {
+                return Err(RunError::operation(
+                    "VNEXT_LLM_STRUCTURED_OUTPUT_REQUIRED",
+                    "chat provider request requires the selected structured-output capability",
+                ));
+            }
+        }
         self.validate_parameters(&request.parameters)
             .map_err(|error| RunError::operation(error.code(), error.to_string()))?;
         let parameters = request.parameters.as_object().cloned().ok_or_else(|| {
@@ -263,7 +278,13 @@ impl ChatModel for OpenAiChatModel {
             )
         })?;
         let parameters_keys_count = parameters.len();
-        let messages_count = request.messages.len();
+        let wire_messages = openai_wire_messages(&request).ok_or_else(|| {
+            RunError::operation(
+                "VNEXT_LLM_RESPONSE_CONFIG_INVALID",
+                "chat provider structured response format is invalid",
+            )
+        })?;
+        let messages_count = wire_messages.len();
         let image_parts_count = request
             .messages
             .iter()
@@ -277,15 +298,16 @@ impl ChatModel for OpenAiChatModel {
             parameters_keys_count,
             "sending OpenAI-compatible chat request"
         );
-        let messages = request
-            .messages
+        let messages = wire_messages
             .iter()
             .map(OpenAiMessage::from)
             .collect::<Vec<_>>();
+        let response_format = openai_response_format(request.response_format.as_ref());
         let body = OpenAiRequest {
             model: &self.model,
             messages: &messages,
             stream: true,
+            response_format,
             parameters,
         };
         let request = self.client.post(self.endpoint.clone()).json(&body);
@@ -387,8 +409,58 @@ struct OpenAiRequest<'a> {
     model: &'a str,
     messages: &'a [OpenAiMessage<'a>],
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<OpenAiResponseFormat<'a>>,
     #[serde(flatten)]
     parameters: Map<String, Value>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenAiResponseFormat<'a> {
+    JsonObject,
+    JsonSchema { json_schema: OpenAiJsonSchema<'a> },
+}
+
+#[derive(Serialize)]
+struct OpenAiJsonSchema<'a> {
+    name: &'a str,
+    strict: bool,
+    schema: &'a Value,
+}
+
+fn openai_response_format(
+    response_format: Option<&ChatResponseFormat>,
+) -> Option<OpenAiResponseFormat<'_>> {
+    response_format.map(|format| match format {
+        ChatResponseFormat::JsonObject { .. } => OpenAiResponseFormat::JsonObject,
+        ChatResponseFormat::JsonSchema { name, schema } => OpenAiResponseFormat::JsonSchema {
+            json_schema: OpenAiJsonSchema {
+                name,
+                strict: true,
+                schema,
+            },
+        },
+    })
+}
+
+fn openai_wire_messages(request: &ChatRequest) -> Option<Vec<ChatMessage>> {
+    let mut messages = request.messages.clone();
+    let Some(ChatResponseFormat::JsonObject { schema, .. }) = &request.response_format else {
+        return Some(messages);
+    };
+    let schema = serde_json::to_string(schema).ok()?;
+    let instruction =
+        format!("\n\nReturn only a valid JSON object matching this JSON Schema:\n{schema}");
+    let final_message = messages.last_mut()?;
+    if final_message.role != ChatRole::User {
+        return None;
+    }
+    match &mut final_message.content {
+        ChatContent::Text(text) => text.push_str(&instruction),
+        ChatContent::Parts(parts) => parts.push(ChatContentPart::Text { text: instruction }),
+    }
+    Some(messages)
 }
 
 #[derive(Serialize)]

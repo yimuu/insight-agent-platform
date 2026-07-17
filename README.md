@@ -24,7 +24,7 @@ LLM/Action executor + 作用域任务树 → EventHub/Journal → RunRepository
 
 Agent 作者只使用四种结构化 step：
 
-| `kind` | 作用 |
+| `type` | 作用 |
 |---|---|
 | `llm` | 调用一个命名模型，使用有序 `messages`，并绑定经过验证的响应 |
 | `action` | 调用一个版本化、Schema 驱动的 Action，并绑定类型化输出 |
@@ -33,7 +33,7 @@ Agent 作者只使用四种结构化 step：
 
 控制流是语言结构，不是可注册能力。编译器把顺序、并发和选择降低为内部 `Call`、`Parallel`、`Branch/Phi`、`RegionYield`、`WorkflowReturn` 和 `Raise`；这些 IR 指令不能出现在 Agent YAML 中。
 
-`ai.chat`、`action.call`、Operation registry 和 provider 私有 content part 只存在于 compiler/runtime 内部。作者不能写 `kind: operation`、`uses` 或任意 `config` bag；新业务能力应实现为有稳定 ID、SemVer、输入/输出 Schema、effect、幂等性与取消合同的 Action，再由 `kind: action` 调用。当前进程不加载外部动态库、WASM、远程插件或下载代码。
+`ai.chat`、`action.call`、Operation registry 和 provider 私有 content part 只存在于 compiler/runtime 内部。作者不能写 `kind: operation`、`uses` 或任意 `config` bag；新业务能力应实现为有稳定 ID、SemVer、输入/输出 Schema、effect、幂等性与取消合同的 Action，再由 `type: action` 调用。当前进程不加载外部动态库、WASM、远程插件或下载代码。
 
 ## 配置与启动
 
@@ -138,7 +138,7 @@ models:
     base_url: https://example-model-service.test/v1
     model: example-chat
     api_key_env: OPENAI_API_KEY
-    capabilities: []
+    capabilities: [json_schema_output]
     connect_timeout: 5s
     request_timeout: 2m
     limits:
@@ -154,11 +154,15 @@ models:
 
 OpenAI-compatible 流只有收到完整的 `data: [DONE]` 才算成功。HTTP clean EOF、`finish_reason` 或 usage-only chunk 都不能替代完成标记。缺少标记固定以 `UPSTREAM_STREAM_INCOMPLETE` 失败，错误不会回显 provider payload、部分输出、密钥或 endpoint query。
 
+结构化 `response` 需要显式声明供应商的真实能力：`json_schema_output` 直接发送严格 JSON Schema；`json_object_output` 仅适用于顶层对象，适配器会注入平台生成的 JSON/Schema 指令，并在返回后按 Schema 本地校验。数组、数字和布尔等非对象根只能使用 `json_schema_output`；两种能力同时存在时固定优先前者。带图片的消息另需 `vision`，文本 `response: string` 不要求结构化输出能力。
+
 ## Agent DSL
 
-### 文档外形
+当前作者语法以 [DSL 作者语法精简规范](docs/superpowers/specs/2026-07-17-dsl-authoring-syntax-simplification.md) 为准。作者只声明业务类型和结构化步骤；JSON Schema、消息平台类型与内部 Region/SSA 计划均由编译器生成。
 
-每个 Agent 目录包含一个严格的 `agent.yaml`：
+### 最小完整文档
+
+`types`、`inputs`、`output` 使用简洁类型表达式；自定义类型使用 PascalCase，数组写成 `Type[]`。输入名、字段名和 step id 使用 snake_case。
 
 <!-- dsl-example: canonical; entry: agent -->
 ```yaml
@@ -166,282 +170,179 @@ api_version: insight.agent/v2
 kind: agent
 
 metadata:
-  id: text_metrics
-  name: Text Metrics
-  description: Compute deterministic text metrics.
+  id: concise_answer
+  name: Concise Answer
+  description: Answer one question with optional history and image.
 
-schema_dialect: https://json-schema.org/draft/2020-12/schema
+types:
+  Answer:
+    fields:
+      answer: string
+      confidence: number
 
-$defs: {}
-prompts: {}
-errors: {}
+prompts:
+  system:
+    inline: You are a concise assistant.
 
-input:
-  schema:
-    type: object
-    required: [text]
-    properties:
-      text: {type: string}
-    additionalProperties: false
+inputs:
+  question:
+    type: string
+    min_length: 1
+  messages:
+    type: Message[]
+    default: []
+  image_url:
+    type: string
+    optional: true
 
-output:
-  data_schema:
-    type: object
-    required: [characters, words, lines]
-    properties:
-      characters: {type: integer, minimum: 0}
-      words: {type: integer, minimum: 0}
-      lines: {type: integer, minimum: 0}
-    additionalProperties: false
+output: Answer
 
 workflow:
   steps:
-    - kind: action
-      id: analyze_text
-      call: example.text_metrics
-      inputs:
-        text: {from: input.text}
+    - type: llm
+      id: answer
+      model: vision_chat
+      messages:
+        - role: system
+          content:
+            - text: system
+        - $messages
+        - role: user
+          content:
+            - text: "Question: {{ question }}"
+            - image_url: $image_url
+      parameters: {temperature: 0.2}
+      response: Answer
 
   result:
-    return:
-      content:
-        template:
-          text: "characters={{ characters }}, words={{ words }}, lines={{ lines }}"
-          bindings:
-            characters: {from: steps.analyze_text.output.characters}
-            words: {from: steps.analyze_text.output.words}
-            lines: {from: steps.analyze_text.output.lines}
-      format: text
-      data: {from: steps.analyze_text.output}
+    return: $answer
 ```
 
-`api_version` 和 `kind` 是精确判别符，`schema_dialect` 必填且只能是 canonical `https://json-schema.org/draft/2020-12/schema`。每层都拒绝未知字段。标识符匹配 `[A-Za-z_][A-Za-z0-9_]*`。顶层 `$defs` 会注入每一份 authored contract，因此 `#/$defs/Name` 在 input、output、Parallel branch、Switch 和 LLM structured response 中含义一致。
+作者不再在类型与响应合同位置书写 `schema_dialect`、`$defs`、`$ref`、`input.schema`、`output.data_schema` 或 `output_schema`。需要默认值、可选性或长度约束时，在字段的完整声明中添加 `default`、`optional`、`min_length`、`max_length`、`min_items`、`max_items`、`pattern` 或 `enum`。Action 业务 payload 中同名的普通 mapping key 不会被误判为类型声明。
 
-### 类型化 JSON Schema profile
+`Message` 是平台内建类型。动态历史必须声明为 `Message[]`，通常使用默认值 `[]`；Agent 不重复定义 Message、role 或 content part Schema。
 
-运行时合同使用 Draft 2020-12 验证器，但编译器只接受一套能够保守映射为静态类型的 profile：布尔 schema；`type`（含类型数组）；标量 `const`/`enum`；带显式 `items` 和可选 `minItems` 的同构数组；`properties`、`required`、`additionalProperties` 对象；以及没有 shape-changing sibling 的 `oneOf`/`anyOf`。`#/$defs/<Identifier>` 会先完整展开，再进入静态类型编译。
+### 自然值与引用
 
-`minLength`、`maximum`、`format`、`maxItems` 等不改变可达字段类型的约束仍由运行时验证器执行，但不会赋予静态路径或窄化能力。会改变结构而当前静态类型没有建模的关键字会在启动编译期明确失败，包括 `allOf`、`not`、`if`/`then`/`else`、`dependentSchemas`、`dependentRequired`、`patternProperties`、`propertyNames`、`unevaluatedProperties`、`minProperties`/`maxProperties`、`prefixItems`、`unevaluatedItems` 和动态引用。这样不会出现运行时 schema 与编译器所声称的字段合同不一致。
-
-### ValueExpr 与数据流
-
-所有运行期派生值都必须使用一个显式、递归的 `ValueExpr`。下面一个 object 同时展示 `literal`、`from`、`array` 与 `template`：
+YAML mapping、sequence 和 scalar 直接表示对象、数组和常量。完整运行时值以 `$name` 或 `$name.field` 引用，文本中的 `{{ name }}` 是受限插值：
 
 <!-- dsl-example: canonical; entry: value -->
 ```yaml
-object:
-  limit: {literal: 10}
-  question: {from: input.question}
-  perspectives:
-    array: [{literal: technical}, {literal: risk}]
-  label:
-    template:
-      text: "Question: {{ question }}"
-      bindings:
-        question: {from: input.question}
+mode: strict
+question: $question
+labels: [technical, risk]
+summary: "Question: {{ question }}"
+metadata:
+  request_id: $run.request_id
 ```
 
-- `literal` 保留完整 JSON 类型，不做字符串化；
-- `from` 保留源值类型；
-- `object`、`array` 递归组合类型化值；
-- `template` 只看到显式 `bindings`，不会获得全局上下文；
-- 普通字符串始终是普通字符串，不会被解释成模板或引用；
-- 一个 ValueExpr 对象只能包含一个表达式键。
+顶层可见输入直接写成 `$question`；当前 body 中较早 step 的直接业务输出写成 `$answer` 或 `$answer.field`。Parallel/Switch 子作用域只看得到该结构通过 `inputs` 捕获的名字和本地较早 step。前向引用、动态 key/index、跨 branch/arm 读取和 child-local escape 都会在编译期失败。
 
-Prompt 不再是通用 ValueExpr。它只在 LLM `content` 中以已声明 Prompt ID 出现，例如 `content: system`。空 `{array: []}` 使用 bottom/Never element type，不会退化成绕过检查的 `Any`。
+旧 `{from: ...}`、`{literal: ...}`、`{object: ...}`、`{array: ...}`、`{template: ...}` 形状会被明确拒绝，不作为兼容别名或普通业务对象解释。输入 `default` 是纯静态数据：不会执行引用或模板，完整匹配 `$name`/`$name.field` 的字符串会被拒绝，避免把看似运行时引用的值静默物化成字面量。
 
-初始引用根只有：
+### LLM 消息与响应
 
-- `input`：Run 输入；
-- `run`：闭合的安全 Run 元数据对象，只含字符串字段 `id`、`request_id`、`agent_id`、`agent_version`、`started_at`；
-- `scope`：结构化 block 通过 `inputs` 显式捕获的不可变值；
-- `steps.<id>.output`：当前 body 中更早成功完成的 step 输出。
-
-标识符形状的对象键可使用点路径；任意 JSON key 和固定数组索引使用 RFC 6901 JSON Pointer 后缀，例如 `input#/items/0/display-name` 和 `steps.lookup.output#/data/a~1b`。动态 key、动态索引、前向引用、跨分支引用和未被所有路径支配的引用都会在启动编译期失败。
-
-结构化 block 先在父作用域计算 `inputs`，再只把这些值作为子作用域的 `scope` 暴露。子作用域内部值不会泄露到父作用域或兄弟作用域；唯一向外的数据通道是该 block 的 `result`。
-
-### LLM 的 instruction/data 边界
-
-LLM 作者层直接使用有序 `messages`。顶层 Prompt catalog 可以把 `technical_system` 声明为 `file: prompts/technical_system.md` 或 `inline: ...`；`.md` 文件在启动时受 containment、regular-file、UTF-8、大小和受限模板检查。Prompt 内的 `{{ question }}` 等 slot 按同名连接当前 LLM `inputs`，不会看到全局 workflow 上下文。
-
-`content: technical_system` 是 Prompt ID；`{text: ...}` 是 inline template；`{from: inputs.question}` 是不做二次模板解释的运行时字符串：
+`messages` 本身就是有序列表。Authored message 只有 `role` 和 `content`；`content` 是有序列表，每个 part 必须是严格的单键 `{text: ...}` 或 `{image_url: ...}`：
 
 <!-- dsl-example: canonical; entry: step -->
 ```yaml
-- kind: llm
+- type: llm
   id: analyze
-  model: general_chat
-  inputs:
-    question: {from: input.question}
+  model: vision_chat
   messages:
-    - role: system
-      content: technical_system
+    - $messages
     - role: user
       content:
-        - text: Analyze the following untrusted question.
-        - from: inputs.question
+        - text: "Analyze: {{ question }}"
+        - text: $question
+        - image_url: $image_url
   parameters: {temperature: 0.2}
-  response:
-    format: json
-    schema: {$ref: "#/$defs/Perspective"}
+  response: Perspective
 ```
 
-system/assistant 消息只接受零运行时 slot 的 authored Prompt 或 inline text。user Prompt/inline template 可以消费当前节点的同名 `inputs` slot；运行时文本和 `{image: {from: inputs.image_url}}` 也只允许进入 user content，nullable image 为 `null` 时自动省略。所有 LLM `inputs` binding 必须被 message source、content 或 template slot 消费，不能存在隐式额外上下文。
+声明过的 Prompt ID 可以直接作为 `text` 的值；普通文本无需预先声明 Prompt。以 `$` 开头的 `text` 是运行时 string，不会进行 Prompt 查找或二次模板渲染。`image_url` 的值是 URL 字符串或 string 引用；可选值为 null 时省略该图片。`- $messages` 在当前位置展开真实消息列表，不需要 `spread`、`concat` 或 JSON 字符串拼接。
 
-动态历史使用真实列表引用：在 `inputs.history` 的静态 Schema 可证明满足 closed `DynamicMessage[]` profile 后，`messages` 中的 `- {from: inputs.history}` 会在当前位置自动展开；它不是 JSON 字符串，也不需要 `spread`、`concat` 或 `parts`。动态消息只能使用 `user`/`assistant`，不会创建 system prompt，也不会触发模板或 Prompt ID 解析。
+`response` 直接写 `string`、`ResultType` 或 `ResultType[]`。文本输出和结构化输出都直接绑定为 step 的业务值，不存在作者可见的 `.output.data` envelope。
 
-`response.format: text` 返回字符串；`response.format: json` 要求 `schema`，模型完成结果必须通过 Draft 2020-12 校验后才会绑定。稳定输出为 `{data, finish_reason, usage}`。请求预算统计最终 RuntimeMessage 与 parameters 的 provider-neutral 序列化大小，超限时不会调用 provider。
+### Action、Parallel 与 Switch
 
-### Parallel 与 Switch
-
-Parallel 同时拥有 spawn 和 barrier 语义。每个 branch 是一个完整的词法子作用域，有自己的 `output_schema`、`steps` 与 `result`：
+Action 直接声明静态 `call` 和自然 `inputs`：
 
 <!-- dsl-example: canonical; entry: step -->
 ```yaml
-- kind: parallel
+- type: action
+  id: now
+  call: current_time
+  inputs:
+    timezone: Asia/Shanghai
+    request_id: $run.request_id
+```
+
+Parallel 同时拥有 spawn 和 barrier 语义。每个 branch 是词法子作用域，有自己的 `output`、`steps` 与 `result`；Switch 按顺序执行第一个匹配 case，且必须声明 default：
+
+<!-- dsl-example: canonical; entry: step -->
+```yaml
+- type: parallel
   id: analyses
   inputs:
-    question: {from: input.question}
+    question: $question
   settle: all_settled
   max_concurrency: 2
   branches:
     technical:
-      output_schema: {$ref: "#/$defs/Perspective"}
+      output: string
       steps:
-        - kind: llm
+        - type: llm
           id: analyze
           model: general_chat
-          inputs:
-            question: {from: scope.question}
           messages:
             - role: user
               content:
-                - {text: Analyze technical feasibility.}
-                - {from: inputs.question}
-          parameters: {}
-          response: {format: text}
+                - text: "Analyze technical feasibility: {{ question }}"
+          response: string
       result:
-        return: {from: steps.analyze.output.data}
+        return: $analyze
 
     risk:
-      output_schema: {$ref: "#/$defs/Perspective"}
+      output: string
       steps:
-        - kind: llm
+        - type: llm
           id: analyze
           model: general_chat
-          inputs:
-            question: {from: scope.question}
           messages:
             - role: user
               content:
-                - {text: Analyze risk and compliance.}
-                - {from: inputs.question}
-          parameters: {}
-          response: {format: text}
+                - text: "Analyze risk and compliance: {{ question }}"
+          response: string
       result:
-        return: {from: steps.analyze.output.data}
-```
+        return: $analyze
 
-完整的差异化 prompt 和后续综合策略见 `agents/parallel_researcher/agent.yaml`。
-
-`settle: all` 要求全部 branch 成功；一个可收集失败会停止继续接纳、取消同级并等待已接纳任务全部清理。`settle: all_settled` 把可收集结果变成以下严格联合类型：
-
-```json
-{"status":"ok","value":{}}
-{"status":"error","error":{"category":"workflow","code":"WORKFLOW_...","retryable":false,"origin":"/workflow/..."}}
-```
-
-停止、进程中断、ownership/persistence 丢失、task panic 等基础设施失败不会被伪装成业务数据。它们向外传播并触发作用域取消与 drain。
-
-Switch 是有序 first-match 选择；`default` 是必需的。每个正常完成的 arm 必须返回同一份完整 `output_schema`，或显式 raise：
-
-<!-- dsl-example: canonical; entry: step -->
-```yaml
-- kind: switch
+- type: switch
   id: synthesis_mode
   inputs:
-    technical: {from: steps.analyses.output.technical}
-    risk: {from: steps.analyses.output.risk}
-  output_schema:
-    type: string
-    enum: [full, technical_only, risk_only]
+    analyses: $analyses
+  output: string
   cases:
     - id: complete
       when:
         cel: >-
-          scope.technical.status == 'ok' &&
-          scope.risk.status == 'ok'
+          scope.analyses.technical.status == 'ok' &&
+          scope.analyses.risk.status == 'ok'
       result:
-        return: {literal: full}
-    - id: technical_only
-      when:
-        cel: scope.technical.status == 'ok'
-      result:
-        return: {literal: technical_only}
+        return: full
   default:
-    id: risk_only
+    id: partial
     result:
-      return: {literal: risk_only}
+      return: partial
 ```
 
-只有被选择的 arm 执行；编译器在内部使用 Branch/Phi 合并唯一结果。未选择 arm 不产生占位值，也没有额外 authored 聚合步骤。
+`settle: all` 要求所有 branch 成功；可收集失败会取消同级并完整 drain。`all_settled` 把每个 branch 变成严格的 success/error 联合值。停止、进程中断、ownership/persistence 丢失和 task panic 等基础设施失败不会伪装成业务 branch 数据。
 
-`when.cel` 使用刻意收窄的 typed predicate profile：唯一根是 `scope`；每个字段必须静态可读；只接受类型正确的布尔逻辑、相等/顺序比较和 `size()`；最终类型必须是 boolean。`scope.result.status == 'ok'` 这类合取中的标量判别会只在当前 case 内把联合类型收窄，因此该 case 可以安全读取 `scope.result.value`。`default` 不会自动继承前序条件的否定窄化。
-
-### Root return、child yield 与 raise
-
-每个 Parallel branch 和 Switch arm 都有一个 `result`：
-
-```yaml
-result:
-  return: {from: steps.analyze.output}
-```
-
-编译器把 child return 降低为内部 `RegionYield`。它只完成当前子作用域，不创建公共 `RunOutput`。
-
-只有 workflow root 的 return 能成功完成 Run，并拥有平台的公共 `{content?, format?, data}` envelope：
-
-```yaml
-workflow:
-  steps: []
-  result:
-    return:
-      content: {literal: done}
-      format: text
-      data: {literal: null}
-```
-
-`data` 必须满足 `output.data_schema`。`content` 存在时必须是字符串，并同时声明 `format: text|markdown`。Run 只有在 root return 已形成、所有后代完成或取消并 drain、输出合同与大小限制通过、权威终态事务提交后才算成功。
-
-Authored failure 先在顶层声明，再由任意可见 block `raise`：
-
-```yaml
-errors:
-  all_failed:
-    category: workflow
-    code: WORKFLOW_ALL_BRANCHES_FAILED
-    public_message: No analysis perspective was available.
-
-workflow:
-  result:
-    raise: all_failed
-```
-
-Authored error 只能使用 `workflow` category，不能伪造 operation timeout、stop、ownership 或 infrastructure failure。
+Child `result.return` 只完成当前子作用域；workflow root 的 `result.return` 才完成 Run，并且其值必须满足顶层 `output` 类型。平台负责公共 RunOutput envelope，作者不再声明 `content/format/data` 包装。任意可见 block 仍可通过顶层 `errors` catalog 中的 ID 执行 `raise`。
 
 ### Region/SSA 与运行时作用域树
 
-结构化 YAML 是唯一作者合同，Region/SSA 是唯一运行时计划。编译器为作用域、Operation 和值生成稳定的限定身份，例如：
-
-```text
-/workflow/analyses/branches/technical/analyze
-/workflow/synthesis_mode/cases/complete
-```
-
-IR verifier 在运行前拒绝重复身份、错误 terminator、use-before-definition、跨 Region value escape、未声明 capture、Schema/类型不匹配及错误 Branch/Phi 结构。
-
-ScopeScheduler 递归执行 RunScope、OperationScope、ParallelScope、BranchScope 和选中 arm。父作用域拥有所有子 future：关闭 admission 后先请求协作取消，再完整 drain；不会留下脱离父作用域的工作流任务。
+结构化 YAML 是唯一作者合同，Region/SSA 是唯一运行时计划。编译器拒绝重复身份、use-before-definition、跨 Region value escape、未声明 capture 和类型不匹配。运行时父作用域拥有所有子任务：关闭 admission 后请求协作取消并完整 drain，不会留下脱离父作用域的工作流任务。
 
 ## HTTP、事件与 Run 生命周期
 
@@ -465,7 +366,7 @@ GET    /v1/runs/{run_id}
 DELETE /v1/runs/{run_id}
 ```
 
-Agent 发现接口返回 `id`、`name`、`description`、内容寻址 `version` 和 `input_schema`。`input_schema` 是编译和 Run 创建时使用的同一份 Draft 2020-12 合同；API 不公开 prompt、structured workflow、模型或 Action config。
+Agent 发现接口返回 `id`、`name`、`description`、内容寻址 `version` 和公开的 authored `input_schema`。Run 创建先按这份合同接收输入并物化 default/optional，再按编译出的 normalized contract 验证完整输入；API 不公开 prompt、structured workflow、模型或 Action config。
 
 Attached POST 会先原子订阅实时事件再启动 Run。终态事件发送后 SSE 立即关闭；非终态连接断开会取消 Run。Detached POST 返回 HTTP 202，连接断开不影响执行，客户端通过 GET Run 轮询或 DELETE 幂等取消。平台不提供公开事件重放；`seq` 与 SSE `id` 只用于单 Run 排序和审计关联，不是恢复游标。
 
@@ -475,7 +376,7 @@ v2 leaf operation 只公开生命周期元数据事件：
 - `operation.completed`；
 - `operation.failed`。
 
-Operation 不提供公共内容增量；输出值也不会进入公共事件或 journal。完成事件只公开限定 `operation_id`、类型、attempt、耗时和输出字节数；失败事件使用固定公共消息，不携带内部诊断。模型 provider 仍可使用内部流式传输，但 `ai.chat` 会在运行时内聚合并完成响应校验后才产生叶子结果。中间值只存在于运行期数据流，只有显式 ValueExpr 投影能把它交给后续 Operation，只有 root return 能把结果写入公共 Run 终态。
+Operation 不提供公共内容增量；输出值也不会进入公共事件或 journal。完成事件只公开限定 `operation_id`、类型、attempt、耗时和输出字节数；失败事件使用固定公共消息，不携带内部诊断。模型 provider 仍可使用内部流式传输，但 `ai.chat` 会在运行时内聚合并完成响应校验后才产生叶子结果。中间值只存在于运行期数据流，只有显式 `$` 引用能把它交给后续 Operation，只有 root return 能把结果写入公共 Run 终态。
 
 默认结构化日志保持 body-free：只记录身份、状态、稳定错误 code/kind、耗时、计数和序列化字节数，不记录自由错误 message、Run 输入、prompt、模型或 Action 输入/输出、事件 payload、带 query 的完整 URL、header 或凭据。
 
@@ -523,4 +424,4 @@ cargo audit
 cargo deny check
 ```
 
-旧 Agent 文档不会被静默解释为 v2。当前作者层合同见 [DSL 作者层 LLM、Action 与消息模型重设计规范](docs/superpowers/specs/2026-07-17-dsl-authoring-surface-redesign.md)，Region/SSA、结构化控制流与作用域运行时的仍有效部分见 [DSL vNext Region/SSA Design](docs/superpowers/specs/2026-07-16-dsl-vnext-region-ssa-design.md)，权威性规则见 [Design-document authority](docs/superpowers/README.md)，切换原则和数据处理见 [DSL v2 直接切换说明](docs/formal-v1-breaking-changes.md)。
+旧 Agent 文档不会被静默解释为 v2。当前作者语法见 [DSL 作者语法精简规范](docs/superpowers/specs/2026-07-17-dsl-authoring-syntax-simplification.md)；旧作者层重设计文档仅保留未被精简规范覆盖的设计背景。Region/SSA、结构化控制流与作用域运行时的仍有效部分见 [DSL vNext Region/SSA Design](docs/superpowers/specs/2026-07-16-dsl-vnext-region-ssa-design.md)，权威性规则见 [Design-document authority](docs/superpowers/README.md)，切换原则和数据处理见 [DSL v2 直接切换说明](docs/formal-v1-breaking-changes.md)。

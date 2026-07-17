@@ -1,18 +1,13 @@
 api_version: insight.agent/v2
 kind: agent
 metadata: {id: legacy_operation, name: Legacy Operation, description: Negative fixture.}
-schema_dialect: https://json-schema.org/draft/2020-12/schema
-input:
-  schema: {type: object}
-output:
-  data_schema: {type: "null"}
+inputs: {}
+output: string
 workflow:
   steps:
-    - kind: operation
+    - type: operation
       id: answer
-      uses: ai.chat
-      with: {}
-      config: {}
+      call: current_time
+      inputs: {}
   result:
-    return:
-      data: {literal: null}
+    return: unreachable

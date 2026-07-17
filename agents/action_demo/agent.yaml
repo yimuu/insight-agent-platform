@@ -6,46 +6,25 @@ metadata:
   name: Action Demo
   description: Demonstrates a typed native Rust action whose JSON output feeds the public result.
 
-schema_dialect: https://json-schema.org/draft/2020-12/schema
+types:
+  TextMetrics:
+    fields:
+      characters: integer
+      words: integer
+      lines: integer
 
-input:
-  schema:
-    type: object
-    required: [text]
-    properties:
-      text: {type: string}
-    additionalProperties: false
+inputs:
+  text: string
 
-output:
-  data_schema:
-    type: object
-    required: [characters, words, lines]
-    properties:
-      characters: {type: integer, minimum: 0}
-      words: {type: integer, minimum: 0}
-      lines: {type: integer, minimum: 0}
-    additionalProperties: false
+output: TextMetrics
 
 workflow:
   steps:
-    - kind: action
+    - type: action
       id: analyze_text
       call: example.text_metrics
       inputs:
-        text: {from: input.text}
+        text: $text
 
   result:
-    return:
-      content:
-        template:
-          text: |-
-            Text metrics:
-            - characters: {{ characters }}
-            - words: {{ words }}
-            - lines: {{ lines }}
-          bindings:
-            characters: {from: steps.analyze_text.output.characters}
-            words: {from: steps.analyze_text.output.words}
-            lines: {from: steps.analyze_text.output.lines}
-      format: text
-      data: {from: steps.analyze_text.output}
+    return: $analyze_text

@@ -70,6 +70,8 @@ pub fn load_model_registry_with_env(
                 let capabilities = capabilities
                     .into_iter()
                     .map(|capability| match capability {
+                        CapabilityYaml::JsonObjectOutput => ModelCapability::JsonObjectOutput,
+                        CapabilityYaml::JsonSchemaOutput => ModelCapability::JsonSchemaOutput,
                         CapabilityYaml::Vision => ModelCapability::Vision,
                     })
                     .collect::<BTreeSet<_>>();
@@ -188,6 +190,8 @@ impl From<PlaintextHttpYaml> for OpenAiTransportPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CapabilityYaml {
+    JsonObjectOutput,
+    JsonSchemaOutput,
     Vision,
 }
 

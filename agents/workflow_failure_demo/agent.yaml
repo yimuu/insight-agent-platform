@@ -6,7 +6,9 @@ metadata:
   name: Workflow Failure Demo
   description: Demonstrates an authored workflow failure terminal.
 
-schema_dialect: https://json-schema.org/draft/2020-12/schema
+types:
+  FailureResult:
+    fields: {}
 
 errors:
   rejected:
@@ -14,14 +16,9 @@ errors:
     code: WORKFLOW_DEMO_REJECTED
     public_message: workflow failure demo rejected the run
 
-input:
-  schema:
-    type: object
-    additionalProperties: false
+inputs: {}
 
-output:
-  data_schema:
-    type: "null"
+output: FailureResult
 
 workflow:
   result:

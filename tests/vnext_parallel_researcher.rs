@@ -109,7 +109,7 @@ struct ScenarioModel {
 #[async_trait]
 impl ChatModel for ScenarioModel {
     fn capabilities(&self) -> BTreeSet<ModelCapability> {
-        BTreeSet::new()
+        BTreeSet::from([ModelCapability::JsonSchemaOutput])
     }
 
     fn validate_parameters(&self, _parameters: &serde_json::Value) -> Result<(), CompileError> {
@@ -394,8 +394,11 @@ async fn full_success_uses_distinct_perspectives_and_complete_synthesis() {
     let RunExecutionResult::Ended(TerminalOutcome::Success { output }) = result else {
         panic!("expected successful workflow return")
     };
-    assert_eq!(output.content.as_deref(), Some("balanced synthesis"));
-    assert_eq!(output.data, json!({"degraded": false}));
+    assert_eq!(output.content, None);
+    assert_eq!(
+        output.data,
+        json!({"content": "balanced synthesis", "degraded": false})
+    );
     let requests = tracker.requests();
     assert_eq!(requests.len(), 3);
     assert!(requests
@@ -434,12 +437,29 @@ async fn each_partial_success_uses_only_success_values_and_closed_failure_metada
             "risk",
             "PRIVATE_RISK_FAILURE",
         ),
+        (
+            Scenario {
+                technical: ResponseMode::Success(""),
+                risk: ResponseMode::Success("risk after empty peer"),
+                synthesis: ResponseMode::Success("empty-peer synthesis"),
+            },
+            "risk after empty peer",
+            "technical",
+            "VNEXT_LLM_RESPONSE_CONTRACT_INVALID",
+        ),
     ] {
         let (result, tracker) = run(scenario).await;
         let RunExecutionResult::Ended(TerminalOutcome::Success { output }) = result else {
             panic!("expected degraded workflow return")
         };
-        assert_eq!(output.data, json!({"degraded": true}));
+        let expected_content = match scenario.synthesis {
+            ResponseMode::Success(content) => content,
+            ResponseMode::Fail(_) | ResponseMode::Pending => unreachable!(),
+        };
+        assert_eq!(
+            output.data,
+            json!({"content": expected_content, "degraded": true})
+        );
         let requests = tracker.requests();
         assert_eq!(requests.len(), 3);
         let synthesis = synthesis_request(&requests);
@@ -489,8 +509,11 @@ async fn production_service_commits_one_private_terminal_for_full_and_partial_su
         let RunLifecycle::Completed { output } = &record.lifecycle else {
             panic!("expected completed service-backed run")
         };
-        assert_eq!(output.content.as_deref(), Some(expected_content));
-        assert_eq!(output.data, json!({"degraded": degraded}));
+        assert_eq!(output.content, None);
+        assert_eq!(
+            output.data,
+            json!({"content": expected_content, "degraded": degraded})
+        );
         assert_eq!(tracker.requests().len(), 3);
         assert_durable_parallel_contract(&record, &events, &forbidden_intermediates);
     }

@@ -11,8 +11,10 @@ use tokio::time::sleep;
 
 use crate::{
     resources::models::{
-        model_response_too_large, serialized_json_within_limit, ChatContent, ChatContentPart,
-        ChatMessage, ChatRequest, ChatRole, ModelCapability, ModelRegistry,
+        model_response_too_large, planned_structured_output_capability,
+        select_structured_output_capability, serialized_json_within_limit, ChatContent,
+        ChatContentPart, ChatMessage, ChatRequest, ChatResponseFormat, ChatRole, ModelCapability,
+        ModelRegistry,
     },
     runtime::{RunError, StopReason},
 };
@@ -47,6 +49,7 @@ const CHAT_MESSAGES_INVALID: &str = "VNEXT_LLM_CONTENT_INVALID";
 const CHAT_INPUT_CONTRACT_INVALID: &str = "VNEXT_LLM_TEMPLATE_BINDING_INVALID";
 const CHAT_PROMPT_NOT_FOUND: &str = "VNEXT_LLM_PROMPT_NOT_FOUND";
 const CHAT_VISION_REQUIRED: &str = "VNEXT_LLM_VISION_REQUIRED";
+const CHAT_STRUCTURED_OUTPUT_REQUIRED: &str = "VNEXT_LLM_STRUCTURED_OUTPUT_REQUIRED";
 const CHAT_RESPONSE_SCHEMA_INVALID: &str = "VNEXT_LLM_RESPONSE_CONFIG_INVALID";
 const CHAT_DATA_TOO_LARGE: &str = "VNEXT_LLM_REQUEST_TOO_LARGE";
 const CHAT_RESPONSE_JSON_INVALID: &str = "VNEXT_LLM_RESPONSE_JSON_INVALID";
@@ -237,7 +240,7 @@ impl ChatOperation {
         &self,
         response: &ResponseConfig,
     ) -> Result<(Value, ValueType), OperationError> {
-        let data_schema = match response {
+        let output_schema = match response {
             ResponseConfig::Text => json!({"type":"string"}),
             ResponseConfig::Json { schema } => compile_contract_schema(&self.definitions, schema)
                 .map_err(|_| {
@@ -249,16 +252,6 @@ impl ChatOperation {
                 .expanded_schema()
                 .clone(),
         };
-        let output_schema = json!({
-            "type":"object",
-            "required":["data", "finish_reason", "usage"],
-            "properties":{
-                "data":data_schema,
-                "finish_reason":{"type":["string", "null"]},
-                "usage":true
-            },
-            "additionalProperties":false
-        });
         let output_type = SchemaType::compile(&output_schema)
             .map_err(|_| {
                 operation_error(
@@ -369,9 +362,26 @@ impl ChatOperation {
             .map_err(|_| {
                 operation_error(CHAT_PARAMETERS_INVALID, "ai.chat parameters are invalid")
             })?;
-        if !plan.capabilities.is_subset(&model.capabilities()) {
+        let capabilities = model.capabilities();
+        if let ValidatedResponseContract::Json { data } = &plan.response {
+            let Some(capability) = planned_structured_output_capability(&plan.capabilities) else {
+                return Err(operation_error(
+                    CHAT_STRUCTURED_OUTPUT_REQUIRED,
+                    "ai.chat plan must select exactly one structured-output capability",
+                ));
+            };
+            if capability == ModelCapability::JsonObjectOutput
+                && !matches!(&data.value_type, ValueType::Object(_))
+            {
+                return Err(operation_error(
+                    CHAT_STRUCTURED_OUTPUT_REQUIRED,
+                    "ai.chat json_object_output requires a top-level object response",
+                ));
+            }
+        }
+        if !plan.capabilities.is_subset(&capabilities) {
             return Err(operation_error(
-                CHAT_VISION_REQUIRED,
+                CHAT_CONFIG_INVALID,
                 "ai.chat model capabilities differ from the compiled plan",
             ));
         }
@@ -599,6 +609,18 @@ impl Operation for ChatOperation {
             ));
         }
         let (output_schema, output_type) = self.output_contract(&config.response)?;
+        if matches!(config.response, ResponseConfig::Json { .. })
+            && select_structured_output_capability(
+                &model.capabilities(),
+                matches!(&output_type, ValueType::Object(_)),
+            )
+            .is_none()
+        {
+            return Err(operation_error(
+                CHAT_STRUCTURED_OUTPUT_REQUIRED,
+                "ai.chat structured response requires json_schema_output, or json_object_output for a top-level object",
+            ));
+        }
 
         Ok(CompiledOperationContract {
             output_schema,
@@ -655,6 +677,26 @@ impl Operation for ChatOperation {
         let request = ChatRequest {
             messages,
             parameters: plan.parameters.value().clone(),
+            response_format: match &plan.response {
+                ValidatedResponseContract::Text => None,
+                ValidatedResponseContract::Json { data } => {
+                    let capability = planned_structured_output_capability(&plan.capabilities)
+                        .expect("verified LLM plan selects one structured-output capability");
+                    Some(match capability {
+                        ModelCapability::JsonObjectOutput => ChatResponseFormat::JsonObject {
+                            name: "response".to_string(),
+                            schema: data.schema.clone(),
+                        },
+                        ModelCapability::JsonSchemaOutput => ChatResponseFormat::JsonSchema {
+                            name: "response".to_string(),
+                            schema: data.schema.clone(),
+                        },
+                        ModelCapability::Vision => {
+                            unreachable!("vision is not a structured-output capability")
+                        }
+                    })
+                }
+            },
         };
         if !model.request_body_within_limit(&request, plan.limits.max_request_bytes) {
             return Err(chat_request_too_large());
@@ -668,8 +710,6 @@ impl Operation for ChatOperation {
             _ = sleep(context.control.remaining()) => return Err(RunError::operation_timeout()),
         };
         let mut text = String::new();
-        let mut finish_reason = None;
-        let mut usage = None;
         let max_text_bytes = model.max_accumulated_text_bytes();
         loop {
             let chunk = tokio::select! {
@@ -685,15 +725,25 @@ impl Operation for ChatOperation {
                 return Err(model_response_too_large());
             }
             text.push_str(&chunk.text);
-            if chunk.finish_reason.is_some() {
-                finish_reason = chunk.finish_reason;
-            }
-            if chunk.usage.is_some() {
-                usage = chunk.usage;
-            }
         }
-        let data = match &plan.response {
-            ValidatedResponseContract::Text => Value::String(text),
+        Ok(match &plan.response {
+            ValidatedResponseContract::Text => {
+                let value = Value::String(text);
+                let validator = crate::schema::compile_schema_2020(&plan.output_contract.schema)
+                    .map_err(|_| {
+                        run_error(
+                            CHAT_RESPONSE_SCHEMA_INVALID,
+                            "chat response schema is invalid",
+                        )
+                    })?;
+                if !validator.is_valid(&value) {
+                    return Err(run_error(
+                        CHAT_RESPONSE_CONTRACT_INVALID,
+                        "chat response does not match its schema",
+                    ));
+                }
+                value
+            }
             ValidatedResponseContract::Json { data } => {
                 let value: Value = serde_json::from_str(&text).map_err(|_| {
                     run_error(
@@ -715,12 +765,7 @@ impl Operation for ChatOperation {
                 }
                 value
             }
-        };
-        Ok(json!({
-            "data": data,
-            "finish_reason": finish_reason,
-            "usage": usage,
-        }))
+        })
     }
 
     async fn execute(
@@ -736,9 +781,52 @@ impl Operation for ChatOperation {
             .resolve(&config.model)
             .map_err(|_| run_error(CHAT_MODEL_NOT_FOUND, "ai.chat model is not registered"))?;
         let messages = self.render_messages(&config, &inputs)?;
+        let response_format = match &config.response {
+            ResponseConfig::Text => None,
+            ResponseConfig::Json { schema } => {
+                let contract =
+                    compile_contract_schema(&self.definitions, schema).map_err(|_| {
+                        run_error(
+                            CHAT_RESPONSE_SCHEMA_INVALID,
+                            "chat response schema is invalid",
+                        )
+                    })?;
+                let output_type =
+                    SchemaType::compile(contract.expanded_schema()).map_err(|_| {
+                        run_error(
+                            CHAT_RESPONSE_SCHEMA_INVALID,
+                            "chat response schema is invalid",
+                        )
+                    })?;
+                let capability = select_structured_output_capability(
+                    &model.capabilities(),
+                    matches!(output_type.value_type(), ValueType::Object(_)),
+                )
+                .ok_or_else(|| {
+                    run_error(
+                        CHAT_STRUCTURED_OUTPUT_REQUIRED,
+                        "ai.chat structured response requires json_schema_output, or json_object_output for a top-level object",
+                    )
+                })?;
+                Some(match capability {
+                    ModelCapability::JsonObjectOutput => ChatResponseFormat::JsonObject {
+                        name: "response".to_string(),
+                        schema: contract.validator_document().clone(),
+                    },
+                    ModelCapability::JsonSchemaOutput => ChatResponseFormat::JsonSchema {
+                        name: "response".to_string(),
+                        schema: contract.validator_document().clone(),
+                    },
+                    ModelCapability::Vision => {
+                        unreachable!("vision is not a structured-output capability")
+                    }
+                })
+            }
+        };
         let request = ChatRequest {
             messages,
             parameters: config.parameters.clone(),
+            response_format,
         };
 
         let stream = model.stream_chat(request);
@@ -750,8 +838,6 @@ impl Operation for ChatOperation {
         };
 
         let mut text = String::new();
-        let mut finish_reason = None;
-        let mut usage = None;
         let max_text_bytes = model.max_accumulated_text_bytes();
         loop {
             let chunk = tokio::select! {
@@ -769,15 +855,9 @@ impl Operation for ChatOperation {
             if !chunk.text.is_empty() {
                 text.push_str(&chunk.text);
             }
-            if chunk.finish_reason.is_some() {
-                finish_reason = chunk.finish_reason;
-            }
-            if chunk.usage.is_some() {
-                usage = chunk.usage;
-            }
         }
 
-        let data = match &config.response {
+        Ok(match &config.response {
             ResponseConfig::Text => Value::String(text),
             ResponseConfig::Json { schema } => {
                 let data: Value = serde_json::from_str(&text).map_err(|_| {
@@ -801,12 +881,7 @@ impl Operation for ChatOperation {
                 }
                 data
             }
-        };
-        Ok(json!({
-            "data": data,
-            "finish_reason": finish_reason,
-            "usage": usage,
-        }))
+        })
     }
 }
 
@@ -1006,8 +1081,8 @@ mod tests {
             DslPath,
         },
         resources::models::{
-            ChatChunk, ChatMessage, ChatModel, ChatRequest, ChatRole, ChatStream, ModelCapability,
-            ModelRegistry,
+            ChatChunk, ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest,
+            ChatResponseFormat, ChatRole, ChatStream, ModelCapability, ModelRegistry,
         },
         runtime::{stop_pair, ExecutionControl, RunError},
     };
@@ -1016,16 +1091,13 @@ mod tests {
     struct FakeModel {
         response: String,
         requests: Arc<Mutex<Vec<ChatRequest>>>,
-        vision: bool,
+        capabilities: BTreeSet<ModelCapability>,
     }
 
     #[async_trait]
     impl ChatModel for FakeModel {
         fn capabilities(&self) -> BTreeSet<ModelCapability> {
-            self.vision
-                .then_some(ModelCapability::Vision)
-                .into_iter()
-                .collect()
+            self.capabilities.clone()
         }
 
         fn validate_parameters(&self, parameters: &Value) -> Result<(), crate::dsl::CompileError> {
@@ -1054,6 +1126,17 @@ mod tests {
         response: &str,
         vision: bool,
     ) -> (ChatOperation, Arc<Mutex<Vec<ChatRequest>>>) {
+        let mut capabilities = BTreeSet::from([ModelCapability::JsonSchemaOutput]);
+        if vision {
+            capabilities.insert(ModelCapability::Vision);
+        }
+        fake_operation_with_capabilities(response, capabilities)
+    }
+
+    fn fake_operation_with_capabilities(
+        response: &str,
+        capabilities: BTreeSet<ModelCapability>,
+    ) -> (ChatOperation, Arc<Mutex<Vec<ChatRequest>>>) {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let mut models = ModelRegistry::default();
         models
@@ -1062,7 +1145,7 @@ mod tests {
                 FakeModel {
                     response: response.to_string(),
                     requests: Arc::clone(&requests),
-                    vision,
+                    capabilities,
                 },
             )
             .unwrap();
@@ -1159,20 +1242,11 @@ mod tests {
         capabilities: BTreeSet<ModelCapability>,
         max_request_bytes: usize,
     ) -> CallPlan {
-        let data_schema = match &response {
+        let output_schema = match &response {
             ValidatedResponseContract::Text => json!({"type":"string"}),
             ValidatedResponseContract::Json { data } => data.schema.clone(),
         };
-        let output_contract = typed_contract(json!({
-            "type":"object",
-            "required":["data", "finish_reason", "usage"],
-            "properties":{
-                "data":data_schema,
-                "finish_reason":{"type":["string", "null"]},
-                "usage":true
-            },
-            "additionalProperties":false
-        }));
+        let output_contract = typed_contract(output_schema);
         let atom_limit = max_request_bytes.min(16 * 1024);
         CallPlan::Llm(CompiledLlmPlan {
             model: ResolvedModelId::parse("chat").unwrap(),
@@ -1248,7 +1322,7 @@ mod tests {
             16 * 1024,
         );
 
-        operation
+        let output = operation
             .execute_plan(
                 &plan,
                 evaluated_call(vec![
@@ -1256,8 +1330,8 @@ mod tests {
                         id("history"),
                         history,
                         json!([
-                            {"role":"user", "content":r#"prior {"raw":true}"#},
-                            {"role":"assistant", "content":"answer exactly"}
+                            {"role":"user", "content":[{"text":r#"prior {"raw":true}"#}]},
+                            {"role":"assistant", "content":[{"text":"answer exactly"}]}
                         ]),
                     ),
                     (id("question"), question, json!(r#"What is "x"?"#)),
@@ -1266,14 +1340,25 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(output, "done");
 
         let requests = requests.lock().unwrap();
         assert_eq!(
             requests[0].messages,
             vec![
                 ChatMessage::from_text(ChatRole::System, "System instruction."),
-                ChatMessage::from_text(ChatRole::User, r#"prior {"raw":true}"#),
-                ChatMessage::from_text(ChatRole::Assistant, "answer exactly"),
+                ChatMessage {
+                    role: ChatRole::User,
+                    content: ChatContent::Parts(vec![ChatContentPart::Text {
+                        text: r#"prior {"raw":true}"#.to_string(),
+                    }]),
+                },
+                ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: ChatContent::Parts(vec![ChatContentPart::Text {
+                        text: "answer exactly".to_string(),
+                    }]),
+                },
                 ChatMessage::from_text(ChatRole::User, r#"What is "x"?"#),
             ]
         );
@@ -1507,7 +1592,7 @@ mod tests {
                     history,
                     json!([{
                         "role": "user",
-                        "content": [{"image": "https://example.test/report.png"}]
+                        "content": [{"image_url": "https://example.test/report.png"}]
                     }]),
                 )]),
                 context(),
@@ -1550,7 +1635,7 @@ mod tests {
             BTreeSet::new(),
             16 * 1024,
         );
-        let exact = serde_json::to_vec(&json!([{"role":"user", "content":"q"}]))
+        let exact = serde_json::to_vec(&json!([{"role":"user", "content":[{"text":"q"}]}]))
             .unwrap()
             .len();
         let CallPlan::Llm(plan) = &mut plan else {
@@ -1578,8 +1663,8 @@ mod tests {
         let (operation, _) = fake_operation("done", false);
         let first = value_id("first_history");
         let second = value_id("second_history");
-        let first_value = json!([{"role":"user", "content":"a".repeat(40)}]);
-        let second_value = json!([{"role":"user", "content":"b".repeat(40)}]);
+        let first_value = json!([{"role":"user", "content":[{"text":"a".repeat(40)}]}]);
+        let second_value = json!([{"role":"user", "content":[{"text":"b".repeat(40)}]}]);
         let single_bytes = serde_json::to_vec(&first_value).unwrap().len();
         let mut plan = llm_plan(
             BTreeMap::from([(id("first"), first.clone()), (id("second"), second.clone())]),
@@ -1676,11 +1761,11 @@ mod tests {
             }],
             BTreeMap::new(),
             json!({}),
-            response,
-            BTreeSet::new(),
+            response.clone(),
+            BTreeSet::from([ModelCapability::JsonSchemaOutput]),
             16 * 1024,
         );
-        let (operation, _) = fake_operation(r#"{"answer":"ok"}"#, false);
+        let (operation, requests) = fake_operation(r#"{"answer":"ok"}"#, false);
 
         let output = operation
             .execute_plan(
@@ -1690,18 +1775,117 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(output["data"], json!({"answer":"ok"}));
-        assert_eq!(output["finish_reason"], "stop");
-        assert_eq!(output["usage"], json!({"tokens":3}));
+        assert_eq!(output, json!({"answer":"ok"}));
+        assert!(matches!(
+            requests.lock().unwrap()[0].response_format,
+            Some(ChatResponseFormat::JsonSchema { .. })
+        ));
 
-        let (invalid, _) = fake_operation(r#"{"answer":2}"#, false);
+        let object_plan = llm_plan(
+            BTreeMap::from([(id("question"), question.clone())]),
+            vec![MessageSourcePlan::Authored {
+                role: PlannedRole::User,
+                content: vec![CompiledContentAtom::RuntimeText {
+                    value: question.clone(),
+                }],
+            }],
+            BTreeMap::new(),
+            json!({}),
+            response,
+            BTreeSet::from([ModelCapability::JsonObjectOutput]),
+            16 * 1024,
+        );
+        let (object_operation, object_requests) = fake_operation_with_capabilities(
+            r#"{"answer":"ok"}"#,
+            BTreeSet::from([ModelCapability::JsonObjectOutput]),
+        );
+        assert_eq!(
+            object_operation
+                .execute_plan(
+                    &object_plan,
+                    evaluated_call(vec![(id("question"), question.clone(), json!("Question"))]),
+                    context(),
+                )
+                .await
+                .unwrap(),
+            json!({"answer":"ok"})
+        );
+        assert!(matches!(
+            object_requests.lock().unwrap()[0].response_format,
+            Some(ChatResponseFormat::JsonObject { .. })
+        ));
+
+        let (invalid, _) = fake_operation_with_capabilities(
+            r#"{"answer":2}"#,
+            BTreeSet::from([ModelCapability::JsonObjectOutput]),
+        );
         assert_eq!(
             invalid
                 .execute_plan(
-                    &plan,
+                    &object_plan,
                     evaluated_call(vec![(id("question"), question, json!("Question"))]),
                     context(),
                 )
+                .await
+                .unwrap_err()
+                .code(),
+            "VNEXT_LLM_RESPONSE_CONTRACT_INVALID"
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_text_response_preserves_and_enforces_string_alias_constraints() {
+        let text_schema = json!({
+            "type":"string",
+            "minLength":2,
+            "pattern":"^[A-Z]"
+        });
+        let build_plan = || {
+            let mut call_plan = llm_plan(
+                BTreeMap::new(),
+                vec![MessageSourcePlan::Authored {
+                    role: PlannedRole::User,
+                    content: vec![CompiledContentAtom::Template {
+                        template_id: inline_template(
+                            "constrained_text",
+                            "Answer briefly.",
+                            BTreeMap::new(),
+                        )
+                        .0,
+                        bindings: BTreeMap::new(),
+                    }],
+                }],
+                BTreeMap::from([inline_template(
+                    "constrained_text",
+                    "Answer briefly.",
+                    BTreeMap::new(),
+                )]),
+                json!({}),
+                ValidatedResponseContract::Text,
+                BTreeSet::new(),
+                16 * 1024,
+            );
+            let CallPlan::Llm(plan) = &mut call_plan else {
+                unreachable!()
+            };
+            plan.output_contract = typed_contract(text_schema.clone());
+            call_plan
+        };
+
+        let (valid, valid_requests) = fake_operation("AB", false);
+        assert_eq!(
+            valid
+                .execute_plan(&build_plan(), evaluated_call(Vec::new()), context())
+                .await
+                .unwrap(),
+            json!("AB")
+        );
+        assert!(valid_requests.lock().unwrap()[0].response_format.is_none());
+
+        let (invalid, _) = fake_operation("a", false);
+        assert_eq!(
+            invalid
+                .execute_plan(&build_plan(), evaluated_call(Vec::new()), context())
                 .await
                 .unwrap_err()
                 .code(),
@@ -1715,10 +1899,8 @@ mod tests {
         let inputs = BTreeMap::from([(id("question"), ValueType::String)]);
         let contract = operation.compile(&text_config(), &inputs).unwrap();
         assert_eq!(operation.uses(), AI_CHAT_USES);
-        assert!(matches!(
-            contract.output_type.require_path_str("data").unwrap(),
-            ValueType::String
-        ));
+        assert_eq!(contract.output_schema, json!({"type":"string"}));
+        assert_eq!(contract.output_type, ValueType::String);
 
         let mut invalid = text_config();
         invalid["messages"][0]["parts"] = json!([{"kind":"data","input":"question"}]);
@@ -1739,7 +1921,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(output["data"], "answer");
+        assert_eq!(output, "answer");
         let requests = requests.lock().unwrap();
         let user = requests[0].messages[1].text().unwrap();
         assert!(user.contains("Untrusted data (JSON):"));
@@ -1759,6 +1941,20 @@ mod tests {
                 "additionalProperties":false
             }
         });
+        let contract = operation
+            .compile(
+                &config,
+                &BTreeMap::from([(id("question"), ValueType::String)]),
+            )
+            .unwrap();
+        assert_eq!(contract.output_schema, config["response"]["schema"]);
+        assert_eq!(
+            contract.output_type,
+            SchemaType::compile(&config["response"]["schema"])
+                .unwrap()
+                .into_value_type()
+        );
+
         let output = operation
             .execute(
                 &config,
@@ -1767,7 +1963,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(output["data"], json!({"answer":"ok"}));
+        assert_eq!(output, json!({"answer":"ok"}));
 
         let (invalid, _) = fake_operation(r#"{"answer":2}"#, false);
         assert_eq!(

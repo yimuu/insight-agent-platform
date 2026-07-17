@@ -14,7 +14,9 @@ use crate::{
 };
 
 use super::{
+    author::materialize_resolved_prompt_bindings,
     chat::ChatOperation,
+    input::InputNormalizer,
     ir::{OperationKind, Region, TypedContract, WorkflowIr},
     lower::{lower_workflow, ResolvedActionContract, ResolvedModelContract, ResourceResolver},
     operation::{ActionCallOperation, OperationRegistry},
@@ -41,6 +43,8 @@ pub struct CompiledWorkflow {
     pub ir: Arc<WorkflowIr>,
     operations: OperationRegistry,
     input_validator: Arc<JsonSchemaValidator>,
+    normalized_input_validator: Arc<JsonSchemaValidator>,
+    input_normalizer: InputNormalizer,
     output_validator: Arc<JsonSchemaValidator>,
 }
 
@@ -53,12 +57,23 @@ impl CompiledWorkflow {
         &self.output_validator
     }
 
+    pub fn normalize_input(
+        &self,
+        input: Value,
+    ) -> Result<Value, super::input::InputNormalizationError> {
+        self.input_normalizer.normalize(input)
+    }
+
+    pub fn normalized_input_validator(&self) -> &JsonSchemaValidator {
+        &self.normalized_input_validator
+    }
+
     pub(crate) fn operations(&self) -> &OperationRegistry {
         &self.operations
     }
 
-    pub(crate) fn input_validator_arc(&self) -> Arc<JsonSchemaValidator> {
-        Arc::clone(&self.input_validator)
+    pub(crate) fn normalized_input_validator_arc(&self) -> Arc<JsonSchemaValidator> {
+        Arc::clone(&self.normalized_input_validator)
     }
 
     pub(crate) fn output_validator_arc(&self) -> Arc<JsonSchemaValidator> {
@@ -129,16 +144,6 @@ impl WorkflowCompiler {
         self.compile_spanned(root, document)
     }
 
-    pub fn compile_raw(
-        &self,
-        root: &Path,
-        raw: RawWorkflow,
-    ) -> Result<CompiledWorkflow, CompileError> {
-        let diagnostics = CompileDiagnosticContext::new(&raw);
-        self.compile_raw_inner(root, raw)
-            .map_err(|error| diagnostics.decorate(error))
-    }
-
     fn compile_spanned(
         &self,
         root: &Path,
@@ -160,6 +165,29 @@ impl WorkflowCompiler {
             .iter()
             .map(|(name, text)| (name.clone(), PromptDeclaration::Inline(text.clone())))
             .collect();
+        materialize_resolved_prompt_bindings(&mut raw).map_err(|_| {
+            CompileError::new(
+                "VNEXT_LLM_TEMPLATE_BINDING_INVALID",
+                "LLM prompt template bindings could not be resolved",
+            )
+        })?;
+
+        let input_normalization = InputNormalizer::compile(&raw.definitions, &raw.input.schema)
+            .map_err(|_| {
+                CompileError::new(
+                    "VNEXT_INPUT_SCHEMA_INVALID",
+                    "compiled vNext input schema is invalid",
+                )
+            })?;
+        let public_input_contract = compile_contract_schema(&raw.definitions, &raw.input.schema)
+            .map_err(|_| {
+                CompileError::new(
+                    "VNEXT_INPUT_SCHEMA_INVALID",
+                    "compiled vNext input schema is invalid",
+                )
+            })?;
+        let mut lowering_raw = raw.clone();
+        lowering_raw.input.schema = input_normalization.normalized_schema;
 
         let mut operations = OperationRegistry::default();
         operations
@@ -177,7 +205,7 @@ impl WorkflowCompiler {
             models: &self.models,
             actions: &self.actions,
         };
-        let ir = lower_workflow(&raw, &resolver).map_err(|errors| {
+        let ir = lower_workflow(&lowering_raw, &resolver).map_err(|errors| {
             let error = errors
                 .first()
                 .expect("lowering returns at least one error when it fails");
@@ -196,7 +224,8 @@ impl WorkflowCompiler {
                 compile_error.with_path(authored_location_to_dsl_path(&raw, location))
             })
         })?;
-        let input_validator = compile_schema_2020(&ir.input.schema).map_err(|_| {
+        let input_validator = public_input_contract.validator().clone();
+        let normalized_input_validator = compile_schema_2020(&ir.input.schema).map_err(|_| {
             CompileError::new(
                 "VNEXT_INPUT_SCHEMA_INVALID",
                 "compiled vNext input schema is invalid",
@@ -215,6 +244,8 @@ impl WorkflowCompiler {
             ir: Arc::new(ir),
             operations,
             input_validator: Arc::new(input_validator),
+            normalized_input_validator: Arc::new(normalized_input_validator),
+            input_normalizer: input_normalization.normalizer,
             output_validator: Arc::new(output_validator),
         })
     }
@@ -1116,27 +1147,19 @@ mod tests {
 api_version: insight.agent/v2
 kind: agent
 metadata: {id: fixture, name: Fixture}
-schema_dialect: https://json-schema.org/draft/2020-12/schema
+types:
+  Answer:
+    fields:
+      answer: string
 prompts:
   system: {file: prompts/system.md}
-input:
-  schema:
-    type: object
-    required: [question]
-    properties: {question: {type: string}}
-    additionalProperties: false
-output:
-  data_schema:
-    type: object
-    required: [answer]
-    properties: {answer: {type: string}}
-    additionalProperties: false
+inputs:
+  question: string
+output: Answer
 workflow:
   result:
     return:
-      data:
-        object:
-          answer: {from: input.question}
+      answer: $question
 "#;
 
     #[test]
@@ -1170,6 +1193,102 @@ workflow:
     }
 
     #[test]
+    fn keeps_public_input_optional_but_compiles_a_total_normalized_contract() {
+        let directory = tempdir().unwrap();
+        let source = SOURCE
+            .replace(
+                "  system: {file: prompts/system.md}",
+                "  system: {inline: system}",
+            )
+            .replace(
+                "  question: string",
+                r#"  question: string
+  messages:
+    type: Message[]
+    default: []
+  image_url:
+    type: string
+    optional: true"#,
+            );
+        let workflow = WorkflowCompiler::new(ModelRegistry::default(), ActionRegistry::default())
+            .compile_source(directory.path(), &source)
+            .unwrap();
+        let authored = serde_json::json!({"question":"answer"});
+
+        assert!(workflow.input_validator().is_valid(&authored));
+        assert!(!workflow.normalized_input_validator().is_valid(&authored));
+
+        let normalized = workflow.normalize_input(authored).unwrap();
+        assert_eq!(
+            normalized,
+            serde_json::json!({"question":"answer","messages":[],"image_url":null})
+        );
+        assert!(workflow.normalized_input_validator().is_valid(&normalized));
+        assert_eq!(
+            workflow.normalize_input(normalized.clone()).unwrap(),
+            normalized
+        );
+    }
+
+    #[test]
+    fn materializes_and_validates_defaults_for_named_input_types() {
+        let directory = tempdir().unwrap();
+        let source = SOURCE
+            .replace(
+                "  Answer:\n    fields:",
+                "  Filters:\n    fields:\n      tags: string[]\n  Answer:\n    fields:",
+            )
+            .replace(
+                "  system: {file: prompts/system.md}",
+                "  system: {inline: system}",
+            )
+            .replace(
+                "  question: string",
+                "  question: string\n  filters:\n    type: Filters\n    default: {tags: []}",
+            );
+        let compiler = WorkflowCompiler::new(ModelRegistry::default(), ActionRegistry::default());
+        let workflow = compiler.compile_source(directory.path(), &source).unwrap();
+        let authored = serde_json::json!({"question":"answer"});
+
+        assert!(workflow.input_validator().is_valid(&authored));
+        let normalized = workflow.normalize_input(authored).unwrap();
+        assert_eq!(
+            normalized,
+            serde_json::json!({"question":"answer","filters":{"tags":[]}})
+        );
+        assert!(workflow.normalized_input_validator().is_valid(&normalized));
+        assert_eq!(
+            workflow.normalize_input(normalized.clone()).unwrap(),
+            normalized
+        );
+
+        let invalid_default = source.replace("default: {tags: []}", "default: {tags: [1]}");
+        let error = compiler
+            .compile_source(directory.path(), &invalid_default)
+            .unwrap_err();
+        assert_eq!(error.code(), "VNEXT_INPUT_SCHEMA_INVALID");
+    }
+
+    #[test]
+    fn explicit_null_default_is_validated_instead_of_treated_as_missing() {
+        let directory = tempdir().unwrap();
+        let source = SOURCE
+            .replace(
+                "  system: {file: prompts/system.md}",
+                "  system: {inline: system}",
+            )
+            .replace(
+                "  question: string",
+                "  question:\n    type: string\n    default: null",
+            );
+        let error = WorkflowCompiler::new(ModelRegistry::default(), ActionRegistry::default())
+            .compile_source(directory.path(), &source)
+            .unwrap_err();
+
+        assert_eq!(error.code(), "VNEXT_INPUT_SCHEMA_INVALID");
+    }
+
+    #[test]
     fn workflow_hash_canonicalizes_json_object_map_order() {
         let directory = tempdir().unwrap();
         let source = SOURCE.replace(
@@ -1177,12 +1296,12 @@ workflow:
             "  system: {inline: system}",
         );
         let left = source.replace(
-            "properties: {question: {type: string}}",
-            "properties: {question: {type: string}, context: {type: integer}}",
+            "inputs:\n  question: string",
+            "inputs:\n  question: string\n  context: integer",
         );
         let right = source.replace(
-            "properties: {question: {type: string}}",
-            "properties: {context: {type: integer}, question: {type: string}}",
+            "inputs:\n  question: string",
+            "inputs:\n  context: integer\n  question: string",
         );
         let compiler = WorkflowCompiler::new(ModelRegistry::default(), ActionRegistry::default());
 
@@ -1273,36 +1392,26 @@ workflow:
 api_version: insight.agent/v2
 kind: agent
 metadata: {id: inline_hash, name: Inline Hash}
-schema_dialect: https://json-schema.org/draft/2020-12/schema
-prompts: {}
-input:
-  schema:
-    type: object
-    required: [question]
-    properties: {question: {type: string}}
-    additionalProperties: false
-output:
-  data_schema:
-    type: object
-    required: [answer]
-    properties: {answer: {type: string}}
-    additionalProperties: false
+types:
+  Answer:
+    fields:
+      answer: string
+inputs:
+  question: string
+output: Answer
 workflow:
   steps:
-    - kind: llm
-      id: answer
+    - id: answer
+      type: llm
       model: hash_model
-      inputs:
-        question: {from: input.question}
       messages:
         - role: user
-          content: {text: "Question: {{question}}"}
-      response: {format: text}
+          content:
+            - text: "Question: {{question}}"
+      response: string
   result:
     return:
-      data:
-        object:
-          answer: {from: steps.answer.output.data}
+      answer: $answer
 "#;
         let (raw, _) = parse_workflow(source).unwrap().into_parts();
         let mut ir = lower_workflow(&raw, &HashOnlyResolver).unwrap();
@@ -1533,16 +1642,16 @@ workflow:
             "workflow:\n  result:",
             r#"workflow:
   steps:
-    - kind: llm
-      id: ask
+    - id: ask
+      type: llm
       model: unavailable
       messages:
         - role: user
           content:
-            text: |-
-              第一行
-              第二行 {{#if secret}}do-not-render{{/if}}
-      response: {format: text}
+            - text: |-
+                第一行
+                第二行 {{#if secret}}do-not-render{{/if}}
+      response: string
   result:"#,
         );
 
@@ -1555,7 +1664,7 @@ workflow:
         assert_eq!(error.step_id(), Some("ask"));
         assert_eq!(
             error.path().map(ToString::to_string).as_deref(),
-            Some("$.workflow.steps[0].messages[0].content")
+            Some("$.workflow.steps[0].messages[0].content[0]")
         );
         assert!(source_slice(&source, error.span().unwrap()).starts_with("text: |-"));
         let decoded = error.decoded_template_span().unwrap();
@@ -1573,26 +1682,26 @@ workflow:
             "workflow:\n  result:",
             r#"workflow:
   steps:
-    - kind: parallel
-      id: fanout
+    - id: fanout
+      type: parallel
       settle: all
       max_concurrency: 2
       branches:
         left:
-          output_schema: {}
+          output: string
           steps:
-            - kind: switch
-              id: route
-              output_schema: {}
+            - id: route
+              type: switch
+              output: string
               cases:
                 - id: active
                   when: {cel: "true"}
-                  result: {return: {literal: null}}
+                  result: {return: active}
               default:
                 id: fallback
                 steps:
-                  - kind: llm
-                    id: ask
+                  - id: ask
+                    type: llm
                     model: unavailable
                     messages:
                       - role: user
@@ -1601,12 +1710,12 @@ workflow:
                           - text: |-
                               第一行
                               第二行 {{#if secret}}do-not-render{{/if}}
-                    response: {format: text}
-                result: {return: {literal: null}}
-          result: {return: {literal: null}}
+                    response: string
+                result: {return: $ask}
+          result: {return: $route}
         right:
-          output_schema: {}
-          result: {return: {literal: null}}
+          output: string
+          result: {return: right}
   result:"#,
         );
 
@@ -1665,66 +1774,50 @@ workflow:
             "workflow:\n  result:",
             r#"workflow:
   steps:
-    - kind: llm
-      id: ask
+    - id: ask
+      type: llm
       model: unavailable
-      inputs:
-        unused: {literal: do-not-render}
       messages:
-        - {role: system, content: system}
-        - {role: user, content: {text: hello}}
-      response: {format: text}
+        - role: system
+          content:
+            - text: $question
+        - role: user
+          content:
+            - text: hello
+      response: string
   result:"#,
         );
         let error = compiler
             .compile_source(directory.path(), &semantic)
             .unwrap_err();
-        assert_eq!(error.code(), "VNEXT_LLM_INPUT_UNUSED");
+        assert_eq!(
+            error.code(),
+            super::super::lower::LLM_SYSTEM_RUNTIME_INPUT_FORBIDDEN
+        );
         assert_eq!(error.agent_id(), Some("fixture"));
         assert_eq!(error.step_id(), Some("ask"));
         assert_eq!(
             error.path().map(ToString::to_string).as_deref(),
-            Some("$.workflow.steps[0].inputs.unused")
+            Some("$.workflow.steps[0].messages[0].content[0]")
         );
-        assert_eq!(
-            source_slice(&semantic, error.span().unwrap()),
-            "{literal: do-not-render}"
-        );
-        assert!(!error.to_string().contains("do-not-render"));
-
-        let lower = SOURCE.replace(
-            "https://json-schema.org/draft/2020-12/schema",
-            "urn:unsupported",
-        );
-        let error = compiler
-            .compile_source(directory.path(), &lower)
-            .unwrap_err();
-        assert_eq!(
-            error.code(),
-            super::super::lower::LOWER_SCHEMA_DIALECT_INVALID
-        );
-        assert_eq!(error.agent_id(), Some("fixture"));
-        assert_eq!(error.step_id(), None);
-        assert_eq!(
-            error.path().map(ToString::to_string).as_deref(),
-            Some("$.schema_dialect")
-        );
-        assert_eq!(
-            source_slice(&lower, error.span().unwrap()),
-            "urn:unsupported"
-        );
+        let semantic_span = source_slice(&semantic, error.span().unwrap());
+        assert_eq!(semantic_span, "text: $question");
 
         let slash_location = SOURCE.replace(
             "workflow:\n  result:",
             r#"workflow:
   steps:
-    - kind: llm
-      id: ask
+    - id: ask
+      type: llm
       model: unavailable
       messages:
-        - {role: system, content: system}
-        - {role: user, content: {text: hello}}
-      response: {format: text}
+        - role: system
+          content:
+            - text: system
+        - role: user
+          content:
+            - text: hello
+      response: string
   result:"#,
         );
         let error = compiler
@@ -1739,9 +1832,9 @@ workflow:
         );
         let span = source_slice(&slash_location, error.span().unwrap());
         assert!(
-            span.starts_with("- kind: llm") || span.starts_with("kind: llm"),
+            span.starts_with("- id: ask") || span.starts_with("id: ask"),
             "unexpected step span: {span:?}"
         );
-        assert!(span.ends_with("{format: text}"));
+        assert!(span.ends_with("response: string"));
     }
 }

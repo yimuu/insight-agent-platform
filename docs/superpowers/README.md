@@ -1,5 +1,7 @@
 # Design-document authority
 
-The canonical authored DSL is defined by [DSL Authoring Surface Redesign](./specs/2026-07-17-dsl-authoring-surface-redesign.md), the top-level README, and executable parser/compiler tests. The still-applicable Region/SSA, structured-control, lexical-scope, cancellation, and scope-runtime contracts are defined by [DSL vNext Region/SSA Design](./specs/2026-07-16-dsl-vnext-region-ssa-design.md); its superseded authored-operation/message sections are historical only.
+The canonical authored DSL is defined by [DSL Authoring Syntax Simplification](./specs/2026-07-17-dsl-authoring-syntax-simplification.md), the top-level README, and executable parser/compiler tests. It supersedes conflicting author-syntax examples in [DSL Authoring Surface Redesign](./specs/2026-07-17-dsl-authoring-surface-redesign.md); that document remains useful only for design contracts not replaced by the simplification spec.
+
+The still-applicable Region/SSA, structured-control, lexical-scope, cancellation, and scope-runtime contracts are defined by [DSL vNext Region/SSA Design](./specs/2026-07-16-dsl-vnext-region-ssa-design.md); its superseded authored-operation/message sections are historical only.
 
 Earlier dated specifications and plans are retained as historical decision records. Their original status records what was true when they were written; it does not make graph fields, `core.*` nodes, generic authored `operation`, `with`, Chat `parts[]`, node events, or flat-scheduler behavior part of the current contract. Cross-cutting decisions such as PostgreSQL ownership, TLS, HTTP lifecycle, history privacy, and resource limits remain applicable only where they do not conflict with the canonical vNext documents and current code.

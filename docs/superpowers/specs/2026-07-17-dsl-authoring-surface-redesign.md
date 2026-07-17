@@ -1,8 +1,10 @@
 # DSL 作者层 LLM、Action 与消息模型重设计规范
 
+> **Historical / Superseded for authored syntax.** 当前作者语法以 [DSL 作者语法精简规范](./2026-07-17-dsl-authoring-syntax-simplification.md) 为准。本文中与该规范冲突的 `canonical` 示例只保留历史背景，不再描述当前 parser/compiler 合同。
+
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented |
+| 状态 | Superseded for authored syntax |
 | 变更类型 | Breaking |
 | 日期 | 2026-07-17 |
 

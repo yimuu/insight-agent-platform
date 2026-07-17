@@ -287,35 +287,34 @@ metadata:
   id: {id}
   name: {id}
   description: Delivery contract fixture.
-schema_dialect: https://json-schema.org/draft/2020-12/schema
-input:
-  schema:
-    type: object
-    required: [text]
-    properties:
-      text: {{type: string}}
-    additionalProperties: true
-output:
-  data_schema:
-    type: object
-    required: [ok]
-    properties:
-      ok: {{type: boolean}}
-    additionalProperties: false
+types:
+  ExtraInput:
+    fields:
+      token: string
+  DeliveryResult:
+    fields:
+      ok: boolean
+inputs:
+  text: string
+  nested:
+    type: ExtraInput
+    optional: true
+  escaped:
+    type: string
+    optional: true
+  count:
+    type: integer
+    optional: true
+output: DeliveryResult
 workflow:
   steps:
-    - kind: action
+    - type: action
       id: work
       call: test.delivery
       inputs:
-        mode:
-          template:
-            text: {mode}
+        mode: {mode}
   result:
-    return:
-      content: {{literal: done}}
-      format: text
-      data: {{from: steps.work.output}}
+    return: $work
 "#
     )
 }
@@ -328,33 +327,22 @@ metadata:
   id: action_cancel_agent
   name: Action Cancel Agent
   description: Verifies cooperative action.call cancellation.
-schema_dialect: https://json-schema.org/draft/2020-12/schema
-input:
-  schema:
-    type: object
-    required: [text]
-    properties:
-      text: {type: string}
-    additionalProperties: false
-output:
-  data_schema:
-    type: object
-    required: [ok]
-    properties:
-      ok: {type: boolean}
-    additionalProperties: false
+types:
+  DeliveryResult:
+    fields:
+      ok: boolean
+inputs:
+  text: string
+output: DeliveryResult
 workflow:
   steps:
-    - kind: action
+    - type: action
       id: work
       call: test.cooperative_cancel
       inputs:
-        text: {from: input.text}
+        text: $text
   result:
-    return:
-      content: {literal: done}
-      format: text
-      data: {from: steps.work.output}
+    return: $work
 "#
     .to_string()
 }

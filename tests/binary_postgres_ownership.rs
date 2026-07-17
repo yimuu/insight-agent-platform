@@ -487,28 +487,21 @@ metadata:
   id: ownership_blocker
   name: Ownership Blocker
   description: Keeps a real model stream in flight for PostgreSQL ownership tests.
-schema_dialect: https://json-schema.org/draft/2020-12/schema
-input:
-  schema:
-    type: object
-    additionalProperties: false
-output:
-  data_schema: {type: string}
+inputs: {}
+output: string
 workflow:
   steps:
-    - kind: llm
+    - type: llm
       id: block
       model: blocking_chat
       messages:
         - role: user
-          content: {text: wait until this process is stopped}
+          content:
+            - text: wait until this process is stopped
       parameters: {}
-      response: {format: text}
+      response: string
   result:
-    return:
-      content: {from: steps.block.output.data}
-      format: text
-      data: {from: steps.block.output.data}
+    return: $block
 "#,
         )
         .unwrap();

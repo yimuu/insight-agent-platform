@@ -7,9 +7,39 @@ use serde_json::Value;
 
 use crate::{dsl::CompileError, runtime::RunError};
 
+use super::image::validate_image_url;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ModelCapability {
+    JsonObjectOutput,
+    JsonSchemaOutput,
     Vision,
+}
+
+pub(crate) fn select_structured_output_capability(
+    capabilities: &BTreeSet<ModelCapability>,
+    json_object_compatible: bool,
+) -> Option<ModelCapability> {
+    if capabilities.contains(&ModelCapability::JsonSchemaOutput) {
+        Some(ModelCapability::JsonSchemaOutput)
+    } else if json_object_compatible && capabilities.contains(&ModelCapability::JsonObjectOutput) {
+        Some(ModelCapability::JsonObjectOutput)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn planned_structured_output_capability(
+    capabilities: &BTreeSet<ModelCapability>,
+) -> Option<ModelCapability> {
+    match (
+        capabilities.contains(&ModelCapability::JsonObjectOutput),
+        capabilities.contains(&ModelCapability::JsonSchemaOutput),
+    ) {
+        (true, false) => Some(ModelCapability::JsonObjectOutput),
+        (false, true) => Some(ModelCapability::JsonSchemaOutput),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,16 +106,41 @@ impl ChatMessage {
     }
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatResponseFormat {
+    JsonObject { name: String, schema: Value },
+    JsonSchema { name: String, schema: Value },
+}
+
+impl ChatResponseFormat {
+    pub fn required_capability(&self) -> ModelCapability {
+        match self {
+            Self::JsonObject { .. } => ModelCapability::JsonObjectOutput,
+            Self::JsonSchema { .. } => ModelCapability::JsonSchemaOutput,
+        }
+    }
+
+    fn contract(&self) -> (&str, &Value) {
+        match self {
+            Self::JsonObject { name, schema } | Self::JsonSchema { name, schema } => (name, schema),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     pub parameters: Value,
+    pub response_format: Option<ChatResponseFormat>,
 }
 
 #[derive(Serialize)]
 struct ProviderNeutralRequest<'a> {
     messages: &'a [ChatMessage],
     parameters: &'a Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<&'a ChatResponseFormat>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +158,7 @@ pub const MODEL_RESPONSE_TOO_LARGE_MESSAGE: &str =
     "chat provider response exceeded the configured size limit";
 const LLM_CONTENT_INVALID: &str = "VNEXT_LLM_CONTENT_INVALID";
 const LLM_MESSAGE_ORDER_INVALID: &str = "VNEXT_LLM_MESSAGE_ORDER_INVALID";
+const LLM_RESPONSE_FORMAT_INVALID: &str = "VNEXT_LLM_RESPONSE_CONFIG_INVALID";
 
 pub fn model_response_too_large() -> RunError {
     RunError::operation(
@@ -157,7 +213,8 @@ pub(crate) fn validate_chat_request(request: &ChatRequest) -> Result<(), RunErro
                         }
                         ChatContentPart::Text { .. } => {}
                         ChatContentPart::Image { image }
-                            if message.role != ChatRole::User || image.trim().is_empty() =>
+                            if message.role != ChatRole::User
+                                || validate_image_url(image).is_err() =>
                         {
                             return Err(invalid_chat_request(
                                 LLM_CONTENT_INVALID,
@@ -177,7 +234,87 @@ pub(crate) fn validate_chat_request(request: &ChatRequest) -> Result<(), RunErro
             "chat provider request must end with a user message",
         ));
     }
+    if let Some(response_format) = &request.response_format {
+        let (name, schema) = response_format.contract();
+        if name.is_empty()
+            || name.len() > 64
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            || !schema.is_object()
+            || crate::schema::compile_schema_2020(schema).is_err()
+        {
+            return Err(invalid_chat_request(
+                LLM_RESPONSE_FORMAT_INVALID,
+                "chat provider structured response format is invalid",
+            ));
+        }
+        if matches!(response_format, ChatResponseFormat::JsonObject { .. })
+            && !schema_requires_object_root(schema)
+        {
+            return Err(invalid_chat_request(
+                LLM_RESPONSE_FORMAT_INVALID,
+                "chat provider json_object response requires an object-root schema",
+            ));
+        }
+    }
     Ok(())
+}
+
+fn schema_requires_object_root(schema: &Value) -> bool {
+    schema_node_requires_object(schema, schema, &mut BTreeSet::new())
+}
+
+fn schema_node_requires_object(
+    document: &Value,
+    schema: &Value,
+    visited_refs: &mut BTreeSet<String>,
+) -> bool {
+    let Some(object) = schema.as_object() else {
+        return false;
+    };
+    if let Some(schema_type) = object.get("type") {
+        return match schema_type {
+            Value::String(schema_type) => schema_type == "object",
+            Value::Array(types) => {
+                types.len() == 1 && types.first().and_then(Value::as_str) == Some("object")
+            }
+            _ => false,
+        };
+    }
+    if object.get("const").is_some_and(Value::is_object) {
+        return true;
+    }
+    if let Some(values) = object.get("enum").and_then(Value::as_array) {
+        return !values.is_empty() && values.iter().all(Value::is_object);
+    }
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        let Some(pointer) = reference.strip_prefix('#') else {
+            return false;
+        };
+        if !visited_refs.insert(reference.to_string()) {
+            return false;
+        }
+        let result = document
+            .pointer(pointer)
+            .is_some_and(|target| schema_node_requires_object(document, target, visited_refs));
+        visited_refs.remove(reference);
+        return result;
+    }
+    if let Some(all_of) = object.get("allOf").and_then(Value::as_array) {
+        return all_of
+            .iter()
+            .any(|branch| schema_node_requires_object(document, branch, visited_refs));
+    }
+    for keyword in ["anyOf", "oneOf"] {
+        if let Some(branches) = object.get(keyword).and_then(Value::as_array) {
+            return !branches.is_empty()
+                && branches
+                    .iter()
+                    .all(|branch| schema_node_requires_object(document, branch, visited_refs));
+        }
+    }
+    false
 }
 
 fn invalid_chat_request(code: &'static str, message: &'static str) -> RunError {
@@ -201,6 +338,7 @@ pub trait ChatModel: Send + Sync + fmt::Debug {
             &ProviderNeutralRequest {
                 messages: &request.messages,
                 parameters: &request.parameters,
+                response_format: request.response_format.as_ref(),
             },
             max_bytes,
         )

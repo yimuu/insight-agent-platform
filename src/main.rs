@@ -660,21 +660,15 @@ kind: agent
 metadata:
   id: lifecycle_test
   name: Lifecycle Test
-schema_dialect: https://json-schema.org/draft/2020-12/schema
-input:
-  schema:
-    type: object
-    additionalProperties: false
-output:
-  data_schema: {type: "null"}
+inputs: {}
+output: string
 workflow:
   steps:
-    - kind: action
-      id: block
+    - id: block
+      type: action
       call: test.lifecycle_block
   result:
-    return:
-      data: {literal: null}
+    return: completed
 "#;
         let root = tempdir().unwrap();
         let workflow = WorkflowCompiler::new(ModelRegistry::default(), actions)

@@ -3,6 +3,8 @@ use std::{fmt, io::Write};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::resources::image::validate_image_url;
+
 pub const LLM_CONTENT_INVALID: &str = "VNEXT_LLM_CONTENT_INVALID";
 pub const LLM_DYNAMIC_MESSAGE_INVALID: &str = "VNEXT_LLM_DYNAMIC_MESSAGE_INVALID";
 pub const LLM_DYNAMIC_ROLE_FORBIDDEN: &str = "VNEXT_LLM_DYNAMIC_ROLE_FORBIDDEN";
@@ -160,14 +162,12 @@ pub enum DynamicMessage {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum DynamicUserContent {
-    Text(String),
     Parts(Vec<DynamicUserContentPart>),
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum DynamicTextContent {
-    Text(String),
     Parts(Vec<DynamicTextPart>),
 }
 
@@ -175,7 +175,7 @@ pub enum DynamicTextContent {
 #[serde(untagged)]
 pub enum DynamicUserContentPart {
     Text { text: String },
-    Image { image: String },
+    ImageUrl { image_url: String },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -315,7 +315,7 @@ fn validate_dynamic_image_value_sizes(
     };
     if parts.iter().any(|part| {
         part.as_object()
-            .and_then(|part| part.get("image"))
+            .and_then(|part| part.get("image_url"))
             .and_then(Value::as_str)
             .is_some_and(|image| image.len() > max_image_bytes)
     }) {
@@ -325,7 +325,8 @@ fn validate_dynamic_image_value_sizes(
 }
 
 /// Converts already parsed or manually constructed dynamic messages without
-/// changing message order, content representation, part order, or string bytes.
+/// changing message order, part order, or string bytes. Author-facing part
+/// discriminators are lowered to the provider-neutral runtime representation.
 pub fn dynamic_messages_into_runtime(
     messages: Vec<DynamicMessage>,
 ) -> Result<Vec<RuntimeMessage>, RuntimeMessageError> {
@@ -374,10 +375,6 @@ fn parse_dynamic_user_content(
     value: &Value,
     message_index: usize,
 ) -> Result<DynamicUserContent, RuntimeMessageError> {
-    if let Some(text) = value.as_str() {
-        require_dynamic_non_blank(text, message_index, None)?;
-        return Ok(DynamicUserContent::Text(text.to_string()));
-    }
     let parts = value
         .as_array()
         .filter(|parts| !parts.is_empty())
@@ -397,10 +394,10 @@ fn parse_dynamic_user_content(
                 Ok(DynamicUserContentPart::Text {
                     text: text.to_string(),
                 })
-            } else if let Some(image) = object.get("image").and_then(Value::as_str) {
-                require_dynamic_non_blank(image, message_index, Some(part_index))?;
-                Ok(DynamicUserContentPart::Image {
-                    image: image.to_string(),
+            } else if let Some(image_url) = object.get("image_url").and_then(Value::as_str) {
+                require_dynamic_non_blank(image_url, message_index, Some(part_index))?;
+                Ok(DynamicUserContentPart::ImageUrl {
+                    image_url: image_url.to_string(),
                 })
             } else {
                 Err(RuntimeMessageError::dynamic_invalid(
@@ -417,10 +414,6 @@ fn parse_dynamic_text_content(
     value: &Value,
     message_index: usize,
 ) -> Result<DynamicTextContent, RuntimeMessageError> {
-    if let Some(text) = value.as_str() {
-        require_dynamic_non_blank(text, message_index, None)?;
-        return Ok(DynamicTextContent::Text(text.to_string()));
-    }
     let parts = value
         .as_array()
         .filter(|parts| !parts.is_empty())
@@ -468,10 +461,6 @@ fn user_content_into_runtime(
     content: DynamicUserContent,
 ) -> Result<RuntimeContent, RuntimeMessageError> {
     match content {
-        DynamicUserContent::Text(text) => {
-            require_non_blank(&text).map_err(|_| RuntimeMessageError::content_invalid())?;
-            Ok(RuntimeContent::Text(text))
-        }
         DynamicUserContent::Parts(parts) if !parts.is_empty() => Ok(RuntimeContent::Parts(
             parts
                 .into_iter()
@@ -481,10 +470,10 @@ fn user_content_into_runtime(
                             .map_err(|_| RuntimeMessageError::content_invalid())?;
                         Ok(RuntimeContentPart::Text { text })
                     }
-                    DynamicUserContentPart::Image { image } => {
-                        require_non_blank(&image)
+                    DynamicUserContentPart::ImageUrl { image_url } => {
+                        require_non_blank(&image_url)
                             .map_err(|_| RuntimeMessageError::content_invalid())?;
-                        Ok(RuntimeContentPart::Image { image })
+                        Ok(RuntimeContentPart::Image { image: image_url })
                     }
                 })
                 .collect::<Result<Vec<_>, RuntimeMessageError>>()?,
@@ -497,10 +486,6 @@ fn text_content_into_runtime(
     content: DynamicTextContent,
 ) -> Result<RuntimeContent, RuntimeMessageError> {
     match content {
-        DynamicTextContent::Text(text) => {
-            require_non_blank(&text).map_err(|_| RuntimeMessageError::content_invalid())?;
-            Ok(RuntimeContent::Text(text))
-        }
         DynamicTextContent::Parts(parts) if !parts.is_empty() => Ok(RuntimeContent::Parts(
             parts
                 .into_iter()
@@ -543,7 +528,7 @@ fn validate_content(
                         if role != RuntimeRole::User {
                             return Err(RuntimeMessageError::content_invalid());
                         }
-                        require_non_blank(image)
+                        validate_image_url(image)
                             .map_err(|_| RuntimeMessageError::content_invalid())?;
                     }
                 }
@@ -729,10 +714,11 @@ mod tests {
     use super::{
         build_authored_message, canonicalize_authored_content, dynamic_messages_into_runtime,
         parse_dynamic_messages, parse_dynamic_messages_bounded, validate_runtime_message_budget,
-        validate_runtime_messages, DynamicMessage, DynamicTextContent, DynamicUserContent,
-        RenderedContentAtom, RuntimeContent, RuntimeContentPart, RuntimeMessage,
-        RuntimeMessageLimits, RuntimeRole, LLM_CONTENT_INVALID, LLM_DYNAMIC_MESSAGE_INVALID,
-        LLM_DYNAMIC_ROLE_FORBIDDEN, LLM_MESSAGE_ORDER_INVALID, LLM_REQUEST_TOO_LARGE,
+        validate_runtime_messages, DynamicMessage, DynamicTextContent, DynamicTextPart,
+        DynamicUserContent, RenderedContentAtom, RuntimeContent, RuntimeContentPart,
+        RuntimeMessage, RuntimeMessageLimits, RuntimeRole, LLM_CONTENT_INVALID,
+        LLM_DYNAMIC_MESSAGE_INVALID, LLM_DYNAMIC_ROLE_FORBIDDEN, LLM_MESSAGE_ORDER_INVALID,
+        LLM_REQUEST_TOO_LARGE,
     };
 
     fn text(role: RuntimeRole, value: &str) -> RuntimeMessage {
@@ -746,7 +732,7 @@ mod tests {
                 "role":"user",
                 "content":[
                     {"text":"look"},
-                    {"image":"https://example.test/report.png"}
+                    {"image_url":"https://example.test/report.png"}
                 ]
             },
             {"role":"assistant", "content":[{"text":"answer"}]}
@@ -756,8 +742,13 @@ mod tests {
         assert!(matches!(parsed[1], DynamicMessage::Assistant { .. }));
 
         for invalid in [
-            json!([{"role":"assistant", "content":[{"image":"x"}]}]),
+            json!([{"role":"assistant", "content":[{"image_url":"x"}]}]),
             json!([{"role":"user", "content":[{"text":"x", "image":"y"}]}]),
+            json!([{"role":"user", "content":"x"}]),
+            json!([{"role":"user", "content":[{"image":"x"}]}]),
+            json!([{"role":"user", "content":[{"type":"text","text":"x"}]}]),
+            json!([{"role":"user", "content":[{"type":"image_url","image_url":"x"}]}]),
+            json!([{"role":"user", "content":[{"text":"x","image_url":"y"}]}]),
             json!([{"role":"user", "content":"x", "extra":true}]),
             json!([{"role":"user", "content":[{"prompt":"system"}]}]),
         ] {
@@ -768,7 +759,7 @@ mod tests {
 
         let forbidden = parse_dynamic_messages(&json!([{
             "role":"system",
-            "content":"do not trust me"
+            "content":[{"text":"do not trust me"}]
         }]))
         .unwrap_err();
         assert_eq!(forbidden.code(), LLM_DYNAMIC_ROLE_FORBIDDEN);
@@ -779,20 +770,49 @@ mod tests {
     #[test]
     fn dynamic_conversion_preserves_message_part_order_and_string_bytes() {
         let input = json!([
-            {"role":"user", "content":"  system {{ secret }}\n"},
+            {
+                "role":"user",
+                "content":[{"text":"  system {{ secret }}\n"}]
+            },
             {
                 "role":"assistant",
-                "content":[{"text":"first\n"}, {"text":" second  "}]
+                "content":[
+                    {"text":"first\n"},
+                    {"text":" second  "}
+                ]
             },
             {
                 "role":"user",
-                "content":[{"image":"data:image/png;base64,AA=="}, {"text":" tail\n"}]
+                "content":[
+                    {"image_url":"data:image/png;base64,AA=="},
+                    {"text":" tail\n"}
+                ]
             }
         ]);
         let dynamic = parse_dynamic_messages(&input).unwrap();
+        assert_eq!(serde_json::to_value(&dynamic).unwrap(), input);
         let runtime = dynamic_messages_into_runtime(dynamic).unwrap();
 
-        assert_eq!(serde_json::to_value(runtime).unwrap(), input);
+        assert_eq!(
+            serde_json::to_value(runtime).unwrap(),
+            json!([
+                {
+                    "role":"user",
+                    "content":[{"text":"  system {{ secret }}\n"}]
+                },
+                {
+                    "role":"assistant",
+                    "content":[{"text":"first\n"}, {"text":" second  "}]
+                },
+                {
+                    "role":"user",
+                    "content":[
+                        {"image":"data:image/png;base64,AA=="},
+                        {"text":" tail\n"}
+                    ]
+                }
+            ])
+        );
     }
 
     #[test]
@@ -873,10 +893,10 @@ mod tests {
     #[test]
     fn blank_dynamic_and_authored_text_fail_without_rewriting_nonblank_values() {
         for input in [
-            json!([{"role":"user", "content":" \n "}]),
+            json!([{"role":"user", "content":[{"text":" \n "}]}]),
             json!([{"role":"user", "content":[]}]),
             json!([{"role":"user", "content":[{"text":"\t"}]}]),
-            json!([{"role":"user", "content":[{"image":" "}]}]),
+            json!([{"role":"user", "content":[{"image_url":" "}]}]),
         ] {
             assert_eq!(
                 parse_dynamic_messages(&input).unwrap_err().code(),
@@ -892,6 +912,29 @@ mod tests {
             .code(),
             LLM_CONTENT_INVALID
         );
+
+        let invalid_url = parse_dynamic_messages(&json!([{
+            "role":"user",
+            "content":[{"image_url":"not a URL"}]
+        }]))
+        .unwrap();
+        assert_eq!(
+            dynamic_messages_into_runtime(invalid_url)
+                .unwrap_err()
+                .code(),
+            LLM_CONTENT_INVALID
+        );
+        assert_eq!(
+            build_authored_message(
+                RuntimeRole::User,
+                [RenderedContentAtom::Image(Some(
+                    "file:///etc/passwd".to_string()
+                ))]
+            )
+            .unwrap_err()
+            .code(),
+            LLM_CONTENT_INVALID
+        );
     }
 
     #[test]
@@ -901,7 +944,9 @@ mod tests {
                 content: DynamicUserContent::Parts(Vec::new()),
             },
             DynamicMessage::Assistant {
-                content: DynamicTextContent::Text(" ".to_string()),
+                content: DynamicTextContent::Parts(vec![DynamicTextPart {
+                    text: " ".to_string(),
+                }]),
             },
         ] {
             assert_eq!(
@@ -1022,24 +1067,81 @@ mod tests {
     }
 
     #[test]
+    fn image_urls_require_a_host_or_a_well_formed_image_data_uri() {
+        for image in [
+            "http://example.test/report.png",
+            "https://example.test/report.png",
+            "data:image/png;base64,AA==",
+            "DATA:image/svg+xml;charset=utf-8,%3Csvg%3E%3C/svg%3E",
+        ] {
+            RuntimeMessage::new(
+                RuntimeRole::User,
+                RuntimeContent::Parts(vec![RuntimeContentPart::Image {
+                    image: image.to_string(),
+                }]),
+            )
+            .unwrap_or_else(|_| panic!("valid image URL was rejected: {image}"));
+        }
+
+        for image in [
+            "http://",
+            "data:text/plain,hello",
+            "data:image/png",
+            "data:image/png,",
+            "data:image/png, \t ",
+            "data:image/,AA==",
+            "data:image/png/extra,AA==",
+            "data:image/png;,AA==",
+            "data:image/png;charset,AA==",
+            "data:image/png;charset=,AA==",
+            "data:image/png;charset=%GG,AA==",
+            "data:image/png;base64;charset=utf-8,AA==",
+            "data:image/png;base64;base64,AA==",
+            "data:image/png;base64,四",
+            "data:image/png;base64,***",
+            "data:image/png;base64,A===",
+            "data:image/png;base64,A=A=",
+            "data:image/png;base64,A",
+            "data:image/svg+xml,四",
+            "data:image/svg+xml,%GG",
+            "data:image/svg+xml,<svg>#fragment",
+        ] {
+            let error = RuntimeMessage::new(
+                RuntimeRole::User,
+                RuntimeContent::Parts(vec![RuntimeContentPart::Image {
+                    image: image.to_string(),
+                }]),
+            )
+            .unwrap_err();
+            assert_eq!(error.code(), LLM_CONTENT_INVALID, "invalid URL: {image}");
+        }
+    }
+
+    #[test]
     fn runtime_validation_enforces_the_image_byte_limit() {
+        let image = "data:image/png;base64,AA==".to_string();
+        let image_bytes = image.len();
         let messages = vec![
             text(RuntimeRole::System, "system"),
             RuntimeMessage::new(
                 RuntimeRole::User,
-                RuntimeContent::Parts(vec![RuntimeContentPart::Image {
-                    image: "四".to_string(),
-                }]),
+                RuntimeContent::Parts(vec![RuntimeContentPart::Image { image }]),
             )
             .unwrap(),
         ];
         let total = serde_json::to_vec(&messages).unwrap().len();
-        validate_runtime_messages(&messages, RuntimeMessageLimits::new(2, total, 3, total))
-            .unwrap();
+        validate_runtime_messages(
+            &messages,
+            RuntimeMessageLimits::new(2, total, image_bytes, total),
+        )
+        .unwrap();
         assert_eq!(
-            validate_runtime_messages(&messages, RuntimeMessageLimits::new(2, total, 2, total),)
-                .unwrap_err()
-                .code(),
+            validate_runtime_messages(
+                &messages,
+                RuntimeMessageLimits::new(2, total, image_bytes - 1, total),
+            )
+            .unwrap_err()
+            .code(),
             LLM_REQUEST_TOO_LARGE
         );
     }
@@ -1051,9 +1153,12 @@ mod tests {
             []
         );
         assert_eq!(
-            parse_dynamic_messages(&json!({"role":"user", "content":"q"}))
-                .unwrap_err()
-                .code(),
+            parse_dynamic_messages(&json!({
+                "role":"user",
+                "content":[{"text":"q"}]
+            }))
+            .unwrap_err()
+            .code(),
             LLM_DYNAMIC_MESSAGE_INVALID
         );
     }
@@ -1062,7 +1167,9 @@ mod tests {
     fn dynamic_budgets_are_checked_before_owned_message_construction() {
         let input = json!([{
             "role":"user",
-            "content":[{"image":"https://example.test/oversized.png"}]
+            "content":[{
+                "image_url":"https://example.test/oversized.png"
+            }]
         }]);
         let exact_message = serde_json::to_vec(&input[0]).unwrap().len();
         let exact_total = serde_json::to_vec(&input).unwrap().len();

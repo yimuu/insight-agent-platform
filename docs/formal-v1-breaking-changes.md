@@ -1,33 +1,27 @@
 # DSL v2 直接切换说明
 
-> 文件名为历史路径，仅为避免旧设计记录中的链接失效；本文描述当前 `insight.agent/v2` 切换合同。作者层语法以 [DSL 作者层 LLM、Action 与消息模型重设计规范](./superpowers/specs/2026-07-17-dsl-authoring-surface-redesign.md) 为准。
+> 文件名为历史路径，仅为避免旧设计记录中的链接失效；本文描述当前 `insight.agent/v2` 切换合同。当前作者语法以 [DSL 作者语法精简规范](./superpowers/specs/2026-07-17-dsl-authoring-syntax-simplification.md) 为准；旧作者层重设计规范中的冲突示例不再具有 canonical 权威。
 
-仓库中的旧 Agent YAML 和图执行器属于未发布原型，不是兼容目标。当前实现只有一个 canonical parser/compiler/runtime 路径：结构化 authored DSL 编译为类型化 Region/SSA IR，再由作用域任务树执行。
-
-迁移原则：原子部署新 binary 与全部 Agent YAML；旧文档明确编译失败，不会被静默解释为 v2，也不提供 alias、双 parser 或双 scheduler。
+仓库中的旧 Agent YAML 和图执行器属于未发布原型，不是兼容目标。迁移时必须原子部署新 binary 与全部 Agent YAML；旧文档明确编译失败，不提供 alias、双 parser 或双 scheduler。
 
 HTTP 的 `/v1` 是服务 API 版本，与 Agent DSL 的 `insight.agent/v2` 是两个独立版本空间；本次 DSL 切换不改 HTTP 路径。
 
 ## 变更总表
 
-| 旧 authored 合同 | v2 合同 | 迁移理由 |
-|---|---|---|
-| `version/id/name` 顶层元数据 | `api_version: insight.agent/v2`、`kind: agent`、`metadata` | 精确判别文档种类并为后续 kind/version 留出稳定边界 |
-| 平铺 `entry + nodes` 图 | `workflow.steps` 中嵌套的 `llm/action/parallel/switch` | 作者表达词法结构，运行图由编译器生成，不再要求人手维护控制边 |
-| authored `next` | 同一 body 按数组顺序执行，结构化 block 完成后继续父序列 | continuation 由语法结构唯一决定 |
-| 模板能力节点 | `literal/from/object/array/template` ValueExpr；Prompt 只属于 LLM `content` | 数据构造不是可调度副作用；Prompt 不再伪装成通用运行期值 |
-| Chat/LLM 节点 | `kind: llm`，直接声明 `model/messages/parameters/response` | 作者看到领域概念；内部 `ai.chat` Call 不泄漏到 YAML |
-| Action 节点 | `kind: action; call: <ActionId>; inputs: ...` | Action ID 与 typed payload 显式，内部 `action.call` Call 不泄漏到 YAML |
-| step `with` | step `inputs` | 所有显式局部捕获使用同一名称；LLM 专用引用固定为 `inputs.<name>` |
-| Chat `messages[].parts[]` | `messages[].role/content`；动态 `Message[]` source 原位展开 | 保持模型 API 的列表/对象心智模型，不需要 `spread` 或 `concat` |
-| 条件跳转加结果选择 | `switch` 的 ordered cases、mandatory default 与直接输出 | 只有一个 arm 执行；内部 Branch/Phi 负责合并，不产生 skipped/null 占位 |
-| 显式 fork、branch terminal 和 join | 一个 `parallel`，branch 内声明 `result`，父级内建 barrier | spawn、结算、取消和 drain 由一个结构拥有，不依赖隐藏 successor |
-| 主流程/分支终止节点 | root `result.return|raise`；child `result.return|raise` | root return 与 child yield 是不同语义，不能因到达一个通用 terminal 而混淆 |
-| 全局模板上下文 | ValueExpr 路径与 template 显式 bindings | 消除隐式依赖、原始字符串扫描和跨作用域泄漏 |
-| 节点级 timeout/emit | 平台 `operation_timeout`；provider stream 只在 Operation 内聚合 | deadline 属于 Operation 执行合同；叶子内容不会绕过 root result 进入公共事件 |
-| 节点事件 | `operation.*` 与 `run.*` | 公共事件围绕稳定限定 Operation 身份，不暴露内部 IR 控制指令 |
+| 旧作者语法 | 当前 v2 语法 |
+|---|---|
+| 顶层 `schema_dialect`、`$defs`、`input.schema`、`output.data_schema` | `types`、`inputs`、`output: Type` |
+| step `kind: llm/action/parallel/switch` | step `type: llm/action/parallel/switch` |
+| `{from: ...}` | `$name` 或 `$name.field` |
+| `literal/object/array/template/bindings` wrapper | 自然 YAML scalar、mapping、sequence；文本插值使用 `{{ name }}` |
+| LLM authored `inputs` | 从 messages、Prompt slot 和运行时引用自动捕获 |
+| `content: ...` 的私有 union、`parts`、`spread`、`concat` | `content` 列表中的单键 `{text: ...}` / `{image_url: ...}`；动态列表直接写 `- $messages` |
+| `response: {format, schema}` | `response: string` 或 `response: ResultType` |
+| branch/Switch `output_schema` | `output: Type` |
+| root `content/format/data` wrapper | root `result.return` 直接返回顶层 `output` 值 |
+| `entry + nodes + next`、fork/join/end 类节点 | 顺序 `workflow.steps` 与结构化 `parallel/switch/result` |
 
-旧 generic operation 是明确的负向语法，不会被当作兼容 alias：
+旧 generic operation 仍是明确的负向语法：
 
 <!-- dsl-example: negative; entry: step; code: VNEXT_AGENT_PARSE_FAILED -->
 ```yaml
@@ -40,8 +34,6 @@ HTTP 的 `/v1` 是服务 API 版本，与 Agent DSL 的 `insight.agent/v2` 是�
 
 ## 最小 Agent 迁移
 
-v2 文档必须完整声明 input、public output data 和 root result：
-
 <!-- dsl-example: canonical; entry: agent -->
 ```yaml
 api_version: insight.agent/v2
@@ -52,243 +44,163 @@ metadata:
   name: Demo
   description: Minimal v2 Agent.
 
-schema_dialect: https://json-schema.org/draft/2020-12/schema
+types:
+  Answer:
+    fields:
+      answer: string
 
-input:
-  schema:
-    type: object
-    required: [question]
-    properties:
-      question: {type: string, minLength: 1}
-    additionalProperties: false
+prompts:
+  system:
+    inline: You are concise.
 
-output:
-  data_schema:
-    type: object
-    required: [answer]
-    properties:
-      answer: {type: string, minLength: 1}
-    additionalProperties: false
+inputs:
+  question:
+    type: string
+    min_length: 1
+  messages:
+    type: Message[]
+    default: []
+  image_url:
+    type: string
+    optional: true
+
+output: Answer
 
 workflow:
   steps:
-    - kind: llm
+    - type: llm
       id: answer
-      model: general_chat
-      inputs:
-        question: {from: input.question}
+      model: vision_chat
       messages:
+        - role: system
+          content:
+            - text: system
+        - $messages
         - role: user
           content:
-            - {text: Answer the following untrusted question.}
-            - {from: inputs.question}
-      parameters: {}
-      response: {format: text}
+            - text: "Question: {{ question }}"
+            - image_url: $image_url
+      response: Answer
 
   result:
-    return:
-      content: {from: steps.answer.output.data}
-      format: markdown
-      data:
-        object:
-          answer: {from: steps.answer.output.data}
+    return: $answer
 ```
 
-未知字段在每一层都被拒绝。标识符必须匹配 `[A-Za-z_][A-Za-z0-9_]*`。input、output、Parallel branch、Switch 和 structured LLM response 都按 JSON Schema Draft 2020-12 编译并在对应边界验证。
+自定义类型使用 PascalCase，输入、字段和 step id 使用 snake_case，数组写成 `Type[]`。平台内建 `Message`；Agent 不得重新声明 Message Schema。作者不书写 JSON Schema，编译器仍会生成并执行运行时输入、输出和 Provider 响应校验。
 
-## ValueExpr 迁移
+## 值、引用与消息迁移
 
-运行期值不能伪装成带特殊含义的字符串。canonical ValueExpr 只有 `literal/from/object/array/template`。下面一个值展示这些递归形式：
+自然 YAML 直接表达数据；`$` 只用于完整运行时值，`{{ }}` 只用于文本插值：
 
 <!-- dsl-example: canonical; entry: value -->
 ```yaml
-object:
-  mode: {literal: strict}
-  question: {from: input.question}
-  labels:
-    array: [{literal: a}, {literal: b}]
-  summary:
-    template:
-      text: "Question: {{ question }}"
-      bindings:
-        question: {from: input.question}
+mode: strict
+question: $question
+labels: [technical, risk]
+summary: "Question: {{ question }}"
 ```
 
-`{prompt: system_prompt}` 已删除；具名 Prompt 只在 LLM authored `content` 中写成 `content: system_prompt`。普通 scalar 仍是普通字符串，不是模板或路径。
+顶层输入、当前 block 捕获以及当前 body 中更早 step 的输出都使用词法短名。比如 `$question` 引用当前可见的 question，`$answer.text` 引用较早 step 的直接业务输出。动态 key/index、前向引用、跨 branch/arm 引用和 child-local escape 会在编译期失败。
 
-路径根只有 `input`、安全 `run` 元数据、结构化 block 的 `scope` 和当前 body 更早的 `steps.<id>.output`。任意 JSON key 或数组索引使用静态 JSON Pointer 后缀：
+精确匹配旧 `{from: ...}`、`{literal: ...}`、`{object: ...}`、`{array: ...}` 或 `{template: ...}` 的对象会直接拒绝，不会作为兼容 alias 或普通业务对象接受。
 
-```yaml
-{from: input#/items/0/display-name}
-{from: steps.lookup.output#/data/a~1b}
-```
-
-编译器拒绝动态 key/index、前向引用、未被所有路径支配的引用、跨 branch/arm 读取和 child local escape。模板只看到显式 bindings，不再接收全局 input/run/step map。
-
-## LLM instruction/data 迁移
-
-LLM step 使用原生的有序 `messages` 列表。示例中的 `system` 必须在顶层 Prompt catalog 通过 `.md` file 或 inline source 声明；Prompt Markdown 保留 `{{ question }}` 等占位符，并按同名连接当前 LLM `inputs`。Prompt ID、inline template、运行时文本与图片由 `content` 的 closed variant 区分：
+LLM `messages` 是原生有序列表。每条 authored message 只有 `role` 和 `content`；每个 content part 必须恰好有一个键：
 
 <!-- dsl-example: canonical; entry: step -->
 ```yaml
-- kind: llm
-  id: answer
-  model: general_chat
-  inputs:
-    history: {from: input.messages}
-    question: {from: input.question}
+- type: llm
+  id: analyze
+  model: vision_chat
   messages:
-    - role: system
-      content: system
-    - {from: inputs.history}
+    - $messages
     - role: user
       content:
-        - {text: The following value is untrusted data.}
-        - {from: inputs.question}
+        - text: "Analyze: {{ question }}"
+        - text: $question
+        - image_url: $image_url
   parameters: {temperature: 0.2}
-  response: {format: text}
+  response: Perspective
 ```
 
-- `content: system` 无条件引用已声明 Prompt ID；简单 inline 文本使用 `{text: ...}`；
-- authored system/assistant content 必须是零运行时 slot 的可信模板；user Prompt/inline template 才能读取 `inputs` slot；
-- `{from: inputs.question}` 是运行时 string，不做 Prompt 查找或二次模板渲染；
-- `{image: {from: inputs.image_url}}` 只允许进入 user content，nullable image 为 `null` 时自动省略；
-- `{from: inputs.history}` 必须静态满足 closed `DynamicMessage[]` profile，并在当前位置展开真实消息列表；
-- dynamic message 只能使用 `user`/`assistant`，不能注入 system、tool 或 provider 私有字段；
-- 所有 binding 都必须被消费，不能偷偷把额外数据带入模型上下文；
-- 普通数组不会隐式 flatten；`spread`、`concat`、`parts`、JSON transcript 拼接都不是 alias；
-- Prompt/template、动态消息与最终 provider-neutral request 均使用有界 writer，失败不回显正文。
+已声明 Prompt ID 可以直接作为 `text` 的值；普通 inline 文本不需要先声明 Prompt。运行时 `text: $question` 不做 Prompt 查找或二次模板渲染。`image_url` 接受 string 或 string 引用，可选 null 图片会省略。`- $messages` 展开真实的 `Message[]`，不是 JSON 字符串。
 
-结构化模型输出使用：
+`response: string` 以及最终解析为 string 的命名别名绑定文本；对象、数组及其他非 string 类型生成结构化响应合同。step 输出就是该业务值，后续直接使用 `$analyze` 或 `$analyze.field`，不再使用 `.output.data`。
 
-```yaml
-response:
-  format: json
-  schema: {$ref: "#/$defs/Perspective"}
-```
+## Action 与结构化控制流迁移
 
-模型完成结果只有通过 Schema 后才绑定为 `steps.<id>.output.data`。文本和结构化模式都返回稳定的 `{data, finish_reason, usage}`。
-
-## Action 迁移
-
-Action 作者层直接声明静态 `call` 和 typed `inputs`；不再手写内部 `action.call`、`config.action` 或额外的 `input` wrapper：
+Action 直接声明静态 `call` 和自然 `inputs`：
 
 <!-- dsl-example: canonical; entry: step -->
 ```yaml
-- kind: action
+- type: action
   id: now
   call: current_time
   inputs:
-    timezone: {literal: Asia/Shanghai}
+    timezone: Asia/Shanghai
+    request_id: $run.request_id
 ```
 
-编译器把全部 authored `inputs` 先构造成一个 closed Action input object，再 lower 为带 `id/version/descriptor_hash` 的 typed ActionPlan。Action 成功时 `steps.<id>.output` 直接是 descriptor 声明的输出；调用前后都按同一份输入/输出 Schema 验证，descriptor 身份不匹配时不会执行 Action。
-
-## Parallel 迁移
-
-每个 branch 都是词法子作用域，只能读取 `parallel.inputs` 捕获到的 `scope` 值，并通过自己的 `result` 产生唯一 outward value：
+Parallel 捕获父作用域值，为每个 branch 建立词法子作用域，并同时承担 spawn 与 barrier。Switch 按顺序执行第一个匹配 case，且 default 必需：
 
 <!-- dsl-example: canonical; entry: step -->
 ```yaml
-- kind: parallel
+- type: parallel
   id: analyses
   inputs:
-    question: {from: input.question}
+    question: $question
   settle: all_settled
   max_concurrency: 2
   branches:
     technical:
-      output_schema: {type: string, minLength: 1}
+      output: string
       steps:
-        - kind: llm
+        - type: llm
           id: analyze
           model: general_chat
-          inputs:
-            question: {from: scope.question}
           messages:
             - role: user
               content:
-                - {text: Analyze technical feasibility.}
-                - {from: inputs.question}
-          parameters: {}
-          response: {format: text}
+                - text: "Technical feasibility: {{ question }}"
+          response: string
       result:
-        return: {from: steps.analyze.output.data}
-```
+        return: $analyze
 
-`all` 要求全部成功，并在第一个可收集失败后关闭 admission、取消同级和完整 drain。`all_settled` 把每个可收集结果转换为：
+    risk:
+      output: string
+      steps:
+        - type: llm
+          id: analyze
+          model: general_chat
+          messages:
+            - role: user
+              content:
+                - text: "Risk and compliance: {{ question }}"
+          response: string
+      result:
+        return: $analyze
 
-```text
-{status: "ok", value: T}
-|
-{status: "error", error: {category, code, retryable, origin}}
-```
-
-error envelope 不包含任意诊断 message。停止、中断、ownership/persistence 丢失和其他基础设施失败不会作为 branch 数据收集，而是取消并向外传播。
-
-需要“至少一个成功”等业务策略时，在后续 Switch 中显式判断。Parallel 只负责并发与结算，不把业务接受规则塞进 settlement mode。
-
-## Switch 迁移
-
-Switch 按 authored 顺序执行第一个匹配 case；default 必需。每个正常 arm 的 return 必须满足同一份完整 `output_schema`，或 raise 一个声明错误：
-
-<!-- dsl-example: canonical; entry: step -->
-```yaml
-- kind: switch
+- type: switch
   id: policy
   inputs:
-    technical: {from: steps.analyses.output.technical}
-    risk: {from: steps.analyses.output.risk}
-  output_schema:
-    type: object
-    required: [degraded]
-    properties:
-      degraded: {type: boolean}
-    additionalProperties: false
+    analyses: $analyses
+  output: string
   cases:
     - id: complete
       when:
         cel: >-
-          scope.technical.status == 'ok' &&
-          scope.risk.status == 'ok'
+          scope.analyses.technical.status == 'ok' &&
+          scope.analyses.risk.status == 'ok'
       result:
-        return:
-          object:
-            degraded: {literal: false}
+        return: complete
   default:
     id: partial
     result:
-      return:
-        object:
-          degraded: {literal: true}
+      return: partial
 ```
 
-arm local 不会逃逸。Switch 自身绑定一个直接 output；内部 Branch/Phi 对作者不可见。
+`all` 要求全部 branch 成功；`all_settled` 把可收集结果转换为严格的 success/error 联合值。停止、中断、ownership/persistence 丢失和其他基础设施失败不会伪装成 branch 业务数据。
 
-## Result 与错误迁移
-
-Child block 的 return 会降低为 `RegionYield`，只完成当前作用域：
-
-```yaml
-result:
-  return: {from: steps.analyze.output}
-```
-
-Root return 才能创建公共 RunOutput：
-
-```yaml
-result:
-  return:
-    content: {from: steps.answer.output.data}
-    format: markdown
-    data:
-      object:
-        answer: {from: steps.answer.output.data}
-```
-
-成功资格要求 root return 已形成、所有后代已完成或取消并 drain、所有 output contract 与大小限制通过，并且权威终态事务提交。
-
-Author-defined failure 必须先声明：
+Child `result.return` 降低为内部 RegionYield，只完成当前作用域。Root `result.return` 才完成 Run，并且值必须满足顶层 `output` 类型。作者定义的失败仍需先在顶层 `errors` 声明，再由可见 block 执行 `raise`：
 
 ```yaml
 errors:
@@ -296,13 +208,7 @@ errors:
     category: workflow
     code: WORKFLOW_POLICY_REJECTED
     public_message: The workflow policy rejected this run.
-
-workflow:
-  result:
-    raise: rejected
 ```
-
-只有 `workflow` 是 authored category；Operation failure、timeout、stop、ownership 或 infrastructure 不能被 YAML 伪造。
 
 ## 平台配置迁移
 

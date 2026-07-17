@@ -13,7 +13,8 @@ use crate::{
     history::{
         repository::{HistoryError, RunRepository},
         types::{
-            NewRun, RunLifecycle, RunRecord, RunStatus, RunTerminal, StopError, TerminalUpdate,
+            summarize_input, NewRun, RunLifecycle, RunRecord, RunStatus, RunTerminal, StopError,
+            TerminalUpdate,
         },
     },
     observability::{elapsed_ms, json_size_bytes},
@@ -63,12 +64,14 @@ impl RunCoordinator {
 
     pub async fn execute(
         &self,
-        new_run: NewRun,
+        mut new_run: NewRun,
         input: Value,
         stop: StopSignal,
         execution_deadline: TokioInstant,
     ) -> Result<RunStatus, RunError> {
         bind_execution_deadline(&stop, execution_deadline)?;
+        let input = self.normalize_input(input)?;
+        new_run.input_summary = summarize_input(&input);
         self.validate_run(&new_run, &input)?;
         self.repository
             .create_run(new_run.clone())
@@ -93,6 +96,7 @@ impl RunCoordinator {
         execution_deadline: TokioInstant,
     ) -> Result<RunStatus, RunError> {
         bind_execution_deadline(&stop, execution_deadline)?;
+        let input = self.normalize_input(input)?;
         self.validate_run(&new_run, &input)?;
         self.execute_managed(new_run, input, stop, state, execution_deadline)
             .await
@@ -248,13 +252,19 @@ impl RunCoordinator {
                 "run metadata does not match the compiled agent",
             ));
         }
-        if !self.agent.input_validator().is_valid(input) {
+        if !self.agent.normalized_input_validator().is_valid(input) {
             return Err(RunError::infrastructure(
                 "INPUT_INVALID",
                 "input does not match the agent schema",
             ));
         }
         Ok(())
+    }
+
+    fn normalize_input(&self, input: Value) -> Result<Value, RunError> {
+        self.agent.normalize_input(input).map_err(|_| {
+            RunError::infrastructure("INPUT_INVALID", "input does not match the agent schema")
+        })
     }
 
     async fn finish_terminal(

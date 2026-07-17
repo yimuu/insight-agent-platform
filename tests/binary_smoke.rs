@@ -107,18 +107,10 @@ async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
     let completed = create_and_wait(&client, &base_url, "action_demo", discovered_input).await;
     assert_eq!(completed["data"]["agent_id"], "action_demo");
     assert_eq!(completed["data"]["status"], "completed");
-    assert_eq!(completed["data"]["output"]["format"], "text");
     assert_eq!(
-        completed["data"]["output"]["data"],
-        json!({"characters":16,"words":3,"lines":1})
+        completed["data"]["output"],
+        json!({"data":{"characters":16,"words":3,"lines":1}})
     );
-    let content = completed["data"]["output"]["content"]
-        .as_str()
-        .expect("completed output must contain text content");
-    assert!(content.contains("Text metrics:"), "{content}");
-    assert!(content.contains("- characters: 16"), "{content}");
-    assert!(content.contains("- words: 3"), "{content}");
-    assert!(content.contains("- lines: 1"), "{content}");
 
     let failed = create_and_wait(&client, &base_url, "workflow_failure_demo", json!({})).await;
     assert_eq!(failed["data"]["agent_id"], "workflow_failure_demo");

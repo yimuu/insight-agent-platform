@@ -235,6 +235,7 @@ impl Serialize for MessageListExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResponseConfig {
     Text,
+    TextSchema { schema: Value },
     Json { schema: Value },
 }
 
@@ -254,6 +255,9 @@ impl<'de> Deserialize<'de> for ResponseConfig {
             .ok_or_else(|| D::Error::custom("LLM response format must be a string"))?;
         match format.as_str() {
             "text" if object.is_empty() => Ok(Self::Text),
+            "text" if object.len() == 1 && object.contains_key("schema") => Ok(Self::TextSchema {
+                schema: object.remove("schema").expect("schema key was checked"),
+            }),
             "json" if object.len() == 1 && object.contains_key("schema") => Ok(Self::Json {
                 schema: object.remove("schema").expect("schema key was checked"),
             }),
@@ -274,10 +278,14 @@ impl Serialize for ResponseConfig {
 
         let mut map = serializer.serialize_map(Some(match self {
             Self::Text => 1,
-            Self::Json { .. } => 2,
+            Self::TextSchema { .. } | Self::Json { .. } => 2,
         }))?;
         match self {
             Self::Text => map.serialize_entry("format", "text")?,
+            Self::TextSchema { schema } => {
+                map.serialize_entry("format", "text")?;
+                map.serialize_entry("schema", schema)?;
+            }
             Self::Json { schema } => {
                 map.serialize_entry("format", "json")?;
                 map.serialize_entry("schema", schema)?;
@@ -353,9 +361,13 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(response, ResponseConfig::Json { .. }));
-        assert!(
-            yaml_serde::from_str::<ResponseConfig>("format: text\nschema: {type: string}").is_err()
-        );
+        let response: ResponseConfig =
+            yaml_serde::from_str("format: text\nschema: {type: string, minLength: 1}").unwrap();
+        assert!(matches!(
+            response,
+            ResponseConfig::TextSchema { schema }
+                if schema == serde_json::json!({"type": "string", "minLength": 1})
+        ));
     }
 
     #[test]

@@ -813,7 +813,7 @@ fn text_part_shape() -> SchemaShape {
 }
 
 fn image_part_shape() -> SchemaShape {
-    closed_object([("image", SchemaShape::String)])
+    closed_object([("image_url", SchemaShape::String)])
 }
 
 fn user_message_shape() -> SchemaShape {
@@ -825,12 +825,9 @@ fn user_message_shape() -> SchemaShape {
         ),
         (
             "content",
-            normalize_union(vec![
-                SchemaShape::String,
-                SchemaShape::Array(ArrayShape {
-                    items: Box::new(part),
-                }),
-            ]),
+            SchemaShape::Array(ArrayShape {
+                items: Box::new(part),
+            }),
         ),
     ])
 }
@@ -843,12 +840,9 @@ fn assistant_message_shape() -> SchemaShape {
         ),
         (
             "content",
-            normalize_union(vec![
-                SchemaShape::String,
-                SchemaShape::Array(ArrayShape {
-                    items: Box::new(text_part_shape()),
-                }),
-            ]),
+            SchemaShape::Array(ArrayShape {
+                items: Box::new(text_part_shape()),
+            }),
         ),
     ])
 }
@@ -939,8 +933,8 @@ mod tests {
     fn image_part() -> Value {
         json!({
             "type":"object",
-            "required":["image"],
-            "properties":{"image":{"type":"string"}},
+            "required":["image_url"],
+            "properties":{"image_url":{"type":"string"}},
             "additionalProperties":false
         })
     }
@@ -954,10 +948,9 @@ mod tests {
         let shape = messages(json!({
             "oneOf":[
                 message("user", json!({
-                    "oneOf":[
-                        {"type":"string","minLength":1,"pattern":".+"},
-                        {"type":"array","minItems":1,"items":image_part()}
-                    ]
+                    "type":"array",
+                    "minItems":1,
+                    "items":{"oneOf":[text_part(), image_part()]}
                 })),
                 message("assistant", json!({
                     "type":"array",
@@ -977,7 +970,10 @@ mod tests {
 
     #[test]
     fn narrower_text_only_and_user_only_shapes_are_valid_without_nominal_markers() {
-        let assistant_text = messages(message("assistant", json!({"type":"string"})));
+        let assistant_text = messages(message(
+            "assistant",
+            json!({"type":"array","minItems":1,"items":text_part()}),
+        ));
         assert_eq!(
             prove_dynamic_message_array(&assistant_text).unwrap(),
             DynamicMessageShapeProof {
@@ -985,8 +981,10 @@ mod tests {
             }
         );
 
-        let user_text_parts =
-            messages(message("user", json!({"type":"array","items":text_part()})));
+        let user_text_parts = messages(message(
+            "user",
+            json!({"type":"array","minItems":1,"items":text_part()}),
+        ));
         assert!(
             !prove_dynamic_message_array(&user_text_parts)
                 .unwrap()
@@ -1007,11 +1005,15 @@ mod tests {
                     "required":["role","content"],
                     "properties":{
                         "role":{"const":"tool"},
-                        "content":{"type":"string"}
+                        "content":{"type":"array","minItems":1,"items":text_part()}
                     }
                 }
             }),
             json!({"type":"array","items":{"type":"array","items":text_part()}}),
+            json!({
+                "type":"array",
+                "items":message("user", json!({"type":"string"}))
+            }),
         ];
 
         for schema in cases {
@@ -1042,6 +1044,30 @@ mod tests {
             }),
         ));
         assert!(prove_dynamic_message_array(&open_part).is_err());
+
+        for legacy_part in [
+            json!({
+                "type":"object",
+                "required":["type","text"],
+                "properties":{
+                    "type":{"const":"text"},
+                    "text":{"type":"string"}
+                },
+                "additionalProperties":false
+            }),
+            json!({
+                "type":"object",
+                "required":["image"],
+                "properties":{"image":{"type":"string"}},
+                "additionalProperties":false
+            }),
+        ] {
+            let legacy = messages(message(
+                "user",
+                json!({"type":"array","minItems":1,"items":legacy_part}),
+            ));
+            assert!(prove_dynamic_message_array(&legacy).is_err());
+        }
     }
 
     #[test]
@@ -1087,8 +1113,16 @@ mod tests {
                     "type":"array",
                     "items":{
                         "oneOf":[
-                            message("user", json!({"type":"string"})),
-                            message("assistant", json!({"type":"string"}))
+                            message("user", json!({
+                                "type":"array",
+                                "minItems":1,
+                                "items":{"oneOf":[text_part(), image_part()]}
+                            })),
+                            message("assistant", json!({
+                                "type":"array",
+                                "minItems":1,
+                                "items":text_part()
+                            }))
                         ]
                     }
                 },
@@ -1120,7 +1154,7 @@ mod tests {
         };
         assert!(matches!(
             messages.resolve_path(&["content".to_string()]).unwrap(),
-            SchemaShape::String
+            SchemaShape::Array(_)
         ));
     }
 
@@ -1128,7 +1162,11 @@ mod tests {
     fn path_resolution_rejects_union_gaps_and_unproven_array_indexes() {
         let union_with_gap = compile(json!({
             "oneOf":[
-                message("user", json!({"type":"string"})),
+                message("user", json!({
+                    "type":"array",
+                    "minItems":1,
+                    "items":text_part()
+                })),
                 {
                     "type":"object",
                     "required":["role"],
@@ -1168,10 +1206,9 @@ mod tests {
             "items":{
                 "oneOf":[
                     message("user", json!({
-                        "oneOf":[
-                            {"type":"string","minLength":1},
-                            {"type":"array","minItems":1,"items":image_part()}
-                        ]
+                        "type":"array",
+                        "minItems":1,
+                        "items":{"oneOf":[text_part(), image_part()]}
                     })),
                     message("assistant", json!({
                         "type":"array",
