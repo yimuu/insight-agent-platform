@@ -102,7 +102,7 @@ pub const MODEL_RESPONSE_TOO_LARGE_MESSAGE: &str =
     "chat provider response exceeded the configured size limit";
 
 pub fn model_response_too_large() -> RunError {
-    RunError::new(
+    RunError::operation(
         MODEL_RESPONSE_TOO_LARGE_CODE,
         MODEL_RESPONSE_TOO_LARGE_MESSAGE,
     )

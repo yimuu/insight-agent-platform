@@ -1,92 +1,305 @@
-# 正式 V1 破坏性变更
+# DSL v2 直接切换说明
 
-仓库原有的 `/v1`、Agent YAML、事件和历史结构都是未发布的原型，不是稳定合同。本次重写不提供兼容层，而是把第一个稳定合同直接命名为 HTTP/DSL/Event `V1`。这样可以避免为了兼容一个从未正式发布的原型而永久保留 `v2` 和双运行时分支。
+> 文件名为历史路径，仅为避免旧设计记录中的链接失效；本文描述当前 `insight.agent/v2` 切换合同。
 
-迁移原则：重新编译 Agent、切换客户端合同、使用全新的历史数据库。旧客户端和旧 YAML 会明确失败，不会被静默解释成新语义。
+仓库中的旧 Agent YAML 和图执行器属于未发布原型，不是兼容目标。当前实现只有一个 canonical parser/compiler/runtime 路径：结构化 authored DSL 编译为类型化 Region/SSA IR，再由作用域任务树执行。
+
+迁移原则：原子部署新 binary 与全部 Agent YAML；旧文档明确编译失败，不会被静默解释为 v2，也不提供 alias、双 parser 或双 scheduler。
+
+HTTP 的 `/v1` 是服务 API 版本，与 Agent DSL 的 `insight.agent/v2` 是两个独立版本空间；本次 DSL 切换不改 HTTP 路径。
 
 ## 变更总表
 
-fork/join 引入的 DSL、调度和事件接口变化是有意的；本次 live-only SSE 基线还会删除公开事件恢复路由。删除原因不是事件不再持久化，而是公开补发会让重连潮直接竞争数据库连接与 journal 写入，并且既有 Run 的纯实时订阅无法补齐创建到订阅之间的事件缺口。
+| 旧 authored 合同 | v2 合同 | 迁移理由 |
+|---|---|---|
+| `version/id/name` 顶层元数据 | `api_version: insight.agent/v2`、`kind: agent`、`metadata` | 精确判别文档种类并为后续 kind/version 留出稳定边界 |
+| 平铺 `entry + nodes` 图 | `workflow.steps` 中嵌套的 `operation/parallel/switch` | 作者表达词法结构，运行图由编译器生成，不再要求人手维护控制边 |
+| authored `next` | 同一 body 按数组顺序执行，结构化 block 完成后继续父序列 | continuation 由语法结构唯一决定 |
+| 模板能力节点 | `literal/from/object/array/template/prompt` ValueExpr | 数据构造不是可调度副作用；引用与渲染获得独立类型合同 |
+| Chat 节点 | `kind: operation; uses: ai.chat` | Chat 是可扩展叶子能力，不拥有控制流 |
+| Action 节点 | `kind: operation; uses: action.call` | Action 输入、输出、取消和身份由统一 Operation 边界承载 |
+| 条件跳转加结果选择 | `switch` 的 ordered cases、mandatory default 与直接输出 | 只有一个 arm 执行；内部 Branch/Phi 负责合并，不产生 skipped/null 占位 |
+| 显式 fork、branch terminal 和 join | 一个 `parallel`，branch 内声明 `result`，父级内建 barrier | spawn、结算、取消和 drain 由一个结构拥有，不依赖隐藏 successor |
+| 主流程/分支终止节点 | root `result.return|raise`；child `result.return|raise` | root return 与 child yield 是不同语义，不能因到达一个通用 terminal 而混淆 |
+| 全局模板上下文 | ValueExpr 路径与 template 显式 bindings | 消除隐式依赖、原始字符串扫描和跨作用域泄漏 |
+| 节点级 timeout/emit | 平台 `operation_timeout`；provider stream 只在 Operation 内聚合 | deadline 属于 Operation 执行合同；叶子内容不会绕过 root result 进入公共事件 |
+| 节点事件 | `operation.*` 与 `run.*` | 公共事件围绕稳定限定 Operation 身份，不暴露内部 IR 控制指令 |
 
-| 原型 | 正式 V1 | 为什么改 | 最小迁移示例 |
-|---|---|---|---|
-| `steps: [...]` 隐式顺序，混合 `goto/end` | `entry` + `nodes` DAG | 顺序、跳转和依赖都是图语义；启动期可统一检查缺边、环、不可达节点和前驱引用 | `steps: [{id: answer,...}]` → `entry: answer; nodes: {answer: {...}}` |
-| `prompt` / `text` step | `core.template` | 模板渲染与模型调用、内容发布是不同职责 | `type: text; prompt: "{{ input.x }}"` → `type: core.template; config.value: "{{ input.x }}"` |
-| 通用 `llm` step 和 Agent 顶层 model | 命名模型资源 + `core.chat` | chat、embedding、speech、rerank 需要不同合同；不应塞进一个可选字段集合 | `type: llm` → `type: core.chat; config.model: general_chat` |
-| `tool` 与 `code` 两套调用边界 | `core.action` + `ActionRegistry` | 两者本质上都是严格 JSON 能力调用；统一 Schema、取消和错误语义 | `type: code; handler: example.text_metrics` → `type: core.action; config.action: example.text_metrics` |
-| 运行时编译 condition/CEL | `core.condition` 在启动时预编译 | 平台自有工作流的表达式错误不应延迟到用户请求 | `cases[].goto` → `config.cases[].next`，上下文从 `steps.x` 改为 `nodes.x` |
-| 最后一个 step 隐式成为结果 | 主流程必需 `core.end`，Fork 分支必需 `core.branch_end` | workflow termination 与 branch settlement 必须由 authored kind 明确区分 | 主流程添加 `result: {type: core.end, ...}`；每个分支添加自己的 `core.branch_end`，不再指向 Join |
-| 节点 `stream: true/false` | 公共 envelope 的 `emit: content/none` | 供应商是否使用流传输与内容是否公开给客户端是两件事 | `stream: true` → `emit: content` |
-| Agent `public/default_public/exposure` | 平台 `auth.mode` + `agents.enabled` | 工作流元数据不能决定部署安全；鉴权和启用策略必须分离 | 删除 `public`，在平台配置中显式写 `auth.mode` 和 `agents.enabled` |
-| SSE 连接拥有所有 Run | attached 与 detached 两种创建接口 | 交互式断开取消和后台执行是两种明确意图 | `/runs/stream` 创建 attached；`/runs` 创建 detached 并返回 202 |
-| 传输消费时才写历史 | 独立 `EventHub` + bounded journal + live-only Attached SSE | 持久化不能依赖 SSE 消费者；公开补发会让重连潮直接竞争数据库连接和 journal 写入 | Attached 使用 `/runs/stream`；Detached 使用 `/runs` 后轮询 Run 资源 |
-| 数字 API/event code | 稳定字符串码 | 字符串自描述，避免维护未文档化的数字区间 | `"code":0` → `"code":"OK"`；错误如 `RUN_NOT_FOUND` |
-| 原型 SQLite/PostgreSQL 表 | 全新 formal V1 `runs/run_events/node_outputs` | 新生命周期、attachment、序号和终态事务约束无法安全套用旧表 | 删除本地旧 SQLite 文件或重建开发 PostgreSQL volume 后启动 |
+## 最小 Agent 迁移
 
-## DSL 迁移
-
-原型：
+v2 文档必须完整声明 input、public output data 和 root result：
 
 ```yaml
-id: demo
-model: {provider: provider_a, type: llm, model: model_a}
-input:
-  schema: {type: object}
-steps:
-  - id: answer
-    type: llm
-    prompt: "{{ input.question }}"
-    stream: true
-```
+api_version: insight.agent/v2
+kind: agent
 
-正式 V1：
+metadata:
+  id: demo
+  name: Demo
+  description: Minimal v2 Agent.
 
-```yaml
-version: 1
-id: demo
-name: Demo
+schema_dialect: https://json-schema.org/draft/2020-12/schema
+
 input:
-  schema: {type: object}
-entry: answer
-nodes:
-  answer:
-    type: core.chat
-    next: result
-    emit: content
-    config:
-      model: general_chat
-      messages:
-        - role: user
-          content: "{{ input.question }}"
+  schema:
+    type: object
+    required: [question]
+    properties:
+      question: {type: string, minLength: 1}
+    additionalProperties: false
+
+output:
+  data_schema:
+    type: object
+    required: [answer]
+    properties:
+      answer: {type: string, minLength: 1}
+    additionalProperties: false
+
+workflow:
+  steps:
+    - kind: operation
+      id: answer
+      uses: ai.chat
+      with:
+        question: {from: input.question}
+      config:
+        model: general_chat
+        messages:
+          - role: user
+            parts:
+              - kind: text
+                text: Answer the following untrusted question.
+              - kind: data
+                input: question
+        parameters: {}
+        response: {format: text}
+
   result:
-    type: core.end
-    config:
-      outcome: success
-      content: {template: "{{ nodes.answer.output.text }}"}
+    return:
+      content: {from: steps.answer.output.data}
       format: markdown
+      data:
+        object:
+          answer: {from: steps.answer.output.data}
 ```
 
-Prompt 文件继续相对 Agent 目录声明，但消息通过 `{template_ref: name}` 引用。所有跨节点模板和 CEL 引用使用 `nodes.<node_id>.output`；编译器只允许引用所有到达路径上都已完成的前驱。
+未知字段在每一层都被拒绝。标识符必须匹配 `[A-Za-z_][A-Za-z0-9_]*`。input、output、Parallel branch、Switch 和 structured Chat response 都按 JSON Schema Draft 2020-12 编译并在对应边界验证。
 
-结构化 JSON 值不能裸插入字符串模板；对象的既有 Handlebars 显示仍是 `[object]`。Chat 需要消费节点 JSON 时必须显式使用 user message JSON content part：
+## ValueExpr 迁移
+
+运行期值不能伪装成带特殊含义的字符串。使用以下六种单键表达式：
 
 ```yaml
-content:
-  - type: json
-    json: {path: nodes.collect.output.branches.perspective_a.output, max_bytes: 262144}
+{literal: {mode: strict}}
+{from: input.question}
+{object: {question: {from: input.question}}}
+{array: [{literal: a}, {literal: b}]}
+{prompt: system_prompt}
+template:
+  text: "Answer count: {{ count }}"
+  bindings:
+    count: {from: steps.search.output.count}
 ```
 
-新 part 只接受 canonical `nodes.<node_id>.output[.<field>...]`，参与现有图引用校验，并以不超过 256 KiB 的 compact JSON 映射成 provider text content。纯文本/JSON parts 会合并成一个 string；含图片时保持标准 part array。它不改变全局模板语义，不允许 system role，也不构成完整 Chat request 的总大小合同。旧 Agent 若依赖裸对象插值，应显式迁移。把 Join 失败数据发送给另一个 provider 时还必须排除自由文本 `error.message`，只投影所需成功 output 和受控 failure kind/code。本次只改变 Agent 编译/执行合同和相应 Agent version，不需要数据库 migration 或历史 reset。
+路径根只有 `input`、安全 `run` 元数据、结构化 block 的 `scope` 和当前 body 更早的 `steps.<id>.output`。任意 JSON key 或数组索引使用静态 JSON Pointer 后缀：
 
-`core.end` 与 `core.branch_end` 共享严格联合类型并禁止 `next`：success 至少提供 `content` 或 `data`，failure 只提供静态 `WORKFLOW_...` code 与静态单行 message。`core.end` 只允许在主流程（包括 Join 后）并决定 Run 成功或 workflow failure；`core.branch_end` 只允许在 Fork 分支并只结算所属分支。作用域不匹配固定以 `TERMINAL_SCOPE_INVALID` 编译失败。failure terminal 本身仍成功执行，所以事件顺序是 `node.completed(core.branch_end)` 后跟 `branch.failed(kind=workflow)`，或 `node.completed(core.end)` 后跟 `run.failed(kind=workflow)`，而不是 `node.failed`。
+```yaml
+{from: input#/items/0/display-name}
+{from: steps.lookup.output#/data/a~1b}
+```
 
-Fork 分支不再直接进入 Join。每个静态路径必须到达分支局部 `core.branch_end`；所有分支结算后 `all_settled` Join 才执行。Join 输出的每个失败包含 `error.kind: workflow|node|timeout`，`summary.failures` 分别计数三种来源。即使所有分支失败，Join 也会执行；Join 后的 Condition 显式选择 degraded success 或主流程 failure End。
+编译器拒绝动态 key/index、前向引用、未被所有路径支配的引用、跨 branch/arm 读取和 child local escape。模板只看到显式 bindings，不再接收全局 input/run/step map。
 
-这是 authored DSL 的 hard cutover，不提供 `core.end` 的 branch alias。它不修改数据库或历史格式，但 binary 和 Agent YAML 必须原子部署：旧 binary 不认识 `core.branch_end`，新 binary 会拒绝分支内的旧式 `core.end`。迁移时不能全局替换；主流程和 Join 后的 terminal 必须继续使用 `core.end`。
+## Chat instruction/data 迁移
 
-## HTTP 与事件迁移
+Authored instruction 与 runtime data 必须使用不同 part：
 
-正式端点只有：
+```yaml
+with:
+  question: {from: input.question}
+config:
+  model: general_chat
+  messages:
+    - role: system
+      parts:
+        - kind: prompt
+          prompt: system
+    - role: user
+      parts:
+        - kind: text
+          text: The following value is untrusted data.
+        - kind: data
+          input: question
+  parameters: {temperature: 0.2}
+  response: {format: text}
+```
+
+- `text` 和 `prompt` 是 authored instruction source；
+- `data` 和 `image_url` 是运行期、不可信输入，只能出现在 user message；
+- part 的 `input` 必须精确引用同名 `with` binding；
+- 所有 binding 都必须被消费，不能偷偷把额外数据带入模型上下文；
+- runtime data 由有界 writer 编码，缺失、超限或序列化失败不会回显正文；
+- `max_request_bytes` 统计 authored text/prompt、data 和 image URL 的聚合大小，默认 256 KiB，最大 1 MiB。
+
+结构化模型输出使用：
+
+```yaml
+response:
+  format: json
+  schema: {$ref: "#/$defs/Perspective"}
+```
+
+模型完成结果只有通过 Schema 后才绑定为 `steps.<id>.output.data`。文本和结构化模式都返回稳定的 `{data, finish_reason, usage}`。
+
+## Parallel 迁移
+
+每个 branch 都是词法子作用域，只能读取 `parallel.with` 捕获到的 `scope` 值，并通过自己的 `result` 产生唯一 outward value：
+
+```yaml
+- kind: parallel
+  id: analyses
+  with:
+    question: {from: input.question}
+  settle: all_settled
+  max_concurrency: 2
+  branches:
+    technical:
+      output_schema: {type: string, minLength: 1}
+      steps:
+        - kind: operation
+          id: analyze
+          uses: ai.chat
+          with:
+            question: {from: scope.question}
+          config:
+            model: general_chat
+            messages:
+              - role: user
+                parts:
+                  - {kind: text, text: Analyze technical feasibility.}
+                  - {kind: data, input: question}
+            parameters: {}
+            response: {format: text}
+      result:
+        return: {from: steps.analyze.output.data}
+```
+
+`all` 要求全部成功，并在第一个可收集失败后关闭 admission、取消同级和完整 drain。`all_settled` 把每个可收集结果转换为：
+
+```text
+{status: "ok", value: T}
+|
+{status: "error", error: {category, code, retryable, origin}}
+```
+
+error envelope 不包含任意诊断 message。停止、中断、ownership/persistence 丢失和其他基础设施失败不会作为 branch 数据收集，而是取消并向外传播。
+
+需要“至少一个成功”等业务策略时，在后续 Switch 中显式判断。Parallel 只负责并发与结算，不把业务接受规则塞进 settlement mode。
+
+## Switch 迁移
+
+Switch 按 authored 顺序执行第一个匹配 case；default 必需。每个正常 arm 的 return 必须满足同一份完整 `output_schema`，或 raise 一个声明错误：
+
+```yaml
+- kind: switch
+  id: policy
+  with:
+    technical: {from: steps.analyses.output.technical}
+    risk: {from: steps.analyses.output.risk}
+  output_schema:
+    type: object
+    required: [degraded]
+    properties:
+      degraded: {type: boolean}
+    additionalProperties: false
+  cases:
+    - id: complete
+      when:
+        cel: >-
+          scope.technical.status == 'ok' &&
+          scope.risk.status == 'ok'
+      result:
+        return:
+          object:
+            degraded: {literal: false}
+  default:
+    id: partial
+    result:
+      return:
+        object:
+          degraded: {literal: true}
+```
+
+arm local 不会逃逸。Switch 自身绑定一个直接 output；内部 Branch/Phi 对作者不可见。
+
+## Result 与错误迁移
+
+Child block 的 return 会降低为 `RegionYield`，只完成当前作用域：
+
+```yaml
+result:
+  return: {from: steps.analyze.output}
+```
+
+Root return 才能创建公共 RunOutput：
+
+```yaml
+result:
+  return:
+    content: {from: steps.answer.output.data}
+    format: markdown
+    data:
+      object:
+        answer: {from: steps.answer.output.data}
+```
+
+成功资格要求 root return 已形成、所有后代已完成或取消并 drain、所有 output contract 与大小限制通过，并且权威终态事务提交。
+
+Author-defined failure 必须先声明：
+
+```yaml
+errors:
+  rejected:
+    category: workflow
+    code: WORKFLOW_POLICY_REJECTED
+    public_message: The workflow policy rejected this run.
+
+workflow:
+  result:
+    raise: rejected
+```
+
+只有 `workflow` 是 authored category；Operation failure、timeout、stop、ownership 或 infrastructure 不能被 YAML 伪造。
+
+## 平台配置迁移
+
+旧图运行时并发字段由作用域/Operation 字段替换：
+
+```yaml
+runtime:
+  max_concurrent_runs: 32
+  max_concurrent_operations: 32
+  max_concurrent_operations_per_run: 8
+  operation_timeout: 60s
+  operation_cancel_grace_period: 5s
+  max_template_output_bytes: 262144
+  run_timeout: 5m
+```
+
+- `max_concurrent_operations`：进程范围 Operation semaphore；
+- `max_concurrent_operations_per_run`：单 Run Operation semaphore；
+- `parallel.max_concurrency`：单个 Parallel 的 branch admission 上限；
+- `operation_timeout`：单次 Operation attempt deadline；
+- `operation_cancel_grace_period`：任意 attempt stop 后的独立有界协作清理窗口；
+- `run_timeout`：RunService 在执行开始时计算一次的绝对 execution deadline；attempt 使用它与 operation deadline 的较早者；
+- `max_template_output_bytes`：单次显式 template 结果上限。
+
+所有数值与 timeout 必须大于零。duration 使用正整数紧跟 `ms`、`s` 或 `m`。
+
+## HTTP 与事件
+
+对外端点保持：
 
 ```text
 GET    /health
@@ -100,167 +313,42 @@ GET    /v1/runs/{run_id}
 DELETE /v1/runs/{run_id}
 ```
 
-`GET /v1/agents` 与 `GET /v1/agents/{agent_id}` 使用相同的公开 Agent 元数据结构：`id`、`name`、`description`、`version`、`input_schema`。`input_schema` 是编译期通过 Draft 7 策略校验、运行期用于校验两个 Run POST 完整 JSON body 的同一份结构化文档；API 不公开 prompt、节点图、模型或 Action 配置。Schema 变化会进入现有 Agent `version`，不另增 `schema_hash`。
+Attached SSE 是 live-only，断开会取消未终止 Run；Detached 返回 202 并通过 GET Run 轮询。平台不提供公开事件 replay，`seq` 和 SSE `id` 不是恢复 cursor。
 
-`/health/live` 是不查询 history 或 journal 的公开 liveness；handler 可响应时返回 `200/OK`。`/health/ready` 是公开 readiness，要求 Run admission 开放、journal 健康且有界 history probe 成功；并发请求通过 single-flight 合并，成功与失败最多缓存 250ms。`/health` 保留为 `/health/ready` 的直接兼容别名，两者在所有状态下返回完全相同的状态码和 JSON；失败统一为经清理的 `503/RUNTIME_UNHEALTHY`。三个探针都返回 `Cache-Control: no-store`。关停先关闭 admission 并保持 HTTP 提供探针与查询，运行时 drain 完成或失败后才关闭 HTTP；关停期间的新 Run 返回 `503/RUN_SERVICE_UNAVAILABLE`。新增可选 runtime 字段 `readiness_probe_timeout`、`shutdown_grace_period` 和 `shutdown_hard_deadline`，默认分别为 `2s`、`30s` 和 `35s`，且 hard deadline 必须严格大于 grace period。
+v2 叶子调用只发布 `operation.started`、`operation.completed` 和 `operation.failed` 生命周期元数据。Operation 不提供公共内容增量，输出值也不进入公共事件或 journal。模型流只在运行时内部聚合并验证。完成事件只含身份、类型、attempt、elapsed 与 output byte count；失败事件使用固定公共 message，不携带自由诊断。Execution deadline 到达后的协作 cleanup 与终态持久化可以继续占用额外有界时间。
 
-原型的 Run 列表/过滤端点和 `X-Caller-Service/X-Tenant-Id/X-User-Id` 元数据不属于正式 V1。原因是执行合同不应提前绑定多租户管理面；后续查询/管理 API 可以在独立授权与分页合同下增加。`X-Request-Id` 保留用于关联请求。
+## 部署、历史与安全
 
-attached POST 在构造 SSE 前完成 JSON 与 Schema 校验，先订阅实时广播再启动 Run，并返回 X-Run-Id；终态事件发送后连接立即结束，非终态连接断开会立即取消 Run。正式 V1 不提供 GET /runs/{run_id}/events、after_seq 或 Last-Event-ID 恢复：公开恢复会让并发重连直接查询事件库，而 live-only 的既有 Run 订阅又无法保证创建到订阅之间无缺口。detached POST 返回 202，客户端通过 GET Run 轮询最终状态；DELETE 是唯一显式取消接口且幂等。
+1. 在发布前用新 compiler 编译全部 enabled Agent；任何旧文档都必须失败。
+2. 停止所有连接目标 history store 的旧 runtime。
+3. 原子部署新 binary、Agent YAML 和平台配置；不要滚动混用两套 authored/runtime 合同。
+4. disposable 开发 store 直接切到 `migrations/formal_v2` 和新的 `data/formal_v2.sqlite3`；不要在旧 store 上编写 DSL/runtime 兼容路径。
+5. 启动后先检查 `/health/ready`、Agent metadata、detached action-only smoke，再恢复流量。
 
-事件的 schema_version 仍为 1，seq 和 SSE id 仍表示单 Run 顺序并用于审计关联，但不再表示可恢复游标。事件继续先持久化再广播；数据库事件历史保留给内部终态恢复和审计。本次 pre-adoption 终端重写会直接改写 Formal V1 initial migration，不提供旧本地数据库的就地升级。
+历史 Run 的终态 envelope 可以按持久化结构读取，但旧 Agent YAML 不会被重新编译或恢复执行。平台不存储原始 Run 输入，只保存输入摘要；中间 Operation 值不进入公共事件。
 
-## 配置与安全迁移
+远程 PostgreSQL history URL 必须使用 `sslmode=verify-full`。每个 PostgreSQL store 只允许一个 active runtime，并要求 session-affine advisory lock；PgBouncer transaction/statement pooling 不适用。
 
-- 平台 YAML 和模型 YAML 都必须写 `version: 1`，每层拒绝未知字段。
-- `PLATFORM_CONFIG` 一旦设置，目标文件必须存在；相对路径以平台文件目录为基准。
-- `auth.mode` 必须明确为 `disabled` 或 `bearer_env`。
-- `agents.enabled` 默认空，不再从 Agent YAML 推断公开范围。
-- YAML 只保存环境变量名；Bearer token、模型 API key 和 PostgreSQL URL 从环境变量读取，`Debug` 输出脱敏。
-- 模型别名取代 provider/type/model 三元组，Agent 不再关心供应商组织方式。
-- A8 后 `open_ai_chat.base_url` 默认只接受 HTTPS。既有 HTTP 模型服务必须改为 HTTPS，或显式声明 `transport.plaintext_http: loopback` / `trusted_private`。`trusted_private` 是部署方对私有网络明文链路的风险接受，不是运行时自动内网判定。
-- A8 后 Agent 节点 `timeout` 只接受正整数紧跟 `ms`、`s` 或 `m`。把 `1 sec`、`90 seconds`、`1h`、`1s 500ms` 等写法改为 `1s`、`90s`、`60m` 或等价毫秒值。
+`open_ai_chat.base_url` 默认只接受 HTTPS。HTTP 仅允许显式 `loopback` 或部署方接受风险的 `trusted_private`。`trusted_private` 不代表运行时完成 DNS/IP 私网证明。
 
-## OpenAI-compatible 流完成合同收紧
-
-OpenAI-compatible Chat 流现在只有收到完整的 `data: [DONE]` 应用层标记才会成功结束。HTTP body clean EOF 只证明传输正常结束，`finish_reason` 只证明某个 choice 停止生成，usage-only chunk 只携带统计信息；三者都不能替代 `[DONE]`。
-
-这个变化会让省略 `[DONE]` 的非严格兼容端点从原来的静默成功变为固定失败：
+Action input/output Schema 校验失败使用固定公共错误，不拼接 validator instance：
 
 ```text
-UPSTREAM_STREAM_INCOMPLETE
-chat provider stream ended without completion evidence
+ACTION_INPUT_INVALID  / action input validation failed
+ACTION_OUTPUT_INVALID / action output validation failed
 ```
 
-迁移时应直接检查 provider 的 raw streaming response，而不是只检查 SDK 是否返回了文本。确保每个成功响应最终发送 `data: [DONE]`；不能用 `finish_reason: "stop"` 后关闭连接来模拟完成。`[DONE]` 一经解析，平台就释放 HTTP body，不要求 provider 随后关闭 socket；此前已解析的 chunk 仍按顺序排空，随后结束逻辑流。残缺 JSON/UTF-8 和显式传输错误继续按原有错误分类失败，已交付的部分文本不会把 Run 转成成功。
+OpenAI-compatible 成功流必须包含完整 `data: [DONE]`。clean EOF、`finish_reason` 和 usage-only chunk 都不是完成证据。
 
-如果未来必须接入无法发送 `[DONE]` 的 provider，应先设计显式的 per-model 弱化策略和独立风险接受，不能通过全局容忍 clean EOF 恢复旧语义。本次变化不需要数据库 migration，也不改变模型 YAML、`ChatChunk` 或公共 HTTP/SSE schema。
-
-## Dependency governance: PostgreSQL TLS transport
-
-Remote PostgreSQL history URLs now require `sslmode=verify-full`. This intentionally breaks remote URLs that relied on SQLx's default `prefer` behavior because that mode can fall back to plaintext. Local development may keep exact loopback or Unix socket URLs.
-
-Migration example:
-
-```text
-postgres://user:password@database/private
-postgres://user:password@database/private?sslmode=verify-full
-```
-
-## Dependency governance: Axum 0.8 route syntax
-
-- Phase 3 upgrades the server framework from Axum 0.7 to Axum 0.8.
-- Public Formal V1 paths are unchanged, but internal route definitions now use Axum 0.8 `{param}` captures instead of Axum 0.7 `:param` captures.
-- This is intentional: relying on old route syntax after the major upgrade would hide framework-compatibility behavior inside the route table and make future route reviews less clear.
-- API response envelopes, SSE event payloads, auth behavior, cancellation behavior, and unsupported replay/recovery routes are unchanged.
-
-## Dependency governance: Reqwest 0.13 TLS contract
-
-- Phase 3 upgrades the HTTP client from Reqwest 0.12 to Reqwest 0.13.
-- The direct feature selection changes from `rustls-tls` to `rustls` because Reqwest 0.13 changed its TLS feature contract.
-- Reqwest default features remain disabled. The platform does not opt into implicit `default-tls`, system proxy behavior, HTTP/2, compression, cookies, SOCKS, HTTP/3, or alternate DNS behavior in this phase.
-- Project-built Reqwest clients explicitly call `tls_backend_rustls()` so model and action traffic do not depend on a backend-abstract default TLS alias.
-- HTTPS verification uses Reqwest 0.13's rustls/platform verifier path and the runtime environment's trusted roots. Private HTTPS model services should install private CA roots at the host/container layer until a future explicit per-model CA configuration exists.
-- Existing `transport.plaintext_http` semantics are unchanged: default HTTPS-only, `loopback` for exact local hosts, and `trusted_private` when the deployment owner accepts a private-network plaintext model hop.
-
-医学示例也不是兼容合同。正式示例使用单个 `image_url` 展示一个有 `vision` 能力的多模态消息；原型的 `images` 数组调用方需要选择一个图片 URL，或通过自定义节点/后续多图内容类型扩展。这个限制只属于当前示例输入，不是核心运行时的医学规则。
-
-## 历史重置
-
-不执行原型表或旧 Formal V1 终端表的就地升级，也不读取原始输入。`core.end` 重写增加显式 `error_kind` 和完整终态字段约束，因此已有本地 Formal V1 数据库必须整体重建，不能只清空 runs 表。
-
-停止所有使用目标 history store 的进程后执行以下一种操作。
-
-SQLite：
+## 验证切换
 
 ```bash
-SQLITE_DB=/absolute/path/to/formal_v1.sqlite3
-rm -f "$SQLITE_DB" "$SQLITE_DB-wal" "$SQLITE_DB-shm"
+rg -n 'api_version: insight.agent/v2' agents/*/agent.yaml
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
+cargo audit
+cargo deny check
 ```
 
-仓库默认开发配置可直接删除 `data/formal_v1.sqlite3`，quickstart 可删除 `data/quickstart.sqlite3`；两者也应同时删除对应的 `-wal`、`-shm` 文件。
-
-PostgreSQL 本地开发 volume：
-
-```bash
-docker compose -f docker-compose.postgres.yml down -v
-docker compose -f docker-compose.postgres.yml up -d
-```
-
-正式 migration 只位于 `migrations/formal_v1/{sqlite,postgres}`。重启新二进制后由 SQLx 在空数据库上重新应用 initial migration。应用不会自动删除或改写不兼容历史。生产环境如需保留原型审计数据，应先导出到独立只读存储；不要把旧表复制进正式 V1 数据库。
-
-### A0 Action validation error containment
-
-旧版本可能把 Action JSON Schema 校验失败的原始 input/output instance 写入 Run 和事件错误消息。A0 从校验源头改为固定消息：
-
-- `ACTION_INPUT_INVALID` / `action input validation failed`
-- `ACTION_OUTPUT_INVALID` / `action output validation failed`
-
-错误码和 HTTP/SSE/Event/Run 数据结构不变；动态 validator 文本不再是兼容合同。由于旧错误文本不可靠区分诊断内容和敏感值，本次升级不迁移或扫描历史 Run，部署前必须显式重置历史。
-
-停止所有使用目标 history store 的进程后执行以下一种操作。
-
-SQLite：
-
-```bash
-SQLITE_DB=/absolute/path/to/run_history.sqlite3
-rm -f "$SQLITE_DB" "$SQLITE_DB-wal" "$SQLITE_DB-shm"
-```
-
-PostgreSQL：
-
-```bash
-psql "$RUN_HISTORY_DATABASE_URL" <<'SQL'
-BEGIN;
-TRUNCATE TABLE node_outputs, run_events, runs;
-COMMIT;
-SQL
-```
-
-不要删除 SQLx migration metadata。应用不会自动删除历史，也不提供 reset API/CLI。删除后的历史不能通过回滚旧二进制恢复；不要把 A0 前的 Run/Event 数据重新导入运行库。
-
-部署顺序：停止服务、重置历史、部署新二进制、启动并完成 migration check、运行 `cargo test --test action_error_containment -- --nocapture --test-threads=1`、检查 `/health/ready`，然后恢复流量。
-
-### A5 Semantic compile-time validation
-
-A5 收紧 Agent DSL 的编译期语义校验：
-
-- fully static `core.action.config.input` 会在 Agent 编译期按注册 Action input schema 校验，失败码为 `ACTION_INPUT_INVALID`，消息固定为 `action input validation failed`；
-- 节点 ID 和 fork branch ID 必须匹配 `[A-Za-z_][A-Za-z0-9_]*`；
-- 跨节点引用只能使用 `nodes.<node_id>.output`；
-- CEL 中的 `nodes["id"].output`、`nodes[id].output`、`nodes.<id>["output"]`、直接访问 `nodes` map 等形式会失败；
-- Handlebars/CEL 字符串、注释、raw 文本中的 `nodes.<id>.output` 不再被误识别为图依赖。
-
-这样做的原因是编译期图校验必须知道每个跨节点依赖的确定 node ID。computed/indexed access 依赖运行时值，无法可靠参与 predecessor、parallel branch 和 post-join 校验。静态非法 Action input 已经在部署前可知，延迟到用户请求时失败不符合 fail-before-serving 合同。
-
-迁移方式：
-
-```yaml
-# 不再支持
-route:
-  type: core.condition
-  config:
-    cases:
-      - when: 'nodes["classify"].output.kind == "medical"'
-        next: medical
-    default: general
-
-# 使用 canonical dotted reference
-route:
-  type: core.condition
-  config:
-    cases:
-      - when: 'nodes.classify.output.kind == "medical"'
-        next: medical
-    default: general
-```
-
-如果旧 Agent 使用 `some-node` 这类 ID，需要改为 `some_node` 并同步更新所有 `next`、fork branch、join output 和模板/CEL 引用。A5 不需要数据库 migration，也不需要重置 Run 历史；它只影响 Agent 启动编译。
-
-## JSON Schema validator boundary
-
-`CompiledAgent.input_schema` and resource internals now use the project-owned `JsonSchemaValidator` adapter instead of exposing the upstream `jsonschema::JSONSchema` type.
-
-Reason: the platform needs a stable validation contract while upgrading `jsonschema` from 0.18 to 0.47. The adapter fixes the platform default at Draft 7, disables upstream HTTP/file/CLI default features, rejects non-Draft-7 `$schema` values, rejects external `$ref`, and keeps runtime validation errors redacted.
-
-Runtime API behavior is unchanged: invalid run input, Action input/output, and OpenAI model parameters keep the existing public error codes and fixed messages.
+可执行的 v2 数据流、Parallel/Switch 与 partial/zero-success 策略以 `agents/parallel_researcher/agent.yaml` 为准。

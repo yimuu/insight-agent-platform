@@ -795,7 +795,6 @@ impl Action for SchemaPolicyAction {
             input_schema: (self.input_schema)(),
             output_schema: (self.output_schema)(),
             idempotent: true,
-            streams_content: false,
         }
     }
 

@@ -1,5 +1,7 @@
 # Core Select Condition Convergence Implementation Plan
 
+> **Historical / superseded:** authored `core.select` was removed; structured `switch` lowers to internal Branch/Phi. See [DSL vNext Region/SSA Design](../specs/2026-07-16-dsl-vnext-region-ssa-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a strict `core.select` node that converts exactly one visible output from mutually exclusive condition paths into one dominating `{source_node_id, value}` output.

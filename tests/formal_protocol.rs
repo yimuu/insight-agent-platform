@@ -2,8 +2,8 @@ use chrono::{TimeZone, Utc};
 use insight_agent_platform::{
     events::protocol::{RunEvent, RunEventScope, RunEventType},
     history::types::{
-        NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunRecord, RunStatus, RunSummary,
-        RunTerminal, StopError, TerminalUpdate,
+        NewRun, RunAttachment, RunLifecycle, RunRecord, RunStatus, RunSummary, RunTerminal,
+        StopError, TerminalUpdate,
     },
     outcome::{FailureKind, RunFailure, RunOutput},
 };
@@ -13,82 +13,81 @@ fn at(second: u32) -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 7, 10, 0, 0, second).unwrap()
 }
 
-fn scope(node_id: Option<&str>) -> RunEventScope {
+fn scope() -> RunEventScope {
     RunEventScope {
         request_id: "req_1".to_string(),
         run_id: "run_1".to_string(),
         agent_id: "researcher".to_string(),
         agent_version: "sha256:abc".to_string(),
-        node_id: node_id.map(str::to_string),
     }
 }
 
 #[test]
-fn node_event_serializes_the_exact_formal_v1_envelope() {
+fn operation_event_serializes_the_exact_formal_v2_envelope() {
     let event = RunEvent::ok_at(
-        RunEventType::NodeCompleted,
+        RunEventType::OperationCompleted,
         4,
-        scope(Some("plan")),
+        scope(),
         at(4),
-        json!({"output":{"text":"done"}}),
+        json!({
+            "operation_id":"/workflow/plan#Authored",
+            "operation_type":"ai.chat",
+            "attempt":1,
+            "elapsed_ms":12,
+            "output_bytes":128
+        }),
     );
 
     let value = serde_json::to_value(event).unwrap();
 
-    assert_eq!(value["schema_version"], 1);
-    assert_eq!(value["type"], "node.completed");
+    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["type"], "operation.completed");
     assert_eq!(value["seq"], 4);
     assert_eq!(value["request_id"], "req_1");
     assert_eq!(value["run_id"], "run_1");
     assert_eq!(value["agent_id"], "researcher");
     assert_eq!(value["agent_version"], "sha256:abc");
-    assert_eq!(value["node_id"], "plan");
     assert_eq!(value["time"], "2026-07-10T00:00:04Z");
     assert_eq!(value["code"], "OK");
     assert_eq!(value["message"], "ok");
-    assert_eq!(value["data"], json!({"output":{"text":"done"}}));
-    assert_eq!(value.as_object().unwrap().len(), 12);
+    assert_eq!(
+        value["data"],
+        json!({
+            "operation_id":"/workflow/plan#Authored",
+            "operation_type":"ai.chat",
+            "attempt":1,
+            "elapsed_ms":12,
+            "output_bytes":128
+        })
+    );
+    assert_eq!(value.as_object().unwrap().len(), 11);
 }
 
 #[test]
-fn run_events_omit_node_id_and_error_events_keep_stable_string_codes() {
-    let run_event = RunEvent::ok_at(
-        RunEventType::RunStarted,
-        2,
-        scope(Some("must_be_ignored")),
-        at(2),
-        json!({}),
-    );
+fn run_and_operation_error_events_keep_stable_string_codes() {
+    let run_event = RunEvent::ok_at(RunEventType::RunStarted, 2, scope(), at(2), json!({}));
     let value = serde_json::to_value(run_event).unwrap();
+    assert_eq!(value["type"], "run.started");
     assert!(value.get("node_id").is_none());
 
     let failed = RunEvent::error_at(
-        RunEventType::NodeFailed,
+        RunEventType::OperationFailed,
         3,
-        scope(Some("answer")),
+        scope(),
         at(3),
         "UPSTREAM_FAILURE",
-        "model request failed",
-        json!({}),
+        "operation failed",
+        json!({
+            "operation_id":"/workflow/answer#Authored",
+            "operation_type":"ai.chat",
+            "attempt":1,
+            "elapsed_ms":7,
+            "error_kind":"operation"
+        }),
     );
     let value = serde_json::to_value(failed).unwrap();
     assert_eq!(value["code"], "UPSTREAM_FAILURE");
-    assert_eq!(value["message"], "model request failed");
-    assert_eq!(value["node_id"], "answer");
-
-    let branch_event = RunEvent::ok_at(
-        RunEventType::BranchCompleted,
-        6,
-        scope(Some("must_be_ignored")),
-        at(6),
-        json!({
-            "fork_id":"fanout",
-            "branch_id":"source_a",
-            "terminal_node_id":"summarize_a"
-        }),
-    );
-    let value = serde_json::to_value(branch_event).unwrap();
-    assert!(value.get("node_id").is_none());
+    assert_eq!(value["message"], "operation failed");
 }
 
 #[test]
@@ -96,13 +95,9 @@ fn formal_event_type_set_is_exact_and_uses_dotted_names() {
     let types = [
         RunEventType::RunCreated,
         RunEventType::RunStarted,
-        RunEventType::NodeStarted,
-        RunEventType::ContentDelta,
-        RunEventType::NodeCompleted,
-        RunEventType::NodeFailed,
-        RunEventType::BranchStarted,
-        RunEventType::BranchCompleted,
-        RunEventType::BranchFailed,
+        RunEventType::OperationStarted,
+        RunEventType::OperationCompleted,
+        RunEventType::OperationFailed,
         RunEventType::RunCompleted,
         RunEventType::RunFailed,
         RunEventType::RunCancelled,
@@ -119,13 +114,9 @@ fn formal_event_type_set_is_exact_and_uses_dotted_names() {
         vec![
             json!("run.created"),
             json!("run.started"),
-            json!("node.started"),
-            json!("content.delta"),
-            json!("node.completed"),
-            json!("node.failed"),
-            json!("branch.started"),
-            json!("branch.completed"),
-            json!("branch.failed"),
+            json!("operation.started"),
+            json!("operation.completed"),
+            json!("operation.failed"),
             json!("run.completed"),
             json!("run.failed"),
             json!("run.cancelled"),
@@ -142,6 +133,18 @@ fn formal_event_type_set_is_exact_and_uses_dotted_names() {
             serde_json::from_value::<RunEventType>(serialized).unwrap(),
             event_type
         );
+    }
+    for legacy in [
+        "node.started",
+        "content.delta",
+        "operation.content_delta",
+        "node.completed",
+        "node.failed",
+        "branch.started",
+        "branch.completed",
+        "branch.failed",
+    ] {
+        assert_eq!(RunEventType::parse(legacy), None);
     }
 }
 
@@ -298,9 +301,9 @@ fn terminal_update_derives_status_from_the_terminal_variant() {
         at(10),
         RunTerminal::Failed {
             error: RunFailure {
-                kind: FailureKind::Node,
-                code: "NODE_FAILED".into(),
-                message: "node failed".into(),
+                kind: FailureKind::Operation,
+                code: "OPERATION_FAILED".into(),
+                message: "operation failed".into(),
             },
         },
     );
@@ -347,13 +350,6 @@ fn formal_history_records_preserve_version_attachment_and_sanitized_terminal_dat
         },
         ..record.clone()
     });
-    let node_output = NodeOutputRecord {
-        run_id: "run_1".to_string(),
-        node_id: "plan".to_string(),
-        output: json!({"text":"done"}),
-        completed_at: at(2),
-    };
-
     assert_eq!(summary.agent_version, "sha256:abc");
     assert_eq!(summary.attachment, RunAttachment::Detached);
     assert_eq!(summary.status(), RunStatus::Failed);
@@ -365,6 +361,4 @@ fn formal_history_records_preserve_version_attachment_and_sanitized_terminal_dat
     assert_eq!(completed_summary["status"], "completed");
     assert!(completed_summary.get("output").is_none());
     assert!(completed_summary.get("error").is_none());
-    assert_eq!(node_output.node_id, "plan");
-    assert_eq!(node_output.output, json!({"text":"done"}));
 }

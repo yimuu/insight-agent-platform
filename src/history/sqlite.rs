@@ -14,14 +14,14 @@ use crate::{
     history::{
         repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
         types::{
-            NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunRecord, RunStatus,
-            RunTerminal, StopError, TerminalUpdate,
+            NewRun, RunAttachment, RunLifecycle, RunRecord, RunStatus, RunTerminal, StopError,
+            TerminalUpdate,
         },
     },
     outcome::{FailureKind, RunFailure, RunOutput},
 };
 
-static MIGRATOR: Migrator = sqlx::migrate!("migrations/formal_v1/sqlite");
+static MIGRATOR: Migrator = sqlx::migrate!("migrations/formal_v2/sqlite");
 
 #[derive(Clone)]
 pub struct SqliteRunRepository {
@@ -139,22 +139,6 @@ impl RunRepository for SqliteRunRepository {
         transaction.commit().await.map_err(write_error)
     }
 
-    async fn put_node_output(&self, output: NodeOutputRecord) -> Result<(), HistoryError> {
-        let value = serialize_json(&output.output, "node output")?;
-        sqlx::query(
-            "INSERT INTO node_outputs (run_id, node_id, output, completed_at)
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind(&output.run_id)
-        .bind(&output.node_id)
-        .bind(value)
-        .bind(format_timestamp(output.completed_at))
-        .execute(&self.pool)
-        .await
-        .map_err(write_error)?;
-        Ok(())
-    }
-
     async fn commit_terminal(
         &self,
         proposal: TerminalProposal,
@@ -198,7 +182,7 @@ impl RunRepository for SqliteRunRepository {
         let after_seq = to_i64(after_seq, "event sequence is too large")?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = sqlx::query_as::<_, EventRow>(
-            "SELECT e.seq, e.event_type, e.node_id, e.timestamp, e.code, e.message, e.data,
+            "SELECT e.seq, e.event_type, e.timestamp, e.code, e.message, e.data,
                     r.request_id, r.run_id, r.agent_id, r.agent_version
              FROM run_events e
              JOIN runs r ON r.run_id = e.run_id
@@ -376,7 +360,7 @@ async fn load_last_event_sqlite(
     run_id: &str,
 ) -> Result<RunEvent, HistoryError> {
     let row = sqlx::query_as::<_, EventRow>(
-        "SELECT e.seq, e.event_type, e.node_id, e.timestamp, e.code, e.message, e.data,
+        "SELECT e.seq, e.event_type, e.timestamp, e.code, e.message, e.data,
                 r.request_id, r.run_id, r.agent_id, r.agent_version
          FROM run_events e
          JOIN runs r ON r.run_id = e.run_id
@@ -398,7 +382,7 @@ async fn load_last_event_sqlite(
 }
 
 fn ensure_terminal_matches_status(status: RunStatus, event: &RunEvent) -> Result<(), HistoryError> {
-    if terminal_event_type(status) != event.event_type || event.node_id.is_some() {
+    if terminal_event_type(status) != event.event_type {
         return Err(HistoryError::new(
             "HISTORY_TERMINAL_EVENT_MISMATCH",
             "stored terminal event does not match run status",
@@ -442,13 +426,12 @@ async fn insert_event(
     let data = serialize_json(&event.data, "event data")?;
     sqlx::query(
         "INSERT INTO run_events (
-            run_id, seq, event_type, node_id, timestamp, code, message, data
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            run_id, seq, event_type, timestamp, code, message, data
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&event.run_id)
     .bind(seq)
     .bind(event.event_type.as_str())
-    .bind(&event.node_id)
     .bind(format_timestamp(event.timestamp))
     .bind(&event.code)
     .bind(&event.message)
@@ -587,7 +570,6 @@ fn parse_failure_kind(value: &str) -> Result<FailureKind, HistoryError> {
 struct EventRow {
     seq: i64,
     event_type: String,
-    node_id: Option<String>,
     timestamp: String,
     code: String,
     message: String,
@@ -610,7 +592,6 @@ fn run_event_from_row(row: EventRow) -> Result<RunEvent, HistoryError> {
         run_id: row.run_id,
         agent_id: row.agent_id,
         agent_version: row.agent_version,
-        node_id: row.node_id,
         timestamp: parse_timestamp(&row.timestamp, "event timestamp")?,
         code: row.code,
         message: row.message,

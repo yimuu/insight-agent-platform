@@ -14,10 +14,7 @@ use tokio::{
 
 use crate::{
     events::protocol::RunEvent,
-    history::{
-        repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
-        types::NodeOutputRecord,
-    },
+    history::repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
 };
 
 use super::hub::EventError;
@@ -25,10 +22,6 @@ use super::hub::EventError;
 enum JournalCommand {
     Append {
         event: RunEvent,
-        reply: oneshot::Sender<Result<(), EventError>>,
-    },
-    PutOutput {
-        output: NodeOutputRecord,
         reply: oneshot::Sender<Result<(), EventError>>,
     },
     Finish {
@@ -90,12 +83,6 @@ impl EventJournal {
     pub(crate) async fn append(&self, event: RunEvent) -> Result<(), EventError> {
         let (reply, response) = oneshot::channel();
         self.try_send(JournalCommand::Append { event, reply })?;
-        wait_for_response(response).await?
-    }
-
-    pub(crate) async fn put_output(&self, output: NodeOutputRecord) -> Result<(), EventError> {
-        let (reply, response) = oneshot::channel();
-        self.try_send(JournalCommand::PutOutput { output, reply })?;
         wait_for_response(response).await?
     }
 
@@ -235,17 +222,6 @@ async fn run_worker(
                         }
                         return;
                     }
-                }
-            }
-            JournalCommand::PutOutput { output, reply } => {
-                let result = bounded_repository_call(
-                    &mut stop,
-                    operation_timeout,
-                    repository.put_node_output(output),
-                )
-                .await;
-                if send_repository_result(&mut receiver, reply, result) {
-                    return;
                 }
             }
             JournalCommand::Finish {

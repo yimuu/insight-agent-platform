@@ -1,7 +1,9 @@
 # General Agent Runtime V1 Rewrite Design
 
+> **Historical / superseded:** the graph/node DSL and runtime in this document were removed. The canonical contract is [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+
 Date: 2026-07-10
-Status: Approved for implementation
+Status: Superseded by DSL vNext
 
 ## Goal
 
@@ -284,7 +286,7 @@ enum NodeTransition {
 }
 ```
 
-`ExecutionControl` exposes cancellation state, the effective deadline, and `emit_content`. Content emission succeeds only for a node compiled with `emit: content`; calling it from an `emit: none` node is a typed runtime error. This gives streaming model and action implementations one bounded publication path without exposing the event hub itself.
+`ExecutionControl` exposes cancellation state and the effective deadline. Provider streams are aggregated inside the leaf executor; leaf chunks are not a public workflow or event surface.
 
 `NodeTypeRegistry` rejects duplicate kind names. Names use namespaces such as `core.chat`, `builtin.http_request`, or `company.vector_search`. A contract test registers a synthetic node, compiles an agent using it, and executes it without changes to core compiler or coordinator code.
 
@@ -351,7 +353,7 @@ String leaves in `input` are strict templates. The compiler validates statically
 
 An action descriptor declares name, input schema, output schema, and whether it is idempotent. V1 records idempotency metadata but performs no automatic retries.
 
-The action execution context exposes cooperative cancellation, the effective deadline, and `emit_content`. Streaming actions may call `emit_content`; the compiler rejects `emit: content` when the selected action descriptor does not declare streaming-content support. The action's final JSON result remains the node output and is not inferred from emitted chunks.
+The action execution context exposes cooperative cancellation and the effective deadline. The action's schema-validated final JSON result is its only workflow output; actions cannot publish leaf content chunks.
 
 ### `core.condition`
 

@@ -1,5 +1,7 @@
 # Medical Report Follow-up Routing Design
 
+> **Historical syntax:** the product behavior is retained by the checked-in vNext Agent, but the condition/node graph below is not accepted. See [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+
 ## Goal
 
 Give `medical_report_interpreter` a dedicated multi-turn path. A follow-up request must answer the current question directly instead of reusing the first-turn prompts or executing the three-step initial interpretation workflow.

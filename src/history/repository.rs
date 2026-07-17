@@ -9,7 +9,7 @@ use crate::{
     outcome::RunOutput,
 };
 
-use super::types::{NewRun, NodeOutputRecord, RunRecord, RunTerminal, TerminalUpdate};
+use super::types::{NewRun, RunRecord, RunTerminal, TerminalUpdate};
 
 pub struct HistoryError {
     code: &'static str,
@@ -170,8 +170,6 @@ pub trait RunRepository: Send + Sync {
     ) -> Result<(), HistoryError>;
 
     async fn append_events(&self, events: &[RunEvent]) -> Result<(), HistoryError>;
-
-    async fn put_node_output(&self, output: NodeOutputRecord) -> Result<(), HistoryError>;
 
     /// Atomically commits the proposed Run terminal and its event, or returns the
     /// exact validated durable terminal event when another proposal already won.

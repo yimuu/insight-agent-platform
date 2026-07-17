@@ -11,14 +11,14 @@ use crate::{
     history::{
         repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
         types::{
-            NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunRecord, RunStatus,
-            RunTerminal, StopError, TerminalUpdate,
+            NewRun, RunAttachment, RunLifecycle, RunRecord, RunStatus, RunTerminal, StopError,
+            TerminalUpdate,
         },
     },
     outcome::{FailureKind, RunFailure, RunOutput},
 };
 
-static MIGRATOR: Migrator = sqlx::migrate!("migrations/formal_v1/postgres");
+static MIGRATOR: Migrator = sqlx::migrate!("migrations/formal_v2/postgres");
 
 mod ownership;
 
@@ -200,22 +200,6 @@ impl RunRepository for PostgresRunRepository {
         transaction.commit().await.map_err(write_error)
     }
 
-    async fn put_node_output(&self, output: NodeOutputRecord) -> Result<(), HistoryError> {
-        let mut transaction = self.begin_owned_write().await?;
-        sqlx::query(
-            "INSERT INTO node_outputs (run_id, node_id, output, completed_at)
-             VALUES ($1, $2, $3, $4)",
-        )
-        .bind(&output.run_id)
-        .bind(&output.node_id)
-        .bind(Json(output.output))
-        .bind(output.completed_at)
-        .execute(&mut *transaction)
-        .await
-        .map_err(write_error)?;
-        transaction.commit().await.map_err(write_error)
-    }
-
     async fn commit_terminal(
         &self,
         proposal: TerminalProposal,
@@ -259,7 +243,7 @@ impl RunRepository for PostgresRunRepository {
         let after_seq = to_i64(after_seq, "event sequence is too large")?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = sqlx::query_as::<_, EventRow>(
-            "SELECT e.seq, e.event_type, e.node_id, e.timestamp, e.code, e.message, e.data,
+            "SELECT e.seq, e.event_type, e.timestamp, e.code, e.message, e.data,
                     r.request_id, r.run_id, r.agent_id, r.agent_version
              FROM run_events e
              JOIN runs r ON r.run_id = e.run_id
@@ -424,7 +408,7 @@ async fn load_last_event_postgres(
     run_id: &str,
 ) -> Result<RunEvent, HistoryError> {
     let row = sqlx::query_as::<_, EventRow>(
-        "SELECT e.seq, e.event_type, e.node_id, e.timestamp, e.code, e.message, e.data,
+        "SELECT e.seq, e.event_type, e.timestamp, e.code, e.message, e.data,
                 r.request_id, r.run_id, r.agent_id, r.agent_version
          FROM run_events e
          JOIN runs r ON r.run_id = e.run_id
@@ -446,7 +430,7 @@ async fn load_last_event_postgres(
 }
 
 fn ensure_terminal_matches_status(status: RunStatus, event: &RunEvent) -> Result<(), HistoryError> {
-    if terminal_event_type(status) != event.event_type || event.node_id.is_some() {
+    if terminal_event_type(status) != event.event_type {
         return Err(HistoryError::new(
             "HISTORY_TERMINAL_EVENT_MISMATCH",
             "stored terminal event does not match run status",
@@ -489,13 +473,12 @@ async fn insert_event(
     let seq = to_i64(event.seq, "event sequence is too large")?;
     sqlx::query(
         "INSERT INTO run_events (
-            run_id, seq, event_type, node_id, timestamp, code, message, data
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            run_id, seq, event_type, timestamp, code, message, data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(&event.run_id)
     .bind(seq)
     .bind(event.event_type.as_str())
-    .bind(&event.node_id)
     .bind(event.timestamp)
     .bind(&event.code)
     .bind(&event.message)
@@ -625,7 +608,6 @@ fn parse_failure_kind(value: &str) -> Result<FailureKind, HistoryError> {
 struct EventRow {
     seq: i64,
     event_type: String,
-    node_id: Option<String>,
     timestamp: DateTime<Utc>,
     code: String,
     message: String,
@@ -648,7 +630,6 @@ fn run_event_from_row(row: EventRow) -> Result<RunEvent, HistoryError> {
         run_id: row.run_id,
         agent_id: row.agent_id,
         agent_version: row.agent_version,
-        node_id: row.node_id,
         timestamp: row.timestamp,
         code: row.code,
         message: row.message,

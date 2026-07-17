@@ -15,12 +15,13 @@ use serde_json::{json, Value};
 use tokio::{
     sync::{oneshot, watch, Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore},
     task::JoinHandle,
-    time::{sleep, timeout},
+    time::{timeout, Instant as TokioInstant},
 };
 use uuid::Uuid;
 
 use crate::{
-    dsl::{compiled::CompiledAgent, CompileError},
+    catalog::AgentCatalog,
+    dsl::vnext::compiler::CompiledWorkflow,
     events::{
         hub::EventHub,
         protocol::{RunEventScope, RunEventType},
@@ -32,45 +33,15 @@ use crate::{
             TerminalUpdate,
         },
     },
-    nodes::registry::NodeExecutorRegistry,
     outcome::{FailureKind, RunFailure},
 };
 
 use super::{
     attachment::{AttachedRun, LeaseOwner, RunSubscription, SubscriptionLease},
-    stop_pair, ExecutionLimiter, RunCoordinator, RunState, StopController, StopReason, StopSignal,
+    stop_pair, RunCoordinator, RunState, StopController, StopReason, StopSignal,
 };
 
 const READINESS_PROBE_CACHE_TTL: Duration = Duration::from_millis(250);
-
-#[derive(Clone, Default)]
-pub struct CompiledAgentRegistry {
-    agents: BTreeMap<String, Arc<CompiledAgent>>,
-}
-
-impl CompiledAgentRegistry {
-    pub fn new(agents: Vec<Arc<CompiledAgent>>) -> Result<Self, CompileError> {
-        let mut registry = Self::default();
-        for agent in agents {
-            let agent_id = agent.id.clone();
-            if registry.agents.insert(agent_id.clone(), agent).is_some() {
-                return Err(CompileError::new(
-                    "DUPLICATE_AGENT",
-                    format!("compiled agent '{agent_id}' is already registered"),
-                ));
-            }
-        }
-        Ok(registry)
-    }
-
-    pub fn get(&self, agent_id: &str) -> Option<Arc<CompiledAgent>> {
-        self.agents.get(agent_id).cloned()
-    }
-
-    pub fn list(&self) -> impl Iterator<Item = &Arc<CompiledAgent>> {
-        self.agents.values()
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct RequestMetadata {
@@ -80,8 +51,11 @@ pub struct RequestMetadata {
 #[derive(Debug, Clone, Copy)]
 pub struct RunServiceConfig {
     pub max_concurrent_runs: usize,
-    pub max_parallel_node_executions: usize,
-    pub max_parallel_branches_per_run: usize,
+    pub max_concurrent_operations: usize,
+    pub max_concurrent_operations_per_run: usize,
+    pub operation_timeout: Duration,
+    pub operation_cancel_grace_period: Duration,
+    pub max_template_output_bytes: usize,
     pub run_timeout: Duration,
 }
 
@@ -125,7 +99,7 @@ struct PendingActiveRun {
 }
 
 struct PreparingRun {
-    agent: Arc<CompiledAgent>,
+    agent: Arc<CompiledWorkflow>,
     new_run: NewRun,
     input: Value,
     attachment: RunAttachment,
@@ -139,12 +113,11 @@ struct PreparingRun {
 }
 
 struct RunServiceInner {
-    agents: CompiledAgentRegistry,
-    executors: NodeExecutorRegistry,
+    agents: AgentCatalog,
     repository: Arc<dyn RunRepository>,
     events: EventHub,
     capacity: Arc<Semaphore>,
-    node_capacity: Arc<Semaphore>,
+    operation_capacity: Arc<Semaphore>,
     config: RunServiceConfig,
     preparing: Mutex<BTreeMap<String, PreparingRun>>,
     active: Mutex<BTreeMap<String, ActiveRun>>,
@@ -170,7 +143,7 @@ impl fmt::Debug for RunService {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RunService")
-            .field("agent_ids", &self.inner.agents.agents.keys())
+            .field("agent_ids", &self.inner.agents.ids().collect::<Vec<_>>())
             .field(
                 "max_concurrent_runs",
                 &self.inner.config.max_concurrent_runs,
@@ -334,15 +307,17 @@ impl RunServiceInner {
 
 impl RunService {
     pub fn new(
-        agents: CompiledAgentRegistry,
-        executors: NodeExecutorRegistry,
+        agents: AgentCatalog,
         repository: Arc<dyn RunRepository>,
         events: EventHub,
         config: RunServiceConfig,
     ) -> Result<Self, ServiceError> {
         if config.max_concurrent_runs == 0
-            || config.max_parallel_node_executions == 0
-            || config.max_parallel_branches_per_run == 0
+            || config.max_concurrent_operations == 0
+            || config.max_concurrent_operations_per_run == 0
+            || config.operation_timeout.is_zero()
+            || config.operation_cancel_grace_period.is_zero()
+            || config.max_template_output_bytes == 0
             || config.run_timeout.is_zero()
         {
             return Err(ServiceError::new(
@@ -353,11 +328,10 @@ impl RunService {
         Ok(Self {
             inner: Arc::new(RunServiceInner {
                 agents,
-                executors,
                 repository,
                 events,
                 capacity: Arc::new(Semaphore::new(config.max_concurrent_runs)),
-                node_capacity: Arc::new(Semaphore::new(config.max_parallel_node_executions)),
+                operation_capacity: Arc::new(Semaphore::new(config.max_concurrent_operations)),
                 config,
                 preparing: Mutex::new(BTreeMap::new()),
                 active: Mutex::new(BTreeMap::new()),
@@ -370,7 +344,7 @@ impl RunService {
         })
     }
 
-    pub fn agents(&self) -> &CompiledAgentRegistry {
+    pub fn agents(&self) -> &AgentCatalog {
         &self.inner.agents
     }
 
@@ -564,7 +538,7 @@ impl RunService {
             .agents
             .get(agent_id)
             .ok_or_else(|| ServiceError::new("AGENT_NOT_FOUND", "agent not found"))?;
-        if !agent.input_schema.is_valid(&input) {
+        if !agent.input_validator().is_valid(&input) {
             return Err(ServiceError::new(
                 "INPUT_INVALID",
                 "input does not match the agent schema",
@@ -581,7 +555,7 @@ impl RunService {
         let new_run = NewRun {
             run_id: run_id.clone(),
             request_id: request_id.clone(),
-            agent_id: agent.id.clone(),
+            agent_id: agent.ir.metadata.id.as_str().to_string(),
             agent_version: agent.version_hash.clone(),
             attachment,
             created_at: Utc::now(),
@@ -709,7 +683,6 @@ impl RunService {
             panic_active_task,
         } = preparing;
         let run_id = new_run.run_id.clone();
-        let task_stop = stop.clone();
         let task_state = Arc::clone(&state);
         let inner = Arc::clone(&self.inner);
         let task_run_id = run_id.clone();
@@ -739,17 +712,16 @@ impl RunService {
                     panic!("private scheduler panic payload");
                 }
                 let coordinator = active_task_coordinator(&task_inner, agent);
-                let result = {
-                    let execution =
-                        coordinator.execute_existing(new_run, input, signal, task_state);
-                    tokio::pin!(execution);
-                    tokio::select! {
-                        result = &mut execution => result,
-                        _ = sleep(task_inner.config.run_timeout) => {
-                            task_stop.request(StopReason::TimedOut);
-                            execution.await
-                        }
-                    }
+                let execution_deadline = TokioInstant::now() + task_inner.config.run_timeout;
+                let result = if signal.bind_deadline(execution_deadline).is_err() {
+                    Err(super::RunError::infrastructure(
+                        "RUN_STOP_DEADLINE_INVALID",
+                        "Run stop signal was bound to a different execution deadline",
+                    ))
+                } else {
+                    coordinator
+                        .execute_existing(new_run, input, signal, task_state, execution_deadline)
+                        .await
                 };
                 if let Err(error) = result {
                     task_inner.close_admission();
@@ -997,22 +969,27 @@ async fn publish_prelaunch_terminal(
     Ok(())
 }
 
-fn active_task_coordinator(inner: &RunServiceInner, agent: Arc<CompiledAgent>) -> RunCoordinator {
+fn active_task_coordinator(
+    inner: &RunServiceInner,
+    agent: Arc<CompiledWorkflow>,
+) -> RunCoordinator {
     RunCoordinator::new(
         agent,
-        inner.executors.clone(),
         inner.events.clone(),
         Arc::clone(&inner.repository),
-        ExecutionLimiter::new(
-            Arc::clone(&inner.node_capacity),
-            Arc::new(Semaphore::new(inner.config.max_parallel_branches_per_run)),
-        ),
+        Arc::clone(&inner.operation_capacity),
+        super::scope_scheduler::ScopeSchedulerConfig {
+            max_concurrent_operations_per_run: inner.config.max_concurrent_operations_per_run,
+            operation_timeout: inner.config.operation_timeout,
+            operation_cancel_grace_period: inner.config.operation_cancel_grace_period,
+            max_template_output_bytes: inner.config.max_template_output_bytes,
+        },
     )
 }
 
 async fn recover_task_panic(
     inner: Arc<RunServiceInner>,
-    agent: Arc<CompiledAgent>,
+    agent: Arc<CompiledWorkflow>,
     state: Arc<RunState>,
     run: NewRun,
     started: Instant,
@@ -1068,12 +1045,51 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        dsl::compiled::ExecutionPlan,
+        dsl::vnext::compiler::WorkflowCompiler,
         history::{
             repository::{TerminalProposal, TerminalSequence},
-            types::{NodeOutputRecord, RunLifecycle},
+            types::RunLifecycle,
         },
+        resources::{actions::ActionRegistry, models::ModelRegistry},
     };
+
+    fn test_agent(id: &str) -> Arc<CompiledWorkflow> {
+        let source = format!(
+            r#"
+api_version: insight.agent/v2
+kind: agent
+metadata:
+  id: {id}
+  name: Test Agent
+schema_dialect: https://json-schema.org/draft/2020-12/schema
+input:
+  schema: {{type: object, additionalProperties: false}}
+output:
+  data_schema: {{type: object, additionalProperties: false}}
+workflow:
+  result:
+    return:
+      data: {{literal: {{}}}}
+"#
+        );
+        Arc::new(
+            WorkflowCompiler::new(ModelRegistry::default(), ActionRegistry::default())
+                .compile_source(std::path::Path::new("."), &source)
+                .unwrap(),
+        )
+    }
+
+    fn test_config() -> RunServiceConfig {
+        RunServiceConfig {
+            max_concurrent_runs: 1,
+            max_concurrent_operations: 1,
+            max_concurrent_operations_per_run: 1,
+            operation_timeout: Duration::from_secs(1),
+            operation_cancel_grace_period: Duration::from_millis(100),
+            max_template_output_bytes: 16_384,
+            run_timeout: Duration::from_secs(1),
+        }
+    }
 
     #[derive(Default)]
     struct UnitRepository {
@@ -1131,10 +1147,6 @@ mod tests {
             events: &[crate::events::protocol::RunEvent],
         ) -> Result<(), HistoryError> {
             self.events.lock().await.extend_from_slice(events);
-            Ok(())
-        }
-
-        async fn put_node_output(&self, _output: NodeOutputRecord) -> Result<(), HistoryError> {
             Ok(())
         }
 
@@ -1266,33 +1278,17 @@ mod tests {
                 operation_timeout: Duration::from_secs(1),
             },
         );
-        let agent = Arc::new(CompiledAgent {
-            id: "ownership-agent".to_string(),
-            name: "ownership-agent".to_string(),
-            description: String::new(),
-            version_hash: "sha256:ownership-agent".to_string(),
-            input_schema: Arc::new(crate::schema::compile_schema(&json!({})).unwrap()),
-            entry: "missing".to_string(),
-            execution_plan: ExecutionPlan::sequential("missing", Vec::<String>::new()),
-            nodes: BTreeMap::new(),
-            templates: Arc::new(handlebars::Handlebars::new()),
-        });
+        let agent = test_agent("ownership_agent");
         let service = RunService::new(
-            CompiledAgentRegistry::new(vec![agent]).unwrap(),
-            NodeExecutorRegistry::default(),
+            AgentCatalog::new(vec![agent]).unwrap(),
             repository_trait,
             events,
-            RunServiceConfig {
-                max_concurrent_runs: 1,
-                max_parallel_node_executions: 1,
-                max_parallel_branches_per_run: 1,
-                run_timeout: Duration::from_secs(1),
-            },
+            test_config(),
         )
         .unwrap();
 
         let error = service
-            .create_detached("ownership-agent", json!({}), RequestMetadata::default())
+            .create_detached("ownership_agent", json!({}), RequestMetadata::default())
             .await
             .unwrap_err();
 
@@ -1303,7 +1299,7 @@ mod tests {
         assert!(repository.runs.lock().await.is_empty());
 
         let rejected = service
-            .create_detached("ownership-agent", json!({}), RequestMetadata::default())
+            .create_detached("ownership_agent", json!({}), RequestMetadata::default())
             .await
             .unwrap_err();
         assert_eq!(rejected.code(), "RUN_SERVICE_STOPPING");
@@ -1322,16 +1318,10 @@ mod tests {
             },
         );
         let service = RunService::new(
-            CompiledAgentRegistry::new(Vec::new()).unwrap(),
-            NodeExecutorRegistry::default(),
+            AgentCatalog::new(Vec::new()).unwrap(),
             repository,
             events,
-            RunServiceConfig {
-                max_concurrent_runs: 1,
-                max_parallel_node_executions: 1,
-                max_parallel_branches_per_run: 1,
-                run_timeout: Duration::from_secs(1),
-            },
+            test_config(),
         )
         .unwrap();
 
@@ -1372,26 +1362,21 @@ mod tests {
             },
         );
         let service = RunService::new(
-            CompiledAgentRegistry::new(Vec::new()).unwrap(),
-            NodeExecutorRegistry::default(),
+            AgentCatalog::new(Vec::new()).unwrap(),
             Arc::clone(&repository_trait),
             events,
-            RunServiceConfig {
-                max_concurrent_runs: 1,
-                max_parallel_node_executions: 1,
-                max_parallel_branches_per_run: 1,
-                run_timeout: Duration::from_secs(1),
-            },
+            test_config(),
         )
         .unwrap();
         let permit = Arc::clone(&service.inner.capacity)
             .try_acquire_owned()
             .unwrap();
+        let agent = test_agent("agent");
         let new_run = NewRun {
             run_id: "run_unit_attached".to_string(),
             request_id: "req_unit_attached".to_string(),
             agent_id: "agent".to_string(),
-            agent_version: "sha256:agent".to_string(),
+            agent_version: agent.version_hash.clone(),
             attachment: RunAttachment::Attached,
             created_at: Utc::now(),
             input_summary: json!({"keys":[], "serialized_bytes":2}),
@@ -1401,17 +1386,7 @@ mod tests {
         lock_preparing(&service.inner).insert(
             new_run.run_id.clone(),
             PreparingRun {
-                agent: Arc::new(CompiledAgent {
-                    id: "agent".to_string(),
-                    name: "agent".to_string(),
-                    description: String::new(),
-                    version_hash: "sha256:agent".to_string(),
-                    input_schema: Arc::new(crate::schema::compile_schema(&json!({})).unwrap()),
-                    entry: "missing".to_string(),
-                    execution_plan: ExecutionPlan::sequential("missing", Vec::<String>::new()),
-                    nodes: BTreeMap::new(),
-                    templates: Arc::new(handlebars::Handlebars::new()),
-                }),
+                agent,
                 new_run: new_run.clone(),
                 input: json!({}),
                 attachment: RunAttachment::Attached,
@@ -1448,18 +1423,8 @@ mod tests {
         panic!("attached preparing run did not become cancelled");
     }
 
-    fn panic_test_agent() -> Arc<CompiledAgent> {
-        Arc::new(CompiledAgent {
-            id: "panic-agent".to_string(),
-            name: "panic-agent".to_string(),
-            description: String::new(),
-            version_hash: "sha256:panic-agent".to_string(),
-            input_schema: Arc::new(crate::schema::compile_schema(&json!({})).unwrap()),
-            entry: "missing".to_string(),
-            execution_plan: ExecutionPlan::sequential("missing", Vec::<String>::new()),
-            nodes: BTreeMap::new(),
-            templates: Arc::new(handlebars::Handlebars::new()),
-        })
+    fn panic_test_agent() -> Arc<CompiledWorkflow> {
+        test_agent("panic_agent")
     }
 
     fn panic_test_service(repository: Arc<UnitRepository>) -> RunService {
@@ -1474,16 +1439,10 @@ mod tests {
             },
         );
         RunService::new(
-            CompiledAgentRegistry::new(vec![panic_test_agent()]).unwrap(),
-            NodeExecutorRegistry::default(),
+            AgentCatalog::new(vec![panic_test_agent()]).unwrap(),
             repository_trait,
             events,
-            RunServiceConfig {
-                max_concurrent_runs: 1,
-                max_parallel_node_executions: 1,
-                max_parallel_branches_per_run: 1,
-                run_timeout: Duration::from_secs(1),
-            },
+            test_config(),
         )
         .unwrap()
     }
@@ -1493,7 +1452,7 @@ mod tests {
     ) -> (PreparedRun, Arc<tokio::sync::Notify>, StopSignal) {
         let prepared = service
             .prepare_run(
-                "panic-agent",
+                "panic_agent",
                 json!({}),
                 RequestMetadata::default(),
                 RunAttachment::Detached,
@@ -1603,7 +1562,7 @@ mod tests {
         );
         assert_eq!(
             service
-                .create_detached("panic-agent", json!({}), RequestMetadata::default(),)
+                .create_detached("panic_agent", json!({}), RequestMetadata::default(),)
                 .await
                 .unwrap_err()
                 .code(),

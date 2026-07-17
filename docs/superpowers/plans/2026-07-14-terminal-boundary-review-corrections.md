@@ -1,5 +1,7 @@
 # Terminal Boundary Review Corrections Implementation Plan
 
+> **Historical / superseded:** this plan targeted the removed graph/node runtime. See [DSL vNext Region/SSA Design](../specs/2026-07-16-dsl-vnext-region-ssa-design.md) for the current runtime and terminal contracts.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Eliminate the last three internal terminal-consistency gaps by deriving terminal events from typed updates, distinguishing durable recovery winners, and making infrastructure impossible in settled branch results.

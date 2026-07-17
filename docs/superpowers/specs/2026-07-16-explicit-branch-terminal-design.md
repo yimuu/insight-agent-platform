@@ -1,6 +1,8 @@
 # Explicit Branch Terminal Design
 
-**Status:** Implemented and verified on 2026-07-16
+> **Historical / superseded:** `core.branch_end`, explicit Fork/Join nodes, and the flat graph were removed. Structured branch results now lower to RegionYield and internal Phi under [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+
+**Status:** Superseded by DSL vNext
 
 ## Problem
 

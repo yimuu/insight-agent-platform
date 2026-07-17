@@ -1,20 +1,10 @@
 use std::{
-    future::Future,
-    pin::Pin,
-    sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc,
-    },
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::Duration,
 };
 
-use tokio::time::Instant;
+use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
-
-use super::RunError;
-
-pub type ContentEmitter =
-    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<(), RunError>> + Send>> + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -26,7 +16,8 @@ pub enum StopReason {
 
 struct StopInner {
     token: CancellationToken,
-    reason: AtomicU8,
+    winner: Mutex<Option<StopReason>>,
+    deadline: OnceLock<Instant>,
 }
 
 #[derive(Clone)]
@@ -42,7 +33,8 @@ pub struct StopSignal {
 pub fn stop_pair() -> (StopController, StopSignal) {
     let inner = Arc::new(StopInner {
         token: CancellationToken::new(),
-        reason: AtomicU8::new(0),
+        winner: Mutex::new(None),
+        deadline: OnceLock::new(),
     });
     (
         StopController {
@@ -54,33 +46,101 @@ pub fn stop_pair() -> (StopController, StopSignal) {
 
 impl StopController {
     pub fn request(&self, reason: StopReason) -> bool {
-        if self
-            .inner
-            .reason
-            .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return false;
-        }
-        self.inner.token.cancel();
-        true
+        self.inner.claim_external(reason)
     }
 }
 
 impl StopSignal {
-    pub fn reason(&self) -> Option<StopReason> {
-        match self.inner.reason.load(Ordering::Acquire) {
-            1 => Some(StopReason::Cancelled),
-            2 => Some(StopReason::Interrupted),
-            3 => Some(StopReason::TimedOut),
-            _ => None,
+    pub(crate) fn bind_deadline(&self, deadline: Instant) -> Result<(), ()> {
+        if let Some(existing) = self.inner.deadline.get() {
+            return (*existing == deadline).then_some(()).ok_or(());
         }
+        if self.inner.deadline.set(deadline).is_err()
+            && self.inner.deadline.get().copied() != Some(deadline)
+        {
+            return Err(());
+        }
+        self.inner.claim_elapsed_deadline();
+        Ok(())
+    }
+
+    pub fn reason(&self) -> Option<StopReason> {
+        self.inner.claim_elapsed_deadline();
+        self.inner.reason()
     }
 
     pub async fn stopped(&self) {
-        if self.reason().is_none() {
+        if self.reason().is_some() {
+            return;
+        }
+        if let Some(deadline) = self.inner.deadline.get().copied() {
+            tokio::select! {
+                _ = self.inner.token.cancelled() => {}
+                _ = sleep_until(deadline) => {
+                    self.inner.claim(StopReason::TimedOut);
+                }
+            }
+        } else {
             self.inner.token.cancelled().await;
         }
+    }
+}
+
+impl StopInner {
+    fn claim_external(&self, requested: StopReason) -> bool {
+        let requested_won = {
+            let mut winner = self.lock_winner();
+            if winner.is_some() {
+                return false;
+            }
+            // Compare the absolute deadline and install the winner while
+            // holding the same mutex. This is the linearization point: a
+            // request before the boundary wins, while a request acquiring the
+            // lock after the boundary installs TimedOut instead.
+            let selected = if requested != StopReason::TimedOut && self.deadline_has_elapsed() {
+                StopReason::TimedOut
+            } else {
+                requested
+            };
+            *winner = Some(selected);
+            selected == requested
+        };
+        self.token.cancel();
+        requested_won
+    }
+
+    fn claim(&self, reason: StopReason) -> bool {
+        {
+            let mut winner = self.lock_winner();
+            if winner.is_some() {
+                return false;
+            }
+            *winner = Some(reason);
+        }
+        self.token.cancel();
+        true
+    }
+
+    fn reason(&self) -> Option<StopReason> {
+        *self.lock_winner()
+    }
+
+    fn deadline_has_elapsed(&self) -> bool {
+        self.deadline
+            .get()
+            .is_some_and(|deadline| Instant::now() >= *deadline)
+    }
+
+    fn claim_elapsed_deadline(&self) {
+        if self.deadline_has_elapsed() {
+            self.claim(StopReason::TimedOut);
+        }
+    }
+
+    fn lock_winner(&self) -> MutexGuard<'_, Option<StopReason>> {
+        self.winner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -88,27 +148,15 @@ impl StopSignal {
 pub struct ExecutionControl {
     stop: StopSignal,
     deadline: Instant,
-    emit_content: ContentEmitter,
-    content_enabled: bool,
 }
 
 impl ExecutionControl {
-    pub fn new<F, Fut>(stop: StopSignal, timeout: Duration, emit_content: F) -> Self
-    where
-        F: Fn(String) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<(), RunError>> + Send + 'static,
-    {
-        Self {
-            stop,
-            deadline: Instant::now() + timeout,
-            emit_content: Arc::new(move |content| Box::pin(emit_content(content))),
-            content_enabled: true,
-        }
+    pub fn new(stop: StopSignal, timeout: Duration) -> Self {
+        Self::with_deadline(stop, Instant::now() + timeout)
     }
 
-    pub fn with_content_enabled(mut self, enabled: bool) -> Self {
-        self.content_enabled = enabled;
-        self
+    pub fn with_deadline(stop: StopSignal, deadline: Instant) -> Self {
+        Self { stop, deadline }
     }
 
     pub fn stop_reason(&self) -> Option<StopReason> {
@@ -122,17 +170,37 @@ impl ExecutionControl {
     pub fn remaining(&self) -> Duration {
         self.deadline.saturating_duration_since(Instant::now())
     }
+}
 
-    pub async fn emit_content(&self, content: impl Into<String>) -> Result<(), RunError> {
-        if !self.content_enabled {
-            return Err(RunError::new(
-                "CONTENT_EMIT_DISABLED",
-                "content emission is disabled for this node",
-            ));
-        }
-        if let Some(reason) = self.stop_reason() {
-            return Err(RunError::stopped(reason));
-        }
-        (self.emit_content)(content.into()).await
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn elapsed_deadline_wins_over_a_late_external_cancel() {
+        let (controller, signal) = stop_pair();
+        signal
+            .bind_deadline(Instant::now() + Duration::from_secs(5))
+            .unwrap();
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+
+        assert!(!controller.request(StopReason::Cancelled));
+        signal.stopped().await;
+        assert_eq!(signal.reason(), Some(StopReason::TimedOut));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn external_cancel_winner_survives_a_later_deadline() {
+        let (controller, signal) = stop_pair();
+        signal
+            .bind_deadline(Instant::now() + Duration::from_secs(5))
+            .unwrap();
+
+        assert!(controller.request(StopReason::Cancelled));
+        tokio::time::advance(Duration::from_secs(5)).await;
+
+        signal.stopped().await;
+        assert_eq!(signal.reason(), Some(StopReason::Cancelled));
     }
 }

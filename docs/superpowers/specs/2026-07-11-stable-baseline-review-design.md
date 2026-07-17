@@ -1,5 +1,7 @@
 # Stable Baseline Review and Dependency Governance Design
 
+> **Historical baseline:** findings and remediation history remain useful, but its graph/node DSL snapshot is not current. See [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+
 **Date:** 2026-07-11
 **Status:** Approved
 **Code baseline:** `main@af414de`

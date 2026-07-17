@@ -121,7 +121,6 @@ impl Action for SchemaMatrixAction {
             }),
             output_schema: json!({"type":"object"}),
             idempotent: true,
-            streams_content: false,
         }
     }
 
@@ -183,14 +182,12 @@ async fn action_validation_errors_are_fixed_and_instance_free() {
     actions
         .register(EchoAction {
             calls: Arc::clone(&valid_calls),
-            streams_content: false,
             invalid_output: false,
         })
         .unwrap();
     actions
         .register(EchoAction {
             calls: Arc::new(Mutex::new(Vec::new())),
-            streams_content: false,
             invalid_output: true,
         })
         .unwrap();
@@ -381,7 +378,6 @@ impl Action for ContainmentAction {
                 "properties":{"result":{"type":"integer"}}
             }),
             idempotent: true,
-            streams_content: false,
         }
     }
 

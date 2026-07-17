@@ -7,7 +7,7 @@ auth:
 agents:
   directory: ../agents
   enabled:
-    - code_node_demo
+    - action_demo
     - medical_report_interpreter
     - parallel_researcher
     - researcher
@@ -22,14 +22,15 @@ actions:
 
 history:
   provider: sqlite
-  path: ../data/formal_v1.sqlite3
+  path: ../data/formal_v2.sqlite3
 
 runtime:
   max_concurrent_runs: 32
-  max_fork_branches: 32
-  max_parallel_node_executions: 32
-  max_parallel_branches_per_run: 8
-  default_node_timeout: 60s
+  max_concurrent_operations: 32
+  max_concurrent_operations_per_run: 8
+  operation_timeout: 60s
+  operation_cancel_grace_period: 5s
+  max_template_output_bytes: 262144
   run_timeout: 5m
   sse_keep_alive_interval: 5s
   subscriber_capacity: 128

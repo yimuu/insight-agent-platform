@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::{
     dsl::CompileError,
     runtime::{ExecutionControl, RunError},
-    schema::{compile_schema, JsonSchemaValidator},
+    schema::{compile_schema_2020, JsonSchemaValidator},
 };
 
 #[derive(Debug, Clone)]
@@ -15,25 +15,35 @@ pub struct ActionDescriptor {
     pub input_schema: Value,
     pub output_schema: Value,
     pub idempotent: bool,
-    pub streams_content: bool,
 }
 
 #[derive(Clone)]
 pub struct ActionContext {
     pub run_id: String,
-    pub node_id: String,
+    /// Stable qualified operation identity.
+    pub operation_id: String,
+    pub attempt: u32,
+    pub attempt_id: String,
+    /// Stable across retry attempts for the same logical operation.
+    pub idempotency_key: String,
     pub control: ExecutionControl,
 }
 
 impl ActionContext {
-    pub fn new(
+    pub fn for_operation(
         run_id: impl Into<String>,
-        node_id: impl Into<String>,
+        operation_id: impl Into<String>,
+        attempt: u32,
         control: ExecutionControl,
     ) -> Self {
+        let run_id = run_id.into();
+        let operation_id = operation_id.into();
         Self {
-            run_id: run_id.into(),
-            node_id: node_id.into(),
+            attempt_id: format!("{run_id}:{operation_id}:{attempt}"),
+            idempotency_key: format!("{run_id}:{operation_id}"),
+            run_id,
+            operation_id,
+            attempt,
             control,
         }
     }
@@ -86,7 +96,7 @@ fn validate_json(
     message: &'static str,
 ) -> Result<(), RunError> {
     if !validator.is_valid(value) {
-        return Err(RunError::new(code, message));
+        return Err(RunError::operation(code, message));
     }
     Ok(())
 }
@@ -115,13 +125,13 @@ impl ActionRegistry {
                 format!("action '{name}' is already registered"),
             ));
         }
-        let input_validator = compile_schema(&descriptor.input_schema).map_err(|error| {
+        let input_validator = compile_schema_2020(&descriptor.input_schema).map_err(|error| {
             CompileError::new(
                 "ACTION_INPUT_SCHEMA_INVALID",
                 format!("action '{name}' input schema is invalid: {error}"),
             )
         })?;
-        let output_validator = compile_schema(&descriptor.output_schema).map_err(|error| {
+        let output_validator = compile_schema_2020(&descriptor.output_schema).map_err(|error| {
             CompileError::new(
                 "ACTION_OUTPUT_SCHEMA_INVALID",
                 format!("action '{name}' output schema is invalid: {error}"),

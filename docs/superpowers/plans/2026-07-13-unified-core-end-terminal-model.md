@@ -1,5 +1,7 @@
 # Unified `core.end` Terminal Model Implementation Plan
 
+> **Historical / superseded:** authored `core.end` was removed in favor of lexical block `return`/`raise`. See [DSL vNext Region/SSA Design](../specs/2026-07-16-dsl-vnext-region-ssa-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace `core.output` and implicit branch-to-Join settlement with one typed, scope-aware `core.end` terminal model across DSL, graph compilation, scheduling, events, persistence, API, Agents, and documentation.

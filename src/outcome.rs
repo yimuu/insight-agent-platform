@@ -1,13 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EndOutcomeKind {
-    Success,
-    Failure,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -30,20 +23,11 @@ pub enum TerminalOutcome {
     Failure { error: WorkflowError },
 }
 
-impl TerminalOutcome {
-    pub fn kind(&self) -> EndOutcomeKind {
-        match self {
-            Self::Success { .. } => EndOutcomeKind::Success,
-            Self::Failure { .. } => EndOutcomeKind::Failure,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureKind {
     Workflow,
-    Node,
+    Operation,
     Timeout,
     Infrastructure,
 }
@@ -52,7 +36,7 @@ impl FailureKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Workflow => "workflow",
-            Self::Node => "node",
+            Self::Operation => "operation",
             Self::Timeout => "timeout",
             Self::Infrastructure => "infrastructure",
         }
@@ -61,7 +45,7 @@ impl FailureKind {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "workflow" => Some(Self::Workflow),
-            "node" => Some(Self::Node),
+            "operation" => Some(Self::Operation),
             "timeout" => Some(Self::Timeout),
             "infrastructure" => Some(Self::Infrastructure),
             _ => None,

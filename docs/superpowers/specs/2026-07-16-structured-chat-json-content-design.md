@@ -1,6 +1,8 @@
 # Structured Chat JSON Content Design
 
-**Status:** Implemented and verified on 2026-07-16
+> **Historical / superseded:** this fix targeted Join envelopes rendered through `core.chat`. vNext uses typed ValueExpr bindings and labelled `ai.chat` data parts; see [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+
+**Status:** Superseded by DSL vNext
 
 ## Problem
 

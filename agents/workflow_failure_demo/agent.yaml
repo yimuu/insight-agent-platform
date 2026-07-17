@@ -1,16 +1,28 @@
-version: 1
-id: workflow_failure_demo
-name: Workflow Failure Demo
-description: Demonstrates an authored workflow failure terminal.
+api_version: insight.agent/v2
+kind: agent
+
+metadata:
+  id: workflow_failure_demo
+  name: Workflow Failure Demo
+  description: Demonstrates an authored workflow failure terminal.
+
+schema_dialect: https://json-schema.org/draft/2020-12/schema
+
+errors:
+  rejected:
+    category: workflow
+    code: WORKFLOW_DEMO_REJECTED
+    public_message: workflow failure demo rejected the run
+
 input:
   schema:
     type: object
     additionalProperties: false
-entry: reject
-nodes:
-  reject:
-    type: core.end
-    config:
-      outcome: failure
-      code: WORKFLOW_DEMO_REJECTED
-      message: workflow failure demo rejected the run
+
+output:
+  data_schema:
+    type: "null"
+
+workflow:
+  result:
+    raise: rejected

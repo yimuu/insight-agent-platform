@@ -222,9 +222,9 @@ impl ChatModel for OpenAiChatModel {
 
     async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, RunError> {
         self.validate_parameters(&request.parameters)
-            .map_err(|error| RunError::new(error.code(), error.to_string()))?;
+            .map_err(|error| RunError::operation(error.code(), error.to_string()))?;
         let parameters = request.parameters.as_object().cloned().ok_or_else(|| {
-            RunError::new(
+            RunError::operation(
                 "MODEL_PARAMETERS_INVALID",
                 "model parameters must be an object",
             )
@@ -256,7 +256,7 @@ impl ChatModel for OpenAiChatModel {
             None => request,
         };
         let response = request.send().await.map_err(|error| {
-            RunError::new(
+            RunError::operation(
                 "UPSTREAM_TRANSPORT",
                 format!(
                     "chat provider request failed ({})",
@@ -266,7 +266,7 @@ impl ChatModel for OpenAiChatModel {
         })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(RunError::new(
+            return Err(RunError::operation(
                 "UPSTREAM_STATUS",
                 format!("chat provider returned HTTP {}", status.as_u16()),
             ));
@@ -323,7 +323,7 @@ impl ChatModel for OpenAiChatModel {
                             }
                         }
                         Some(Err(error)) => {
-                            return Err(RunError::new(
+                            return Err(RunError::operation(
                                 "UPSTREAM_STREAM",
                                 format!(
                                     "chat provider stream failed ({})",
@@ -503,10 +503,11 @@ fn parse_sse_line(line: &[u8], limits: OpenAiChatLimits) -> Result<ParsedSseLine
     if payload == b"[DONE]" {
         return Ok(ParsedSseLine::Done);
     }
-    let payload = std::str::from_utf8(payload)
-        .map_err(|_| RunError::new("UPSTREAM_STREAM_INVALID", "invalid UTF-8 in chat stream"))?;
+    let payload = std::str::from_utf8(payload).map_err(|_| {
+        RunError::operation("UPSTREAM_STREAM_INVALID", "invalid UTF-8 in chat stream")
+    })?;
     let parsed: OpenAiChunk = serde_json::from_str(payload).map_err(|_| {
-        RunError::new(
+        RunError::operation(
             "UPSTREAM_STREAM_INVALID",
             "invalid chat provider stream payload",
         )
@@ -523,7 +524,7 @@ fn parse_sse_line(line: &[u8], limits: OpenAiChatLimits) -> Result<ParsedSseLine
             .flatten();
         if let Some(usage) = &usage {
             let bytes = serde_json::to_vec(usage).map_err(|_| {
-                RunError::new(
+                RunError::operation(
                     "UPSTREAM_STREAM_INVALID",
                     "invalid chat provider stream payload",
                 )
@@ -543,7 +544,7 @@ fn parse_sse_line(line: &[u8], limits: OpenAiChatLimits) -> Result<ParsedSseLine
     if chunks.is_empty() {
         if let Some(usage) = parsed.usage {
             let bytes = serde_json::to_vec(&usage).map_err(|_| {
-                RunError::new(
+                RunError::operation(
                     "UPSTREAM_STREAM_INVALID",
                     "invalid chat provider stream payload",
                 )
@@ -562,7 +563,7 @@ fn parse_sse_line(line: &[u8], limits: OpenAiChatLimits) -> Result<ParsedSseLine
 }
 
 fn incomplete_stream() -> RunError {
-    RunError::new(
+    RunError::operation(
         "UPSTREAM_STREAM_INCOMPLETE",
         "chat provider stream ended without completion evidence",
     )

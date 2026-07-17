@@ -138,7 +138,7 @@ impl OwnershipState {
     }
 }
 
-/// Retains the dedicated PostgreSQL session that owns one Formal V1 store.
+/// Retains the dedicated PostgreSQL session that owns one canonical history store.
 #[doc(hidden)]
 pub struct PostgresStoreOwner {
     state: OwnershipState,

@@ -16,9 +16,7 @@ use insight_agent_platform::{
     },
     history::{
         repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
-        types::{
-            NewRun, NodeOutputRecord, RunRecord, RunStatus, RunTerminal, StopError, TerminalUpdate,
-        },
+        types::{NewRun, RunRecord, RunStatus, RunTerminal, StopError, TerminalUpdate},
     },
     outcome::{FailureKind, RunFailure, RunOutput},
 };
@@ -31,17 +29,16 @@ fn at(second: u32) -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 7, 10, 0, 0, second).unwrap()
 }
 
-fn scope(node_id: Option<&str>) -> RunEventScope {
-    scope_for(RUN_ID, node_id)
+fn scope() -> RunEventScope {
+    scope_for(RUN_ID)
 }
 
-fn scope_for(run_id: &str, node_id: Option<&str>) -> RunEventScope {
+fn scope_for(run_id: &str) -> RunEventScope {
     RunEventScope {
         request_id: "req_events".to_string(),
         run_id: run_id.to_string(),
         agent_id: "agent_events".to_string(),
         agent_version: "sha256:events".to_string(),
-        node_id: node_id.map(str::to_string),
     }
 }
 
@@ -139,20 +136,20 @@ async fn terminal_events_are_projected_only_from_typed_updates() {
         ),
         (
             TerminalUpdate::new(
-                "run_node",
+                "run_operation",
                 at(12),
                 RunTerminal::Failed {
                     error: RunFailure {
-                        kind: FailureKind::Node,
-                        code: "NODE_FAILED".into(),
-                        message: "node failed".into(),
+                        kind: FailureKind::Operation,
+                        code: "OPERATION_FAILED".into(),
+                        message: "operation failed".into(),
                     },
                 },
             ),
             RunEventType::RunFailed,
-            "NODE_FAILED",
-            "node failed",
-            json!({"kind":"node"}),
+            "OPERATION_FAILED",
+            "operation failed",
+            json!({"kind":"operation"}),
         ),
         (
             TerminalUpdate::new(
@@ -228,7 +225,7 @@ async fn terminal_events_are_projected_only_from_typed_updates() {
         let repository = Arc::new(MemoryRepository::default());
         let hub = EventHub::new(repository, config(8));
         let event = requested_event(
-            hub.publish_terminal(scope_for(&run_id, None), update)
+            hub.publish_terminal(scope_for(&run_id), update)
                 .await
                 .unwrap(),
         );
@@ -257,7 +254,7 @@ async fn generic_publish_interfaces_reject_all_terminal_event_types_without_side
             let hub = EventHub::new(repository.clone(), config(8));
             let error = if publish_error {
                 hub.publish_error(
-                    scope_for(&run_id, None),
+                    scope_for(&run_id),
                     event_type,
                     "FORGED_TERMINAL",
                     "forged terminal event",
@@ -266,7 +263,7 @@ async fn generic_publish_interfaces_reject_all_terminal_event_types_without_side
                 .await
                 .unwrap_err()
             } else {
-                hub.publish(scope_for(&run_id, None), event_type, json!({"forged":true}))
+                hub.publish(scope_for(&run_id), event_type, json!({"forged":true}))
                     .await
                     .unwrap_err()
             };
@@ -295,22 +292,22 @@ async fn same_type_and_timestamp_with_different_terminal_fields_is_authoritative
             },
         },
     );
-    requested_event(hub.publish_terminal(scope(None), durable).await.unwrap());
+    requested_event(hub.publish_terminal(scope(), durable).await.unwrap());
 
     let requested = TerminalUpdate::new(
         RUN_ID,
         ended_at,
         RunTerminal::Failed {
             error: RunFailure {
-                kind: FailureKind::Node,
-                code: "REQUESTED_NODE_FAILURE".into(),
-                message: "requested node failure".into(),
+                kind: FailureKind::Operation,
+                code: "REQUESTED_OPERATION_FAILURE".into(),
+                message: "requested operation failure".into(),
             },
         },
     );
     let expected_type = RunEventType::RunFailed;
     let authoritative =
-        authoritative_event(hub.publish_terminal(scope(None), requested).await.unwrap());
+        authoritative_event(hub.publish_terminal(scope(), requested).await.unwrap());
 
     assert_eq!(authoritative.event_type, expected_type);
     assert_eq!(authoritative.timestamp, ended_at);
@@ -325,7 +322,7 @@ async fn terminal_publish_rejects_mismatched_typed_request_before_storage() {
     let hub = EventHub::new(repository.clone(), config(8));
 
     let wrong_run = hub
-        .publish_terminal(scope(None), failed_update("different_run", 10))
+        .publish_terminal(scope(), failed_update("different_run", 10))
         .await
         .unwrap_err();
     assert_eq!(wrong_run.code(), "HISTORY_EVENT_INVALID");
@@ -338,7 +335,6 @@ async fn terminal_publish_rejects_mismatched_typed_request_before_storage() {
 #[derive(Default)]
 struct MemoryRepository {
     events: Mutex<BTreeMap<String, Vec<RunEvent>>>,
-    outputs: Mutex<Vec<NodeOutputRecord>>,
     terminal_updates: Mutex<Vec<TerminalUpdate>>,
     fail_appends: AtomicBool,
     block_appends: AtomicBool,
@@ -436,11 +432,6 @@ impl RunRepository for MemoryRepository {
                 .or_default()
                 .push(event.clone());
         }
-        Ok(())
-    }
-
-    async fn put_node_output(&self, output: NodeOutputRecord) -> Result<(), HistoryError> {
-        self.outputs.lock().await.push(output);
         Ok(())
     }
 
@@ -550,14 +541,14 @@ async fn publish_allocates_and_persists_ordered_sequences() {
     let repository = Arc::new(MemoryRepository::default());
     let hub = EventHub::new(repository.clone(), config(8));
     assert_eq!(
-        hub.publish(scope(None), RunEventType::RunCreated, json!({}))
+        hub.publish(scope(), RunEventType::RunCreated, json!({}))
             .await
             .unwrap()
             .seq,
         1
     );
     assert_eq!(
-        hub.publish(scope(None), RunEventType::RunStarted, json!({}))
+        hub.publish(scope(), RunEventType::RunStarted, json!({}))
             .await
             .unwrap()
             .seq,
@@ -568,20 +559,28 @@ async fn publish_allocates_and_persists_ordered_sequences() {
 }
 
 #[tokio::test]
-async fn branch_lifecycle_events_use_contiguous_durable_sequences() {
+async fn operation_lifecycle_events_use_contiguous_durable_sequences() {
     let repository = Arc::new(MemoryRepository::default());
     let hub = EventHub::new(repository.clone(), config(8));
 
     let mut published = Vec::new();
     for event_type in [
-        RunEventType::BranchStarted,
-        RunEventType::BranchCompleted,
-        RunEventType::BranchFailed,
+        RunEventType::OperationStarted,
+        RunEventType::OperationCompleted,
+        RunEventType::OperationFailed,
     ] {
         published.push(
-            hub.publish(scope(Some("must_be_ignored")), event_type, json!({}))
-                .await
-                .unwrap(),
+            hub.publish(
+                scope(),
+                event_type,
+                json!({
+                    "operation_id":"/workflow/work#Authored",
+                    "operation_type":"test.operation",
+                    "attempt":1
+                }),
+            )
+            .await
+            .unwrap(),
         );
     }
 
@@ -589,7 +588,6 @@ async fn branch_lifecycle_events_use_contiguous_durable_sequences() {
         published.iter().map(|event| event.seq).collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
-    assert!(published.iter().all(|event| event.node_id.is_none()));
     hub.flush().await.unwrap();
     assert_eq!(repository.stored_sequences(RUN_ID).await, vec![1, 2, 3]);
 }
@@ -600,10 +598,10 @@ async fn two_subscribers_receive_identical_ordered_events() {
     let mut first = hub.subscribe(RUN_ID).await;
     let mut second = hub.subscribe(RUN_ID).await;
 
-    hub.publish(scope(None), RunEventType::RunCreated, json!({}))
+    hub.publish(scope(), RunEventType::RunCreated, json!({}))
         .await
         .unwrap();
-    hub.publish(scope(None), RunEventType::RunStarted, json!({}))
+    hub.publish(scope(), RunEventType::RunStarted, json!({}))
         .await
         .unwrap();
 
@@ -628,7 +626,7 @@ async fn nonterminal_event_is_broadcast_only_after_the_repository_commit() {
     let publishing = {
         let hub = hub.clone();
         tokio::spawn(async move {
-            hub.publish(scope(None), RunEventType::RunCreated, json!({}))
+            hub.publish(scope(), RunEventType::RunCreated, json!({}))
                 .await
         })
     };
@@ -653,7 +651,7 @@ async fn lagging_subscriber_is_closed_with_its_last_delivered_sequence() {
     let mut subscriber = hub.subscribe(RUN_ID).await;
 
     for _ in 0..3 {
-        hub.publish(scope(None), RunEventType::RunStarted, json!({}))
+        hub.publish(scope(), RunEventType::RunStarted, json!({}))
             .await
             .unwrap();
     }
@@ -681,7 +679,7 @@ async fn full_journal_queue_fails_immediately_instead_of_blocking_the_run() {
         let hub = hub.clone();
         tokio::spawn(async move {
             hub.publish(
-                scope_for("run_queue_1", None),
+                scope_for("run_queue_1"),
                 RunEventType::RunCreated,
                 json!({}),
             )
@@ -693,7 +691,7 @@ async fn full_journal_queue_fails_immediately_instead_of_blocking_the_run() {
         let hub = hub.clone();
         tokio::spawn(async move {
             hub.publish(
-                scope_for("run_queue_2", None),
+                scope_for("run_queue_2"),
                 RunEventType::RunStarted,
                 json!({}),
             )
@@ -704,9 +702,13 @@ async fn full_journal_queue_fails_immediately_instead_of_blocking_the_run() {
 
     let error = hub
         .publish(
-            scope_for("run_queue_3", Some("work")),
-            RunEventType::NodeStarted,
-            json!({}),
+            scope_for("run_queue_3"),
+            RunEventType::OperationStarted,
+            json!({
+                "operation_id":"/workflow/work#Authored",
+                "operation_type":"test.operation",
+                "attempt":1
+            }),
         )
         .await
         .unwrap_err();
@@ -738,7 +740,7 @@ async fn saturated_queue_failure_drops_no_broadcast_and_each_run_can_recover() {
         let hub = hub.clone();
         tokio::spawn(async move {
             hub.publish(
-                scope_for("run_failure_1", None),
+                scope_for("run_failure_1"),
                 RunEventType::RunCreated,
                 json!({}),
             )
@@ -750,7 +752,7 @@ async fn saturated_queue_failure_drops_no_broadcast_and_each_run_can_recover() {
         let hub = hub.clone();
         tokio::spawn(async move {
             hub.publish(
-                scope_for("run_failure_2", None),
+                scope_for("run_failure_2"),
                 RunEventType::RunCreated,
                 json!({}),
             )
@@ -760,7 +762,7 @@ async fn saturated_queue_failure_drops_no_broadcast_and_each_run_can_recover() {
     tokio::task::yield_now().await;
     assert_eq!(
         hub.publish(
-            scope_for("run_failure_3", None),
+            scope_for("run_failure_3"),
             RunEventType::RunCreated,
             json!({}),
         )
@@ -791,7 +793,7 @@ async fn saturated_queue_failure_drops_no_broadcast_and_each_run_can_recover() {
     {
         let update = failed_update(run_id, 20 + index as u32);
         assert!(matches!(
-            hub.recover_terminal(scope_for(run_id, None), update)
+            hub.recover_terminal(scope_for(run_id), update)
                 .await
                 .unwrap(),
             TerminalResolution::Requested(_)
@@ -820,7 +822,7 @@ async fn journal_operation_timeout_bounds_terminal_persistence_waits() {
     );
     let update = failed_update(RUN_ID, 11);
 
-    let error = hub.publish_terminal(scope(None), update).await.unwrap_err();
+    let error = hub.publish_terminal(scope(), update).await.unwrap_err();
     assert_eq!(error.code(), "JOURNAL_OPERATION_TIMEOUT");
 }
 
@@ -841,7 +843,7 @@ async fn recovery_derives_terminal_after_an_uncertain_append_commit() {
     );
     let mut subscriber = hub.subscribe(RUN_ID).await;
     assert_eq!(
-        hub.publish(scope(None), RunEventType::RunCreated, json!({}))
+        hub.publish(scope(), RunEventType::RunCreated, json!({}))
             .await
             .unwrap_err()
             .code(),
@@ -857,7 +859,7 @@ async fn recovery_derives_terminal_after_an_uncertain_append_commit() {
     let failed = failed_update(RUN_ID, 14);
     let created_type = RunEventType::RunCreated;
     let failed_type = RunEventType::RunFailed;
-    let terminal = authoritative_event(hub.recover_terminal(scope(None), failed).await.unwrap());
+    let terminal = authoritative_event(hub.recover_terminal(scope(), failed).await.unwrap());
     assert_eq!(terminal.seq, 2);
     assert_eq!(subscriber.recv().await.unwrap().event_type, created_type);
     assert_eq!(subscriber.recv().await.unwrap().event_type, failed_type);
@@ -892,7 +894,7 @@ async fn recovery_timeout_isolates_live_state_and_hands_off_one_owner() {
     let mut subscriber = hub.subscribe(RUN_ID).await;
 
     assert_eq!(
-        hub.publish(scope(None), RunEventType::RunCreated, json!({}))
+        hub.publish(scope(), RunEventType::RunCreated, json!({}))
             .await
             .unwrap_err()
             .code(),
@@ -901,7 +903,7 @@ async fn recovery_timeout_isolates_live_state_and_hands_off_one_owner() {
 
     let error = tokio::time::timeout(
         Duration::from_millis(250),
-        hub.recover_terminal(scope(None), failed_update(RUN_ID, 21)),
+        hub.recover_terminal(scope(), failed_update(RUN_ID, 21)),
     )
     .await
     .expect("foreground recovery must be bounded")
@@ -944,7 +946,7 @@ async fn duplicate_recovery_timeouts_reuse_the_same_background_owner() {
     );
 
     assert_eq!(
-        hub.publish(scope(None), RunEventType::RunCreated, json!({}))
+        hub.publish(scope(), RunEventType::RunCreated, json!({}))
             .await
             .unwrap_err()
             .code(),
@@ -954,7 +956,7 @@ async fn duplicate_recovery_timeouts_reuse_the_same_background_owner() {
     for second in [22, 23] {
         let error = tokio::time::timeout(
             Duration::from_millis(250),
-            hub.recover_terminal(scope(None), failed_update(RUN_ID, second)),
+            hub.recover_terminal(scope(), failed_update(RUN_ID, second)),
         )
         .await
         .expect("foreground recovery must be bounded")
@@ -1000,7 +1002,7 @@ async fn authoritative_recovery_terminal_with_blocked_reconciliation_closes_live
     let mut subscriber = hub.subscribe(RUN_ID).await;
 
     assert_eq!(
-        hub.publish(scope(None), RunEventType::RunCreated, json!({}))
+        hub.publish(scope(), RunEventType::RunCreated, json!({}))
             .await
             .unwrap_err()
             .code(),
@@ -1008,7 +1010,7 @@ async fn authoritative_recovery_terminal_with_blocked_reconciliation_closes_live
     );
 
     let error = hub
-        .recover_terminal(scope(None), failed_update(RUN_ID, 24))
+        .recover_terminal(scope(), failed_update(RUN_ID, 24))
         .await
         .unwrap_err();
 
@@ -1041,24 +1043,18 @@ async fn authoritative_recovery_terminal_with_mismatched_history_closes_without_
     let mut subscriber = hub.subscribe(RUN_ID).await;
 
     assert_eq!(
-        hub.publish(scope(None), RunEventType::RunCreated, json!({}))
+        hub.publish(scope(), RunEventType::RunCreated, json!({}))
             .await
             .unwrap_err()
             .code(),
         "JOURNAL_OPERATION_TIMEOUT"
     );
-    let replayed_created = RunEvent::error(
-        RunEventType::RunCreated,
-        1,
-        scope(None),
-        "OK",
-        "ok",
-        json!({}),
-    );
+    let replayed_created =
+        RunEvent::error(RunEventType::RunCreated, 1, scope(), "OK", "ok", json!({}));
     let wrong_terminal = RunEvent::error(
         RunEventType::RunCancelled,
         2,
-        scope(None),
+        scope(),
         "RUN_CANCELLED",
         "run cancelled by explicit request",
         json!({}),
@@ -1068,7 +1064,7 @@ async fn authoritative_recovery_terminal_with_mismatched_history_closes_without_
         .await;
 
     let error = hub
-        .recover_terminal(scope(None), failed_update(RUN_ID, 25))
+        .recover_terminal(scope(), failed_update(RUN_ID, 25))
         .await
         .unwrap_err();
 
@@ -1097,7 +1093,7 @@ async fn timed_out_terminal_write_is_cancelled_before_recovery() {
     let mut subscriber = hub.subscribe(RUN_ID).await;
     let completed = completed_update(RUN_ID, 12);
     assert_eq!(
-        hub.publish_terminal(scope(None), completed)
+        hub.publish_terminal(scope(), completed)
             .await
             .unwrap_err()
             .code(),
@@ -1107,7 +1103,7 @@ async fn timed_out_terminal_write_is_cancelled_before_recovery() {
 
     let failed = failed_update(RUN_ID, 13);
     assert!(matches!(
-        hub.recover_terminal(scope(None), failed).await.unwrap(),
+        hub.recover_terminal(scope(), failed).await.unwrap(),
         TerminalResolution::Requested(_)
     ));
 
@@ -1128,7 +1124,7 @@ async fn ordinary_live_publish_never_reads_event_history() {
     let hub = EventHub::new(repository.clone(), config(8));
     let mut subscription = hub.subscribe(RUN_ID).await;
     let published = hub
-        .publish(scope(None), RunEventType::RunCreated, json!({}))
+        .publish(scope(), RunEventType::RunCreated, json!({}))
         .await
         .unwrap();
     assert_eq!(subscription.recv().await.unwrap(), published);
@@ -1142,7 +1138,7 @@ async fn journal_worker_failure_closes_the_queue_instead_of_dropping_history() {
     let hub = EventHub::new(repository, config(8));
 
     let error = hub
-        .publish(scope(None), RunEventType::RunCreated, json!({}))
+        .publish(scope(), RunEventType::RunCreated, json!({}))
         .await
         .unwrap_err();
     assert_eq!(error.code(), "SYNTHETIC_WRITE_FAILURE");
@@ -1160,7 +1156,7 @@ async fn terminal_event_is_broadcast_only_after_the_repository_commit() {
     let update = completed_update(RUN_ID, 10);
     let publishing = {
         let hub = hub.clone();
-        tokio::spawn(async move { hub.publish_terminal(scope(None), update).await })
+        tokio::spawn(async move { hub.publish_terminal(scope(), update).await })
     };
 
     repository.terminal_called.notified().await;

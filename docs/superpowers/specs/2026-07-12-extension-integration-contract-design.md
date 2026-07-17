@@ -1,5 +1,7 @@
 # A6 — Extension integration contract design
 
+> **Historical / superseded:** the node registry and transition contract below were removed. vNext extensions are typed leaf Operations and cannot own control flow; see [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+
 Date: 2026-07-12
 
 ## Status

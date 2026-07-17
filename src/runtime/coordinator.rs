@@ -2,9 +2,10 @@ use std::{sync::Arc, time::Instant};
 
 use chrono::Utc;
 use serde_json::{json, Value};
+use tokio::{sync::Semaphore, time::Instant as TokioInstant};
 
 use crate::{
-    dsl::compiled::CompiledAgent,
+    dsl::vnext::compiler::CompiledWorkflow,
     events::{
         hub::{EventError, EventHub, TerminalResolution},
         protocol::{RunEventScope, RunEventType},
@@ -15,22 +16,21 @@ use crate::{
             NewRun, RunLifecycle, RunRecord, RunStatus, RunTerminal, StopError, TerminalUpdate,
         },
     },
-    nodes::registry::NodeExecutorRegistry,
     observability::{elapsed_ms, json_size_bytes},
     outcome::{FailureKind, RunFailure, TerminalOutcome},
 };
 
 use super::{
-    ExecutionLimiter, RunContext, RunError, RunErrorKind, RunMetadata, RunState, Scheduler,
-    SchedulerResult, StopReason, StopSignal,
+    scope_scheduler::{ScopeScheduler, ScopeSchedulerConfig},
+    RunError, RunErrorKind, RunExecutionResult, RunMetadata, RunState, StopReason, StopSignal,
 };
 
 pub struct RunCoordinator {
-    agent: Arc<CompiledAgent>,
-    executors: NodeExecutorRegistry,
+    agent: Arc<CompiledWorkflow>,
     events: EventHub,
     repository: Arc<dyn RunRepository>,
-    limiter: ExecutionLimiter,
+    global_operation_permits: Arc<Semaphore>,
+    scheduler_config: ScopeSchedulerConfig,
 }
 
 struct TerminalLogSummary {
@@ -42,18 +42,18 @@ struct TerminalLogSummary {
 
 impl RunCoordinator {
     pub fn new(
-        agent: Arc<CompiledAgent>,
-        executors: NodeExecutorRegistry,
+        agent: Arc<CompiledWorkflow>,
         events: EventHub,
         repository: Arc<dyn RunRepository>,
-        limiter: ExecutionLimiter,
+        global_operation_permits: Arc<Semaphore>,
+        scheduler_config: ScopeSchedulerConfig,
     ) -> Self {
         Self {
             agent,
-            executors,
             events,
             repository,
-            limiter,
+            global_operation_permits,
+            scheduler_config,
         }
     }
 
@@ -62,14 +62,22 @@ impl RunCoordinator {
         new_run: NewRun,
         input: Value,
         stop: StopSignal,
+        execution_deadline: TokioInstant,
     ) -> Result<RunStatus, RunError> {
+        bind_execution_deadline(&stop, execution_deadline)?;
         self.validate_run(&new_run, &input)?;
         self.repository
             .create_run(new_run.clone())
             .await
             .map_err(history_error)?;
-        self.execute_managed(new_run, input, stop, Arc::new(RunState::new()))
-            .await
+        self.execute_managed(
+            new_run,
+            input,
+            stop,
+            Arc::new(RunState::new()),
+            execution_deadline,
+        )
+        .await
     }
 
     pub(crate) async fn execute_existing(
@@ -78,9 +86,12 @@ impl RunCoordinator {
         input: Value,
         stop: StopSignal,
         state: Arc<RunState>,
+        execution_deadline: TokioInstant,
     ) -> Result<RunStatus, RunError> {
+        bind_execution_deadline(&stop, execution_deadline)?;
         self.validate_run(&new_run, &input)?;
-        self.execute_managed(new_run, input, stop, state).await
+        self.execute_managed(new_run, input, stop, state, execution_deadline)
+            .await
     }
 
     async fn execute_managed(
@@ -89,10 +100,18 @@ impl RunCoordinator {
         input: Value,
         stop: StopSignal,
         state: Arc<RunState>,
+        execution_deadline: TokioInstant,
     ) -> Result<RunStatus, RunError> {
         let started = Instant::now();
         match self
-            .execute_inner(&new_run, input, stop, Arc::clone(&state), started)
+            .execute_inner(
+                &new_run,
+                input,
+                stop,
+                Arc::clone(&state),
+                started,
+                execution_deadline,
+            )
             .await
         {
             Ok(status) => Ok(status),
@@ -115,6 +134,7 @@ impl RunCoordinator {
         stop: StopSignal,
         state: Arc<RunState>,
         started: Instant,
+        execution_deadline: TokioInstant,
     ) -> Result<RunStatus, RunError> {
         self.events
             .publish(
@@ -152,58 +172,38 @@ impl RunCoordinator {
             "run started"
         );
 
-        let context = RunContext::new(
-            RunMetadata {
-                run_id: new_run.run_id.clone(),
-                request_id: new_run.request_id.clone(),
-                agent_id: new_run.agent_id.clone(),
-                agent_version: new_run.agent_version.clone(),
-                started_at,
-            },
-            input,
-        )
-        .with_templates(Arc::clone(&self.agent.templates));
-        let result = Scheduler::new(
+        let metadata = RunMetadata {
+            run_id: new_run.run_id.clone(),
+            request_id: new_run.request_id.clone(),
+            agent_id: new_run.agent_id.clone(),
+            agent_version: new_run.agent_version.clone(),
+            started_at,
+            execution_deadline,
+        };
+        let result = ScopeScheduler::new(
             Arc::clone(&self.agent),
-            self.executors.clone(),
+            Arc::clone(&self.global_operation_permits),
             self.events.clone(),
-            self.limiter.clone(),
+            self.scheduler_config.clone(),
         )
-        .run(context, stop)
+        .run(metadata, input, stop)
         .await?;
 
         let terminal = match result {
-            SchedulerResult::Ended(TerminalOutcome::Success { output }) => {
+            RunExecutionResult::Ended(TerminalOutcome::Success { output }) => {
                 RunTerminal::Completed { output }
             }
-            SchedulerResult::Ended(TerminalOutcome::Failure { error }) => RunTerminal::Failed {
+            RunExecutionResult::Ended(TerminalOutcome::Failure { error }) => RunTerminal::Failed {
                 error: RunFailure {
                     kind: FailureKind::Workflow,
                     code: error.code,
                     message: error.message,
                 },
             },
-            SchedulerResult::Failed(error) => {
-                let kind = match error.kind() {
-                    RunErrorKind::Node => FailureKind::Node,
-                    RunErrorKind::Timeout => FailureKind::Timeout,
-                    RunErrorKind::Infrastructure => FailureKind::Infrastructure,
-                    RunErrorKind::Stop => {
-                        return Err(RunError::infrastructure(
-                            "RUN_TERMINAL_INVALID",
-                            "scheduler returned a stop error as a failed result",
-                        ));
-                    }
-                };
-                RunTerminal::Failed {
-                    error: RunFailure {
-                        kind,
-                        code: error.code().to_string(),
-                        message: error.message().to_string(),
-                    },
-                }
-            }
-            SchedulerResult::Stopped(error) => match error.stop_reason() {
+            RunExecutionResult::Failed(error) => RunTerminal::Failed {
+                error: public_run_failure(&new_run.run_id, &error)?,
+            },
+            RunExecutionResult::Stopped(error) => match error.stop_reason() {
                 Some(StopReason::Cancelled) => RunTerminal::Cancelled {
                     error: StopError {
                         code: error.code().to_string(),
@@ -236,14 +236,16 @@ impl RunCoordinator {
     }
 
     fn validate_run(&self, run: &NewRun, input: &Value) -> Result<(), RunError> {
-        if run.agent_id != self.agent.id || run.agent_version != self.agent.version_hash {
-            return Err(RunError::new(
+        if run.agent_id != self.agent.ir.metadata.id.as_str()
+            || run.agent_version != self.agent.version_hash
+        {
+            return Err(RunError::infrastructure(
                 "RUN_AGENT_MISMATCH",
                 "run metadata does not match the compiled agent",
             ));
         }
-        if !self.agent.input_schema.is_valid(input) {
-            return Err(RunError::new(
+        if !self.agent.input_validator().is_valid(input) {
+            return Err(RunError::infrastructure(
                 "INPUT_INVALID",
                 "input does not match the agent schema",
             ));
@@ -352,7 +354,10 @@ impl RunCoordinator {
                     .await
                     .map_err(history_error)?
                     .ok_or_else(|| {
-                        RunError::new("RUN_NOT_FOUND", "run not found after terminal race")
+                        RunError::infrastructure(
+                            "RUN_NOT_FOUND",
+                            "run not found after terminal race",
+                        )
                     })?;
                 terminal_log_summary_from_record(&record)
             }
@@ -360,6 +365,18 @@ impl RunCoordinator {
         state.try_terminal(durable.status).await?;
         Ok(durable)
     }
+}
+
+fn bind_execution_deadline(
+    stop: &StopSignal,
+    execution_deadline: TokioInstant,
+) -> Result<(), RunError> {
+    stop.bind_deadline(execution_deadline).map_err(|_| {
+        RunError::infrastructure(
+            "RUN_STOP_DEADLINE_INVALID",
+            "Run stop signal was bound to a different execution deadline",
+        )
+    })
 }
 
 fn terminal_log_summary_from_terminal(terminal: &RunTerminal) -> TerminalLogSummary {
@@ -423,4 +440,133 @@ fn history_error(error: HistoryError) -> RunError {
 
 fn event_error(error: EventError) -> RunError {
     RunError::infrastructure(error.code(), error.to_string())
+}
+
+fn public_run_failure(run_id: &str, error: &RunError) -> Result<RunFailure, RunError> {
+    let (kind, public_message) = match error.kind() {
+        RunErrorKind::Operation => {
+            tracing::warn!(
+                run_id,
+                code = error.code(),
+                failure_kind = "operation",
+                "root operation failed"
+            );
+            (FailureKind::Operation, "operation failed")
+        }
+        RunErrorKind::Timeout => {
+            tracing::warn!(
+                run_id,
+                code = error.code(),
+                failure_kind = "timeout",
+                "root operation timed out"
+            );
+            (FailureKind::Timeout, "operation timed out")
+        }
+        RunErrorKind::Infrastructure => {
+            tracing::error!(
+                run_id,
+                code = error.code(),
+                failure_kind = "infrastructure",
+                "root operation reported an infrastructure failure"
+            );
+            (FailureKind::Infrastructure, "runtime infrastructure failed")
+        }
+        RunErrorKind::Stop => {
+            return Err(RunError::infrastructure(
+                "RUN_TERMINAL_INVALID",
+                "scheduler returned a stop error as a failed result",
+            ));
+        }
+    };
+    Ok(RunFailure {
+        kind,
+        code: error.code().to_string(),
+        message: public_message.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
+
+    use tracing_subscriber::fmt::MakeWriter;
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    #[test]
+    fn root_operation_failure_keeps_diagnostic_out_of_public_terminal() {
+        let failure = public_run_failure(
+            "run_private_diagnostic",
+            &RunError::operation(
+                "ACTION_PRIVATE_FAILURE",
+                "database password and private provider diagnostic",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(failure.kind, FailureKind::Operation);
+        assert_eq!(failure.code, "ACTION_PRIVATE_FAILURE");
+        assert_eq!(failure.message, "operation failed");
+        assert!(!failure.message.contains("password"));
+        assert!(!failure.message.contains("provider"));
+    }
+
+    #[test]
+    fn root_operation_failure_log_excludes_private_diagnostic() {
+        const PRIVATE_DIAGNOSTIC: &str = "PRIVATE_ROOT_OPERATION_DIAGNOSTIC_MUST_NOT_REACH_LOGS";
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(logs.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            public_run_failure(
+                "run_log_redaction",
+                &RunError::operation("ACTION_PRIVATE_FAILURE", PRIVATE_DIAGNOSTIC),
+            )
+            .unwrap();
+        });
+
+        let rendered = logs.text();
+        assert!(rendered.contains("run_log_redaction"));
+        assert!(rendered.contains("ACTION_PRIVATE_FAILURE"));
+        assert!(rendered.contains("failure_kind=\"operation\""));
+        assert!(!rendered.contains(PRIVATE_DIAGNOSTIC));
+    }
 }

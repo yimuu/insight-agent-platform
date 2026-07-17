@@ -10,8 +10,8 @@ use insight_agent_platform::{
         postgres::PostgresRunRepository,
         repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
         types::{
-            summarize_input, NewRun, NodeOutputRecord, RunAttachment, RunLifecycle, RunStatus,
-            RunTerminal, StopError, TerminalUpdate,
+            summarize_input, NewRun, RunAttachment, RunLifecycle, RunStatus, RunTerminal,
+            StopError, TerminalUpdate,
         },
     },
     outcome::{FailureKind, RunFailure, RunOutput},
@@ -45,7 +45,7 @@ struct PostgresTestSchema {
 
 impl PostgresTestSchema {
     async fn create(database_url: &str, label: &str) -> Self {
-        let schema = format!("formal_v1_{label}_{}", Uuid::new_v4().simple());
+        let schema = format!("formal_v2_{label}_{}", Uuid::new_v4().simple());
         let admin = PgPoolOptions::new()
             .max_connections(4)
             .connect(database_url)
@@ -195,21 +195,20 @@ fn new_run(run_id: &str) -> NewRun {
     }
 }
 
-fn scope(run_id: &str, node_id: Option<&str>) -> RunEventScope {
+fn scope(run_id: &str) -> RunEventScope {
     RunEventScope {
         request_id: format!("req_{run_id}"),
         run_id: run_id.to_string(),
         agent_id: "general-agent".to_string(),
         agent_version: "sha256:postgres".to_string(),
-        node_id: node_id.map(str::to_string),
     }
 }
 
-fn event(run_id: &str, event_type: RunEventType, seq: u64, node_id: Option<&str>) -> RunEvent {
+fn event(run_id: &str, event_type: RunEventType, seq: u64) -> RunEvent {
     RunEvent::ok_at(
         event_type,
         seq,
-        scope(run_id, node_id),
+        scope(run_id),
         at(seq as u32),
         json!({"seq":seq}),
     )
@@ -244,7 +243,7 @@ fn failed_update(run_id: &str) -> TerminalUpdate {
 }
 
 #[tokio::test]
-async fn postgres_repository_matches_the_formal_v1_contract() {
+async fn postgres_repository_matches_the_formal_v2_contract() {
     let Some(database_url) = postgres_database_url() else {
         return;
     };
@@ -265,24 +264,11 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
     repo.create_run(new_run(&run_id)).await.unwrap();
     repo.mark_running(&run_id, at(1)).await.unwrap();
     repo.append_events(&[
-        event(&run_id, RunEventType::RunCreated, 1, None),
-        event(&run_id, RunEventType::RunStarted, 2, None),
-        event(&run_id, RunEventType::NodeStarted, 3, Some("answer")),
-        event(
-            &run_id,
-            RunEventType::BranchFailed,
-            4,
-            Some("must_be_ignored"),
-        ),
+        event(&run_id, RunEventType::RunCreated, 1),
+        event(&run_id, RunEventType::RunStarted, 2),
+        event(&run_id, RunEventType::OperationStarted, 3),
+        event(&run_id, RunEventType::OperationCompleted, 4),
     ])
-    .await
-    .unwrap();
-    repo.put_node_output(NodeOutputRecord {
-        run_id: run_id.clone(),
-        node_id: "answer".to_string(),
-        output: json!({"text":"ok"}),
-        completed_at: at(4),
-    })
     .await
     .unwrap();
     assert_eq!(
@@ -295,12 +281,11 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
         vec![2, 3, 4]
     );
     let replay = repo.list_events_after(&run_id, 3, 100).await.unwrap();
-    assert_eq!(replay[0].event_type, RunEventType::BranchFailed);
-    assert_eq!(replay[0].node_id, None);
+    assert_eq!(replay[0].event_type, RunEventType::OperationCompleted);
 
     let sequence_error = repo
         .commit_terminal(
-            TerminalProposal::new(scope(&run_id, None), completed_update(&run_id)).unwrap(),
+            TerminalProposal::new(scope(&run_id), completed_update(&run_id)).unwrap(),
             TerminalSequence::Expected(6),
         )
         .await
@@ -313,7 +298,7 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
 
     let committed = repo
         .commit_terminal(
-            TerminalProposal::new(scope(&run_id, None), completed_update(&run_id)).unwrap(),
+            TerminalProposal::new(scope(&run_id), completed_update(&run_id)).unwrap(),
             TerminalSequence::Expected(5),
         )
         .await
@@ -321,7 +306,7 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
     let expected = RunEvent::ok_at(
         RunEventType::RunCompleted,
         5,
-        scope(&run_id, None),
+        scope(&run_id),
         at(10),
         json!({
             "content": "answer",
@@ -342,7 +327,7 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
     );
     let authoritative = repo
         .commit_terminal(
-            TerminalProposal::new(scope(&run_id, None), losing_update).unwrap(),
+            TerminalProposal::new(scope(&run_id), losing_update).unwrap(),
             TerminalSequence::Expected(5),
         )
         .await
@@ -368,7 +353,7 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
     assert_eq!(replay.last(), Some(&expected));
 
     let duplicate_error = repo
-        .append_events(&[event(&run_id, RunEventType::RunStarted, 5, None)])
+        .append_events(&[event(&run_id, RunEventType::RunStarted, 5)])
         .await
         .unwrap_err();
     assert_eq!(duplicate_error.code(), "HISTORY_WRITE_FAILED");
@@ -376,13 +361,13 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
     let recovery_id = format!("recovery_pg_{suffix}");
     repo.create_run(new_run(&recovery_id)).await.unwrap();
     repo.mark_running(&recovery_id, at(1)).await.unwrap();
-    let created = event(&recovery_id, RunEventType::RunCreated, 1, None);
+    let created = event(&recovery_id, RunEventType::RunCreated, 1);
     repo.append_events(std::slice::from_ref(&created))
         .await
         .unwrap();
     let recovered = repo
         .commit_terminal(
-            TerminalProposal::new(scope(&recovery_id, None), failed_update(&recovery_id)).unwrap(),
+            TerminalProposal::new(scope(&recovery_id), failed_update(&recovery_id)).unwrap(),
             TerminalSequence::NextDurable,
         )
         .await
@@ -415,15 +400,15 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
     let conflict_id = format!("recovery_conflict_pg_{suffix}");
     repo.create_run(new_run(&conflict_id)).await.unwrap();
     repo.mark_running(&conflict_id, at(1)).await.unwrap();
-    repo.append_events(&[event(&conflict_id, RunEventType::RunCreated, 1, None)])
+    repo.append_events(&[event(&conflict_id, RunEventType::RunCreated, 1)])
         .await
         .unwrap();
-    repo.append_events(&[event(&conflict_id, RunEventType::RunStarted, 2, None)])
+    repo.append_events(&[event(&conflict_id, RunEventType::RunStarted, 2)])
         .await
         .unwrap();
     let terminal = repo
         .commit_terminal(
-            TerminalProposal::new(scope(&conflict_id, None), failed_update(&conflict_id)).unwrap(),
+            TerminalProposal::new(scope(&conflict_id), failed_update(&conflict_id)).unwrap(),
             TerminalSequence::NextDurable,
         )
         .await
@@ -442,8 +427,7 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
     );
     let durable_winner = repo
         .commit_terminal(
-            TerminalProposal::new(scope(&conflict_id, None), completed_update(&conflict_id))
-                .unwrap(),
+            TerminalProposal::new(scope(&conflict_id), completed_update(&conflict_id)).unwrap(),
             TerminalSequence::NextDurable,
         )
         .await
@@ -452,12 +436,12 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
 
     for active_id in ["created_pg", "running_pg"] {
         repo.create_run(new_run(active_id)).await.unwrap();
-        repo.append_events(&[event(active_id, RunEventType::RunCreated, 1, None)])
+        repo.append_events(&[event(active_id, RunEventType::RunCreated, 1)])
             .await
             .unwrap();
     }
     repo.mark_running("running_pg", at(1)).await.unwrap();
-    repo.append_events(&[event("running_pg", RunEventType::RunStarted, 2, None)])
+    repo.append_events(&[event("running_pg", RunEventType::RunStarted, 2)])
         .await
         .unwrap();
     assert_eq!(repo.mark_incomplete_interrupted(at(20)).await.unwrap(), 2);
@@ -626,14 +610,7 @@ async fn postgres_repository_matches_the_formal_v1_contract() {
         .fetch_one(&scoped_admin)
         .await
         .unwrap();
-    let output_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM node_outputs WHERE run_id = $1")
-            .bind(&run_id)
-            .fetch_one(&scoped_admin)
-            .await
-            .unwrap();
     assert_eq!(event_count, 0);
-    assert_eq!(output_count, 0);
 
     scoped_admin.close().await;
     drop(repo);
@@ -661,14 +638,14 @@ async fn postgres_independent_connections_resolve_one_authoritative_terminal() {
     repository.mark_running(&run_id, at(1)).await.unwrap();
     repository
         .append_events(&[
-            event(&run_id, RunEventType::RunCreated, 1, None),
-            event(&run_id, RunEventType::RunStarted, 2, None),
+            event(&run_id, RunEventType::RunCreated, 1),
+            event(&run_id, RunEventType::RunStarted, 2),
         ])
         .await
         .unwrap();
 
-    let completed = TerminalProposal::new(scope(&run_id, None), completed_update(&run_id)).unwrap();
-    let failed = TerminalProposal::new(scope(&run_id, None), failed_update(&run_id)).unwrap();
+    let completed = TerminalProposal::new(scope(&run_id), completed_update(&run_id)).unwrap();
+    let failed = TerminalProposal::new(scope(&run_id), failed_update(&run_id)).unwrap();
     let completed_requested = completed.event_at(3);
     let failed_requested = failed.event_at(3);
 
@@ -732,7 +709,7 @@ async fn postgres_independent_connections_resolve_one_authoritative_terminal() {
     let authoritative = completed_result;
 
     let third = TerminalProposal::new(
-        scope(&run_id, None),
+        scope(&run_id),
         TerminalUpdate::new(
             &run_id,
             at(12),
@@ -1061,22 +1038,21 @@ async fn postgres_backend_loss_fences_all_old_writes_but_preserves_reads() {
     let readable_id = format!("loss_readable_{suffix}");
     let mark_id = format!("loss_mark_{suffix}");
     let event_id = format!("loss_event_{suffix}");
-    let output_id = format!("loss_output_{suffix}");
     let terminal_id = format!("loss_terminal_{suffix}");
-    for run_id in [&readable_id, &mark_id, &event_id, &output_id, &terminal_id] {
+    for run_id in [&readable_id, &mark_id, &event_id, &terminal_id] {
         old_repository.create_run(new_run(run_id)).await.unwrap();
     }
     old_repository
-        .append_events(&[event(&readable_id, RunEventType::RunCreated, 1, None)])
+        .append_events(&[event(&readable_id, RunEventType::RunCreated, 1)])
         .await
         .unwrap();
     old_repository
-        .append_events(&[event(&event_id, RunEventType::RunCreated, 1, None)])
+        .append_events(&[event(&event_id, RunEventType::RunCreated, 1)])
         .await
         .unwrap();
     old_repository.mark_running(&event_id, at(1)).await.unwrap();
     old_repository
-        .append_events(&[event(&terminal_id, RunEventType::RunCreated, 1, None)])
+        .append_events(&[event(&terminal_id, RunEventType::RunCreated, 1)])
         .await
         .unwrap();
     old_repository
@@ -1128,26 +1104,14 @@ async fn postgres_backend_loss_fences_all_old_writes_but_preserves_reads() {
     );
     assert_ownership_lost(
         old_repository
-            .append_events(&[event(&event_id, RunEventType::RunStarted, 2, None)])
-            .await
-            .unwrap_err(),
-    );
-    assert_ownership_lost(
-        old_repository
-            .put_node_output(NodeOutputRecord {
-                run_id: output_id.clone(),
-                node_id: "loss_output".to_string(),
-                output: json!({"text":"stale"}),
-                completed_at: at(2),
-            })
+            .append_events(&[event(&event_id, RunEventType::RunStarted, 2)])
             .await
             .unwrap_err(),
     );
     assert_ownership_lost(
         old_repository
             .commit_terminal(
-                TerminalProposal::new(scope(&terminal_id, None), completed_update(&terminal_id))
-                    .unwrap(),
+                TerminalProposal::new(scope(&terminal_id), completed_update(&terminal_id)).unwrap(),
                 TerminalSequence::Expected(2),
             )
             .await

@@ -265,7 +265,7 @@ impl PostgresStore {
         let suffix = Uuid::new_v4().simple().to_string();
         let role = format!("binary_owner_{suffix}");
         let credential_sentinel = format!("credential_{suffix}_secret");
-        let schema = format!("formal_v1_binary_{suffix}");
+        let schema = format!("formal_v2_binary_{suffix}");
         let admin = PgPoolOptions::new()
             .max_connections(4)
             .connect(admin_database_url)
@@ -481,37 +481,38 @@ impl BinaryFiles {
         fs::create_dir_all(&agent_dir).unwrap();
         fs::write(
             agent_dir.join("agent.yaml"),
-            r#"version: 1
-id: ownership_blocker
-name: Ownership Blocker
-description: Keeps a real model stream in flight for PostgreSQL ownership tests.
-
+            r#"api_version: insight.agent/v2
+kind: agent
+metadata:
+  id: ownership_blocker
+  name: Ownership Blocker
+  description: Keeps a real model stream in flight for PostgreSQL ownership tests.
+schema_dialect: https://json-schema.org/draft/2020-12/schema
 input:
   schema:
     type: object
     additionalProperties: false
-
-entry: block
-
-nodes:
-  block:
-    type: core.chat
-    next: result
-    emit: content
-    config:
-      model: blocking_chat
-      messages:
-        - role: user
-          content: wait until this process is stopped
-      parameters: {}
-
+output:
+  data_schema: {type: string}
+workflow:
+  steps:
+    - kind: operation
+      id: block
+      uses: ai.chat
+      config:
+        model: blocking_chat
+        messages:
+          - role: user
+            parts:
+              - kind: text
+                text: wait until this process is stopped
+        parameters: {}
+        response: {format: text}
   result:
-    type: core.end
-    config:
-      outcome: success
-      content:
-        template: "{{ nodes.block.output.text }}"
+    return:
+      content: {from: steps.block.output.data}
       format: text
+      data: {from: steps.block.output.data}
 "#,
         )
         .unwrap();
@@ -571,10 +572,11 @@ history:
 
 runtime:
   max_concurrent_runs: 4
-  max_fork_branches: 4
-  max_parallel_node_executions: 4
-  max_parallel_branches_per_run: 2
-  default_node_timeout: 2m
+  max_concurrent_operations: 4
+  max_concurrent_operations_per_run: 32
+  operation_timeout: 2m
+  operation_cancel_grace_period: 1s
+  max_template_output_bytes: 1048576
   run_timeout: 2m
   sse_keep_alive_interval: 100ms
   subscriber_capacity: 32

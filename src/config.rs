@@ -1,4 +1,4 @@
-//! Strict formal V1 platform configuration.
+//! Strict platform configuration for the canonical v2 runtime.
 
 use std::{
     collections::BTreeSet,
@@ -84,10 +84,11 @@ impl HistoryConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub max_concurrent_runs: usize,
-    pub max_fork_branches: usize,
-    pub max_parallel_node_executions: usize,
-    pub max_parallel_branches_per_run: usize,
-    pub default_node_timeout: Duration,
+    pub max_concurrent_operations: usize,
+    pub max_concurrent_operations_per_run: usize,
+    pub operation_timeout: Duration,
+    pub operation_cancel_grace_period: Duration,
+    pub max_template_output_bytes: usize,
     pub run_timeout: Duration,
     pub sse_keep_alive_interval: Duration,
     pub subscriber_capacity: usize,
@@ -278,10 +279,11 @@ enum HistoryYaml {
 #[serde(deny_unknown_fields)]
 struct RuntimeYaml {
     max_concurrent_runs: usize,
-    max_fork_branches: usize,
-    max_parallel_node_executions: usize,
-    max_parallel_branches_per_run: usize,
-    default_node_timeout: String,
+    max_concurrent_operations: usize,
+    max_concurrent_operations_per_run: usize,
+    operation_timeout: String,
+    operation_cancel_grace_period: String,
+    max_template_output_bytes: usize,
     run_timeout: String,
     sse_keep_alive_interval: String,
     subscriber_capacity: usize,
@@ -481,9 +483,9 @@ fn raw_authority_host(database_url: &str) -> Option<String> {
 fn resolve_runtime(raw: RuntimeYaml) -> Result<RuntimeConfig, PlatformConfigError> {
     let capacities = [
         raw.max_concurrent_runs,
-        raw.max_fork_branches,
-        raw.max_parallel_node_executions,
-        raw.max_parallel_branches_per_run,
+        raw.max_concurrent_operations,
+        raw.max_concurrent_operations_per_run,
+        raw.max_template_output_bytes,
         raw.subscriber_capacity,
         raw.journal_capacity,
         raw.journal_batch_size,
@@ -515,13 +517,14 @@ fn resolve_runtime(raw: RuntimeYaml) -> Result<RuntimeConfig, PlatformConfigErro
     }
     Ok(RuntimeConfig {
         max_concurrent_runs: raw.max_concurrent_runs,
-        max_fork_branches: raw.max_fork_branches,
-        max_parallel_node_executions: raw.max_parallel_node_executions,
-        max_parallel_branches_per_run: raw.max_parallel_branches_per_run,
-        default_node_timeout: positive_duration(
-            &raw.default_node_timeout,
-            "runtime.default_node_timeout",
+        max_concurrent_operations: raw.max_concurrent_operations,
+        max_concurrent_operations_per_run: raw.max_concurrent_operations_per_run,
+        operation_timeout: positive_duration(&raw.operation_timeout, "runtime.operation_timeout")?,
+        operation_cancel_grace_period: positive_duration(
+            &raw.operation_cancel_grace_period,
+            "runtime.operation_cancel_grace_period",
         )?,
+        max_template_output_bytes: raw.max_template_output_bytes,
         run_timeout: positive_duration(&raw.run_timeout, "runtime.run_timeout")?,
         sse_keep_alive_interval: positive_duration(
             &raw.sse_keep_alive_interval,

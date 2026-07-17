@@ -1,5 +1,7 @@
 # General Agent Runtime Formal V1 Rewrite Implementation Plan
 
+> **Historical / superseded:** this plan implemented the removed graph/node baseline. See [DSL vNext Region/SSA Design](../specs/2026-07-16-dsl-vnext-region-ssa-design.md) for the canonical contract.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the prototype runtime with the formal V1 compiler, extensible node system, deterministic run service, replayable bounded events, equivalent SQLite/PostgreSQL history, and explicit attached/detached HTTP APIs.
@@ -287,21 +289,14 @@ Expected: FAIL because the formal resource registries do not exist.
 Define in `src/runtime/control.rs`:
 
 ```rust
-pub type ContentEmitter = Arc<
-    dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<(), RunError>> + Send>>
-        + Send
-        + Sync,
->;
-
 #[derive(Clone)]
 pub struct ExecutionControl {
     stop: StopSignal,
     deadline: Instant,
-    emit_content: ContentEmitter,
 }
 ```
 
-Define `StopReason::{Cancelled, Interrupted}` plus paired `StopController`/`StopSignal` backed by one `CancellationToken` and an atomic reason set before cancellation. Provide `stop_reason`, `stopped`, `remaining`, and `emit_content`. Add a formal `RunError { code: &'static str, message: String }` to `runtime/mod.rs` with sanitized constructors for cancellation, interruption, timeout, invalid action data, and upstream failures.
+Define `StopReason::{Cancelled, Interrupted}` plus paired `StopController`/`StopSignal` backed by one `CancellationToken` and an atomic reason set before cancellation. Provide `stop_reason`, `stopped`, and `remaining`. Add a formal `RunError { code: &'static str, message: String }` to `runtime/mod.rs` with sanitized constructors for cancellation, interruption, timeout, invalid action data, and upstream failures.
 
 - [ ] **Step 4: Implement the model registry**
 
@@ -333,7 +328,6 @@ pub struct ActionDescriptor {
     pub input_schema: Value,
     pub output_schema: Value,
     pub idempotent: bool,
-    pub streams_content: bool,
 }
 
 #[async_trait]
@@ -721,7 +715,7 @@ Add compile failures for missing model alias, invalid provider parameters, image
 
 - [ ] **Step 2: Write failing action tests**
 
-Use an `echo` action and assert recursive input rendering, input/output schema validation, cancellation propagation, and final output. Assert `emit: content` is rejected when the action descriptor has `streams_content == false`, and forwarded when true.
+Use an `echo` action and assert recursive input rendering, input/output schema validation, cooperative cancellation propagation, and final output. Leaf chunks remain runtime-internal; only the validated final result may become workflow data.
 
 - [ ] **Step 3: Run the tests and verify both built-ins are missing**
 

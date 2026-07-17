@@ -953,7 +953,6 @@ fn action_compile_validates_literal_input_against_registered_schema() {
     actions
         .register(EchoAction {
             calls: Arc::new(Mutex::new(Vec::new())),
-            streams_content: false,
             invalid_output: false,
         })
         .unwrap();
@@ -982,7 +981,6 @@ fn action_compile_allows_valid_literal_and_dynamic_inputs() {
     actions
         .register(EchoAction {
             calls: Arc::new(Mutex::new(Vec::new())),
-            streams_content: false,
             invalid_output: false,
         })
         .unwrap();

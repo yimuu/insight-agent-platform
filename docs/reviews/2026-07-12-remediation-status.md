@@ -1,8 +1,10 @@
 # Remediation Status
 
-Current through: 2026-07-16
+> Historical pre-v2 status. DSL and scheduler sections describe the retired graph runtime; the current authored/runtime contract is `insight.agent/v2` structured DSL lowered to Region/SSA, as documented in the README and vNext design specification.
 
-This document is the current operational status entrypoint for the stable-baseline and dependency-governance remediation work. It supersedes the open-work status in the 2026-07-11 reviews, but it does not replace their historical evidence.
+Current through: 2026-07-16 (superseded for DSL/runtime architecture)
+
+This document was the operational status entrypoint for the stable-baseline and dependency-governance remediation work through the date above. It superseded the open-work status in the 2026-07-11 reviews, but it does not replace their historical evidence or describe the current v2 DSL/runtime architecture.
 
 Historical snapshots:
 

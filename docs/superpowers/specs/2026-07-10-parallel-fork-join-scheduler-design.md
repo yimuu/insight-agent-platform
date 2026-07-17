@@ -1,7 +1,9 @@
 # Explicit Fork/Join Parallel Scheduler Design
 
+> **Historical / superseded:** authored `core.fork`/`core.join` and the flat scheduler were removed. The canonical contract is [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+
 **Date:** 2026-07-10  
-**Status:** Approved for implementation planning
+**Status:** Superseded by DSL vNext
 **Scope:** Fixed parallel subgraphs with `all_settled` join semantics
 
 ## 1. Context

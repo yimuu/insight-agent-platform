@@ -7,7 +7,7 @@ auth:
 agents:
   directory: ../agents
   enabled:
-    - code_node_demo
+    - action_demo
 
 models:
   config: models.quickstart.yaml
@@ -22,10 +22,11 @@ history:
 
 runtime:
   max_concurrent_runs: 4
-  max_fork_branches: 4
-  max_parallel_node_executions: 4
-  max_parallel_branches_per_run: 2
-  default_node_timeout: 30s
+  max_concurrent_operations: 4
+  max_concurrent_operations_per_run: 2
+  operation_timeout: 30s
+  operation_cancel_grace_period: 2s
+  max_template_output_bytes: 262144
   run_timeout: 1m
   sse_keep_alive_interval: 5s
   subscriber_capacity: 32

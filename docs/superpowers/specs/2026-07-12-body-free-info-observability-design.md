@@ -1,5 +1,7 @@
 # A7 — Body-free INFO observability design
 
+> **Historical implementation record:** the body-free logging principle remains current; node-era names and event examples are superseded by [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+
 Date: 2026-07-12
 
 ## Status

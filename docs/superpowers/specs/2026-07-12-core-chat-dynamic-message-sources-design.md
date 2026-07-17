@@ -1,5 +1,7 @@
 # Core Chat Dynamic Message Sources Design
 
+> **Historical / superseded:** `core.chat` and implicit dynamic message sources were removed. Canonical `ai.chat` instruction/data provenance is defined by [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+
 ## Goal
 
 Allow `core.chat.messages` to interleave existing static messages with runtime message arrays read from agent input or a completed predecessor node. Dynamic messages remain structured JSON and are never generated or re-rendered through Handlebars.

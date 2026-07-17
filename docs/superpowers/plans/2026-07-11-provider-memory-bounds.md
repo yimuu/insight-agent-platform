@@ -1165,9 +1165,6 @@ if !chunk.text.is_empty() {
         return Err(model_response_too_large());
     }
     text.push_str(&chunk.text);
-    if node.emit == EmitPolicy::Content {
-        control.emit_content(chunk.text).await?;
-    }
 }
 ```
 

@@ -1,8 +1,10 @@
 # Terminal Boundary Review Corrections Design
 
+> **Historical / superseded:** this correction targeted the removed graph/node runtime. Durable terminal principles retained by vNext are restated in [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+
 Date: 2026-07-14
 
-Status: approved approach, pending written-spec review
+Status: Superseded by DSL vNext
 
 ## 1. Context
 

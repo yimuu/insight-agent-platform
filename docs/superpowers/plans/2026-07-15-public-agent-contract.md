@@ -32,7 +32,7 @@ Agent's exact validated input schema through the existing discovery endpoints.
 
 ## Task 3: Prove the real boundary and document it
 
-1. Extend `tests/binary_smoke.rs` to assert the checked-in `code_node_demo` schema.
+1. Extend `tests/binary_smoke.rs` to assert the checked-in `action_demo` schema.
 2. Keep the existing Run creation based on the discovered required `text` field.
 3. Update README discovery documentation with the response shape, Draft 7 rule, and
    public-schema warning.

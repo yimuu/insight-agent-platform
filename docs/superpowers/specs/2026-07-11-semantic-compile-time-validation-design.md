@@ -1,6 +1,8 @@
 # A5 Semantic Compile-Time Validation Design
 
-**Status:** Approved for written spec in conversation on 2026-07-11; written-spec review pending.
+> **Historical / superseded:** this document targets the removed graph/reference scanner. vNext validation is defined by [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md) and the current compiler tests.
+
+**Status:** Superseded by DSL vNext
 
 ## Context
 

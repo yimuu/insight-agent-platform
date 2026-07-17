@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::{
-    dsl::compiled::CompiledAgent,
+    dsl::vnext::compiler::CompiledWorkflow,
     runtime::{RequestMetadata, RunService},
 };
 
@@ -110,14 +110,14 @@ struct AgentMetadata {
     input_schema: Value,
 }
 
-impl From<&CompiledAgent> for AgentMetadata {
-    fn from(agent: &CompiledAgent) -> Self {
+impl From<&CompiledWorkflow> for AgentMetadata {
+    fn from(agent: &CompiledWorkflow) -> Self {
         Self {
-            id: agent.id.clone(),
-            name: agent.name.clone(),
-            description: agent.description.clone(),
+            id: agent.ir.metadata.id.as_str().to_string(),
+            name: agent.ir.metadata.name.clone(),
+            description: agent.ir.metadata.description.clone(),
             version: agent.version_hash.clone(),
-            input_schema: agent.input_schema.document().clone(),
+            input_schema: agent.input_validator().document().clone(),
         }
     }
 }

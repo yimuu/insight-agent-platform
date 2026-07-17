@@ -357,7 +357,6 @@ impl Action for ObservabilityAction {
             input_schema: json!({"type":"object", "additionalProperties":true}),
             output_schema: json!({"type":"object", "additionalProperties":true}),
             idempotent: true,
-            streams_content: false,
         }
     }
 

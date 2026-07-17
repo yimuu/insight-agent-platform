@@ -8,7 +8,7 @@ use tokio::{
 
 use crate::history::{
     repository::{HistoryError, RunRepository, TerminalProposal, TerminalSequence},
-    types::{NodeOutputRecord, TerminalUpdate},
+    types::TerminalUpdate,
 };
 
 use super::{
@@ -212,10 +212,6 @@ impl EventHub {
         drop(state);
         self.isolate_run_state(&run_id, &state_handle).await;
         Ok(terminal_resolution(requested, authoritative))
-    }
-
-    pub async fn put_node_output(&self, output: NodeOutputRecord) -> Result<(), EventError> {
-        self.inner.journal.put_output(output).await
     }
 
     pub async fn flush(&self) -> Result<(), EventError> {

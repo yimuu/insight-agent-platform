@@ -24,11 +24,11 @@ use tokio::{
 
 fn control() -> ExecutionControl {
     let (_, stop) = stop_pair();
-    ExecutionControl::new(stop, Duration::from_secs(2), |_| async { Ok(()) })
+    ExecutionControl::new(stop, Duration::from_secs(2))
 }
 
 fn action_context() -> ActionContext {
-    ActionContext::new("run_test", "action_test", control())
+    ActionContext::for_operation("run_test", "action_test", 1, control())
 }
 
 fn model(base_url: String, api_key: Option<String>) -> OpenAiChatModel {
@@ -1033,7 +1033,6 @@ fn builtin_action_descriptors_define_strict_contracts() {
     let current_time = CurrentTimeAction.descriptor();
     assert_eq!(current_time.name, "current_time");
     assert!(!current_time.idempotent);
-    assert!(!current_time.streams_content);
     assert_eq!(current_time.input_schema["additionalProperties"], false);
 
     let http = RestrictedHttpGetAction::new(
@@ -1045,7 +1044,6 @@ fn builtin_action_descriptors_define_strict_contracts() {
     .descriptor();
     assert_eq!(http.name, "http_get");
     assert!(http.idempotent);
-    assert!(!http.streams_content);
     assert_eq!(http.output_schema["required"], json!(["status", "body"]));
 
     let metrics = TextMetricsAction.descriptor();

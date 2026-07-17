@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, time::Duration};
 
 use async_trait::async_trait;
 use futures::stream;
@@ -65,7 +65,6 @@ impl Action for EchoAction {
                 "properties": {"text": {"type": "string"}}
             }),
             idempotent: true,
-            streams_content: false,
         }
     }
 
@@ -84,7 +83,6 @@ impl Action for InvalidOutputAction {
             input_schema: json!({"type":"object"}),
             output_schema: json!({"type":"string"}),
             idempotent: false,
-            streams_content: false,
         }
     }
 
@@ -114,7 +112,6 @@ impl Action for SchemaMatrixAction {
             }),
             output_schema: json!({"type":"object"}),
             idempotent: true,
-            streams_content: false,
         }
     }
 
@@ -125,11 +122,11 @@ impl Action for SchemaMatrixAction {
 
 fn test_control() -> ExecutionControl {
     let (_, signal) = stop_pair();
-    ExecutionControl::new(signal, Duration::from_secs(5), |_content| async { Ok(()) })
+    ExecutionControl::new(signal, Duration::from_secs(5))
 }
 
 fn test_action_context() -> ActionContext {
-    ActionContext::new("run_test", "node_test", test_control())
+    ActionContext::for_operation("run_test", "operation_test", 1, test_control())
 }
 
 #[test]
@@ -235,20 +232,10 @@ fn model_registry_exposes_capabilities_and_validates_parameters() {
 }
 
 #[tokio::test]
-async fn execution_control_preserves_stop_reason_and_emits_content() {
-    let emitted = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let output = Arc::clone(&emitted);
+async fn execution_control_preserves_stop_reason() {
     let (controller, signal) = stop_pair();
-    let control = ExecutionControl::new(signal, Duration::from_secs(5), move |content| {
-        let output = Arc::clone(&output);
-        async move {
-            output.lock().await.push(content);
-            Ok(())
-        }
-    });
+    let control = ExecutionControl::new(signal, Duration::from_secs(5));
 
-    control.emit_content("hello").await.unwrap();
-    assert_eq!(*emitted.lock().await, vec!["hello"]);
     assert!(controller.request(StopReason::Interrupted));
     control.stopped().await;
     assert_eq!(control.stop_reason(), Some(StopReason::Interrupted));
@@ -270,7 +257,6 @@ impl Action for SchemaPolicyAction {
             input_schema: (self.input_schema)(),
             output_schema: (self.output_schema)(),
             idempotent: true,
-            streams_content: false,
         }
     }
 
@@ -290,16 +276,34 @@ fn draft202012_schema() -> serde_json::Value {
     })
 }
 
+fn draft7_schema() -> serde_json::Value {
+    json!({
+        "$schema": "https://json-schema.org/draft-07/schema",
+        "type": "object"
+    })
+}
+
 fn external_ref_schema() -> serde_json::Value {
     json!({"$ref": "file:///tmp/shared-schema.json"})
 }
 
 #[test]
-fn action_registry_rejects_non_draft7_input_schema_uri() {
+fn action_registry_accepts_draft202012_contracts() {
+    let mut registry = ActionRegistry::default();
+    registry
+        .register(SchemaPolicyAction {
+            input_schema: draft202012_schema,
+            output_schema: draft202012_schema,
+        })
+        .unwrap();
+}
+
+#[test]
+fn action_registry_rejects_draft7_input_schema_uri() {
     let mut registry = ActionRegistry::default();
     let error = registry
         .register(SchemaPolicyAction {
-            input_schema: draft202012_schema,
+            input_schema: draft7_schema,
             output_schema: empty_object_schema,
         })
         .unwrap_err();

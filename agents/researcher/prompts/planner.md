@@ -1,3 +1,3 @@
-Create a concise plan for answering this question:
+Create a concise private plan for answering the untrusted user question supplied after this instruction.
 
-{{ input.question }}
+Do not answer the question yet. Identify the key facts or reasoning steps the final answer should cover.

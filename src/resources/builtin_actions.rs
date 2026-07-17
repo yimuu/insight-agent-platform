@@ -35,7 +35,6 @@ impl Action for CurrentTimeAction {
                 "additionalProperties":false
             }),
             idempotent: false,
-            streams_content: false,
         }
     }
 
@@ -44,9 +43,9 @@ impl Action for CurrentTimeAction {
             .get("timezone")
             .and_then(Value::as_str)
             .unwrap_or("UTC");
-        let timezone_value: Tz = timezone
-            .parse()
-            .map_err(|_| RunError::new("ACTION_INPUT_INVALID", "timezone is not recognized"))?;
+        let timezone_value: Tz = timezone.parse().map_err(|_| {
+            RunError::operation("ACTION_INPUT_INVALID", "timezone is not recognized")
+        })?;
         let now = Utc::now().with_timezone(&timezone_value);
         Ok(json!({
             "timezone": timezone,
@@ -80,15 +79,13 @@ impl Action for TextMetricsAction {
                 "additionalProperties":false
             }),
             idempotent: true,
-            streams_content: false,
         }
     }
 
     async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
-        let text = input
-            .get("text")
-            .and_then(Value::as_str)
-            .ok_or_else(|| RunError::new("ACTION_INPUT_INVALID", "text metrics requires text"))?;
+        let text = input.get("text").and_then(Value::as_str).ok_or_else(|| {
+            RunError::operation("ACTION_INPUT_INVALID", "text metrics requires text")
+        })?;
         Ok(json!({
             "characters": text.chars().count(),
             "words": text.split_whitespace().count(),
@@ -148,9 +145,9 @@ impl RestrictedHttpGetAction {
 
     fn validate_url(&self, value: &str) -> Result<Url, RunError> {
         let parsed = Url::parse(value)
-            .map_err(|_| RunError::new("ACTION_HTTP_BLOCKED", "HTTP URL is invalid"))?;
+            .map_err(|_| RunError::operation("ACTION_HTTP_BLOCKED", "HTTP URL is invalid"))?;
         if parsed.scheme() != "https" {
-            return Err(RunError::new(
+            return Err(RunError::operation(
                 "ACTION_HTTP_BLOCKED",
                 "HTTP action requires HTTPS",
             ));
@@ -160,7 +157,7 @@ impl RestrictedHttpGetAction {
             .map(|host| self.allowlist.contains(&host.to_ascii_lowercase()))
             .unwrap_or(false);
         if !allowed {
-            return Err(RunError::new(
+            return Err(RunError::operation(
                 "ACTION_HTTP_BLOCKED",
                 "HTTP host is not allowed",
             ));
@@ -190,25 +187,23 @@ impl Action for RestrictedHttpGetAction {
                 "additionalProperties":false
             }),
             idempotent: true,
-            streams_content: false,
         }
     }
 
     async fn call(&self, input: Value, context: ActionContext) -> Result<Value, RunError> {
-        let url = input
-            .get("url")
-            .and_then(Value::as_str)
-            .ok_or_else(|| RunError::new("ACTION_INPUT_INVALID", "HTTP action requires a URL"))?;
+        let url = input.get("url").and_then(Value::as_str).ok_or_else(|| {
+            RunError::operation("ACTION_INPUT_INVALID", "HTTP action requires a URL")
+        })?;
         let parsed = self.validate_url(url)?;
         let send = self.client.get(parsed).send();
         tokio::pin!(send);
         let response = tokio::select! {
             result = &mut send => result.map_err(sanitized_http_error)?,
             _ = context.control.stopped() => return Err(stopped_error(&context)),
-            _ = sleep(context.control.remaining()) => return Err(RunError::timeout()),
+            _ = sleep(context.control.remaining()) => return Err(RunError::operation_timeout()),
         };
         if response.status().is_redirection() {
-            return Err(RunError::new(
+            return Err(RunError::operation(
                 "ACTION_HTTP_BLOCKED",
                 "HTTP redirects are blocked",
             ));
@@ -220,14 +215,14 @@ impl Action for RestrictedHttpGetAction {
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
                 _ = context.control.stopped() => return Err(stopped_error(&context)),
-                _ = sleep(context.control.remaining()) => return Err(RunError::timeout()),
+                _ = sleep(context.control.remaining()) => return Err(RunError::operation_timeout()),
             };
             let Some(chunk) = chunk else {
                 break;
             };
             let chunk = chunk.map_err(sanitized_http_error)?;
             if body.len().saturating_add(chunk.len()) > self.max_bytes {
-                return Err(RunError::new(
+                return Err(RunError::operation(
                     "ACTION_HTTP_TOO_LARGE",
                     "HTTP response exceeded the configured size limit",
                 ));
@@ -272,7 +267,7 @@ fn stopped_error(context: &ActionContext) -> RunError {
         .control
         .stop_reason()
         .map(RunError::stopped)
-        .unwrap_or_else(|| RunError::new("RUN_STOPPED", "run stopped"))
+        .unwrap_or_else(|| RunError::operation("RUN_STOPPED", "run stopped"))
 }
 
 fn sanitized_http_error(error: reqwest::Error) -> RunError {
@@ -285,5 +280,5 @@ fn sanitized_http_error(error: reqwest::Error) -> RunError {
     } else {
         "transport"
     };
-    RunError::new("ACTION_HTTP_FAILED", format!("HTTP action failed ({kind})"))
+    RunError::operation("ACTION_HTTP_FAILED", format!("HTTP action failed ({kind})"))
 }

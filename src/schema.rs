@@ -7,9 +7,30 @@ pub struct JsonSchemaValidator {
 }
 
 pub fn compile_schema(schema: &Value) -> Result<JsonSchemaValidator, String> {
-    validate_schema_policy(schema)?;
+    compile_schema_with_draft(schema, SupportedDraft::Draft7)
+}
+
+pub fn compile_schema_2020(schema: &Value) -> Result<JsonSchemaValidator, String> {
+    compile_schema_with_draft(schema, SupportedDraft::Draft202012)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupportedDraft {
+    Draft7,
+    Draft202012,
+}
+
+fn compile_schema_with_draft(
+    schema: &Value,
+    draft: SupportedDraft,
+) -> Result<JsonSchemaValidator, String> {
+    validate_schema_policy(schema, draft)?;
+    let jsonschema_draft = match draft {
+        SupportedDraft::Draft7 => jsonschema::Draft::Draft7,
+        SupportedDraft::Draft202012 => jsonschema::Draft::Draft202012,
+    };
     let inner = jsonschema::options()
-        .with_draft(jsonschema::Draft::Draft7)
+        .with_draft(jsonschema_draft)
         .build(schema)
         .map_err(|error| error.to_string())?;
     Ok(JsonSchemaValidator {
@@ -28,25 +49,25 @@ impl JsonSchemaValidator {
     }
 }
 
-fn validate_schema_policy(value: &Value) -> Result<(), String> {
+fn validate_schema_policy(value: &Value, draft: SupportedDraft) -> Result<(), String> {
     match value {
         Value::Object(object) => {
             if let Some(schema_value) = object.get("$schema") {
                 let schema_uri = schema_value
                     .as_str()
                     .ok_or_else(|| "$schema must be a string".to_string())?;
-                validate_schema_uri(schema_uri)?;
+                validate_schema_uri(schema_uri, draft)?;
             }
             if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
                 validate_reference(reference)?;
             }
             for value in object.values() {
-                validate_schema_policy(value)?;
+                validate_schema_policy(value, draft)?;
             }
         }
         Value::Array(values) => {
             for value in values {
-                validate_schema_policy(value)?;
+                validate_schema_policy(value, draft)?;
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
@@ -54,14 +75,33 @@ fn validate_schema_policy(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_schema_uri(uri: &str) -> Result<(), String> {
-    match uri {
-        "http://json-schema.org/draft-07/schema#" | "https://json-schema.org/draft-07/schema#" => {
-            Ok(())
-        }
-        _ => Err(format!(
-            "unsupported JSON Schema draft '{uri}'; only Draft 7 is supported"
-        )),
+fn validate_schema_uri(uri: &str, draft: SupportedDraft) -> Result<(), String> {
+    let accepted = match draft {
+        SupportedDraft::Draft7 => matches!(
+            uri,
+            "http://json-schema.org/draft-07/schema#"
+                | "https://json-schema.org/draft-07/schema#"
+                | "http://json-schema.org/draft-07/schema"
+                | "https://json-schema.org/draft-07/schema"
+        ),
+        SupportedDraft::Draft202012 => matches!(
+            uri,
+            "http://json-schema.org/draft/2020-12/schema"
+                | "https://json-schema.org/draft/2020-12/schema"
+                | "http://json-schema.org/draft/2020-12/schema#"
+                | "https://json-schema.org/draft/2020-12/schema#"
+        ),
+    };
+    if accepted {
+        Ok(())
+    } else {
+        let expected = match draft {
+            SupportedDraft::Draft7 => "Draft 7",
+            SupportedDraft::Draft202012 => "Draft 2020-12",
+        };
+        Err(format!(
+            "unsupported JSON Schema draft '{uri}'; only {expected} is supported"
+        ))
     }
 }
 
@@ -77,7 +117,7 @@ fn validate_reference(reference: &str) -> Result<(), String> {
 mod tests {
     use serde_json::json;
 
-    use super::compile_schema;
+    use super::{compile_schema, compile_schema_2020};
 
     #[test]
     fn validates_basic_object_schema() {
@@ -180,5 +220,30 @@ mod tests {
             let error = compile_schema(&json!({"$ref": reference})).unwrap_err();
             assert!(error.contains("external JSON Schema references are not supported"));
         }
+    }
+
+    #[test]
+    fn compiles_draft_2020_12_without_changing_the_general_draft7_helper() {
+        let schema = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "array",
+            "prefixItems": [{"type": "string"}],
+            "items": false
+        });
+
+        let validator = compile_schema_2020(&schema).unwrap();
+        assert!(validator.is_valid(&json!(["ok"])));
+        assert!(!validator.is_valid(&json!(["ok", "extra"])));
+        assert!(compile_schema(&schema).is_err());
+    }
+
+    #[test]
+    fn draft_2020_12_rejects_other_declared_dialects_and_external_refs() {
+        assert!(compile_schema_2020(&json!({
+            "$schema": "https://json-schema.org/draft-07/schema#",
+            "type": "object"
+        }))
+        .is_err());
+        assert!(compile_schema_2020(&json!({"$ref": "https://example.invalid/schema"})).is_err());
     }
 }

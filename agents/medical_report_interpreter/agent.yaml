@@ -1,161 +1,282 @@
-version: 1
-id: medical_report_interpreter
-name: Medical Report Interpreter
-description: One multimodal example built on the general chat-node contract.
+api_version: insight.agent/v2
+kind: agent
+
+metadata:
+  id: medical_report_interpreter
+  name: Medical Report Interpreter
+  description: A structured multimodal medical-report interpretation workflow with separate first-turn and follow-up paths.
+
+schema_dialect: https://json-schema.org/draft/2020-12/schema
+
+$defs:
+  MedicalResult:
+    type: object
+    required: [mode, answer]
+    properties:
+      mode:
+        type: string
+        enum: [initial, follow_up]
+      answer:
+        type: string
+        minLength: 1
+      abnormal_indicators:
+        type: string
+      comprehensive_interpretation:
+        type: string
+      health_advice:
+        type: string
+    additionalProperties: false
+
+prompts:
+  system:
+    file: prompts/system.md
+  abnormal_indicators:
+    file: prompts/abnormal_indicators.md
+  comprehensive_interpretation:
+    file: prompts/comprehensive_interpretation.md
+  health_advice:
+    file: prompts/health_advice.md
+  follow_up:
+    file: prompts/follow_up.md
 
 input:
   schema:
     type: object
-    required: [report_text, messages, question]
-    additionalProperties: false
+    required: [report_text, image_url, messages, question]
     properties:
       report_text:
         type: string
       image_url:
-        type: string
-        pattern: "^(http://|https://|data:image/|$)"
+        oneOf:
+          - type: string
+            pattern: "^(http://|https://|data:image/|$)"
+          - type: "null"
       messages:
         type: array
         items:
           type: object
           required: [role, content]
-          additionalProperties: false
           properties:
             role:
               type: string
               enum: [user, assistant]
             content:
               type: string
+          additionalProperties: false
       question:
         type: string
+    additionalProperties: false
 
-prompts:
-  system: prompts/system.md
-  abnormal_indicators: prompts/abnormal_indicators.md
-  comprehensive_interpretation: prompts/comprehensive_interpretation.md
-  health_advice: prompts/health_advice.md
-  follow_up: prompts/follow_up.md
+output:
+  data_schema: {$ref: "#/$defs/MedicalResult"}
 
-entry: route
-
-nodes:
-  route:
-    type: core.condition
-    config:
+workflow:
+  steps:
+    - kind: switch
+      id: route
+      with:
+        report_text: {from: input.report_text}
+        image_url: {from: input.image_url}
+        messages: {from: input.messages}
+        question: {from: input.question}
+      output_schema: {$ref: "#/$defs/MedicalResult"}
       cases:
-        - when: "size(input.messages) > 0"
-          next: follow_up
-      default: abnormal_indicators
+        - id: follow_up
+          when:
+            cel: size(scope.messages) > 0
+          steps:
+            - kind: operation
+              id: answer
+              uses: ai.chat
+              with:
+                report_text: {from: scope.report_text}
+                image_url: {from: scope.image_url}
+                messages: {from: scope.messages}
+                question: {from: scope.question}
+              config:
+                model: vision_chat
+                messages:
+                  - role: system
+                    parts:
+                      - kind: prompt
+                        prompt: system
+                  - role: user
+                    parts:
+                      - kind: prompt
+                        prompt: follow_up
+                      - kind: text
+                        text: The report text follows.
+                      - kind: data
+                        input: report_text
+                      - kind: text
+                        text: The prior conversation follows.
+                      - kind: data
+                        input: messages
+                      - kind: text
+                        text: The current question follows.
+                      - kind: data
+                        input: question
+                      - kind: image_url
+                        input: image_url
+                        optional: true
+                parameters: {temperature: 0.2}
+                response: {format: text}
+          result:
+            return:
+              object:
+                mode: {literal: follow_up}
+                answer: {from: steps.answer.output.data}
 
-  follow_up:
-    type: core.chat
-    next: follow_up_result
-    emit: content
-    config:
-      model: vision_chat
-      messages:
-        - role: system
-          content:
-            template_ref: system
-        - role: user
-          content:
-            - type: text
-              text:
-                template_ref: follow_up
-            - type: image_url
-              optional: true
-              image_url:
-                url: "{{ input.image_url }}"
-      parameters:
-        temperature: 0.2
+      default:
+        id: initial
+        steps:
+          - kind: operation
+            id: abnormal_indicators
+            uses: ai.chat
+            with:
+              report_text: {from: scope.report_text}
+              image_url: {from: scope.image_url}
+              messages: {from: scope.messages}
+              question: {from: scope.question}
+            config:
+              model: vision_chat
+              messages:
+                - role: system
+                  parts:
+                    - kind: prompt
+                      prompt: system
+                - role: user
+                  parts:
+                    - kind: prompt
+                      prompt: abnormal_indicators
+                    - kind: text
+                      text: The report text follows.
+                    - kind: data
+                      input: report_text
+                    - kind: text
+                      text: The prior conversation follows.
+                    - kind: data
+                      input: messages
+                    - kind: text
+                      text: The current question follows.
+                    - kind: data
+                      input: question
+                    - kind: image_url
+                      input: image_url
+                      optional: true
+              parameters: {temperature: 0.2}
+              response: {format: text}
 
-  follow_up_result:
-    type: core.end
-    config:
-      outcome: success
-      content:
-        template: "{{ nodes.follow_up.output.text }}"
-      format: markdown
+          - kind: operation
+            id: comprehensive_interpretation
+            uses: ai.chat
+            with:
+              report_text: {from: scope.report_text}
+              image_url: {from: scope.image_url}
+              messages: {from: scope.messages}
+              question: {from: scope.question}
+              abnormal_indicators: {from: steps.abnormal_indicators.output.data}
+            config:
+              model: vision_chat
+              messages:
+                - role: system
+                  parts:
+                    - kind: prompt
+                      prompt: system
+                - role: user
+                  parts:
+                    - kind: prompt
+                      prompt: comprehensive_interpretation
+                    - kind: text
+                      text: The report text follows.
+                    - kind: data
+                      input: report_text
+                    - kind: text
+                      text: The prior conversation follows.
+                    - kind: data
+                      input: messages
+                    - kind: text
+                      text: The current question follows.
+                    - kind: data
+                      input: question
+                    - kind: text
+                      text: The completed abnormal-indicator interpretation follows.
+                    - kind: data
+                      input: abnormal_indicators
+                    - kind: image_url
+                      input: image_url
+                      optional: true
+              parameters: {temperature: 0.2}
+              response: {format: text}
 
-  abnormal_indicators:
-    type: core.chat
-    next: comprehensive_interpretation
-    emit: content
-    config:
-      model: vision_chat
-      messages:
-        - role: system
-          content:
-            template_ref: system
-        - role: user
-          content:
-            - type: text
-              text:
-                template_ref: abnormal_indicators
-            - type: image_url
-              optional: true
-              image_url:
-                url: "{{ input.image_url }}"
-      parameters:
-        temperature: 0.2
+          - kind: operation
+            id: health_advice
+            uses: ai.chat
+            with:
+              report_text: {from: scope.report_text}
+              image_url: {from: scope.image_url}
+              messages: {from: scope.messages}
+              question: {from: scope.question}
+              abnormal_indicators: {from: steps.abnormal_indicators.output.data}
+              comprehensive_interpretation: {from: steps.comprehensive_interpretation.output.data}
+            config:
+              model: vision_chat
+              messages:
+                - role: system
+                  parts:
+                    - kind: prompt
+                      prompt: system
+                - role: user
+                  parts:
+                    - kind: prompt
+                      prompt: health_advice
+                    - kind: text
+                      text: The report text follows.
+                    - kind: data
+                      input: report_text
+                    - kind: text
+                      text: The prior conversation follows.
+                    - kind: data
+                      input: messages
+                    - kind: text
+                      text: The current question follows.
+                    - kind: data
+                      input: question
+                    - kind: text
+                      text: The completed abnormal-indicator interpretation follows.
+                    - kind: data
+                      input: abnormal_indicators
+                    - kind: text
+                      text: The completed comprehensive interpretation follows.
+                    - kind: data
+                      input: comprehensive_interpretation
+                    - kind: image_url
+                      input: image_url
+                      optional: true
+              parameters: {temperature: 0.2}
+              response: {format: text}
+        result:
+          return:
+            object:
+              mode: {literal: initial}
+              answer:
+                template:
+                  text: |-
+                    {{ abnormal_indicators }}
 
-  comprehensive_interpretation:
-    type: core.chat
-    next: health_advice
-    emit: content
-    config:
-      model: vision_chat
-      messages:
-        - role: system
-          content:
-            template_ref: system
-        - role: user
-          content:
-            - type: text
-              text:
-                template_ref: comprehensive_interpretation
-            - type: image_url
-              optional: true
-              image_url:
-                url: "{{ input.image_url }}"
-      parameters:
-        temperature: 0.2
+                    {{ comprehensive_interpretation }}
 
-  health_advice:
-    type: core.chat
-    next: result
-    emit: content
-    config:
-      model: vision_chat
-      messages:
-        - role: system
-          content:
-            template_ref: system
-        - role: user
-          content:
-            - type: text
-              text:
-                template_ref: health_advice
-            - type: image_url
-              optional: true
-              image_url:
-                url: "{{ input.image_url }}"
-      parameters:
-        temperature: 0.2
+                    {{ health_advice }}
+                  bindings:
+                    abnormal_indicators: {from: steps.abnormal_indicators.output.data}
+                    comprehensive_interpretation: {from: steps.comprehensive_interpretation.output.data}
+                    health_advice: {from: steps.health_advice.output.data}
+              abnormal_indicators: {from: steps.abnormal_indicators.output.data}
+              comprehensive_interpretation: {from: steps.comprehensive_interpretation.output.data}
+              health_advice: {from: steps.health_advice.output.data}
 
   result:
-    type: core.end
-    config:
-      outcome: success
-      content:
-        template: |-
-          {{ nodes.abnormal_indicators.output.text }}
-
-          {{ nodes.comprehensive_interpretation.output.text }}
-
-          {{ nodes.health_advice.output.text }}
+    return:
+      content: {from: steps.route.output.answer}
       format: markdown
-      data:
-        abnormal_indicators: "{{ nodes.abnormal_indicators.output.text }}"
-        comprehensive_interpretation: "{{ nodes.comprehensive_interpretation.output.text }}"
-        health_advice: "{{ nodes.health_advice.output.text }}"
+      data: {from: steps.route.output}

@@ -1,71 +1,111 @@
-version: 1
-id: researcher
-name: Research Assistant
-description: Research and answer questions with a private plan-first flow.
+api_version: insight.agent/v2
+kind: agent
+
+metadata:
+  id: researcher
+  name: Research Assistant
+  description: Research and answer questions with a private plan-first flow.
+
+schema_dialect: https://json-schema.org/draft/2020-12/schema
+
+prompts:
+  system:
+    file: prompts/system.md
+  planner:
+    file: prompts/planner.md
+  final:
+    file: prompts/final.md
 
 input:
   schema:
     type: object
     required: [question]
-    additionalProperties: false
     properties:
       question:
         type: string
         minLength: 1
+    additionalProperties: false
 
-prompts:
-  system: prompts/system.md
-  planner: prompts/planner.md
-  final: prompts/final.md
+output:
+  data_schema:
+    type: object
+    required: [answer]
+    properties:
+      answer:
+        type: string
+        minLength: 1
+    additionalProperties: false
 
-entry: plan
+workflow:
+  steps:
+    - kind: operation
+      id: plan
+      uses: ai.chat
+      with:
+        question: {from: input.question}
+      config:
+        model: general_chat
+        messages:
+          - role: system
+            parts:
+              - kind: prompt
+                prompt: system
+          - role: user
+            parts:
+              - kind: prompt
+                prompt: planner
+              - kind: data
+                input: question
+        parameters: {temperature: 0.3}
+        response: {format: text}
 
-nodes:
-  plan:
-    type: core.chat
-    next: now
-    config:
-      model: general_chat
-      messages:
-        - role: system
-          content:
-            template_ref: system
-        - role: user
-          content:
-            template_ref: planner
-      parameters:
-        temperature: 0.3
+    - kind: operation
+      id: now
+      uses: action.call
+      with:
+        input:
+          object:
+            timezone: {literal: Asia/Shanghai}
+      config:
+        action: current_time
 
-  now:
-    type: core.action
-    next: answer
-    config:
-      action: current_time
-      input:
-        timezone: Asia/Shanghai
-
-  answer:
-    type: core.chat
-    next: result
-    emit: content
-    config:
-      model: general_chat
-      messages:
-        - role: system
-          content:
-            template_ref: system
-        - role: user
-          content:
-            template_ref: final
-      parameters:
-        temperature: 0.3
+    - kind: operation
+      id: answer
+      uses: ai.chat
+      with:
+        question: {from: input.question}
+        plan: {from: steps.plan.output.data}
+        current_time: {from: steps.now.output}
+      config:
+        model: general_chat
+        messages:
+          - role: system
+            parts:
+              - kind: prompt
+                prompt: system
+          - role: user
+            parts:
+              - kind: prompt
+                prompt: final
+              - kind: text
+                text: The original question follows.
+              - kind: data
+                input: question
+              - kind: text
+                text: The private answer plan follows.
+              - kind: data
+                input: plan
+              - kind: text
+                text: The current time record follows.
+              - kind: data
+                input: current_time
+        parameters: {temperature: 0.3}
+        response: {format: text}
 
   result:
-    type: core.end
-    config:
-      outcome: success
-      content:
-        template: "{{ nodes.answer.output.text }}"
+    return:
+      content: {from: steps.answer.output.data}
       format: markdown
       data:
-        answer: "{{ nodes.answer.output.text }}"
+        object:
+          answer: {from: steps.answer.output.data}

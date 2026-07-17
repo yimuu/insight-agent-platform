@@ -1,7 +1,9 @@
 # Unified `core.end` Terminal Model Design
 
-**Date:** 2026-07-13  
-**Status:** Approved for implementation planning  
+> **Historical / superseded:** authored `core.end` and graph terminals were removed in favor of lexical block `return`/`raise`. The canonical contract is [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+
+**Date:** 2026-07-13
+**Status:** Superseded by DSL vNext
 **Scope:** Formal V1 DSL, compiler graph model, scheduler, Fork/Join settlement, events, history, API, checked-in Agents, documentation, and verification
 
 ## 1. Context

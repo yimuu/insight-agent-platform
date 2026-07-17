@@ -1,68 +1,75 @@
 # Insight Agent Platform
 
-一个面向平台自有 Agent 的通用 Rust 运行时基线。它把严格 DSL 编译为不可变执行图，通过可扩展的节点、模型和 Action 注册表运行，并提供 live-only Attached SSE、Detached 轮询、显式取消以及 SQLite/PostgreSQL 事件历史。
+一个面向平台自有 Agent 的通用 Rust 运行时。平台在启动时把严格的结构化 DSL 编译为不可变、类型化的 Region/SSA 执行计划，再以作用域任务树运行；对外提供 live-only Attached SSE、Detached 轮询、显式取消以及 SQLite/PostgreSQL 事件历史。
 
-医学报告单解读只是仓库中的一个多模态示例，不是平台的领域边界。
+医学报告解读只是仓库中的一个多模态示例，不是平台的领域边界。
 
 ## 架构
 
-启动链路是确定的：
+启动和执行链路是确定的：
 
 ```text
-严格平台配置 + 命名资源
-          ↓
-节点/模型/Action 注册表
-          ↓
-AgentCompiler（Schema、模板、引用、DAG、能力校验）
-          ↓
-不可变 CompiledAgent
-          ↓
-RunService → RunCoordinator → EventHub/Journal → RunRepository
-          ↓
-             /v1 JSON + SSE
+严格平台配置 + 命名模型/Action 资源
+                    ↓
+WorkflowCompiler（语法、Schema、类型、作用域、支配关系）
+                    ↓
+不可变 CompiledWorkflow + 已验证 Region/SSA IR
+                    ↓
+RunService → RunCoordinator → ScopeScheduler
+                    ↓
+Operation + 作用域任务树 → EventHub/Journal → RunRepository
+                    ↓
+                  /v1 JSON + SSE
 ```
 
-DSL 使用显式 `entry + nodes` DAG，而不是隐式步骤数组。核心理由是：执行顺序、条件跳转和数据依赖本质上属于图语义；显式 DAG 可以在启动前统一发现缺边、环、不可达节点和非法前驱引用，也让新增节点类型无需修改调度器。
+Agent 作者只使用三种结构化 step：
 
-正式 V1 内置九种节点：
-
-| 节点 | 作用 |
+| `kind` | 作用 |
 |---|---|
-| `core.template` | 递归渲染字符串、数组或对象 |
-| `core.chat` | 调用命名 Chat 模型，支持文本、多模态、有界 JSON 数据消息和私有/公开增量 |
-| `core.action` | 通过严格 JSON Schema 调用本地或受限外部能力 |
-| `core.condition` | 按顺序执行预编译 CEL 条件并选择分支 |
-| `core.fork` | 显式启动固定并行分支 |
-| `core.join` | 以 `all_settled` 汇合 fork 分支并输出稳定汇总 |
-| `core.select` | 将互斥条件路径中唯一已执行的结果汇合为稳定输出 |
-| `core.branch_end` | 以显式 success/failure outcome 结算当前 Fork 分支 |
-| `core.end` | 以显式 success/failure outcome 终止当前 Run |
+| `operation` | 调用一个注册的叶子能力，并绑定类型化输出 |
+| `parallel` | 创建词法隔离的子作用域，按 `all` 或 `all_settled` 策略等待所有已接纳任务清理完成 |
+| `switch` | 按顺序选择第一个匹配分支，并把唯一分支结果绑定为直接输出 |
 
-条件节点和其他节点一样通过注册表解析。新增节点是静态链接的 Rust 扩展：实现 `NodeType` 负责编译期 config、envelope、边和引用声明，实现 `NodeExecutor` 负责运行期执行；两者分别注册到编译期和运行期注册表。注册后，自定义节点走同一套 DSL 解析、图校验、调度、事件、节点输出和终态提交路径，核心节点源码、调度器和 HTTP 层不需要增加分支：
+控制流是语言结构，不是可注册能力。编译器把顺序、并发和选择降低为内部 `Call`、`Parallel`、`Branch/Phi`、`RegionYield`、`WorkflowReturn` 和 `Raise`；这些 IR 指令不能出现在 Agent YAML 中。
 
-```rust,ignore
-let mut types = NodeTypeRegistry::default();
-types.register(MyNode)?;
+内置叶子 Operation：
 
-let mut executors = NodeExecutorRegistry::default();
-executors.register(MyNode)?;
-```
+| `uses` | 作用 |
+|---|---|
+| `ai.chat` | 调用命名 Chat 模型，分离 authored instruction 与 runtime data，支持文本、多模态和结构化响应 |
+| `action.call` | 通过严格 JSON Schema 调用本地或受限外部 Action |
 
-这不是动态插件系统：V1 不加载外部动态库、WASM、远程插件或下载代码。扩展代码由平台进程在构建/启动时显式链接和注册；如果编译期类型和运行期 executor 注册不一致，Run 会按普通运行时错误路径失败并写入终态。
-
-业务能力优先实现为 Action。Action 声明输入/输出 Schema、幂等元数据和是否允许流式内容，再由 `core.action` 调用：
+扩展只允许实现叶子 `Operation`：它声明静态 config、输入和输出合同、effect 与幂等性，然后计算一个值。扩展不能创建控制边、工作流子作用域或 Run 终态：
 
 ```rust,ignore
 #[async_trait]
-impl Action for ClassifyAction {
-    fn descriptor(&self) -> ActionDescriptor { /* strict JSON contracts */ }
-    async fn call(&self, input: Value, context: ActionContext) -> Result<Value, RunError> {
-        /* cooperative cancellation through context */
+impl Operation for MyOperation {
+    fn uses(&self) -> &'static str { "example.lookup" }
+
+    fn compile(
+        &self,
+        config: &Value,
+        inputs: &BTreeMap<Identifier, ValueType>,
+    ) -> Result<CompiledOperationContract, OperationError> {
+        /* validate static config and resolve the exact output contract */
+    }
+
+    async fn execute(
+        &self,
+        config: &Value,
+        inputs: BTreeMap<Identifier, Value>,
+        context: OperationContext,
+    ) -> Result<Value, RunError> {
+        /* cooperate with cancellation and the inherited deadline */
     }
 }
 
-actions.register(ClassifyAction)?;
+let mut extensions = OperationRegistry::default();
+extensions.register(MyOperation)?;
+let compiler = WorkflowCompiler::with_extensions(models, actions, extensions);
 ```
+
+这不是动态插件系统：当前进程不加载外部动态库、WASM、远程插件或下载代码。业务能力通常优先实现为 Action，再由 `action.call` 统一获得 Schema、取消、事件和身份合同。
 
 ## 配置与启动
 
@@ -72,7 +79,7 @@ actions.register(ClassifyAction)?;
 PLATFORM_CONFIG=config/platform.quickstart.yaml cargo run
 ```
 
-该配置只启用 `code_node_demo`，使用 SQLite 本地历史和内置 `example.text_metrics` Action。它引用 `config/models.quickstart.yaml` 中的未使用 dummy 模型别名，因此不需要 `OPENAI_API_KEY`，也不会调用外部模型服务。
+该配置只启用 `action_demo`，使用 SQLite 本地历史和内置 `example.text_metrics` Action。它不会调用外部模型服务，因此不需要 `OPENAI_API_KEY`。
 
 另开一个终端验证 readiness 和 Agent 列表：
 
@@ -87,10 +94,10 @@ curl --silent http://127.0.0.1:3000/v1/agents
 curl --silent --request POST \
   --header 'content-type: application/json' \
   --data '{"text":"hello rust world"}' \
-  http://127.0.0.1:3000/v1/agents/code_node_demo/runs
+  http://127.0.0.1:3000/v1/agents/action_demo/runs
 ```
 
-复制响应里的 `data.run_id`，循环查询 Run；detached Run 是异步执行，短时间内可能返回 `created` 或 `running`，直到 `data.status` 为 `completed` 再继续：
+复制响应里的 `data.run_id`，循环查询 Run；detached Run 是异步执行，短时间内可能仍为 `created` 或 `running`：
 
 ```bash
 RUN_ID=<paste-run-id>
@@ -103,7 +110,7 @@ while true; do
 done
 ```
 
-模型能力示例需要配置真实模型密钥：
+模型示例需要配置真实密钥：
 
 ```bash
 cp .env.example .env
@@ -111,9 +118,7 @@ cp .env.example .env
 cargo run
 ```
 
-默认配置只监听 `127.0.0.1:3000`，并显式关闭鉴权。`/health/live`、`/health/ready` 和 `/health` 始终公开且返回 `Cache-Control: no-store`；`/health/live` 在 HTTP handler 可响应时固定返回 `200/OK`，`/health/ready` 会有界检查 Run admission、journal 和 history backend。并发 readiness 请求共享一次探测，成功和失败结果只缓存 250ms，避免探针流量争用 history 连接池。`/health` 是 readiness 的直接兼容别名，两者的状态码和 JSON 完全一致。未 ready 时返回 `503/RUNTIME_UNHEALTHY`，且不会暴露底层数据库错误。`/v1` 可切换到从环境变量读取的 Bearer token：
-
-INFO 日志是结构化且 body-free 的：Run、节点、Chat 和 provider 记录只包含 `run_id`、`request_id`、`agent_id`、`agent_version`、节点 ID/type、状态、耗时、计数和序列化字节数。End 完成日志可额外记录 `terminal_outcome`；Run 失败日志可记录稳定的 `failure_kind` 和错误码，但不记录工作流失败消息。日志不记录请求输入值、prompt、模型输出、Action 输入/输出、End content/data、分支输出、事件 payload、带 query 的完整 URL、请求/响应头或凭据。当前基线只提供结构化日志，不包含 metrics backend 或 exporter。
+平台配置示例：
 
 ```yaml
 version: 1
@@ -123,20 +128,21 @@ auth:
   token_env: AGENT_RUNTIME_TOKEN
 agents:
   directory: ../agents
-  enabled: [code_node_demo, medical_report_interpreter, researcher]
+  enabled: [action_demo, medical_report_interpreter, researcher]
 models:
   config: models.yaml
 actions:
   enabled: [current_time, example.text_metrics]
 history:
   provider: sqlite
-  path: ../data/formal_v1.sqlite3
+  path: ../data/formal_v2.sqlite3
 runtime:
   max_concurrent_runs: 32
-  max_fork_branches: 32
-  max_parallel_node_executions: 32
-  max_parallel_branches_per_run: 8
-  default_node_timeout: 60s
+  max_concurrent_operations: 32
+  max_concurrent_operations_per_run: 8
+  operation_timeout: 60s
+  operation_cancel_grace_period: 5s
+  max_template_output_bytes: 262144
   run_timeout: 5m
   sse_keep_alive_interval: 5s
   subscriber_capacity: 128
@@ -148,7 +154,15 @@ runtime:
   shutdown_hard_deadline: 35s
 ```
 
-`agents.enabled` 默认是空集合，不会意外暴露目录中的 Agent。相对路径从平台配置文件所在目录解析。未知字段、零容量、零超时、缺失文件和缺失/空密钥都会阻止启动；`shutdown_hard_deadline` 必须严格大于 `shutdown_grace_period`。
+`max_concurrent_operations` 是进程范围的 leaf-operation 并发上限，`max_concurrent_operations_per_run` 是单 Run 并发上限，`operation_timeout` 是单次调用上限，`operation_cancel_grace_period` 是任意 stop 请求后的独立协作清理窗口。`run_timeout` 由 RunService 在开始执行时计算为一次性的绝对 execution deadline；每个 Operation attempt 的有效 deadline 是它与 operation deadline 的较早者。`parallel.max_concurrency` 还能进一步收紧一个 Parallel 内的并发。
+
+Execution deadline 到达后，运行时先向叶子能力发送 typed stop，再允许其在 `operation_cancel_grace_period` 内协作清理。因此 `run_timeout` 不是整个 HTTP 请求或终态持久化的墙钟上限：cleanup、终态事件写入和 repository commit 可以在 execution deadline 之后继续占用有界时间。
+
+`agents.enabled` 默认是空集合，不会意外暴露目录中的 Agent。相对路径从平台配置文件所在目录解析。未知字段、零容量、零超时、缺失文件和缺失或空密钥都会阻止启动；`shutdown_hard_deadline` 必须严格大于 `shutdown_grace_period`。
+
+默认只监听 `127.0.0.1:3000` 并关闭鉴权。`/health/live`、`/health/ready` 和 `/health` 始终公开且返回 `Cache-Control: no-store`；`/health` 是 readiness 的兼容别名。未 ready 时返回 `503/RUNTIME_UNHEALTHY`，且不暴露数据库诊断。
+
+### 模型传输
 
 Agent 只引用模型别名，不感知供应商分组：
 
@@ -172,155 +186,305 @@ models:
       max_accumulated_text_bytes: 1048576
 ```
 
-`open_ai_chat.base_url` 默认必须使用 HTTPS。明文 HTTP 只能显式声明：
+`open_ai_chat.base_url` 默认必须使用 HTTPS。明文 HTTP 只能显式声明 `transport.plaintext_http: loopback`（精确本机目标）或 `trusted_private`（部署方明确接受风险的可信私网链路）。`trusted_private` 不是自动的 DNS/IP 私网证明。公网或其他不可信服务必须使用 HTTPS；URL 不允许携带 username/password，密钥只通过 `api_key_env` 注入。
+
+OpenAI-compatible 流只有收到完整的 `data: [DONE]` 才算成功。HTTP clean EOF、`finish_reason` 或 usage-only chunk 都不能替代完成标记。缺少标记固定以 `UPSTREAM_STREAM_INCOMPLETE` 失败，错误不会回显 provider payload、部分输出、密钥或 endpoint query。
+
+## Agent DSL
+
+### 文档外形
+
+每个 Agent 目录包含一个严格的 `agent.yaml`：
 
 ```yaml
-transport:
-  plaintext_http: loopback        # 仅 127.0.0.1 / localhost / [::1]
-```
+api_version: insight.agent/v2
+kind: agent
 
-或：
+metadata:
+  id: text_metrics
+  name: Text Metrics
+  description: Compute deterministic text metrics.
 
-```yaml
-transport:
-  plaintext_http: trusted_private # 部署方明确接受的私有网络模型服务链路
-```
+schema_dialect: https://json-schema.org/draft/2020-12/schema
 
-`trusted_private` 不会自动证明目标地址在内网，也不会做 DNS/IP 私网判定；它表示部署方确认该 HTTP 链路处于可信私有边界内。公网或其他不可信模型服务必须使用 HTTPS。模型 URL 不允许携带 username/password；密钥只通过 `api_key_env` 指向的环境变量注入。
+$defs: {}
+prompts: {}
+errors: {}
 
-`limits` 可省略；省略时使用上述默认字节上限。零值非法，会以 `MODEL_CONFIG_INVALID` 阻止启动。上游响应体、SSE 行、单个 `data:` payload、单个文本 delta、usage JSON 和最终累计文本都会在写入或继续累计前检查。超限 Run 使用稳定错误 `MODEL_RESPONSE_TOO_LARGE`，错误消息为 `chat provider response exceeded the configured size limit`，不会包含 provider body、prompt、API key、URL query、响应头、usage、响应片段或配置的具体限制值。
-
-OpenAI-compatible 流只有收到完整的 `data: [DONE]` 应用层标记才算成功；该标记一经解析就释放 upstream HTTP body，不等待 provider 关闭 socket，此前已解析的 chunk 仍按顺序排空后再结束逻辑流。`finish_reason` 只描述 choice 停止生成，usage-only chunk 也只是统计数据，两者都不能替代 `[DONE]`。如果 HTTP body 干净结束但缺少该标记，Run 使用固定的 `UPSTREAM_STREAM_INCOMPLETE / chat provider stream ended without completion evidence` 失败；残缺 JSON/UTF-8 和显式传输错误继续使用各自的稳定错误，已收到的部分内容不会把失败转换成成功。错误不会回显 provider payload、部分输出、API key 或 endpoint/query。
-
-## Agent DSL 示例
-
-```yaml
-version: 1
-id: answerer
-name: Answerer
 input:
   schema:
     type: object
-    required: [question]
-    additionalProperties: false
+    required: [text]
     properties:
-      question: {type: string, minLength: 1}
-prompts:
-  answer: prompts/answer.md
-entry: answer
-nodes:
-  answer:
-    type: core.chat
-    next: result
-    emit: content
-    config:
-      model: general_chat
-      messages:
-        - role: user
-          content: {template_ref: answer}
-      parameters: {}
+      text: {type: string}
+    additionalProperties: false
+
+output:
+  data_schema:
+    type: object
+    required: [characters, words, lines]
+    properties:
+      characters: {type: integer, minimum: 0}
+      words: {type: integer, minimum: 0}
+      lines: {type: integer, minimum: 0}
+    additionalProperties: false
+
+workflow:
+  steps:
+    - kind: operation
+      id: analyze_text
+      uses: action.call
+      with:
+        input:
+          object:
+            text: {from: input.text}
+      config:
+        action: example.text_metrics
+
   result:
-    type: core.end
-    config:
-      outcome: success
+    return:
       content:
-        template: "{{ nodes.answer.output.text }}"
-      format: markdown
+        template:
+          text: "characters={{ characters }}, words={{ words }}, lines={{ lines }}"
+          bindings:
+            characters: {from: steps.analyze_text.output.characters}
+            words: {from: steps.analyze_text.output.words}
+            lines: {from: steps.analyze_text.output.lines}
+      format: text
+      data: {from: steps.analyze_text.output}
 ```
 
-`core.end` 与 `core.branch_end` 共享严格的 success/failure 联合类型，且都不能声明 `next`。成功 terminal 至少声明 `content` 或 `data`；`content` 存在时必须同时声明 `format: text|markdown`，结构化结果继续使用稳定的 `{content?, format?, data}` output。失败 terminal 只接受静态 `WORKFLOW_...` code 和静态单行 message，并禁止 `content`、`format`、`data`、模板和 CEL：
+`api_version` 和 `kind` 是精确判别符，`schema_dialect` 必填且只能是 canonical `https://json-schema.org/draft/2020-12/schema`。每层都拒绝未知字段。标识符匹配 `[A-Za-z_][A-Za-z0-9_]*`。顶层 `$defs` 会注入每一份 authored contract，因此 `#/$defs/Name` 在 input、output、Parallel branch、Switch 和 Chat structured response 中含义一致。
+
+### 类型化 JSON Schema profile
+
+运行时合同使用 Draft 2020-12 验证器，但编译器只接受一套能够保守映射为静态类型的 profile：布尔 schema；`type`（含类型数组）；标量 `const`/`enum`；带显式 `items` 和可选 `minItems` 的同构数组；`properties`、`required`、`additionalProperties` 对象；以及没有 shape-changing sibling 的 `oneOf`/`anyOf`。`#/$defs/<Identifier>` 会先完整展开，再进入静态类型编译。
+
+`minLength`、`maximum`、`format`、`maxItems` 等不改变可达字段类型的约束仍由运行时验证器执行，但不会赋予静态路径或窄化能力。会改变结构而当前静态类型没有建模的关键字会在启动编译期明确失败，包括 `allOf`、`not`、`if`/`then`/`else`、`dependentSchemas`、`dependentRequired`、`patternProperties`、`propertyNames`、`unevaluatedProperties`、`minProperties`/`maxProperties`、`prefixItems`、`unevaluatedItems` 和动态引用。这样不会出现运行时 schema 与编译器所声称的字段合同不一致。
+
+### ValueExpr 与数据流
+
+所有运行期派生值都必须使用一个显式、递归的 `ValueExpr`：
 
 ```yaml
-reject:
-  type: core.end
+{literal: 10}
+{from: input.question}
+{from: steps.search.output.items}
+{object: {question: {from: input.question}, limit: {literal: 10}}}
+{array: [{literal: technical}, {literal: risk}]}
+{prompt: synthesis_system}
+template:
+  text: "Found {{ count }} results"
+  bindings:
+    count: {from: steps.search.output.count}
+```
+
+- `literal` 保留完整 JSON 类型，不做字符串化；
+- `from` 保留源值类型；
+- `object`、`array` 递归组合类型化值；
+- `prompt` 解析一个已声明的 inline/file prompt；
+- `template` 只看到显式 `bindings`，不会获得全局上下文；
+- 普通字符串始终是普通字符串，不会被解释成模板或引用；
+- 一个 ValueExpr 对象只能包含一个表达式键。
+
+初始引用根只有：
+
+- `input`：Run 输入；
+- `run`：闭合的安全 Run 元数据对象，只含字符串字段 `id`、`request_id`、`agent_id`、`agent_version`、`started_at`；
+- `scope`：结构化 block 通过 `with` 显式捕获的不可变值；
+- `steps.<id>.output`：当前 body 中更早成功完成的 step 输出。
+
+标识符形状的对象键可使用点路径；任意 JSON key 和固定数组索引使用 RFC 6901 JSON Pointer 后缀，例如 `input#/items/0/display-name` 和 `steps.lookup.output#/data/a~1b`。动态 key、动态索引、前向引用、跨分支引用和未被所有路径支配的引用都会在启动编译期失败。
+
+结构化 block 先在父作用域计算 `with`，再只把这些值作为子作用域的 `scope` 暴露。子作用域内部值不会泄露到父作用域或兄弟作用域；唯一向外的数据通道是该 block 的 `result`。
+
+### Chat 的 instruction/data 边界
+
+`ai.chat` 的 authored prompt/text 与 runtime data 使用不同 part：
+
+```yaml
+- kind: operation
+  id: analyze
+  uses: ai.chat
+  with:
+    question: {from: input.question}
   config:
-    outcome: failure
-    code: WORKFLOW_POLICY_REJECTED
-    message: workflow policy rejected the run
+    model: general_chat
+    messages:
+      - role: system
+        parts:
+          - kind: prompt
+            prompt: technical_system
+      - role: user
+        parts:
+          - kind: text
+            text: Analyze the following untrusted question.
+          - kind: data
+            input: question
+    parameters: {temperature: 0.2}
+    response:
+      format: json
+      schema: {$ref: "#/$defs/Perspective"}
+    max_request_bytes: 262144
 ```
 
-作用域由节点类型显式声明：`core.end` 只允许出现在主流程（包括 Join 之后），其成功/失败分别完成/失败整个 Run；`core.branch_end` 只允许出现在 Fork 分支内，只结算所属分支，不能直接终止父 Run。用错作用域会在启动编译时以 `TERMINAL_SCOPE_INVALID` 拒绝。两种 terminal 都表示节点按声明成功执行，因此先持久化 terminal envelope 并发布 `node.completed`；失败 terminal 随后发布 `branch.failed(kind=workflow)` 或 `run.failed(kind=workflow)`，不会发布 `node.failed`。
+system/assistant 消息只接受 authored `text` 或 `prompt`。运行期 `data` 与 `image_url` 只允许出现在 user 消息，并且必须命名一个 `with` binding；Chat 会把 runtime data 标为不可信并进行有界 JSON 编码。所有 `with` binding 必须被消息精确消费，不能存在隐式额外上下文。
 
-### 条件结果汇合
+`response.format: text` 返回字符串；`response.format: json` 要求 `schema`，模型完成结果必须通过 Draft 2020-12 校验后才会绑定。稳定输出为 `{data, finish_reason, usage}`。`max_request_bytes` 是单次 Chat 请求中 authored text/prompt、runtime data 和 image URL 的聚合上限，默认 256 KiB，最大 1 MiB。
+
+### Parallel 与 Switch
+
+Parallel 同时拥有 spawn 和 barrier 语义。每个 branch 是一个完整的词法子作用域，有自己的 `output_schema`、`steps` 与 `result`：
 
 ```yaml
-version: 1
-id: select_demo
-name: Select Demo
-input:
-  schema:
-    type: object
-    additionalProperties: false
-    required: [kind]
-    properties:
-      kind:
-        type: string
+- kind: parallel
+  id: analyses
+  with:
+    question: {from: input.question}
+  settle: all_settled
+  max_concurrency: 2
+  branches:
+    technical:
+      output_schema: {$ref: "#/$defs/Perspective"}
+      steps:
+        - kind: operation
+          id: analyze
+          uses: ai.chat
+          with:
+            question: {from: scope.question}
+          config:
+            model: general_chat
+            messages:
+              - role: user
+                parts:
+                  - {kind: text, text: Analyze technical feasibility.}
+                  - {kind: data, input: question}
+            parameters: {}
+            response: {format: text}
+      result:
+        return: {from: steps.analyze.output.data}
 
-entry: route
-nodes:
-  route:
-    type: core.condition
-    config:
-      cases:
-        - when: "input.kind == 'medical'"
-          next: medical
-      default: general
+    risk:
+      output_schema: {$ref: "#/$defs/Perspective"}
+      steps:
+        - kind: operation
+          id: analyze
+          uses: ai.chat
+          with:
+            question: {from: scope.question}
+          config:
+            model: general_chat
+            messages:
+              - role: user
+                parts:
+                  - {kind: text, text: Analyze risk and compliance.}
+                  - {kind: data, input: question}
+            parameters: {}
+            response: {format: text}
+      result:
+        return: {from: steps.analyze.output.data}
+```
 
-  medical:
-    type: core.template
-    next: selected_answer
-    config:
-      value:
-        kind: medical
-        text: "medical answer"
+完整的差异化 prompt 和后续综合策略见 `agents/parallel_researcher/agent.yaml`。
 
-  general:
-    type: core.template
-    next: selected_answer
-    config:
-      value:
-        kind: general
-        text: "general answer"
+`settle: all` 要求全部 branch 成功；一个可收集失败会停止继续接纳、取消同级并等待已接纳任务全部清理。`settle: all_settled` 把可收集结果变成以下严格联合类型：
 
-  selected_answer:
-    type: core.select
-    next: result
-    config:
-      sources: [medical, general]
+```json
+{"status":"ok","value":{}}
+{"status":"error","error":{"category":"workflow","code":"WORKFLOW_...","retryable":false,"origin":"/workflow/..."}}
+```
 
+停止、进程中断、ownership/persistence 丢失、task panic 等基础设施失败不会被伪装成业务数据。它们向外传播并触发作用域取消与 drain。
+
+Switch 是有序 first-match 选择；`default` 是必需的。每个正常完成的 arm 必须返回同一份完整 `output_schema`，或显式 raise：
+
+```yaml
+- kind: switch
+  id: synthesis_mode
+  with:
+    technical: {from: steps.analyses.output.technical}
+    risk: {from: steps.analyses.output.risk}
+  output_schema:
+    type: string
+    enum: [full, technical_only, risk_only]
+  cases:
+    - id: complete
+      when:
+        cel: >-
+          scope.technical.status == 'ok' &&
+          scope.risk.status == 'ok'
+      result:
+        return: {literal: full}
+    - id: technical_only
+      when:
+        cel: scope.technical.status == 'ok'
+      result:
+        return: {literal: technical_only}
+  default:
+    id: risk_only
+    result:
+      return: {literal: risk_only}
+```
+
+只有被选择的 arm 执行；编译器在内部使用 Branch/Phi 合并唯一结果。未选择 arm 不产生占位值，也没有额外 authored 聚合步骤。
+
+`when.cel` 使用刻意收窄的 typed predicate profile：唯一根是 `scope`；每个字段必须静态可读；只接受类型正确的布尔逻辑、相等/顺序比较和 `size()`；最终类型必须是 boolean。`scope.result.status == 'ok'` 这类合取中的标量判别会只在当前 case 内把联合类型收窄，因此该 case 可以安全读取 `scope.result.value`。`default` 不会自动继承前序条件的否定窄化。
+
+### Root return、child yield 与 raise
+
+每个 Parallel branch 和 Switch arm 都有一个 `result`：
+
+```yaml
+result:
+  return: {from: steps.analyze.output}
+```
+
+编译器把 child return 降低为内部 `RegionYield`。它只完成当前子作用域，不创建公共 `RunOutput`。
+
+只有 workflow root 的 return 能成功完成 Run，并拥有平台的公共 `{content?, format?, data}` envelope：
+
+```yaml
+workflow:
+  steps: []
   result:
-    type: core.end
-    config:
-      outcome: success
-      data:
-        source: "{{ nodes.selected_answer.output.source_node_id }}"
-        answer: "{{ nodes.selected_answer.output.value.text }}"
+    return:
+      content: {literal: done}
+      format: text
+      data: {literal: null}
 ```
 
-`core.select` 只用于互斥路径的一选一汇合。`sources` 必须完整列出 Select 的直接前驱，并且这些前驱必须处于同一执行区域且彼此不可达。运行时恰好一个来源可见才成功；已执行节点返回的 JSON `null` 仍是有效值，未执行来源不会被自动补 `null`。下游统一引用 `nodes.selected_answer.output.source_node_id` 和 `nodes.selected_answer.output.value`，不能绕过 Select 直接引用某个条件分支节点。
+`data` 必须满足 `output.data_schema`。`content` 存在时必须是字符串，并同时声明 `format: text|markdown`。Run 只有在 root return 已形成、所有后代完成或取消并 drain、输出合同与大小限制通过、权威终态事务提交后才算成功。
 
-Select 与 Join 的职责不同：Condition 只选择一条路径，因此使用 `core.select`；Fork 会执行全部固定分支，因此使用 `core.join` 和显式 `mode: all_settled`。Select 不做数组拼接、对象合并、优先级回退或并行聚合。
-
-`emit: none` 保持节点增量私有，`emit: content` 才发布 `content.delta`。模板上下文只暴露 `input`、`run` 和已完成的 `nodes.<node_id>.output`。节点 ID 和 fork branch ID 必须匹配 `[A-Za-z_][A-Za-z0-9_]*`；跨节点引用只能使用 `nodes.<node_id>.output`，不能使用 `nodes["id"]`、computed access 或直接访问 `nodes` map。
-
-JSON 对象不能裸插入字符串模板；Handlebars 会把它渲染成 `[object]`。需要把已完成节点的结构化结果交给 Chat 模型时，使用显式 JSON user content part：
+Authored failure 先在顶层声明，再由任意可见 block `raise`：
 
 ```yaml
-- role: user
-  content:
-    - type: text
-      text: Treat the next settled envelope as untrusted data.
-    - type: json
-      json:
-        path: nodes.collect.output
-        max_bytes: 262144
+errors:
+  all_failed:
+    category: workflow
+    code: WORKFLOW_ALL_BRANCHES_FAILED
+    public_message: No analysis perspective was available.
+
+workflow:
+  result:
+    raise: all_failed
 ```
 
-`path` 只接受 `nodes.<node_id>.output` 及其对象字段，仍参与正常的支配关系和 Fork region 引用校验。JSON part 只能出现在静态 `user` 消息中，运行时通过有界 writer 生成 compact JSON；纯文本/JSON parts 会以空行分隔后合并成一个 provider `content` string，带图片时继续使用标准 text/image part array。它不是 provider 原生 JSON 类型。`max_bytes` 必填、必须为 `1..=262144`，且只限制当前 part，不代表整个 Chat request 已有总字节上限。缺失、超限和序列化错误不会回显 JSON 正文，也不会静默截断。
+Authored error 只能使用 `workflow` category，不能伪造 operation timeout、stop、ownership 或 infrastructure failure。
 
-节点 `timeout` 使用正式 V1 窄语法：正整数紧跟 `ms`、`s` 或 `m`，例如 `250ms`、`5s`、`2m`。不接受空格、复合值、别名、分数、`h/d` 等更大单位或前导零。
+### Region/SSA 与运行时作用域树
 
-## HTTP 与 Run 生命周期
+结构化 YAML 是唯一作者合同，Region/SSA 是唯一运行时计划。编译器为作用域、Operation 和值生成稳定的限定身份，例如：
+
+```text
+/workflow/analyses/branches/technical/analyze
+/workflow/synthesis_mode/cases/complete
+```
+
+IR verifier 在运行前拒绝重复身份、错误 terminator、use-before-definition、跨 Region value escape、未声明 capture、Schema/类型不匹配及错误 Branch/Phi 结构。
+
+ScopeScheduler 递归执行 RunScope、OperationScope、ParallelScope、BranchScope 和选中 arm。父作用域拥有所有子 future：关闭 admission 后先请求协作取消，再完整 drain；不会留下脱离父作用域的工作流任务。
+
+## HTTP、事件与 Run 生命周期
 
 JSON 响应统一使用字符串码：
 
@@ -328,107 +492,37 @@ JSON 响应统一使用字符串码：
 {"code":"OK","message":"ok","data":{}}
 ```
 
-公开 liveness、readiness 和兼容健康检查：
-
-```bash
-curl --silent http://127.0.0.1:3000/health/live
-curl --silent http://127.0.0.1:3000/health/ready
-curl --silent http://127.0.0.1:3000/health
-```
-
-进程只有在配置、Agent 编译、history 初始化和遗留 Run 恢复全部成功后才绑定 HTTP。收到 SIGINT/SIGTERM 后，进程先关闭新 Run admission；此时 liveness 仍为 200，readiness 与 `/health` 为 503。运行时随后尝试在 grace period 内终态化并持久化活动 Run（Attached 为 `cancelled`，Detached 为 `interrupted`），再关闭 HTTP。只有 runtime 与 HTTP 都成功 drain 才干净退出；失败或 hard deadline 会非零退出，并由下次启动 reconciliation 收敛遗留 Run。
-
-如果 scheduler 或 prelaunch finalizer 的最外层 Run task 发生 panic，runtime 会立即关闭 admission 并进入不可恢复的 fail-stop 状态。受影响的 durable Run 会尽力以脱敏的 `failed/infrastructure/INFRASTRUCTURE_FAILURE` 终态收敛；无论终态恢复是否成功，active ownership、并发 permit 与 lifecycle waiter 都会释放。进程随后按同一 runtime-first、HTTP-second 顺序 drain，并固定非零退出；部署 supervisor 负责启动干净的 replacement。生产 panic hook 只记录固定分类和消息，不记录 panic payload。
-
-列出 Agent：
-
-```bash
-curl --silent http://127.0.0.1:3000/v1/agents
-```
-
-列表与 `GET /v1/agents/{agent_id}` 返回同一个公开 Agent 合同：
-
-```json
-{
-  "code": "OK",
-  "message": "ok",
-  "data": [{
-    "id": "code_node_demo",
-    "name": "Action Node Demo",
-    "description": "Demonstrates a typed native Rust action whose JSON output feeds later nodes.",
-    "version": "sha256:...",
-    "input_schema": {
-      "type": "object",
-      "required": ["text"],
-      "additionalProperties": false,
-      "properties": {"text": {"type": "string"}}
-    }
-  }]
-}
-```
-
-`input_schema` 是运行时校验 Run 创建请求完整 JSON body 的同一份 Schema，不存在额外的 `input` 包装层。Schema 固定按 JSON Schema Draft 7 解释；缺少 `$schema` 时 API 不会注入或改写该字段。客户端可按 `(id, version)` 缓存合同，输入 Schema 的任何变化都会改变 `version`。完整 Schema 属于公开元数据，Agent 作者不得在 `description`、`examples`、`default` 等 Schema 注解中放置秘密；prompt、节点图、模型和 Action 配置不会通过发现接口返回。
-
-创建 detached Run 会返回 HTTP 202。它与 SSE 订阅独立，客户端断开后继续执行，直到完成、失败、超时、显式取消或进程关闭：
-
-```bash
-curl --silent --request POST \
-  --header 'content-type: application/json' \
-  --data '{"text":"hello rust world"}' \
-  http://127.0.0.1:3000/v1/agents/code_node_demo/runs
-```
-
-创建 attached Run 会原子地订阅实时事件并启动执行，响应头包含 X-Run-Id 和 X-Request-Id。终态事件写入历史后发送，发送后 SSE 立即关闭。客户端断开会立即取消仍在运行的 attached Run；该接口不支持重连补发。
-
-SSE 每 5 秒发送 keepalive 注释用于尽快发现半开连接；注释不是协议事件，不占用 seq。网络栈、代理和调度会影响实际发现时间，因此 5 秒是检测目标而不是硬实时保证。
-
-```bash
-curl --no-buffer \
-  --header 'x-request-id: req_demo_001' \
-  --header 'content-type: application/json' \
-  --data '{"question":"解释这个运行时的扩展边界"}' \
-  http://127.0.0.1:3000/v1/agents/researcher/runs/stream
-```
-
-事件 envelope 包含 `schema_version: 1`、单 Run 单调递增的 `seq`、字符串 `code` 和点分事件类型。SSE keepalive 是注释，不占用序号：
+正式端点：
 
 ```text
-id: 3
-event: content.delta
-data: {"schema_version":1,"type":"content.delta","seq":3,"request_id":"req_demo_001","run_id":"run_...","agent_id":"researcher","agent_version":"sha256:...","node_id":"answer","time":"2026-07-10T00:00:00Z","code":"OK","message":"ok","data":{"content":"Rust"}}
+GET    /health
+GET    /health/live
+GET    /health/ready
+GET    /v1/agents
+GET    /v1/agents/{agent_id}
+POST   /v1/agents/{agent_id}/runs/stream
+POST   /v1/agents/{agent_id}/runs
+GET    /v1/runs/{run_id}
+DELETE /v1/runs/{run_id}
 ```
 
-Detached：创建后通过 Run 资源轮询，断开不会停止任务：
+Agent 发现接口返回 `id`、`name`、`description`、内容寻址 `version` 和 `input_schema`。`input_schema` 是编译和 Run 创建时使用的同一份 Draft 2020-12 合同；API 不公开 prompt、structured workflow、模型或 Action config。
 
-```bash
-# Detached：创建后通过 Run 资源轮询，断开不会停止任务
-curl --silent --request POST \
-  --header 'content-type: application/json' \
-  --data '{"text":"hello rust world"}' \
-  http://127.0.0.1:3000/v1/agents/code_node_demo/runs
+Attached POST 会先原子订阅实时事件再启动 Run。终态事件发送后 SSE 立即关闭；非终态连接断开会取消 Run。Detached POST 返回 HTTP 202，连接断开不影响执行，客户端通过 GET Run 轮询或 DELETE 幂等取消。平台不提供公开事件重放；`seq` 与 SSE `id` 只用于单 Run 排序和审计关联，不是恢复游标。
 
-curl --silent http://127.0.0.1:3000/v1/runs/run_xxx
-curl --silent --request DELETE http://127.0.0.1:3000/v1/runs/run_xxx
-```
+v2 leaf operation 只公开生命周期元数据事件：
 
-`GET /v1/runs/{run_id}/events` 和 `after_seq` 已删除。`seq` 与 SSE `id` 只用于单 Run 事件排序和审计关联，不是恢复游标。`DELETE` 仍然幂等：活动 Run 返回取消后的记录，已终止 Run 原样返回。
+- `operation.started`；
+- `operation.completed`；
+- `operation.failed`。
 
-以下命令可在默认开发配置下完整验证确定性 action-only 路径（需要 `jq`）：
+Operation 不提供公共内容增量；输出值也不会进入公共事件或 journal。完成事件只公开限定 `operation_id`、类型、attempt、耗时和输出字节数；失败事件使用固定公共消息，不携带内部诊断。模型 provider 仍可使用内部流式传输，但 `ai.chat` 会在运行时内聚合并完成响应校验后才产生叶子结果。中间值只存在于运行期数据流，只有显式 ValueExpr 投影能把它交给后续 Operation，只有 root return 能把结果写入公共 Run 终态。
 
-```bash
-curl --fail --silent http://127.0.0.1:3000/health/ready | jq
-curl --fail --silent http://127.0.0.1:3000/v1/agents | jq
-CREATED=$(curl --fail --silent --request POST \
-  --header 'content-type: application/json' \
-  --data '{"text":"hello rust world"}' \
-  http://127.0.0.1:3000/v1/agents/code_node_demo/runs)
-RUN_ID=$(printf '%s' "$CREATED" | jq --exit-status --raw-output '.data.run_id')
-curl --fail --silent "http://127.0.0.1:3000/v1/runs/$RUN_ID" | jq
-curl --fail --silent --request DELETE \
-  "http://127.0.0.1:3000/v1/runs/$RUN_ID" | jq
-```
+默认结构化日志保持 body-free：只记录身份、状态、稳定错误 code/kind、耗时、计数和序列化字节数，不记录自由错误 message、Run 输入、prompt、模型或 Action 输入/输出、事件 payload、带 query 的完整 URL、header 或凭据。
 
-## 历史后端
+收到 SIGINT/SIGTERM 后，进程先关闭新 Run admission；liveness 仍为 200，readiness 为 503。运行时在 grace period 内终态化并持久化活动 Run，再关闭 HTTP。panic、journal 失败或 hard deadline 会触发 fail-stop 和非零退出，由 supervisor 启动干净 replacement。
+
+## 历史后端与单运行时所有权
 
 SQLite 是本地默认后端。PostgreSQL 使用环境变量保存连接密钥：
 
@@ -438,11 +532,11 @@ history:
   database_url_env: RUN_HISTORY_DATABASE_URL
 ```
 
-Remote PostgreSQL URLs must include `sslmode=verify-full`. Plaintext PostgreSQL is accepted only for exact local development targets (`localhost`, `127.0.0.1`, `[::1]`) or Unix sockets.
+远程 PostgreSQL URL 必须包含 `sslmode=verify-full`。明文只允许精确 loopback 开发目标或 Unix socket。
 
-每个 Formal V1 PostgreSQL store（同一数据库和当前 schema）只允许一个 active runtime。runtime 会在 migration、启动 reconciliation 和 HTTP bind 之前取得数据库强制的 exclusive ownership；指向同一 store 的 contender 会直接启动失败并非零退出，不会在进程内等待成为 standby。运行期间一旦 ownership 丢失，readiness 与 `/health` 会返回 503，新 Run admission 会关闭，进程会在既有 hard deadline 内尝试 drain，随后无论 drain 是否成功都非零退出。平台不会自动重新取得 ownership；部署 supervisor 负责启动 replacement。
+每个 PostgreSQL history store（同一数据库和当前 schema）只允许一个 active runtime。runtime 在 migration、启动 reconciliation 和 HTTP bind 前取得 session advisory lock，并以 ownership generation fence 保护写入。竞争者启动时直接失败，不等待成为 standby；运行期 ownership 丢失会关闭 readiness 和 admission，尝试 drain，然后固定非零退出。平台不会自动重新取得 ownership。
 
-该合同要求 PostgreSQL 连接具有 session affinity：必须直连 PostgreSQL，或使用 session-pooling 模式的连接池代理。PgBouncer transaction pooling 和 statement pooling 不支持 session advisory lock，不能用于这个 history store。旧版本 runtime 不具备相同 ownership/fencing 合同，不能与当前版本做滚动升级；升级 disposable PostgreSQL store 时，必须先停掉所有旧 runtime，再按下方 Formal V1 reset 合同重建整个 schema，然后才能启动新版本。
+该合同要求 session affinity：必须直连 PostgreSQL，或使用 session-pooling 代理。PgBouncer transaction/statement pooling 不支持该所有权合同。升级 disposable store 时应先停止所有旧 runtime，再重建 schema；应用不会静默解释或升级不兼容历史。
 
 本地运行 PostgreSQL 合同测试：
 
@@ -452,198 +546,13 @@ RUN_HISTORY_POSTGRES_URL='postgres://insight:insight@127.0.0.1:5433/insight_agen
   cargo test --test history_postgres -- --nocapture
 ```
 
-统一 `core.end`、类型化 Run lifecycle 和 PostgreSQL ownership generation fence 会直接改写 Formal V1 initial migration；已有本地 SQLite 数据库和开发 PostgreSQL volume 必须按[正式 V1 历史重置](docs/formal-v1-breaking-changes.md#历史重置)整体重建，应用不会静默升级。重建 PostgreSQL schema 前必须先停掉所有仍可能连接该 store 的旧 runtime。A0 Action 校验错误安全修复不兼容既有 Run 历史；部署前按[正式 V1 破坏性变更中的 A0 重置流程](docs/formal-v1-breaking-changes.md#a0-action-validation-error-containment)停止服务并显式清空历史。A5 会让静态非法 Action input、hyphenated node/branch ID、indexed/computed `nodes` access 在启动编译期失败；迁移理由见[正式 V1 破坏性变更中的 A5 语义编译期校验](docs/formal-v1-breaking-changes.md#a5-semantic-compile-time-validation)。
+## 仓库示例
 
-显式 `core.branch_end` hard cutover 不修改数据库或历史格式，但 binary 与 Agent YAML 必须原子部署：旧 binary 不认识 `core.branch_end`，新 binary 会以 `TERMINAL_SCOPE_INVALID` 拒绝分支内旧式 `core.end`。迁移时只改真实分支 terminal；主流程及 Join 后的 terminal 继续使用 `core.end`。
-
-正式 V1 不存储原始输入，只保存顶层键和序列化字节数摘要。journal 只有在数据库确认事件持久化后才向订阅者广播；单次数据库操作受 `journal_operation_timeout` 限制。失败时先停止 journal worker，恢复事务锁定 Run，并基于持久化的 `MAX(seq)` 原子派生终态序号；这也能判定超时发生在 `COMMIT` 附近时的实际结果。journal 永久关闭后拒绝新 Run。进程启动时遗留的 `created/running` 记录会被标记为 `interrupted`，V1 不恢复工作。
-
-## 示例
-
-- `agents/researcher`：私有计划 + 公开答案。
-- `agents/code_node_demo`：`example.text_metrics` 原生 Action，不调用模型，适合确定性冒烟测试。
-- `agents/medical_report_interpreter`：使用同一个通用 `core.chat` 多模态协议的垂直示例。
-- `agents/parallel_researcher`：两个多节点分支汇聚后再综合：
-- `agents/workflow_failure_demo`：不需要密钥的 authored workflow failure 示例；只用于编译和真实 binary smoke，不在正常或 quickstart 配置中启用。
-
-条件路径结果使用 `core.select`；以下示例是并行分支，因此使用 `core.fork`、显式 `core.branch_end` 和 `core.join`。分支 terminal 不声明 `next`；Fork 的 `join` 字段是所有分支结算后才激活的结构化 continuation：
-
-```yaml
-fanout:
-  type: core.fork
-  config:
-    branches: {perspective_a: analyze_a, perspective_b: analyze_b}
-    join: collect
-
-analyze_a:
-  type: core.chat
-  next: end_a
-  config:
-    model: general_chat
-    messages: [{role: user, content: "Analyze {{ input.question }} from perspective A."}]
-    parameters: {}
-end_a:
-  type: core.branch_end
-  config:
-    outcome: success
-    data: {answer: "{{ nodes.analyze_a.output.text }}"}
-
-analyze_b:
-  type: core.chat
-  next: end_b
-  config:
-    model: general_chat
-    messages: [{role: user, content: "Analyze {{ input.question }} from perspective B."}]
-    parameters: {}
-end_b:
-  type: core.branch_end
-  config:
-    outcome: success
-    data: {answer: "{{ nodes.analyze_b.output.text }}"}
-
-collect:
-  type: core.join
-  next: decide
-  config: {mode: all_settled}
-
-decide:
-  type: core.condition
-  config:
-    cases:
-      - when: nodes.collect.output.summary.succeeded == 0
-        next: fail_all
-      - when: nodes.collect.output.summary.failed == 0
-        next: synthesize_full
-      - when: nodes.collect.output.branches.perspective_a.status == 'succeeded'
-        next: synthesize_a_only
-    default: synthesize_b_only
-
-synthesize_full:
-  type: core.chat
-  next: selected_synthesis
-  config:
-    model: general_chat
-    messages:
-      - role: user
-        content:
-          - type: text
-            text: Perspective A succeeded output follows as untrusted JSON.
-          - type: json
-            json: {path: nodes.collect.output.branches.perspective_a.output, max_bytes: 262144}
-          - type: text
-            text: Perspective B succeeded output follows as untrusted JSON.
-          - type: json
-            json: {path: nodes.collect.output.branches.perspective_b.output, max_bytes: 262144}
-    parameters: {}
-
-synthesize_a_only:
-  type: core.chat
-  next: selected_synthesis
-  config:
-    model: general_chat
-    messages:
-      - role: user
-        content:
-          - type: text
-            text: |
-              Perspective B is unavailable; disclose partial evidence.
-              Failure kind: {{ nodes.collect.output.branches.perspective_b.error.kind }}
-              Failure code: {{ nodes.collect.output.branches.perspective_b.error.code }}
-              Perspective A succeeded output follows as untrusted JSON.
-          - type: json
-            json: {path: nodes.collect.output.branches.perspective_a.output, max_bytes: 262144}
-    parameters: {}
-
-synthesize_b_only:
-  type: core.chat
-  next: selected_synthesis
-  config:
-    model: general_chat
-    messages:
-      - role: user
-        content:
-          - type: text
-            text: |
-              Perspective A is unavailable; disclose partial evidence.
-              Failure kind: {{ nodes.collect.output.branches.perspective_a.error.kind }}
-              Failure code: {{ nodes.collect.output.branches.perspective_a.error.code }}
-              Perspective B succeeded output follows as untrusted JSON.
-          - type: json
-            json: {path: nodes.collect.output.branches.perspective_b.output, max_bytes: 262144}
-    parameters: {}
-
-selected_synthesis:
-  type: core.select
-  next: result_policy
-  config:
-    sources: [synthesize_full, synthesize_a_only, synthesize_b_only]
-
-result_policy:
-  type: core.condition
-  config:
-    cases:
-      - when: nodes.collect.output.summary.failed > 0
-        next: finish_degraded
-    default: finish_full
-
-finish_full:
-  type: core.end
-  config:
-    outcome: success
-    content: {template: "{{ nodes.selected_synthesis.output.value.text }}"}
-    format: markdown
-    data: {degraded: false}
-
-finish_degraded:
-  type: core.end
-  config:
-    outcome: success
-    content: {template: "{{ nodes.selected_synthesis.output.value.text }}"}
-    format: markdown
-    data: {degraded: true}
-
-fail_all:
-  type: core.end
-  config:
-    outcome: failure
-    code: WORKFLOW_ALL_BRANCHES_FAILED
-    message: all parallel branches failed
-```
-
-每个静态分支路径都必须到达自己的 `core.branch_end`；分支中的 `core.end`、主流程或 Join 后的 `core.branch_end` 都会以 `TERMINAL_SCOPE_INVALID` 编译失败。分支就绪并进入执行队列时发布 `branch.started`；Branch End envelope 和 `node.completed` 持久化之后，才发布 `branch.completed` 或 `branch.failed`。authored Branch End failure 的错误是 `kind: workflow`；普通节点失败和超时分别是 `kind: node` 与 `kind: timeout`。`branch.started` 表示 ready-queue activation，不代表模型已开始返回内容。
-
-`core.join` 的输出是固定聚合对象（不是 Run 终态 envelope）：
-
-```json
-{
-  "branches": {
-    "perspective_a": {
-      "status": "succeeded",
-      "terminal_node_id": "end_a",
-      "output": {"data": {"answer": "..."}}
-    },
-    "perspective_b": {
-      "status": "failed",
-      "terminal_node_id": "end_b",
-      "error": {
-        "kind": "workflow",
-        "code": "WORKFLOW_LOW_CONFIDENCE",
-        "message": "branch confidence is insufficient"
-      }
-    }
-  },
-  "summary": {
-    "total": 2,
-    "succeeded": 1,
-    "failed": 1,
-    "failures": {"workflow": 1, "node": 0, "timeout": 0}
-  }
-}
-```
-
-`total == succeeded + failed`，且 `failed == failures.workflow + failures.node + failures.timeout`。即使所有分支都失败，`all_settled` Join 仍会成功执行并返回汇总；Join 本身不决定 Run 终态。Join 后的 Condition 显式决定策略：至少一个成功时可以生成明确标记的 degraded success；零成功时路由到 failure End。取消、interrupted 和 infrastructure failure 会停止整个 Run，不会伪装成可汇合的分支结果。`max_concurrent_runs` 和 `max_parallel_node_executions` 是进程范围上限；`max_parallel_branches_per_run` 与 `max_fork_branches` 分别限制单 Run 并发分支和单 Fork 分支数。V1 不支持嵌套 Fork、resume、新 Join 模式，也不允许 post-Join 节点直接引用分支节点。
-
-把 Join 结果发送给外部模型时不能无差别发送整个 failure envelope：扩展节点的自由文本 `error.message` 可能包含上游细节。仓库 Agent 的 partial 路径只发送成功分支 output 和失败分支的受控 `kind/code`；详细 message 仍保留在 Join 节点输出/事件中，不进入下一次 provider 请求。每个成功 output 的 JSON part 上限为 256 KiB，超限会显式失败而不是截断。
+- `agents/researcher`：私有规划、时间 Action 与公开回答的顺序工作流；
+- `agents/action_demo`：`example.text_metrics` 原生 Action，不调用模型，适合确定性冒烟；
+- `agents/medical_report_interpreter`：使用 Switch 区分首轮与追问的多模态示例；
+- `agents/parallel_researcher`：技术可行性与风险合规两个差异化 Parallel branch，支持完整、降级与零成功策略；
+- `agents/workflow_failure_demo`：不需要密钥的 authored workflow raise 示例。
 
 ## 验证
 
@@ -655,4 +564,4 @@ cargo audit
 cargo deny check
 ```
 
-完整接口迁移理由见 [正式 V1 破坏性变更](docs/formal-v1-breaking-changes.md)。
+旧 Agent 文档不会被静默解释为 v2。当前语言与运行时合同见 [DSL vNext Region/SSA Design](docs/superpowers/specs/2026-07-16-dsl-vnext-region-ssa-design.md)，历史设计的权威性规则见 [Design-document authority](docs/superpowers/README.md)，切换原则和数据处理见 [DSL v2 直接切换说明](docs/formal-v1-breaking-changes.md)。

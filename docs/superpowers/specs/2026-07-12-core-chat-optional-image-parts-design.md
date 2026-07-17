@@ -1,5 +1,7 @@
 # Core Chat Optional Image Parts Design
 
+> **Historical syntax:** optional-image behavior was migrated to the vNext `ai.chat` operation; the `core.chat` examples below are not accepted. See [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+
 ## Goal
 
 Allow a `core.chat` image content part to be explicitly optional. Optional image parts are omitted when their URL input is absent or blank, allowing one chat node to handle both text-only and multimodal requests. Update `medical_report_interpreter` to use this capability and accept HTTP image URLs.

@@ -10,14 +10,13 @@ use insight_agent_platform::{
     api::formal::{build_router, ApiAuth, FormalApiState},
     catalog::compile_enabled_agents,
     config::{HistoryConfig, PlatformConfig},
-    dsl::compiler::CompileLimits,
+    dsl::vnext::compiler::WorkflowCompiler,
     events::hub::{EventHub, EventHubConfig},
     history::{
         postgres::{PostgresRunRepository, PostgresStoreOwner},
         repository::{HistoryError, RunRepository},
         sqlite::SqliteRunRepository,
     },
-    nodes::default_node_registries,
     resources::{
         builtin_actions::{builtin_action_registry, RestrictedHttpGetAction},
         config::load_model_registry,
@@ -83,18 +82,9 @@ async fn main() -> MainResult<()> {
         &config.actions.enabled.iter().cloned().collect::<Vec<_>>(),
         http_get,
     )?;
-    let (node_types, executors) = default_node_registries()?;
-    let agents = compile_enabled_agents(
-        &config.agents.directory,
-        &config.agents.enabled,
-        node_types,
-        models,
-        actions,
-        config.runtime.default_node_timeout,
-        CompileLimits {
-            max_fork_branches: config.runtime.max_fork_branches,
-        },
-    )?;
+    let compiler = WorkflowCompiler::new(models, actions);
+    let agents =
+        compile_enabled_agents(&config.agents.directory, &config.agents.enabled, &compiler)?;
     let InitializedRepository {
         repository,
         mut owner,
@@ -116,13 +106,15 @@ async fn main() -> MainResult<()> {
     );
     let service = RunService::new(
         agents,
-        executors,
         repository,
         events,
         RunServiceConfig {
             max_concurrent_runs: config.runtime.max_concurrent_runs,
-            max_parallel_node_executions: config.runtime.max_parallel_node_executions,
-            max_parallel_branches_per_run: config.runtime.max_parallel_branches_per_run,
+            max_concurrent_operations: config.runtime.max_concurrent_operations,
+            max_concurrent_operations_per_run: config.runtime.max_concurrent_operations_per_run,
+            operation_timeout: config.runtime.operation_timeout,
+            operation_cancel_grace_period: config.runtime.operation_cancel_grace_period,
+            max_template_output_bytes: config.runtime.max_template_output_bytes,
             run_timeout: config.runtime.run_timeout,
         },
     )?;
@@ -155,7 +147,7 @@ async fn main() -> MainResult<()> {
     tracing::info!(
         bind_addr = %config.bind_addr,
         agents = service.agents().list().count(),
-        "formal V1 runtime listening"
+        "v2 runtime listening"
     );
     let (http_shutdown, wait_http_shutdown) = tokio::sync::oneshot::channel::<()>();
     let server = axum::serve(listener, app)
@@ -511,31 +503,29 @@ async fn wait_for_shutdown_signal() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{BTreeMap, BTreeSet},
+        collections::BTreeMap,
         sync::atomic::{AtomicUsize, Ordering},
     };
 
     use async_trait::async_trait;
-    use handlebars::Handlebars;
     use insight_agent_platform::{
-        dsl::{
-            compiled::{
-                CompiledAgent, CompiledNode, ExecutionPlan, NodeCompilation, NodeControl,
-                NodeOutcome,
+        catalog::AgentCatalog,
+        dsl::vnext::{
+            compiler::WorkflowCompiler,
+            operation::{
+                CompiledOperationContract, Operation, OperationContext, OperationEffect,
+                OperationRegistry,
             },
-            compiler::CompileContext,
-            CompileError, EmitPolicy,
+            types::ValueType,
+            value::Identifier,
         },
         events::protocol::{RunEvent, RunEventType},
         history::types::{RunAttachment, RunLifecycle, RunRecord, RunStatus},
-        nodes::registry::{NodeExecutor, NodeExecutorRegistry, NodeType},
-        runtime::{
-            AttachedRun, CompiledAgentRegistry, ExecutionControl, RequestMetadata, RunContext,
-            RunError,
-        },
-        schema::compile_schema,
+        resources::{actions::ActionRegistry, models::ModelRegistry},
+        runtime::{AttachedRun, RequestMetadata, RunError},
     };
     use serde_json::{json, Value};
+    use tempfile::tempdir;
     use tokio::sync::{Notify, Semaphore};
 
     use super::*;
@@ -591,39 +581,43 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct BlockingTestNode {
+    struct BlockingTestOperation {
         progress: Arc<BlockingProgress>,
     }
 
-    impl NodeType for BlockingTestNode {
-        fn kind(&self) -> &'static str {
+    #[async_trait]
+    impl Operation for BlockingTestOperation {
+        fn uses(&self) -> &'static str {
             "test.lifecycle_block"
         }
 
         fn compile(
             &self,
-            _node_id: &str,
-            _config: Value,
-            _context: &mut CompileContext<'_>,
-        ) -> Result<NodeCompilation, CompileError> {
-            Err(CompileError::new(
-                "TEST_ONLY",
-                "lifecycle test nodes are constructed directly",
-            ))
+            _config: &Value,
+            inputs: &BTreeMap<Identifier, ValueType>,
+        ) -> Result<
+            CompiledOperationContract,
+            insight_agent_platform::dsl::vnext::operation::OperationError,
+        > {
+            assert!(inputs.is_empty());
+            Ok(CompiledOperationContract {
+                output_schema: json!({"type":"null"}),
+                output_type: ValueType::Null,
+                effect: OperationEffect::Pure,
+                idempotent: true,
+            })
         }
-    }
 
-    #[async_trait]
-    impl NodeExecutor for BlockingTestNode {
         async fn execute(
             &self,
-            _node: &CompiledNode,
-            _context: &RunContext,
-            control: &ExecutionControl,
-        ) -> Result<NodeOutcome, RunError> {
+            _config: &Value,
+            inputs: BTreeMap<Identifier, Value>,
+            context: OperationContext,
+        ) -> Result<Value, RunError> {
+            assert!(inputs.is_empty());
             self.progress.started.fetch_add(1, Ordering::SeqCst);
             self.progress.started_changed.notify_waiters();
-            control.stopped().await;
+            context.control.stopped().await;
             self.progress.stopped.fetch_add(1, Ordering::SeqCst);
             self.progress.stopped_changed.notify_waiters();
             if let Some(release) = &self.progress.release_after_stop {
@@ -634,7 +628,8 @@ mod tests {
                     .forget();
             }
             Err(RunError::stopped(
-                control
+                context
+                    .control
                     .stop_reason()
                     .expect("stop notification omitted reason"),
             ))
@@ -664,44 +659,53 @@ mod tests {
         } else {
             BlockingProgress::default()
         });
-        let node = CompiledNode {
-            id: "block".to_string(),
-            kind: "test.lifecycle_block".to_string(),
-            next: None,
-            emit: EmitPolicy::None,
-            timeout: Duration::from_secs(60),
-            body: Arc::new(()),
-            edges: Vec::new(),
-            references: BTreeSet::new(),
-            control: NodeControl::Ordinary,
-        };
-        let nodes = BTreeMap::from([(node.id.clone(), node)]);
-        let agent = Arc::new(CompiledAgent {
-            id: "lifecycle-test".to_string(),
-            name: "Lifecycle Test".to_string(),
-            description: String::new(),
-            version_hash: "sha256:lifecycle-test".to_string(),
-            input_schema: Arc::new(compile_schema(&json!({"type":"object"})).unwrap()),
-            entry: "block".to_string(),
-            execution_plan: ExecutionPlan::sequential("block", nodes.keys().cloned()),
-            nodes,
-            templates: Arc::new(Handlebars::new()),
-        });
-        let mut executors = NodeExecutorRegistry::default();
-        executors
-            .register(BlockingTestNode {
+        let mut operations = OperationRegistry::default();
+        operations
+            .register(BlockingTestOperation {
                 progress: Arc::clone(&progress),
             })
             .unwrap();
+        let source = r#"
+api_version: insight.agent/v2
+kind: agent
+metadata:
+  id: lifecycle_test
+  name: Lifecycle Test
+schema_dialect: https://json-schema.org/draft/2020-12/schema
+input:
+  schema:
+    type: object
+    additionalProperties: false
+output:
+  data_schema: {type: "null"}
+workflow:
+  steps:
+    - kind: operation
+      id: block
+      uses: test.lifecycle_block
+  result:
+    return:
+      data: {literal: null}
+"#;
+        let root = tempdir().unwrap();
+        let workflow = WorkflowCompiler::with_extensions(
+            ModelRegistry::default(),
+            ActionRegistry::default(),
+            operations,
+        )
+        .compile_source(root.path(), source)
+        .unwrap();
         let service = RunService::new(
-            CompiledAgentRegistry::new(vec![agent]).unwrap(),
-            executors,
+            AgentCatalog::new(vec![Arc::new(workflow)]).unwrap(),
             repository_trait,
             events,
             RunServiceConfig {
                 max_concurrent_runs: 2,
-                max_parallel_node_executions: 2,
-                max_parallel_branches_per_run: 1,
+                max_concurrent_operations: 2,
+                max_concurrent_operations_per_run: 2,
+                operation_timeout: Duration::from_secs(60),
+                operation_cancel_grace_period: Duration::from_secs(1),
+                max_template_output_bytes: 1024,
                 run_timeout: Duration::from_secs(60),
             },
         )
@@ -718,12 +722,12 @@ mod tests {
     ) -> (AttachedRun, RunRecord) {
         let detached = runtime
             .service
-            .create_detached("lifecycle-test", json!({}), RequestMetadata::default())
+            .create_detached("lifecycle_test", json!({}), RequestMetadata::default())
             .await
             .unwrap();
         let attached = runtime
             .service
-            .create_attached("lifecycle-test", json!({}), RequestMetadata::default())
+            .create_attached("lifecycle_test", json!({}), RequestMetadata::default())
             .await
             .unwrap();
         runtime.progress.wait_started(2).await;

@@ -1,4 +1,4 @@
-//! Real binary smoke test for the formal V1 runtime.
+//! Real binary smoke test for the structured v2 workflow runtime.
 
 use std::{
     fs,
@@ -66,7 +66,7 @@ async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
         .as_array()
         .expect("agents data must be array");
     assert_eq!(agents.len(), 2, "binary smoke should expose two Agents");
-    assert_eq!(agents[0]["id"], "code_node_demo");
+    assert_eq!(agents[0]["id"], "action_demo");
     assert_eq!(agents[1]["id"], "workflow_failure_demo");
     assert_eq!(
         agents[0]["input_schema"],
@@ -74,19 +74,20 @@ async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
             "type": "object",
             "required": ["text"],
             "additionalProperties": false,
-            "properties": {"text": {"type": "string"}}
+            "properties": {"text": {"type": "string"}},
+            "$defs": {}
         })
     );
     let required_field = agents[0]["input_schema"]["required"]
         .as_array()
         .and_then(|required| required.first())
         .and_then(Value::as_str)
-        .expect("code_node_demo discovery contract must identify its required input");
+        .expect("action_demo discovery contract must identify its required input");
     let discovered_input = Value::Object(serde_json::Map::from_iter([(
         required_field.to_string(),
         Value::String("hello rust world".to_string()),
     )]));
-    let agent_url = format!("{base_url}/v1/agents/code_node_demo");
+    let agent_url = format!("{base_url}/v1/agents/action_demo");
     let detail = expect_json(
         format!("GET {agent_url}"),
         client.get(agent_url),
@@ -103,11 +104,14 @@ async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
     .await;
     assert_eq!(disabled["code"], "AGENT_NOT_FOUND");
 
-    let completed = create_and_wait(&client, &base_url, "code_node_demo", discovered_input).await;
-    assert_eq!(completed["data"]["agent_id"], "code_node_demo");
+    let completed = create_and_wait(&client, &base_url, "action_demo", discovered_input).await;
+    assert_eq!(completed["data"]["agent_id"], "action_demo");
     assert_eq!(completed["data"]["status"], "completed");
     assert_eq!(completed["data"]["output"]["format"], "text");
-    assert_eq!(completed["data"]["output"]["data"], Value::Null);
+    assert_eq!(
+        completed["data"]["output"]["data"],
+        json!({"characters":16,"words":3,"lines":1})
+    );
     let content = completed["data"]["output"]["content"]
         .as_str()
         .expect("completed output must contain text content");
@@ -170,7 +174,7 @@ auth:
 agents:
   directory: {}
   enabled:
-    - code_node_demo
+    - action_demo
     - workflow_failure_demo
 
 models:
@@ -186,10 +190,11 @@ history:
 
 runtime:
   max_concurrent_runs: 4
-  max_fork_branches: 4
-  max_parallel_node_executions: 4
-  max_parallel_branches_per_run: 2
-  default_node_timeout: 30s
+  max_concurrent_operations: 4
+  max_concurrent_operations_per_run: 32
+  operation_timeout: 30s
+  operation_cancel_grace_period: 1s
+  max_template_output_bytes: 1048576
   run_timeout: 1m
   sse_keep_alive_interval: 5s
   subscriber_capacity: 32

@@ -1,29 +1,25 @@
 pub mod attachment;
-pub mod context;
 pub mod control;
 pub mod coordinator;
-pub mod execution;
-pub mod scheduler;
+pub mod execution_result;
+pub mod metadata;
+pub mod run_state;
+pub mod scope_scheduler;
 pub mod service;
-pub mod state;
 
 use std::{error::Error, fmt};
 
 pub use attachment::{AttachedRun, RunSubscription};
-pub use context::{RunContext, RunMetadata};
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
 pub use coordinator::RunCoordinator;
-pub(crate) use execution::execute_node_with_cancellation;
-pub use execution::{execute_node, ExecutionLimiter, NodeExecutionFailure, NodeExecutionResult};
-pub use scheduler::{Scheduler, SchedulerResult};
-pub use service::{
-    CompiledAgentRegistry, RequestMetadata, RunService, RunServiceConfig, ServiceError,
-};
-pub use state::{BranchError, BranchFailureKind, BranchResult, BranchState, NodeState, RunState};
+pub use execution_result::RunExecutionResult;
+pub use metadata::RunMetadata;
+pub use run_state::RunState;
+pub use service::{RequestMetadata, RunService, RunServiceConfig, ServiceError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunErrorKind {
-    Node,
+    Operation,
     Timeout,
     Stop,
     Infrastructure,
@@ -38,11 +34,11 @@ pub struct RunError {
 }
 
 impl RunError {
-    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub fn operation(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
-            kind: RunErrorKind::Node,
+            kind: RunErrorKind::Operation,
             stop_reason: None,
         }
     }
@@ -86,10 +82,10 @@ impl RunError {
         }
     }
 
-    pub fn timeout() -> Self {
+    pub fn operation_timeout() -> Self {
         Self {
-            code: "NODE_TIMEOUT",
-            message: "node execution timed out".to_string(),
+            code: "OPERATION_TIMEOUT",
+            message: "operation execution timed out".to_string(),
             kind: RunErrorKind::Timeout,
             stop_reason: None,
         }

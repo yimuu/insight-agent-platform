@@ -206,14 +206,6 @@ pub struct NewRun {
     pub input_summary: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct NodeOutputRecord {
-    pub run_id: String,
-    pub node_id: String,
-    pub output: Value,
-    pub completed_at: DateTime<Utc>,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunTerminal {
     Completed { output: RunOutput },

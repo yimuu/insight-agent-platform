@@ -2,7 +2,6 @@ use serde::{de::DeserializeOwned, Serialize};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum YamlSurface {
-    Agent,
     Platform,
     ModelResources,
 }
@@ -10,7 +9,6 @@ pub(crate) enum YamlSurface {
 impl YamlSurface {
     fn label(self) -> &'static str {
         match self {
-            Self::Agent => "agent YAML",
             Self::Platform => "platform YAML",
             Self::ModelResources => "model resources YAML",
         }
@@ -46,10 +44,11 @@ mod tests {
 
     #[test]
     fn rejects_multi_document_streams() {
-        let error = from_str::<SingleDocument>("value: 1\n---\nvalue: 2\n", YamlSurface::Agent)
-            .unwrap_err();
+        let error =
+            from_str::<SingleDocument>("value: 1\n---\nvalue: 2\n", YamlSurface::ModelResources)
+                .unwrap_err();
 
-        assert!(error.contains("agent YAML"));
+        assert!(error.contains("model resources YAML"));
         assert!(error.contains("more than one document"));
     }
 

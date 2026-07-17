@@ -1,8 +1,10 @@
 # Core Select Condition Convergence Design
 
+> **Historical / superseded:** authored `core.select` was removed; structured `switch` lowers to internal Branch/Phi. The canonical contract is [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md).
+
 **Date:** 2026-07-13
 
-**Status:** Approved for implementation
+**Status:** Superseded by DSL vNext
 
 **Scope:** Explicit one-of-N result convergence for mutually exclusive control-flow paths
 
