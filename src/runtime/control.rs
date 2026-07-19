@@ -156,6 +156,8 @@ impl ExecutionControl {
     }
 
     pub fn with_deadline(stop: StopSignal, deadline: Instant) -> Self {
+        stop.bind_deadline(deadline)
+            .expect("a stop signal has one immutable execution deadline");
         Self { stop, deadline }
     }
 

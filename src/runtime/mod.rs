@@ -1,21 +1,16 @@
-pub mod attachment;
 pub mod control;
-pub mod coordinator;
-pub mod execution_result;
-pub mod metadata;
-pub mod run_state;
-pub mod scope_scheduler;
-pub mod service;
+pub mod v3_service;
 
 use std::{error::Error, fmt};
 
-pub use attachment::{AttachedRun, RunSubscription};
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
-pub use coordinator::RunCoordinator;
-pub use execution_result::RunExecutionResult;
-pub use metadata::RunMetadata;
-pub use run_state::RunState;
-pub use service::{RequestMetadata, RunService, RunServiceConfig, ServiceError};
+pub use v3_service::{
+    AttachedRun, DeployedAgentCatalog, ForkRecoveryOptions, GraphPublication,
+    MigrationNodeMappingRequest, ProductionRunRepository, RecoveryOperation,
+    RecoveryRequestMetadata, RecoveryReusePolicy, RecoveryRunResult, RequestMetadata,
+    RunRepositoryCapability, RunService, RunServiceConfig, RunSubscription, ServiceError,
+    SubscriptionError,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunErrorKind {

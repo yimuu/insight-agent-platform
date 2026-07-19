@@ -1,418 +1,183 @@
 # Insight Agent Platform
 
-一个面向平台自有 Agent 的通用 Rust 运行时。平台在启动时把严格的结构化 DSL 编译为不可变、类型化的 Region/SSA 执行计划，再以作用域任务树运行；对外提供 live-only Attached SSE、Detached 轮询、显式取消以及 SQLite/PostgreSQL 事件历史。
+Insight Agent Platform 是一个以 Rust 实现的 DSL v3 持久化图执行运行时。Agent 作者编写结构化 YAML；平台在启动时将其编译为不可变、类型化的 Canonical Plan，并由数据库驱动的调度器执行。进程重启、Worker lease 过期、信号/超时竞态和取消都通过持久化状态与 first-winner 事务恢复，不依赖进程内执行栈重放。
 
-医学报告解读只是仓库中的一个多模态示例，不是平台的领域边界。
+当前规范是 [DSL v3 Durable Graph Execution（中文）](docs/superpowers/specs/2026-07-18-dsl-v3-durable-graph-execution-design.md)。仓库仍处于快速演进期，不提供旧 DSL 或旧运行内核兼容层。
 
-## 架构
-
-启动和执行链路是确定的：
+## 运行模型
 
 ```text
-严格平台配置 + 命名模型/Action 资源
-                    ↓
-WorkflowCompiler（语法、Schema、类型、作用域、支配关系）
-                    ↓
-不可变 CompiledWorkflow + 已验证 typed CallPlan / Region/SSA IR
-                    ↓
-RunService → RunCoordinator → ScopeScheduler
-                    ↓
-LLM/Action executor + 作用域任务树 → EventHub/Journal → RunRepository
-                    ↓
-                  /v1 JSON + SSE
+Agent YAML
+    ↓ parse / type-check / link
+Canonical Typed Plan（不可变 revision）
+    ↓ durable admission
+Run → Scope → Activation → Attempt
+    ↓ lease / heartbeat / fenced commit
+PostgreSQL（生产）/ SQLite（单进程开发）+ content-addressed artifacts
 ```
 
-Agent 作者只使用四种结构化 step：
+核心合同：
 
-| `type` | 作用 |
-|---|---|
-| `llm` | 调用一个命名模型，使用有序 `messages`，并绑定经过验证的响应 |
-| `action` | 调用一个版本化、Schema 驱动的 Action，并绑定类型化输出 |
-| `parallel` | 创建词法隔离的子作用域，按 `all` 或 `all_settled` 策略等待所有已接纳任务清理完成 |
-| `switch` | 按顺序选择第一个匹配分支，并把唯一分支结果绑定为直接输出 |
+- `Run`、`Scope`、`Activation`、`Attempt`、控制 token、timer、signal 和 task outbox 都有稳定身份并持久化；
+- scheduler 只根据 Plan、持久化事实和数据库时间作确定性决策；
+- Worker 通过带 epoch/fence 的 lease 提交结果，过期 Worker 不能覆盖新权威结果；
+- 每个终态、join、signal/timeout 和 cancel/success 竞态都由数据库事务决定唯一赢家；
+- 小值内联保存，大值写入 content-addressed Artifact store，并在结果事务中提交引用；生产 runtime 必须共享同一物理 store；
+- SQLite 覆盖确定性的单进程语义子集；多 runtime lease、fencing 与生产恢复合同只由真实 PostgreSQL 16 门禁承诺。
 
-控制流是语言结构，不是可注册能力。编译器把顺序、并发和选择降低为内部 `Call`、`Parallel`、`Branch/Phi`、`RegionYield`、`WorkflowReturn` 和 `Raise`；这些 IR 指令不能出现在 Agent YAML 中。
+## 快速启动
 
-`ai.chat`、`action.call`、Operation registry 和 provider 私有 content part 只存在于 compiler/runtime 内部。作者不能写 `kind: operation`、`uses` 或任意 `config` bag；新业务能力应实现为有稳定 ID、SemVer、输入/输出 Schema、effect、幂等性与取消合同的 Action，再由 `type: action` 调用。当前进程不加载外部动态库、WASM、远程插件或下载代码。
-
-## 配置与启动
-
-无密钥本地 quickstart：
+仓库要求 Rust `1.94.1`。Quickstart 只启用本地 `action_demo`，不需要模型密钥：
 
 ```bash
 PLATFORM_CONFIG=config/platform.quickstart.yaml cargo run
 ```
 
-该配置只启用 `action_demo`，使用 SQLite 本地历史和内置 `example.text_metrics` Action。它不会调用外部模型服务，因此不需要 `OPENAI_API_KEY`。
-
-另开一个终端验证 readiness 和 Agent 列表：
+服务默认监听 `127.0.0.1:3000`：
 
 ```bash
-curl --silent http://127.0.0.1:3000/health/ready
-curl --silent http://127.0.0.1:3000/v1/agents
+curl http://127.0.0.1:3000/health/ready
+
+curl -X POST http://127.0.0.1:3000/v1/agents/action_demo/runs \
+  -H 'content-type: application/json' \
+  -H 'x-request-id: example-1' \
+  -d '{"text":"hello durable graph"}'
 ```
 
-创建一个 detached Run：
+创建接口返回 `202 Accepted` 和 `run_id`。随后查询：
 
 ```bash
-curl --silent --request POST \
-  --header 'content-type: application/json' \
-  --data '{"text":"hello rust world"}' \
-  http://127.0.0.1:3000/v1/agents/action_demo/runs
+curl http://127.0.0.1:3000/v1/runs/RUN_ID
 ```
 
-复制响应里的 `data.run_id`，循环查询 Run；detached Run 是异步执行，短时间内可能仍为 `created` 或 `running`：
+生产配置入口由 `PLATFORM_CONFIG` 指定，默认是 `config/platform.yaml`。`deployment_mode: production` 强制使用 PostgreSQL 和显式的 `artifacts.provider: shared_filesystem`；共享存储必须声明 `namespace`，所有连接同一数据库的 runtime 必须挂载同一物理目录。第一次启动会把 marker 中的随机 `store_id` 原子绑定到数据库的不可变 Artifact-store authority，后续实例只有 identity 完全一致才能在任何 catalog/publication 写入或 GC 领取前启动。相同路径的不同挂载别名不影响 identity，而同 namespace 的不同物理根目录会 fail-closed。`local_filesystem` 禁止 namespace，只允许 `single_process_development`。SQLite 不承诺多进程所有权、HA 或生产部署语义。Quickstart 已显式选择单进程开发模式。配置中的路径相对于配置文件解析。运行时配置只接受当前 durable v3 真正生效的参数，旧内核的进程内 journal、template 和协作取消窗口参数会作为未知字段拒绝。`runtime.public_event_retention` 只控制已发布的非终态 Public Event，`runtime.public_event_prune_interval` 控制有界清理周期；terminal Public Event 不受该保留策略影响并持续作为 durable delivery authority。
 
-```bash
-RUN_ID=<paste-run-id>
-while true; do
-  BODY=$(curl --silent "http://127.0.0.1:3000/v1/runs/${RUN_ID}")
-  printf '%s\n' "$BODY"
-  STATUS=$(printf '%s' "$BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["status"])')
-  [ "$STATUS" = "completed" ] && break
-  sleep 0.2
-done
-```
+### PostgreSQL 启动迁移
 
-模型示例需要配置真实密钥：
+生产进程连接 PostgreSQL 后会自动执行唯一的 durable-v3 前向 migration manifest，成功后才创建 `RunService` 或读取运行表。并发启动的多个实例由固定的事务级 advisory lock 串行化；`durable_v3_schema_migrations` 独立记录每个 migration 的 version、文件名、SQL SHA-256 和应用时间。已应用记录必须是当前 manifest 的精确前缀；版本空洞、未知或更高版本、文件名或 checksum 漂移，以及已有 v3 表但没有 ledger，都会使进程 fail-closed 退出，不会自动认领或猜测旧 schema。
 
-```bash
-cp .env.example .env
-# 编辑 .env，设置 OPENAI_API_KEY
-cargo run
-```
+数据库角色需要目标 database/schema 的连接与使用权限、在目标 schema 中创建对象的权限，以及后续 migration 对既有表、索引、函数和 trigger 的 owner/ALTER 权限，同时需要读写 migration ledger。每个缺失 migration 的 SQL 与 ledger 记录处于同一事务；任一步失败都会回滚，`RunService` 不会在半迁移 schema 上启动。
 
-平台配置示例：
+## DSL v3
+
+最小 Agent：
 
 ```yaml
-version: 1
-bind_addr: 127.0.0.1:3000
-auth:
-  mode: bearer_env
-  token_env: AGENT_RUNTIME_TOKEN
-agents:
-  directory: ../agents
-  enabled: [action_demo, medical_report_interpreter, researcher]
-models:
-  config: models.yaml
-actions:
-  enabled: [current_time, example.text_metrics]
-history:
-  provider: sqlite
-  path: ../data/formal_v2.sqlite3
-runtime:
-  max_concurrent_runs: 32
-  max_concurrent_operations: 32
-  max_concurrent_operations_per_run: 8
-  operation_timeout: 60s
-  operation_cancel_grace_period: 5s
-  max_template_output_bytes: 262144
-  run_timeout: 5m
-  sse_keep_alive_interval: 5s
-  subscriber_capacity: 128
-  journal_capacity: 1024
-  journal_batch_size: 32
-  journal_operation_timeout: 30s
-  readiness_probe_timeout: 2s
-  shutdown_grace_period: 30s
-  shutdown_hard_deadline: 35s
-```
-
-`max_concurrent_operations` 是进程范围的 leaf-operation 并发上限，`max_concurrent_operations_per_run` 是单 Run 并发上限，`operation_timeout` 是单次调用上限，`operation_cancel_grace_period` 是任意 stop 请求后的独立协作清理窗口。`run_timeout` 由 RunService 在开始执行时计算为一次性的绝对 execution deadline；每个 Operation attempt 的有效 deadline 是它与 operation deadline 的较早者。`parallel.max_concurrency` 还能进一步收紧一个 Parallel 内的并发。
-
-Execution deadline 到达后，运行时先向叶子能力发送 typed stop，再允许其在 `operation_cancel_grace_period` 内协作清理。因此 `run_timeout` 不是整个 HTTP 请求或终态持久化的墙钟上限：cleanup、终态事件写入和 repository commit 可以在 execution deadline 之后继续占用有界时间。
-
-`agents.enabled` 默认是空集合，不会意外暴露目录中的 Agent。相对路径从平台配置文件所在目录解析。未知字段、零容量、零超时、缺失文件和缺失或空密钥都会阻止启动；`shutdown_hard_deadline` 必须严格大于 `shutdown_grace_period`。
-
-默认只监听 `127.0.0.1:3000` 并关闭鉴权。`/health/live`、`/health/ready` 和 `/health` 始终公开且返回 `Cache-Control: no-store`；`/health` 是 readiness 的兼容别名。未 ready 时返回 `503/RUNTIME_UNHEALTHY`，且不暴露数据库诊断。
-
-### 模型传输
-
-Agent 只引用模型别名，不感知供应商分组：
-
-```yaml
-version: 1
-models:
-  general_chat:
-    type: open_ai_chat
-    base_url: https://example-model-service.test/v1
-    model: example-chat
-    api_key_env: OPENAI_API_KEY
-    capabilities: [json_schema_output]
-    connect_timeout: 5s
-    request_timeout: 2m
-    limits:
-      max_upstream_bytes: 8388608
-      max_buffered_line_bytes: 1048576
-      max_event_payload_bytes: 1048576
-      max_chunk_text_bytes: 262144
-      max_usage_json_bytes: 65536
-      max_accumulated_text_bytes: 1048576
-```
-
-`open_ai_chat.base_url` 默认必须使用 HTTPS。明文 HTTP 只能显式声明 `transport.plaintext_http: loopback`（精确本机目标）或 `trusted_private`（部署方明确接受风险的可信私网链路）。`trusted_private` 不是自动的 DNS/IP 私网证明。公网或其他不可信服务必须使用 HTTPS；URL 不允许携带 username/password，密钥只通过 `api_key_env` 注入。
-
-OpenAI-compatible 流只有收到完整的 `data: [DONE]` 才算成功。HTTP clean EOF、`finish_reason` 或 usage-only chunk 都不能替代完成标记。缺少标记固定以 `UPSTREAM_STREAM_INCOMPLETE` 失败，错误不会回显 provider payload、部分输出、密钥或 endpoint query。
-
-结构化 `response` 需要显式声明供应商的真实能力：`json_schema_output` 直接发送严格 JSON Schema；`json_object_output` 仅适用于顶层对象，适配器会注入平台生成的 JSON/Schema 指令，并在返回后按 Schema 本地校验。数组、数字和布尔等非对象根只能使用 `json_schema_output`；两种能力同时存在时固定优先前者。带图片的消息另需 `vision`，文本 `response: string` 不要求结构化输出能力。
-
-## Agent DSL
-
-当前作者语法以 [DSL 作者语法精简规范](docs/superpowers/specs/2026-07-17-dsl-authoring-syntax-simplification.md) 为准。作者只声明业务类型和结构化步骤；JSON Schema、消息平台类型与内部 Region/SSA 计划均由编译器生成。
-
-### 最小完整文档
-
-`types`、`inputs`、`output` 使用简洁类型表达式；自定义类型使用 PascalCase，数组写成 `Type[]`。输入名、字段名和 step id 使用 snake_case。
-
-<!-- dsl-example: canonical; entry: agent -->
-```yaml
-api_version: insight.agent/v2
+api_version: insight.agent/v3
 kind: agent
 
-metadata:
-  id: concise_answer
-  name: Concise Answer
-  description: Answer one question with optional history and image.
+inputs:
+  text: string
+
+output: TextMetrics
 
 types:
-  Answer:
+  TextMetrics:
     fields:
-      answer: string
-      confidence: number
-
-prompts:
-  system:
-    inline: You are a concise assistant.
-
-inputs:
-  question:
-    type: string
-    min_length: 1
-  messages:
-    type: Message[]
-    default: []
-  image_url:
-    type: string
-    optional: true
-
-output: Answer
+      characters: integer
+      words: integer
+      lines: integer
 
 workflow:
   steps:
-    - type: llm
-      id: answer
-      model: vision_chat
-      messages:
-        - role: system
-          content:
-            - text: system
-        - $messages
-        - role: user
-          content:
-            - text: "Question: {{ question }}"
-            - image_url: $image_url
-      parameters: {temperature: 0.2}
-      response: Answer
+    - type: action
+      id: analyze_text
+      call: example.text_metrics
+      inputs:
+        text: $text
+      response: TextMetrics
 
-  result:
-    return: $answer
+    - return: $analyze_text
 ```
 
-作者不再在类型与响应合同位置书写 `schema_dialect`、`$defs`、`$ref`、`input.schema`、`output.data_schema` 或 `output_schema`。需要默认值、可选性或长度约束时，在字段的完整声明中添加 `default`、`optional`、`min_length`、`max_length`、`min_items`、`max_items`、`pattern` 或 `enum`。Action 业务 payload 中同名的普通 mapping key 不会被误判为类型声明。
+作者层直接表达结构化控制流和数据：
 
-`Message` 是平台内建类型。动态历史必须声明为 `Message[]`，通常使用默认值 `[]`；Agent 不重复定义 Message、role 或 content part Schema。
+- `if / elif / else` 做流程选择，`match` 只选择值；
+- `parallel` 配合 `all_success` 或 `all_settled` 表达 fork/join；
+- `map`、`loop`、`agent_loop` 表达动态重复执行；
+- `call` 表达固定 revision/interface 的子流程；
+- `try / catch / finally`、`human_task`、signal wait 和 timer wait 表达可恢复的长流程；
+- `yield` 产生局部结构结果，`return` 与 `raise` 终结工作流。
 
-### 自然值与引用
-
-YAML mapping、sequence 和 scalar 直接表示对象、数组和常量。完整运行时值以 `$name` 或 `$name.field` 引用，文本中的 `{{ name }}` 是受限插值：
-
-<!-- dsl-example: canonical; entry: value -->
-```yaml
-mode: strict
-question: $question
-labels: [technical, risk]
-summary: "Question: {{ question }}"
-metadata:
-  request_id: $run.request_id
-```
-
-顶层可见输入直接写成 `$question`；当前 body 中较早 step 的直接业务输出写成 `$answer` 或 `$answer.field`。Parallel/Switch 子作用域只看得到该结构通过 `inputs` 捕获的名字和本地较早 step。前向引用、动态 key/index、跨 branch/arm 读取和 child-local escape 都会在编译期失败。
-
-旧 `{from: ...}`、`{literal: ...}`、`{object: ...}`、`{array: ...}`、`{template: ...}` 形状会被明确拒绝，不作为兼容别名或普通业务对象解释。输入 `default` 是纯静态数据：不会执行引用或模板，完整匹配 `$name`/`$name.field` 的字符串会被拒绝，避免把看似运行时引用的值静默物化成字面量。
-
-### LLM 消息与响应
-
-`messages` 本身就是有序列表。Authored message 只有 `role` 和 `content`；`content` 是有序列表，每个 part 必须是严格的单键 `{text: ...}` 或 `{image_url: ...}`：
-
-<!-- dsl-example: canonical; entry: step -->
-```yaml
-- type: llm
-  id: analyze
-  model: vision_chat
-  messages:
-    - $messages
-    - role: user
-      content:
-        - text: "Analyze: {{ question }}"
-        - text: $question
-        - image_url: $image_url
-  parameters: {temperature: 0.2}
-  response: Perspective
-```
-
-声明过的 Prompt ID 可以直接作为 `text` 的值；普通文本无需预先声明 Prompt。以 `$` 开头的 `text` 是运行时 string，不会进行 Prompt 查找或二次模板渲染。`image_url` 的值是 URL 字符串或 string 引用；可选值为 null 时省略该图片。`- $messages` 在当前位置展开真实消息列表，不需要 `spread`、`concat` 或 JSON 字符串拼接。
-
-`response` 直接写 `string`、`ResultType` 或 `ResultType[]`。文本输出和结构化输出都直接绑定为 step 的业务值，不存在作者可见的 `.output.data` envelope。
-
-### Action、Parallel 与 Switch
-
-Action 直接声明静态 `call` 和自然 `inputs`：
-
-<!-- dsl-example: canonical; entry: step -->
-```yaml
-- type: action
-  id: now
-  call: current_time
-  inputs:
-    timezone: Asia/Shanghai
-    request_id: $run.request_id
-```
-
-Parallel 同时拥有 spawn 和 barrier 语义。每个 branch 是词法子作用域，有自己的 `output`、`steps` 与 `result`；Switch 按顺序执行第一个匹配 case，且必须声明 default：
-
-<!-- dsl-example: canonical; entry: step -->
-```yaml
-- type: parallel
-  id: analyses
-  inputs:
-    question: $question
-  settle: all_settled
-  max_concurrency: 2
-  branches:
-    technical:
-      output: string
-      steps:
-        - type: llm
-          id: analyze
-          model: general_chat
-          messages:
-            - role: user
-              content:
-                - text: "Analyze technical feasibility: {{ question }}"
-          response: string
-      result:
-        return: $analyze
-
-    risk:
-      output: string
-      steps:
-        - type: llm
-          id: analyze
-          model: general_chat
-          messages:
-            - role: user
-              content:
-                - text: "Analyze risk and compliance: {{ question }}"
-          response: string
-      result:
-        return: $analyze
-
-- type: switch
-  id: synthesis_mode
-  inputs:
-    analyses: $analyses
-  output: string
-  cases:
-    - id: complete
-      when:
-        cel: >-
-          scope.analyses.technical.status == 'ok' &&
-          scope.analyses.risk.status == 'ok'
-      result:
-        return: full
-  default:
-    id: partial
-    result:
-      return: partial
-```
-
-`settle: all` 要求所有 branch 成功；可收集失败会取消同级并完整 drain。`all_settled` 把每个 branch 变成严格的 success/error 联合值。停止、进程中断、ownership/persistence 丢失和 task panic 等基础设施失败不会伪装成业务 branch 数据。
-
-Child `result.return` 只完成当前子作用域；workflow root 的 `result.return` 才完成 Run，并且其值必须满足顶层 `output` 类型。平台负责公共 RunOutput envelope，作者不再声明 `content/format/data` 包装。任意可见 block 仍可通过顶层 `errors` catalog 中的 ID 执行 `raise`。
-
-### Region/SSA 与运行时作用域树
-
-结构化 YAML 是唯一作者合同，Region/SSA 是唯一运行时计划。编译器拒绝重复身份、use-before-definition、跨 Region value escape、未声明 capture 和类型不匹配。运行时父作用域拥有所有子任务：关闭 admission 后请求协作取消并完整 drain，不会留下脱离父作用域的工作流任务。
-
-## HTTP、事件与 Run 生命周期
-
-JSON 响应统一使用字符串码：
-
-```json
-{"code":"OK","message":"ok","data":{}}
-```
-
-正式端点：
-
-```text
-GET    /health
-GET    /health/live
-GET    /health/ready
-GET    /v1/agents
-GET    /v1/agents/{agent_id}
-POST   /v1/agents/{agent_id}/runs/stream
-POST   /v1/agents/{agent_id}/runs
-GET    /v1/runs/{run_id}
-DELETE /v1/runs/{run_id}
-```
-
-Agent 发现接口返回 `id`、`name`、`description`、内容寻址 `version` 和公开的 authored `input_schema`。Run 创建先按这份合同接收输入并物化 default/optional，再按编译出的 normalized contract 验证完整输入；API 不公开 prompt、structured workflow、模型或 Action config。
-
-Attached POST 会先原子订阅实时事件再启动 Run。终态事件发送后 SSE 立即关闭；非终态连接断开会取消 Run。Detached POST 返回 HTTP 202，连接断开不影响执行，客户端通过 GET Run 轮询或 DELETE 幂等取消。平台不提供公开事件重放；`seq` 与 SSE `id` 只用于单 Run 排序和审计关联，不是恢复游标。
-
-v2 leaf operation 只公开生命周期元数据事件：
-
-- `operation.started`；
-- `operation.completed`；
-- `operation.failed`。
-
-Operation 不提供公共内容增量；输出值也不会进入公共事件或 journal。完成事件只公开限定 `operation_id`、类型、attempt、耗时和输出字节数；失败事件使用固定公共消息，不携带内部诊断。模型 provider 仍可使用内部流式传输，但 `ai.chat` 会在运行时内聚合并完成响应校验后才产生叶子结果。中间值只存在于运行期数据流，只有显式 `$` 引用能把它交给后续 Operation，只有 root return 能把结果写入公共 Run 终态。
-
-默认结构化日志保持 body-free：只记录身份、状态、稳定错误 code/kind、耗时、计数和序列化字节数，不记录自由错误 message、Run 输入、prompt、模型或 Action 输入/输出、事件 payload、带 query 的完整 URL、header 或凭据。
-
-收到 SIGINT/SIGTERM 后，进程先关闭新 Run admission；liveness 仍为 200，readiness 为 503。运行时在 grace period 内终态化并持久化活动 Run，再关闭 HTTP。panic、journal 失败或 hard deadline 会触发 fail-stop 和非零退出，由 supervisor 启动干净 replacement。
-
-## 历史后端与单运行时所有权
-
-SQLite 是本地默认后端。PostgreSQL 使用环境变量保存连接密钥：
+`human_task` 是独立的持久化人工工作项，不是普通 signal 的别名。`request` 是分派给处理人的类型化上下文，节点结果由 `response` 类型约束；候选人、候选组和 claim lease 都是显式合同：
 
 ```yaml
-history:
-  provider: postgres
-  database_url_env: RUN_HISTORY_DATABASE_URL
+types:
+  Approval:
+    fields:
+      decision: {type: string, enum: [approved, rejected]}
+      comment: string
+
+inputs:
+  report_id: string
+
+workflow:
+  steps:
+    - id: review
+      human_task:
+        signal: medical_review
+        request: {report_id: $report_id}
+        response: Approval
+        assignees: [reviewer-alice]
+        candidate_groups: [medical-reviewers]
+        claim_lease_ms: 300000
+
+    - return: $review
 ```
 
-远程 PostgreSQL URL 必须包含 `sslmode=verify-full`。明文只允许精确 loopback 开发目标或 Unix socket。
+运行时引用使用 `$name` 或 `$object.field`；普通字符串保持普通字符串。LLM `messages` 是标准的有序对象列表，历史消息可作为列表项直接拼入，内容项使用 `text` 或 `image_url`。完整示例见 [agents](agents) 与 [v3 fixtures](tests/fixtures/v3)。
 
-每个 PostgreSQL history store（同一数据库和当前 schema）只允许一个 active runtime。runtime 在 migration、启动 reconciliation 和 HTTP bind 前取得 session advisory lock，并以 ownership generation fence 保护写入。竞争者启动时直接失败，不等待成为 standby；运行期 ownership 丢失会关闭 readiness 和 admission，尝试 drain，然后固定非零退出。平台不会自动重新取得 ownership。
+## HTTP API
 
-该合同要求 session affinity：必须直连 PostgreSQL，或使用 session-pooling 代理。PgBouncer transaction/statement pooling 不支持该所有权合同。升级 disposable store 时应先停止所有旧 runtime，再重建 schema；应用不会静默解释或升级不兼容历史。
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/health/live` | 进程存活 |
+| `GET` | `/health/ready` | repository 与 runtime 就绪 |
+| `GET` | `/v1/agents` | Agent discovery 与输入 schema |
+| `POST` | `/v1/graph-agents/{agent_id}/revisions` | 严格校验并发布不可变 Graph Definition/Deployment Revision |
+| `GET` | `/v1/graph-agents/{agent_id}/revisions/{definition_revision_id}` | 读取已发布 Graph 作者文档 |
+| `POST` | `/v1/graph-agents/{agent_id}/revisions/{definition_revision_id}/semantic-edits` | 以 base hash/head 双 CAS 原子提交一组拓扑语义编辑，并发布新 revision |
+| `GET/PUT` | `/v1/graph-agents/{agent_id}/revisions/{definition_revision_id}/view` | 独立读取或按 `expected_version` CAS 更新 ViewDocument |
+| `POST` | `/v1/agents/{agent_id}/deployments/{deployment_revision_id}/runs` | 从指定不可变 Deployment Revision 创建 pinned Run |
+| `POST` | `/v1/agents/{agent_id}/runs` | 创建 detached Run |
+| `POST` | `/v1/agents/{agent_id}/runs/stream` | 创建 attached SSE Run |
+| `GET` | `/v1/runs/{run_id}` | 查询持久化 Run |
+| `GET` | `/v1/runs/{run_id}/execution-graph` | 读取该 Run 固定 revision 的只读执行图 |
+| `GET` | `/v1/runs/{run_id}/trace` | 读取按稳定节点/Activation ID 关联的 trace overlay |
+| `DELETE` | `/v1/runs/{run_id}` | 请求取消 |
+| `POST` | `/v1/runs/{run_id}/pause` | 暂停新的调度 admission |
+| `POST` | `/v1/runs/{run_id}/resume` | 恢复调度 |
+| `POST` | `/v1/runs/{run_id}/signals/{name}` | 以 `message_id` 幂等提交 typed signal |
+| `POST` | `/v1/runs/{run_id}/redrive` | 使用原始不可变 revision，并可按 `reuse_compatible` 复用闭合前缀 |
+| `POST` | `/v1/runs/{run_id}/fork` | 选择 Deployment Revision、checkpoint ID 与输入覆盖创建分叉 Run |
+| `POST` | `/v1/runs/{run_id}/migrate` | 两阶段迁移到已部署目标 Agent revision |
+| `POST` | `/v1/runs/{run_id}/continue-as-new` | 终结当前 Run 并以同一 revision 开启下一 generation |
+| `GET` | `/v1/human-tasks?limit=100` | 列出当前人工身份有权处理的 open/claimed 工作项 |
+| `POST` | `/v1/human-tasks/{work_item_id}/claim` | 使用 `{}` 请求体和 `X-Request-ID` 幂等抢占工作项 |
+| `POST` | `/v1/human-tasks/{work_item_id}/complete` | 以 `{claim_fence, value}` 和 `X-Request-ID` 幂等完成工作项 |
 
-本地运行 PostgreSQL 合同测试：
+Attached SSE 是实时投影，不是历史重放接口；非终态连接断开会立即提交取消意图，并按结构化并发合同完成 drain。断开本身不能伪造终态或覆盖已经提交的数据库赢家。需要脱离连接继续执行时应创建 Detached Run；Detached 查询和所有控制接口都读取或写入同一个持久化 Run。
+GraphAuthorDocument 发布时会重新验证并编译为 Canonical Plan；Run 只执行固定的不可变 Plan，布局专用 ViewDocument 与 trace overlay 都不是执行真相。View 的 CAS 冲突或损坏不会改变已发布 revision，也不会影响已有或后续 pinned Run。
+恢复接口要求稳定的 `X-Request-ID` 和 `expected_projection_version`。Fork 的 `target_deployment_revision_id`、`checkpoint_id` 与 `input` 只是选择器：checkpoint content hash、复用 candidate、effect proof、revision/interface/schema 兼容证据仍由服务端从 durable authority 推导，客户端不能注入这些低层证明。
 
-```bash
-docker compose -f docker-compose.postgres.yml up -d
-RUN_HISTORY_POSTGRES_URL='postgres://insight:insight@127.0.0.1:5433/insight_agent_platform' \
-  cargo test --test history_postgres -- --nocapture
+人工任务 API 使用独立的 request-scoped principal resolver，与普通 Run 管理 API 的 bearer 身份隔离：人工凭据不能创建、取消或恢复 Run，管理凭据也不会自动获得人工任务权限。claim 返回单调递增的 `claim_fence`；complete 必须回传该 fence，租约过期后的旧处理人无法提交。相同 `X-Request-ID`、身份、fence 和 payload 可安全重放，任一内容变化都会返回冲突。工作流取消或超时会把尚未完成的工作项分别闭合为 `cancelled` 或 `expired`。
+
+正式二进制通过环境变量配置相互独立的平台凭据和人工身份；配置只保存环境变量名，不接受明文 token：
+
+```yaml
+auth:
+  mode: bearer_env
+  token_env: PLATFORM_ADMIN_TOKEN
+  human_task_credentials:
+    - identity: alice
+      groups: [medical-reviewers, triage]
+      token_env: HUMAN_ALICE_TOKEN
+    - identity: bob
+      groups: [medical-reviewers]
+      token_env: HUMAN_BOB_TOKEN
 ```
 
-## 仓库示例
-
-- `agents/researcher`：私有规划、时间 Action 与公开回答的顺序工作流；
-- `agents/action_demo`：`example.text_metrics` 原生 Action，不调用模型，适合确定性冒烟；
-- `agents/medical_report_interpreter`：使用 Switch 区分首轮与追问的多模态示例；
-- `agents/parallel_researcher`：技术可行性与风险合规两个差异化 Parallel branch，支持完整、降级与零成功策略；
-- `agents/workflow_failure_demo`：不需要密钥的 authored workflow raise 示例。
+缺失或空环境变量、重复身份、重复 token（包括与平台管理 token 重复）会阻止启动；未配置 `human_task_credentials` 时，三个 HumanTask 路由保持 fail-closed。token 不进入 Debug、错误或运行日志。
 
 ## 验证
 
@@ -420,8 +185,19 @@ RUN_HISTORY_POSTGRES_URL='postgres://insight:insight@127.0.0.1:5433/insight_agen
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
-cargo audit
-cargo deny check
 ```
 
-旧 Agent 文档不会被静默解释为 v2。当前作者语法见 [DSL 作者语法精简规范](docs/superpowers/specs/2026-07-17-dsl-authoring-syntax-simplification.md)；旧作者层重设计文档仅保留未被精简规范覆盖的设计背景。Region/SSA、结构化控制流与作用域运行时的仍有效部分见 [DSL vNext Region/SSA Design](docs/superpowers/specs/2026-07-16-dsl-vnext-region-ssa-design.md)，权威性规则见 [Design-document authority](docs/superpowers/README.md)，切换原则和数据处理见 [DSL v2 直接切换说明](docs/formal-v1-breaking-changes.md)。
+CI 还运行 cutover residual scan、真实 PostgreSQL 16 合同测试、real-process restart/shutdown 测试和依赖策略检查。PostgreSQL 测试使用 `V3_TEST_POSTGRES_URL`，Artifact repository 专项门禁使用 `V3_ARTIFACT_TEST_POSTGRES_URL`；在 CI 中这些变量必须存在，不能静默跳过。
+
+## 代码导航
+
+- `src/dsl/v3/`：作者文档、类型检查与 lowering；
+- `src/engine/plan/`：Canonical Typed Plan 与 verifier；
+- `src/engine/scheduler/`：纯计划决策与稳定身份；
+- `src/engine/repository/`：SQLite/PostgreSQL 状态机、lease、checkpoint、recovery；
+- `src/runtime/v3_service.rs`：生产 Run 服务、Worker pump 与外部 ingress；
+- `src/catalog_v3.rs`：编译、绑定并固定 deployment revision；
+- `migrations/durable_v3/`：持久化 schema；
+- `tests/v3_*`：编译器、repository、scheduler、恢复和真实数据库门禁。
+
+设计文档的权威关系见 [docs/superpowers/README.md](docs/superpowers/README.md)。

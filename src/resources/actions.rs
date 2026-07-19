@@ -11,12 +11,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    dsl::{
-        vnext::{schema::compile_contract_schema, Identifier},
-        CompileError,
-    },
+    dsl::CompileError,
     runtime::{ExecutionControl, RunError},
-    schema::JsonSchemaValidator,
+    schema::{compile_schema_2020, JsonSchemaValidator},
 };
 
 /// A platform capability which must be granted before an action may run.
@@ -116,6 +113,28 @@ impl ActionContext {
         Self {
             attempt_id: format!("{run_id}:{operation_id}:{attempt}"),
             idempotency_key: format!("{run_id}:{operation_id}"),
+            run_id,
+            operation_id,
+            attempt,
+            control,
+        }
+    }
+
+    /// Durable-v3 constructor. The repository-owned `effect_id`, rather than
+    /// an Attempt identity, is the provider idempotency key and therefore
+    /// remains stable across retries and worker re-leases.
+    pub fn for_durable_effect(
+        run_id: impl Into<String>,
+        operation_id: impl Into<String>,
+        attempt: u32,
+        effect_id: impl Into<String>,
+        control: ExecutionControl,
+    ) -> Self {
+        let run_id = run_id.into();
+        let operation_id = operation_id.into();
+        Self {
+            attempt_id: format!("{run_id}:{operation_id}:{attempt}"),
+            idempotency_key: effect_id.into(),
             run_id,
             operation_id,
             attempt,
@@ -273,42 +292,45 @@ impl ActionRegistry {
     }
 }
 
-/// Produces the same self-contained schema document consumed by vNext
-/// compilation. Local `$defs` references remain local; only the document
-/// boundary is normalized, so Draft 2020-12 validation semantics are retained.
+/// Produces one self-contained Draft 2020-12 schema document. Local `$defs`
+/// references remain local and external resolution is rejected by the shared
+/// schema policy.
 fn normalize_action_schema(authored: &Value) -> Result<(Value, JsonSchemaValidator), String> {
     reject_dynamic_schema_references(authored)?;
 
-    let mut contract = authored.clone();
-    let definitions = match &mut contract {
-        Value::Object(object) => object
-            .remove("$defs")
-            .map(|definitions| {
-                let Value::Object(definitions) = definitions else {
-                    return Err("top-level $defs must be an object".to_string());
-                };
-                definitions
-                    .into_iter()
-                    .map(|(name, schema)| {
-                        Identifier::parse(name)
-                            .map(|name| (name, schema))
-                            .map_err(|_| {
-                                "top-level $defs names must be canonical identifiers".to_string()
-                            })
-                    })
-                    .collect::<Result<BTreeMap<_, _>, _>>()
-            })
-            .transpose()?
-            .unwrap_or_default(),
-        _ => BTreeMap::new(),
+    let Value::Object(mut document) = authored.clone() else {
+        return Err("action schema must be an object".to_string());
     };
-
-    let bundle = compile_contract_schema(&definitions, &contract)
-        .map_err(|error| error.message().to_string())?;
-    let document = bundle.validator_document().clone();
-    let (validator, _) = bundle.into_parts();
-    debug_assert_eq!(validator.document(), &document);
+    let definitions = match document.remove("$defs") {
+        Some(Value::Object(definitions)) => definitions,
+        Some(_) => return Err("top-level $defs must be an object".to_string()),
+        None => serde_json::Map::new(),
+    };
+    if definitions.keys().any(|name| !is_schema_identifier(name)) {
+        return Err("top-level $defs names must be canonical identifiers".to_string());
+    }
+    document.entry("$schema".to_string()).or_insert_with(|| {
+        Value::String("https://json-schema.org/draft/2020-12/schema".to_string())
+    });
+    document.insert("$defs".to_string(), Value::Object(definitions));
+    let document = Value::Object(document);
+    let validator = compile_schema_2020(&document).map_err(|error| {
+        if error.starts_with("unsupported JSON Schema draft") {
+            // Keep the registry diagnostic stable and do not echo an authored
+            // URI. The detailed schema compiler error is an internal detail.
+            "contract schema is not a valid Draft 2020-12 schema".to_string()
+        } else {
+            error
+        }
+    })?;
     Ok((document, validator))
+}
+
+fn is_schema_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    matches!(characters.next(), Some(first) if first.is_ascii_alphabetic() || first == '_')
+        && characters
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
 }
 
 fn reject_dynamic_schema_references(value: &Value) -> Result<(), String> {
@@ -316,6 +338,15 @@ fn reject_dynamic_schema_references(value: &Value) -> Result<(), String> {
         Value::Object(object) => {
             if object.contains_key("$dynamicRef") || object.contains_key("$recursiveRef") {
                 return Err("dynamic JSON Schema references are not supported".to_string());
+            }
+            if let Some(reference) = object.get("$ref") {
+                let valid = reference
+                    .as_str()
+                    .and_then(|value| value.strip_prefix("#/$defs/"))
+                    .is_some_and(|name| !name.contains('/') && is_schema_identifier(name));
+                if !valid {
+                    return Err("schema reference must be exactly #/$defs/<Identifier>".to_string());
+                }
             }
             for value in object.values() {
                 reject_dynamic_schema_references(value)?;

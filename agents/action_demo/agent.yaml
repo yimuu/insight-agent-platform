@@ -1,4 +1,4 @@
-api_version: insight.agent/v2
+api_version: insight.agent/v3
 kind: agent
 
 metadata:
@@ -25,6 +25,6 @@ workflow:
       call: example.text_metrics
       inputs:
         text: $text
+      response: TextMetrics
 
-  result:
-    return: $analyze_text
+    - return: $analyze_text

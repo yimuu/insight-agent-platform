@@ -1,4 +1,5 @@
 version: 1
+deployment_mode: single_process_development
 bind_addr: 127.0.0.1:3000
 
 auth:
@@ -20,19 +21,25 @@ history:
   provider: sqlite
   path: ../data/quickstart.sqlite3
 
+artifacts:
+  provider: local_filesystem
+  directory: ../data/artifacts
+  inline_threshold_bytes: 65536
+  orphan_retention: 24h
+  reference_retention: 30d
+  gc_interval: 1m
+  deletion_claim_seconds: 60
+
 runtime:
   max_concurrent_runs: 4
   max_concurrent_operations: 4
   max_concurrent_operations_per_run: 2
   operation_timeout: 30s
-  operation_cancel_grace_period: 2s
-  max_template_output_bytes: 262144
   run_timeout: 1m
   sse_keep_alive_interval: 5s
   subscriber_capacity: 32
-  journal_capacity: 128
-  journal_batch_size: 16
-  journal_operation_timeout: 5s
+  public_event_retention: 24h
+  public_event_prune_interval: 1m
   readiness_probe_timeout: 2s
   shutdown_grace_period: 30s
   shutdown_hard_deadline: 35s

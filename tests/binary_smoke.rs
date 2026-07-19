@@ -1,21 +1,29 @@
-//! Real binary smoke test for the structured v2 workflow runtime.
+//! Real binary smoke test for the durable v3 workflow runtime.
 
 use std::{
     fs,
     net::{SocketAddr, TcpListener},
+    panic::{resume_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
+use chrono::{DateTime, Utc};
+use futures::FutureExt;
+use insight_agent_platform::engine::repository::migration_manifest::DURABLE_V3_MIGRATIONS;
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
+use sqlx::{postgres::PgPoolOptions, AssertSqlSafe, PgPool};
 use tempfile::TempDir;
+use uuid::Uuid;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const BINARY_POSTGRES_URL_ENV: &str = "BINARY_SMOKE_POSTGRES_URL";
+const BINARY_POSTGRES_ARTIFACT_NAMESPACE: &str = "binary-pg-restart";
 
 #[tokio::test]
 async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
@@ -54,6 +62,17 @@ async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
     )
     .await;
     assert_eq!(live["data"]["status"], "live");
+
+    let human_tasks_url = format!("{base_url}/v1/human-tasks");
+    let unauthorized_human_tasks = expect_json(
+        format!("GET {human_tasks_url}"),
+        client
+            .get(&human_tasks_url)
+            .bearer_auth("unconfigured-human-token"),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    assert_eq!(unauthorized_human_tasks["code"], "UNAUTHORIZED");
 
     let agents_url = format!("{base_url}/v1/agents");
     let agents = expect_json(
@@ -127,6 +146,299 @@ async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
     );
 }
 
+#[tokio::test]
+async fn stock_binary_wires_two_environment_backed_human_principals() {
+    let temp = TempDir::new().unwrap();
+    let bind_addr = reserve_loopback_addr();
+    let platform_config = write_human_auth_configs(temp.path(), bind_addr);
+    let base_url = format!("http://{bind_addr}");
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let admin_token = "binary-admin-secret";
+    let alice_token = "binary-alice-secret";
+    let bob_token = "binary-bob-secret";
+
+    let mut child = ChildGuard::spawn_with_env(
+        &platform_config,
+        &[
+            ("BINARY_ADMIN_TOKEN", admin_token),
+            ("BINARY_ALICE_TOKEN", alice_token),
+            ("BINARY_BOB_TOKEN", bob_token),
+        ],
+    );
+    wait_for_health(&client, &base_url, &mut child).await;
+
+    let human_tasks_url = format!("{base_url}/v1/human-tasks");
+    for token in [alice_token, bob_token] {
+        let tasks = expect_json(
+            format!("GET {human_tasks_url}"),
+            client.get(&human_tasks_url).bearer_auth(token),
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(tasks["data"], json!([]));
+    }
+    let admin_human_tasks = expect_json(
+        format!("GET {human_tasks_url}"),
+        client.get(&human_tasks_url).bearer_auth(admin_token),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    assert_eq!(admin_human_tasks["code"], "UNAUTHORIZED");
+
+    let agents_url = format!("{base_url}/v1/agents");
+    expect_json(
+        format!("GET {agents_url}"),
+        client.get(&agents_url).bearer_auth(alice_token),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    expect_json(
+        format!("GET {agents_url}"),
+        client.get(&agents_url).bearer_auth(admin_token),
+        StatusCode::OK,
+    )
+    .await;
+
+    let output = child.shutdown();
+    assert!(
+        shutdown_was_graceful(&output),
+        "platform should exit cleanly after shutdown request\n{}",
+        format_output(&output)
+    );
+    let rendered_output = format_output(&output);
+    for secret in [admin_token, alice_token, bob_token] {
+        assert!(!rendered_output.contains(secret));
+    }
+}
+
+#[tokio::test]
+async fn ordinary_process_restart_keeps_a_nonterminal_run_recoverable() {
+    let temp = TempDir::new().unwrap();
+    let first_addr = reserve_loopback_addr();
+    let platform_config = write_restart_configs(temp.path(), first_addr);
+    let first_base = format!("http://{first_addr}");
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+
+    let mut first = ChildGuard::spawn(&platform_config);
+    wait_for_health(&client, &first_base, &mut first).await;
+    let created = expect_json(
+        format!("POST {first_base}/v1/agents/restart_waiter/runs"),
+        client
+            .post(format!("{first_base}/v1/agents/restart_waiter/runs"))
+            .header("x-request-id", "restart-request-1")
+            .json(&json!({})),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    assert_eq!(created["data"]["status"], "running");
+    let run_id = created["data"]["run_id"].as_str().unwrap().to_owned();
+    let first_output = first.shutdown();
+    assert!(
+        shutdown_was_graceful(&first_output),
+        "first process should stop cleanly\n{}",
+        format_output(&first_output)
+    );
+
+    let second_addr = reserve_loopback_addr();
+    rewrite_bind_addr(&platform_config, first_addr, second_addr);
+    let second_base = format!("http://{second_addr}");
+    let mut second = ChildGuard::spawn(&platform_config);
+    wait_for_health(&client, &second_base, &mut second).await;
+    let recovered = expect_json(
+        format!("GET {second_base}/v1/runs/{run_id}"),
+        client.get(format!("{second_base}/v1/runs/{run_id}")),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(recovered["data"]["status"], "running");
+    assert_eq!(recovered["data"]["request_id"], "restart-request-1");
+    assert_eq!(recovered["data"]["attachment"], "detached");
+    assert!(recovered["data"]["agent_version"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("deployrev_")));
+
+    let second_output = second.shutdown();
+    assert!(
+        shutdown_was_graceful(&second_output),
+        "second process should stop cleanly\n{}",
+        format_output(&second_output)
+    );
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PostgresStartupAuthoritySnapshot {
+    migrations: Vec<(i64, String, String, DateTime<Utc>)>,
+    artifact_store: (String, String, String, DateTime<Utc>),
+}
+
+#[tokio::test]
+async fn stock_production_binary_recovers_postgres_run_across_restart() {
+    let Some(database_url) = postgres_binary_test_url() else {
+        return;
+    };
+    let schema = format!("binary_restart_{}", Uuid::new_v4().simple());
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap_or_else(|_| panic!("V3_TEST_POSTGRES_URL must be reachable"));
+    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .expect("binary PostgreSQL gate must create its isolated schema");
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    let control = match PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&scoped_url)
+        .await
+    {
+        Ok(control) => control,
+        Err(_) => {
+            sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                .execute(&admin)
+                .await
+                .expect("failed to clean isolated schema after control connection failure");
+            admin.close().await;
+            panic!("isolated binary PostgreSQL schema must be reachable");
+        }
+    };
+
+    let outcome = AssertUnwindSafe(async {
+        let temp = TempDir::new().unwrap();
+        let first_addr = reserve_loopback_addr();
+        let platform_config = write_postgres_restart_configs(temp.path(), first_addr);
+        let first_base = format!("http://{first_addr}");
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let process_environment = [(BINARY_POSTGRES_URL_ENV, scoped_url.as_str())];
+
+        let mut first = ChildGuard::spawn_with_env(&platform_config, &process_environment);
+        wait_for_health(&client, &first_base, &mut first).await;
+        let created = expect_json(
+            format!("POST {first_base}/v1/agents/restart_waiter/runs"),
+            client
+                .post(format!("{first_base}/v1/agents/restart_waiter/runs"))
+                .header("x-request-id", "postgres-restart-request-1")
+                .json(&json!({})),
+            StatusCode::ACCEPTED,
+        )
+        .await;
+        assert_eq!(created["data"]["status"], "running");
+        let run_id = created["data"]["run_id"]
+            .as_str()
+            .expect("create response must contain run_id")
+            .to_owned();
+        let first_authority = postgres_startup_authority(&control).await;
+
+        let first_output = first.shutdown();
+        assert!(
+            shutdown_was_graceful(&first_output),
+            "first production PostgreSQL process should stop cleanly\n{}",
+            format_output(&first_output)
+        );
+
+        let second_addr = reserve_loopback_addr();
+        rewrite_bind_addr(&platform_config, first_addr, second_addr);
+        let second_base = format!("http://{second_addr}");
+        let mut second = ChildGuard::spawn_with_env(&platform_config, &process_environment);
+        wait_for_health(&client, &second_base, &mut second).await;
+        let recovered = expect_json(
+            format!("GET {second_base}/v1/runs/{run_id}"),
+            client.get(format!("{second_base}/v1/runs/{run_id}")),
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(recovered["data"]["status"], "running");
+        assert_eq!(
+            recovered["data"]["request_id"],
+            "postgres-restart-request-1"
+        );
+        assert_eq!(recovered["data"]["attachment"], "detached");
+        assert!(recovered["data"]["agent_version"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("deployrev_")));
+
+        let second_authority = postgres_startup_authority(&control).await;
+        assert_eq!(
+            second_authority, first_authority,
+            "restart must not rewrite migration or Artifact-store authority"
+        );
+        let second_output = second.shutdown();
+        assert!(
+            shutdown_was_graceful(&second_output),
+            "second production PostgreSQL process should stop cleanly\n{}",
+            format_output(&second_output)
+        );
+    })
+    .catch_unwind()
+    .await;
+
+    control.close().await;
+    let cleanup = sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await;
+    admin.close().await;
+    match outcome {
+        Ok(()) => cleanup.expect("binary PostgreSQL gate must clean its isolated schema"),
+        Err(payload) => {
+            if let Err(error) = cleanup {
+                eprintln!("failed to clean binary PostgreSQL schema after panic: {error}");
+            }
+            resume_unwind(payload);
+        }
+    };
+}
+
+fn postgres_binary_test_url() -> Option<String> {
+    match std::env::var("V3_TEST_POSTGRES_URL") {
+        Ok(value) => Some(value),
+        Err(error) if std::env::var_os("CI").is_some() => {
+            panic!("CI must set V3_TEST_POSTGRES_URL for the stock production binary gate: {error}")
+        }
+        Err(_) => None,
+    }
+}
+
+async fn postgres_startup_authority(pool: &PgPool) -> PostgresStartupAuthoritySnapshot {
+    let migrations = sqlx::query_as::<_, (i64, String, String, DateTime<Utc>)>(
+        "SELECT version,name,checksum,applied_at
+         FROM durable_v3_schema_migrations ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("stock binary must expose its migration ledger");
+    assert_eq!(migrations.len(), DURABLE_V3_MIGRATIONS.len());
+    for (actual, expected) in migrations.iter().zip(DURABLE_V3_MIGRATIONS.iter()) {
+        assert_eq!(u64::try_from(actual.0).unwrap(), expected.version);
+        assert_eq!(actual.1, expected.name);
+        assert_eq!(actual.2, expected.postgres_checksum());
+    }
+    let artifact_store = sqlx::query_as::<_, (String, String, String, DateTime<Utc>)>(
+        "SELECT backend,namespace,store_id,bound_at
+         FROM artifact_store_authority WHERE singleton=TRUE",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("stock binary must bind one shared Artifact-store authority");
+    assert_eq!(artifact_store.0, "shared_filesystem");
+    assert_eq!(artifact_store.1, BINARY_POSTGRES_ARTIFACT_NAMESPACE);
+    assert!(artifact_store.2.starts_with("artifact_store_"));
+
+    PostgresStartupAuthoritySnapshot {
+        migrations,
+        artifact_store,
+    }
+}
+
 fn reserve_loopback_addr() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap()
@@ -158,6 +470,7 @@ models:
         &platform_config,
         format!(
             r#"version: 1
+deployment_mode: single_process_development
 bind_addr: {bind_addr}
 
 auth:
@@ -185,14 +498,9 @@ runtime:
   max_concurrent_operations: 4
   max_concurrent_operations_per_run: 32
   operation_timeout: 30s
-  operation_cancel_grace_period: 1s
-  max_template_output_bytes: 1048576
   run_timeout: 1m
   sse_keep_alive_interval: 5s
   subscriber_capacity: 32
-  journal_capacity: 128
-  journal_batch_size: 16
-  journal_operation_timeout: 5s
 "#,
             agents_dir.display(),
             history_path.display(),
@@ -201,6 +509,182 @@ runtime:
     .unwrap();
 
     platform_config
+}
+
+fn write_human_auth_configs(root: &Path, bind_addr: SocketAddr) -> PathBuf {
+    let platform_config = write_temp_configs(root, bind_addr);
+    let source = fs::read_to_string(&platform_config).unwrap();
+    fs::write(
+        &platform_config,
+        source.replacen(
+            "auth:\n  mode: disabled",
+            "auth:\n  mode: bearer_env\n  token_env: BINARY_ADMIN_TOKEN\n  human_task_credentials:\n    - identity: alice\n      groups: [medical, triage]\n      token_env: BINARY_ALICE_TOKEN\n    - identity: bob\n      groups: [legal]\n      token_env: BINARY_BOB_TOKEN",
+            1,
+        ),
+    )
+    .unwrap();
+    platform_config
+}
+
+fn write_restart_configs(root: &Path, bind_addr: SocketAddr) -> PathBuf {
+    let platform_config = root.join("restart-platform.yaml");
+    let models_config = root.join("restart-models.yaml");
+    let history_path = root.join("restart.sqlite3");
+    let agents_dir = root.join("agents");
+    let agent_dir = agents_dir.join("restart_waiter");
+    fs::create_dir_all(&agent_dir).unwrap();
+    fs::write(
+        agent_dir.join("agent.yaml"),
+        r#"api_version: insight.agent/v3
+kind: agent
+
+metadata:
+  id: restart_waiter
+  name: Restart waiter
+  description: Waits durably across an ordinary process restart.
+
+inputs: {}
+output: string
+
+workflow:
+  steps:
+    - id: gate
+      wait:
+        signal: continue
+        response: string
+    - return: $gate
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &models_config,
+        r#"version: 1
+
+models:
+  unused_restart_model:
+    type: open_ai_chat
+    base_url: https://models.example.invalid/v1
+    model: unused-restart-model
+    capabilities: []
+    connect_timeout: 1s
+    request_timeout: 5s
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &platform_config,
+        format!(
+            r#"version: 1
+deployment_mode: single_process_development
+bind_addr: {bind_addr}
+
+auth:
+  mode: disabled
+
+agents:
+  directory: {}
+  enabled: [restart_waiter]
+
+models:
+  config: restart-models.yaml
+
+actions:
+  enabled: []
+
+history:
+  provider: sqlite
+  path: {}
+
+runtime:
+  max_concurrent_runs: 4
+  max_concurrent_operations: 4
+  max_concurrent_operations_per_run: 4
+  operation_timeout: 30s
+  run_timeout: 1m
+  sse_keep_alive_interval: 5s
+  subscriber_capacity: 32
+  shutdown_grace_period: 2s
+  shutdown_hard_deadline: 3s
+"#,
+            agents_dir.display(),
+            history_path.display(),
+        ),
+    )
+    .unwrap();
+    platform_config
+}
+
+fn write_postgres_restart_configs(root: &Path, bind_addr: SocketAddr) -> PathBuf {
+    let platform_config = write_restart_configs(root, bind_addr);
+    let agents_dir = root.join("agents");
+    let artifact_root = root.join("shared-artifacts");
+    fs::write(
+        &platform_config,
+        format!(
+            r#"version: 1
+deployment_mode: production
+bind_addr: {}
+
+auth:
+  mode: disabled
+
+agents:
+  directory: {}
+  enabled: [restart_waiter]
+
+models:
+  config: restart-models.yaml
+
+actions:
+  enabled: []
+
+history:
+  provider: postgres
+  database_url_env: {}
+
+artifacts:
+  provider: shared_filesystem
+  namespace: {}
+  directory: {}
+  inline_threshold_bytes: 65536
+  orphan_retention: 24h
+  reference_retention: 30d
+  gc_interval: 1m
+  deletion_claim_seconds: 60
+
+runtime:
+  max_concurrent_runs: 4
+  max_concurrent_operations: 4
+  max_concurrent_operations_per_run: 4
+  operation_timeout: 30s
+  run_timeout: 1m
+  sse_keep_alive_interval: 5s
+  subscriber_capacity: 32
+  shutdown_grace_period: 2s
+  shutdown_hard_deadline: 3s
+"#,
+            bind_addr,
+            agents_dir.display(),
+            BINARY_POSTGRES_URL_ENV,
+            BINARY_POSTGRES_ARTIFACT_NAMESPACE,
+            artifact_root.display(),
+        ),
+    )
+    .unwrap();
+    platform_config
+}
+
+fn rewrite_bind_addr(path: &Path, from: SocketAddr, to: SocketAddr) {
+    let source = fs::read_to_string(path).unwrap();
+    fs::write(
+        path,
+        source.replacen(
+            &format!("bind_addr: {from}"),
+            &format!("bind_addr: {to}"),
+            1,
+        ),
+    )
+    .unwrap();
 }
 
 trait RecoverableChild {
@@ -234,12 +718,19 @@ impl<C: RecoverableChild> ChildGuard<C> {
 
 impl ChildGuard<Child> {
     fn spawn(platform_config: &Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_insight-agent-platform"))
+        Self::spawn_with_env(platform_config, &[])
+    }
+
+    fn spawn_with_env(platform_config: &Path, environment: &[(&str, &str)]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_insight-agent-platform"));
+        command
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .env("PLATFORM_CONFIG", platform_config)
+            .envs(environment.iter().copied())
             .env_remove("OPENAI_API_KEY")
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command
             .spawn()
             .expect("failed to spawn insight-agent-platform binary");
         Self::new(child)

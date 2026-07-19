@@ -1,7 +1,8 @@
 pub mod api;
-pub mod catalog;
+pub mod catalog_v3;
 pub mod config;
 pub mod dsl;
+pub mod engine;
 pub mod events;
 pub mod history;
 pub(crate) mod observability;

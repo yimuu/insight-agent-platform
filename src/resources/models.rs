@@ -1,9 +1,13 @@
-use std::{collections::BTreeMap, collections::BTreeSet, fmt, io::Write, pin::Pin, sync::Arc};
+use std::{
+    collections::BTreeMap, collections::BTreeSet, fmt, fmt::Write as _, io::Write, pin::Pin,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{dsl::CompileError, runtime::RunError};
 
@@ -16,6 +20,16 @@ pub enum ModelCapability {
     Vision,
 }
 
+impl ModelCapability {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::JsonObjectOutput => "json_object_output",
+            Self::JsonSchemaOutput => "json_schema_output",
+            Self::Vision => "vision",
+        }
+    }
+}
+
 pub(crate) fn select_structured_output_capability(
     capabilities: &BTreeSet<ModelCapability>,
     json_object_compatible: bool,
@@ -26,19 +40,6 @@ pub(crate) fn select_structured_output_capability(
         Some(ModelCapability::JsonObjectOutput)
     } else {
         None
-    }
-}
-
-pub(crate) fn planned_structured_output_capability(
-    capabilities: &BTreeSet<ModelCapability>,
-) -> Option<ModelCapability> {
-    match (
-        capabilities.contains(&ModelCapability::JsonObjectOutput),
-        capabilities.contains(&ModelCapability::JsonSchemaOutput),
-    ) {
-        (true, false) => Some(ModelCapability::JsonObjectOutput),
-        (false, true) => Some(ModelCapability::JsonSchemaOutput),
-        _ => None,
     }
 }
 
@@ -380,13 +381,104 @@ impl Write for LimitWriter {
     }
 }
 
+/// Non-secret immutable identity for one model alias binding. Secrets are
+/// deliberately absent; rotating a secret value does not rewrite a published
+/// Deployment Revision, while changing provider/model/adapter policy does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelDeploymentIdentity {
+    worker_version: String,
+    binding_hash: String,
+    evidence: Value,
+}
+
+impl ModelDeploymentIdentity {
+    pub fn new(worker_version: impl Into<String>, evidence: Value) -> Result<Self, CompileError> {
+        let worker_version = worker_version.into();
+        if worker_version.is_empty()
+            || worker_version.len() > 256
+            || worker_version
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+            || !evidence.is_object()
+        {
+            return Err(CompileError::new(
+                "MODEL_DEPLOYMENT_IDENTITY_INVALID",
+                "model deployment identity must contain a bounded worker version and object evidence",
+            ));
+        }
+        let canonical = serde_jcs::to_vec(&evidence).map_err(|_| {
+            CompileError::new(
+                "MODEL_DEPLOYMENT_IDENTITY_INVALID",
+                "model deployment evidence cannot be canonicalized",
+            )
+        })?;
+        let digest = Sha256::digest(canonical);
+        let mut binding_hash = String::with_capacity("sha256:".len() + digest.len() * 2);
+        binding_hash.push_str("sha256:");
+        for byte in digest {
+            write!(&mut binding_hash, "{byte:02x}")
+                .expect("writing a digest into String cannot fail");
+        }
+        Ok(Self {
+            worker_version,
+            binding_hash,
+            evidence,
+        })
+    }
+
+    pub fn worker_version(&self) -> &str {
+        &self.worker_version
+    }
+
+    pub fn binding_hash(&self) -> &str {
+        &self.binding_hash
+    }
+
+    pub fn evidence(&self) -> &Value {
+        &self.evidence
+    }
+}
+
+#[derive(Clone)]
+struct RegisteredModel {
+    model: Arc<dyn ChatModel>,
+    deployment: ModelDeploymentIdentity,
+}
+
 #[derive(Clone, Default)]
 pub struct ModelRegistry {
-    models: BTreeMap<String, Arc<dyn ChatModel>>,
+    models: BTreeMap<String, RegisteredModel>,
 }
 
 impl ModelRegistry {
     pub fn register<M>(&mut self, alias: impl Into<String>, model: M) -> Result<(), CompileError>
+    where
+        M: ChatModel + 'static,
+    {
+        let alias = alias.into();
+        let capabilities = model
+            .capabilities()
+            .into_iter()
+            .map(ModelCapability::as_str)
+            .collect::<Vec<_>>();
+        let deployment = ModelDeploymentIdentity::new(
+            "legacy-model-registration-v1",
+            serde_json::json!({
+                "adapter_type": std::any::type_name::<M>(),
+                "alias": alias,
+                "capabilities": capabilities,
+                "registration": "legacy_explicit_test_surface",
+            }),
+        )?;
+        self.register_versioned(alias, deployment, model)
+    }
+
+    pub fn register_versioned<M>(
+        &mut self,
+        alias: impl Into<String>,
+        deployment: ModelDeploymentIdentity,
+        model: M,
+    ) -> Result<(), CompileError>
     where
         M: ChatModel + 'static,
     {
@@ -403,16 +495,44 @@ impl ModelRegistry {
                 format!("model alias '{alias}' is already registered"),
             ));
         }
-        self.models.insert(alias, Arc::new(model));
+        self.models.insert(
+            alias,
+            RegisteredModel {
+                model: Arc::new(model),
+                deployment,
+            },
+        );
         Ok(())
     }
 
     pub fn resolve(&self, alias: &str) -> Result<Arc<dyn ChatModel>, CompileError> {
-        self.models.get(alias).cloned().ok_or_else(|| {
-            CompileError::new(
-                "MODEL_NOT_FOUND",
-                format!("model alias '{alias}' is not registered"),
-            )
-        })
+        self.models
+            .get(alias)
+            .map(|entry| entry.model.clone())
+            .ok_or_else(|| {
+                CompileError::new(
+                    "MODEL_NOT_FOUND",
+                    format!("model alias '{alias}' is not registered"),
+                )
+            })
+    }
+
+    pub fn deployment_identity(
+        &self,
+        alias: &str,
+    ) -> Result<&ModelDeploymentIdentity, CompileError> {
+        self.models
+            .get(alias)
+            .map(|entry| &entry.deployment)
+            .ok_or_else(|| {
+                CompileError::new(
+                    "MODEL_NOT_FOUND",
+                    format!("model alias '{alias}' is not registered"),
+                )
+            })
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.models.keys().map(String::as_str)
     }
 }

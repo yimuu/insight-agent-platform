@@ -1,4 +1,4 @@
-pub mod vnext;
+pub mod v3;
 
 use std::{error::Error, fmt};
 
@@ -160,6 +160,7 @@ impl SourceSpan {
         self.column_end
     }
 
+    #[cfg(test)]
     pub(crate) fn document(source: &str) -> Self {
         let (line_end, column_end) = source_position(source, source.len());
         Self::new(0, source.len() as u64, 1, 1, line_end, column_end)

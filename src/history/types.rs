@@ -74,6 +74,8 @@ impl RunAttachment {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunRecord {
     pub run_id: String,
+    /// Durable optimistic-concurrency version used by recovery operations.
+    pub projection_version: u64,
     pub request_id: String,
     pub agent_id: String,
     pub agent_version: String,

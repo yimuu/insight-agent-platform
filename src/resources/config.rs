@@ -8,7 +8,7 @@ use std::{
 use serde::Deserialize;
 
 use super::{
-    models::{ModelCapability, ModelRegistry},
+    models::{ModelCapability, ModelDeploymentIdentity, ModelRegistry},
     openai_chat::{OpenAiChatLimits, OpenAiChatModel, OpenAiTransportPolicy},
 };
 
@@ -56,7 +56,7 @@ pub fn load_model_registry_with_env(
         match model {
             ModelYaml::OpenAiChat {
                 base_url,
-                model,
+                model: model_name,
                 api_key_env,
                 capabilities,
                 connect_timeout,
@@ -76,14 +76,46 @@ pub fn load_model_registry_with_env(
                     })
                     .collect::<BTreeSet<_>>();
                 let limits = limits.unwrap_or_default().resolve()?;
-                let transport_policy = transport.unwrap_or_default().plaintext_http.into();
+                let transport_policy: OpenAiTransportPolicy =
+                    transport.unwrap_or_default().plaintext_http.into();
+                let connect_timeout = positive_duration(&connect_timeout, "connect_timeout")?;
+                let request_timeout = positive_duration(&request_timeout, "request_timeout")?;
+                let capability_names = capabilities
+                    .iter()
+                    .copied()
+                    .map(ModelCapability::as_str)
+                    .collect::<Vec<_>>();
+                let deployment = ModelDeploymentIdentity::new(
+                    "openai-chat-adapter-1.0.0",
+                    serde_json::json!({
+                        "adapter": "openai_chat",
+                        "adapter_version": "1.0.0",
+                        "base_url": base_url.clone(),
+                        "model": model_name.clone(),
+                        "capabilities": capability_names,
+                        "connect_timeout_ms": connect_timeout.as_millis().to_string(),
+                        "request_timeout_ms": request_timeout.as_millis().to_string(),
+                        "limits": {
+                            "max_upstream_bytes": limits.max_upstream_bytes,
+                            "max_buffered_line_bytes": limits.max_buffered_line_bytes,
+                            "max_event_payload_bytes": limits.max_event_payload_bytes,
+                            "max_chunk_text_bytes": limits.max_chunk_text_bytes,
+                            "max_usage_json_bytes": limits.max_usage_json_bytes,
+                            "max_accumulated_text_bytes": limits.max_accumulated_text_bytes,
+                        },
+                        "transport": transport_policy.as_str(),
+                    }),
+                )
+                .map_err(|error| {
+                    ResourceConfigError::new(error.code(), format!("model '{alias}': {error}"))
+                })?;
                 let model = OpenAiChatModel::new_with_limits_and_transport_policy(
                     api_key,
-                    base_url,
-                    model,
+                    base_url.clone(),
+                    model_name.clone(),
                     capabilities,
-                    positive_duration(&connect_timeout, "connect_timeout")?,
-                    positive_duration(&request_timeout, "request_timeout")?,
+                    connect_timeout,
+                    request_timeout,
                     limits,
                     transport_policy,
                 )
@@ -91,7 +123,7 @@ pub fn load_model_registry_with_env(
                     ResourceConfigError::new(error.code(), format!("model '{alias}': {error}"))
                 })?;
                 registry
-                    .register(alias, model)
+                    .register_versioned(alias, deployment, model)
                     .map_err(|error| ResourceConfigError::new(error.code(), error.to_string()))?;
             }
         }

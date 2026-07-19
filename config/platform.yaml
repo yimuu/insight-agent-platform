@@ -1,4 +1,5 @@
 version: 1
+deployment_mode: production
 bind_addr: 127.0.0.1:3000
 
 auth:
@@ -21,22 +22,29 @@ actions:
     - example.text_metrics
 
 history:
-  provider: sqlite
-  path: ../data/formal_v2.sqlite3
+  provider: postgres
+  database_url_env: RUN_HISTORY_POSTGRES_URL
+
+artifacts:
+  provider: shared_filesystem
+  namespace: production
+  directory: ../data/artifacts
+  inline_threshold_bytes: 65536
+  orphan_retention: 24h
+  reference_retention: 30d
+  gc_interval: 1m
+  deletion_claim_seconds: 60
 
 runtime:
   max_concurrent_runs: 32
   max_concurrent_operations: 32
   max_concurrent_operations_per_run: 8
   operation_timeout: 60s
-  operation_cancel_grace_period: 5s
-  max_template_output_bytes: 262144
   run_timeout: 5m
   sse_keep_alive_interval: 5s
   subscriber_capacity: 128
-  journal_capacity: 1024
-  journal_batch_size: 32
-  journal_operation_timeout: 30s
+  public_event_retention: 24h
+  public_event_prune_interval: 1m
   readiness_probe_timeout: 2s
   shutdown_grace_period: 30s
   shutdown_hard_deadline: 35s

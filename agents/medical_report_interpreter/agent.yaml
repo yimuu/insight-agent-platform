@@ -1,4 +1,4 @@
-api_version: insight.agent/v2
+api_version: insight.agent/v3
 kind: agent
 
 metadata:
@@ -7,6 +7,10 @@ metadata:
   description: A structured multimodal medical-report interpretation workflow with separate first-turn and follow-up paths.
 
 types:
+  NonEmptyText:
+    type: string
+    min_length: 1
+
   MedicalResult:
     fields:
       mode:
@@ -49,90 +53,78 @@ output: MedicalResult
 
 workflow:
   steps:
-    - type: switch
-      id: route
-      inputs:
-        report_text: $report_text
-        image_url: $image_url
-        messages: $messages
-        question: $question
-      output: MedicalResult
-      cases:
-        - id: follow_up
-          when:
-            cel: size(scope.messages) > 0
-          steps:
-            - type: llm
-              id: answer
-              model: vision_chat
-              messages:
-                - role: system
-                  content:
-                    - text: system
-                - $messages
-                - role: user
-                  content:
-                    - text: follow_up
-                    - image_url: $image_url
-              parameters: {temperature: 0.2}
-              response: string
-          result:
-            return:
-              mode: follow_up
-              answer: $answer
-              abnormal_indicators: ""
-              comprehensive_interpretation: ""
-              health_advice: ""
+    - id: route
+      if: size(messages) > 0
+      then:
+        - type: llm
+          id: answer
+          model: vision_chat
+          messages:
+            - role: system
+              content:
+                - text: system
+            - $messages
+            - role: user
+              content:
+                - text: follow_up
+                - image_url: $image_url
+          parameters: {temperature: 0.2}
+          response: NonEmptyText
 
-      default:
-        id: initial
-        steps:
-          - type: llm
-            id: abnormal_indicators
-            model: vision_chat
-            messages:
-              - role: system
-                content:
-                  - text: system
-              - $messages
-              - role: user
-                content:
-                  - text: abnormal_indicators
-                  - image_url: $image_url
-            parameters: {temperature: 0.2}
-            response: string
+        - return:
+            mode: follow_up
+            answer: $answer
+            abnormal_indicators: ""
+            comprehensive_interpretation: ""
+            health_advice: ""
 
-          - type: llm
-            id: comprehensive_interpretation
-            model: vision_chat
-            messages:
-              - role: system
-                content:
-                  - text: system
-              - $messages
-              - role: user
-                content:
-                  - text: comprehensive_interpretation
-                  - image_url: $image_url
-            parameters: {temperature: 0.2}
-            response: string
+      else:
+        - type: llm
+          id: abnormal_indicators
+          model: vision_chat
+          messages:
+            - role: system
+              content:
+                - text: system
+            - $messages
+            - role: user
+              content:
+                - text: abnormal_indicators
+                - image_url: $image_url
+          parameters: {temperature: 0.2}
+          response: NonEmptyText
 
-          - type: llm
-            id: health_advice
-            model: vision_chat
-            messages:
-              - role: system
-                content:
-                  - text: system
-              - $messages
-              - role: user
-                content:
-                  - text: health_advice
-                  - image_url: $image_url
-            parameters: {temperature: 0.2}
-            response: string
-        result:
-          return:
+        - type: llm
+          id: comprehensive_interpretation
+          model: vision_chat
+          messages:
+            - role: system
+              content:
+                - text: system
+            - $messages
+            - role: user
+              content:
+                - text: comprehensive_interpretation
+                - image_url: $image_url
+          parameters: {temperature: 0.2}
+          response: NonEmptyText
+
+        - type: llm
+          id: health_advice
+          model: vision_chat
+          messages:
+            - role: system
+              content:
+                - text: system
+            - $messages
+            - role: user
+              content:
+                - text: health_advice
+                - image_url: $image_url
+          parameters: {temperature: 0.2}
+          response: NonEmptyText
+
+        - return:
             mode: initial
             answer: |-
               {{ abnormal_indicators }}
@@ -143,6 +135,3 @@ workflow:
             abnormal_indicators: $abnormal_indicators
             comprehensive_interpretation: $comprehensive_interpretation
             health_advice: $health_advice
-
-  result:
-    return: $route

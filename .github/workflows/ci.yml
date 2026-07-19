@@ -13,6 +13,12 @@ jobs:
     env:
       CI: "1"
       RUN_HISTORY_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
+      # All durable-v3 PostgreSQL gates must exercise the same real PG16
+      # service in CI.  Keep the explicit test variables so no gate can
+      # silently turn into a no-op because it looked for a different name.
+      V3_TEST_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
+      V3_ARTIFACT_TEST_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
+      TEST_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
       CARGO_TERM_COLOR: always
     services:
       postgres:
@@ -38,6 +44,8 @@ jobs:
         with:
           cache-targets: "true"
           cache-on-failure: "false"
+      - name: Check DSL v3 cutover residuals
+        run: bash scripts/check-v3-cutover-residuals.sh
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy

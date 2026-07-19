@@ -45,6 +45,31 @@ fn strict_model_resources_resolve_alias_capability_and_redacted_secret() {
 }
 
 #[test]
+fn deployment_identity_pins_non_secret_binding_but_excludes_secret_values() {
+    let (_directory, path) = write_config(&model_yaml(""));
+    let first = load_model_registry_with_env(&path, |_| Some("secret-one".to_string())).unwrap();
+    let second = load_model_registry_with_env(&path, |_| Some("secret-two".to_string())).unwrap();
+    let first = first.deployment_identity("primary").unwrap();
+    let second = second.deployment_identity("primary").unwrap();
+    assert_eq!(first.binding_hash(), second.binding_hash());
+    assert_eq!(first.evidence(), second.evidence());
+    let rendered = serde_json::to_string(first.evidence()).unwrap();
+    assert!(!rendered.contains("secret-one"));
+    assert!(!rendered.contains("secret-two"));
+
+    let changed = model_yaml("").replace("model: example-chat", "model: example-chat-v2");
+    let (_directory, path) = write_config(&changed);
+    let changed = load_model_registry_with_env(&path, |_| Some("secret-one".to_string())).unwrap();
+    assert_ne!(
+        first.binding_hash(),
+        changed
+            .deployment_identity("primary")
+            .unwrap()
+            .binding_hash()
+    );
+}
+
+#[test]
 fn model_resources_default_and_override_response_limits() {
     let defaults = OpenAiChatLimits::default();
     let (_directory, path) = write_config(&model_yaml(""));

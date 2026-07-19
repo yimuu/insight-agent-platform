@@ -1,4 +1,4 @@
-api_version: insight.agent/v2
+api_version: insight.agent/v3
 kind: agent
 
 metadata:
@@ -13,16 +13,15 @@ types:
 
   SafeBranchError:
     fields:
-      category:
+      kind:
         type: string
-        enum: [workflow, operation, timeout]
+        enum: [safe_error]
       code:
         type: string
         min_length: 1
         max_length: 128
         pattern: "^[A-Z][A-Z0-9_]*$"
-      retryable: boolean
-      origin:
+      message:
         type: string
         min_length: 1
         max_length: 512
@@ -73,97 +72,77 @@ output: SynthesisResult
 
 workflow:
   steps:
-    - type: parallel
-      id: analyses
-      inputs:
-        question: $question
+    - id: analyses
       settle: all_settled
-      max_concurrency: 2
-      branches:
+      parallel:
         technical:
-          output: Perspective
-          steps:
-            - type: llm
-              id: analyze
-              model: general_chat
-              messages:
-                - role: system
-                  content:
-                    - text: system
-                - role: user
-                  content:
-                    - text: perspective_a
-              parameters: {temperature: 0.2}
-              response: Perspective
-          result:
-            return: $analyze
+          - type: llm
+            id: analyze_technical
+            model: general_chat
+            messages:
+              - role: system
+                content:
+                  - text: system
+              - role: user
+                content:
+                  - text: perspective_a
+            parameters: {temperature: 0.2}
+            response: Perspective
+          - yield: $analyze_technical
 
         risk:
-          output: Perspective
-          steps:
-            - type: llm
-              id: analyze
-              model: general_chat
-              messages:
-                - role: system
-                  content:
-                    - text: system
-                - role: user
-                  content:
-                    - text: perspective_b
-              parameters: {temperature: 0.2}
-              response: Perspective
-          result:
-            return: $analyze
+          - type: llm
+            id: analyze_risk
+            model: general_chat
+            messages:
+              - role: system
+                content:
+                  - text: system
+              - role: user
+                content:
+                  - text: perspective_b
+            parameters: {temperature: 0.2}
+            response: Perspective
+          - yield: $analyze_risk
 
-    - type: switch
-      id: synthesis_input
-      inputs:
-        results: $analyses
-      output: SynthesisInput
-      cases:
-        - id: complete
-          when:
-            cel: >-
-              scope.results.technical.status == 'ok' &&
-              scope.results.risk.status == 'ok'
-          result:
-            return:
-              perspectives:
-                - $results.technical.value
-                - $results.risk.value
-              failed_branches: []
+    - id: synthesis_input
+      if: >-
+        analyses.technical.kind == 'ok' &&
+        analyses.risk.kind == 'ok'
+      then:
+        - yield:
+            perspectives:
+              - $analyses.technical.value
+              - $analyses.risk.value
+            failed_branches: []
 
+      elif:
         - id: technical_only
-          when:
-            cel: >-
-              scope.results.technical.status == 'ok' &&
-              scope.results.risk.status == 'error'
-          result:
-            return:
-              perspectives:
-                - $results.technical.value
-              failed_branches:
-                - branch: risk
-                  error: $results.risk.error
+          when: >-
+            analyses.technical.kind == 'ok' &&
+            analyses.risk.kind == 'error'
+          then:
+            - yield:
+                perspectives:
+                  - $analyses.technical.value
+                failed_branches:
+                  - branch: risk
+                    error: $analyses.risk.error
 
         - id: risk_only
-          when:
-            cel: >-
-              scope.results.technical.status == 'error' &&
-              scope.results.risk.status == 'ok'
-          result:
-            return:
-              perspectives:
-                - $results.risk.value
-              failed_branches:
-                - branch: technical
-                  error: $results.technical.error
+          when: >-
+            analyses.technical.kind == 'error' &&
+            analyses.risk.kind == 'ok'
+          then:
+            - yield:
+                perspectives:
+                  - $analyses.risk.value
+                failed_branches:
+                  - branch: technical
+                    error: $analyses.technical.error
 
-      default:
-        id: all_failed
-        result:
-          raise: all_failed
+      else:
+        - raise: all_failed
 
     - type: llm
       id: synthesize
@@ -178,5 +157,4 @@ workflow:
       parameters: {temperature: 0.2}
       response: SynthesisResult
 
-  result:
-    return: $synthesize
+    - return: $synthesize

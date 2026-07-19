@@ -81,6 +81,16 @@ pub enum OpenAiTransportPolicy {
     AllowTrustedPrivateHttp,
 }
 
+impl OpenAiTransportPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HttpsOnly => "https_only",
+            Self::AllowLoopbackHttp => "allow_loopback_http",
+            Self::AllowTrustedPrivateHttp => "allow_trusted_private_http",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct OpenAiChatModel {
     client: Client,

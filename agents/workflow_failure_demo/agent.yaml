@@ -1,4 +1,4 @@
-api_version: insight.agent/v2
+api_version: insight.agent/v3
 kind: agent
 
 metadata:
@@ -21,5 +21,5 @@ inputs: {}
 output: FailureResult
 
 workflow:
-  result:
-    raise: rejected
+  steps:
+    - raise: rejected

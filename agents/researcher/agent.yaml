@@ -1,4 +1,4 @@
-api_version: insight.agent/v2
+api_version: insight.agent/v3
 kind: agent
 
 metadata:
@@ -7,11 +7,20 @@ metadata:
   description: Research and answer questions with a private plan-first flow.
 
 types:
+  NonEmptyText:
+    type: string
+    min_length: 1
+
   ResearchResult:
     fields:
       answer:
         type: string
         min_length: 1
+
+  CurrentTime:
+    fields:
+      timezone: string
+      iso8601: string
 
 prompts:
   system:
@@ -48,6 +57,7 @@ workflow:
       call: current_time
       inputs:
         timezone: Asia/Shanghai
+      response: CurrentTime
 
     - type: llm
       id: answer
@@ -60,8 +70,7 @@ workflow:
           content:
             - text: final
       parameters: {temperature: 0.3}
-      response: string
+      response: NonEmptyText
 
-  result:
-    return:
-      answer: $answer
+    - return:
+        answer: $answer
