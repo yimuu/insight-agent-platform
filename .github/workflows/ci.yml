@@ -7,19 +7,49 @@ on:
 permissions:
   contents: read
 
+env:
+  CI: "1"
+  CARGO_TERM_COLOR: always
+  # CI runners are disposable. Incremental state and full debug information
+  # consume substantial disk without improving reuse across jobs.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 jobs:
-  quality:
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-registry-only"
+          shared-key: "registry-only"
+          cache-targets: "false"
+          cache-on-failure: "false"
+      - name: Check DSL v3 cutover residuals
+        run: bash scripts/check-v3-cutover-residuals.sh
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test
     runs-on: ubuntu-latest
     env:
-      CI: "1"
       RUN_HISTORY_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
       # All durable-v3 PostgreSQL gates must exercise the same real PG16
-      # service in CI.  Keep the explicit test variables so no gate can
+      # service in CI. Keep the explicit test variables so no gate can
       # silently turn into a no-op because it looked for a different name.
       V3_TEST_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
       V3_ARTIFACT_TEST_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
       TEST_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
-      CARGO_TERM_COLOR: always
     services:
       postgres:
         image: postgres:16-alpine
@@ -39,19 +69,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.94.1
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-targets: "true"
+          prefix-key: "v1-registry-only"
+          shared-key: "registry-only"
+          cache-targets: "false"
           cache-on-failure: "false"
-      - name: Check DSL v3 cutover residuals
-        run: bash scripts/check-v3-cutover-residuals.sh
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets
+
+  policy:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-registry-only"
+          shared-key: "registry-only"
+          cache-targets: "false"
+          cache-on-failure: "false"
       - name: Install dependency policy tools
         run: |
           cargo install --locked cargo-audit
