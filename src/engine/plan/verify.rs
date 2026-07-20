@@ -1924,6 +1924,7 @@ fn verify_node_descriptors(
             match &node.kind {
             NodeKind::LlmTask(descriptor)
             | NodeKind::ActionTask(descriptor)
+            | NodeKind::RetrievalTask(descriptor)
             | NodeKind::HttpTask(descriptor)
             | NodeKind::ToolTask(descriptor) => {
                 verify_leaf_descriptor(descriptor)?;
@@ -3780,6 +3781,7 @@ fn policy_execution_contract(
         node,
         NodeKind::LlmTask(_)
             | NodeKind::ActionTask(_)
+            | NodeKind::RetrievalTask(_)
             | NodeKind::HttpTask(_)
             | NodeKind::ToolTask(_)
     );

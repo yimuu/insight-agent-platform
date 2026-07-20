@@ -1,7 +1,9 @@
 use std::fs;
 
 use insight_agent_platform::resources::{
-    config::load_model_registry_with_env, models::ModelCapability, openai_chat::OpenAiChatLimits,
+    config::load_model_registry_with_env,
+    models::{ModelCapability, ModelRequestCapability},
+    openai_chat::OpenAiChatLimits,
 };
 use tempfile::tempdir;
 
@@ -41,6 +43,13 @@ fn strict_model_resources_resolve_alias_capability_and_redacted_secret() {
     assert!(model
         .capabilities()
         .contains(&ModelCapability::JsonSchemaOutput));
+    assert_eq!(
+        model.request_capabilities(),
+        std::collections::BTreeSet::from([
+            ModelRequestCapability::Complete,
+            ModelRequestCapability::Streaming,
+        ])
+    );
     assert!(!format!("{model:?}").contains("never-log-this-key"));
 }
 
@@ -53,6 +62,12 @@ fn deployment_identity_pins_non_secret_binding_but_excludes_secret_values() {
     let second = second.deployment_identity("primary").unwrap();
     assert_eq!(first.binding_hash(), second.binding_hash());
     assert_eq!(first.evidence(), second.evidence());
+    assert_eq!(first.worker_version(), "openai-chat-adapter-2.0.0");
+    assert_eq!(first.evidence()["adapter_version"], "2.0.0");
+    assert_eq!(
+        first.evidence()["request_capabilities"],
+        serde_json::json!(["complete_request", "streaming_request"])
+    );
     let rendered = serde_json::to_string(first.evidence()).unwrap();
     assert!(!rendered.contains("secret-one"));
     assert!(!rendered.contains("secret-two"));

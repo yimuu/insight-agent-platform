@@ -1,0 +1,562 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:insight-agent-platform:vendor:openai-responses-streaming:2026-07-19",
+  "title": "Pinned response-stream/v1 standard event wire schema",
+  "description": "Draft 2020-12 schema for the standard OpenAI-compatible events supported by response-stream/v1. workflow.* events are separate platform extensions and are intentionally excluded from this union. The response.completed and response.failed variants include this endpoint's documented top-level workflow terminal extension.",
+  "snapshot_id": "openai-responses-streaming-2026-07-19",
+  "captured_at": "2026-07-19",
+  "protocol_binding": "response-stream/v1",
+  "source": "https://developers.openai.com/api/docs/guides/streaming-responses",
+  "standard_events": [
+    "response.created",
+    "response.in_progress",
+    "response.output_item.added",
+    "response.content_part.added",
+    "response.output_text.delta",
+    "response.output_text.done",
+    "response.content_part.done",
+    "response.function_call_arguments.delta",
+    "response.function_call_arguments.done",
+    "response.output_item.done",
+    "response.file_search_call.in_progress",
+    "response.file_search_call.searching",
+    "response.file_search_call.completed",
+    "response.completed",
+    "response.failed",
+    "error"
+  ],
+  "platform_extensions": {
+    "event_namespace": "workflow.*",
+    "included_in_standard_event_schema": false,
+    "terminal_fields": {
+      "response.completed": ["workflow"],
+      "response.failed": ["workflow"]
+    }
+  },
+  "oneOf": [
+    {"$ref": "#/$defs/ResponseCreated"},
+    {"$ref": "#/$defs/ResponseInProgress"},
+    {"$ref": "#/$defs/ResponseOutputItemAdded"},
+    {"$ref": "#/$defs/ResponseContentPartAdded"},
+    {"$ref": "#/$defs/ResponseOutputTextDelta"},
+    {"$ref": "#/$defs/ResponseOutputTextDone"},
+    {"$ref": "#/$defs/ResponseContentPartDone"},
+    {"$ref": "#/$defs/ResponseFunctionCallArgumentsDelta"},
+    {"$ref": "#/$defs/ResponseFunctionCallArgumentsDone"},
+    {"$ref": "#/$defs/ResponseOutputItemDone"},
+    {"$ref": "#/$defs/ResponseFileSearchCallInProgress"},
+    {"$ref": "#/$defs/ResponseFileSearchCallSearching"},
+    {"$ref": "#/$defs/ResponseFileSearchCallCompleted"},
+    {"$ref": "#/$defs/ResponseCompleted"},
+    {"$ref": "#/$defs/ResponseFailed"},
+    {"$ref": "#/$defs/ErrorEvent"}
+  ],
+  "$defs": {
+    "SequenceNumber": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "Index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "ResponseStatus": {
+      "enum": ["in_progress", "completed", "failed", "cancelled", "incomplete"]
+    },
+    "ResponseItemStatus": {
+      "enum": ["in_progress", "completed", "failed", "incomplete"]
+    },
+    "ResponseContentPart": {
+      "type": "object",
+      "required": ["type", "text", "annotations"],
+      "properties": {
+        "type": {"const": "output_text"},
+        "text": {"type": "string"},
+        "annotations": {
+          "type": "array",
+          "items": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResponseMessageItem": {
+      "type": "object",
+      "required": ["type", "id", "status", "role", "content"],
+      "properties": {
+        "type": {"const": "message"},
+        "id": {"type": "string"},
+        "status": {"$ref": "#/$defs/ResponseItemStatus"},
+        "role": {"const": "assistant"},
+        "content": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/ResponseContentPart"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResponseFunctionCallItem": {
+      "type": "object",
+      "required": ["type", "id", "status", "call_id", "name", "arguments"],
+      "properties": {
+        "type": {"const": "function_call"},
+        "id": {"type": "string"},
+        "status": {"$ref": "#/$defs/ResponseItemStatus"},
+        "call_id": {"type": "string"},
+        "name": {"type": "string"},
+        "arguments": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseFileSearchCallItem": {
+      "type": "object",
+      "required": ["type", "id", "status", "queries", "results"],
+      "properties": {
+        "type": {"const": "file_search_call"},
+        "id": {"type": "string"},
+        "status": {"$ref": "#/$defs/ResponseItemStatus"},
+        "queries": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "results": {
+          "type": "array",
+          "items": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResponseOutputItem": {
+      "oneOf": [
+        {"$ref": "#/$defs/ResponseMessageItem"},
+        {"$ref": "#/$defs/ResponseFunctionCallItem"},
+        {"$ref": "#/$defs/ResponseFileSearchCallItem"}
+      ]
+    },
+    "PublicResponseError": {
+      "type": "object",
+      "required": ["code", "message", "param"],
+      "properties": {
+        "code": {"type": "string"},
+        "message": {"type": "string"},
+        "param": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "ResponseUsageInputDetails": {
+      "type": "object",
+      "required": ["cached_tokens"],
+      "properties": {
+        "cached_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResponseUsageOutputDetails": {
+      "type": "object",
+      "required": ["reasoning_tokens"],
+      "properties": {
+        "reasoning_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResponseUsage": {
+      "type": "object",
+      "required": [
+        "input_tokens",
+        "input_tokens_details",
+        "output_tokens",
+        "output_tokens_details",
+        "total_tokens"
+      ],
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "input_tokens_details": {"$ref": "#/$defs/ResponseUsageInputDetails"},
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens_details": {"$ref": "#/$defs/ResponseUsageOutputDetails"},
+        "total_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "PublicResponse": {
+      "type": "object",
+      "required": ["id", "object", "status", "output", "usage", "error"],
+      "properties": {
+        "id": {"type": "string"},
+        "object": {"const": "response"},
+        "status": {"$ref": "#/$defs/ResponseStatus"},
+        "output": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/ResponseOutputItem"}
+        },
+        "usage": {
+          "oneOf": [
+            {"$ref": "#/$defs/ResponseUsage"},
+            {"type": "null"}
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {"$ref": "#/$defs/PublicResponseError"},
+            {"type": "null"}
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ArtifactRef": {
+      "type": "object",
+      "required": ["artifact_id", "content_hash", "size_bytes", "media_type"],
+      "properties": {
+        "artifact_id": {"type": "string"},
+        "content_hash": {"type": "string"},
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "media_type": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "WorkflowToolContent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "text"],
+          "properties": {
+            "type": {"const": "output_text"},
+            "text": {"type": "string"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "json"],
+          "properties": {
+            "type": {"const": "output_json"},
+            "json": {}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "artifact"],
+          "properties": {
+            "type": {"const": "output_image"},
+            "artifact": {"$ref": "#/$defs/ArtifactRef"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "artifact"],
+          "properties": {
+            "type": {"const": "output_file"},
+            "artifact": {"$ref": "#/$defs/ArtifactRef"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "artifact"],
+          "properties": {
+            "type": {"const": "output_audio"},
+            "artifact": {"$ref": "#/$defs/ArtifactRef"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "WorkflowToolResult": {
+      "type": "object",
+      "required": ["call_id", "tool_name", "content"],
+      "properties": {
+        "call_id": {"type": "string"},
+        "tool_name": {"type": "string"},
+        "content": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/WorkflowToolContent"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorkflowRetrievalResult": {
+      "type": "object",
+      "required": ["id", "metadata"],
+      "properties": {
+        "id": {"type": "string"},
+        "title": {"type": "string"},
+        "uri": {"type": "string"},
+        "score": {"type": "number"},
+        "snippet": {"type": "string"},
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "artifact": {"$ref": "#/$defs/ArtifactRef"}
+      },
+      "additionalProperties": false
+    },
+    "WorkflowRetrieval": {
+      "type": "object",
+      "required": ["retrieval_id", "results"],
+      "properties": {
+        "retrieval_id": {"type": "string"},
+        "query": {"type": "string"},
+        "results": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/WorkflowRetrievalResult"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorkflowUsageStatus": {
+      "enum": ["complete", "partial", "unavailable"]
+    },
+    "WorkflowPublicError": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"type": "string"},
+        "message": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "WorkflowCompleted": {
+      "type": "object",
+      "required": ["run_id", "result", "tool_results", "retrievals", "usage_status"],
+      "properties": {
+        "run_id": {"type": "string"},
+        "result": {},
+        "tool_results": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/WorkflowToolResult"}
+        },
+        "retrievals": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/WorkflowRetrieval"}
+        },
+        "usage_status": {"$ref": "#/$defs/WorkflowUsageStatus"}
+      },
+      "additionalProperties": false
+    },
+    "WorkflowFailure": {
+      "type": "object",
+      "required": ["run_id", "error", "tool_results", "retrievals", "usage_status"],
+      "properties": {
+        "run_id": {"type": "string"},
+        "error": {"$ref": "#/$defs/WorkflowPublicError"},
+        "tool_results": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/WorkflowToolResult"}
+        },
+        "retrievals": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/WorkflowRetrieval"}
+        },
+        "usage_status": {"$ref": "#/$defs/WorkflowUsageStatus"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseCreated": {
+      "type": "object",
+      "required": ["type", "sequence_number", "response"],
+      "properties": {
+        "type": {"const": "response.created"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "response": {"$ref": "#/$defs/PublicResponse"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseInProgress": {
+      "type": "object",
+      "required": ["type", "sequence_number", "response"],
+      "properties": {
+        "type": {"const": "response.in_progress"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "response": {"$ref": "#/$defs/PublicResponse"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseOutputItemAdded": {
+      "type": "object",
+      "required": ["type", "sequence_number", "output_index", "item"],
+      "properties": {
+        "type": {"const": "response.output_item.added"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "output_index": {"$ref": "#/$defs/Index"},
+        "item": {"$ref": "#/$defs/ResponseOutputItem"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseContentPartAdded": {
+      "type": "object",
+      "required": ["type", "sequence_number", "item_id", "output_index", "content_index", "part"],
+      "properties": {
+        "type": {"const": "response.content_part.added"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "item_id": {"type": "string"},
+        "output_index": {"$ref": "#/$defs/Index"},
+        "content_index": {"$ref": "#/$defs/Index"},
+        "part": {"$ref": "#/$defs/ResponseContentPart"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseOutputTextDelta": {
+      "type": "object",
+      "required": ["type", "sequence_number", "item_id", "output_index", "content_index", "delta"],
+      "properties": {
+        "type": {"const": "response.output_text.delta"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "item_id": {"type": "string"},
+        "output_index": {"$ref": "#/$defs/Index"},
+        "content_index": {"$ref": "#/$defs/Index"},
+        "delta": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseOutputTextDone": {
+      "type": "object",
+      "required": ["type", "sequence_number", "item_id", "output_index", "content_index", "text"],
+      "properties": {
+        "type": {"const": "response.output_text.done"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "item_id": {"type": "string"},
+        "output_index": {"$ref": "#/$defs/Index"},
+        "content_index": {"$ref": "#/$defs/Index"},
+        "text": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseContentPartDone": {
+      "type": "object",
+      "required": ["type", "sequence_number", "item_id", "output_index", "content_index", "part"],
+      "properties": {
+        "type": {"const": "response.content_part.done"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "item_id": {"type": "string"},
+        "output_index": {"$ref": "#/$defs/Index"},
+        "content_index": {"$ref": "#/$defs/Index"},
+        "part": {"$ref": "#/$defs/ResponseContentPart"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseFunctionCallArgumentsDelta": {
+      "type": "object",
+      "required": ["type", "sequence_number", "item_id", "output_index", "delta"],
+      "properties": {
+        "type": {"const": "response.function_call_arguments.delta"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "item_id": {"type": "string"},
+        "output_index": {"$ref": "#/$defs/Index"},
+        "delta": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseFunctionCallArgumentsDone": {
+      "type": "object",
+      "required": ["type", "sequence_number", "item_id", "output_index", "name", "arguments"],
+      "properties": {
+        "type": {"const": "response.function_call_arguments.done"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "item_id": {"type": "string"},
+        "output_index": {"$ref": "#/$defs/Index"},
+        "name": {"type": "string"},
+        "arguments": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseOutputItemDone": {
+      "type": "object",
+      "required": ["type", "sequence_number", "output_index", "item"],
+      "properties": {
+        "type": {"const": "response.output_item.done"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "output_index": {"$ref": "#/$defs/Index"},
+        "item": {"$ref": "#/$defs/ResponseOutputItem"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseFileSearchCallInProgress": {
+      "type": "object",
+      "required": ["type", "sequence_number", "item_id", "output_index"],
+      "properties": {
+        "type": {"const": "response.file_search_call.in_progress"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "item_id": {"type": "string"},
+        "output_index": {"$ref": "#/$defs/Index"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseFileSearchCallSearching": {
+      "type": "object",
+      "required": ["type", "sequence_number", "item_id", "output_index"],
+      "properties": {
+        "type": {"const": "response.file_search_call.searching"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "item_id": {"type": "string"},
+        "output_index": {"$ref": "#/$defs/Index"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseFileSearchCallCompleted": {
+      "type": "object",
+      "required": ["type", "sequence_number", "item_id", "output_index"],
+      "properties": {
+        "type": {"const": "response.file_search_call.completed"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "item_id": {"type": "string"},
+        "output_index": {"$ref": "#/$defs/Index"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseCompleted": {
+      "type": "object",
+      "required": ["type", "sequence_number", "response", "workflow"],
+      "properties": {
+        "type": {"const": "response.completed"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "response": {"$ref": "#/$defs/PublicResponse"},
+        "workflow": {"$ref": "#/$defs/WorkflowCompleted"}
+      },
+      "additionalProperties": false
+    },
+    "ResponseFailed": {
+      "type": "object",
+      "required": ["type", "sequence_number", "response", "workflow"],
+      "properties": {
+        "type": {"const": "response.failed"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "response": {"$ref": "#/$defs/PublicResponse"},
+        "workflow": {"$ref": "#/$defs/WorkflowFailure"}
+      },
+      "additionalProperties": false
+    },
+    "ErrorEvent": {
+      "type": "object",
+      "required": ["type", "sequence_number", "code", "message", "param"],
+      "properties": {
+        "type": {"const": "error"},
+        "sequence_number": {"$ref": "#/$defs/SequenceNumber"},
+        "code": {"type": "string"},
+        "message": {"type": "string"},
+        "param": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -2,14 +2,649 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::engine::worker::{ModelCallCompletion, ModelFinishReason};
 use crate::engine::{
-    AdmissionState, ContentHash, EventSeq, ExecutionEventEnvelope, ExecutionEventId, IntentHash,
-    PendingExecutionEvent, PublicEventContext, PublicEventEnvelope, PublicEventId, PublicEventKind,
-    PublicEventPayload, RunId, RunLifecycle, TransitionKey, EXECUTION_EVENT_SCHEMA_VERSION,
-    PUBLIC_EVENT_SCHEMA_VERSION,
+    ActivationId, AdmissionState, AttemptNo, ContentHash, EventSeq, ExecutionEventEnvelope,
+    ExecutionEventId, IntentHash, PendingExecutionEvent, PublicEventContext, PublicEventEnvelope,
+    PublicEventId, PublicEventKind, PublicEventPayload, ResponseItemAuthority, RunId, RunLifecycle,
+    TransitionKey, EXECUTION_EVENT_SCHEMA_VERSION, PUBLIC_EVENT_SCHEMA_VERSION,
 };
+use crate::runtime::{WorkflowToolPublicProjection, WorkflowToolResult};
 
 use super::{RepositoryError, REPOSITORY_DATA_INVALID};
+use super::{ResponseTerminalKind, ResponseUsageStatus};
+
+pub(crate) struct StoredResponseItem {
+    pub activation_id: String,
+    pub attempt_no: u32,
+    pub model_call_no: u32,
+    pub item_id: String,
+    pub output_index: u32,
+    pub node_id: String,
+    pub item_kind: String,
+    pub item_status: String,
+    pub seal_index: Option<u64>,
+    pub safe_item: Option<Value>,
+}
+
+pub(crate) struct StoredModelCallUsage {
+    pub usage: Option<Value>,
+    pub usage_complete: bool,
+}
+
+/// One completed durable tool-call row at the terminal snapshot boundary.
+///
+/// This type intentionally has no `Debug` implementation: both JSON values
+/// may contain executor-private material and must only cross the closed public
+/// projection below. Repository callers must read rows in the stable identity
+/// order documented by [`project_terminal_tool_results`].
+pub(crate) struct StoredSucceededModelToolCall {
+    pub activation_id: String,
+    pub attempt_no: u32,
+    pub model_call_no: u32,
+    pub call_index: u32,
+    pub call_id: String,
+    pub tool_name: String,
+    pub effective_public_policy: Value,
+    pub completed_result: Value,
+}
+
+impl StoredSucceededModelToolCall {
+    fn order_key(&self) -> (&str, u32, u32, u32) {
+        (
+            &self.activation_id,
+            self.attempt_no,
+            self.model_call_no,
+            self.call_index,
+        )
+    }
+}
+
+/// Revalidates durable completed tool results against their exact frozen
+/// publication policies and returns only the caller-safe typed projection.
+///
+/// The ordering check is part of the hash/replay authority: callers must use
+/// `(activation_id, attempt_no, model_call_no, call_index)` ascending order.
+/// Fully private results are omitted without inspecting their executor value;
+/// an invalid public policy or public result fails closed.
+pub(crate) fn project_terminal_tool_results(
+    calls: Vec<StoredSucceededModelToolCall>,
+) -> Result<Vec<WorkflowToolResult>, RepositoryError> {
+    let mut previous: Option<(&str, u32, u32, u32)> = None;
+    let mut results = Vec::with_capacity(calls.len());
+    for call in &calls {
+        let current = call.order_key();
+        if previous.is_some_and(|previous| previous >= current) {
+            return Err(RepositoryError::invalid_data());
+        }
+        previous = Some(current);
+
+        let projection = WorkflowToolPublicProjection::from_frozen_effective_policy(
+            &call.effective_public_policy,
+        )
+        .map_err(|_| RepositoryError::invalid_data())?;
+        if let Some(result) = projection
+            .project_validated_completed_result(
+                call.call_id.clone(),
+                call.tool_name.clone(),
+                &call.completed_result,
+            )
+            .map_err(|_| RepositoryError::invalid_data())?
+        {
+            results.push(result);
+        }
+    }
+    Ok(results)
+}
+
+pub(crate) struct PreparedModelCallCompletion {
+    pub call_status: &'static str,
+    pub finish_reason: &'static str,
+    pub usage: Option<Value>,
+    pub usage_complete: bool,
+    pub seal_index: Option<u64>,
+    pub safe_item: Option<Value>,
+    pub function_items: Vec<PreparedResponseFunctionPublication>,
+}
+
+pub(crate) struct PreparedResponseFunctionPublication {
+    pub call_index: u32,
+    pub item: ResponseItemAuthority,
+    pub seal_index: u64,
+    pub reserved_safe_item: Value,
+    pub terminal_item_status: &'static str,
+    pub terminal_safe_item: Value,
+}
+
+pub(crate) fn response_item_id(
+    run_id: &RunId,
+    activation_id: &crate::engine::ActivationId,
+    attempt_no: crate::engine::AttemptNo,
+    model_call_no: u32,
+) -> String {
+    let identity = format!(
+        "insight-agent/response-item/v1/{}/{}/{}/{}",
+        run_id.as_str(),
+        activation_id.as_str(),
+        attempt_no.get(),
+        model_call_no
+    );
+    let digest = ContentHash::from_bytes(identity.as_bytes());
+    format!(
+        "msg_{}",
+        digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .unwrap_or(digest.as_str())
+    )
+}
+
+pub(crate) fn function_call_response_item_id(
+    run_id: &RunId,
+    activation_id: &crate::engine::ActivationId,
+    attempt_no: crate::engine::AttemptNo,
+    model_call_no: u32,
+    call_index: u32,
+    call_id: &str,
+    tool_name: &str,
+) -> String {
+    let identity = format!(
+        "insight-agent/function-call-item/v1/{}/{}/{}/{}/{}/{}/{}",
+        run_id.as_str(),
+        activation_id.as_str(),
+        attempt_no.get(),
+        model_call_no,
+        call_index,
+        call_id,
+        tool_name,
+    );
+    let digest = ContentHash::from_bytes(identity.as_bytes());
+    format!(
+        "fc_{}",
+        digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .unwrap_or(digest.as_str())
+    )
+}
+
+pub(crate) fn prepare_model_call_completion(
+    completion: &ModelCallCompletion,
+    expected_item_id: Option<&str>,
+    run_id: &RunId,
+    activation_id: &ActivationId,
+    attempt_no: AttemptNo,
+) -> Result<PreparedModelCallCompletion, RepositoryError> {
+    let safe_item = completion.safe_public_item().cloned();
+    if expected_item_id.is_none()
+        && (completion.public_item_seal_index().is_some() || safe_item.is_some())
+    {
+        return Err(RepositoryError::invalid_data());
+    }
+    if let Some(value) = safe_item.as_ref() {
+        if completion.finish_reason() != ModelFinishReason::Stop {
+            return Err(RepositoryError::invalid_data());
+        }
+        validate_completed_message_item(
+            value,
+            expected_item_id.ok_or_else(RepositoryError::invalid_data)?,
+        )?;
+    }
+    let usage = completion
+        .usage()
+        .map(|usage| {
+            if usage.is_complete() {
+                usage
+                    .public_value()
+                    .ok_or_else(RepositoryError::invalid_data)
+            } else {
+                serde_json::to_value(usage).map_err(|_| RepositoryError::canonicalization())
+            }
+        })
+        .transpose()?;
+    let mut previous_call_index = None;
+    let mut item_ids = std::collections::BTreeSet::new();
+    let mut output_indices = std::collections::BTreeSet::new();
+    let function_items = completion
+        .incomplete_function_calls()
+        .iter()
+        .map(|call| {
+            if matches!(
+                completion.finish_reason(),
+                ModelFinishReason::Stop | ModelFinishReason::ToolCalls
+            ) || previous_call_index.is_some_and(|previous| previous >= call.call_index())
+                || call.call_index().checked_add(1).is_none()
+                || !item_ids.insert(call.public_item().item_id())
+                || !output_indices.insert(call.public_item().output_index())
+            {
+                return Err(RepositoryError::invalid_data());
+            }
+            previous_call_index = Some(call.call_index());
+            let expected_function_item_id = function_call_response_item_id(
+                run_id,
+                activation_id,
+                attempt_no,
+                completion.model_call_no(),
+                call.call_index(),
+                call.call_id(),
+                call.tool_name(),
+            );
+            if call.public_item().item_id() != expected_function_item_id {
+                return Err(RepositoryError::invalid_data());
+            }
+            let safe_item = serde_json::json!({
+                "id": expected_function_item_id,
+                "type": "function_call",
+                "status": "incomplete",
+                "call_id": call.call_id(),
+                "name": call.tool_name(),
+                "arguments": "",
+            });
+            validate_incomplete_function_call_item(&safe_item, call.public_item().item_id())?;
+            Ok(PreparedResponseFunctionPublication {
+                call_index: call.call_index(),
+                item: call.public_item().clone(),
+                seal_index: call.seal_index(),
+                reserved_safe_item: safe_item.clone(),
+                terminal_item_status: "incomplete",
+                terminal_safe_item: safe_item,
+            })
+        })
+        .collect::<Result<Vec<_>, RepositoryError>>()?;
+    Ok(PreparedModelCallCompletion {
+        call_status: match completion.finish_reason() {
+            ModelFinishReason::Stop | ModelFinishReason::ToolCalls => "completed",
+            ModelFinishReason::Length
+            | ModelFinishReason::ContentFilter
+            | ModelFinishReason::Invalid => "failed",
+        },
+        finish_reason: completion.finish_reason().as_str(),
+        usage_complete: completion.usage().is_some_and(|usage| usage.is_complete()),
+        usage,
+        seal_index: completion.public_item_seal_index(),
+        safe_item,
+        function_items,
+    })
+}
+
+fn validate_completed_message_item(
+    value: &Value,
+    expected_item_id: &str,
+) -> Result<(), RepositoryError> {
+    let object = value
+        .as_object()
+        .ok_or_else(RepositoryError::invalid_data)?;
+    let fields_are_closed = object
+        .keys()
+        .all(|key| matches!(key.as_str(), "id" | "type" | "status" | "role" | "content"));
+    if !fields_are_closed
+        || object.get("id").and_then(Value::as_str) != Some(expected_item_id)
+        || object.get("type").and_then(Value::as_str) != Some("message")
+        || object.get("status").and_then(Value::as_str) != Some("completed")
+        || object.get("role").and_then(Value::as_str) != Some("assistant")
+    {
+        return Err(RepositoryError::invalid_data());
+    }
+    let content = object
+        .get("content")
+        .and_then(Value::as_array)
+        .ok_or_else(RepositoryError::invalid_data)?;
+    if content.iter().any(|part| {
+        let Some(part) = part.as_object() else {
+            return true;
+        };
+        !part
+            .keys()
+            .all(|key| matches!(key.as_str(), "type" | "text" | "annotations"))
+            || part.get("type").and_then(Value::as_str) != Some("output_text")
+            || part.get("text").and_then(Value::as_str).is_none()
+            || part
+                .get("annotations")
+                .is_some_and(|annotations| !annotations.is_array())
+    }) {
+        return Err(RepositoryError::invalid_data());
+    }
+    Ok(())
+}
+
+pub(crate) struct PendingResponseSnapshot {
+    pub response_id: String,
+    pub terminal_kind: ResponseTerminalKind,
+    pub response_status: &'static str,
+    pub response: Value,
+    pub workflow: Value,
+    pub manifest: Value,
+    pub usage: Option<Value>,
+    pub usage_status: ResponseUsageStatus,
+    pub snapshot_hash: ContentHash,
+}
+
+pub(crate) fn build_terminal_response_snapshot(
+    run_id: &RunId,
+    lifecycle: RunLifecycle,
+    output: Option<&Value>,
+    error_code: Option<&str>,
+    items: Vec<StoredResponseItem>,
+    model_calls: Vec<StoredModelCallUsage>,
+    tool_results: Vec<WorkflowToolResult>,
+    retrievals: Vec<crate::runtime::response_stream::WorkflowRetrieval>,
+) -> Result<PendingResponseSnapshot, RepositoryError> {
+    let response_id = format!("resp_{}", run_id.as_str());
+    let (terminal_kind, response_status) = match lifecycle {
+        RunLifecycle::Succeeded => (ResponseTerminalKind::Completed, "completed"),
+        RunLifecycle::Failed => (ResponseTerminalKind::Failed, "failed"),
+        RunLifecycle::TimedOut => (ResponseTerminalKind::TimedOut, "failed"),
+        RunLifecycle::Cancelled => (ResponseTerminalKind::Cancelled, "cancelled"),
+        RunLifecycle::Interrupted => (ResponseTerminalKind::Interrupted, "incomplete"),
+        RunLifecycle::Created
+        | RunLifecycle::Active
+        | RunLifecycle::Waiting
+        | RunLifecycle::Completing
+        | RunLifecycle::Terminating => return Err(RepositoryError::invalid_configuration()),
+    };
+    if (lifecycle == RunLifecycle::Succeeded) != output.is_some() {
+        return Err(RepositoryError::invalid_configuration());
+    }
+
+    let mut public_output = Vec::with_capacity(items.len());
+    let mut manifest = Vec::with_capacity(items.len());
+    for item in items {
+        let status = match item.item_status.as_str() {
+            "completed" => "completed",
+            "reserved" | "incomplete" | "incomplete_unsealed" => "incomplete",
+            _ => return Err(RepositoryError::invalid_data()),
+        };
+        let safe_item = match item.safe_item {
+            Some(value) => {
+                validate_terminal_safe_item(
+                    &value,
+                    &item.item_id,
+                    &item.item_kind,
+                    &item.item_status,
+                )?;
+                value
+            }
+            None if item.item_kind == "message" => serde_json::json!({
+                "id": item.item_id,
+                "type": "message",
+                "status": status,
+                "role": "assistant",
+                "content": [],
+            }),
+            None => return Err(RepositoryError::invalid_data()),
+        };
+        public_output.push(safe_item);
+        manifest.push(serde_json::json!({
+            "activation_id": item.activation_id,
+            "attempt_no": item.attempt_no,
+            "model_call_no": item.model_call_no,
+            "item_id": item.item_id,
+            "output_index": item.output_index,
+            "node_id": item.node_id,
+            "kind": item.item_kind,
+            "status": if item.item_status == "reserved" { "incomplete_unsealed" } else { item.item_status.as_str() },
+            "seal_index": item.seal_index,
+        }));
+    }
+
+    let (usage, usage_status) = aggregate_model_usage(&model_calls)?;
+    let public_error = match lifecycle {
+        RunLifecycle::Failed => Some(serde_json::json!({
+            "code": error_code.unwrap_or("RUN_FAILED"),
+            "message": "run failed",
+            "param": Value::Null,
+        })),
+        RunLifecycle::TimedOut => Some(serde_json::json!({
+            "code": "RUN_TIMEOUT",
+            "message": "run timed out",
+            "param": Value::Null,
+        })),
+        _ => None,
+    };
+    let response = serde_json::json!({
+        "id": response_id,
+        "object": "response",
+        "status": response_status,
+        "output": public_output,
+        "usage": usage,
+        "error": public_error,
+    });
+    let shared = serde_json::json!({
+        "run_id": run_id.as_str(),
+        "tool_results": tool_results,
+        "retrievals": retrievals,
+        "usage_status": usage_status.as_str(),
+    });
+    let mut workflow = shared
+        .as_object()
+        .cloned()
+        .ok_or_else(RepositoryError::canonicalization)?;
+    match lifecycle {
+        RunLifecycle::Succeeded => {
+            workflow.insert(
+                "result".to_owned(),
+                output
+                    .cloned()
+                    .ok_or_else(RepositoryError::invalid_configuration)?,
+            );
+        }
+        RunLifecycle::Failed => {
+            workflow.insert(
+                "error".to_owned(),
+                serde_json::json!({
+                    "code": error_code.unwrap_or("RUN_FAILED"),
+                    "message": "run failed",
+                }),
+            );
+        }
+        RunLifecycle::TimedOut => {
+            workflow.insert(
+                "error".to_owned(),
+                serde_json::json!({"code":"RUN_TIMEOUT", "message":"run timed out"}),
+            );
+        }
+        RunLifecycle::Cancelled => {
+            workflow.insert("reason".to_owned(), Value::String("cancelled".to_owned()));
+        }
+        RunLifecycle::Interrupted => {
+            workflow.insert("reason".to_owned(), Value::String("interrupted".to_owned()));
+        }
+        _ => unreachable!("nonterminal lifecycles were rejected above"),
+    }
+    let workflow = Value::Object(workflow);
+    let manifest = Value::Array(manifest);
+    let hash_projection = serde_json::json!({
+        "response_id": response_id,
+        "terminal_kind": terminal_kind.as_str(),
+        "response": response,
+        "workflow": workflow,
+        "public_item_manifest": manifest,
+        "usage": usage,
+        "usage_status": usage_status.as_str(),
+    });
+    let (_, snapshot_hash) = canonical_value(&hash_projection)?;
+    Ok(PendingResponseSnapshot {
+        response_id,
+        terminal_kind,
+        response_status,
+        response,
+        workflow,
+        manifest,
+        usage,
+        usage_status,
+        snapshot_hash,
+    })
+}
+
+fn validate_terminal_safe_item(
+    value: &Value,
+    expected_item_id: &str,
+    expected_kind: &str,
+    stored_status: &str,
+) -> Result<(), RepositoryError> {
+    match expected_kind {
+        "message" if stored_status == "completed" => {
+            validate_completed_message_item(value, expected_item_id)
+        }
+        "function_call" if stored_status == "completed" => {
+            validate_completed_function_call_item(value, expected_item_id)
+        }
+        "function_call" => validate_incomplete_function_call_item(value, expected_item_id),
+        _ => Err(RepositoryError::invalid_data()),
+    }
+}
+
+fn validate_completed_function_call_item(
+    value: &Value,
+    expected_item_id: &str,
+) -> Result<(), RepositoryError> {
+    validate_function_call_item(value, expected_item_id, true)
+}
+
+pub(crate) fn validate_incomplete_function_call_item(
+    value: &Value,
+    expected_item_id: &str,
+) -> Result<(), RepositoryError> {
+    validate_function_call_item(value, expected_item_id, false)
+}
+
+fn validate_function_call_item(
+    value: &Value,
+    expected_item_id: &str,
+    completed: bool,
+) -> Result<(), RepositoryError> {
+    const MAX_FUNCTION_ARGUMENT_BYTES: usize = 262_144;
+
+    let object = value
+        .as_object()
+        .ok_or_else(RepositoryError::invalid_data)?;
+    if !object.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "id" | "type" | "status" | "call_id" | "name" | "arguments"
+        )
+    }) || object.len() != 6
+        || object.get("id").and_then(Value::as_str) != Some(expected_item_id)
+        || object.get("type").and_then(Value::as_str) != Some("function_call")
+        || object.get("status").and_then(Value::as_str)
+            != Some(if completed { "completed" } else { "incomplete" })
+    {
+        return Err(RepositoryError::invalid_data());
+    }
+    let call_id = object
+        .get("call_id")
+        .and_then(Value::as_str)
+        .ok_or_else(RepositoryError::invalid_data)?;
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(RepositoryError::invalid_data)?;
+    let arguments = object
+        .get("arguments")
+        .and_then(Value::as_str)
+        .ok_or_else(RepositoryError::invalid_data)?;
+    if !valid_terminal_label(call_id, 256)
+        || !valid_terminal_label(name, 128)
+        || arguments.len() > MAX_FUNCTION_ARGUMENT_BYTES
+    {
+        return Err(RepositoryError::invalid_data());
+    }
+    if completed {
+        let parsed: Value =
+            serde_json::from_str(arguments).map_err(|_| RepositoryError::invalid_data())?;
+        if !parsed.is_object()
+            || serde_jcs::to_string(&parsed).map_err(|_| RepositoryError::canonicalization())?
+                != arguments
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+    } else if !arguments.is_empty() {
+        // An incomplete durable item may retain stable call metadata, but
+        // never provisional Provider argument bytes.
+        return Err(RepositoryError::invalid_data());
+    }
+    Ok(())
+}
+
+fn valid_terminal_label(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && !value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+}
+
+fn aggregate_model_usage(
+    calls: &[StoredModelCallUsage],
+) -> Result<(Option<Value>, ResponseUsageStatus), RepositoryError> {
+    if calls.is_empty() {
+        return Ok((None, ResponseUsageStatus::Unavailable));
+    }
+    if calls
+        .iter()
+        .any(|call| !call.usage_complete || call.usage.is_none())
+    {
+        return Ok((None, ResponseUsageStatus::Partial));
+    }
+    let mut input_tokens = 0_u64;
+    let mut cached_tokens = 0_u64;
+    let mut output_tokens = 0_u64;
+    let mut reasoning_tokens = 0_u64;
+    let mut total_tokens = 0_u64;
+    for call in calls {
+        let usage = call
+            .usage
+            .as_ref()
+            .and_then(Value::as_object)
+            .ok_or_else(RepositoryError::invalid_data)?;
+        input_tokens = checked_usage_sum(input_tokens, usage_token(usage, "input_tokens")?)?;
+        output_tokens = checked_usage_sum(output_tokens, usage_token(usage, "output_tokens")?)?;
+        total_tokens = checked_usage_sum(total_tokens, usage_token(usage, "total_tokens")?)?;
+        cached_tokens = checked_usage_sum(
+            cached_tokens,
+            usage_detail_token(usage, "input_tokens_details", "cached_tokens")?,
+        )?;
+        reasoning_tokens = checked_usage_sum(
+            reasoning_tokens,
+            usage_detail_token(usage, "output_tokens_details", "reasoning_tokens")?,
+        )?;
+    }
+    Ok((
+        Some(serde_json::json!({
+            "input_tokens": input_tokens,
+            "input_tokens_details": {"cached_tokens": cached_tokens},
+            "output_tokens": output_tokens,
+            "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
+            "total_tokens": total_tokens,
+        })),
+        ResponseUsageStatus::Complete,
+    ))
+}
+
+fn usage_token(usage: &serde_json::Map<String, Value>, name: &str) -> Result<u64, RepositoryError> {
+    usage
+        .get(name)
+        .and_then(Value::as_u64)
+        .ok_or_else(RepositoryError::invalid_data)
+}
+
+fn usage_detail_token(
+    usage: &serde_json::Map<String, Value>,
+    details: &str,
+    name: &str,
+) -> Result<u64, RepositoryError> {
+    usage
+        .get(details)
+        .and_then(Value::as_object)
+        .and_then(|details| details.get(name))
+        .and_then(Value::as_u64)
+        .ok_or_else(RepositoryError::invalid_data)
+}
+
+fn checked_usage_sum(left: u64, right: u64) -> Result<u64, RepositoryError> {
+    left.checked_add(right)
+        .ok_or_else(RepositoryError::invalid_data)
+}
 
 pub(crate) fn canonical_intent_hash<T>(intent: &T) -> Result<IntentHash, RepositoryError>
 where
@@ -554,9 +1189,56 @@ pub(crate) fn parse_admission_state(value: &str) -> Result<AdmissionState, Repos
 
 #[cfg(test)]
 mod tests {
-    use crate::engine::{PublicEventId, PublicEventKind, RunId, TransitionKey};
+    use serde_json::{json, Value};
 
-    use super::{public_event_id, public_event_ordinal};
+    use crate::{
+        engine::{PublicEventId, PublicEventKind, RunId, RunLifecycle, TransitionKey},
+        resources::actions::{ToolPublicArguments, ToolPublicPolicy},
+    };
+
+    use super::{
+        build_terminal_response_snapshot, project_terminal_tool_results, public_event_id,
+        public_event_ordinal, validate_completed_function_call_item, StoredModelCallUsage,
+        StoredResponseItem, StoredSucceededModelToolCall,
+    };
+
+    fn normalized_public_result_schema() -> Value {
+        json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {},
+            "type": "object",
+            "properties": {"indicator": {"type": "string"}},
+            "required": ["indicator"],
+            "additionalProperties": false
+        })
+    }
+
+    fn frozen_policy(call: bool, result: Option<Value>) -> Value {
+        serde_json::to_value(ToolPublicPolicy {
+            call,
+            arguments: ToolPublicArguments::Private,
+            result_schema: result,
+        })
+        .unwrap()
+    }
+
+    fn stored_tool_call(
+        activation_id: &str,
+        call_index: u32,
+        policy: Value,
+        result: Value,
+    ) -> StoredSucceededModelToolCall {
+        StoredSucceededModelToolCall {
+            activation_id: activation_id.to_owned(),
+            attempt_no: 1,
+            model_call_no: 1,
+            call_index,
+            call_id: format!("call_{call_index}"),
+            tool_name: "lookup".to_owned(),
+            effective_public_policy: policy,
+            completed_result: result,
+        }
+    }
 
     #[test]
     fn public_event_identity_binds_run_transition_key_and_kind() {
@@ -597,5 +1279,281 @@ mod tests {
             public_event_ordinal(PublicEventKind::OperationCompleted),
             public_event_ordinal(PublicEventKind::OperationFailed)
         );
+    }
+
+    #[test]
+    fn terminal_function_call_items_are_closed_and_keep_canonical_object_arguments() {
+        let valid = json!({
+            "id": "fc_public",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_1",
+            "name": "lookup",
+            "arguments": "{\"indicator\":\"WBC\",\"value\":12}"
+        });
+        validate_completed_function_call_item(&valid, "fc_public").unwrap();
+
+        let mut extra = valid.clone();
+        extra["private"] = json!("must-not-leak");
+        assert!(validate_completed_function_call_item(&extra, "fc_public").is_err());
+
+        let mut noncanonical = valid.clone();
+        noncanonical["arguments"] = json!("{\"value\":12,\"indicator\":\"WBC\"}");
+        assert!(validate_completed_function_call_item(&noncanonical, "fc_public").is_err());
+
+        let mut non_object = valid;
+        non_object["arguments"] = json!("[1,2,3]");
+        assert!(validate_completed_function_call_item(&non_object, "fc_public").is_err());
+    }
+
+    #[test]
+    fn terminal_tool_results_omit_private_and_fail_closed_for_order_or_public_values() {
+        let projected = project_terminal_tool_results(vec![
+            stored_tool_call(
+                "activation_a",
+                0,
+                frozen_policy(false, None),
+                json!({"executor_secret": "never inspect or publish"}),
+            ),
+            stored_tool_call(
+                "activation_b",
+                0,
+                frozen_policy(true, Some(normalized_public_result_schema())),
+                json!({"indicator": "WBC"}),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].call_id(), "call_0");
+        assert_eq!(
+            projected[0].content()[0].json(),
+            Some(&json!({"indicator": "WBC"}))
+        );
+
+        assert!(project_terminal_tool_results(vec![
+            stored_tool_call("activation_b", 0, frozen_policy(false, None), Value::Null,),
+            stored_tool_call("activation_a", 0, frozen_policy(false, None), Value::Null,),
+        ])
+        .is_err());
+        assert!(project_terminal_tool_results(vec![stored_tool_call(
+            "activation_a",
+            0,
+            frozen_policy(true, Some(normalized_public_result_schema())),
+            json!({"indicator": 7}),
+        )])
+        .is_err());
+    }
+
+    #[test]
+    fn every_terminal_workflow_snapshot_carries_the_same_stable_tool_results() {
+        let run_id = RunId::new("run_terminal_tool_results").unwrap();
+        let terminal_cases = [
+            RunLifecycle::Succeeded,
+            RunLifecycle::Failed,
+            RunLifecycle::TimedOut,
+            RunLifecycle::Cancelled,
+            RunLifecycle::Interrupted,
+        ];
+        let mut observed = Vec::new();
+        for lifecycle in terminal_cases {
+            let tool_results = project_terminal_tool_results(vec![stored_tool_call(
+                "activation_a",
+                0,
+                frozen_policy(true, Some(normalized_public_result_schema())),
+                json!({"indicator": "WBC"}),
+            )])
+            .unwrap();
+            let snapshot = build_terminal_response_snapshot(
+                &run_id,
+                lifecycle,
+                (lifecycle == RunLifecycle::Succeeded).then_some(&json!({"answer": "safe"})),
+                (lifecycle == RunLifecycle::Failed).then_some("RUN_FAILED"),
+                Vec::new(),
+                Vec::new(),
+                tool_results,
+                Vec::new(),
+            )
+            .unwrap();
+            observed.push(snapshot.workflow["tool_results"].clone());
+        }
+        assert!(observed.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(observed[0][0]["content"][0]["type"], "output_json");
+        assert_eq!(observed[0][0]["content"][0]["json"]["indicator"], "WBC");
+
+        let build_replay = || {
+            build_terminal_response_snapshot(
+                &run_id,
+                RunLifecycle::Cancelled,
+                None,
+                Some("SCHEDULER_CANCELLED"),
+                Vec::new(),
+                Vec::new(),
+                project_terminal_tool_results(vec![stored_tool_call(
+                    "activation_a",
+                    0,
+                    frozen_policy(true, Some(normalized_public_result_schema())),
+                    json!({"indicator": "WBC"}),
+                )])
+                .unwrap(),
+                Vec::new(),
+            )
+            .unwrap()
+        };
+        let first = build_replay();
+        let replay = build_replay();
+        assert_eq!(first.workflow, replay.workflow);
+        assert_eq!(first.snapshot_hash, replay.snapshot_hash);
+    }
+
+    #[test]
+    fn terminal_usage_retains_reported_calls_across_failed_and_cancelled_lifecycles() {
+        let run_id = RunId::new("run_terminal_usage_failure_matrix").unwrap();
+        let complete_calls = || {
+            vec![
+                StoredModelCallUsage {
+                    usage: Some(json!({
+                        "input_tokens": 10,
+                        "input_tokens_details": {"cached_tokens": 1},
+                        "output_tokens": 2,
+                        "output_tokens_details": {"reasoning_tokens": 0},
+                        "total_tokens": 12,
+                    })),
+                    usage_complete: true,
+                },
+                StoredModelCallUsage {
+                    usage: Some(json!({
+                        "input_tokens": 20,
+                        "input_tokens_details": {"cached_tokens": 2},
+                        "output_tokens": 4,
+                        "output_tokens_details": {"reasoning_tokens": 1},
+                        "total_tokens": 24,
+                    })),
+                    usage_complete: true,
+                },
+            ]
+        };
+        let expected = json!({
+            "input_tokens": 30,
+            "input_tokens_details": {"cached_tokens": 3},
+            "output_tokens": 6,
+            "output_tokens_details": {"reasoning_tokens": 1},
+            "total_tokens": 36,
+        });
+
+        for lifecycle in [RunLifecycle::Failed, RunLifecycle::Cancelled] {
+            let snapshot = build_terminal_response_snapshot(
+                &run_id,
+                lifecycle,
+                None,
+                (lifecycle == RunLifecycle::Failed).then_some("PROVIDER_FAILED"),
+                Vec::new(),
+                complete_calls(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(snapshot.response["usage"], expected);
+            assert_eq!(snapshot.workflow["usage_status"], "complete");
+            assert_eq!(snapshot.usage.as_ref(), Some(&expected));
+        }
+    }
+
+    #[test]
+    fn terminal_usage_marks_provider_omission_without_fabricating_zeroes() {
+        let run_id = RunId::new("run_terminal_usage_missing").unwrap();
+        let unavailable = build_terminal_response_snapshot(
+            &run_id,
+            RunLifecycle::Cancelled,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(unavailable.response["usage"], Value::Null);
+        assert_eq!(unavailable.workflow["usage_status"], "unavailable");
+        assert_eq!(unavailable.usage, None);
+
+        let partial = build_terminal_response_snapshot(
+            &run_id,
+            RunLifecycle::Failed,
+            None,
+            Some("PROVIDER_FAILED"),
+            Vec::new(),
+            vec![
+                StoredModelCallUsage {
+                    usage: Some(json!({
+                        "input_tokens": 10,
+                        "input_tokens_details": {"cached_tokens": 1},
+                        "output_tokens": 2,
+                        "output_tokens_details": {"reasoning_tokens": 0},
+                        "total_tokens": 12,
+                    })),
+                    usage_complete: true,
+                },
+                StoredModelCallUsage {
+                    usage: None,
+                    usage_complete: false,
+                },
+            ],
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(partial.response["usage"], Value::Null);
+        assert_eq!(partial.workflow["usage_status"], "partial");
+        assert_eq!(partial.usage, None);
+    }
+
+    #[test]
+    fn terminal_function_call_reservation_is_incomplete_without_provisional_arguments() {
+        let run_id = RunId::new("run_incomplete_function_call").unwrap();
+        let item = |arguments: &str| StoredResponseItem {
+            activation_id: "activation_a".to_owned(),
+            attempt_no: 1,
+            model_call_no: 1,
+            item_id: "fc_safe".to_owned(),
+            output_index: 0,
+            node_id: "answer".to_owned(),
+            item_kind: "function_call".to_owned(),
+            item_status: "reserved".to_owned(),
+            seal_index: None,
+            safe_item: Some(json!({
+                "id": "fc_safe",
+                "type": "function_call",
+                "status": "incomplete",
+                "call_id": "call_safe",
+                "name": "lookup",
+                "arguments": arguments,
+            })),
+        };
+        let snapshot = build_terminal_response_snapshot(
+            &run_id,
+            RunLifecycle::Cancelled,
+            None,
+            Some("SCHEDULER_CANCELLED"),
+            vec![item("")],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.response["output"][0]["status"], "incomplete");
+        assert_eq!(snapshot.response["output"][0]["arguments"], "");
+        assert_eq!(snapshot.manifest[0]["status"], "incomplete_unsealed");
+
+        assert!(build_terminal_response_snapshot(
+            &run_id,
+            RunLifecycle::Cancelled,
+            None,
+            Some("SCHEDULER_CANCELLED"),
+            vec![item(r#"{"secret":"#)],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .is_err());
     }
 }

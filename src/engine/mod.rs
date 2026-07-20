@@ -15,6 +15,8 @@ pub mod leaf_adapters;
 pub mod plan;
 pub mod recovery;
 pub mod repository;
+pub mod retrieval;
+pub mod retrieval_adapter;
 pub mod run;
 pub mod scheduler;
 pub mod scope;
@@ -59,8 +61,9 @@ pub use identity::{
     PortId, RunId, ScopeInstanceId,
 };
 pub use leaf_adapters::{
-    production_worker_registry, production_worker_registry_with_leaf_adapters, LlmTokenObservation,
-    V3ActionTaskExecutor, V3LlmTaskExecutor,
+    production_worker_registry, production_worker_registry_with_leaf_adapters,
+    production_worker_registry_with_live_response, LlmTokenObservation, V3ActionTaskExecutor,
+    V3LlmTaskExecutor,
 };
 pub use plan::{
     BranchCaseId, ControlEdge, ControlEdgeId, ControlPort, ControlPortId, ControlRoute,
@@ -81,6 +84,14 @@ pub use recovery::{
     ReuseRejection, ReuseTargetContract, RunLineage, RunLineageKind, RECOVERY_LINEAGE_INVALID,
     RECOVERY_MATERIALIZATION_MISMATCH, RECOVERY_MIGRATION_NOT_READY,
     RECOVERY_MIGRATION_SCHEMA_INCOMPATIBLE, RECOVERY_REUSE_INELIGIBLE, RECOVERY_REVISION_MISMATCH,
+};
+pub use retrieval::{
+    deterministic_retrieval_id, FrozenRetrievalTarget, RetrievalCompletion,
+    RETRIEVAL_BINDING_INVALID, RETRIEVAL_COMPLETION_INVALID,
+};
+pub use retrieval_adapter::{
+    install_retrieval_workers, production_worker_registry_with_live_response_and_retrievals,
+    production_worker_registry_with_retrievals, V3RetrievalTaskExecutor,
 };
 pub use run::{
     RunExecutionAggregate, RunTerminationProgress, RunWorkProjection,
@@ -105,8 +116,11 @@ pub use state::{
 };
 pub use value::{ArtifactRef, InlineValueRef, ValueRef};
 pub use worker::{
-    LeafTaskExecutor, TaskExecutionRequest, TaskExecutionResult, WorkerExecutionContext,
-    WorkerExecutorRegistry, WorkerFailure, WorkerFailureClass, WORKER_EXECUTION_CONTEXT_INVALID,
-    WORKER_FAILURE_INVALID, WORKER_IMPLEMENTATION_NOT_FOUND, WORKER_OUTPUT_INVALID,
+    LeafTaskExecutor, ModelCallAuthority, ModelCallCompletion, ModelContinuationTurn,
+    ModelFinishReason, ModelFunctionCallPublication, ModelIncompleteFunctionCallPublication,
+    ModelTokenUsage, ModelToolCall, ModelToolCallBatch, ModelToolResult, ResponseItemAuthority,
+    TaskExecutionRequest, TaskExecutionResult, WorkerExecutionContext, WorkerExecutorRegistry,
+    WorkerFailure, WorkerFailureClass, WORKER_EXECUTION_CONTEXT_INVALID, WORKER_FAILURE_INVALID,
+    WORKER_IMPLEMENTATION_NOT_FOUND, WORKER_MODEL_TOOL_CLAIM_INVALID, WORKER_OUTPUT_INVALID,
     WORKER_TASK_KIND_MISMATCH,
 };

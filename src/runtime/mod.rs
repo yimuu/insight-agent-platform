@@ -1,12 +1,35 @@
 pub mod control;
+pub mod postgres_response_broker;
+pub mod response_stream;
 pub mod v3_service;
 
 use std::{error::Error, fmt};
 
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
+pub use postgres_response_broker::{
+    postgres_live_response_channel, PostgresLiveResponseBroker, PostgresLiveResponseBrokerOptions,
+    POSTGRES_LIVE_RESPONSE_MAX_NOTIFY_BYTES,
+};
+pub use response_stream::{
+    CompletedFunctionCallPublication, CompletedFunctionCallTailPublication,
+    InMemoryLiveResponseBroker, LiveResponseBroker, LiveResponseBrokerCapability,
+    LiveResponseBrokerError, LiveResponseByteLimits, LiveResponseCloseOutcome,
+    LiveResponseDelivery, LiveResponseGap, LiveResponseItemIdentity, LiveResponsePayload,
+    LiveResponsePublication, LiveResponsePublishOutcome, LiveResponseSeal, LiveResponseSealStatus,
+    LiveResponseSourceIdentity, LiveResponseSubscriber, LiveWorkflowObservationIdentity,
+    PublicResponse, PublicResponseError, ResponseContentPart, ResponseItemStatus,
+    ResponseObjectKind, ResponseOutputItem, ResponseRole, ResponseStatus, ResponseStreamEvent,
+    ResponseStreamEventType, ResponseUsage, ResponseUsageInputDetails, ResponseUsageOutputDetails,
+    WorkflowCompleted, WorkflowFailure, WorkflowPublicError, WorkflowPublicResultError,
+    WorkflowRetrieval, WorkflowRetrievalMetadata, WorkflowRetrievalPublicProjection,
+    WorkflowRetrievalResult, WorkflowStopReason, WorkflowStopped, WorkflowStreamGapAction,
+    WorkflowToolCompletedArgumentsProjection, WorkflowToolContent, WorkflowToolPublicProjection,
+    WorkflowToolResult, WorkflowUsageStatus, MAX_FUNCTION_CALL_ARGUMENT_BYTES,
+    RESPONSE_STREAM_PROTOCOL_VERSION,
+};
 pub use v3_service::{
     AttachedRun, DeployedAgentCatalog, ForkRecoveryOptions, GraphPublication,
-    MigrationNodeMappingRequest, ProductionRunRepository, RecoveryOperation,
+    MigrationNodeMappingRequest, ProductionRunRepository, PublicArtifact, RecoveryOperation,
     RecoveryRequestMetadata, RecoveryReusePolicy, RecoveryRunResult, RequestMetadata,
     RunRepositoryCapability, RunService, RunServiceConfig, RunSubscription, ServiceError,
     SubscriptionError,

@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 
 use insight_agent_platform::{
     config::{
-        ArtifactStoreProvider, AuthConfig, DeploymentMode, HistoryConfig, PlatformConfig,
-        PlatformConfigError,
+        ArtifactStoreProvider, AuthConfig, DeploymentMode, HistoryConfig,
+        LiveResponseBrokerProvider, PlatformConfig, PlatformConfigError,
     },
     resources::config::load_model_registry_with_env,
 };
@@ -139,6 +139,31 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
         config.runtime.public_event_prune_interval,
         Duration::from_secs(60)
     );
+    assert_eq!(
+        config.runtime.response_stream.broker,
+        LiveResponseBrokerProvider::InProcess
+    );
+    assert_eq!(config.runtime.response_stream.body_queue_capacity, 256);
+    assert_eq!(config.runtime.response_stream.control_queue_capacity, 32);
+    assert_eq!(config.runtime.response_stream.max_frame_bytes, 4 * 1024);
+    assert_eq!(
+        config.runtime.response_stream.max_item_bytes,
+        4 * 1024 * 1024
+    );
+    assert_eq!(
+        config.runtime.response_stream.max_run_bytes,
+        16 * 1024 * 1024
+    );
+    assert_eq!(
+        config.runtime.response_stream.terminal_barrier_timeout,
+        Duration::from_secs(2)
+    );
+    assert_eq!(
+        config.runtime.response_stream.outbound_write_timeout,
+        Duration::from_secs(10)
+    );
+    assert_eq!(config.runtime.max_llm_tool_rounds, 16);
+    assert_eq!(config.runtime.max_llm_tool_calls, 64);
     assert_eq!(config.agents.directory, directory.path().join("agents"));
     assert_eq!(
         config.models.config,
@@ -155,6 +180,7 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
         directory.path().join("data/artifacts")
     );
     assert_eq!(config.artifacts.inline_threshold_bytes, 64 * 1024);
+    assert_eq!(config.artifacts.max_read_bytes, 64 * 1024 * 1024);
     assert_eq!(
         config.artifacts.provider,
         ArtifactStoreProvider::LocalFilesystem
@@ -176,7 +202,7 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
 fn artifact_store_policy_is_strict_resolved_and_bounded() {
     let explicit = base_yaml("  mode: disabled").replace(
         "runtime:",
-        "artifacts:\n  provider: local_filesystem\n  directory: objects\n  inline_threshold_bytes: 1024\n  orphan_retention: 2h\n  reference_retention: 7d\n  gc_interval: 15s\n  deletion_claim_seconds: 30\nruntime:",
+        "artifacts:\n  provider: local_filesystem\n  directory: objects\n  inline_threshold_bytes: 1024\n  max_read_bytes: 4096\n  orphan_retention: 2h\n  reference_retention: 7d\n  gc_interval: 15s\n  deletion_claim_seconds: 30\nruntime:",
     );
     let (directory, path) = write_config(&explicit);
     let config = load(&path, BTreeMap::new()).unwrap();
@@ -185,6 +211,7 @@ fn artifact_store_policy_is_strict_resolved_and_bounded() {
         directory.path().join("config/objects")
     );
     assert_eq!(config.artifacts.inline_threshold_bytes, 1024);
+    assert_eq!(config.artifacts.max_read_bytes, 4096);
     assert_eq!(
         config.artifacts.orphan_retention,
         Duration::from_secs(7_200)
@@ -201,6 +228,8 @@ fn artifact_store_policy_is_strict_resolved_and_bounded() {
             "  inline_threshold_bytes: 1024",
             "  inline_threshold_bytes: 0",
         ),
+        ("  max_read_bytes: 4096", "  max_read_bytes: 0"),
+        ("  max_read_bytes: 4096", "  max_read_bytes: 268435457"),
         ("  orphan_retention: 2h", "  orphan_retention: 0s"),
         ("  reference_retention: 7d", "  reference_retention: 0s"),
         ("  reference_retention: 7d", "  reference_retention: 500ms"),
@@ -350,6 +379,62 @@ fn lifecycle_durations_are_configurable_and_hard_deadline_exceeds_grace_period()
             "PLATFORM_RUNTIME_INVALID"
         );
     }
+}
+
+#[test]
+fn response_stream_transport_and_bounds_are_closed_and_validated() {
+    let response_stream = "  subscriber_capacity: 64\n  max_llm_tool_rounds: 8\n  max_llm_tool_calls: 32\n  response_stream:\n    broker: in_process\n    body_queue_capacity: 17\n    control_queue_capacity: 5\n    max_frame_bytes: 8192\n    max_item_bytes: 65536\n    max_run_bytes: 262144\n    terminal_barrier_timeout: 750ms\n    outbound_write_timeout: 3s";
+    let yaml = base_yaml("  mode: disabled").replace("  subscriber_capacity: 64", response_stream);
+    let (_directory, path) = write_config(&yaml);
+    let config = load(&path, BTreeMap::new()).unwrap();
+    assert_eq!(
+        config.runtime.response_stream.broker,
+        LiveResponseBrokerProvider::InProcess
+    );
+    assert_eq!(config.runtime.response_stream.body_queue_capacity, 17);
+    assert_eq!(config.runtime.response_stream.control_queue_capacity, 5);
+    assert_eq!(config.runtime.response_stream.max_frame_bytes, 8192);
+    assert_eq!(
+        config.runtime.response_stream.terminal_barrier_timeout,
+        Duration::from_millis(750)
+    );
+    assert_eq!(config.runtime.max_llm_tool_rounds, 8);
+    assert_eq!(config.runtime.max_llm_tool_calls, 32);
+
+    for (valid, invalid) in [
+        ("    body_queue_capacity: 17", "    body_queue_capacity: 0"),
+        (
+            "    control_queue_capacity: 5",
+            "    control_queue_capacity: 0",
+        ),
+        ("    max_frame_bytes: 8192", "    max_frame_bytes: 128"),
+        ("    max_item_bytes: 65536", "    max_item_bytes: 4096"),
+        ("    max_run_bytes: 262144", "    max_run_bytes: 32768"),
+        (
+            "    terminal_barrier_timeout: 750ms",
+            "    terminal_barrier_timeout: 0s",
+        ),
+        (
+            "    outbound_write_timeout: 3s",
+            "    outbound_write_timeout: 0s",
+        ),
+        ("  max_llm_tool_rounds: 8", "  max_llm_tool_rounds: 0"),
+        ("  max_llm_tool_calls: 32", "  max_llm_tool_calls: 4"),
+    ] {
+        let invalid_yaml = yaml.replace(valid, invalid);
+        let (_directory, path) = write_config(&invalid_yaml);
+        assert_eq!(
+            load(&path, BTreeMap::new()).unwrap_err().code(),
+            "PLATFORM_RUNTIME_INVALID"
+        );
+    }
+
+    let postgres_oversized = yaml.replace("    broker: in_process", "    broker: postgres_notify");
+    let (_directory, path) = write_config(&postgres_oversized);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_RUNTIME_INVALID"
+    );
 }
 
 #[test]

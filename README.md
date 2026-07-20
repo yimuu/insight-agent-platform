@@ -142,6 +142,7 @@ workflow:
 | `POST` | `/v1/agents/{agent_id}/runs` | 创建 detached Run |
 | `POST` | `/v1/agents/{agent_id}/runs/stream` | 创建 attached SSE Run |
 | `GET` | `/v1/runs/{run_id}` | 查询持久化 Run |
+| `GET` | `/v1/runs/{run_id}/artifacts/{artifact_id}` | 在认证、Run 归属、公共终态引用、大小和 retention 校验后读取 Artifact 原始字节 |
 | `GET` | `/v1/runs/{run_id}/execution-graph` | 读取该 Run 固定 revision 的只读执行图 |
 | `GET` | `/v1/runs/{run_id}/trace` | 读取按稳定节点/Activation ID 关联的 trace overlay |
 | `DELETE` | `/v1/runs/{run_id}` | 请求取消 |
@@ -156,7 +157,18 @@ workflow:
 | `POST` | `/v1/human-tasks/{work_item_id}/claim` | 使用 `{}` 请求体和 `X-Request-ID` 幂等抢占工作项 |
 | `POST` | `/v1/human-tasks/{work_item_id}/complete` | 以 `{claim_fence, value}` 和 `X-Request-ID` 幂等完成工作项 |
 
-Attached SSE 是实时投影，不是历史重放接口；非终态连接断开会立即提交取消意图，并按结构化并发合同完成 drain。断开本身不能伪造终态或覆盖已经提交的数据库赢家。需要脱离连接继续执行时应创建 Detached Run；Detached 查询和所有控制接口都读取或写入同一个持久化 Run。
+Attached SSE 使用固定的 `response-stream/v1` 用户响应协议。连接依次发送
+`response.created`、`response.in_progress`、作者以 LLM 顶层 `publish: true` 授权的实时内容，最后发送
+唯一的 durable terminal snapshot 并立即 EOF。`stream` 只控制 Provider 请求模式，`publish` 只控制
+provisional 内容可见性；四种组合都返回相同的强类型最终结果。终包包含 OpenAI 命名的 token usage、
+`workflow.result` 和持久化 `response.id`；GET Run 通过 `response_id` 暴露同一身份。该端点不发送
+`run.*`、`operation.*` 或 `output_bytes`，这些信息仍属于内部 durable trace。
+
+Attached SSE 是实时投影，不是历史重放接口；不发送 SSE `id`，也不接受 `Last-Event-ID` 恢复。临时
+delta 有界且 best-effort，发生丢失时发送 `workflow.stream.gap`，客户端以终包校准。非终态连接断开
+会立即提交取消意图，并按结构化并发合同完成 drain。断开本身不能伪造终态或覆盖已经提交的数据库
+赢家。需要脱离连接继续执行时应创建 Detached Run；Detached 查询和所有控制接口都读取或写入同一个
+持久化 Run。
 GraphAuthorDocument 发布时会重新验证并编译为 Canonical Plan；Run 只执行固定的不可变 Plan，布局专用 ViewDocument 与 trace overlay 都不是执行真相。View 的 CAS 冲突或损坏不会改变已发布 revision，也不会影响已有或后续 pinned Run。
 恢复接口要求稳定的 `X-Request-ID` 和 `expected_projection_version`。Fork 的 `target_deployment_revision_id`、`checkpoint_id` 与 `input` 只是选择器：checkpoint content hash、复用 candidate、effect proof、revision/interface/schema 兼容证据仍由服务端从 durable authority 推导，客户端不能注入这些低层证明。
 

@@ -262,6 +262,7 @@ fn every_run_lifecycle_round_trips_through_flattened_record_and_summary_shapes()
     for lifecycle in lifecycles {
         let record = RunRecord {
             run_id: "run_round_trip".into(),
+            response_id: "resp_run_round_trip".into(),
             projection_version: 7,
             request_id: "req_round_trip".into(),
             agent_id: "agent_round_trip".into(),
@@ -324,6 +325,7 @@ fn formal_history_records_preserve_version_attachment_and_sanitized_terminal_dat
     };
     let record = RunRecord {
         run_id: new_run.run_id.clone(),
+        response_id: "resp_run_1".to_owned(),
         projection_version: 9,
         request_id: new_run.request_id.clone(),
         agent_id: new_run.agent_id.clone(),

@@ -549,6 +549,67 @@ workflow:
 }
 
 #[test]
+fn native_llm_graph_reduces_descriptor_v2_without_losing_publication_contracts() {
+    const SOURCE: &str = r#"api_version: insight.agent/v3
+kind: agent
+inputs: {}
+output: string
+workflow:
+  steps:
+    - id: answer
+      type: llm
+      model: general_chat
+      messages:
+        - role: user
+          content: [{text: hello}]
+      stream: false
+      publish: true
+      tools: [lookup]
+      tool_choice: required
+      tool_limits: {max_rounds: 2, max_calls: 5}
+      response: string
+    - return: $answer
+"#;
+    let plan = compile_source(SOURCE, options("native_llm.yaml", SOURCE)).unwrap();
+    let expected_hash = plan.semantic_hash().clone();
+    let graph = GraphAuthorDocument::from_verified_plan(
+        GraphDocumentId::new("native_llm_graph").unwrap(),
+        plan,
+    )
+    .unwrap();
+    let graph = GraphAuthorDocument::decode_json(&graph.encode_json().unwrap()).unwrap();
+
+    let reduced = graph.to_structured().unwrap();
+    let insight_agent_platform::dsl::v3::ast::Step::Leaf(leaf) = &reduced.document().steps[0]
+    else {
+        panic!("expected reduced LLM leaf");
+    };
+    let llm = leaf.llm.as_ref().unwrap();
+    assert!(!llm.stream);
+    assert!(llm.publish);
+    assert_eq!(llm.tools, ["lookup"]);
+    assert_eq!(
+        llm.tool_choice,
+        insight_agent_platform::dsl::v3::ast::LlmToolChoice::Required
+    );
+    assert_eq!(
+        (llm.tool_limits.max_rounds, llm.tool_limits.max_calls),
+        (2, 5)
+    );
+
+    let recompiled = compile_source(
+        reduced.source(),
+        options("native_llm_reduced.json", reduced.source()),
+    )
+    .unwrap();
+    assert_eq!(recompiled.semantic_hash(), &expected_hash);
+
+    let changed = SOURCE.replace("stream: false", "stream: true");
+    let changed = compile_source(&changed, options("native_llm_changed.yaml", &changed)).unwrap();
+    assert_ne!(changed.semantic_hash(), &expected_hash);
+}
+
+#[test]
 fn native_graph_input_contract_round_trip_preserves_presence_defaults_and_hash() {
     const SOURCE: &str = r#"api_version: insight.agent/v3
 kind: agent

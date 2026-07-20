@@ -13,6 +13,7 @@ use crate::engine::NodeId;
 pub enum LeafTaskKind {
     Llm,
     Action,
+    Retrieval,
     Http,
     Tool,
 }
@@ -22,6 +23,7 @@ impl LeafTaskKind {
         match self {
             Self::Llm => "llm_task",
             Self::Action => "action_task",
+            Self::Retrieval => "retrieval_task",
             Self::Http => "http_task",
             Self::Tool => "tool_task",
         }
@@ -566,6 +568,7 @@ impl<'a> PlanIndex<'a> {
         let (kind, descriptor) = match node.kind() {
             NodeKind::LlmTask(value) => (LeafTaskKind::Llm, value),
             NodeKind::ActionTask(value) => (LeafTaskKind::Action, value),
+            NodeKind::RetrievalTask(value) => (LeafTaskKind::Retrieval, value),
             NodeKind::HttpTask(value) => (LeafTaskKind::Http, value),
             NodeKind::ToolTask(value) => (LeafTaskKind::Tool, value),
             _ => return None,

@@ -203,6 +203,7 @@ pub struct DescriptorContract {
     descriptor_version: VersionTag,
     configuration: DescriptorConfigurationContract,
     worker: WorkerContract,
+    deployment_binding: serde_json::Value,
 }
 
 impl DescriptorContract {
@@ -217,7 +218,24 @@ impl DescriptorContract {
             descriptor_version,
             configuration,
             worker,
+            deployment_binding: serde_json::Value::Object(Default::default()),
         }
+    }
+
+    /// Freezes publication-time, non-secret provider/tool binding evidence
+    /// into every durable worker dispatch. Author configuration and deployment
+    /// binding deliberately remain separate trust domains.
+    pub fn with_deployment_binding(
+        mut self,
+        binding: serde_json::Value,
+    ) -> Result<Self, PlanError> {
+        if !binding.is_object() || serde_jcs::to_vec(&binding).is_err() {
+            return Err(link_error(
+                "descriptor deployment binding must be one canonical non-secret object",
+            ));
+        }
+        self.deployment_binding = binding;
+        Ok(self)
     }
 
     pub fn implementation(&self) -> &str {
@@ -234,6 +252,10 @@ impl DescriptorContract {
 
     pub fn worker(&self) -> &WorkerContract {
         &self.worker
+    }
+
+    pub fn deployment_binding(&self) -> &serde_json::Value {
+        &self.deployment_binding
     }
 }
 

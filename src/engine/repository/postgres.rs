@@ -22,14 +22,17 @@ use super::postgres_projection::{
 };
 use super::{
     common::{
-        canonical_intent_hash, canonical_value, decode_public_projection_decision,
-        decode_stored_execution_event, durable_public_event_envelope, event_id, i64_from_u64,
-        parse_admission_state, parse_run_lifecycle, payload_id, public_event_id,
+        build_terminal_response_snapshot, canonical_intent_hash, canonical_value,
+        decode_public_projection_decision, decode_stored_execution_event,
+        durable_public_event_envelope, event_id, i64_from_u64, parse_admission_state,
+        parse_run_lifecycle, payload_id, project_terminal_tool_results, public_event_id,
         public_event_ordinal, u64_from_i64, validate_inline_payload, StoredExecutionEventRow,
-        StoredPublicProjectionDecision,
+        StoredModelCallUsage, StoredPublicProjectionDecision, StoredResponseItem,
+        StoredSucceededModelToolCall,
     },
-    CommitReceipt, CreateRunCommand, DurableRepository, PlanInstallOutcome, PlanPublicationOutcome,
-    PublicationHead, PublicationOrigin, PublishVersionedPlanCommand, RepositoryError,
+    CommitReceipt, CreateRunCommand, DurableRepository, DurableResponseSnapshot,
+    PlanInstallOutcome, PlanPublicationOutcome, PublicationHead, PublicationOrigin,
+    PublishVersionedPlanCommand, RepositoryError, ResponseTerminalKind, ResponseUsageStatus,
     RunProjection, RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
     REPOSITORY_PLAN_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
 };
@@ -146,6 +149,14 @@ impl PostgresDurableRepository {
             .await
             .map_err(RepositoryError::storage)?;
         Ok(Self { pool })
+    }
+
+    /// Shares the configured PostgreSQL endpoint with infrastructure that is
+    /// explicitly non-durable (for example LISTEN/NOTIFY live responses).
+    /// Cloning a `PgPool` does not duplicate credentials into application
+    /// payloads and preserves one startup/readiness authority.
+    pub fn connection_pool(&self) -> PgPool {
+        self.pool.clone()
     }
 
     /// Runs the production forward-only coordinator. A fixed transaction-level
@@ -453,12 +464,13 @@ impl DurableRepository for PostgresDurableRepository {
                 replacement_run_id, next_event_seq, projection_version,
                 scheduler_lease_epoch, scheduler_lease_owner,
                 scheduler_lease_expires_at, scheduler_heartbeat_at,
-                created_at, started_at, updated_at, terminal_at, deadline_at
+                created_at, started_at, updated_at, terminal_at, deadline_at,
+                artifact_reference_retention_seconds
              ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, 'created', 'open',
                 NULL, NULL, NULL, $9, NULL, NULL, NULL, NULL, NULL, NULL,
                 NULL, NULL, 1, NULL, 1, 0, 0, NULL, NULL, NULL,
-                CURRENT_TIMESTAMP, NULL, CURRENT_TIMESTAMP, NULL, $10
+                CURRENT_TIMESTAMP, NULL, CURRENT_TIMESTAMP, NULL, $10, $11
              ) ON CONFLICT (run_id) DO NOTHING",
         )
         .bind(command.run_id().as_str())
@@ -471,6 +483,7 @@ impl DurableRepository for PostgresDurableRepository {
         .bind(command.attachment().as_str())
         .bind(&input_payload_id)
         .bind(run_deadline_at)
+        .bind(i64::from(command.artifact_reference_retention_seconds()))
         .execute(&mut *transaction)
         .await
         .map_err(RepositoryError::storage)?
@@ -743,6 +756,30 @@ impl DurableRepository for PostgresDurableRepository {
             .await
             .map_err(RepositoryError::storage)?;
         }
+        if command.next_lifecycle().is_terminal() {
+            super::postgres_model_tool_queue::close_model_tool_work_for_terminal_run_postgres(
+                &mut transaction,
+                command.run_id(),
+            )
+            .await?;
+            persist_terminal_response_snapshot_postgres(
+                &mut transaction,
+                command.run_id(),
+                command.next_lifecycle(),
+                command.terminal().and_then(TerminalRunMutation::output),
+                command.terminal().and_then(TerminalRunMutation::error_code),
+            )
+            .await?;
+            register_terminal_artifact_retention_postgres(
+                &mut transaction,
+                command.run_id(),
+                &transition_key,
+                intent_hash.as_str(),
+                &event_id,
+                event_seq,
+            )
+            .await?;
+        }
         finalize_projection_checkpoints(&mut transaction, command.run_id(), &event_id).await?;
         transaction
             .commit()
@@ -760,7 +797,7 @@ impl DurableRepository for PostgresDurableRepository {
 
     async fn load_run(&self, run_id: &RunId) -> Result<Option<RunProjection>, RepositoryError> {
         let row = sqlx::query(
-            "SELECT r.definition_id,d.agent_id,r.definition_revision_id,
+            "SELECT r.response_id,r.definition_id,d.agent_id,r.definition_revision_id,
                     r.deployment_revision_id,r.plan_hash,r.binding_hash,
                     r.request_id,r.attachment,r.lifecycle,
                     r.admission_state,r.projection_version,r.next_event_seq,
@@ -783,6 +820,408 @@ impl DurableRepository for PostgresDurableRepository {
         .map_err(RepositoryError::storage)?;
         row.map(|row| projection_from_row(run_id, &row)).transpose()
     }
+
+    async fn load_response_snapshot(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<DurableResponseSnapshot>, RepositoryError> {
+        load_response_snapshot_postgres(&self.pool, run_id).await
+    }
+}
+
+/// Registers the referenced-Artifact hold in the same first-winner transaction
+/// as Run terminal state, the response snapshot, and terminal public outbox.
+/// The caller must first build the snapshot and validate every first-class
+/// public ArtifactRef. It already owns the Run row lock, preserving the global
+/// Run-first order before any Artifact metadata is touched.
+pub(crate) async fn register_terminal_artifact_retention_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    terminal_transition_key: &TransitionKey,
+    terminal_intent_hash: &str,
+    terminal_event_id: &str,
+    terminal_event_seq: u64,
+) -> Result<(), RepositoryError> {
+    let row = sqlx::query(
+        "SELECT terminal_at,artifact_reference_retention_seconds
+         FROM workflow_runs
+         WHERE run_id=$1
+           AND lifecycle IN ('succeeded','failed','cancelled','interrupted','timed_out')
+           AND admission_state='closed' AND terminal_at IS NOT NULL",
+    )
+    .bind(run_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .ok_or_else(RepositoryError::invalid_data)?;
+    let terminal_at = row
+        .try_get::<DateTime<Utc>, _>("terminal_at")
+        .map_err(|_| RepositoryError::invalid_data())?;
+    let retention_seconds = row
+        .try_get::<i64, _>("artifact_reference_retention_seconds")
+        .map_err(|_| RepositoryError::invalid_data())?;
+    if !(1..=315_360_000).contains(&retention_seconds) {
+        return Err(RepositoryError::invalid_data());
+    }
+    let retain_until = sqlx::query_scalar::<_, DateTime<Utc>>(
+        "SELECT $1::timestamptz + make_interval(secs => $2)",
+    )
+    .bind(terminal_at)
+    .bind(i32::try_from(retention_seconds).map_err(|_| RepositoryError::invalid_data())?)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let artifact_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM artifacts WHERE run_id=$1 AND artifact_state='referenced'",
+    )
+    .bind(run_id.as_str())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    sqlx::query(
+        "UPDATE artifacts SET retain_until=CASE
+             WHEN retain_until IS NULL OR retain_until<$1 THEN $1 ELSE retain_until END
+         WHERE run_id=$2 AND artifact_state='referenced'",
+    )
+    .bind(retain_until)
+    .bind(run_id.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    sqlx::query(
+        "INSERT INTO artifact_retention_releases (
+            run_id,transition_key,intent_hash,event_id,event_seq,retain_until,
+            artifact_count,created_at,registration_kind
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,clock_timestamp(),'terminal_atomic')",
+    )
+    .bind(run_id.as_str())
+    .bind(terminal_transition_key.as_str())
+    .bind(terminal_intent_hash)
+    .bind(terminal_event_id)
+    .bind(i64_from_u64(terminal_event_seq)?)
+    .bind(retain_until)
+    .bind(artifact_count)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    Ok(())
+}
+
+pub(crate) async fn persist_terminal_response_snapshot_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    lifecycle: RunLifecycle,
+    output: Option<&Value>,
+    error_code: Option<&str>,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        "UPDATE response_public_items
+         SET item_status='incomplete_unsealed',updated_at=clock_timestamp()
+         WHERE run_id=$1 AND item_status='reserved'",
+    )
+    .bind(run_id.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let item_rows = sqlx::query(
+        "SELECT activation_id,attempt_no,model_call_no,item_id,output_index,node_id,
+                item_kind,item_status,seal_index,safe_item
+         FROM response_public_items WHERE run_id=$1 ORDER BY output_index",
+    )
+    .bind(run_id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let items = item_rows
+        .into_iter()
+        .map(|row| {
+            Ok(StoredResponseItem {
+                activation_id: row
+                    .try_get("activation_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                attempt_no: u32::try_from(
+                    row.try_get::<i32, _>("attempt_no")
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .map_err(|_| RepositoryError::invalid_data())?,
+                model_call_no: u32::try_from(
+                    row.try_get::<i32, _>("model_call_no")
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .map_err(|_| RepositoryError::invalid_data())?,
+                item_id: row
+                    .try_get("item_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                output_index: u32::try_from(
+                    row.try_get::<i32, _>("output_index")
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .map_err(|_| RepositoryError::invalid_data())?,
+                node_id: row
+                    .try_get("node_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                item_kind: row
+                    .try_get("item_kind")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                item_status: row
+                    .try_get("item_status")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                seal_index: row
+                    .try_get::<Option<i64>, _>("seal_index")
+                    .map_err(|_| RepositoryError::invalid_data())?
+                    .map(u64_from_i64)
+                    .transpose()?,
+                safe_item: row
+                    .try_get("safe_item")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            })
+        })
+        .collect::<Result<Vec<_>, RepositoryError>>()?;
+    let usage_rows = sqlx::query(
+        "SELECT usage,usage_complete FROM model_call_usage
+         WHERE run_id=$1 ORDER BY activation_id,attempt_no,model_call_no",
+    )
+    .bind(run_id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let model_calls = usage_rows
+        .into_iter()
+        .map(|row| {
+            Ok(StoredModelCallUsage {
+                usage: row
+                    .try_get("usage")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                usage_complete: row
+                    .try_get("usage_complete")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            })
+        })
+        .collect::<Result<Vec<_>, RepositoryError>>()?;
+    let tool_results = load_terminal_tool_results_postgres(transaction, run_id).await?;
+    validate_terminal_tool_result_artifacts_postgres(transaction, run_id, &tool_results).await?;
+    let retrievals = super::postgres_retrieval_publication::load_terminal_retrievals_postgres(
+        transaction,
+        run_id,
+    )
+    .await?;
+    validate_terminal_retrieval_artifacts_postgres(transaction, run_id, &retrievals).await?;
+    let snapshot = build_terminal_response_snapshot(
+        run_id,
+        lifecycle,
+        output,
+        error_code,
+        items,
+        model_calls,
+        tool_results,
+        retrievals,
+    )?;
+    sqlx::query(
+        "INSERT INTO response_snapshots (
+            run_id,response_id,terminal_kind,response_status,response_payload,
+            workflow_payload,public_item_manifest,usage,usage_status,snapshot_hash,created_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,clock_timestamp())",
+    )
+    .bind(run_id.as_str())
+    .bind(&snapshot.response_id)
+    .bind(snapshot.terminal_kind.as_str())
+    .bind(snapshot.response_status)
+    .bind(snapshot.response)
+    .bind(snapshot.workflow)
+    .bind(snapshot.manifest)
+    .bind(snapshot.usage)
+    .bind(snapshot.usage_status.as_str())
+    .bind(snapshot.snapshot_hash.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    Ok(())
+}
+
+async fn load_terminal_tool_results_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+) -> Result<Vec<crate::runtime::WorkflowToolResult>, RepositoryError> {
+    let rows = sqlx::query(
+        "SELECT activation_id,attempt_no,model_call_no,call_index,call_id,tool_name,
+                effective_public_policy,result_json
+         FROM model_tool_calls
+         WHERE run_id=$1 AND call_status='succeeded'
+         ORDER BY activation_id COLLATE \"C\",attempt_no,model_call_no,call_index",
+    )
+    .bind(run_id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let calls = rows
+        .into_iter()
+        .map(|row| {
+            Ok(StoredSucceededModelToolCall {
+                activation_id: row
+                    .try_get("activation_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                attempt_no: u32::try_from(
+                    row.try_get::<i32, _>("attempt_no")
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .map_err(|_| RepositoryError::invalid_data())?,
+                model_call_no: u32::try_from(
+                    row.try_get::<i32, _>("model_call_no")
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .map_err(|_| RepositoryError::invalid_data())?,
+                call_index: u32::try_from(
+                    row.try_get::<i32, _>("call_index")
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .map_err(|_| RepositoryError::invalid_data())?,
+                call_id: row
+                    .try_get("call_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                tool_name: row
+                    .try_get("tool_name")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                effective_public_policy: row
+                    .try_get("effective_public_policy")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                completed_result: row
+                    .try_get("result_json")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            })
+        })
+        .collect::<Result<Vec<_>, RepositoryError>>()?;
+    project_terminal_tool_results(calls)
+}
+
+async fn validate_terminal_tool_result_artifacts_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    tool_results: &[crate::runtime::WorkflowToolResult],
+) -> Result<(), RepositoryError> {
+    for artifact in tool_results
+        .iter()
+        .flat_map(|result| result.content())
+        .filter_map(crate::runtime::WorkflowToolContent::artifact)
+    {
+        let row = sqlx::query(
+            "SELECT content_hash,size_bytes,media_type,artifact_state
+             FROM artifacts WHERE run_id=$1 AND artifact_id=$2",
+        )
+        .bind(run_id.as_str())
+        .bind(artifact.artifact_id().as_str())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?
+        .ok_or_else(RepositoryError::invalid_data)?;
+        let content_hash = row
+            .try_get::<String, _>("content_hash")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let size_bytes = u64_from_i64(
+            row.try_get::<i64, _>("size_bytes")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )?;
+        let media_type = row
+            .try_get::<Option<String>, _>("media_type")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let artifact_state = row
+            .try_get::<String, _>("artifact_state")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        if artifact_state != "referenced"
+            || content_hash != artifact.content_hash().as_str()
+            || size_bytes != artifact.size_bytes()
+            || media_type.as_deref() != artifact.media_type()
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+    }
+    Ok(())
+}
+
+async fn validate_terminal_retrieval_artifacts_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    retrievals: &[crate::runtime::response_stream::WorkflowRetrieval],
+) -> Result<(), RepositoryError> {
+    for artifact in retrievals
+        .iter()
+        .flat_map(|retrieval| retrieval.results())
+        .filter_map(crate::runtime::response_stream::WorkflowRetrievalResult::artifact)
+    {
+        let row = sqlx::query(
+            "SELECT content_hash,size_bytes,media_type,artifact_state
+             FROM artifacts WHERE run_id=$1 AND artifact_id=$2",
+        )
+        .bind(run_id.as_str())
+        .bind(artifact.artifact_id().as_str())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?
+        .ok_or_else(RepositoryError::invalid_data)?;
+        let content_hash = row
+            .try_get::<String, _>("content_hash")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let size_bytes = u64_from_i64(
+            row.try_get::<i64, _>("size_bytes")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )?;
+        let media_type = row
+            .try_get::<Option<String>, _>("media_type")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let artifact_state = row
+            .try_get::<String, _>("artifact_state")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        if artifact_state != "referenced"
+            || content_hash != artifact.content_hash().as_str()
+            || size_bytes != artifact.size_bytes()
+            || media_type.as_deref() != artifact.media_type()
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+    }
+    Ok(())
+}
+
+async fn load_response_snapshot_postgres(
+    pool: &PgPool,
+    run_id: &RunId,
+) -> Result<Option<DurableResponseSnapshot>, RepositoryError> {
+    let row = sqlx::query(
+        "SELECT response_id,terminal_kind,response_payload,workflow_payload,
+                public_item_manifest,usage,usage_status,snapshot_hash
+         FROM response_snapshots WHERE run_id=$1",
+    )
+    .bind(run_id.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(RepositoryError::storage)?;
+    row.map(|row| {
+        DurableResponseSnapshot::new(
+            row.try_get("response_id")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            ResponseTerminalKind::parse(
+                &row.try_get::<String, _>("terminal_kind")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )?,
+            row.try_get("response_payload")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            row.try_get("workflow_payload")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            row.try_get("public_item_manifest")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            row.try_get("usage")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            ResponseUsageStatus::parse(
+                &row.try_get::<String, _>("usage_status")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )?,
+            ContentHash::parse(
+                row.try_get::<String, _>("snapshot_hash")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .map_err(|_| RepositoryError::invalid_data())?,
+        )
+    })
+    .transpose()
 }
 
 async fn lock_and_match_publication_heads(
@@ -1734,6 +2173,8 @@ fn projection_from_row(run_id: &RunId, row: &PgRow) -> Result<RunProjection, Rep
     };
     Ok(RunProjection::new(
         run_id.clone(),
+        row.try_get("response_id")
+            .map_err(|_| RepositoryError::invalid_data())?,
         row.try_get("definition_id")
             .map_err(|_| RepositoryError::invalid_data())?,
         row.try_get("agent_id")

@@ -40,14 +40,23 @@ use crate::{
         WorkerCancellation, WorkerEffectClass, WorkerEffectPolicy, WorkerExecutorRegistry,
     },
     resources::{
-        actions::{ActionRegistry, CancellationClass, EffectClass, IdempotencyClass},
-        models::{ModelCapability, ModelRegistry},
+        actions::{
+            ActionRegistry, CancellationClass, EffectClass, IdempotencyClass, ToolPublicPolicy,
+        },
+        models::{ModelCapability, ModelRegistry, ModelRequestCapability},
+        retrievals::{RetrievalPublicPolicy, RetrievalRegistry},
     },
 };
 
 const AGENT_FILE: &str = "agent.yaml";
 const DEFINITION_REVISION_DOMAIN: &[u8] = b"insight-agent/definition-revision/v3";
 const DEPLOYMENT_REVISION_DOMAIN: &str = "insight-agent/deployment-revision/v3";
+
+/// Explicit production-link capability for scheduler-native LLM tool
+/// continuation. The default production resolver deliberately does not grant
+/// this capability until the durable continuation state machine is enabled.
+pub const LLM_TOOL_CONTINUATION_CAPABILITY: &str = "runtime.llm_tool_continuation.v1";
+const LLM_TOOL_CONTINUATION_UNAVAILABLE: &str = "LLM_TOOL_CONTINUATION_UNAVAILABLE";
 
 /// Closed, machine-readable deployment risk taxonomy. Diagnostics are review
 /// evidence only and never mutate the frozen worker policy.
@@ -140,6 +149,104 @@ impl std::fmt::Display for AgentInputError {
 
 impl std::error::Error for AgentInputError {}
 
+/// Closed public protocol identifier for an Agent response stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentStreamingProtocol {
+    #[serde(rename = "response-stream/v1")]
+    ResponseStreamV1,
+}
+
+/// Closed transport vocabulary for public response streaming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStreamingTransport {
+    Sse,
+}
+
+/// Closed source kind vocabulary for `response-stream/v1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStreamingSourceKind {
+    Llm,
+    Retrieval,
+}
+
+/// Whether a public source arrives incrementally or as one complete,
+/// validated observation after the underlying operation finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStreamingSourceMode {
+    Streaming,
+    Buffered,
+}
+
+/// Closed public content vocabulary for response-stream/v1 sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStreamingSourceFormat {
+    Text,
+    #[serde(rename = "structured/retrieval")]
+    StructuredRetrieval,
+}
+
+/// One author-stable node that may publish user-visible response content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentStreamingSource {
+    id: String,
+    kind: AgentStreamingSourceKind,
+    mode: AgentStreamingSourceMode,
+    format: AgentStreamingSourceFormat,
+}
+
+impl AgentStreamingSource {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn kind(&self) -> AgentStreamingSourceKind {
+        self.kind
+    }
+
+    pub fn mode(&self) -> AgentStreamingSourceMode {
+        self.mode
+    }
+
+    pub fn format(&self) -> AgentStreamingSourceFormat {
+        self.format
+    }
+}
+
+/// Public response streaming discovery. This contains only protocol facts and
+/// author-stable source identities; prompts, model bindings and runtime
+/// occurrence identities remain private.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentStreamingContract {
+    protocol: AgentStreamingProtocol,
+    transport: AgentStreamingTransport,
+    live_only: bool,
+    sources: Vec<AgentStreamingSource>,
+}
+
+impl AgentStreamingContract {
+    pub fn protocol(&self) -> AgentStreamingProtocol {
+        self.protocol
+    }
+
+    pub fn transport(&self) -> AgentStreamingTransport {
+        self.transport
+    }
+
+    pub fn live_only(&self) -> bool {
+        self.live_only
+    }
+
+    pub fn sources(&self) -> &[AgentStreamingSource] {
+        &self.sources
+    }
+}
+
 /// One immutable, verified author revision ready for deployment linking.
 #[derive(Debug, Clone)]
 pub struct PublishedV3Agent {
@@ -184,6 +291,78 @@ impl PublishedV3Agent {
         public_input_schema(schema, contract.defaults())
     }
 
+    /// Publishes the canonical workflow result type used by runtime output
+    /// validation. Unlike the input author surface, output types are already
+    /// frozen as normalized Plan types, so their self-contained Draft 2020-12
+    /// projection is the public contract.
+    pub fn public_output_schema(&self) -> Value {
+        self.plan
+            .metadata()
+            .output_type()
+            .json_schema_document()
+            .expect("a verified Plan output type always has a JSON Schema projection")
+    }
+
+    /// Derives response-stream discovery exclusively from normalized Plan
+    /// descriptors. Source order is author-order independent and therefore
+    /// stable across storage and Graph round-trips.
+    pub fn public_streaming_contract(&self) -> AgentStreamingContract {
+        let mut sources = self
+            .plan
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                let (kind, mode, format) = match node.kind() {
+                    NodeKind::LlmTask(descriptor)
+                        if descriptor.public_configuration.get("publish")
+                            == Some(&DescriptorValue::Boolean(true)) =>
+                    {
+                        let mode = match descriptor.public_configuration.get("stream") {
+                            Some(DescriptorValue::Boolean(true)) => {
+                                AgentStreamingSourceMode::Streaming
+                            }
+                            Some(DescriptorValue::Boolean(false)) => {
+                                AgentStreamingSourceMode::Buffered
+                            }
+                            _ => unreachable!(
+                                "published canonical core.llm descriptors always contain boolean stream"
+                            ),
+                        };
+                        (
+                            AgentStreamingSourceKind::Llm,
+                            mode,
+                            AgentStreamingSourceFormat::Text,
+                        )
+                    }
+                    NodeKind::RetrievalTask(descriptor)
+                        if descriptor.public_configuration.get("publish")
+                            == Some(&DescriptorValue::Boolean(true)) =>
+                    {
+                        (
+                            AgentStreamingSourceKind::Retrieval,
+                            AgentStreamingSourceMode::Buffered,
+                            AgentStreamingSourceFormat::StructuredRetrieval,
+                        )
+                    }
+                    _ => return None,
+                };
+                Some(AgentStreamingSource {
+                    id: node.id().as_str().to_owned(),
+                    kind,
+                    mode,
+                    format,
+                })
+            })
+            .collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.id.cmp(&right.id));
+        AgentStreamingContract {
+            protocol: AgentStreamingProtocol::ResponseStreamV1,
+            transport: AgentStreamingTransport::Sse,
+            live_only: true,
+            sources,
+        }
+    }
+
     pub fn graph_author_document(&self) -> Option<&GraphAuthorDocument> {
         self.graph_author_document.as_ref()
     }
@@ -203,6 +382,7 @@ impl PublishedV3Agent {
         let agent_id = agent_id.into();
         let definition_revision_id = graph.metadata().definition_revision_id().clone();
         let plan = graph.plan().clone();
+        validate_published_llm_contracts(&plan)?;
         Ok(Self {
             metadata: Metadata {
                 id: agent_id,
@@ -260,6 +440,7 @@ impl PublishedV3Agent {
                 "stored graph, Plan and immutable revision identity disagree",
             ));
         }
+        validate_published_llm_contracts(&canonical)?;
         Ok(Self {
             metadata: Metadata {
                 id: plan.agent_id().to_owned(),
@@ -303,6 +484,7 @@ impl PublishedV3Agent {
                 "stored structured Plan and immutable revision identity disagree",
             ));
         }
+        validate_published_llm_contracts(&canonical)?;
         let author_source = plan
             .author_document()
             .get("source")
@@ -356,6 +538,113 @@ impl PublishedV3Agent {
             )
         })
     }
+}
+
+fn validate_published_llm_contracts(plan: &Plan) -> Result<(), CompileError> {
+    for node in plan.nodes() {
+        let NodeKind::LlmTask(descriptor) = node.kind() else {
+            continue;
+        };
+        let invalid = |message: &str| {
+            CompileError::new(
+                "LLM_DESCRIPTOR_INVALID",
+                format!("llm node '{}' {message}", node.id()),
+            )
+        };
+        if descriptor.implementation != "core.llm" {
+            return Err(invalid("must use the frozen core.llm implementation"));
+        }
+        if descriptor.descriptor_version.as_str() != "2" {
+            return Err(invalid("must use descriptor version 2"));
+        }
+        for field in ["stream", "publish"] {
+            if !matches!(
+                descriptor.public_configuration.get(field),
+                Some(DescriptorValue::Boolean(_))
+            ) {
+                return Err(invalid(&format!(
+                    "must contain normalized boolean '{field}'"
+                )));
+            }
+        }
+
+        let Some(DescriptorValue::Array(tool_values)) =
+            descriptor.public_configuration.get("tools")
+        else {
+            return Err(invalid("must contain a normalized tools list"));
+        };
+        let mut tools = BTreeSet::new();
+        for value in tool_values {
+            let DescriptorValue::String(tool) = value else {
+                return Err(invalid("tools must contain only stable identifiers"));
+            };
+            if !is_stable_identifier(tool) || !tools.insert(tool.as_str()) {
+                return Err(invalid(
+                    "tools must contain unique stable identifiers in author order",
+                ));
+            }
+        }
+
+        let Some(DescriptorValue::String(tool_choice)) =
+            descriptor.public_configuration.get("tool_choice")
+        else {
+            return Err(invalid("must contain a normalized string tool_choice"));
+        };
+        match tool_choice.as_str() {
+            "auto" => {}
+            "required" if !tools.is_empty() => {}
+            "required" => return Err(invalid("cannot require a tool when tools is empty")),
+            tool if tools.contains(tool) => {}
+            _ => {
+                return Err(invalid(
+                    "tool_choice must name a declared tool or a closed mode",
+                ))
+            }
+        }
+
+        let Some(DescriptorValue::Object(limits)) =
+            descriptor.public_configuration.get("tool_limits")
+        else {
+            return Err(invalid("must contain normalized tool_limits"));
+        };
+        if limits.keys().map(String::as_str).collect::<Vec<_>>() != ["max_calls", "max_rounds"] {
+            return Err(invalid(
+                "tool_limits must contain exactly max_calls and max_rounds",
+            ));
+        }
+        for field in ["max_calls", "max_rounds"] {
+            if !matches!(
+                limits.get(field),
+                Some(DescriptorValue::Integer(value))
+                    if *value > 0 && *value <= i64::from(u32::MAX)
+            ) {
+                return Err(invalid(&format!(
+                    "tool_limits.{field} must be a positive u32"
+                )));
+            }
+        }
+
+        if let Some(parameters) = descriptor.public_configuration.get("parameters") {
+            let DescriptorValue::Object(parameters) = parameters else {
+                return Err(invalid("parameters must be an object"));
+            };
+            if parameters.contains_key("stream") {
+                return Err(invalid(
+                    "cannot contain parameters.stream; stream is an execution field",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_stable_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    value.len() <= 64
+        && bytes
+            .next()
+            .is_some_and(|byte| byte == b'_' || byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte == b'_' || byte == b'-' || byte.is_ascii_alphanumeric())
 }
 
 fn public_input_schema(mut schema: Value, defaults: &BTreeMap<String, Value>) -> Value {
@@ -498,7 +787,7 @@ impl VersionedLeafAdapterIdentity {
         let expected = match kind {
             LeafTaskKind::Http => "core.http",
             LeafTaskKind::Tool => "core.tool",
-            LeafTaskKind::Llm | LeafTaskKind::Action => {
+            LeafTaskKind::Llm | LeafTaskKind::Action | LeafTaskKind::Retrieval => {
                 return Err(CompileError::new(
                     "LEAF_ADAPTER_IDENTITY_INVALID",
                     "external leaf registrations are restricted to HTTP and Tool nodes",
@@ -750,7 +1039,7 @@ impl VersionedLeafAdapterRegistry {
                     match identity.kind() {
                         LeafTaskKind::Http => SchedulerTaskKind::Http,
                         LeafTaskKind::Tool => SchedulerTaskKind::Tool,
-                        LeafTaskKind::Llm | LeafTaskKind::Action => {
+                        LeafTaskKind::Llm | LeafTaskKind::Action | LeafTaskKind::Retrieval => {
                             unreachable!("registration constructor rejects built-in leaf kinds")
                         }
                     },
@@ -776,8 +1065,12 @@ impl VersionedLeafAdapterRegistry {
 pub struct ProductionLeafDeploymentResolver<'a> {
     models: &'a ModelRegistry,
     actions: &'a ActionRegistry,
+    retrievals: Option<&'a RetrievalRegistry>,
     external_leaf_adapters: Option<&'a VersionedLeafAdapterRegistry>,
     operation_timeout_ms: u64,
+    max_llm_tool_rounds: u32,
+    max_llm_tool_calls: u32,
+    llm_tool_continuation: bool,
 }
 
 impl<'a> ProductionLeafDeploymentResolver<'a> {
@@ -785,9 +1078,22 @@ impl<'a> ProductionLeafDeploymentResolver<'a> {
         Self {
             models,
             actions,
+            retrievals: None,
             external_leaf_adapters: None,
             operation_timeout_ms: 60_000,
+            max_llm_tool_rounds: u32::MAX,
+            max_llm_tool_calls: u32::MAX,
+            llm_tool_continuation: false,
         }
+    }
+
+    /// Adds the first-class Retrieval resource registry used to freeze
+    /// retrieval identities and public projection policy at publication.
+    /// The default remains absent so a retrieval Plan fails closed rather
+    /// than being rebound by a runtime lookup.
+    pub fn with_retrievals(mut self, retrievals: &'a RetrievalRegistry) -> Self {
+        self.retrievals = Some(retrievals);
+        self
     }
 
     pub fn with_external_leaf_adapters(
@@ -809,6 +1115,31 @@ impl<'a> ProductionLeafDeploymentResolver<'a> {
                 )
             })?;
         Ok(self)
+    }
+
+    pub fn with_llm_tool_limits(
+        mut self,
+        max_rounds: u32,
+        max_calls: u32,
+    ) -> Result<Self, CompileError> {
+        if max_rounds == 0 || max_calls == 0 || max_calls < max_rounds {
+            return Err(CompileError::new(
+                "LLM_TOOL_LIMIT_INVALID",
+                "platform LLM tool limits are invalid",
+            ));
+        }
+        self.max_llm_tool_rounds = max_rounds;
+        self.max_llm_tool_calls = max_calls;
+        Ok(self)
+    }
+
+    /// Explicitly grants the frozen scheduler capability required by an LLM
+    /// node with a non-empty tool whitelist. This is intentionally opt-in so
+    /// production publication fails closed until the continuation runtime is
+    /// installed and ready.
+    pub fn with_llm_tool_continuation_capability(mut self) -> Self {
+        self.llm_tool_continuation = true;
+        self
     }
 }
 
@@ -838,6 +1169,30 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                     })?;
                 let model = self.models.resolve(alias)?;
                 let identity = self.models.deployment_identity(alias)?;
+                let stream = match descriptor.public_configuration.get("stream") {
+                    Some(DescriptorValue::Boolean(stream)) => *stream,
+                    _ => {
+                        return Err(CompileError::new(
+                            "LLM_REQUEST_MODE_INVALID",
+                            "llm descriptor must contain one normalized stream mode",
+                        ))
+                    }
+                };
+                let request_mode = if stream {
+                    ModelRequestCapability::Streaming
+                } else {
+                    ModelRequestCapability::Complete
+                };
+                let request_capabilities = model.request_capabilities();
+                if !request_capabilities.contains(&request_mode) {
+                    return Err(CompileError::new(
+                        "LLM_REQUEST_MODE_UNSUPPORTED",
+                        format!(
+                            "model alias '{alias}' does not support {}",
+                            request_mode.as_str()
+                        ),
+                    ));
+                }
                 let parameters = descriptor
                     .public_configuration
                     .get("parameters")
@@ -855,14 +1210,187 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                         "llm descriptor contains image content but its frozen model is not vision-capable",
                     ));
                 }
+                let publish = match descriptor.public_configuration.get("publish") {
+                    Some(DescriptorValue::Boolean(publish)) => *publish,
+                    _ => {
+                        return Err(CompileError::new(
+                            "LLM_PUBLICATION_POLICY_INVALID",
+                            "llm descriptor must contain one normalized publish decision",
+                        ))
+                    }
+                };
+                let tool_names = match descriptor.public_configuration.get("tools") {
+                    Some(DescriptorValue::Array(tools)) => tools,
+                    _ => {
+                        return Err(CompileError::new(
+                            "LLM_TOOL_BINDING_INVALID",
+                            "llm descriptor must contain one normalized tool whitelist",
+                        ))
+                    }
+                };
+                if !tool_names.is_empty() && !self.llm_tool_continuation {
+                    return Err(CompileError::new(
+                        LLM_TOOL_CONTINUATION_UNAVAILABLE,
+                        format!(
+                            "llm tool continuation requires deployment capability '{LLM_TOOL_CONTINUATION_CAPABILITY}'"
+                        ),
+                    ));
+                }
+                let mut tool_bindings = Vec::with_capacity(tool_names.len());
+                let mut linked_tool_names = BTreeSet::new();
+                for tool in tool_names {
+                    let DescriptorValue::String(tool_name) = tool else {
+                        return Err(CompileError::new(
+                            "LLM_TOOL_BINDING_INVALID",
+                            "llm tool whitelist contains a non-string name",
+                        ));
+                    };
+                    if !linked_tool_names.insert(tool_name.as_str()) {
+                        return Err(CompileError::new(
+                            "LLM_TOOL_BINDING_INVALID",
+                            "llm tool whitelist contains a duplicate name",
+                        ));
+                    }
+                    let action = self.actions.resolve(tool_name).map_err(|_| {
+                        CompileError::new(
+                            "LLM_TOOL_NOT_FOUND",
+                            format!("llm tool '{tool_name}' is not registered"),
+                        )
+                    })?;
+                    action.validate_public_policy_for_link()?;
+                    let action_identity = action.identity();
+                    let action_descriptor = action.descriptor();
+                    let effective_public = if publish {
+                        action.public_policy().clone()
+                    } else {
+                        ToolPublicPolicy::private()
+                    };
+                    let tool_effect_policy = WorkerEffectPolicy::frozen(
+                        match action_descriptor.effect {
+                            EffectClass::Pure => WorkerEffectClass::Pure,
+                            EffectClass::ReadOnly => WorkerEffectClass::ReadOnly,
+                            EffectClass::Mutating => WorkerEffectClass::Mutating,
+                        },
+                        match action_descriptor.idempotency {
+                            IdempotencyClass::Idempotent => EffectIdempotency::Idempotent,
+                            IdempotencyClass::NonIdempotent => EffectIdempotency::NonIdempotent,
+                        },
+                        1,
+                        0,
+                        0,
+                        self.operation_timeout_ms,
+                        match action_descriptor.cancellation {
+                            CancellationClass::Cooperative => WorkerCancellation::Cooperative,
+                            CancellationClass::NotSupported => WorkerCancellation::LeaseOnly,
+                        },
+                    )
+                    .map_err(plan_compile_error)?;
+                    tool_bindings.push(serde_json::json!({
+                        "name": tool_name,
+                        "action_id": action_identity.id,
+                        "action_version": action_identity.version.to_string(),
+                        "descriptor_hash": action_identity.descriptor_hash,
+                        "input_schema": action_descriptor.input_schema,
+                        "output_schema": action_descriptor.output_schema,
+                        "effect": action_descriptor.effect,
+                        "idempotency": action_descriptor.idempotency,
+                        "cancellation": action_descriptor.cancellation,
+                        "required_capabilities": action_descriptor.required_capabilities.iter().map(|value| value.as_str()).collect::<Vec<_>>(),
+                        "effect_policy": tool_effect_policy,
+                        "public_policy": action.public_policy(),
+                        "effective_public_policy": effective_public,
+                    }));
+                }
+                let tool_choice = descriptor
+                    .public_configuration
+                    .get("tool_choice")
+                    .and_then(descriptor_string)
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            "LLM_TOOL_BINDING_INVALID",
+                            "llm descriptor must contain one normalized tool choice",
+                        )
+                    })?;
+                match tool_choice {
+                    "auto" => {}
+                    "required" if !linked_tool_names.is_empty() => {}
+                    "required" => {
+                        return Err(CompileError::new(
+                            "LLM_TOOL_BINDING_INVALID",
+                            "llm cannot require a tool when its whitelist is empty",
+                        ))
+                    }
+                    tool if linked_tool_names.contains(tool) => {}
+                    _ => {
+                        return Err(CompileError::new(
+                            "LLM_TOOL_BINDING_INVALID",
+                            "llm tool choice is outside its frozen whitelist",
+                        ))
+                    }
+                }
+                let tool_limits = descriptor
+                    .public_configuration
+                    .get("tool_limits")
+                    .and_then(|value| match value {
+                        DescriptorValue::Object(values) => Some(values),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            "LLM_TOOL_LIMIT_INVALID",
+                            "llm descriptor is missing normalized tool limits",
+                        )
+                    })?;
+                let limit = |name: &str| {
+                    tool_limits
+                        .get(name)
+                        .and_then(|value| match value {
+                            DescriptorValue::Integer(value) => u32::try_from(*value).ok(),
+                            _ => None,
+                        })
+                        .filter(|value| *value > 0)
+                        .ok_or_else(|| {
+                            CompileError::new(
+                                "LLM_TOOL_LIMIT_INVALID",
+                                "llm descriptor contains invalid tool limits",
+                            )
+                        })
+                };
+                let max_rounds = limit("max_rounds")?;
+                let max_calls = limit("max_calls")?;
+                if max_rounds > self.max_llm_tool_rounds || max_calls > self.max_llm_tool_calls {
+                    return Err(CompileError::new(
+                        "LLM_TOOL_LIMIT_INVALID",
+                        "llm tool limits exceed the configured platform hard limits",
+                    ));
+                }
+                let request_capabilities = request_capabilities
+                    .into_iter()
+                    .map(ModelRequestCapability::as_str)
+                    .collect::<Vec<_>>();
+                let mut binding_evidence = serde_json::json!({
+                    "adapter": "core.llm",
+                    "model_alias": alias,
+                    "model_binding_hash": identity.binding_hash(),
+                    "model_binding": identity.evidence(),
+                    "request_mode": request_mode.as_str(),
+                    "request_capabilities": request_capabilities,
+                    "tool_choice": tool_choice,
+                    "tool_limits": {"max_rounds": max_rounds, "max_calls": max_calls},
+                    "tools": tool_bindings,
+                });
+                if !linked_tool_names.is_empty() {
+                    binding_evidence
+                        .as_object_mut()
+                        .expect("LLM deployment binding is constructed as an object")
+                        .insert(
+                            "runtime_capabilities".to_owned(),
+                            serde_json::json!([LLM_TOOL_CONTINUATION_CAPABILITY]),
+                        );
+                }
                 let resolved = ResolvedLeafDeployment::new(
                     VersionTag::new(identity.worker_version()).map_err(plan_compile_error)?,
-                    serde_json::json!({
-                        "adapter": "core.llm",
-                        "model_alias": alias,
-                        "model_binding_hash": identity.binding_hash(),
-                        "model_binding": identity.evidence(),
-                    }),
+                    binding_evidence,
                 )?;
                 Ok(resolved.with_effect_policy(
                     WorkerEffectPolicy::frozen(
@@ -879,6 +1407,7 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
             }
             LeafTaskKind::Action => {
                 let action = self.actions.resolve(&descriptor.implementation)?;
+                action.validate_public_policy_for_link()?;
                 let identity = action.identity();
                 let action_descriptor = action.descriptor();
                 let resolved = ResolvedLeafDeployment::new(
@@ -892,6 +1421,7 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                         "idempotency": action_descriptor.idempotency,
                         "cancellation": action_descriptor.cancellation,
                         "required_capabilities": action_descriptor.required_capabilities.iter().map(|value| value.as_str()).collect::<Vec<_>>(),
+                        "public": action.public_policy(),
                     }),
                 )?;
                 Ok(resolved.with_effect_policy(
@@ -910,6 +1440,91 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                         0,
                         self.operation_timeout_ms,
                         match action_descriptor.cancellation {
+                            CancellationClass::Cooperative => WorkerCancellation::Cooperative,
+                            CancellationClass::NotSupported => WorkerCancellation::LeaseOnly,
+                        },
+                    )
+                    .map_err(plan_compile_error)?,
+                ))
+            }
+            LeafTaskKind::Retrieval => {
+                let authored_resource = descriptor
+                    .public_configuration
+                    .get("retrieval")
+                    .and_then(descriptor_string)
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            "RETRIEVAL_BINDING_INVALID",
+                            "retrieval descriptor must contain one resource id",
+                        )
+                    })?;
+                if authored_resource != descriptor.implementation {
+                    return Err(CompileError::new(
+                        "RETRIEVAL_BINDING_INVALID",
+                        "retrieval descriptor resource and implementation disagree",
+                    ));
+                }
+                let publish = match descriptor.public_configuration.get("publish") {
+                    Some(DescriptorValue::Boolean(publish)) => *publish,
+                    _ => {
+                        return Err(CompileError::new(
+                            "RETRIEVAL_PUBLICATION_POLICY_INVALID",
+                            "retrieval descriptor must contain one normalized publish decision",
+                        ))
+                    }
+                };
+                let retrieval = self
+                    .retrievals
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            "RETRIEVAL_REGISTRY_UNAVAILABLE",
+                            "retrieval Plan nodes require an explicit production registry",
+                        )
+                    })?
+                    .resolve(authored_resource)?;
+                let identity = retrieval.identity();
+                let retrieval_descriptor = retrieval.descriptor();
+                let public = retrieval.public_policy();
+                let effective_public_policy = if publish {
+                    public.clone()
+                } else {
+                    RetrievalPublicPolicy::private()
+                };
+                let resolved = ResolvedLeafDeployment::new(
+                    VersionTag::new(identity.version.to_string()).map_err(plan_compile_error)?,
+                    serde_json::json!({
+                        "adapter": "native_retrieval",
+                        "retrieval_id": identity.id,
+                        "retrieval_version": identity.version.to_string(),
+                        "descriptor_hash": identity.descriptor_hash,
+                        "input_schema": retrieval_descriptor.input_schema,
+                        "output_schema": retrieval_descriptor.output_schema,
+                        "query_field": retrieval_descriptor.query_field,
+                        "effect": retrieval_descriptor.effect,
+                        "idempotency": retrieval_descriptor.idempotency,
+                        "cancellation": retrieval_descriptor.cancellation,
+                        "required_capabilities": retrieval_descriptor.required_capabilities.iter().map(|value| value.as_str()).collect::<Vec<_>>(),
+                        "publish": publish,
+                        "public": public,
+                        "effective_public_policy": effective_public_policy,
+                    }),
+                )?;
+                Ok(resolved.with_effect_policy(
+                    WorkerEffectPolicy::frozen(
+                        match retrieval_descriptor.effect {
+                            EffectClass::Pure => WorkerEffectClass::Pure,
+                            EffectClass::ReadOnly => WorkerEffectClass::ReadOnly,
+                            EffectClass::Mutating => WorkerEffectClass::Mutating,
+                        },
+                        match retrieval_descriptor.idempotency {
+                            IdempotencyClass::Idempotent => EffectIdempotency::Idempotent,
+                            IdempotencyClass::NonIdempotent => EffectIdempotency::NonIdempotent,
+                        },
+                        1,
+                        0,
+                        0,
+                        self.operation_timeout_ms,
+                        match retrieval_descriptor.cancellation {
                             CancellationClass::Cooperative => WorkerCancellation::Cooperative,
                             CancellationClass::NotSupported => WorkerCancellation::LeaseOnly,
                         },
@@ -953,8 +1568,12 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
 pub struct OwnedProductionLeafDeploymentResolver {
     models: ModelRegistry,
     actions: ActionRegistry,
+    retrievals: Option<RetrievalRegistry>,
     external_leaf_adapters: Option<VersionedLeafAdapterRegistry>,
     operation_timeout_ms: u64,
+    max_llm_tool_rounds: u32,
+    max_llm_tool_calls: u32,
+    llm_tool_continuation: bool,
 }
 
 impl OwnedProductionLeafDeploymentResolver {
@@ -962,9 +1581,18 @@ impl OwnedProductionLeafDeploymentResolver {
         Self {
             models: models.clone(),
             actions: actions.clone(),
+            retrievals: None,
             external_leaf_adapters: None,
             operation_timeout_ms: 60_000,
+            max_llm_tool_rounds: u32::MAX,
+            max_llm_tool_calls: u32::MAX,
+            llm_tool_continuation: false,
         }
+    }
+
+    pub fn with_retrievals(mut self, retrievals: &RetrievalRegistry) -> Self {
+        self.retrievals = Some(retrievals.clone());
+        self
     }
 
     pub fn with_external_leaf_adapters(mut self, adapters: &VersionedLeafAdapterRegistry) -> Self {
@@ -984,6 +1612,29 @@ impl OwnedProductionLeafDeploymentResolver {
             })?;
         Ok(self)
     }
+
+    pub fn with_llm_tool_limits(
+        mut self,
+        max_rounds: u32,
+        max_calls: u32,
+    ) -> Result<Self, CompileError> {
+        if max_rounds == 0 || max_calls == 0 || max_calls < max_rounds {
+            return Err(CompileError::new(
+                "LLM_TOOL_LIMIT_INVALID",
+                "platform LLM tool limits are invalid",
+            ));
+        }
+        self.max_llm_tool_rounds = max_rounds;
+        self.max_llm_tool_calls = max_calls;
+        Ok(self)
+    }
+
+    /// Explicitly grants scheduler-native LLM tool continuation to graph
+    /// publications resolved through this owned production resolver.
+    pub fn with_llm_tool_continuation_capability(mut self) -> Self {
+        self.llm_tool_continuation = true;
+        self
+    }
 }
 
 impl LeafDeploymentResolver for OwnedProductionLeafDeploymentResolver {
@@ -993,10 +1644,16 @@ impl LeafDeploymentResolver for OwnedProductionLeafDeploymentResolver {
         descriptor: &LeafTaskDescriptor,
     ) -> Result<ResolvedLeafDeployment, CompileError> {
         let mut resolver = ProductionLeafDeploymentResolver::new(&self.models, &self.actions);
+        if let Some(retrievals) = &self.retrievals {
+            resolver = resolver.with_retrievals(retrievals);
+        }
         if let Some(adapters) = &self.external_leaf_adapters {
             resolver = resolver.with_external_leaf_adapters(adapters);
         }
         resolver.operation_timeout_ms = self.operation_timeout_ms;
+        resolver.max_llm_tool_rounds = self.max_llm_tool_rounds;
+        resolver.max_llm_tool_calls = self.max_llm_tool_calls;
+        resolver.llm_tool_continuation = self.llm_tool_continuation;
         resolver.resolve_leaf(kind, descriptor)
     }
 }
@@ -1083,7 +1740,9 @@ impl DeployedV3Agent {
                         descriptor.descriptor_version.clone(),
                         configuration,
                         worker,
-                    ),
+                    )
+                    .with_deployment_binding(resolved.binding_evidence.clone())
+                    .map_err(plan_compile_error)?,
                 )
                 .map_err(plan_compile_error)?;
 
@@ -1332,6 +1991,12 @@ impl DeployedV3Agent {
                         "stored leaf binding must be one closed evidence object",
                     ));
                 }
+                let binding_evidence = binding.get("binding").ok_or_else(|| {
+                    stored_deployment_invalid("stored leaf deployment binding is missing")
+                })?;
+                if leaf.kind() == LeafTaskKind::Llm {
+                    validate_stored_llm_runtime_capabilities(descriptor, binding_evidence)?;
+                }
 
                 let inputs = index
                     .data_inputs(node.id())
@@ -1375,7 +2040,9 @@ impl DeployedV3Agent {
                             descriptor.descriptor_version.clone(),
                             exact_configuration_contract(descriptor),
                             worker,
-                        ),
+                        )
+                        .with_deployment_binding(binding_evidence.clone())
+                        .map_err(plan_compile_error)?,
                     )
                     .map_err(plan_compile_error)?;
             }
@@ -1479,6 +2146,7 @@ impl DeployedV3Agent {
             let kind = match contract.worker().task_kind() {
                 LeafTaskKind::Llm => SchedulerTaskKind::Llm,
                 LeafTaskKind::Action => SchedulerTaskKind::Action,
+                LeafTaskKind::Retrieval => SchedulerTaskKind::Retrieval,
                 LeafTaskKind::Http => SchedulerTaskKind::Http,
                 LeafTaskKind::Tool => SchedulerTaskKind::Tool,
             };
@@ -1494,6 +2162,37 @@ impl DeployedV3Agent {
 
 fn stored_deployment_invalid(message: impl Into<String>) -> CompileError {
     CompileError::new("STORED_DEPLOYMENT_INVALID", message)
+}
+
+fn validate_stored_llm_runtime_capabilities(
+    descriptor: &LeafTaskDescriptor,
+    binding: &Value,
+) -> Result<(), CompileError> {
+    let tools = descriptor
+        .public_configuration
+        .get("tools")
+        .and_then(|value| match value {
+            DescriptorValue::Array(tools) => Some(tools),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            stored_deployment_invalid(
+                "stored llm descriptor is missing its normalized tool whitelist",
+            )
+        })?;
+    let runtime_capabilities = binding.get("runtime_capabilities");
+    if tools.is_empty() {
+        if runtime_capabilities.is_some() {
+            return Err(stored_deployment_invalid(
+                "stored tool-free llm binding contains unsupported runtime capabilities",
+            ));
+        }
+    } else if runtime_capabilities != Some(&serde_json::json!([LLM_TOOL_CONTINUATION_CAPABILITY])) {
+        return Err(stored_deployment_invalid(
+            "stored llm tool binding is missing its exact continuation capability evidence",
+        ));
+    }
+    Ok(())
 }
 
 fn stored_document_array<'a>(value: &'a Value, label: &str) -> Result<&'a [Value], CompileError> {
@@ -1895,6 +2594,7 @@ pub fn compile_v3_agent_dir(directory: &Path) -> Result<PublishedV3Agent, Compil
             "compiled Plan did not retain its frozen definition revision",
         ));
     }
+    validate_published_llm_contracts(&plan)?;
     Ok(PublishedV3Agent {
         metadata,
         definition_revision_id,

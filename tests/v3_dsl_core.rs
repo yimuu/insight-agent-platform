@@ -21,7 +21,10 @@ fn options(source: &str) -> CompileOptions {
 fn compiles_linear_leaf_and_return_to_verified_plan() {
     let source = include_str!("fixtures/v3/linear.yaml");
     let plan = compile_source(source, options(source)).unwrap();
-    assert!(matches!(plan.nodes()[0].kind(), NodeKind::ActionTask(_)));
+    let NodeKind::ActionTask(descriptor) = plan.nodes()[0].kind() else {
+        panic!("expected action task");
+    };
+    assert_eq!(descriptor.descriptor_version.as_str(), "1");
     assert!(plan
         .nodes()
         .iter()
@@ -331,6 +334,165 @@ workflow:
         )]))
     );
     assert!(plan.data_bindings().len() >= 4);
+}
+
+#[test]
+fn llm_execution_and_publication_contracts_are_normalized_into_descriptor_v2() {
+    let source = r#"api_version: insight.agent/v3
+kind: agent
+inputs: {}
+output: string
+workflow:
+  steps:
+    - id: answer
+      type: llm
+      model: general_chat
+      messages:
+        - role: user
+          content: [{text: hello}]
+      stream: false
+      publish: true
+      tools: [lookup, summarize]
+      tool_choice: summarize
+      tool_limits: {max_rounds: 3}
+      response: string
+    - return: $answer
+"#;
+    let document = validate(insight_agent_platform::dsl::v3::parse(source).unwrap()).unwrap();
+    let insight_agent_platform::dsl::v3::ast::Step::Leaf(leaf) = &document.steps[0] else {
+        panic!("expected llm leaf");
+    };
+    let llm = leaf.llm.as_ref().unwrap();
+    assert!(!llm.stream);
+    assert!(llm.publish);
+    assert_eq!(llm.tools, ["lookup", "summarize"]);
+    assert_eq!(
+        llm.tool_choice,
+        insight_agent_platform::dsl::v3::ast::LlmToolChoice::Tool("summarize".to_owned())
+    );
+    assert_eq!(
+        (llm.tool_limits.max_rounds, llm.tool_limits.max_calls),
+        (3, 32)
+    );
+
+    let plan = insight_agent_platform::dsl::v3::compile(document, options(source)).unwrap();
+    let NodeKind::LlmTask(descriptor) = plan.nodes()[0].kind() else {
+        panic!("expected LLM task");
+    };
+    assert_eq!(descriptor.descriptor_version.as_str(), "2");
+    assert_eq!(
+        descriptor.public_configuration.get("stream"),
+        Some(&DescriptorValue::Boolean(false))
+    );
+    assert_eq!(
+        descriptor.public_configuration.get("publish"),
+        Some(&DescriptorValue::Boolean(true))
+    );
+    assert_eq!(
+        descriptor.public_configuration.get("tools"),
+        Some(&DescriptorValue::Array(vec![
+            DescriptorValue::String("lookup".to_owned()),
+            DescriptorValue::String("summarize".to_owned()),
+        ]))
+    );
+    assert_eq!(
+        descriptor.public_configuration.get("tool_choice"),
+        Some(&DescriptorValue::String("summarize".to_owned()))
+    );
+    assert_eq!(
+        descriptor.public_configuration.get("tool_limits"),
+        Some(&DescriptorValue::Object(std::collections::BTreeMap::from(
+            [
+                ("max_calls".to_owned(), DescriptorValue::Integer(32)),
+                ("max_rounds".to_owned(), DescriptorValue::Integer(3)),
+            ]
+        )))
+    );
+}
+
+#[test]
+fn llm_defaults_are_explicit_plan_semantics() {
+    let source = r#"api_version: insight.agent/v3
+kind: agent
+inputs: {}
+output: string
+workflow:
+  steps:
+    - id: answer
+      type: llm
+      model: general_chat
+      messages:
+        - role: user
+          content: [{text: hello}]
+      response: string
+    - return: $answer
+"#;
+    let plan = compile_source(source, options(source)).unwrap();
+    let NodeKind::LlmTask(descriptor) = plan.nodes()[0].kind() else {
+        panic!("expected LLM task");
+    };
+    assert_eq!(descriptor.descriptor_version.as_str(), "2");
+    assert_eq!(
+        descriptor.public_configuration.get("stream"),
+        Some(&DescriptorValue::Boolean(true))
+    );
+    assert_eq!(
+        descriptor.public_configuration.get("publish"),
+        Some(&DescriptorValue::Boolean(false))
+    );
+    assert_eq!(
+        descriptor.public_configuration.get("tools"),
+        Some(&DescriptorValue::Array(Vec::new()))
+    );
+    assert_eq!(
+        descriptor.public_configuration.get("tool_choice"),
+        Some(&DescriptorValue::String("auto".to_owned()))
+    );
+    assert_eq!(
+        descriptor.public_configuration.get("tool_limits"),
+        Some(&DescriptorValue::Object(std::collections::BTreeMap::from(
+            [
+                ("max_calls".to_owned(), DescriptorValue::Integer(32)),
+                ("max_rounds".to_owned(), DescriptorValue::Integer(8)),
+            ]
+        )))
+    );
+}
+
+#[test]
+fn invalid_llm_control_contracts_fail_in_author_validation() {
+    let base = r#"api_version: insight.agent/v3
+kind: agent
+inputs: {}
+output: string
+workflow:
+  steps:
+    - id: answer
+      type: llm
+      model: general_chat
+      messages:
+        - role: user
+          content: [{text: hello}]
+      CONTROL
+      response: string
+    - return: $answer
+"#;
+    for control in [
+        "parameters: {stream: true}",
+        "stream: streaming",
+        "publish: 1",
+        "tools: lookup",
+        "tools: [lookup, lookup]",
+        "tools: [lookup]\n      tool_choice: missing",
+        "tool_choice: required",
+        "tool_limits: {max_rounds: 0}",
+        "tool_limits: {max_calls: -1}",
+        "tool_limits: {max_rounds: 1, future: 2}",
+    ] {
+        let source = base.replace("CONTROL", control);
+        let error = validate(insight_agent_platform::dsl::v3::parse(&source).unwrap()).unwrap_err();
+        assert_eq!(error.code(), INVALID_STEP, "control={control}");
+    }
 }
 
 #[test]

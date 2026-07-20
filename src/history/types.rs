@@ -74,6 +74,7 @@ impl RunAttachment {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunRecord {
     pub run_id: String,
+    pub response_id: String,
     /// Durable optimistic-concurrency version used by recovery operations.
     pub projection_version: u64,
     pub request_id: String,
@@ -97,6 +98,7 @@ impl RunRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunSummary {
     pub run_id: String,
+    pub response_id: String,
     pub request_id: String,
     pub agent_id: String,
     pub agent_version: String,
@@ -125,6 +127,7 @@ impl From<&RunRecord> for RunSummary {
     fn from(record: &RunRecord) -> Self {
         Self {
             run_id: record.run_id.clone(),
+            response_id: record.response_id.clone(),
             request_id: record.request_id.clone(),
             agent_id: record.agent_id.clone(),
             agent_version: record.agent_version.clone(),

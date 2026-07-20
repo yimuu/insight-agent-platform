@@ -458,6 +458,52 @@ pub struct ArtifactReceipt {
     state: ArtifactState,
 }
 
+/// Private metadata hand-off for a bounded object-store read.
+///
+/// This proves only that the exact Run-scoped Artifact is referenced and its
+/// owning Run retention has not expired. Callers exposing bytes publicly must
+/// additionally prove that the ArtifactRef occurs in that Run's durable
+/// public response snapshot.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RetainedArtifact {
+    run_id: RunId,
+    artifact: ArtifactRef,
+    storage_locator: StorageLocator,
+}
+
+impl RetainedArtifact {
+    fn new(run_id: RunId, artifact: ArtifactRef, storage_locator: StorageLocator) -> Self {
+        Self {
+            run_id,
+            artifact,
+            storage_locator,
+        }
+    }
+
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    pub fn artifact(&self) -> &ArtifactRef {
+        &self.artifact
+    }
+
+    pub fn storage_locator(&self) -> &StorageLocator {
+        &self.storage_locator
+    }
+}
+
+impl fmt::Debug for RetainedArtifact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RetainedArtifact")
+            .field("run_id", &self.run_id)
+            .field("artifact", &self.artifact)
+            .field("storage_locator", &self.storage_locator)
+            .finish()
+    }
+}
+
 impl ArtifactReceipt {
     fn new(run_id: RunId, artifact: ArtifactRef, state: ArtifactState) -> Self {
         Self {
@@ -594,8 +640,11 @@ pub struct OrphanSweepCommand {
 
 /// Registers the end of the audit/recovery hold for all Artifacts owned by a
 /// terminal Run. The deadline is derived from the durable terminal timestamp,
-/// not the caller clock. Existing downstream recovery roots continue to hold
-/// the object until their owning Run's own retention deadline expires.
+/// and the retention duration frozen at Run admission, not the caller clock or
+/// the current process configuration. `retention_seconds` remains in this
+/// legacy recovery command for bounded wire compatibility; it is not policy
+/// authority. Existing downstream recovery roots continue to hold the object
+/// until their owning Run's own retention deadline expires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReleaseRunArtifactRetentionCommand {
     run_id: RunId,
@@ -978,6 +1027,15 @@ pub trait ArtifactDurableRepository: DurableRepository {
         run_id: &RunId,
         payload_id: &PayloadId,
     ) -> Result<Option<StoredInlinePayload>, RepositoryError>;
+
+    /// Loads private object metadata only while the exact Run-scoped row is
+    /// referenced and the owning Run's retention deadline has not elapsed.
+    /// This method deliberately does not grant public visibility by itself.
+    async fn get_retained_artifact(
+        &self,
+        run_id: &RunId,
+        artifact_id: &ArtifactId,
+    ) -> Result<Option<RetainedArtifact>, RepositoryError>;
 
     async fn stage_artifact(
         &self,
@@ -1736,6 +1794,47 @@ impl ArtifactDurableRepository for SqliteDurableRepository {
         sqlite_payload(&self.pool, run_id, payload_id).await
     }
 
+    async fn get_retained_artifact(
+        &self,
+        run_id: &RunId,
+        artifact_id: &ArtifactId,
+    ) -> Result<Option<RetainedArtifact>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT a.content_hash,a.size_bytes,a.media_type,a.storage_uri
+             FROM artifacts a
+             LEFT JOIN artifact_retention_releases release ON release.run_id=a.run_id
+             WHERE a.run_id=? AND a.artifact_id=? AND a.artifact_state='referenced'
+               AND (release.run_id IS NULL
+                    OR julianday(release.retain_until)>julianday('now'))",
+        )
+        .bind(run_id.as_str())
+        .bind(artifact_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::storage)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let artifact = artifact_ref(
+            artifact_id.as_str().to_owned(),
+            row.try_get("content_hash")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            row.try_get("size_bytes")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            row.try_get("media_type")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )?;
+        let storage_locator = StorageLocator::new(
+            row.try_get::<String, _>("storage_uri")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )?;
+        Ok(Some(RetainedArtifact::new(
+            run_id.clone(),
+            artifact,
+            storage_locator,
+        )))
+    }
+
     async fn stage_artifact(
         &self,
         command: StageArtifactCommand,
@@ -1969,23 +2068,30 @@ impl ArtifactDurableRepository for SqliteDurableRepository {
         let intent_hash = canonical_intent_hash(&command)?;
         let _writer = self.writer.lock().await;
         let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
-        if let Some(row) = sqlx::query(
-            "SELECT run_id,transition_key,intent_hash,event_id,event_seq,retain_until,artifact_count
+        let mut existing = sqlx::query(
+            "SELECT run_id,transition_key,intent_hash,event_id,event_seq,retain_until,artifact_count,
+                    registration_kind
              FROM artifact_retention_releases WHERE run_id=? OR transition_key=?",
         )
         .bind(command.run_id().as_str())
         .bind(transition_key.as_str())
-        .fetch_optional(&mut *transaction)
+        .fetch_all(&mut *transaction)
         .await
-        .map_err(RepositoryError::storage)?
-        {
-            if row.try_get::<String, _>("run_id").ok().as_deref()
-                != Some(command.run_id().as_str())
-                || row.try_get::<String, _>("transition_key").ok().as_deref()
-                    != Some(transition_key.as_str())
-                || row.try_get::<String, _>("intent_hash").ok().as_deref()
-                    != Some(intent_hash.as_str())
-            {
+        .map_err(RepositoryError::storage)?;
+        if existing.len() > 1 {
+            return Err(RepositoryError::intent_conflict());
+        }
+        if let Some(row) = existing.pop() {
+            let same_run = row.try_get::<String, _>("run_id").ok().as_deref()
+                == Some(command.run_id().as_str());
+            let terminal_atomic = row
+                .try_get::<String, _>("registration_kind")
+                .ok()
+                .as_deref()
+                == Some("terminal_atomic");
+            let same_transition = row.try_get::<String, _>("transition_key").ok().as_deref()
+                == Some(transition_key.as_str());
+            if !same_run || (!terminal_atomic && !same_transition) {
                 return Err(RepositoryError::intent_conflict());
             }
             let receipt = sqlite_retention_release_from_row(&row)?;
@@ -1998,7 +2104,8 @@ impl ArtifactDurableRepository for SqliteDurableRepository {
             });
         }
         let run = sqlx::query(
-            "SELECT lifecycle,admission_state,terminal_at,projection_version
+            "SELECT lifecycle,admission_state,terminal_at,projection_version,
+                    artifact_reference_retention_seconds
              FROM workflow_runs WHERE run_id=?",
         )
         .bind(command.run_id().as_str())
@@ -2031,12 +2138,18 @@ impl ArtifactDurableRepository for SqliteDurableRepository {
         let Some(terminal_at) = terminal_at else {
             return Err(RepositoryError::invalid_data());
         };
+        let frozen_retention_seconds = run
+            .try_get::<i64, _>("artifact_reference_retention_seconds")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        if !(1..=i64::from(MAX_RETENTION_SECONDS)).contains(&frozen_retention_seconds) {
+            return Err(RepositoryError::invalid_data());
+        }
         let retain_until = parse_time(
             &sqlx::query_scalar::<_, String>(
                 "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', julianday(?) + CAST(? AS REAL) / 86400.0)",
             )
             .bind(&terminal_at)
-            .bind(i64::from(command.retention_seconds()))
+            .bind(frozen_retention_seconds)
             .fetch_one(&mut *transaction)
             .await
             .map_err(RepositoryError::storage)?,
@@ -2090,8 +2203,9 @@ impl ArtifactDurableRepository for SqliteDurableRepository {
         .await?;
         sqlx::query(
             "INSERT INTO artifact_retention_releases
-             (run_id,transition_key,intent_hash,event_id,event_seq,retain_until,artifact_count,created_at)
-             VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+             (run_id,transition_key,intent_hash,event_id,event_seq,retain_until,artifact_count,
+              created_at,registration_kind)
+             VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP,'legacy')",
         )
         .bind(command.run_id().as_str())
         .bind(transition_key.as_str())
@@ -2876,6 +2990,46 @@ impl ArtifactDurableRepository for PostgresDurableRepository {
         postgres_payload(&self.pool, run_id, payload_id).await
     }
 
+    async fn get_retained_artifact(
+        &self,
+        run_id: &RunId,
+        artifact_id: &ArtifactId,
+    ) -> Result<Option<RetainedArtifact>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT a.content_hash,a.size_bytes,a.media_type,a.storage_uri
+             FROM artifacts a
+             LEFT JOIN artifact_retention_releases release ON release.run_id=a.run_id
+             WHERE a.run_id=$1 AND a.artifact_id=$2 AND a.artifact_state='referenced'
+               AND (release.run_id IS NULL OR release.retain_until>CURRENT_TIMESTAMP)",
+        )
+        .bind(run_id.as_str())
+        .bind(artifact_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::storage)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let artifact = artifact_ref(
+            artifact_id.as_str().to_owned(),
+            row.try_get("content_hash")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            row.try_get("size_bytes")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            row.try_get("media_type")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )?;
+        let storage_locator = StorageLocator::new(
+            row.try_get::<String, _>("storage_uri")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )?;
+        Ok(Some(RetainedArtifact::new(
+            run_id.clone(),
+            artifact,
+            storage_locator,
+        )))
+    }
+
     async fn stage_artifact(
         &self,
         command: StageArtifactCommand,
@@ -3109,24 +3263,31 @@ impl ArtifactDurableRepository for PostgresDurableRepository {
     ) -> Result<TransitionOutcome<ArtifactRetentionRelease>, RepositoryError> {
         let intent_hash = canonical_intent_hash(&command)?;
         let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
-        if let Some(row) = sqlx::query(
-            "SELECT run_id,transition_key,intent_hash,event_id,event_seq,retain_until,artifact_count
+        let mut existing = sqlx::query(
+            "SELECT run_id,transition_key,intent_hash,event_id,event_seq,retain_until,artifact_count,
+                    registration_kind
              FROM artifact_retention_releases
              WHERE run_id=$1 OR transition_key=$2 FOR UPDATE",
         )
         .bind(command.run_id().as_str())
         .bind(transition_key.as_str())
-        .fetch_optional(&mut *transaction)
+        .fetch_all(&mut *transaction)
         .await
-        .map_err(RepositoryError::storage)?
-        {
-            if row.try_get::<String, _>("run_id").ok().as_deref()
-                != Some(command.run_id().as_str())
-                || row.try_get::<String, _>("transition_key").ok().as_deref()
-                    != Some(transition_key.as_str())
-                || row.try_get::<String, _>("intent_hash").ok().as_deref()
-                    != Some(intent_hash.as_str())
-            {
+        .map_err(RepositoryError::storage)?;
+        if existing.len() > 1 {
+            return Err(RepositoryError::intent_conflict());
+        }
+        if let Some(row) = existing.pop() {
+            let same_run = row.try_get::<String, _>("run_id").ok().as_deref()
+                == Some(command.run_id().as_str());
+            let terminal_atomic = row
+                .try_get::<String, _>("registration_kind")
+                .ok()
+                .as_deref()
+                == Some("terminal_atomic");
+            let same_transition = row.try_get::<String, _>("transition_key").ok().as_deref()
+                == Some(transition_key.as_str());
+            if !same_run || (!terminal_atomic && !same_transition) {
                 return Err(RepositoryError::intent_conflict());
             }
             let receipt = postgres_retention_release_from_row(&row)?;
@@ -3139,7 +3300,8 @@ impl ArtifactDurableRepository for PostgresDurableRepository {
             });
         }
         let run = sqlx::query(
-            "SELECT lifecycle,admission_state,terminal_at,projection_version
+            "SELECT lifecycle,admission_state,terminal_at,projection_version,
+                    artifact_reference_retention_seconds
              FROM workflow_runs WHERE run_id=$1 FOR UPDATE",
         )
         .bind(command.run_id().as_str())
@@ -3172,11 +3334,17 @@ impl ArtifactDurableRepository for PostgresDurableRepository {
         let Some(terminal_at) = terminal_at else {
             return Err(RepositoryError::invalid_data());
         };
+        let frozen_retention_seconds = run
+            .try_get::<i64, _>("artifact_reference_retention_seconds")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        if !(1..=i64::from(MAX_RETENTION_SECONDS)).contains(&frozen_retention_seconds) {
+            return Err(RepositoryError::invalid_data());
+        }
         let retain_until = sqlx::query_scalar::<_, DateTime<Utc>>(
             "SELECT $1::timestamptz + make_interval(secs => $2)",
         )
         .bind(terminal_at)
-        .bind(i32::try_from(command.retention_seconds()).map_err(|_| invalid_command())?)
+        .bind(i32::try_from(frozen_retention_seconds).map_err(|_| invalid_command())?)
         .fetch_one(&mut *transaction)
         .await
         .map_err(RepositoryError::storage)?;
@@ -3225,8 +3393,9 @@ impl ArtifactDurableRepository for PostgresDurableRepository {
         .await?;
         sqlx::query(
             "INSERT INTO artifact_retention_releases
-             (run_id,transition_key,intent_hash,event_id,event_seq,retain_until,artifact_count,created_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,CURRENT_TIMESTAMP)",
+             (run_id,transition_key,intent_hash,event_id,event_seq,retain_until,artifact_count,
+              created_at,registration_kind)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,CURRENT_TIMESTAMP,'legacy')",
         )
         .bind(command.run_id().as_str())
         .bind(transition_key.as_str())

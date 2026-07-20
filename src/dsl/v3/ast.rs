@@ -92,6 +92,7 @@ pub enum Step {
 pub enum LeafKind {
     Llm,
     Action,
+    Retrieval,
     Http,
     Tool,
 }
@@ -113,6 +114,34 @@ pub struct LeafStep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmContract {
     pub messages: Vec<MessageExpr>,
+    pub stream: bool,
+    pub publish: bool,
+    pub tools: Vec<String>,
+    pub tool_choice: LlmToolChoice,
+    pub tool_limits: LlmToolLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmToolChoice {
+    Auto,
+    Required,
+    Tool(String),
+}
+
+impl LlmToolChoice {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Auto => "auto",
+            Self::Required => "required",
+            Self::Tool(tool) => tool,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LlmToolLimits {
+    pub max_rounds: u32,
+    pub max_calls: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -627,12 +656,29 @@ fn parse_leaf(
         "llm" => (
             LeafKind::Llm,
             "core.llm".to_owned(),
-            &["id", "type", "model", "messages", "parameters", "response"][..],
+            &[
+                "id",
+                "type",
+                "model",
+                "messages",
+                "stream",
+                "publish",
+                "tools",
+                "tool_choice",
+                "tool_limits",
+                "parameters",
+                "response",
+            ][..],
         ),
         "action" => (
             LeafKind::Action,
             string(required(object, "call")?, "action call")?.to_owned(),
             &["id", "type", "call", "inputs", "response"][..],
+        ),
+        "retrieval" => (
+            LeafKind::Retrieval,
+            string(required(object, "retrieval")?, "retrieval resource")?.to_owned(),
+            &["id", "type", "retrieval", "inputs", "publish", "response"][..],
         ),
         "http" => (
             LeafKind::Http,
@@ -653,7 +699,7 @@ fn parse_leaf(
         _ => {
             return Err(CompileError::new(
                 INVALID_STEP,
-                "leaf type must be llm, action, http, or tool",
+                "leaf type must be llm, action, retrieval, http, or tool",
             ));
         }
     };
@@ -661,11 +707,18 @@ fn parse_leaf(
     let llm = match kind {
         LeafKind::Llm => {
             string(required(object, "model")?, "llm model")?;
-            Some(parse_messages(required(object, "messages")?, prompts)?)
+            Some(parse_llm_contract(object, prompts)?)
         }
         LeafKind::Action => {
             if let Some(inputs) = object.get("inputs") {
                 object_value(inputs, "action inputs")?;
+            }
+            None
+        }
+        LeafKind::Retrieval => {
+            object_value(required(object, "inputs")?, "retrieval inputs")?;
+            if let Some(publish) = object.get("publish") {
+                boolean(publish, "retrieval publish")?;
             }
             None
         }
@@ -684,7 +737,7 @@ fn parse_leaf(
     };
     let output_type = match kind {
         LeafKind::Llm => Some(resolver.resolve_type_value(required(object, "response")?)?),
-        LeafKind::Action | LeafKind::Http | LeafKind::Tool => object
+        LeafKind::Action | LeafKind::Retrieval | LeafKind::Http | LeafKind::Tool => object
             .get("response")
             .map(|value| resolver.resolve_type_value(value))
             .transpose()?,
@@ -692,6 +745,11 @@ fn parse_leaf(
     let mut configuration = object.clone();
     for key in ["id", "type", "response"] {
         configuration.remove(key);
+    }
+    if kind == LeafKind::Retrieval {
+        configuration
+            .entry("publish".to_owned())
+            .or_insert(Value::Bool(false));
     }
     Ok(LeafStep {
         id,
@@ -1355,10 +1413,123 @@ fn reject_dynamic_default(value: &Value) -> Result<(), CompileError> {
     }
 }
 
+fn parse_llm_contract(
+    object: &Map<String, Value>,
+    prompts: &BTreeMap<String, PromptDeclaration>,
+) -> Result<LlmContract, CompileError> {
+    const DEFAULT_MAX_ROUNDS: u32 = 8;
+    const DEFAULT_MAX_CALLS: u32 = 32;
+
+    if let Some(parameters) = object.get("parameters") {
+        let parameters = object_value(parameters, "llm parameters")?;
+        if parameters.contains_key("stream") {
+            return Err(CompileError::new(
+                INVALID_STEP,
+                "llm stream is a top-level execution field and cannot appear in parameters",
+            ));
+        }
+    }
+
+    let stream = object
+        .get("stream")
+        .map(|value| boolean(value, "llm stream"))
+        .transpose()?
+        .unwrap_or(true);
+    let publish = object
+        .get("publish")
+        .map(|value| boolean(value, "llm publish"))
+        .transpose()?
+        .unwrap_or(false);
+
+    let mut seen_tools = BTreeSet::new();
+    let tools = object
+        .get("tools")
+        .map(|value| {
+            value
+                .as_array()
+                .ok_or_else(|| {
+                    CompileError::new(INVALID_STEP, "llm tools must be an ordered list")
+                })?
+                .iter()
+                .map(|value| {
+                    let tool = identifier(value, "llm tool name")?;
+                    if !seen_tools.insert(tool.clone()) {
+                        return Err(CompileError::new(
+                            INVALID_STEP,
+                            format!("llm tools contains duplicate tool '{tool}'"),
+                        ));
+                    }
+                    Ok(tool)
+                })
+                .collect::<Result<Vec<_>, CompileError>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    let tool_choice = match object
+        .get("tool_choice")
+        .map(|value| string(value, "llm tool_choice"))
+        .transpose()?
+        .unwrap_or("auto")
+    {
+        "auto" => LlmToolChoice::Auto,
+        "required" => LlmToolChoice::Required,
+        tool => {
+            validate_identifier(tool, "llm tool_choice")?;
+            if !seen_tools.contains(tool) {
+                return Err(CompileError::new(
+                    INVALID_STEP,
+                    format!("llm tool_choice '{tool}' is not present in tools"),
+                ));
+            }
+            LlmToolChoice::Tool(tool.to_owned())
+        }
+    };
+    if matches!(&tool_choice, LlmToolChoice::Required) && tools.is_empty() {
+        return Err(CompileError::new(
+            INVALID_STEP,
+            "llm tool_choice required needs at least one declared tool",
+        ));
+    }
+
+    let tool_limits = object
+        .get("tool_limits")
+        .map(|value| -> Result<LlmToolLimits, CompileError> {
+            let limits = object_value(value, "llm tool_limits")?;
+            exact_keys(limits, &["max_rounds", "max_calls"])?;
+            Ok(LlmToolLimits {
+                max_rounds: limits
+                    .get("max_rounds")
+                    .map(|value| positive_u32(value, "llm tool_limits.max_rounds"))
+                    .transpose()?
+                    .unwrap_or(DEFAULT_MAX_ROUNDS),
+                max_calls: limits
+                    .get("max_calls")
+                    .map(|value| positive_u32(value, "llm tool_limits.max_calls"))
+                    .transpose()?
+                    .unwrap_or(DEFAULT_MAX_CALLS),
+            })
+        })
+        .transpose()?
+        .unwrap_or(LlmToolLimits {
+            max_rounds: DEFAULT_MAX_ROUNDS,
+            max_calls: DEFAULT_MAX_CALLS,
+        });
+
+    Ok(LlmContract {
+        messages: parse_messages(required(object, "messages")?, prompts)?,
+        stream,
+        publish,
+        tools,
+        tool_choice,
+        tool_limits,
+    })
+}
+
 fn parse_messages(
     value: &Value,
     prompts: &BTreeMap<String, PromptDeclaration>,
-) -> Result<LlmContract, CompileError> {
+) -> Result<Vec<MessageExpr>, CompileError> {
     let messages = value
         .as_array()
         .ok_or_else(|| CompileError::new(INVALID_STEP, "llm messages must be an ordered list"))?;
@@ -1436,7 +1607,7 @@ fn parse_messages(
             content: parsed_content,
         });
     }
-    Ok(LlmContract { messages: parsed })
+    Ok(parsed)
 }
 
 fn validate_reference_path(value: &str) -> Result<(), CompileError> {
@@ -1776,6 +1947,12 @@ fn string<'a>(value: &'a Value, label: &str) -> Result<&'a str, CompileError> {
     value
         .as_str()
         .ok_or_else(|| CompileError::new(INVALID_STEP, format!("{label} must be a string")))
+}
+
+fn boolean(value: &Value, label: &str) -> Result<bool, CompileError> {
+    value
+        .as_bool()
+        .ok_or_else(|| CompileError::new(INVALID_STEP, format!("{label} must be a boolean")))
 }
 
 fn as_object<'a>(

@@ -636,6 +636,7 @@ impl<'linked, 'plan> SchedulerPlanner<'linked, 'plan> {
                 }
                 NodeKind::LlmTask(_)
                 | NodeKind::ActionTask(_)
+                | NodeKind::RetrievalTask(_)
                 | NodeKind::HttpTask(_)
                 | NodeKind::ToolTask(_) => {
                     let task_id = ids.task(node.id(), &scope_instance_id, &occurrence);
@@ -726,6 +727,7 @@ impl<'linked, 'plan> SchedulerPlanner<'linked, 'plan> {
                                     descriptor_version: descriptor.descriptor_version.clone(),
                                     worker_version: contract.worker().worker_version().clone(),
                                     effect_policy,
+                                    deployment_binding: contract.deployment_binding().clone(),
                                     public_configuration: descriptor.public_configuration.clone(),
                                     secret_configuration: descriptor.secret_configuration.clone(),
                                     inputs,
@@ -1293,6 +1295,7 @@ impl<'linked, 'plan> SchedulerPlanner<'linked, 'plan> {
             &descriptor.descriptor_version,
             contract.worker().worker_version(),
             &effect_policy,
+            contract.deployment_binding(),
             &descriptor.public_configuration,
             &descriptor.secret_configuration,
             &inputs,
@@ -4242,6 +4245,7 @@ fn scheduler_task_kind(kind: LeafTaskKind) -> SchedulerTaskKind {
     match kind {
         LeafTaskKind::Llm => SchedulerTaskKind::Llm,
         LeafTaskKind::Action => SchedulerTaskKind::Action,
+        LeafTaskKind::Retrieval => SchedulerTaskKind::Retrieval,
         LeafTaskKind::Http => SchedulerTaskKind::Http,
         LeafTaskKind::Tool => SchedulerTaskKind::Tool,
     }

@@ -184,7 +184,7 @@ fn register_model_worker(
         .register(
             SchedulerTaskKind::Llm,
             "core.llm",
-            version("1"),
+            version("2"),
             version(worker_version),
             Arc::new(V3LlmTaskExecutor::new(models.clone())),
         )

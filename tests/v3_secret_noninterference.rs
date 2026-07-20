@@ -1,19 +1,33 @@
-use std::{collections::BTreeMap, fs, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
+use futures::stream;
 use insight_agent_platform::{
     catalog_v3::{compile_v3_agent_dir, DeployedV3Agent, ProductionLeafDeploymentResolver},
     dsl::v3::{GraphAuthorDocument, GraphDocumentId, TraceOverlay},
     engine::{
         plan::{PlanIndex, VersionTag},
+        production_worker_registry,
         repository::SqliteDurableRepository,
         EffectEvidence, LeafTaskExecutor, RunId, RuntimeValue, SchedulerTaskKind,
         SubflowContractRegistry, TaskExecutionRequest, TaskExecutionResult, WorkerExecutionContext,
         WorkerExecutorRegistry, WorkerFailure,
     },
-    resources::{actions::ActionRegistry, config::load_model_registry_with_env},
+    resources::{
+        actions::ActionRegistry,
+        config::load_model_registry_with_env,
+        models::{
+            ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability,
+            ModelDeploymentIdentity, ModelRegistry,
+        },
+    },
     runtime::{
-        DeployedAgentCatalog, ProductionRunRepository, RequestMetadata, RunService,
+        DeployedAgentCatalog, ProductionRunRepository, RequestMetadata, RunError, RunService,
         RunServiceConfig,
     },
 };
@@ -21,8 +35,47 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 const SECRET_SENTINEL: &str = "v3-secret-sentinel-MUST-NEVER-PERSIST-7c6a1f";
+const RENDER_SEPARATOR: &str = "::runtime-rendered-request-only::";
 
 struct FixtureExecutor;
+
+#[derive(Debug, Clone, Default)]
+struct CapturingModel {
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl ChatModel for CapturingModel {
+    fn capabilities(&self) -> BTreeSet<ModelCapability> {
+        BTreeSet::new()
+    }
+
+    fn validate_parameters(
+        &self,
+        parameters: &serde_json::Value,
+    ) -> Result<(), insight_agent_platform::dsl::CompileError> {
+        if parameters.is_object() {
+            Ok(())
+        } else {
+            Err(insight_agent_platform::dsl::CompileError::new(
+                "MODEL_PARAMETERS_INVALID",
+                "capture model parameters must be an object",
+            ))
+        }
+    }
+
+    async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, RunError> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(serde_json::to_string(&request.messages).unwrap());
+        Ok(Box::pin(stream::iter([Ok(ChatChunk {
+            text: "safe response".to_owned(),
+            finish_reason: Some("stop".to_owned()),
+            usage: None,
+        })])))
+    }
+}
 
 #[async_trait]
 impl LeafTaskExecutor for FixtureExecutor {
@@ -138,7 +191,7 @@ workflow:
             SchedulerTaskKind::Llm,
             leaf.descriptor().implementation.clone(),
             leaf.descriptor().descriptor_version.clone(),
-            VersionTag::new("openai-chat-adapter-1.0.0").unwrap(),
+            VersionTag::new("openai-chat-adapter-2.0.0").unwrap(),
             Arc::new(FixtureExecutor),
         )
         .unwrap();
@@ -198,4 +251,164 @@ workflow:
     drop(repository);
     let database_bytes = fs::read(database).unwrap();
     assert!(!String::from_utf8_lossy(&database_bytes).contains(SECRET_SENTINEL));
+}
+
+#[tokio::test]
+async fn rendered_provider_message_is_used_in_memory_but_not_persisted_as_a_run_fact() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent_dir = directory.path().join("rendered_message_fixture");
+    fs::create_dir_all(&agent_dir).unwrap();
+    fs::write(
+        agent_dir.join("agent.yaml"),
+        format!(
+            r#"api_version: insight.agent/v3
+kind: agent
+metadata:
+  id: rendered_message_fixture
+  name: Rendered message fixture
+  description: Proves that materialized Provider messages are transient.
+inputs:
+  left: string
+  right: string
+output: string
+workflow:
+  steps:
+    - type: llm
+      id: answer
+      model: capture
+      messages:
+        - role: user
+          content:
+            - text: |-
+                {{{{ left }}}}{RENDER_SEPARATOR}{{{{ right }}}}
+      response: string
+    - return: $answer
+"#
+        ),
+    )
+    .unwrap();
+
+    let published = Arc::new(compile_v3_agent_dir(&agent_dir).unwrap());
+    let capture = CapturingModel::default();
+    let captured_requests = Arc::clone(&capture.requests);
+    let mut models = ModelRegistry::default();
+    models
+        .register_versioned(
+            "capture",
+            ModelDeploymentIdentity::new(
+                "render-capture-worker-v1",
+                json!({"adapter": "render-capture"}),
+            )
+            .unwrap(),
+            capture,
+        )
+        .unwrap();
+    let actions = ActionRegistry::default();
+    let resolver = ProductionLeafDeploymentResolver::new(&models, &actions);
+    let deployed = Arc::new(
+        DeployedV3Agent::publish(
+            Arc::clone(&published),
+            &resolver,
+            SubflowContractRegistry::new(),
+        )
+        .unwrap(),
+    );
+    let workers = production_worker_registry(&models, &actions).unwrap();
+
+    let database = directory.path().join("rendered-request.sqlite");
+    let repository = Arc::new(
+        SqliteDurableRepository::connect_path(&database)
+            .await
+            .unwrap(),
+    );
+    let service = tokio::time::timeout(
+        Duration::from_secs(10),
+        RunService::start(
+            DeployedAgentCatalog::new(vec![Arc::clone(&deployed)]).unwrap(),
+            repository.clone() as Arc<dyn ProductionRunRepository>,
+            workers,
+            {
+                let mut config = RunServiceConfig::single_process_development(2, 1, 1, 32);
+                config.pump_interval = Duration::from_millis(2);
+                config.run_timeout = Duration::from_secs(10);
+                config.artifact_gc_interval = Duration::from_secs(60);
+                config.public_event_prune_interval = Duration::from_secs(60);
+                config
+            },
+        ),
+    )
+    .await
+    .expect("rendered-message service startup stalled")
+    .unwrap();
+
+    let left = "render-left-7ef20a";
+    let right = "render-right-68d91b";
+    let rendered = format!("{left}{RENDER_SEPARATOR}{right}");
+    assert!(!serde_json::to_string(deployed.versioned_plan())
+        .unwrap()
+        .contains(&rendered));
+    let mut attached = tokio::time::timeout(
+        Duration::from_secs(5),
+        service.create_attached(
+            "rendered_message_fixture",
+            json!({"left": left, "right": right}),
+            RequestMetadata::default(),
+        ),
+    )
+    .await
+    .expect("rendered-message Run admission stalled")
+    .unwrap();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), attached.subscription.recv())
+            .await
+            .expect("rendered-message Run stalled")
+            .unwrap();
+        assert!(!serde_json::to_string(&event).unwrap().contains(&rendered));
+        if matches!(
+            event.event_type,
+            insight_agent_platform::events::protocol::RunEventType::RunCompleted
+                | insight_agent_platform::events::protocol::RunEventType::RunFailed
+                | insight_agent_platform::events::protocol::RunEventType::RunCancelled
+                | insight_agent_platform::events::protocol::RunEventType::RunInterrupted
+        ) {
+            break;
+        }
+    }
+    let captured = captured_requests.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert!(
+        captured[0].contains(&rendered),
+        "the Provider fixture must observe the fully materialized message"
+    );
+    drop(captured);
+    drop(attached);
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        service.shutdown(Duration::from_secs(1)),
+    )
+    .await
+    .expect("rendered-message service shutdown stalled")
+    .unwrap();
+    drop(service);
+    drop(repository);
+
+    let mut durable_bytes = Vec::new();
+    for entry in fs::read_dir(directory.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("rendered-request.sqlite"))
+        {
+            durable_bytes.extend(fs::read(path).unwrap());
+        }
+    }
+    let durable_text = String::from_utf8_lossy(&durable_bytes);
+    assert!(durable_text.contains(left));
+    assert!(durable_text.contains(right));
+    assert!(
+        !durable_text.contains(&rendered),
+        "the fully materialized Provider message must not become a durable Run fact"
+    );
 }

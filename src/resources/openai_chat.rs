@@ -7,7 +7,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream, StreamExt};
-use reqwest::{redirect::Policy, Client, Url};
+use reqwest::{redirect::Policy, Client, Response, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -20,8 +20,11 @@ use crate::{
 
 use super::models::{
     model_response_too_large, serialized_json_within_limit, validate_chat_request, ChatChunk,
-    ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest, ChatResponseFormat,
-    ChatRole, ChatStream, ModelCapability, DEFAULT_MAX_ACCUMULATED_TEXT_BYTES,
+    ChatContent, ChatContentPart, ChatEvent, ChatEventStream, ChatFinishReason,
+    ChatInputTokensDetails, ChatMessage, ChatModel, ChatOutputTokensDetails, ChatRequest,
+    ChatRequestMode, ChatResponse, ChatResponseFormat, ChatRole, ChatStream, ChatToolCall,
+    ChatToolCallDelta, ChatToolChoice, ChatToolDefinition, ChatUsage, ModelCapability,
+    ModelRequestCapability, DEFAULT_MAX_ACCUMULATED_TEXT_BYTES,
 };
 
 pub const DEFAULT_MAX_UPSTREAM_BYTES: usize = 8 * 1024 * 1024;
@@ -210,53 +213,20 @@ impl fmt::Debug for OpenAiChatModel {
     }
 }
 
-#[async_trait]
-impl ChatModel for OpenAiChatModel {
-    fn capabilities(&self) -> BTreeSet<ModelCapability> {
-        self.capabilities.clone()
-    }
+struct PreparedOpenAiRequest {
+    wire_messages: Vec<ChatMessage>,
+    parameters: Map<String, Value>,
+    response_format: Option<ChatResponseFormat>,
+    tools: Vec<ChatToolDefinition>,
+    tool_choice: ChatToolChoice,
+    messages_count: usize,
+    image_parts_count: usize,
+    parameters_keys_count: usize,
+}
 
-    fn validate_parameters(&self, parameters: &Value) -> Result<(), CompileError> {
-        if self.parameter_validator.is_valid(parameters) {
-            Ok(())
-        } else {
-            Err(CompileError::new(
-                "MODEL_PARAMETERS_INVALID",
-                "OpenAI parameters do not match the allowed schema",
-            ))
-        }
-    }
-
-    fn max_accumulated_text_bytes(&self) -> usize {
-        self.limits.max_accumulated_text_bytes
-    }
-
-    fn request_body_within_limit(&self, request: &ChatRequest, max_bytes: usize) -> bool {
-        let Some(parameters) = request.parameters.as_object().cloned() else {
-            return false;
-        };
-        let Some(wire_messages) = openai_wire_messages(request) else {
-            return false;
-        };
-        let messages = wire_messages
-            .iter()
-            .map(OpenAiMessage::from)
-            .collect::<Vec<_>>();
-        let response_format = openai_response_format(request.response_format.as_ref());
-        serialized_json_within_limit(
-            &OpenAiRequest {
-                model: &self.model,
-                messages: &messages,
-                stream: true,
-                response_format,
-                parameters,
-            },
-            max_bytes,
-        )
-    }
-
-    async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, RunError> {
-        validate_chat_request(&request)?;
+impl OpenAiChatModel {
+    fn prepare_request(&self, request: &ChatRequest) -> Result<PreparedOpenAiRequest, RunError> {
+        validate_chat_request(request)?;
         if request
             .messages
             .iter()
@@ -287,38 +257,109 @@ impl ChatModel for OpenAiChatModel {
                 "model parameters must be an object",
             )
         })?;
-        let parameters_keys_count = parameters.len();
-        let wire_messages = openai_wire_messages(&request).ok_or_else(|| {
+        let wire_messages = openai_wire_messages(request).ok_or_else(|| {
             RunError::operation(
                 "VNEXT_LLM_RESPONSE_CONFIG_INVALID",
                 "chat provider structured response format is invalid",
             )
         })?;
-        let messages_count = wire_messages.len();
-        let image_parts_count = request
-            .messages
-            .iter()
-            .map(|message| message.image_urls().len())
-            .sum::<usize>();
-        tracing::info!(
-            event_name = "openai.request",
-            model = self.model.as_str(),
-            messages_count,
-            image_parts_count,
-            parameters_keys_count,
-            "sending OpenAI-compatible chat request"
-        );
-        let messages = wire_messages
+        Ok(PreparedOpenAiRequest {
+            messages_count: wire_messages.len(),
+            image_parts_count: request
+                .messages
+                .iter()
+                .map(|message| message.image_urls().len())
+                .sum(),
+            parameters_keys_count: parameters.len(),
+            wire_messages,
+            parameters,
+            response_format: request.response_format.clone(),
+            tools: request.tools.clone(),
+            tool_choice: request.tool_choice.clone(),
+        })
+    }
+
+    fn body_within_limit(
+        &self,
+        request: &ChatRequest,
+        mode: ChatRequestMode,
+        max_bytes: usize,
+    ) -> bool {
+        let Ok(prepared) = self.prepare_request(request) else {
+            return false;
+        };
+        let messages = prepared
+            .wire_messages
             .iter()
             .map(OpenAiMessage::from)
             .collect::<Vec<_>>();
-        let response_format = openai_response_format(request.response_format.as_ref());
+        let response_format = openai_response_format(prepared.response_format.as_ref());
+        let tools = prepared
+            .tools
+            .iter()
+            .map(OpenAiTool::from)
+            .collect::<Vec<_>>();
+        let tool_choice = openai_tool_choice(&prepared.tools, &prepared.tool_choice);
+        serialized_json_within_limit(
+            &OpenAiRequest {
+                model: &self.model,
+                messages: &messages,
+                stream: mode == ChatRequestMode::Streaming,
+                stream_options: (mode == ChatRequestMode::Streaming).then_some(
+                    OpenAiStreamOptions {
+                        include_usage: true,
+                    },
+                ),
+                response_format,
+                tools: &tools,
+                tool_choice,
+                parameters: prepared.parameters,
+            },
+            max_bytes,
+        )
+    }
+
+    async fn send_request(
+        &self,
+        request: &ChatRequest,
+        mode: ChatRequestMode,
+    ) -> Result<Response, RunError> {
+        let prepared = self.prepare_request(request)?;
+        tracing::info!(
+            event_name = "openai.request",
+            model = self.model.as_str(),
+            request_mode = match mode {
+                ChatRequestMode::Complete => "complete",
+                ChatRequestMode::Streaming => "streaming",
+            },
+            messages_count = prepared.messages_count,
+            image_parts_count = prepared.image_parts_count,
+            parameters_keys_count = prepared.parameters_keys_count,
+            "sending OpenAI-compatible chat request"
+        );
+        let messages = prepared
+            .wire_messages
+            .iter()
+            .map(OpenAiMessage::from)
+            .collect::<Vec<_>>();
+        let response_format = openai_response_format(prepared.response_format.as_ref());
+        let tools = prepared
+            .tools
+            .iter()
+            .map(OpenAiTool::from)
+            .collect::<Vec<_>>();
+        let tool_choice = openai_tool_choice(&prepared.tools, &prepared.tool_choice);
         let body = OpenAiRequest {
             model: &self.model,
             messages: &messages,
-            stream: true,
+            stream: mode == ChatRequestMode::Streaming,
+            stream_options: (mode == ChatRequestMode::Streaming).then_some(OpenAiStreamOptions {
+                include_usage: true,
+            }),
             response_format,
-            parameters,
+            tools: &tools,
+            tool_choice,
+            parameters: prepared.parameters,
         };
         let request = self.client.post(self.endpoint.clone()).json(&body);
         let request = match &self.api_key {
@@ -347,6 +388,74 @@ impl ChatModel for OpenAiChatModel {
         {
             return Err(model_response_too_large());
         }
+        Ok(response)
+    }
+}
+
+#[async_trait]
+impl ChatModel for OpenAiChatModel {
+    fn capabilities(&self) -> BTreeSet<ModelCapability> {
+        self.capabilities.clone()
+    }
+
+    fn request_capabilities(&self) -> BTreeSet<ModelRequestCapability> {
+        BTreeSet::from([
+            ModelRequestCapability::Complete,
+            ModelRequestCapability::Streaming,
+        ])
+    }
+
+    fn validate_parameters(&self, parameters: &Value) -> Result<(), CompileError> {
+        if self.parameter_validator.is_valid(parameters) {
+            Ok(())
+        } else {
+            Err(CompileError::new(
+                "MODEL_PARAMETERS_INVALID",
+                "OpenAI parameters do not match the allowed schema",
+            ))
+        }
+    }
+
+    fn max_accumulated_text_bytes(&self) -> usize {
+        self.limits.max_accumulated_text_bytes
+    }
+
+    fn request_body_within_limit(&self, request: &ChatRequest, max_bytes: usize) -> bool {
+        self.body_within_limit(request, ChatRequestMode::Streaming, max_bytes)
+    }
+
+    fn request_body_within_limit_for_mode(
+        &self,
+        request: &ChatRequest,
+        mode: ChatRequestMode,
+        max_bytes: usize,
+    ) -> bool {
+        self.body_within_limit(request, mode, max_bytes)
+    }
+
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, RunError> {
+        let started = Instant::now();
+        let response = self
+            .send_request(&request, ChatRequestMode::Complete)
+            .await?;
+        let bytes = read_bounded_complete_body(response, self.limits.max_upstream_bytes).await?;
+        let parsed = parse_complete_response(&bytes, self.limits)?;
+        tracing::info!(
+            event_name = "openai.response",
+            model = self.model.as_str(),
+            request_mode = "complete",
+            upstream_bytes = bytes.len(),
+            usage_bytes = parsed.usage.as_ref().map_or(0, normalized_usage_size_bytes),
+            elapsed_ms = elapsed_ms(started),
+            "OpenAI-compatible chat response metadata"
+        );
+        Ok(parsed)
+    }
+
+    async fn stream_chat_events(&self, request: ChatRequest) -> Result<ChatEventStream, RunError> {
+        let response = self
+            .send_request(&request, ChatRequestMode::Streaming)
+            .await?;
 
         let stream = stream::try_unfold(
             StreamState {
@@ -412,6 +521,21 @@ impl ChatModel for OpenAiChatModel {
         );
         Ok(Box::pin(stream))
     }
+
+    async fn stream_chat(&self, request: ChatRequest) -> Result<ChatStream, RunError> {
+        let stream = self.stream_chat_events(request).await?;
+        Ok(Box::pin(stream.map(|event| {
+            let event = event?;
+            Ok(ChatChunk {
+                text: event.text_delta,
+                finish_reason: event.finish_reason.map(|reason| reason.as_str().to_owned()),
+                usage: event.usage.map(|usage| {
+                    serde_json::to_value(usage)
+                        .expect("the closed normalized usage type is always serializable")
+                }),
+            })
+        })))
+    }
 }
 
 #[derive(Serialize)]
@@ -420,9 +544,24 @@ struct OpenAiRequest<'a> {
     messages: &'a [OpenAiMessage<'a>],
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<OpenAiStreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<OpenAiResponseFormat<'a>>,
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    tools: &'a [OpenAiTool<'a>],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<OpenAiToolChoice<'a>>,
     #[serde(flatten)]
     parameters: Map<String, Value>,
+}
+
+fn slice_is_empty<T>(values: &[T]) -> bool {
+    values.is_empty()
+}
+
+#[derive(Serialize)]
+struct OpenAiStreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Serialize)]
@@ -437,6 +576,70 @@ struct OpenAiJsonSchema<'a> {
     name: &'a str,
     strict: bool,
     schema: &'a Value,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenAiTool<'a> {
+    Function {
+        function: OpenAiFunctionDefinition<'a>,
+    },
+}
+
+#[derive(Serialize)]
+struct OpenAiFunctionDefinition<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+    parameters: &'a Value,
+}
+
+impl<'a> From<&'a ChatToolDefinition> for OpenAiTool<'a> {
+    fn from(tool: &'a ChatToolDefinition) -> Self {
+        Self::Function {
+            function: OpenAiFunctionDefinition {
+                name: &tool.name,
+                description: tool.description.as_deref(),
+                parameters: &tool.input_schema,
+            },
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum OpenAiToolChoice<'a> {
+    Mode(&'static str),
+    Named(OpenAiNamedToolChoice<'a>),
+}
+
+#[derive(Serialize)]
+struct OpenAiNamedToolChoice<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: OpenAiNamedFunction<'a>,
+}
+
+#[derive(Serialize)]
+struct OpenAiNamedFunction<'a> {
+    name: &'a str,
+}
+
+fn openai_tool_choice<'a>(
+    tools: &'a [ChatToolDefinition],
+    choice: &'a ChatToolChoice,
+) -> Option<OpenAiToolChoice<'a>> {
+    if tools.is_empty() {
+        return None;
+    }
+    Some(match choice {
+        ChatToolChoice::Auto => OpenAiToolChoice::Mode("auto"),
+        ChatToolChoice::Required => OpenAiToolChoice::Mode("required"),
+        ChatToolChoice::Named(name) => OpenAiToolChoice::Named(OpenAiNamedToolChoice {
+            kind: "function",
+            function: OpenAiNamedFunction { name },
+        }),
+    })
 }
 
 fn openai_response_format(
@@ -462,11 +665,16 @@ fn openai_wire_messages(request: &ChatRequest) -> Option<Vec<ChatMessage>> {
     let schema = serde_json::to_string(schema).ok()?;
     let instruction =
         format!("\n\nReturn only a valid JSON object matching this JSON Schema:\n{schema}");
-    let final_message = messages.last_mut()?;
-    if final_message.role != ChatRole::User {
-        return None;
-    }
-    match &mut final_message.content {
+    let final_user_content = messages
+        .iter_mut()
+        .rev()
+        .find_map(|message| match message {
+            ChatMessage::User { content } => Some(content),
+            ChatMessage::System { .. }
+            | ChatMessage::Assistant { .. }
+            | ChatMessage::Tool { .. } => None,
+        })?;
+    match final_user_content {
         ChatContent::Text(text) => text.push_str(&instruction),
         ChatContent::Parts(parts) => parts.push(ChatContentPart::Text { text: instruction }),
     }
@@ -474,31 +682,103 @@ fn openai_wire_messages(request: &ChatRequest) -> Option<Vec<ChatMessage>> {
 }
 
 #[derive(Serialize)]
-struct OpenAiMessage<'a> {
+#[serde(untagged)]
+enum OpenAiMessage<'a> {
+    Author(OpenAiAuthorMessage<'a>),
+    Assistant(OpenAiAssistantMessage<'a>),
+    Tool(OpenAiToolResultMessage<'a>),
+}
+
+#[derive(Serialize)]
+struct OpenAiAuthorMessage<'a> {
     role: ChatRole,
     content: OpenAiContent<'a>,
 }
 
+#[derive(Serialize)]
+struct OpenAiAssistantMessage<'a> {
+    role: ChatRole,
+    content: Option<OpenAiContent<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<OpenAiAssistantToolCall<'a>>,
+}
+
+#[derive(Serialize)]
+struct OpenAiAssistantToolCall<'a> {
+    id: &'a str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: OpenAiAssistantFunctionCall<'a>,
+}
+
+#[derive(Serialize)]
+struct OpenAiAssistantFunctionCall<'a> {
+    name: &'a str,
+    arguments: &'a str,
+}
+
+#[derive(Serialize)]
+struct OpenAiToolResultMessage<'a> {
+    role: ChatRole,
+    tool_call_id: &'a str,
+    content: &'a str,
+}
+
 impl<'a> From<&'a ChatMessage> for OpenAiMessage<'a> {
     fn from(message: &'a ChatMessage) -> Self {
-        let content = match &message.content {
-            ChatContent::Text(text) => OpenAiContent::Text(text),
-            ChatContent::Parts(parts) => OpenAiContent::Parts(
-                parts
+        match message {
+            ChatMessage::System { content } => Self::Author(OpenAiAuthorMessage {
+                role: ChatRole::System,
+                content: openai_content(content),
+            }),
+            ChatMessage::User { content } => Self::Author(OpenAiAuthorMessage {
+                role: ChatRole::User,
+                content: openai_content(content),
+            }),
+            ChatMessage::Assistant {
+                content,
+                tool_calls,
+            } => Self::Assistant(OpenAiAssistantMessage {
+                role: ChatRole::Assistant,
+                content: content.as_ref().map(openai_content),
+                tool_calls: tool_calls
                     .iter()
-                    .map(|part| match part {
-                        ChatContentPart::Text { text } => OpenAiContentPart::Text { text },
-                        ChatContentPart::Image { image } => OpenAiContentPart::ImageUrl {
-                            image_url: OpenAiImageUrl { url: image },
+                    .map(|call| OpenAiAssistantToolCall {
+                        id: &call.id,
+                        kind: "function",
+                        function: OpenAiAssistantFunctionCall {
+                            name: &call.name,
+                            arguments: &call.arguments,
                         },
                     })
                     .collect(),
-            ),
-        };
-        Self {
-            role: message.role,
-            content,
+            }),
+            ChatMessage::Tool {
+                tool_call_id,
+                content,
+            } => Self::Tool(OpenAiToolResultMessage {
+                role: ChatRole::Tool,
+                tool_call_id,
+                content,
+            }),
         }
+    }
+}
+
+fn openai_content(content: &ChatContent) -> OpenAiContent<'_> {
+    match content {
+        ChatContent::Text(text) => OpenAiContent::Text(text),
+        ChatContent::Parts(parts) => OpenAiContent::Parts(
+            parts
+                .iter()
+                .map(|part| match part {
+                    ChatContentPart::Text { text } => OpenAiContentPart::Text { text },
+                    ChatContentPart::Image { image } => OpenAiContentPart::ImageUrl {
+                        image_url: OpenAiImageUrl { url: image },
+                    },
+                })
+                .collect(),
+        ),
     }
 }
 
@@ -527,7 +807,7 @@ type ResponseByteStream =
 struct StreamState {
     bytes: Option<ResponseByteStream>,
     decoder: SseDecoder,
-    pending: VecDeque<ChatChunk>,
+    pending: VecDeque<ChatEvent>,
     upstream_bytes: usize,
     limits: OpenAiChatLimits,
     model: String,
@@ -538,13 +818,13 @@ struct StreamState {
 }
 
 impl StreamState {
-    fn pop_pending_chunk(&mut self) -> Option<ChatChunk> {
-        let chunk = self.pending.pop_front()?;
+    fn pop_pending_chunk(&mut self) -> Option<ChatEvent> {
+        let event = self.pending.pop_front()?;
         self.chunks_count += 1;
         self.usage_bytes = self
             .usage_bytes
-            .saturating_add(chunk.usage.as_ref().map_or(0, json_size_bytes));
-        Some(chunk)
+            .saturating_add(event.usage.as_ref().map_or(0, normalized_usage_size_bytes));
+        Some(event)
     }
 
     fn log_response_metadata(&self) {
@@ -575,7 +855,7 @@ impl SseDecoder {
         }
     }
 
-    fn push(&mut self, bytes: &[u8]) -> Result<Vec<ChatChunk>, RunError> {
+    fn push(&mut self, bytes: &[u8]) -> Result<Vec<ChatEvent>, RunError> {
         if self.complete {
             return Ok(Vec::new());
         }
@@ -599,7 +879,7 @@ impl SseDecoder {
         Ok(chunks)
     }
 
-    fn finish(&mut self) -> Result<Vec<ChatChunk>, RunError> {
+    fn finish(&mut self) -> Result<Vec<ChatEvent>, RunError> {
         if self.complete {
             return Ok(Vec::new());
         }
@@ -618,7 +898,7 @@ impl SseDecoder {
         self.complete
     }
 
-    fn drain_complete_lines(&mut self) -> Result<Vec<ChatChunk>, RunError> {
+    fn drain_complete_lines(&mut self) -> Result<Vec<ChatEvent>, RunError> {
         let mut chunks = Vec::new();
         while !self.complete {
             let Some(index) = self.buffer.iter().position(|byte| *byte == b'\n') else {
@@ -637,9 +917,9 @@ impl SseDecoder {
         Ok(chunks)
     }
 
-    fn parse_line(&mut self, line: &[u8]) -> Result<Vec<ChatChunk>, RunError> {
+    fn parse_line(&mut self, line: &[u8]) -> Result<Vec<ChatEvent>, RunError> {
         match parse_sse_line(line, self.limits)? {
-            ParsedSseLine::Chunks(chunks) => Ok(chunks),
+            ParsedSseLine::Events(events) => Ok(events),
             ParsedSseLine::Done => {
                 self.complete = true;
                 Ok(Vec::new())
@@ -653,16 +933,16 @@ fn trim_carriage_return(line: &[u8]) -> &[u8] {
 }
 
 enum ParsedSseLine {
-    Chunks(Vec<ChatChunk>),
+    Events(Vec<ChatEvent>),
     Done,
 }
 
 fn parse_sse_line(line: &[u8], limits: OpenAiChatLimits) -> Result<ParsedSseLine, RunError> {
     if line.is_empty() {
-        return Ok(ParsedSseLine::Chunks(Vec::new()));
+        return Ok(ParsedSseLine::Events(Vec::new()));
     }
     let Some(payload) = line.strip_prefix(b"data:") else {
-        return Ok(ParsedSseLine::Chunks(Vec::new()));
+        return Ok(ParsedSseLine::Events(Vec::new()));
     };
     let payload = trim_ascii_space(payload);
     if payload.len() > limits.max_event_payload_bytes {
@@ -680,54 +960,7 @@ fn parse_sse_line(line: &[u8], limits: OpenAiChatLimits) -> Result<ParsedSseLine
             "invalid chat provider stream payload",
         )
     })?;
-    let choice_count = parsed.choices.len();
-    let mut chunks = Vec::new();
-    for (index, choice) in parsed.choices.into_iter().enumerate() {
-        let text = choice.delta.content.unwrap_or_default();
-        if text.len() > limits.max_chunk_text_bytes {
-            return Err(model_response_too_large());
-        }
-        let usage = (index + 1 == choice_count)
-            .then(|| parsed.usage.clone())
-            .flatten();
-        if let Some(usage) = &usage {
-            let bytes = serde_json::to_vec(usage).map_err(|_| {
-                RunError::operation(
-                    "UPSTREAM_STREAM_INVALID",
-                    "invalid chat provider stream payload",
-                )
-            })?;
-            if bytes.len() > limits.max_usage_json_bytes {
-                return Err(model_response_too_large());
-            }
-        }
-        if !text.is_empty() || choice.finish_reason.is_some() || usage.is_some() {
-            chunks.push(ChatChunk {
-                text,
-                finish_reason: choice.finish_reason,
-                usage,
-            });
-        }
-    }
-    if chunks.is_empty() {
-        if let Some(usage) = parsed.usage {
-            let bytes = serde_json::to_vec(&usage).map_err(|_| {
-                RunError::operation(
-                    "UPSTREAM_STREAM_INVALID",
-                    "invalid chat provider stream payload",
-                )
-            })?;
-            if bytes.len() > limits.max_usage_json_bytes {
-                return Err(model_response_too_large());
-            }
-            chunks.push(ChatChunk {
-                text: String::new(),
-                finish_reason: None,
-                usage: Some(usage),
-            });
-        }
-    }
-    Ok(ParsedSseLine::Chunks(chunks))
+    Ok(ParsedSseLine::Events(openai_chunk_events(parsed, limits)?))
 }
 
 fn incomplete_stream() -> RunError {
@@ -748,12 +981,12 @@ fn trim_ascii_space(bytes: &[u8]) -> &[u8] {
 #[derive(Deserialize)]
 struct OpenAiChunk {
     #[serde(default)]
-    choices: Vec<OpenAiChoice>,
+    choices: Vec<OpenAiStreamChoice>,
     usage: Option<Value>,
 }
 
 #[derive(Deserialize)]
-struct OpenAiChoice {
+struct OpenAiStreamChoice {
     delta: OpenAiDelta,
     finish_reason: Option<String>,
 }
@@ -761,6 +994,267 @@ struct OpenAiChoice {
 #[derive(Deserialize)]
 struct OpenAiDelta {
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<OpenAiToolCallDelta>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiToolCallDelta {
+    index: u32,
+    id: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    function: Option<OpenAiFunctionDelta>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiFunctionDelta {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompleteResponse {
+    choices: Vec<OpenAiCompleteChoice>,
+    usage: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompleteChoice {
+    message: OpenAiCompleteMessage,
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompleteMessage {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<OpenAiCompleteToolCall>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompleteToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    function: OpenAiCompleteFunction,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompleteFunction {
+    name: String,
+    arguments: String,
+}
+
+fn openai_chunk_events(
+    parsed: OpenAiChunk,
+    limits: OpenAiChatLimits,
+) -> Result<Vec<ChatEvent>, RunError> {
+    if parsed.choices.len() > 1 {
+        return Err(invalid_stream_payload());
+    }
+    let usage = normalize_openai_usage(parsed.usage, limits, invalid_stream_payload)?;
+    let Some(choice) = parsed.choices.into_iter().next() else {
+        return Ok(usage
+            .map(|usage| {
+                vec![ChatEvent {
+                    usage: Some(usage),
+                    ..ChatEvent::default()
+                }]
+            })
+            .unwrap_or_default());
+    };
+    let text_delta = choice.delta.content.unwrap_or_default();
+    if text_delta.len() > limits.max_chunk_text_bytes {
+        return Err(model_response_too_large());
+    }
+    let mut tool_call_deltas = Vec::with_capacity(choice.delta.tool_calls.len());
+    for call in choice.delta.tool_calls {
+        if call.kind.as_deref().is_some_and(|kind| kind != "function")
+            || call.id.as_deref().is_some_and(str::is_empty)
+        {
+            return Err(invalid_stream_payload());
+        }
+        let function = call.function.unwrap_or(OpenAiFunctionDelta {
+            name: None,
+            arguments: None,
+        });
+        if function.name.as_deref().is_some_and(str::is_empty) {
+            return Err(invalid_stream_payload());
+        }
+        let arguments_delta = function.arguments.unwrap_or_default();
+        if arguments_delta.len() > limits.max_chunk_text_bytes {
+            return Err(model_response_too_large());
+        }
+        tool_call_deltas.push(ChatToolCallDelta {
+            index: call.index,
+            id: call.id,
+            name: function.name,
+            arguments_delta,
+        });
+    }
+    let event = ChatEvent {
+        text_delta,
+        tool_call_deltas,
+        finish_reason: choice
+            .finish_reason
+            .as_deref()
+            .map(|reason| ChatFinishReason::from_provider(Some(reason))),
+        usage,
+    };
+    Ok((!event.is_empty()).then_some(event).into_iter().collect())
+}
+
+async fn read_bounded_complete_body(
+    response: Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, RunError> {
+    let mut body = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(|error| {
+            RunError::operation(
+                "UPSTREAM_RESPONSE",
+                format!(
+                    "chat provider response failed ({})",
+                    classify_request_error(&error)
+                ),
+            )
+        })?;
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(model_response_too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn parse_complete_response(
+    bytes: &[u8],
+    limits: OpenAiChatLimits,
+) -> Result<ChatResponse, RunError> {
+    let parsed: OpenAiCompleteResponse =
+        serde_json::from_slice(bytes).map_err(|_| invalid_complete_response())?;
+    if parsed.choices.len() != 1 {
+        return Err(invalid_complete_response());
+    }
+    let choice = parsed
+        .choices
+        .into_iter()
+        .next()
+        .expect("the exact choice count was checked");
+    let text = choice.message.content.unwrap_or_default();
+    if text.len() > limits.max_accumulated_text_bytes {
+        return Err(model_response_too_large());
+    }
+    let mut tool_calls = Vec::with_capacity(choice.message.tool_calls.len());
+    for (index, call) in choice.message.tool_calls.into_iter().enumerate() {
+        if call.kind != "function"
+            || call.id.is_empty()
+            || call.function.name.is_empty()
+            || call.function.arguments.len() > limits.max_accumulated_text_bytes
+        {
+            return Err(invalid_complete_response());
+        }
+        tool_calls.push(ChatToolCall {
+            index: u32::try_from(index).map_err(|_| invalid_complete_response())?,
+            id: call.id,
+            name: call.function.name,
+            arguments: call.function.arguments,
+        });
+    }
+    Ok(ChatResponse {
+        text,
+        tool_calls,
+        finish_reason: ChatFinishReason::from_provider(choice.finish_reason.as_deref()),
+        usage: normalize_openai_usage(parsed.usage, limits, invalid_complete_response)?,
+    })
+}
+
+fn normalize_openai_usage(
+    usage: Option<Value>,
+    limits: OpenAiChatLimits,
+    invalid: fn() -> RunError,
+) -> Result<Option<ChatUsage>, RunError> {
+    let Some(usage) = usage else {
+        return Ok(None);
+    };
+    let bytes = serde_json::to_vec(&usage).map_err(|_| invalid())?;
+    if bytes.len() > limits.max_usage_json_bytes {
+        return Err(model_response_too_large());
+    }
+    let object = usage.as_object().ok_or_else(invalid)?;
+    let optional_count = |name: &str| -> Result<Option<u64>, RunError> {
+        object
+            .get(name)
+            .filter(|value| !value.is_null())
+            .map(|value| value.as_u64().ok_or_else(invalid))
+            .transpose()
+    };
+    let input_tokens_details =
+        normalize_input_details(object.get("prompt_tokens_details"), invalid)?;
+    let output_tokens_details =
+        normalize_output_details(object.get("completion_tokens_details"), invalid)?;
+    Ok(Some(ChatUsage {
+        input_tokens: optional_count("prompt_tokens")?,
+        input_tokens_details,
+        output_tokens: optional_count("completion_tokens")?,
+        output_tokens_details,
+        total_tokens: optional_count("total_tokens")?,
+    }))
+}
+
+fn normalize_input_details(
+    details: Option<&Value>,
+    invalid: fn() -> RunError,
+) -> Result<Option<ChatInputTokensDetails>, RunError> {
+    let Some(details) = details.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let object = details.as_object().ok_or_else(invalid)?;
+    Ok(Some(ChatInputTokensDetails {
+        cached_tokens: object
+            .get("cached_tokens")
+            .filter(|value| !value.is_null())
+            .map(|value| value.as_u64().ok_or_else(invalid))
+            .transpose()?,
+    }))
+}
+
+fn normalize_output_details(
+    details: Option<&Value>,
+    invalid: fn() -> RunError,
+) -> Result<Option<ChatOutputTokensDetails>, RunError> {
+    let Some(details) = details.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let object = details.as_object().ok_or_else(invalid)?;
+    Ok(Some(ChatOutputTokensDetails {
+        reasoning_tokens: object
+            .get("reasoning_tokens")
+            .filter(|value| !value.is_null())
+            .map(|value| value.as_u64().ok_or_else(invalid))
+            .transpose()?,
+    }))
+}
+
+fn normalized_usage_size_bytes(usage: &ChatUsage) -> usize {
+    json_size_bytes(usage)
+}
+
+fn invalid_stream_payload() -> RunError {
+    RunError::operation(
+        "UPSTREAM_STREAM_INVALID",
+        "invalid chat provider stream payload",
+    )
+}
+
+fn invalid_complete_response() -> RunError {
+    RunError::operation(
+        "UPSTREAM_RESPONSE_INVALID",
+        "invalid chat provider response payload",
+    )
 }
 
 fn parameter_schema() -> Value {

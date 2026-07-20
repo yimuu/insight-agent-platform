@@ -45,7 +45,10 @@ use super::{
     INVALID_DOCUMENT, INVALID_REFERENCE, INVALID_TYPE, PROMPT_RESOURCE_BLOCKED,
 };
 
-pub const V3_COMPILER_VERSION: &str = "structured-v3-advanced-2";
+pub const V3_COMPILER_VERSION: &str = "structured-v3-advanced-3";
+
+const V3_LLM_DESCRIPTOR_VERSION: &str = "2";
+const V3_LEAF_DESCRIPTOR_VERSION: &str = "1";
 
 #[derive(Debug, Clone)]
 pub struct CompileOptions {
@@ -504,6 +507,36 @@ impl GraphCompiler {
                 configuration.remove("messages");
             }
             public_configuration.insert("message_program".to_owned(), compile_message_program(llm));
+            public_configuration.insert("stream".to_owned(), DescriptorValue::Boolean(llm.stream));
+            public_configuration
+                .insert("publish".to_owned(), DescriptorValue::Boolean(llm.publish));
+            public_configuration.insert(
+                "tools".to_owned(),
+                DescriptorValue::Array(
+                    llm.tools
+                        .iter()
+                        .cloned()
+                        .map(DescriptorValue::String)
+                        .collect(),
+                ),
+            );
+            public_configuration.insert(
+                "tool_choice".to_owned(),
+                DescriptorValue::String(llm.tool_choice.as_str().to_owned()),
+            );
+            public_configuration.insert(
+                "tool_limits".to_owned(),
+                DescriptorValue::Object(BTreeMap::from([
+                    (
+                        "max_calls".to_owned(),
+                        DescriptorValue::Integer(i64::from(llm.tool_limits.max_calls)),
+                    ),
+                    (
+                        "max_rounds".to_owned(),
+                        DescriptorValue::Integer(i64::from(llm.tool_limits.max_rounds)),
+                    ),
+                ])),
+            );
         }
         let configuration_references = collect_configuration_references(&reference_configuration)?;
         let mut references = configuration_references.clone();
@@ -616,12 +649,18 @@ impl GraphCompiler {
         }
         let descriptor = LeafTaskDescriptor::new(
             step.implementation.clone(),
-            version("1")?,
+            version(match step.kind {
+                LeafKind::Llm => V3_LLM_DESCRIPTOR_VERSION,
+                LeafKind::Action | LeafKind::Retrieval | LeafKind::Http | LeafKind::Tool => {
+                    V3_LEAF_DESCRIPTOR_VERSION
+                }
+            })?,
             public_configuration,
         );
         let kind = match step.kind {
             LeafKind::Llm => NodeKind::LlmTask(descriptor),
             LeafKind::Action => NodeKind::ActionTask(descriptor),
+            LeafKind::Retrieval => NodeKind::RetrievalTask(descriptor),
             LeafKind::Http => NodeKind::HttpTask(descriptor),
             LeafKind::Tool => NodeKind::ToolTask(descriptor),
         };
@@ -1167,7 +1206,7 @@ impl GraphCompiler {
         if step.flavor == AuthorLoopFlavor::Agent && !contains_agent_operation(&step.steps) {
             return Err(CompileError::new(
                 INVALID_CONTROL_FLOW,
-                "agent_loop must contain an llm, tool, or fixed subflow call",
+                "agent_loop must contain an llm, retrieval, tool, or fixed subflow call",
             ));
         }
         let loop_id = node_id(&step.id)?;
@@ -3287,7 +3326,10 @@ fn reject_duplicate_static_map_keys(
 
 fn contains_agent_operation(steps: &[Step]) -> bool {
     steps.iter().any(|step| match step {
-        Step::Leaf(leaf) => matches!(leaf.kind, LeafKind::Llm | LeafKind::Tool),
+        Step::Leaf(leaf) => matches!(
+            leaf.kind,
+            LeafKind::Llm | LeafKind::Retrieval | LeafKind::Tool
+        ),
         Step::Call(_) => true,
         Step::If(value) => {
             contains_agent_operation(&value.then_steps)

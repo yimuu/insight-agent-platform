@@ -222,6 +222,10 @@ impl<'a> Reducer<'a> {
                 let step = self.reduce_leaf(node, "action", descriptor)?;
                 Ok((step, self.linear_next(node)?))
             }
+            NodeKind::RetrievalTask(descriptor) => {
+                let step = self.reduce_leaf(node, "retrieval", descriptor)?;
+                Ok((step, self.linear_next(node)?))
+            }
             NodeKind::HttpTask(descriptor) => {
                 let step = self.reduce_leaf(node, "http", descriptor)?;
                 Ok((step, self.linear_next(node)?))
@@ -269,11 +273,13 @@ impl<'a> Reducer<'a> {
         kind: &str,
         descriptor: &LeafTaskDescriptor,
     ) -> ReductionResult<Value> {
-        if descriptor.descriptor_version.as_str() != "1" {
+        let expected_descriptor_version = if kind == "llm" { "2" } else { "1" };
+        if descriptor.descriptor_version.as_str() != expected_descriptor_version {
             return Err(format!(
-                "leaf '{}' uses descriptor version '{}' without an author-surface inverse",
+                "leaf '{}' uses descriptor version '{}' without the expected v3 author-surface inverse '{}'",
                 node.id(),
-                descriptor.descriptor_version
+                descriptor.descriptor_version,
+                expected_descriptor_version,
             ));
         }
         if !descriptor.secret_configuration.is_empty() {
@@ -288,6 +294,7 @@ impl<'a> Reducer<'a> {
             .map(|(name, value)| Ok((name.clone(), descriptor_json(value)?)))
             .collect::<ReductionResult<Map<_, _>>>()?;
         configuration.remove("runtime_bindings");
+        configuration.remove("optional_runtime_bindings");
         configuration.remove("prompt_catalog");
         let message_program = configuration.remove("message_program");
 
@@ -304,6 +311,22 @@ impl<'a> Reducer<'a> {
             }
             "llm" if descriptor.implementation != "core.llm" => {
                 return Err(format!("LLM '{}' has a non-core implementation", node.id()));
+            }
+            "retrieval" => {
+                if configuration.get("retrieval").and_then(Value::as_str)
+                    != Some(descriptor.implementation.as_str())
+                {
+                    return Err(format!(
+                        "retrieval '{}' implementation and authored resource do not match",
+                        node.id()
+                    ));
+                }
+                if !matches!(configuration.get("publish"), Some(Value::Bool(_))) {
+                    return Err(format!(
+                        "retrieval '{}' has no normalized publish decision",
+                        node.id()
+                    ));
+                }
             }
             "http" if descriptor.implementation != "core.http" => {
                 return Err(format!(
@@ -966,6 +989,7 @@ impl<'a> Reducer<'a> {
             },
             NodeKind::LlmTask(_)
             | NodeKind::ActionTask(_)
+            | NodeKind::RetrievalTask(_)
             | NodeKind::HttpTask(_)
             | NodeKind::ToolTask(_)
             | NodeKind::SubflowCall(_)
@@ -1110,6 +1134,7 @@ impl<'a> Reducer<'a> {
             let descriptor = match node.kind() {
                 NodeKind::LlmTask(value)
                 | NodeKind::ActionTask(value)
+                | NodeKind::RetrievalTask(value)
                 | NodeKind::HttpTask(value)
                 | NodeKind::ToolTask(value) => value,
                 _ => continue,

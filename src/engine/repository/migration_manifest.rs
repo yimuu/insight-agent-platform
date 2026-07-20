@@ -62,7 +62,7 @@ macro_rules! migration {
     };
 }
 
-pub const DURABLE_V3_MIGRATIONS: [DurableV3Migration; 17] = [
+pub const DURABLE_V3_MIGRATIONS: [DurableV3Migration; 23] = [
     migration!(
         202607180001,
         "durable_v3",
@@ -159,5 +159,47 @@ pub const DURABLE_V3_MIGRATIONS: [DurableV3Migration; 17] = [
         202607180017,
         "artifact_store_authority",
         SqliteMigrationGuard::Always
+    ),
+    migration!(
+        202607180018,
+        "response_stream_authority",
+        SqliteMigrationGuard::WhenQueryMissing(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='response_snapshots'"
+        )
+    ),
+    migration!(
+        202607180019,
+        "llm_tool_call_checkpoints",
+        SqliteMigrationGuard::WhenQueryMissing(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_tool_call_batches'"
+        )
+    ),
+    migration!(
+        202607180020,
+        "model_tool_parent_deadline",
+        SqliteMigrationGuard::WhenQueryMissing(
+            "SELECT 1 FROM pragma_table_info('model_tool_call_batches') WHERE name='parent_operation_deadline'"
+        )
+    ),
+    migration!(
+        202607180021,
+        "function_call_publication_sequence",
+        SqliteMigrationGuard::WhenQueryMissing(
+            "SELECT 1 FROM pragma_table_info('model_tool_calls') WHERE name='response_seal_index'"
+        )
+    ),
+    migration!(
+        202607180022,
+        "atomic_artifact_retention",
+        SqliteMigrationGuard::WhenQueryMissing(
+            "SELECT 1 FROM pragma_table_info('workflow_runs') WHERE name='artifact_reference_retention_seconds'"
+        )
+    ),
+    migration!(
+        202607180023,
+        "retrieval_publications",
+        SqliteMigrationGuard::WhenQueryMissing(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_retrieval_publications'"
+        )
     ),
 ];

@@ -97,7 +97,7 @@ fn workers(
         .register(
             SchedulerTaskKind::Llm,
             "core.llm",
-            VersionTag::new("1").unwrap(),
+            VersionTag::new("2").unwrap(),
             VersionTag::new("token-observer-worker-1").unwrap(),
             Arc::new(executor),
         )

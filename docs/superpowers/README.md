@@ -2,6 +2,8 @@
 
 当前唯一的整体架构与执行语义规范是 [DSL v3 Durable Graph Execution](./specs/2026-07-18-dsl-v3-durable-graph-execution-design.md)。它定义作者 DSL、Canonical Typed Plan、持久化 Run/Scope/Activation/Attempt、控制 token、Worker lease、恢复、artifact 和发布门禁。
 
+已经完成的窄增量 [Response 实时流与 LLM 发布控制规范](./specs/2026-07-19-response-streaming-and-llm-publication-design.md) 调整了 v3 的 Attached 用户响应流、LLM `stream`/`publish` 作者合同、工具 continuation、RAG 公开结果和最终 response snapshot。其实现边界与验收范围以规范开头、第 15、16 节及仓库测试为准。
+
 仓库根目录的 [README](../../README.md)、checked-in Agent、v3 positive fixtures、schema、实现与测试是该规范的可执行一致性证据。它们不能各自发明与规范冲突的新语义；发现冲突时，应先修正规范或证据并明确说明原因。
 
 本目录中更早日期的 specs 与 plans 仅作为历史决策记录保留。除非当前 v3 规范显式引用某项跨领域合同，否则旧文档中的作者语法、执行计划、控制节点或恢复模型都不是当前生产合同，也不能作为重新引入已删除实现的依据。

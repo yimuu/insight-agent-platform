@@ -1534,6 +1534,16 @@ async fn repair_run(
     if rows != 1 {
         return Err(RepositoryError::invalid_data());
     }
+    if matches!(
+        json_string(value, "lifecycle")?.as_str(),
+        "succeeded" | "failed" | "cancelled" | "interrupted" | "timed_out"
+    ) {
+        super::sqlite_model_tool_queue::close_model_tool_work_for_terminal_run_sqlite(
+            transaction,
+            run_id,
+        )
+        .await?;
+    }
     Ok(())
 }
 

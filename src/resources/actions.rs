@@ -6,7 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use semver::Version;
-use serde::Serialize;
+use serde::{de::Error as _, ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -61,6 +61,95 @@ impl IdempotencyClass {
 pub enum CancellationClass {
     Cooperative,
     NotSupported,
+}
+
+/// Closed authorization vocabulary for model-visible tool arguments.
+///
+/// `All` is deliberately distinct from an exhaustive field list: only `All`
+/// authorizes raw Provider argument deltas. `Fields` authorizes a completed,
+/// schema-validated projection and therefore serializes as an ordered JSON
+/// array rather than an open object.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ToolPublicArguments {
+    #[default]
+    Private,
+    All,
+    Fields(BTreeSet<String>),
+}
+
+impl Serialize for ToolPublicArguments {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Private => serializer.serialize_str("private"),
+            Self::All => serializer.serialize_str("all"),
+            Self::Fields(fields) => {
+                let mut sequence = serializer.serialize_seq(Some(fields.len()))?;
+                for field in fields {
+                    sequence.serialize_element(field)?;
+                }
+                sequence.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolPublicArguments {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            Value::String(mode) if mode == "private" => Ok(Self::Private),
+            Value::String(mode) if mode == "all" => Ok(Self::All),
+            Value::Array(values) => {
+                let fields = values
+                    .into_iter()
+                    .map(|value| {
+                        value.as_str().map(str::to_owned).ok_or_else(|| {
+                            D::Error::custom("public argument fields must be strings")
+                        })
+                    })
+                    .collect::<Result<BTreeSet<_>, _>>()?;
+                Ok(Self::Fields(fields))
+            }
+            _ => Err(D::Error::custom(
+                "public arguments must be 'private', 'all', or a field list",
+            )),
+        }
+    }
+}
+
+/// Tool-side half of the public response authorization contract.
+///
+/// The default is fully private. `result` is a self-contained, closed JSON
+/// Schema for the safe public projection; it is not the executor's raw output
+/// schema. The Agent-side `llm.publish` decision is applied separately by the
+/// deployment linker.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolPublicPolicy {
+    #[serde(default)]
+    pub call: bool,
+    #[serde(default)]
+    pub arguments: ToolPublicArguments,
+    #[serde(default, rename = "result")]
+    pub result_schema: Option<Value>,
+}
+
+impl ToolPublicPolicy {
+    pub fn private() -> Self {
+        Self::default()
+    }
+
+    pub fn is_fully_private(&self) -> bool {
+        !self.call
+            && matches!(self.arguments, ToolPublicArguments::Private)
+            && self.result_schema.is_none()
+    }
 }
 
 /// The complete, closed metadata which defines one action contract.
@@ -146,6 +235,32 @@ impl ActionContext {
 #[async_trait]
 pub trait Action: Send + Sync {
     fn descriptor(&self) -> ActionDescriptor;
+
+    /// Returns the descriptor's public projection policy. Existing actions
+    /// remain private unless they opt in explicitly.
+    fn public_policy(&self) -> ToolPublicPolicy {
+        ToolPublicPolicy::private()
+    }
+
+    /// Adds process-local, server-only values to a model-originated tool
+    /// input after the complete model-visible object has passed its frozen
+    /// schema contract.
+    ///
+    /// The returned value is handed directly to [`Action::call`]. It is never
+    /// used as model-call evidence, durable queue input, public response data,
+    /// or terminal snapshot data. The default is an identity transform, so an
+    /// existing Action has exactly the same behavior for ordinary and
+    /// model-originated calls unless it explicitly opts into injection.
+    /// Implementations must not copy protected values into their output or
+    /// error text.
+    fn inject_model_tool_input(
+        &self,
+        model_visible_input: Value,
+        _context: &ActionContext,
+    ) -> Result<Value, RunError> {
+        Ok(model_visible_input)
+    }
+
     async fn call(&self, input: Value, context: ActionContext) -> Result<Value, RunError>;
 }
 
@@ -155,6 +270,8 @@ pub struct RegisteredAction {
     action: Arc<dyn Action>,
     input_validator: JsonSchemaValidator,
     output_validator: JsonSchemaValidator,
+    public_policy: ToolPublicPolicy,
+    public_result_validator: Option<JsonSchemaValidator>,
 }
 
 impl RegisteredAction {
@@ -164,6 +281,44 @@ impl RegisteredAction {
 
     pub fn identity(&self) -> &ActionDescriptorIdentity {
         &self.identity
+    }
+
+    pub fn public_policy(&self) -> &ToolPublicPolicy {
+        &self.public_policy
+    }
+
+    /// Rechecks the cross-field publication invariant at deployment link
+    /// time. Keeping this check at the linker boundary prevents an invalid
+    /// registry entry from ever entering a Deployment Revision.
+    pub fn validate_public_policy_for_link(&self) -> Result<(), CompileError> {
+        if !self.public_policy.call
+            && (!matches!(self.public_policy.arguments, ToolPublicArguments::Private)
+                || self.public_policy.result_schema.is_some())
+        {
+            return Err(CompileError::new(
+                "ACTION_PUBLIC_POLICY_INVALID",
+                format!(
+                    "action '{}' cannot publish arguments or result while public.call is false",
+                    self.descriptor.id
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_public_result(&self, value: &Value) -> Result<(), RunError> {
+        let Some(validator) = &self.public_result_validator else {
+            return Err(RunError::operation(
+                "ACTION_PUBLIC_RESULT_PRIVATE",
+                "action result has no public projection contract",
+            ));
+        };
+        validate_json(
+            validator,
+            value,
+            "ACTION_PUBLIC_RESULT_INVALID",
+            "action public result validation failed",
+        )
     }
 
     pub fn validate_input(&self, input: &Value) -> Result<(), RunError> {
@@ -178,13 +333,66 @@ impl RegisteredAction {
     pub async fn call(&self, input: Value, context: ActionContext) -> Result<Value, RunError> {
         self.validate_input(&input)?;
         let output = self.action.call(input, context).await?;
+        self.validate_output(&output)?;
+        Ok(output)
+    }
+
+    /// Executes one model-originated tool call without ever making injected
+    /// server-only values part of the model-visible input contract.
+    ///
+    /// Callers must first verify the exact frozen Action binding and frozen
+    /// input schema. This second registry validation intentionally applies to
+    /// the safe model object *before* injection; the injected value is not
+    /// revalidated against the closed model-visible schema.
+    pub async fn call_model_tool(
+        &self,
+        model_visible_input: Value,
+        context: ActionContext,
+    ) -> Result<Value, RunError> {
+        self.validate_input(&model_visible_input)?;
+        let input = self
+            .action
+            .inject_model_tool_input(model_visible_input, &context)
+            .map_err(sanitize_model_tool_error)?;
+        let output = self
+            .action
+            .call(input, context)
+            .await
+            .map_err(sanitize_model_tool_error)?;
+        self.validate_output(&output)?;
+        Ok(output)
+    }
+
+    fn validate_output(&self, output: &Value) -> Result<(), RunError> {
         validate_json(
             &self.output_validator,
-            &output,
+            output,
             "VNEXT_ACTION_OUTPUT_CONTRACT_INVALID",
             "action output validation failed",
-        )?;
-        Ok(output)
+        )
+    }
+}
+
+/// A model-tool Action is allowed to consume process-local secrets, but its
+/// error is not allowed to turn those values into durable or public text. Keep
+/// stop/timeout semantics while replacing Action-authored operation and
+/// infrastructure bodies with closed platform errors.
+fn sanitize_model_tool_error(error: RunError) -> RunError {
+    match error.kind() {
+        crate::runtime::RunErrorKind::Operation => RunError::operation(
+            "MODEL_TOOL_ACTION_FAILED",
+            "model tool action execution failed",
+        ),
+        crate::runtime::RunErrorKind::Infrastructure => RunError::infrastructure(
+            "MODEL_TOOL_ACTION_UNAVAILABLE",
+            "model tool action execution is unavailable",
+        ),
+        crate::runtime::RunErrorKind::Timeout => RunError::operation_timeout(),
+        crate::runtime::RunErrorKind::Stop => RunError::stopped(
+            error
+                .stop_reason()
+                .expect("RunErrorKind::Stop always carries a stop reason"),
+        ),
     }
 }
 
@@ -211,6 +419,7 @@ impl ActionRegistry {
         A: Action + 'static,
     {
         let mut descriptor = action.descriptor();
+        let mut public_policy = action.public_policy();
         let id = descriptor.id;
         if !is_qualified_identifier(id) {
             return Err(CompileError::new(
@@ -258,9 +467,29 @@ impl ActionRegistry {
                     format!("action '{id}' output schema is invalid: {error}"),
                 )
             })?;
+        validate_public_argument_policy(id, &public_policy.arguments, &input_schema)?;
+        let public_result_validator = match public_policy.result_schema.take() {
+            Some(schema) => {
+                let (schema, validator) = normalize_action_schema(&schema).map_err(|error| {
+                    CompileError::new(
+                        "ACTION_PUBLIC_RESULT_SCHEMA_INVALID",
+                        format!("action '{id}' public result schema is invalid: {error}"),
+                    )
+                })?;
+                if !is_closed_object_schema(&schema) {
+                    return Err(CompileError::new(
+                        "ACTION_PUBLIC_RESULT_SCHEMA_NOT_CLOSED",
+                        format!("action '{id}' public result schema must describe a closed object"),
+                    ));
+                }
+                public_policy.result_schema = Some(schema);
+                Some(validator)
+            }
+            None => None,
+        };
         descriptor.input_schema = input_schema;
         descriptor.output_schema = output_schema;
-        let descriptor_hash = descriptor_hash(&descriptor)?;
+        let descriptor_hash = descriptor_hash(&descriptor, &public_policy)?;
         self.actions.insert(
             id.to_string(),
             Arc::new(RegisteredAction {
@@ -273,6 +502,8 @@ impl ActionRegistry {
                 action: Arc::new(action),
                 input_validator,
                 output_validator,
+                public_policy,
+                public_result_validator,
             }),
         );
         Ok(())
@@ -290,6 +521,44 @@ impl ActionRegistry {
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.actions.keys().map(String::as_str)
     }
+}
+
+fn validate_public_argument_policy(
+    action_id: &str,
+    policy: &ToolPublicArguments,
+    input_schema: &Value,
+) -> Result<(), CompileError> {
+    let ToolPublicArguments::Fields(fields) = policy else {
+        return Ok(());
+    };
+    if fields.is_empty() {
+        return Err(CompileError::new(
+            "ACTION_PUBLIC_ARGUMENTS_INVALID",
+            format!("action '{action_id}' public argument field list must not be empty"),
+        ));
+    }
+    let properties = root_object_properties(input_schema).ok_or_else(|| {
+        CompileError::new(
+            "ACTION_PUBLIC_ARGUMENTS_INVALID",
+            format!("action '{action_id}' input schema has no model-visible properties"),
+        )
+    })?;
+    if let Some(field) = fields.iter().find(|field| !properties.contains_key(*field)) {
+        return Err(CompileError::new(
+            "ACTION_PUBLIC_ARGUMENTS_INVALID",
+            format!("action '{action_id}' public argument field '{field}' is not model-visible"),
+        ));
+    }
+    Ok(())
+}
+
+fn root_object_properties(schema: &Value) -> Option<&serde_json::Map<String, Value>> {
+    let object = schema.as_object()?;
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        return Some(properties);
+    }
+    let reference = object.get("$ref")?.as_str()?.strip_prefix('#')?;
+    schema.pointer(reference)?.get("properties")?.as_object()
 }
 
 /// Produces one self-contained Draft 2020-12 schema document. Local `$defs`
@@ -372,9 +641,13 @@ struct CanonicalActionDescriptor<'a> {
     idempotency: IdempotencyClass,
     cancellation: CancellationClass,
     required_capabilities: Vec<&'a str>,
+    public: &'a ToolPublicPolicy,
 }
 
-fn descriptor_hash(descriptor: &ActionDescriptor) -> Result<String, CompileError> {
+fn descriptor_hash(
+    descriptor: &ActionDescriptor,
+    public: &ToolPublicPolicy,
+) -> Result<String, CompileError> {
     // Sorting explicitly by UTF-8 bytes makes the Set -> JSON array rule part
     // of this boundary instead of relying on a collection's incidental order.
     let mut required_capabilities = descriptor
@@ -393,6 +666,7 @@ fn descriptor_hash(descriptor: &ActionDescriptor) -> Result<String, CompileError
         idempotency: descriptor.idempotency,
         cancellation: descriptor.cancellation,
         required_capabilities,
+        public,
     })
     .map_err(|_| {
         CompileError::new(
@@ -460,7 +734,11 @@ fn closed_object_facts(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashMap};
+    use std::{
+        collections::{BTreeSet, HashMap},
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use async_trait::async_trait;
     use semver::Version;
@@ -469,8 +747,11 @@ mod tests {
     use super::{
         descriptor_hash, normalize_action_schema, Action, ActionCapability, ActionContext,
         ActionDescriptor, ActionRegistry, CancellationClass, EffectClass, IdempotencyClass,
+        ToolPublicArguments, ToolPublicPolicy,
     };
-    use crate::runtime::RunError;
+    use crate::runtime::{stop_pair, ExecutionControl, RunError};
+
+    const MODEL_TOOL_SECRET_SENTINEL: &str = "server-only-sentinel-do-not-persist";
 
     #[derive(Clone)]
     struct StaticAction(ActionDescriptor);
@@ -484,6 +765,95 @@ mod tests {
         async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
             Ok(input)
         }
+    }
+
+    #[derive(Clone)]
+    struct PublicStaticAction {
+        descriptor: ActionDescriptor,
+        public: ToolPublicPolicy,
+    }
+
+    #[async_trait]
+    impl Action for PublicStaticAction {
+        fn descriptor(&self) -> ActionDescriptor {
+            self.descriptor.clone()
+        }
+
+        fn public_policy(&self) -> ToolPublicPolicy {
+            self.public.clone()
+        }
+
+        async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
+            Ok(input)
+        }
+    }
+
+    #[derive(Clone)]
+    struct ServerInjectingAction {
+        seen: Arc<Mutex<Vec<Value>>>,
+        fail_with_secret: bool,
+    }
+
+    #[async_trait]
+    impl Action for ServerInjectingAction {
+        fn descriptor(&self) -> ActionDescriptor {
+            ActionDescriptor {
+                id: "example.server_injection",
+                version: "1.0.0",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": false
+                }),
+                output_schema: json!({
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": false
+                }),
+                effect: EffectClass::Pure,
+                idempotency: IdempotencyClass::Idempotent,
+                cancellation: CancellationClass::Cooperative,
+                required_capabilities: BTreeSet::new(),
+            }
+        }
+
+        fn inject_model_tool_input(
+            &self,
+            mut model_visible_input: Value,
+            _context: &ActionContext,
+        ) -> Result<Value, RunError> {
+            model_visible_input
+                .as_object_mut()
+                .expect("the registered model-visible schema is an object")
+                .insert(
+                    "server_token".to_owned(),
+                    Value::String(MODEL_TOOL_SECRET_SENTINEL.to_owned()),
+                );
+            Ok(model_visible_input)
+        }
+
+        async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
+            self.seen.lock().unwrap().push(input);
+            if self.fail_with_secret {
+                return Err(RunError::operation(
+                    "ACTION_AUTH_FAILED",
+                    format!("credential {MODEL_TOOL_SECRET_SENTINEL} was rejected"),
+                ));
+            }
+            Ok(json!({"answer": "safe"}))
+        }
+    }
+
+    fn action_context(operation: &str) -> ActionContext {
+        let (_stop, signal) = stop_pair();
+        ActionContext::for_operation(
+            "run_server_injection",
+            operation,
+            1,
+            ExecutionControl::new(signal, Duration::from_secs(30)),
+        )
     }
 
     fn descriptor(
@@ -540,6 +910,85 @@ mod tests {
             .descriptor_hash
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+    }
+
+    #[tokio::test]
+    async fn model_tool_injection_runs_after_safe_input_validation_without_revalidation() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = ActionRegistry::default();
+        registry
+            .register(ServerInjectingAction {
+                seen: Arc::clone(&seen),
+                fail_with_secret: false,
+            })
+            .unwrap();
+        let action = registry.resolve("example.server_injection").unwrap();
+        let safe_input = json!({"query": "white blood cell"});
+
+        let output = action
+            .call_model_tool(safe_input.clone(), action_context("model_tool"))
+            .await
+            .unwrap();
+
+        assert_eq!(output, json!({"answer": "safe"}));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0]["query"], safe_input["query"]);
+        assert_eq!(seen[0]["server_token"], MODEL_TOOL_SECRET_SENTINEL);
+        // The closed model-visible schema would reject the protected member.
+        // Successful execution therefore proves validation happened before,
+        // and not after, the process-local injection hook.
+        assert_eq!(
+            action.validate_input(&seen[0]).unwrap_err().code(),
+            "VNEXT_ACTION_INPUT_CONTRACT_INVALID"
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_action_calls_do_not_run_the_model_tool_injection_hook() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = ActionRegistry::default();
+        registry
+            .register(ServerInjectingAction {
+                seen: Arc::clone(&seen),
+                fail_with_secret: false,
+            })
+            .unwrap();
+        let action = registry.resolve("example.server_injection").unwrap();
+
+        action
+            .call(json!({"query": "ordinary"}), action_context("ordinary"))
+            .await
+            .unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.as_slice(), &[json!({"query": "ordinary"})]);
+    }
+
+    #[tokio::test]
+    async fn model_tool_action_errors_are_closed_before_leaving_the_registry_boundary() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = ActionRegistry::default();
+        registry
+            .register(ServerInjectingAction {
+                seen: Arc::clone(&seen),
+                fail_with_secret: true,
+            })
+            .unwrap();
+        let action = registry.resolve("example.server_injection").unwrap();
+
+        let error = action
+            .call_model_tool(json!({"query": "failure"}), action_context("failure"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "MODEL_TOOL_ACTION_FAILED");
+        assert_eq!(error.message(), "model tool action execution failed");
+        assert!(!format!("{error:?}").contains(MODEL_TOOL_SECRET_SENTINEL));
+        assert_eq!(
+            seen.lock().unwrap()[0]["server_token"],
+            MODEL_TOOL_SECRET_SENTINEL
+        );
     }
 
     #[test]
@@ -695,7 +1144,7 @@ mod tests {
         );
         assert_eq!(
             registered.identity.descriptor_hash,
-            descriptor_hash(&registered.descriptor).unwrap()
+            descriptor_hash(&registered.descriptor, &registered.public_policy).unwrap()
         );
         assert_eq!(
             normalize_action_schema(&registered.descriptor.input_schema)
@@ -837,5 +1286,120 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.code(), "ACTION_INPUT_SCHEMA_INVALID");
         }
+    }
+
+    #[test]
+    fn public_policy_is_closed_private_by_default_and_part_of_descriptor_identity() {
+        let mut private_registry = ActionRegistry::default();
+        private_registry
+            .register(StaticAction(descriptor(
+                "example.public_identity",
+                "1.0.0",
+                closed_input_schema(),
+            )))
+            .unwrap();
+        let private = private_registry.resolve("example.public_identity").unwrap();
+        assert!(private.public_policy().is_fully_private());
+        assert_eq!(
+            serde_json::to_value(private.public_policy()).unwrap(),
+            json!({"call": false, "arguments": "private", "result": null})
+        );
+
+        let public = ToolPublicPolicy {
+            call: true,
+            arguments: ToolPublicArguments::Fields(BTreeSet::from(["value".to_owned()])),
+            result_schema: Some(json!({
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": false
+            })),
+        };
+        let mut public_registry = ActionRegistry::default();
+        public_registry
+            .register(PublicStaticAction {
+                descriptor: descriptor("example.public_identity", "1.0.0", closed_input_schema()),
+                public,
+            })
+            .unwrap();
+        let public = public_registry.resolve("example.public_identity").unwrap();
+        public.validate_public_policy_for_link().unwrap();
+        public
+            .validate_public_result(&json!({"value": "safe"}))
+            .unwrap();
+        assert_eq!(
+            public
+                .validate_public_result(&json!({"value": 1}))
+                .unwrap_err()
+                .code(),
+            "ACTION_PUBLIC_RESULT_INVALID"
+        );
+        assert_ne!(
+            private.identity().descriptor_hash,
+            public.identity().descriptor_hash
+        );
+        let wire = serde_json::to_value(public.public_policy()).unwrap();
+        assert_eq!(wire["arguments"], json!(["value"]));
+        assert_eq!(wire["result"]["$defs"], json!({}));
+        serde_json::from_value::<ToolPublicPolicy>(wire).unwrap();
+        assert!(serde_json::from_value::<ToolPublicPolicy>(json!({
+            "call": true,
+            "arguments": "private",
+            "result": null,
+            "future": true
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn public_policy_rejects_unknown_fields_and_fails_closed_at_link_authorization() {
+        for (arguments, expected_code) in [
+            (
+                ToolPublicArguments::Fields(BTreeSet::new()),
+                "ACTION_PUBLIC_ARGUMENTS_INVALID",
+            ),
+            (
+                ToolPublicArguments::Fields(BTreeSet::from(["secret".to_owned()])),
+                "ACTION_PUBLIC_ARGUMENTS_INVALID",
+            ),
+        ] {
+            let mut registry = ActionRegistry::default();
+            let error = registry
+                .register(PublicStaticAction {
+                    descriptor: descriptor(
+                        "example.bad_public_fields",
+                        "1.0.0",
+                        closed_input_schema(),
+                    ),
+                    public: ToolPublicPolicy {
+                        call: true,
+                        arguments,
+                        result_schema: None,
+                    },
+                })
+                .unwrap_err();
+            assert_eq!(error.code(), expected_code);
+        }
+
+        let mut registry = ActionRegistry::default();
+        registry
+            .register(PublicStaticAction {
+                descriptor: descriptor("example.call_gate", "1.0.0", closed_input_schema()),
+                public: ToolPublicPolicy {
+                    call: false,
+                    arguments: ToolPublicArguments::All,
+                    result_schema: None,
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            registry
+                .resolve("example.call_gate")
+                .unwrap()
+                .validate_public_policy_for_link()
+                .unwrap_err()
+                .code(),
+            "ACTION_PUBLIC_POLICY_INVALID"
+        );
     }
 }

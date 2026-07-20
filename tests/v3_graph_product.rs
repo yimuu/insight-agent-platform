@@ -137,6 +137,10 @@ struct FixtureExecutor;
 
 #[async_trait]
 impl LeafTaskExecutor for FixtureExecutor {
+    fn live_response_capable(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         _context: &WorkerExecutionContext,
@@ -188,6 +192,36 @@ workflow:
         CompileOptions::new(
             DefinitionRevisionId::new("graph_product_unavailable_worker_revision").unwrap(),
             "graph-product-unavailable-worker/agent.yaml",
+            source,
+        ),
+    )
+    .unwrap()
+}
+
+fn public_streaming_graph() -> GraphAuthorDocument {
+    let source = r#"api_version: insight.agent/v3
+kind: agent
+inputs: {question: string}
+output: string
+workflow:
+  steps:
+    - id: answer
+      type: llm
+      model: fixture_model
+      stream: true
+      publish: true
+      messages:
+        - role: user
+          content: [{text: $question}]
+      response: string
+    - return: $answer
+"#;
+    GraphAuthorDocument::from_structured_source(
+        GraphDocumentId::new("graph_product_public_streaming_canvas").unwrap(),
+        source,
+        CompileOptions::new(
+            DefinitionRevisionId::new("graph_product_public_streaming_revision").unwrap(),
+            "graph-product-public-streaming/agent.yaml",
             source,
         ),
     )
@@ -601,6 +635,15 @@ fn workers() -> WorkerExecutorRegistry {
                 Arc::new(FixtureExecutor),
             )
             .unwrap();
+        workers
+            .register(
+                SchedulerTaskKind::Llm,
+                "core.llm",
+                VersionTag::new("2").unwrap(),
+                VersionTag::new(worker_version).unwrap(),
+                Arc::new(FixtureExecutor),
+            )
+            .unwrap();
     }
     workers
 }
@@ -653,6 +696,22 @@ async fn assert_discovery_version(app: &Router, agent_id: &str, expected_version
         .find(|agent| agent["id"] == agent_id)
         .expect("durable Agent head must appear in discovery");
     assert_eq!(listed_agent["version"], expected_version);
+    assert_eq!(
+        listed_agent["streaming"],
+        json!({
+            "protocol": "response-stream/v1",
+            "transport": "sse",
+            "live_only": true,
+            "sources": []
+        })
+    );
+    assert_eq!(
+        listed_agent["output_schema"],
+        json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "string"
+        })
+    );
 
     let loaded = app
         .clone()
@@ -664,10 +723,9 @@ async fn assert_discovery_version(app: &Router, agent_id: &str, expected_version
         .await
         .unwrap();
     assert_eq!(loaded.status(), StatusCode::OK);
-    assert_eq!(
-        response_json(loaded).await["data"]["version"],
-        expected_version
-    );
+    let loaded = response_json(loaded).await;
+    assert_eq!(loaded["data"]["version"], expected_version);
+    assert_eq!(&loaded["data"], listed_agent);
 }
 
 fn authorized(builder: axum::http::request::Builder) -> axum::http::request::Builder {
@@ -1282,6 +1340,68 @@ async fn postgres_graph_author_product_contract_matches_sqlite() {
         .execute(&admin)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn postgres_production_graph_publication_rejects_public_streaming_without_shared_broker() {
+    let Ok(database_url) = std::env::var("V3_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let schema = format!("graph_public_stream_gate_v3_{}", Uuid::new_v4().simple());
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    let repository = Arc::new(
+        PostgresDurableRepository::connect(&scoped_url)
+            .await
+            .unwrap(),
+    );
+    repository.initialize_schema().await.unwrap();
+    let artifact_directory = tempfile::tempdir().unwrap();
+    let artifact_store = shared_artifact_store(
+        artifact_directory.path().join("shared"),
+        "graph-public-stream-gate",
+    )
+    .await;
+    let service = RunService::start_with_artifact_store_and_graph_publication(
+        DeployedAgentCatalog::default(),
+        repository.clone() as Arc<dyn ProductionRunRepository>,
+        workers(),
+        artifact_store,
+        Arc::new(FixtureResolver),
+        config(),
+    )
+    .await
+    .unwrap();
+    let before = repository.load_versioned_plan_catalog().await.unwrap();
+
+    let error = service
+        .publish_graph("graph_product_public_streaming", public_streaming_graph())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.code(),
+        "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER"
+    );
+    let after = repository.load_versioned_plan_catalog().await.unwrap();
+    assert_eq!(after.plans().len(), before.plans().len());
+    assert_eq!(after.heads().len(), before.heads().len());
+
+    service.shutdown(Duration::from_secs(2)).await.unwrap();
+    drop(repository);
+    sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
 }
 
 #[tokio::test]

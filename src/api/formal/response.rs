@@ -111,6 +111,16 @@ impl From<ServiceError> for ApiError {
                 "graph author resource was not found",
             ),
             "RUN_NOT_FOUND" => Self::new(StatusCode::NOT_FOUND, "RUN_NOT_FOUND", "run not found"),
+            "ARTIFACT_NOT_FOUND" => Self::new(
+                StatusCode::NOT_FOUND,
+                "ARTIFACT_NOT_FOUND",
+                "artifact not found",
+            ),
+            "ARTIFACT_TOO_LARGE" => Self::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "ARTIFACT_TOO_LARGE",
+                "artifact exceeds the authorized read size",
+            ),
             "RUN_CONFLICT" | "RUN_CAPACITY_EXCEEDED" => Self::new(
                 StatusCode::CONFLICT,
                 "RUN_CONFLICT",

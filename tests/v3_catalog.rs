@@ -2,12 +2,12 @@ use std::collections::BTreeSet;
 
 use insight_agent_platform::{
     catalog_v3::{
-        compile_enabled_v3_agents, compile_v3_agent_dir, deploy_v3_agents, DeployedV3Agent,
-        DeploymentRiskCode, DeploymentRiskDiagnostic, DeploymentRiskSeverity,
+        compile_enabled_v3_agents, compile_v3_agent_dir, deploy_v3_agents, AgentStreamingContract,
+        DeployedV3Agent, DeploymentRiskCode, DeploymentRiskDiagnostic, DeploymentRiskSeverity,
         LeafDeploymentResolver, PublishedV3Agent, ResolvedLeafDeployment,
     },
     dsl::{
-        v3::{GraphAuthorDocument, GraphDocumentId},
+        v3::{CompileOptions, GraphAuthorDocument, GraphDocumentId},
         CompileError,
     },
     engine::{
@@ -15,7 +15,7 @@ use insight_agent_platform::{
             DescriptorValue, LeafTaskDescriptor, LeafTaskKind, PlanIndex, SubflowContractRegistry,
             ValueSource, VersionTag,
         },
-        ContentHash, NodeId,
+        ContentHash, DefinitionRevisionId, NodeId,
     },
 };
 use serde_json::json;
@@ -76,6 +76,160 @@ fn revision_pins_main_source_and_every_referenced_prompt() {
         second.definition_revision_id()
     );
     assert!(!first.prompt_files().is_empty());
+}
+
+#[test]
+fn public_output_and_streaming_discovery_are_canonical_closed_and_sorted() {
+    let source = r#"api_version: insight.agent/v3
+kind: agent
+inputs: {}
+output: string
+workflow:
+  steps:
+    - id: z_buffered
+      type: llm
+      model: general_chat
+      messages: [{role: user, content: [{text: buffered}]}]
+      stream: false
+      publish: true
+      response: string
+    - id: private
+      type: llm
+      model: general_chat
+      messages: [{role: user, content: [{text: private}]}]
+      stream: true
+      publish: false
+      response: string
+    - id: m_retrieval
+      type: retrieval
+      retrieval: fixture.search
+      inputs: {query: lookup}
+      publish: true
+      response: string
+    - id: private_retrieval
+      type: retrieval
+      retrieval: fixture.private_search
+      inputs: {query: private}
+      publish: false
+      response: string
+    - id: a_streaming
+      type: llm
+      model: general_chat
+      messages: [{role: user, content: [{text: streaming}]}]
+      stream: true
+      publish: true
+      response: string
+    - return: $a_streaming
+"#;
+    let graph = GraphAuthorDocument::from_structured_source(
+        GraphDocumentId::new("public_streaming_contract_graph").unwrap(),
+        source,
+        CompileOptions::new(
+            DefinitionRevisionId::new("public_streaming_contract_revision").unwrap(),
+            "public-streaming/agent.yaml",
+            source,
+        ),
+    )
+    .unwrap();
+    let native_plan = graph.plan().clone();
+    let agent = PublishedV3Agent::from_verified_graph(
+        "public_streaming",
+        "Public streaming",
+        "Public contract fixture",
+        graph,
+    )
+    .unwrap();
+
+    assert_eq!(
+        agent.public_output_schema(),
+        agent
+            .plan()
+            .metadata()
+            .output_type()
+            .json_schema_document()
+            .unwrap()
+    );
+    assert_eq!(
+        agent.public_output_schema(),
+        json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "string"
+        })
+    );
+
+    let wire = serde_json::to_value(agent.public_streaming_contract()).unwrap();
+    assert_eq!(
+        wire,
+        json!({
+            "protocol": "response-stream/v1",
+            "transport": "sse",
+            "live_only": true,
+            "sources": [
+                {"id": "a_streaming", "kind": "llm", "mode": "streaming", "format": "text"},
+                {"id": "m_retrieval", "kind": "retrieval", "mode": "buffered", "format": "structured/retrieval"},
+                {"id": "z_buffered", "kind": "llm", "mode": "buffered", "format": "text"}
+            ]
+        })
+    );
+    serde_json::from_value::<AgentStreamingContract>(wire.clone()).unwrap();
+
+    let mut unknown_contract_field = wire.clone();
+    unknown_contract_field
+        .as_object_mut()
+        .unwrap()
+        .insert("replay".to_owned(), json!(true));
+    assert!(
+        serde_json::from_value::<AgentStreamingContract>(unknown_contract_field).is_err(),
+        "streaming discovery must reject fields outside its closed protocol"
+    );
+
+    let mut unknown_source_field = wire.clone();
+    unknown_source_field["sources"][0]
+        .as_object_mut()
+        .unwrap()
+        .insert("model".to_owned(), json!("private-alias"));
+    assert!(
+        serde_json::from_value::<AgentStreamingContract>(unknown_source_field).is_err(),
+        "streaming sources must not grow private fields implicitly"
+    );
+
+    for (field, value) in [
+        ("kind", json!("future_source")),
+        ("mode", json!("eventual")),
+        ("format", json!("structured/unknown")),
+    ] {
+        let mut unknown_vocabulary = wire.clone();
+        unknown_vocabulary["sources"][1][field] = value;
+        assert!(
+            serde_json::from_value::<AgentStreamingContract>(unknown_vocabulary).is_err(),
+            "streaming discovery must reject unknown {field} vocabulary"
+        );
+    }
+
+    let native = GraphAuthorDocument::from_verified_plan(
+        GraphDocumentId::new("invalid_public_streaming_native_graph").unwrap(),
+        native_plan,
+    )
+    .unwrap();
+    let mut native_wire: serde_json::Value =
+        serde_json::from_slice(&native.encode_json().unwrap()).unwrap();
+    let llm = native_wire["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["kind"]["kind"] == "llm_task")
+        .unwrap();
+    llm["kind"]["descriptor"]["descriptor_version"] = json!("1");
+    let native = GraphAuthorDocument::decode_json(&serde_json::to_vec(&native_wire).unwrap())
+        .expect("generic Plan verification deliberately permits versioned leaf descriptors");
+    let error = PublishedV3Agent::from_verified_graph(
+        "invalid_public_streaming",
+        "Invalid public streaming",
+        "Strict publication fixture",
+        native,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "LLM_DESCRIPTOR_INVALID");
 }
 
 #[test]

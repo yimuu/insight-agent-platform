@@ -286,6 +286,11 @@ where
         repository.stage_artifact(stage).await.unwrap(),
         TransitionOutcome::ExactReplay { .. }
     ));
+    assert!(repository
+        .get_retained_artifact(&run_a, verified.artifact_id())
+        .await
+        .unwrap()
+        .is_none());
     let extended_retain_until = Utc::now() + Duration::seconds(1);
     assert!(matches!(
         repository
@@ -311,6 +316,16 @@ where
             .unwrap(),
         TransitionOutcome::ExactReplay { .. }
     ));
+    assert!(repository
+        .get_retained_artifact(&run_a, verified.artifact_id())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(repository
+        .get_retained_artifact(&run_b, verified.artifact_id())
+        .await
+        .unwrap()
+        .is_none());
     let conflicting_locator = StageArtifactCommand::new(
         run_a.clone(),
         verified.clone(),
@@ -383,7 +398,7 @@ where
     assert_eq!(
         repository
             .verify_artifact(VerifyArtifactCommand::new(
-                run_b,
+                run_b.clone(),
                 verified.artifact_id().clone(),
                 verified.content_hash().clone(),
                 verified.size_bytes(),
@@ -392,6 +407,16 @@ where
             .unwrap(),
         TransitionOutcome::StateConflict
     );
+    assert!(repository
+        .get_retained_artifact(&run_a, verified.artifact_id())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(repository
+        .get_retained_artifact(&run_b, verified.artifact_id())
+        .await
+        .unwrap()
+        .is_none());
 
     let staged = artifact(&format!("{label}_staged"), b"staged-object");
     repository
@@ -568,6 +593,115 @@ where
 async fn sqlite_payload_and_artifact_repository_is_run_scoped_and_fail_closed() {
     let repository = SqliteDurableRepository::in_memory().await.unwrap();
     assert_repository_contract(&repository, "sqlite").await;
+}
+
+#[tokio::test]
+async fn sqlite_retained_artifact_read_metadata_is_run_scoped_and_expires() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("read-authority.sqlite");
+    let repository = SqliteDurableRepository::connect_path(&database)
+        .await
+        .unwrap();
+    let control = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&database)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    let run = create_run(&repository, "retained_read", json!({"input": "a"})).await;
+    let other_run = create_run(&repository, "retained_read_other", json!({"input": "b"})).await;
+    let bytes = b"retained artifact";
+    let artifact = artifact("retained_read", bytes);
+    let locator = StorageLocator::new("content-addressed:v1/sha256/private").unwrap();
+    repository
+        .stage_artifact(StageArtifactCommand::new(
+            run.clone(),
+            artifact.clone(),
+            locator.clone(),
+            None,
+        ))
+        .await
+        .unwrap();
+    repository
+        .verify_artifact(VerifyArtifactCommand::new(
+            run.clone(),
+            artifact.artifact_id().clone(),
+            artifact.content_hash().clone(),
+            artifact.size_bytes(),
+        ))
+        .await
+        .unwrap();
+    assert!(repository
+        .get_retained_artifact(&run, artifact.artifact_id())
+        .await
+        .unwrap()
+        .is_none());
+
+    sqlx::query(
+        "UPDATE artifacts SET artifact_state='referenced',referenced_at=CURRENT_TIMESTAMP
+         WHERE run_id=? AND artifact_id=? AND artifact_state='verified'",
+    )
+    .bind(run.as_str())
+    .bind(artifact.artifact_id().as_str())
+    .execute(&control)
+    .await
+    .unwrap();
+    let retained = repository
+        .get_retained_artifact(&run, artifact.artifact_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.run_id(), &run);
+    assert_eq!(retained.artifact(), &artifact);
+    assert_eq!(retained.storage_locator(), &locator);
+    assert!(!format!("{retained:?}").contains(locator.expose_to_storage_adapter()));
+    assert!(repository
+        .get_retained_artifact(&other_run, artifact.artifact_id())
+        .await
+        .unwrap()
+        .is_none());
+
+    let (event_id, event_seq): (String, i64) = sqlx::query_as(
+        "SELECT event_id,seq FROM execution_events WHERE run_id=? ORDER BY seq LIMIT 1",
+    )
+    .bind(run.as_str())
+    .fetch_one(&control)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO artifact_retention_releases
+         (run_id,transition_key,intent_hash,event_id,event_seq,retain_until,artifact_count,created_at)
+         VALUES (?,?,?,?,?,STRFTIME('%Y-%m-%dT%H:%M:%fZ','now','+1 hour'),1,CURRENT_TIMESTAMP)",
+    )
+    .bind(run.as_str())
+    .bind(key("retained.read.release").as_str())
+    .bind(ContentHash::from_bytes(b"retained.read.release").as_str())
+    .bind(event_id)
+    .bind(event_seq)
+    .execute(&control)
+    .await
+    .unwrap();
+    assert!(repository
+        .get_retained_artifact(&run, artifact.artifact_id())
+        .await
+        .unwrap()
+        .is_some());
+    sqlx::query(
+        "UPDATE artifact_retention_releases
+         SET retain_until=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now','-1 second') WHERE run_id=?",
+    )
+    .bind(run.as_str())
+    .execute(&control)
+    .await
+    .unwrap();
+    assert!(repository
+        .get_retained_artifact(&run, artifact.artifact_id())
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]

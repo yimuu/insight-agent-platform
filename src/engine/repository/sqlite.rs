@@ -22,14 +22,17 @@ use super::sqlite_projection::{
 };
 use super::{
     common::{
-        canonical_intent_hash, canonical_json, canonical_value, decode_public_projection_decision,
-        decode_stored_execution_event, durable_public_event_envelope, event_id, i64_from_u64,
-        parse_admission_state, parse_run_lifecycle, payload_id, public_event_id,
+        build_terminal_response_snapshot, canonical_intent_hash, canonical_json, canonical_value,
+        decode_public_projection_decision, decode_stored_execution_event,
+        durable_public_event_envelope, event_id, i64_from_u64, parse_admission_state,
+        parse_run_lifecycle, payload_id, project_terminal_tool_results, public_event_id,
         public_event_ordinal, u64_from_i64, validate_inline_payload, StoredExecutionEventRow,
-        StoredPublicProjectionDecision,
+        StoredModelCallUsage, StoredPublicProjectionDecision, StoredResponseItem,
+        StoredSucceededModelToolCall,
     },
-    CommitReceipt, CreateRunCommand, DurableRepository, PlanInstallOutcome, PlanPublicationOutcome,
-    PublicationHead, PublicationOrigin, PublishVersionedPlanCommand, RepositoryError,
+    CommitReceipt, CreateRunCommand, DurableRepository, DurableResponseSnapshot,
+    PlanInstallOutcome, PlanPublicationOutcome, PublicationHead, PublicationOrigin,
+    PublishVersionedPlanCommand, RepositoryError, ResponseTerminalKind, ResponseUsageStatus,
     RunProjection, RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
     REPOSITORY_PLAN_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
 };
@@ -336,12 +339,13 @@ impl DurableRepository for SqliteDurableRepository {
                 replacement_run_id, next_event_seq, projection_version,
                 scheduler_lease_epoch, scheduler_lease_owner,
                 scheduler_lease_expires_at, scheduler_heartbeat_at,
-                created_at, started_at, updated_at, terminal_at, deadline_at
+                created_at, started_at, updated_at, terminal_at, deadline_at,
+                artifact_reference_retention_seconds
              ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, 'created', 'open',
                 NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL,
                 NULL, NULL, 1, NULL, 1, 0, 0, NULL, NULL, NULL,
-                CURRENT_TIMESTAMP, NULL, CURRENT_TIMESTAMP, NULL, ?
+                CURRENT_TIMESTAMP, NULL, CURRENT_TIMESTAMP, NULL, ?, ?
              )",
         )
         .bind(command.run_id().as_str())
@@ -354,6 +358,7 @@ impl DurableRepository for SqliteDurableRepository {
         .bind(command.attachment().as_str())
         .bind(&input_payload_id)
         .bind(run_deadline_at.map(|deadline| deadline.to_rfc3339()))
+        .bind(i64::from(command.artifact_reference_retention_seconds()))
         .execute(&mut *transaction)
         .await
         .map_err(RepositoryError::storage)?;
@@ -592,6 +597,31 @@ impl DurableRepository for SqliteDurableRepository {
             .map_err(RepositoryError::storage)?;
         }
 
+        if command.next_lifecycle().is_terminal() {
+            super::sqlite_model_tool_queue::close_model_tool_work_for_terminal_run_sqlite(
+                &mut transaction,
+                command.run_id(),
+            )
+            .await?;
+            persist_terminal_response_snapshot_sqlite(
+                &mut transaction,
+                command.run_id(),
+                command.next_lifecycle(),
+                command.terminal().and_then(TerminalRunMutation::output),
+                command.terminal().and_then(TerminalRunMutation::error_code),
+            )
+            .await?;
+            register_terminal_artifact_retention_sqlite(
+                &mut transaction,
+                command.run_id(),
+                &transition_key,
+                intent_hash.as_str(),
+                &event_id,
+                event_seq,
+            )
+            .await?;
+        }
+
         finalize_projection_checkpoints(&mut transaction, command.run_id(), &event_id).await?;
 
         transaction
@@ -610,7 +640,7 @@ impl DurableRepository for SqliteDurableRepository {
 
     async fn load_run(&self, run_id: &RunId) -> Result<Option<RunProjection>, RepositoryError> {
         let row = sqlx::query(
-            "SELECT r.definition_id,d.agent_id,r.definition_revision_id,
+            "SELECT r.response_id,r.definition_id,d.agent_id,r.definition_revision_id,
                     r.deployment_revision_id,r.plan_hash,r.binding_hash,
                     r.request_id,r.attachment,r.lifecycle,
                     r.admission_state,r.projection_version,r.next_event_seq,
@@ -633,6 +663,433 @@ impl DurableRepository for SqliteDurableRepository {
         .map_err(RepositoryError::storage)?;
         row.map(|row| projection_from_row(run_id, &row)).transpose()
     }
+
+    async fn load_response_snapshot(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<DurableResponseSnapshot>, RepositoryError> {
+        load_response_snapshot_sqlite(&self.pool, run_id).await
+    }
+}
+
+/// Registers the referenced-Artifact hold in the same first-winner transaction
+/// as Run terminal state, the response snapshot, and terminal public outbox.
+/// The caller must first build the snapshot and validate every first-class
+/// public ArtifactRef. The policy is immutable Run admission data, never live
+/// process config.
+pub(crate) async fn register_terminal_artifact_retention_sqlite(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &RunId,
+    terminal_transition_key: &TransitionKey,
+    terminal_intent_hash: &str,
+    terminal_event_id: &str,
+    terminal_event_seq: u64,
+) -> Result<(), RepositoryError> {
+    let row = sqlx::query(
+        "SELECT terminal_at,artifact_reference_retention_seconds
+         FROM workflow_runs
+         WHERE run_id=? AND lifecycle IN ('succeeded','failed','cancelled','interrupted','timed_out')
+           AND admission_state='closed' AND terminal_at IS NOT NULL",
+    )
+    .bind(run_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .ok_or_else(RepositoryError::invalid_data)?;
+    let terminal_at = row
+        .try_get::<String, _>("terminal_at")
+        .map_err(|_| RepositoryError::invalid_data())?;
+    let retention_seconds = row
+        .try_get::<i64, _>("artifact_reference_retention_seconds")
+        .map_err(|_| RepositoryError::invalid_data())?;
+    if !(1..=315_360_000).contains(&retention_seconds) {
+        return Err(RepositoryError::invalid_data());
+    }
+    let retain_until = sqlx::query_scalar::<_, String>(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', julianday(?) + CAST(? AS REAL) / 86400.0)",
+    )
+    .bind(&terminal_at)
+    .bind(retention_seconds)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let artifact_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM artifacts WHERE run_id=? AND artifact_state='referenced'",
+    )
+    .bind(run_id.as_str())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    sqlx::query(
+        "UPDATE artifacts SET retain_until=CASE
+             WHEN retain_until IS NULL OR julianday(retain_until)<julianday(?) THEN ?
+             ELSE retain_until END
+         WHERE run_id=? AND artifact_state='referenced'",
+    )
+    .bind(&retain_until)
+    .bind(&retain_until)
+    .bind(run_id.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    sqlx::query(
+        "INSERT INTO artifact_retention_releases (
+            run_id,transition_key,intent_hash,event_id,event_seq,retain_until,
+            artifact_count,created_at,registration_kind
+         ) VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP,'terminal_atomic')",
+    )
+    .bind(run_id.as_str())
+    .bind(terminal_transition_key.as_str())
+    .bind(terminal_intent_hash)
+    .bind(terminal_event_id)
+    .bind(i64_from_u64(terminal_event_seq)?)
+    .bind(retain_until)
+    .bind(artifact_count)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    Ok(())
+}
+
+pub(crate) async fn persist_terminal_response_snapshot_sqlite(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &RunId,
+    lifecycle: RunLifecycle,
+    output: Option<&serde_json::Value>,
+    error_code: Option<&str>,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        "UPDATE response_public_items
+         SET item_status='incomplete_unsealed',updated_at=CURRENT_TIMESTAMP
+         WHERE run_id=? AND item_status='reserved'",
+    )
+    .bind(run_id.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let item_rows = sqlx::query(
+        "SELECT activation_id,attempt_no,model_call_no,item_id,output_index,node_id,
+                item_kind,item_status,seal_index,safe_item
+         FROM response_public_items WHERE run_id=? ORDER BY output_index",
+    )
+    .bind(run_id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let items = item_rows
+        .into_iter()
+        .map(|row| {
+            let safe_item = row
+                .try_get::<Option<String>, _>("safe_item")
+                .map_err(|_| RepositoryError::invalid_data())?
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|_| RepositoryError::invalid_data())
+                })
+                .transpose()?;
+            Ok(StoredResponseItem {
+                activation_id: row
+                    .try_get("activation_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                attempt_no: u32::try_from(
+                    row.try_get::<i64, _>("attempt_no")
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .map_err(|_| RepositoryError::invalid_data())?,
+                model_call_no: u32::try_from(
+                    row.try_get::<i64, _>("model_call_no")
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .map_err(|_| RepositoryError::invalid_data())?,
+                item_id: row
+                    .try_get("item_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                output_index: u32::try_from(
+                    row.try_get::<i64, _>("output_index")
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .map_err(|_| RepositoryError::invalid_data())?,
+                node_id: row
+                    .try_get("node_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                item_kind: row
+                    .try_get("item_kind")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                item_status: row
+                    .try_get("item_status")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                seal_index: row
+                    .try_get::<Option<i64>, _>("seal_index")
+                    .map_err(|_| RepositoryError::invalid_data())?
+                    .map(u64_from_i64)
+                    .transpose()?,
+                safe_item,
+            })
+        })
+        .collect::<Result<Vec<_>, RepositoryError>>()?;
+    let usage_rows = sqlx::query(
+        "SELECT usage,usage_complete FROM model_call_usage
+         WHERE run_id=? ORDER BY activation_id,attempt_no,model_call_no",
+    )
+    .bind(run_id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let model_calls = usage_rows
+        .into_iter()
+        .map(|row| {
+            let usage = row
+                .try_get::<Option<String>, _>("usage")
+                .map_err(|_| RepositoryError::invalid_data())?
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|_| RepositoryError::invalid_data())
+                })
+                .transpose()?;
+            Ok(StoredModelCallUsage {
+                usage,
+                usage_complete: row
+                    .try_get::<i64, _>("usage_complete")
+                    .map_err(|_| RepositoryError::invalid_data())?
+                    == 1,
+            })
+        })
+        .collect::<Result<Vec<_>, RepositoryError>>()?;
+    let tool_results = load_terminal_tool_results_sqlite(transaction, run_id).await?;
+    validate_terminal_tool_result_artifacts_sqlite(transaction, run_id, &tool_results).await?;
+    let retrievals =
+        super::sqlite_retrieval_publication::load_terminal_retrievals_sqlite(transaction, run_id)
+            .await?;
+    validate_terminal_retrieval_artifacts_sqlite(transaction, run_id, &retrievals).await?;
+    let snapshot = build_terminal_response_snapshot(
+        run_id,
+        lifecycle,
+        output,
+        error_code,
+        items,
+        model_calls,
+        tool_results,
+        retrievals,
+    )?;
+    sqlx::query(
+        "INSERT INTO response_snapshots (
+            run_id,response_id,terminal_kind,response_status,response_payload,
+            workflow_payload,public_item_manifest,usage,usage_status,snapshot_hash,created_at
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+    )
+    .bind(run_id.as_str())
+    .bind(&snapshot.response_id)
+    .bind(snapshot.terminal_kind.as_str())
+    .bind(snapshot.response_status)
+    .bind(canonical_json(&snapshot.response)?)
+    .bind(canonical_json(&snapshot.workflow)?)
+    .bind(canonical_json(&snapshot.manifest)?)
+    .bind(snapshot.usage.as_ref().map(canonical_json).transpose()?)
+    .bind(snapshot.usage_status.as_str())
+    .bind(snapshot.snapshot_hash.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    Ok(())
+}
+
+async fn load_terminal_tool_results_sqlite(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &RunId,
+) -> Result<Vec<crate::runtime::WorkflowToolResult>, RepositoryError> {
+    let rows = sqlx::query(
+        "SELECT activation_id,attempt_no,model_call_no,call_index,call_id,tool_name,
+                effective_public_policy,result_json
+         FROM model_tool_calls
+         WHERE run_id=? AND call_status='succeeded'
+         ORDER BY activation_id COLLATE BINARY,attempt_no,model_call_no,call_index",
+    )
+    .bind(run_id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let calls = rows
+        .into_iter()
+        .map(|row| {
+            let decode_canonical = |name| -> Result<serde_json::Value, RepositoryError> {
+                let source = row
+                    .try_get::<String, _>(name)
+                    .map_err(|_| RepositoryError::invalid_data())?;
+                let value =
+                    serde_json::from_str(&source).map_err(|_| RepositoryError::invalid_data())?;
+                if canonical_json(&value)? != source {
+                    return Err(RepositoryError::invalid_data());
+                }
+                Ok(value)
+            };
+            Ok(StoredSucceededModelToolCall {
+                activation_id: row
+                    .try_get("activation_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                attempt_no: u32::try_from(
+                    row.try_get::<i64, _>("attempt_no")
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .map_err(|_| RepositoryError::invalid_data())?,
+                model_call_no: u32::try_from(
+                    row.try_get::<i64, _>("model_call_no")
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .map_err(|_| RepositoryError::invalid_data())?,
+                call_index: u32::try_from(
+                    row.try_get::<i64, _>("call_index")
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .map_err(|_| RepositoryError::invalid_data())?,
+                call_id: row
+                    .try_get("call_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                tool_name: row
+                    .try_get("tool_name")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                effective_public_policy: decode_canonical("effective_public_policy")?,
+                completed_result: decode_canonical("result_json")?,
+            })
+        })
+        .collect::<Result<Vec<_>, RepositoryError>>()?;
+    project_terminal_tool_results(calls)
+}
+
+async fn validate_terminal_tool_result_artifacts_sqlite(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &RunId,
+    tool_results: &[crate::runtime::WorkflowToolResult],
+) -> Result<(), RepositoryError> {
+    for artifact in tool_results
+        .iter()
+        .flat_map(|result| result.content())
+        .filter_map(crate::runtime::WorkflowToolContent::artifact)
+    {
+        let row = sqlx::query(
+            "SELECT content_hash,size_bytes,media_type,artifact_state
+             FROM artifacts WHERE run_id=? AND artifact_id=?",
+        )
+        .bind(run_id.as_str())
+        .bind(artifact.artifact_id().as_str())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?
+        .ok_or_else(RepositoryError::invalid_data)?;
+        let content_hash = row
+            .try_get::<String, _>("content_hash")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let size_bytes = u64_from_i64(
+            row.try_get::<i64, _>("size_bytes")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )?;
+        let media_type = row
+            .try_get::<Option<String>, _>("media_type")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let artifact_state = row
+            .try_get::<String, _>("artifact_state")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        if artifact_state != "referenced"
+            || content_hash != artifact.content_hash().as_str()
+            || size_bytes != artifact.size_bytes()
+            || media_type.as_deref() != artifact.media_type()
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+    }
+    Ok(())
+}
+
+async fn validate_terminal_retrieval_artifacts_sqlite(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &RunId,
+    retrievals: &[crate::runtime::response_stream::WorkflowRetrieval],
+) -> Result<(), RepositoryError> {
+    for artifact in retrievals
+        .iter()
+        .flat_map(|retrieval| retrieval.results())
+        .filter_map(crate::runtime::response_stream::WorkflowRetrievalResult::artifact)
+    {
+        let row = sqlx::query(
+            "SELECT content_hash,size_bytes,media_type,artifact_state
+             FROM artifacts WHERE run_id=? AND artifact_id=?",
+        )
+        .bind(run_id.as_str())
+        .bind(artifact.artifact_id().as_str())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?
+        .ok_or_else(RepositoryError::invalid_data)?;
+        let content_hash = row
+            .try_get::<String, _>("content_hash")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let size_bytes = u64_from_i64(
+            row.try_get::<i64, _>("size_bytes")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )?;
+        let media_type = row
+            .try_get::<Option<String>, _>("media_type")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let artifact_state = row
+            .try_get::<String, _>("artifact_state")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        if artifact_state != "referenced"
+            || content_hash != artifact.content_hash().as_str()
+            || size_bytes != artifact.size_bytes()
+            || media_type.as_deref() != artifact.media_type()
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+    }
+    Ok(())
+}
+
+async fn load_response_snapshot_sqlite(
+    pool: &SqlitePool,
+    run_id: &RunId,
+) -> Result<Option<DurableResponseSnapshot>, RepositoryError> {
+    let row = sqlx::query(
+        "SELECT response_id,terminal_kind,response_payload,workflow_payload,
+                public_item_manifest,usage,usage_status,snapshot_hash
+         FROM response_snapshots WHERE run_id=?",
+    )
+    .bind(run_id.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(RepositoryError::storage)?;
+    row.map(|row| {
+        let decode = |name| -> Result<serde_json::Value, RepositoryError> {
+            serde_json::from_str(
+                &row.try_get::<String, _>(name)
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .map_err(|_| RepositoryError::invalid_data())
+        };
+        let usage = row
+            .try_get::<Option<String>, _>("usage")
+            .map_err(|_| RepositoryError::invalid_data())?
+            .map(|value| serde_json::from_str(&value).map_err(|_| RepositoryError::invalid_data()))
+            .transpose()?;
+        DurableResponseSnapshot::new(
+            row.try_get("response_id")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            ResponseTerminalKind::parse(
+                &row.try_get::<String, _>("terminal_kind")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )?,
+            decode("response_payload")?,
+            decode("workflow_payload")?,
+            decode("public_item_manifest")?,
+            usage,
+            ResponseUsageStatus::parse(
+                &row.try_get::<String, _>("usage_status")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )?,
+            ContentHash::parse(
+                row.try_get::<String, _>("snapshot_hash")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .map_err(|_| RepositoryError::invalid_data())?,
+        )
+    })
+    .transpose()
 }
 
 async fn match_publication_heads(
@@ -1574,6 +2031,8 @@ fn projection_from_row(run_id: &RunId, row: &SqliteRow) -> Result<RunProjection,
     };
     Ok(RunProjection::new(
         run_id.clone(),
+        row.try_get("response_id")
+            .map_err(|_| RepositoryError::invalid_data())?,
         row.try_get("definition_id")
             .map_err(|_| RepositoryError::invalid_data())?,
         row.try_get("agent_id")
@@ -1649,4 +2108,231 @@ pub(super) fn parse_run_timestamp(value: &str) -> Result<DateTime<Utc>, Reposito
     NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
         .map(|value| value.and_utc())
         .map_err(|_| RepositoryError::invalid_data())
+}
+
+#[cfg(test)]
+mod terminal_tool_result_tests {
+    use serde_json::{json, Value};
+
+    use crate::resources::actions::{ToolPublicArguments, ToolPublicPolicy};
+
+    use super::*;
+
+    const CONTENT_HASH: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const WRONG_CONTENT_HASH: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn frozen_policy(result_schema: Option<Value>, call: bool) -> String {
+        canonical_json(
+            &serde_json::to_value(ToolPublicPolicy {
+                call,
+                arguments: ToolPublicArguments::Private,
+                result_schema,
+            })
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn artifact_result_schema() -> Value {
+        json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {},
+            "type": "object",
+            "properties": {
+                "type": {"const": "output_file"},
+                "artifact": {
+                    "type": "object",
+                    "properties": {
+                        "artifact_id": {"type": "string"},
+                        "content_hash": {"type": "string"},
+                        "size_bytes": {"type": "integer"},
+                        "media_type": {"type": "string"}
+                    },
+                    "required": ["artifact_id", "content_hash", "size_bytes", "media_type"],
+                    "additionalProperties": false
+                }
+            },
+            "required": ["type", "artifact"],
+            "additionalProperties": false
+        })
+    }
+
+    fn artifact_result() -> Value {
+        json!({
+            "type": "output_file",
+            "artifact": {
+                "artifact_id": "artifact_terminal_tool",
+                "content_hash": CONTENT_HASH,
+                "size_bytes": 12,
+                "media_type": "text/plain"
+            }
+        })
+    }
+
+    async fn terminal_attempt(pool: &SqlitePool, run_id: &RunId) -> Result<(), RepositoryError> {
+        let mut transaction = pool.begin().await.map_err(RepositoryError::storage)?;
+        let result = persist_terminal_response_snapshot_sqlite(
+            &mut transaction,
+            run_id,
+            RunLifecycle::Cancelled,
+            None,
+            Some("SCHEDULER_CANCELLED"),
+        )
+        .await;
+        match result {
+            Ok(()) => transaction.commit().await.map_err(RepositoryError::storage),
+            Err(error) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(RepositoryError::storage)?;
+                Err(error)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_terminal_transaction_projects_safe_tools_and_fences_artifact_metadata() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for statement in [
+            "CREATE TABLE response_public_items (
+                run_id TEXT,activation_id TEXT,attempt_no INTEGER,model_call_no INTEGER,
+                item_id TEXT,output_index INTEGER,node_id TEXT,item_kind TEXT,item_status TEXT,
+                seal_index INTEGER,safe_item TEXT,updated_at TEXT
+             )",
+            "CREATE TABLE model_call_usage (
+                run_id TEXT,activation_id TEXT,attempt_no INTEGER,model_call_no INTEGER,
+                usage TEXT,usage_complete INTEGER
+             )",
+            "CREATE TABLE model_tool_calls (
+                run_id TEXT,activation_id TEXT,attempt_no INTEGER,model_call_no INTEGER,
+                call_index INTEGER,call_id TEXT,tool_name TEXT,effective_public_policy TEXT,
+                result_json TEXT,call_status TEXT
+             )",
+            "CREATE TABLE workflow_retrieval_publications (
+                run_id TEXT,retrieval_id TEXT,task_id TEXT,activation_id TEXT,node_id TEXT,
+                attempt_no INTEGER,retrieval_resource_id TEXT,retrieval_resource_version TEXT,
+                retrieval_descriptor_hash TEXT,query_field TEXT,effective_public_policy TEXT,
+                effective_public_policy_hash TEXT,public_projection TEXT,
+                public_projection_hash TEXT,completion_transition_key TEXT,
+                completion_intent_hash TEXT,completion_event_id TEXT,
+                completion_event_seq INTEGER,publication_hash TEXT
+             )",
+            "CREATE TABLE artifacts (
+                run_id TEXT,artifact_id TEXT,content_hash TEXT,size_bytes INTEGER,
+                media_type TEXT,artifact_state TEXT
+             )",
+            "CREATE TABLE response_snapshots (
+                run_id TEXT PRIMARY KEY,response_id TEXT,terminal_kind TEXT,response_status TEXT,
+                response_payload TEXT,workflow_payload TEXT,public_item_manifest TEXT,
+                usage TEXT,usage_status TEXT,snapshot_hash TEXT,created_at TEXT
+             )",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        let run_id = RunId::new("run_sqlite_terminal_tool_results").unwrap();
+        sqlx::query(
+            "INSERT INTO model_tool_calls (
+                run_id,activation_id,attempt_no,model_call_no,call_index,call_id,tool_name,
+                effective_public_policy,result_json,call_status
+             ) VALUES (?,?,?,?,?,?,?,?,?,'succeeded'),(?,?,?,?,?,?,?,?,?,'succeeded')",
+        )
+        .bind(run_id.as_str())
+        .bind("activation_a")
+        .bind(1_i64)
+        .bind(1_i64)
+        .bind(0_i64)
+        .bind("call_public")
+        .bind("render_file")
+        .bind(frozen_policy(Some(artifact_result_schema()), true))
+        .bind(canonical_json(&artifact_result()).unwrap())
+        .bind(run_id.as_str())
+        .bind("activation_a")
+        .bind(1_i64)
+        .bind(1_i64)
+        .bind(1_i64)
+        .bind("call_private")
+        .bind("private_lookup")
+        .bind(frozen_policy(None, false))
+        .bind(canonical_json(&json!({"executor_secret": "never publish"})).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO artifacts (
+                run_id,artifact_id,content_hash,size_bytes,media_type,artifact_state
+             ) VALUES (?,?,?,?,?,?)",
+        )
+        .bind(run_id.as_str())
+        .bind("artifact_terminal_tool")
+        .bind(CONTENT_HASH)
+        .bind(12_i64)
+        .bind("text/plain")
+        .bind("verified")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(terminal_attempt(&pool, &run_id).await.is_err());
+        sqlx::query(
+            "UPDATE artifacts SET artifact_state='referenced',content_hash=? WHERE run_id=?",
+        )
+        .bind(WRONG_CONTENT_HASH)
+        .bind(run_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(terminal_attempt(&pool, &run_id).await.is_err());
+
+        sqlx::query("UPDATE artifacts SET content_hash=?,size_bytes=11 WHERE run_id=?")
+            .bind(CONTENT_HASH)
+            .bind(run_id.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(terminal_attempt(&pool, &run_id).await.is_err());
+
+        sqlx::query("UPDATE artifacts SET size_bytes=12,media_type='text/html' WHERE run_id=?")
+            .bind(run_id.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(terminal_attempt(&pool, &run_id).await.is_err());
+
+        sqlx::query("UPDATE artifacts SET media_type='text/plain' WHERE run_id=?")
+            .bind(run_id.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+        terminal_attempt(&pool, &run_id).await.unwrap();
+
+        let snapshot = load_response_snapshot_sqlite(&pool, &run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let tool_results = snapshot.workflow()["tool_results"].as_array().unwrap();
+        assert_eq!(tool_results.len(), 1, "the private result must be omitted");
+        assert_eq!(tool_results[0]["call_id"], "call_public");
+        assert_eq!(tool_results[0]["content"][0]["type"], "output_file");
+        assert_eq!(
+            tool_results[0]["content"][0]["artifact"]["content_hash"],
+            CONTENT_HASH
+        );
+        assert_eq!(snapshot.workflow()["retrievals"], json!([]));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM response_snapshots")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1,
+            "failed artifact validations must not leave a terminal snapshot"
+        );
+    }
 }

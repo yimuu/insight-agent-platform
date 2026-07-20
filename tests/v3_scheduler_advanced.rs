@@ -1796,6 +1796,7 @@ workflow:
             match kind {
                 LeafTaskKind::Llm => SchedulerTaskKind::Llm,
                 LeafTaskKind::Action => SchedulerTaskKind::Action,
+                LeafTaskKind::Retrieval => SchedulerTaskKind::Retrieval,
                 LeafTaskKind::Http => SchedulerTaskKind::Http,
                 LeafTaskKind::Tool => SchedulerTaskKind::Tool,
             },

@@ -15,7 +15,7 @@ use super::{
     SubflowInvocationFact, TaskFailureFact, WaitRegistrationFact,
 };
 
-pub const SCHEDULER_INTENT_SCHEMA_VERSION: u32 = 10;
+pub const SCHEDULER_INTENT_SCHEMA_VERSION: u32 = 11;
 
 /// The immutable contract the scheduler derives from the actually admitted
 /// leaf occurrence. Recovery metadata is only a hint; repository admission
@@ -146,6 +146,7 @@ impl ReuseAdmissionCandidate {
 pub enum SchedulerTaskKind {
     Llm,
     Action,
+    Retrieval,
     Http,
     Tool,
 }
@@ -291,6 +292,7 @@ impl ReuseAdmissionContract {
         descriptor_version: &VersionTag,
         worker_version: &VersionTag,
         effect_policy: &WorkerEffectPolicy,
+        deployment_binding: &serde_json::Value,
         public_configuration: &BTreeMap<String, DescriptorValue>,
         secret_configuration: &BTreeMap<String, SecretRef>,
         inputs: &[BoundTaskInput],
@@ -386,6 +388,7 @@ impl ReuseAdmissionContract {
                 "implementation": implementation,
                 "descriptor_version": descriptor_version,
                 "worker_version": worker_version,
+                "deployment_binding": deployment_binding,
             }))?,
             contract_hash(&input_projection)?,
             contract_hash(&output_projection)?,
@@ -447,6 +450,7 @@ pub enum SchedulerAction {
         descriptor_version: VersionTag,
         worker_version: VersionTag,
         effect_policy: WorkerEffectPolicy,
+        deployment_binding: serde_json::Value,
         public_configuration: BTreeMap<String, DescriptorValue>,
         secret_configuration: BTreeMap<String, SecretRef>,
         inputs: Vec<BoundTaskInput>,

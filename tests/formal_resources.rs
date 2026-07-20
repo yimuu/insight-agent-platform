@@ -8,8 +8,9 @@ use insight_agent_platform::{
             builtin_action_registry, CurrentTimeAction, RestrictedHttpGetAction, TextMetricsAction,
         },
         models::{
-            ChatContent, ChatContentPart, ChatMessage, ChatModel, ChatRequest, ChatResponseFormat,
-            ChatRole, ChatStream, ModelCapability,
+            ChatContent, ChatContentPart, ChatFinishReason, ChatMessage, ChatModel, ChatRequest,
+            ChatRequestMode, ChatResponseFormat, ChatRole, ChatStream, ChatToolCall,
+            ChatToolChoice, ChatToolDefinition, ModelCapability, ModelRequestCapability,
         },
         openai_chat::{OpenAiChatLimits, OpenAiChatModel, OpenAiTransportPolicy},
     },
@@ -98,6 +99,29 @@ fn default_chat_request() -> ChatRequest {
         messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
         parameters: json!({}),
         response_format: None,
+        tools: Vec::new(),
+        tool_choice: ChatToolChoice::Auto,
+    }
+}
+
+fn weather_tool() -> ChatToolDefinition {
+    ChatToolDefinition {
+        name: "weather".to_string(),
+        description: Some("Look up the weather for one city.".to_string()),
+        input_schema: json!({
+            "type":"object",
+            "properties":{"city":{"type":"string"}},
+            "required":["city"],
+            "additionalProperties":false
+        }),
+    }
+}
+
+fn chat_request_with_weather_tool(tool_choice: ChatToolChoice) -> ChatRequest {
+    ChatRequest {
+        tools: vec![weather_tool()],
+        tool_choice,
+        ..default_chat_request()
     }
 }
 
@@ -105,9 +129,9 @@ fn default_chat_request() -> ChatRequest {
 fn openai_request_budget_matches_the_exact_provider_wire_envelope() {
     let model = loopback_model("http://127.0.0.1:9".to_string(), None);
     let request = ChatRequest {
-        messages: vec![ChatMessage {
-            role: ChatRole::User,
-            content: ChatContent::Parts(vec![
+        messages: vec![ChatMessage::from_content(
+            ChatRole::User,
+            ChatContent::Parts(vec![
                 ChatContentPart::Text {
                     text: "Interpret this.".to_string(),
                 },
@@ -115,12 +139,14 @@ fn openai_request_budget_matches_the_exact_provider_wire_envelope() {
                     image: "https://example.test/report.png".to_string(),
                 },
             ]),
-        }],
+        )],
         parameters: json!({"temperature":0.2, "max_tokens":64}),
         response_format: Some(ChatResponseFormat::JsonSchema {
             name: "response".to_string(),
             schema: json!({"type":"object", "additionalProperties":false}),
         }),
+        tools: Vec::new(),
+        tool_choice: ChatToolChoice::Auto,
     };
     let expected_wire_bytes = serde_json::to_vec(&json!({
         "model": "fallback-model",
@@ -135,6 +161,7 @@ fn openai_request_budget_matches_the_exact_provider_wire_envelope() {
             ]
         }],
         "stream": true,
+        "stream_options": {"include_usage": true},
         "response_format": {
             "type": "json_schema",
             "json_schema": {
@@ -151,6 +178,83 @@ fn openai_request_budget_matches_the_exact_provider_wire_envelope() {
 
     assert!(model.request_body_within_limit(&request, expected_wire_bytes));
     assert!(!model.request_body_within_limit(&request, expected_wire_bytes - 1));
+}
+
+#[test]
+fn openai_reports_both_request_modes_and_budgets_their_distinct_wire_bodies() {
+    let model = loopback_model("http://127.0.0.1:9".to_string(), None);
+    assert_eq!(
+        model.request_capabilities(),
+        BTreeSet::from([
+            ModelRequestCapability::Complete,
+            ModelRequestCapability::Streaming,
+        ])
+    );
+    let request = default_chat_request();
+    let complete_bytes = serde_json::to_vec(&json!({
+        "model":"fallback-model",
+        "messages":[{"role":"user","content":"Hi"}],
+        "stream":false
+    }))
+    .unwrap()
+    .len();
+    let streaming_bytes = serde_json::to_vec(&json!({
+        "model":"fallback-model",
+        "messages":[{"role":"user","content":"Hi"}],
+        "stream":true,
+        "stream_options":{"include_usage":true}
+    }))
+    .unwrap()
+    .len();
+
+    assert!(model.request_body_within_limit_for_mode(
+        &request,
+        ChatRequestMode::Complete,
+        complete_bytes,
+    ));
+    assert!(!model.request_body_within_limit_for_mode(
+        &request,
+        ChatRequestMode::Complete,
+        complete_bytes - 1,
+    ));
+    assert!(model.request_body_within_limit_for_mode(
+        &request,
+        ChatRequestMode::Streaming,
+        streaming_bytes,
+    ));
+    assert!(!model.request_body_within_limit_for_mode(
+        &request,
+        ChatRequestMode::Streaming,
+        streaming_bytes - 1,
+    ));
+}
+
+#[test]
+fn provider_finish_reasons_are_normalized_without_preserving_unknown_values() {
+    assert_eq!(
+        ChatFinishReason::from_provider(Some("stop")),
+        ChatFinishReason::Stop
+    );
+    assert_eq!(
+        ChatFinishReason::from_provider(Some("tool_calls")),
+        ChatFinishReason::ToolCalls
+    );
+    assert_eq!(
+        ChatFinishReason::from_provider(Some("length")),
+        ChatFinishReason::Length
+    );
+    assert_eq!(
+        ChatFinishReason::from_provider(Some("content_filter")),
+        ChatFinishReason::ContentFilter
+    );
+    assert_eq!(
+        ChatFinishReason::from_provider(Some("provider-secret-reason")),
+        ChatFinishReason::Invalid
+    );
+    assert_eq!(
+        ChatFinishReason::from_provider(None),
+        ChatFinishReason::Invalid
+    );
 }
 
 #[test]
@@ -173,11 +277,14 @@ fn json_object_request_budget_counts_the_injected_schema_instruction() {
             name: "response".to_string(),
             schema,
         }),
+        tools: Vec::new(),
+        tool_choice: ChatToolChoice::Auto,
     };
     let expected_wire_bytes = serde_json::to_vec(&json!({
         "model":"fallback-model",
         "messages":[{"role":"user", "content":format!("Analyze this.{instruction}")}],
         "stream":true,
+        "stream_options":{"include_usage":true},
         "response_format":{"type":"json_object"}
     }))
     .unwrap()
@@ -195,6 +302,8 @@ async fn direct_openai_boundary_rejects_invalid_provider_neutral_messages() {
             messages: vec![ChatMessage::from_text(ChatRole::Assistant, "prefill")],
             parameters: json!({}),
             response_format: None,
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::Auto,
         })
         .await;
     let error = match result {
@@ -224,14 +333,16 @@ async fn direct_openai_boundary_rechecks_vision_capability() {
     .unwrap();
     let result = model
         .stream_chat(ChatRequest {
-            messages: vec![ChatMessage {
-                role: ChatRole::User,
-                content: ChatContent::Parts(vec![ChatContentPart::Image {
+            messages: vec![ChatMessage::from_content(
+                ChatRole::User,
+                ChatContent::Parts(vec![ChatContentPart::Image {
                     image: "https://example.test/report.png".to_string(),
                 }]),
-            }],
+            )],
             parameters: json!({}),
             response_format: None,
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::Auto,
         })
         .await;
     let error = match result {
@@ -248,14 +359,16 @@ async fn direct_openai_boundary_rechecks_image_url_contracts() {
     for image in ["image://bad", "data:image/png;base64,***"] {
         let result = model
             .stream_chat(ChatRequest {
-                messages: vec![ChatMessage {
-                    role: ChatRole::User,
-                    content: ChatContent::Parts(vec![ChatContentPart::Image {
+                messages: vec![ChatMessage::from_content(
+                    ChatRole::User,
+                    ChatContent::Parts(vec![ChatContentPart::Image {
                         image: image.to_string(),
                     }]),
-                }],
+                )],
                 parameters: json!({}),
                 response_format: None,
+                tools: Vec::new(),
+                tool_choice: ChatToolChoice::Auto,
             })
             .await;
         let error = match result {
@@ -287,6 +400,8 @@ async fn direct_openai_boundary_rechecks_structured_output_capability() {
                 name: "response".to_string(),
                 schema: json!({"type":"object", "additionalProperties":false}),
             }),
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::Auto,
         })
         .await;
     let error = match result {
@@ -305,6 +420,8 @@ async fn direct_openai_boundary_rechecks_structured_output_capability() {
                 name: "response".to_string(),
                 schema: json!({"type":"object", "additionalProperties":false}),
             }),
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::Auto,
         })
         .await
     {
@@ -321,6 +438,8 @@ async fn direct_openai_boundary_rechecks_structured_output_capability() {
                 name: "response".to_string(),
                 schema: json!({"type":"array", "items":{"type":"string"}}),
             }),
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::Auto,
         })
         .await
     {
@@ -328,6 +447,196 @@ async fn direct_openai_boundary_rechecks_structured_output_capability() {
         Err(error) => error,
     };
     assert_eq!(error.code(), "VNEXT_LLM_RESPONSE_CONFIG_INVALID");
+}
+
+#[tokio::test]
+async fn direct_openai_boundary_rejects_invalid_tool_schema_and_choice_before_network_io() {
+    let model = loopback_model("http://127.0.0.1:9".to_string(), None);
+    let invalid_requests = [
+        ChatRequest {
+            tools: vec![weather_tool(), weather_tool()],
+            ..default_chat_request()
+        },
+        ChatRequest {
+            tools: vec![ChatToolDefinition {
+                name: "bad tool".to_string(),
+                ..weather_tool()
+            }],
+            ..default_chat_request()
+        },
+        ChatRequest {
+            tools: vec![ChatToolDefinition {
+                input_schema: json!({"type":"array", "items":{"type":"string"}}),
+                ..weather_tool()
+            }],
+            ..default_chat_request()
+        },
+        ChatRequest {
+            tools: vec![ChatToolDefinition {
+                input_schema: json!({"type":"object", "required":"city"}),
+                ..weather_tool()
+            }],
+            ..default_chat_request()
+        },
+        ChatRequest {
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::Required,
+            ..default_chat_request()
+        },
+        ChatRequest {
+            tools: vec![weather_tool()],
+            tool_choice: ChatToolChoice::Named("undeclared".to_string()),
+            ..default_chat_request()
+        },
+        ChatRequest {
+            parameters: json!({"tools":[]}),
+            ..default_chat_request()
+        },
+        ChatRequest {
+            parameters: json!({"tool_choice":"auto"}),
+            ..default_chat_request()
+        },
+    ];
+
+    for request in invalid_requests {
+        let error = model.chat(request).await.unwrap_err();
+        assert_eq!(error.code(), "VNEXT_LLM_TOOL_CONFIG_INVALID");
+    }
+}
+
+#[tokio::test]
+async fn direct_openai_boundary_rejects_incomplete_or_mismatched_tool_continuations() {
+    let model = loopback_model("http://127.0.0.1:9".to_string(), None);
+    let valid_call = ChatToolCall {
+        index: 0,
+        id: "call_weather".to_string(),
+        name: "weather".to_string(),
+        arguments: "{\"city\":\"Paris\"}".to_string(),
+    };
+    let invalid_requests = [
+        ChatRequest {
+            messages: vec![
+                ChatMessage::from_text(ChatRole::User, "How is the weather?"),
+                ChatMessage::assistant_tool_calls(None, vec![valid_call.clone()]),
+            ],
+            tools: vec![weather_tool()],
+            ..default_chat_request()
+        },
+        ChatRequest {
+            messages: vec![
+                ChatMessage::from_text(ChatRole::User, "How is the weather?"),
+                ChatMessage::assistant_tool_calls(None, vec![valid_call.clone()]),
+                ChatMessage::tool_result("call_other", "sunny"),
+            ],
+            tools: vec![weather_tool()],
+            ..default_chat_request()
+        },
+        ChatRequest {
+            messages: vec![ChatMessage::tool_result("call_weather", "sunny")],
+            tools: vec![weather_tool()],
+            ..default_chat_request()
+        },
+        ChatRequest {
+            messages: vec![
+                ChatMessage::from_text(ChatRole::User, "How is the weather?"),
+                ChatMessage::assistant_tool_calls(None, Vec::new()),
+            ],
+            tools: vec![weather_tool()],
+            ..default_chat_request()
+        },
+        ChatRequest {
+            messages: vec![
+                ChatMessage::from_text(ChatRole::User, "How is the weather?"),
+                ChatMessage::assistant_tool_calls(
+                    None,
+                    vec![ChatToolCall {
+                        arguments: "{\"city\":3}".to_string(),
+                        ..valid_call.clone()
+                    }],
+                ),
+                ChatMessage::tool_result("call_weather", "sunny"),
+            ],
+            tools: vec![weather_tool()],
+            ..default_chat_request()
+        },
+    ];
+
+    for request in invalid_requests {
+        let error = model.chat(request).await.unwrap_err();
+        assert!(matches!(
+            error.code(),
+            "VNEXT_LLM_CONTENT_INVALID"
+                | "VNEXT_LLM_MESSAGE_ORDER_INVALID"
+                | "VNEXT_LLM_TOOL_CONFIG_INVALID"
+        ));
+    }
+}
+
+#[tokio::test]
+async fn openai_adapter_serializes_complete_tool_continuation_messages_exactly() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_request_json(&mut socket).await;
+        assert_eq!(
+            request["messages"],
+            json!([
+                {"role":"system", "content":"Be concise."},
+                {"role":"user", "content":"How is the weather?"},
+                {
+                    "role":"assistant",
+                    "content":null,
+                    "tool_calls":[{
+                        "id":"call_weather",
+                        "type":"function",
+                        "function":{
+                            "name":"weather",
+                            "arguments":"{\"city\":\"Paris\"}"
+                        }
+                    }]
+                },
+                {
+                    "role":"tool",
+                    "tool_call_id":"call_weather",
+                    "content":"{\"temperature_c\":21}"
+                }
+            ])
+        );
+        write_sse_headers(&mut socket).await;
+        socket
+            .write_all(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"It is 21 C.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            )
+            .await
+            .unwrap();
+    });
+    let request = ChatRequest {
+        messages: vec![
+            ChatMessage::from_text(ChatRole::System, "Be concise."),
+            ChatMessage::from_text(ChatRole::User, "How is the weather?"),
+            ChatMessage::assistant_tool_calls(
+                None,
+                vec![ChatToolCall {
+                    index: 0,
+                    id: "call_weather".to_string(),
+                    name: "weather".to_string(),
+                    arguments: "{\"city\":\"Paris\"}".to_string(),
+                }],
+            ),
+            ChatMessage::tool_result("call_weather", "{\"temperature_c\":21}"),
+        ],
+        tools: vec![weather_tool()],
+        ..default_chat_request()
+    };
+
+    let mut stream = model(format!("http://{address}"), None)
+        .stream_chat(request)
+        .await
+        .unwrap();
+    assert_eq!(stream.next().await.unwrap().unwrap().text, "It is 21 C.");
+    assert!(stream.next().await.is_none());
+    server.await.unwrap();
 }
 
 async fn clean_eof_stream(body: Vec<u8>) -> (ChatStream, tokio::task::JoinHandle<()>) {
@@ -402,6 +711,7 @@ async fn openai_adapter_serializes_formal_messages_and_allowed_parameters() {
         let request = read_request_json(&mut socket).await;
         assert_eq!(request["model"], "fallback-model");
         assert_eq!(request["stream"], true);
+        assert_eq!(request["stream_options"], json!({"include_usage":true}));
         assert_eq!(request["temperature"], 0.2);
         assert_eq!(request["max_tokens"], 64);
         assert_eq!(request["response_format"]["type"], "json_schema");
@@ -440,9 +750,9 @@ async fn openai_adapter_serializes_formal_messages_and_allowed_parameters() {
     let request = ChatRequest {
         messages: vec![
             ChatMessage::from_text(ChatRole::System, "Be concise."),
-            ChatMessage {
-                role: ChatRole::User,
-                content: ChatContent::Parts(vec![
+            ChatMessage::from_content(
+                ChatRole::User,
+                ChatContent::Parts(vec![
                     ChatContentPart::Text {
                         text: "Interpret this.".to_string(),
                     },
@@ -450,13 +760,15 @@ async fn openai_adapter_serializes_formal_messages_and_allowed_parameters() {
                         image: "https://example.test/report.png".to_string(),
                     },
                 ]),
-            },
+            ),
         ],
         parameters: json!({"temperature":0.2, "max_tokens":64}),
         response_format: Some(ChatResponseFormat::JsonSchema {
             name: "response".to_string(),
             schema: json!({"type":"object", "additionalProperties":false}),
         }),
+        tools: Vec::new(),
+        tool_choice: ChatToolChoice::Auto,
     };
 
     let mut stream = model.stream_chat(request).await.unwrap();
@@ -466,7 +778,7 @@ async fn openai_adapter_serializes_formal_messages_and_allowed_parameters() {
     assert_eq!(first.finish_reason, None);
     assert_eq!(second.text, "");
     assert_eq!(second.finish_reason.as_deref(), Some("stop"));
-    assert_eq!(second.usage, Some(json!({"completion_tokens":1})));
+    assert_eq!(second.usage, Some(json!({"output_tokens":1})));
     assert!(stream.next().await.is_none());
     server.await.unwrap();
 }
@@ -506,12 +818,232 @@ async fn openai_adapter_serializes_json_object_mode_and_injects_schema_instructi
             name: "response".to_string(),
             schema,
         }),
+        tools: Vec::new(),
+        tool_choice: ChatToolChoice::Auto,
     };
 
     let mut stream = loopback_json_object_model(format!("http://{address}"))
         .stream_chat(request)
         .await
         .unwrap();
+    assert!(stream.next().await.is_none());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_complete_path_sends_stream_false_and_normalizes_response_and_usage() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_request_json(&mut socket).await;
+        assert_eq!(request["stream"], false);
+        assert!(request.get("stream_options").is_none());
+        write_json_response(
+            &mut socket,
+            &json!({
+                "choices":[{
+                    "message":{"role":"assistant","content":"complete answer"},
+                    "finish_reason":"stop"
+                }],
+                "usage":{
+                    "prompt_tokens":12,
+                    "prompt_tokens_details":{"cached_tokens":3},
+                    "completion_tokens":5,
+                    "completion_tokens_details":{"reasoning_tokens":2},
+                    "total_tokens":17
+                }
+            }),
+        )
+        .await;
+    });
+
+    let response = model(format!("http://{address}"), None)
+        .chat(default_chat_request())
+        .await
+        .unwrap();
+    assert_eq!(response.text, "complete answer");
+    assert!(response.tool_calls.is_empty());
+    assert_eq!(response.finish_reason, ChatFinishReason::Stop);
+    let usage = response.usage.unwrap();
+    assert_eq!(usage.input_tokens, Some(12));
+    assert_eq!(usage.input_tokens_details.unwrap().cached_tokens, Some(3));
+    assert_eq!(usage.output_tokens, Some(5));
+    assert_eq!(
+        usage.output_tokens_details.unwrap().reasoning_tokens,
+        Some(2)
+    );
+    assert_eq!(usage.total_tokens, Some(17));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_complete_path_returns_complete_typed_tool_calls_without_fabricating_usage() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_request_json(&mut socket).await;
+        assert_eq!(request["stream"], false);
+        assert_eq!(request["tool_choice"], "required");
+        assert_eq!(
+            request["tools"],
+            json!([{
+                "type":"function",
+                "function":{
+                    "name":"weather",
+                    "description":"Look up the weather for one city.",
+                    "parameters":{
+                        "type":"object",
+                        "properties":{"city":{"type":"string"}},
+                        "required":["city"],
+                        "additionalProperties":false
+                    }
+                }
+            }])
+        );
+        write_json_response(
+            &mut socket,
+            &json!({
+                "choices":[{
+                    "message":{
+                        "role":"assistant",
+                        "content":null,
+                        "tool_calls":[{
+                            "id":"call_weather",
+                            "type":"function",
+                            "function":{
+                                "name":"weather",
+                                "arguments":"{\"city\":\"Paris\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason":"tool_calls"
+                }]
+            }),
+        )
+        .await;
+    });
+
+    let response = model(format!("http://{address}"), None)
+        .chat(chat_request_with_weather_tool(ChatToolChoice::Required))
+        .await
+        .unwrap();
+    assert_eq!(response.text, "");
+    assert_eq!(response.finish_reason, ChatFinishReason::ToolCalls);
+    assert_eq!(response.usage, None);
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(response.tool_calls[0].index, 0);
+    assert_eq!(response.tool_calls[0].id, "call_weather");
+    assert_eq!(response.tool_calls[0].name, "weather");
+    assert_eq!(response.tool_calls[0].arguments, "{\"city\":\"Paris\"}");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_complete_path_enforces_the_shared_response_bound_without_echoing_body() {
+    let secret = "complete-response-limit-secret";
+    let response = json!({
+        "choices":[{
+            "message":{"role":"assistant","content":secret},
+            "finish_reason":"stop"
+        }]
+    });
+    let response_bytes = serde_json::to_vec(&response).unwrap();
+    let limits = OpenAiChatLimits {
+        max_upstream_bytes: response_bytes.len() - 1,
+        ..OpenAiChatLimits::default()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_request_json(&mut socket).await;
+        write_json_response(&mut socket, &response).await;
+    });
+
+    let error = model_with_limits(format!("http://{address}"), None, limits)
+        .chat(default_chat_request())
+        .await
+        .unwrap_err();
+    assert_too_large(&error, &[secret]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn openai_typed_stream_exposes_tool_argument_deltas_finish_and_partial_usage() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_request_json(&mut socket).await;
+        assert_eq!(request["stream"], true);
+        assert_eq!(request["stream_options"], json!({"include_usage":true}));
+        assert_eq!(
+            request["tool_choice"],
+            json!({"type":"function", "function":{"name":"weather"}})
+        );
+        assert_eq!(request["tools"][0]["type"], "function");
+        assert_eq!(request["tools"][0]["function"]["name"], "weather");
+        assert_eq!(
+            request["tools"][0]["function"]["parameters"]["required"],
+            json!(["city"])
+        );
+        write_sse_headers(&mut socket).await;
+        let first = json!({
+            "choices":[{
+                "delta":{"tool_calls":[{
+                    "index":0,
+                    "id":"call_weather",
+                    "type":"function",
+                    "function":{"name":"weather","arguments":"{\"city\":"}
+                }]},
+                "finish_reason":null
+            }]
+        });
+        let second = json!({
+            "choices":[{
+                "delta":{"tool_calls":[{
+                    "index":0,
+                    "function":{"arguments":"\"Paris\"}"}
+                }]},
+                "finish_reason":null
+            }]
+        });
+        let terminal = json!({
+            "choices":[{"delta":{},"finish_reason":"tool_calls"}],
+            "usage":{"completion_tokens":4}
+        });
+        socket
+            .write_all(
+                format!("data: {first}\n\ndata: {second}\n\ndata: {terminal}\n\ndata: [DONE]\n\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let mut stream = model(format!("http://{address}"), None)
+        .stream_chat_events(chat_request_with_weather_tool(ChatToolChoice::Named(
+            "weather".to_string(),
+        )))
+        .await
+        .unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(first.tool_call_deltas[0].index, 0);
+    assert_eq!(
+        first.tool_call_deltas[0].id.as_deref(),
+        Some("call_weather")
+    );
+    assert_eq!(first.tool_call_deltas[0].name.as_deref(), Some("weather"));
+    assert_eq!(first.tool_call_deltas[0].arguments_delta, "{\"city\":");
+    let second = stream.next().await.unwrap().unwrap();
+    assert_eq!(second.tool_call_deltas[0].id, None);
+    assert_eq!(second.tool_call_deltas[0].name, None);
+    assert_eq!(second.tool_call_deltas[0].arguments_delta, "\"Paris\"}");
+    let terminal = stream.next().await.unwrap().unwrap();
+    assert_eq!(terminal.finish_reason, Some(ChatFinishReason::ToolCalls));
+    assert_eq!(terminal.usage.unwrap().output_tokens, Some(4));
     assert!(stream.next().await.is_none());
     server.await.unwrap();
 }
@@ -547,7 +1079,7 @@ async fn openai_stream_accepts_exact_configured_response_limits() {
     let chunk = stream.next().await.unwrap().unwrap();
     assert_eq!(chunk.text, "abc");
     assert_eq!(chunk.finish_reason.as_deref(), Some("stop"));
-    assert_eq!(chunk.usage, Some(usage));
+    assert_eq!(chunk.usage, Some(json!({})));
     assert!(stream.next().await.is_none());
     server.await.unwrap();
 }
@@ -624,7 +1156,7 @@ async fn openai_finish_and_usage_without_done_are_incomplete_at_clean_eof() {
     let usage = stream.next().await.unwrap().unwrap();
     assert_eq!(usage.text, "");
     assert_eq!(usage.finish_reason, None);
-    assert_eq!(usage.usage, Some(json!({"detail":usage_secret})));
+    assert_eq!(usage.usage, Some(json!({})));
     let error = stream
         .next()
         .await
@@ -695,7 +1227,7 @@ async fn openai_usage_only_clean_eof_is_incomplete() {
     let usage = stream.next().await.unwrap().unwrap();
     assert_eq!(usage.text, "");
     assert_eq!(usage.finish_reason, None);
-    assert_eq!(usage.usage, Some(json!({"detail":usage_secret})));
+    assert_eq!(usage.usage, Some(json!({})));
     let error = stream
         .next()
         .await
@@ -1174,6 +1706,8 @@ async fn openai_sse_decoder_handles_fragmented_multibyte_utf8() {
             messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
             parameters: json!({}),
             response_format: None,
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::Auto,
         })
         .await
         .unwrap();
@@ -1216,6 +1750,8 @@ async fn openai_errors_and_debug_never_expose_api_key_or_response_body() {
             messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
             parameters: json!({}),
             response_format: None,
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::Auto,
         })
         .await
     {
@@ -1276,6 +1812,8 @@ async fn openai_client_does_not_follow_redirects_or_leak_authorization_to_locati
             messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
             parameters: json!({}),
             response_format: None,
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::Auto,
         })
         .await
     {
@@ -1320,6 +1858,8 @@ async fn dropping_openai_stream_closes_the_in_flight_http_body() {
             messages: vec![ChatMessage::from_text(ChatRole::User, "Hi")],
             parameters: json!({}),
             response_format: None,
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::Auto,
         })
         .await
         .unwrap();
@@ -1470,4 +2010,14 @@ async fn write_sse_headers(socket: &mut tokio::net::TcpStream) {
         )
         .await
         .unwrap();
+}
+
+async fn write_json_response(socket: &mut tokio::net::TcpStream, value: &Value) {
+    let body = serde_json::to_vec(value).unwrap();
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    socket.write_all(headers.as_bytes()).await.unwrap();
+    socket.write_all(&body).await.unwrap();
 }

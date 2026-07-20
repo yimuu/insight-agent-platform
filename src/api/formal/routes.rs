@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
-    catalog_v3::DeployedV3Agent,
+    catalog_v3::{AgentStreamingContract, DeployedV3Agent},
     dsl::v3::{
         GraphAuthorDocument, GraphSemanticEditBatch, ViewDocument, MAX_GRAPH_DOCUMENT_BYTES,
     },
@@ -31,6 +31,10 @@ use super::{
 
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 const X_RUN_ID: HeaderName = HeaderName::from_static("x-run-id");
+const X_RESPONSE_ID: HeaderName = HeaderName::from_static("x-response-id");
+const X_ACCEL_BUFFERING: HeaderName = HeaderName::from_static("x-accel-buffering");
+const X_CONTENT_TYPE_OPTIONS: HeaderName = HeaderName::from_static("x-content-type-options");
+const CONTENT_SECURITY_POLICY: HeaderName = HeaderName::from_static("content-security-policy");
 
 #[derive(Clone)]
 pub struct FormalApiState {
@@ -73,6 +77,10 @@ pub fn build_router(state: FormalApiState) -> Router {
         )
         .route("/v1/agents/{agent_id}/runs", post(create_detached_run))
         .route("/v1/runs/{run_id}", get(get_run).delete(cancel_run))
+        .route(
+            "/v1/runs/{run_id}/artifacts/{artifact_id}",
+            get(get_run_artifact),
+        )
         .route(
             "/v1/runs/{run_id}/execution-graph",
             get(get_execution_graph),
@@ -172,6 +180,8 @@ struct AgentMetadata {
     description: String,
     version: String,
     input_schema: Value,
+    output_schema: Value,
+    streaming: AgentStreamingContract,
 }
 
 impl From<&DeployedV3Agent> for AgentMetadata {
@@ -184,6 +194,8 @@ impl From<&DeployedV3Agent> for AgentMetadata {
             description: metadata.description.clone(),
             version: agent.deployment_revision_id().as_str().to_owned(),
             input_schema: published.public_input_schema(),
+            output_schema: published.public_output_schema(),
+            streaming: published.public_streaming_contract(),
         }
     }
 }
@@ -390,12 +402,19 @@ async fn create_attached_run(
         )
         .await
         .map_err(ApiError::from)?;
-    let run_id = attached.run_id;
-    let request_id = attached.request_id;
-    let mut response =
-        response_stream(attached.subscription, state.sse_keep_alive_interval).into_response();
+    let run_id = attached.run_id.clone();
+    let response_id = attached.response_id.clone();
+    let request_id = attached.request_id.clone();
+    let mut response = response_stream(attached, state.sse_keep_alive_interval).into_response();
     insert_header(&mut response, X_RUN_ID, &run_id)?;
+    insert_header(&mut response, X_RESPONSE_ID, &response_id)?;
     insert_header(&mut response, X_REQUEST_ID, &request_id)?;
+    insert_header(
+        &mut response,
+        header::CACHE_CONTROL,
+        "no-store, no-transform",
+    )?;
+    insert_header(&mut response, X_ACCEL_BUFFERING, "no")?;
     Ok(response)
 }
 
@@ -435,6 +454,40 @@ async fn get_run(
         .await
         .map_err(ApiError::from)?;
     Ok(Json(ApiResponse::ok(run)))
+}
+
+async fn get_run_artifact(
+    State(state): State<Arc<FormalApiState>>,
+    Path((run_id, artifact_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let artifact = state
+        .service
+        .read_public_artifact(&run_id, &artifact_id)
+        .await
+        .map_err(ApiError::from)?;
+    let media_type = artifact
+        .artifact()
+        .media_type()
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let content_length = artifact.artifact().size_bytes().to_string();
+    let etag = format!("\"{}\"", artifact.artifact().content_hash().as_str());
+    let mut response = Response::new(Body::from(artifact.into_bytes()));
+    insert_header(&mut response, header::CONTENT_TYPE, &media_type)?;
+    insert_header(&mut response, header::CONTENT_LENGTH, &content_length)?;
+    insert_header(&mut response, header::ETAG, &etag)?;
+    insert_header(
+        &mut response,
+        header::CACHE_CONTROL,
+        "private, no-store, no-transform",
+    )?;
+    insert_header(&mut response, X_CONTENT_TYPE_OPTIONS, "nosniff")?;
+    insert_header(
+        &mut response,
+        CONTENT_SECURITY_POLICY,
+        "sandbox; default-src 'none'",
+    )?;
+    Ok(response)
 }
 
 async fn cancel_run(

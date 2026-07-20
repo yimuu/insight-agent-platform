@@ -107,6 +107,29 @@ pub enum DeploymentMode {
     SingleProcessDevelopment,
 }
 
+/// Transport used for live-only response publications.
+///
+/// This is deliberately separate from the durable history store: response
+/// deltas are bounded observations and never become recovery authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveResponseBrokerProvider {
+    InProcess,
+    PostgresNotify,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseStreamConfig {
+    pub broker: LiveResponseBrokerProvider,
+    pub body_queue_capacity: usize,
+    pub control_queue_capacity: usize,
+    pub max_frame_bytes: usize,
+    pub max_item_bytes: usize,
+    pub max_run_bytes: usize,
+    pub terminal_barrier_timeout: Duration,
+    pub outbound_write_timeout: Duration,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactStoreProvider {
@@ -121,6 +144,8 @@ pub struct ArtifactsConfig {
     pub namespace: Option<String>,
     pub directory: PathBuf,
     pub inline_threshold_bytes: usize,
+    /// Maximum bytes returned by one authorized Artifact read.
+    pub max_read_bytes: usize,
     pub orphan_retention: Duration,
     /// Audit/recovery hold for Artifacts that became part of a durable Run.
     pub reference_retention: Duration,
@@ -146,6 +171,11 @@ pub struct RuntimeConfig {
     pub run_timeout: Duration,
     pub sse_keep_alive_interval: Duration,
     pub subscriber_capacity: usize,
+    pub response_stream: ResponseStreamConfig,
+    /// Platform hard bounds. Author-level LLM tool budgets must not exceed
+    /// these values when a Deployment Revision is linked.
+    pub max_llm_tool_rounds: u32,
+    pub max_llm_tool_calls: u32,
     /// Retention of already-published nonterminal public events. Terminal
     /// public events remain durable and are not governed by this setting.
     pub public_event_retention: Duration,
@@ -245,7 +275,7 @@ impl PlatformConfig {
             ));
         }
         let artifacts = resolve_artifacts(parent, raw.artifacts, raw.deployment_mode)?;
-        let runtime = resolve_runtime(raw.runtime)?;
+        let runtime = resolve_runtime(raw.runtime, raw.deployment_mode)?;
         Ok(Self {
             deployment_mode: raw.deployment_mode,
             bind_addr,
@@ -387,6 +417,8 @@ struct ArtifactsYaml {
     namespace: Option<String>,
     directory: PathBuf,
     inline_threshold_bytes: usize,
+    #[serde(default)]
+    max_read_bytes: Option<usize>,
     orphan_retention: String,
     #[serde(default)]
     reference_retention: Option<String>,
@@ -405,12 +437,31 @@ struct RuntimeYaml {
     sse_keep_alive_interval: String,
     subscriber_capacity: usize,
     #[serde(default)]
+    response_stream: Option<ResponseStreamYaml>,
+    #[serde(default)]
+    max_llm_tool_rounds: Option<u32>,
+    #[serde(default)]
+    max_llm_tool_calls: Option<u32>,
+    #[serde(default)]
     public_event_retention: Option<String>,
     #[serde(default)]
     public_event_prune_interval: Option<String>,
     readiness_probe_timeout: Option<String>,
     shutdown_grace_period: Option<String>,
     shutdown_hard_deadline: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponseStreamYaml {
+    broker: LiveResponseBrokerProvider,
+    body_queue_capacity: usize,
+    control_queue_capacity: usize,
+    max_frame_bytes: usize,
+    max_item_bytes: usize,
+    max_run_bytes: usize,
+    terminal_barrier_timeout: String,
+    outbound_write_timeout: String,
 }
 
 fn resolve_auth(
@@ -564,6 +615,7 @@ fn resolve_artifacts(
             namespace: None,
             directory: PathBuf::from("../data/artifacts"),
             inline_threshold_bytes: 64 * 1024,
+            max_read_bytes: Some(64 * 1024 * 1024),
             orphan_retention: "24h".to_owned(),
             reference_retention: Some("30d".to_owned()),
             gc_interval: "1m".to_owned(),
@@ -600,8 +652,11 @@ fn resolve_artifacts(
             "deployment_mode=production requires artifacts.provider=shared_filesystem",
         ));
     }
+    let max_read_bytes = artifacts.max_read_bytes.unwrap_or(64 * 1024 * 1024);
     if artifacts.inline_threshold_bytes == 0
         || artifacts.inline_threshold_bytes > 64 * 1024 * 1024
+        || max_read_bytes == 0
+        || max_read_bytes > 256 * 1024 * 1024
         || artifacts.deletion_claim_seconds == 0
         || artifacts.deletion_claim_seconds > 3_600
     {
@@ -627,6 +682,7 @@ fn resolve_artifacts(
         namespace: artifacts.namespace,
         directory: resolve_path(parent, &artifacts.directory),
         inline_threshold_bytes: artifacts.inline_threshold_bytes,
+        max_read_bytes,
         orphan_retention: positive_artifact_duration(
             &artifacts.orphan_retention,
             "artifacts.orphan_retention",
@@ -758,7 +814,10 @@ fn raw_authority_host(database_url: &str) -> Option<String> {
     Some(host_port.split(':').next().unwrap_or(host_port).to_string())
 }
 
-fn resolve_runtime(raw: RuntimeYaml) -> Result<RuntimeConfig, PlatformConfigError> {
+fn resolve_runtime(
+    raw: RuntimeYaml,
+    deployment_mode: DeploymentMode,
+) -> Result<RuntimeConfig, PlatformConfigError> {
     let capacities = [
         raw.max_concurrent_runs,
         raw.max_concurrent_operations,
@@ -805,6 +864,17 @@ fn resolve_runtime(raw: RuntimeYaml) -> Result<RuntimeConfig, PlatformConfigErro
             "runtime.shutdown_hard_deadline must be greater than runtime.shutdown_grace_period",
         ));
     }
+    let response_stream = resolve_response_stream(raw.response_stream, deployment_mode)?;
+    let max_llm_tool_rounds = raw.max_llm_tool_rounds.unwrap_or(16);
+    let max_llm_tool_calls = raw.max_llm_tool_calls.unwrap_or(64);
+    if max_llm_tool_rounds == 0
+        || max_llm_tool_rounds > 128
+        || max_llm_tool_calls == 0
+        || max_llm_tool_calls > 1_024
+        || max_llm_tool_calls < max_llm_tool_rounds
+    {
+        return Err(runtime_error("runtime LLM tool hard limits are invalid"));
+    }
     Ok(RuntimeConfig {
         max_concurrent_runs: raw.max_concurrent_runs,
         max_concurrent_operations: raw.max_concurrent_operations,
@@ -816,11 +886,65 @@ fn resolve_runtime(raw: RuntimeYaml) -> Result<RuntimeConfig, PlatformConfigErro
             "runtime.sse_keep_alive_interval",
         )?,
         subscriber_capacity: raw.subscriber_capacity,
+        response_stream,
+        max_llm_tool_rounds,
+        max_llm_tool_calls,
         public_event_retention,
         public_event_prune_interval,
         readiness_probe_timeout,
         shutdown_grace_period,
         shutdown_hard_deadline,
+    })
+}
+
+fn resolve_response_stream(
+    raw: Option<ResponseStreamYaml>,
+    deployment_mode: DeploymentMode,
+) -> Result<ResponseStreamConfig, PlatformConfigError> {
+    let Some(raw) = raw else {
+        return Ok(ResponseStreamConfig {
+            broker: match deployment_mode {
+                DeploymentMode::Production => LiveResponseBrokerProvider::PostgresNotify,
+                DeploymentMode::SingleProcessDevelopment => LiveResponseBrokerProvider::InProcess,
+            },
+            body_queue_capacity: 256,
+            control_queue_capacity: 32,
+            // PostgreSQL NOTIFY has an 8 KiB payload ceiling. Keep enough
+            // headroom for the closed publication envelope.
+            max_frame_bytes: 4 * 1_024,
+            max_item_bytes: 4 * 1_024 * 1_024,
+            max_run_bytes: 16 * 1_024 * 1_024,
+            terminal_barrier_timeout: Duration::from_secs(2),
+            outbound_write_timeout: Duration::from_secs(10),
+        });
+    };
+    let capacities = [raw.body_queue_capacity, raw.control_queue_capacity];
+    if capacities.contains(&0)
+        || raw.max_frame_bytes < 256
+        || raw.max_frame_bytes > 64 * 1_024
+        || raw.max_item_bytes < raw.max_frame_bytes
+        || raw.max_run_bytes < raw.max_item_bytes
+        || raw.max_run_bytes > 256 * 1_024 * 1_024
+        || (raw.broker == LiveResponseBrokerProvider::PostgresNotify
+            && raw.max_frame_bytes > 4 * 1_024)
+    {
+        return Err(runtime_error("runtime.response_stream bounds are invalid"));
+    }
+    Ok(ResponseStreamConfig {
+        broker: raw.broker,
+        body_queue_capacity: raw.body_queue_capacity,
+        control_queue_capacity: raw.control_queue_capacity,
+        max_frame_bytes: raw.max_frame_bytes,
+        max_item_bytes: raw.max_item_bytes,
+        max_run_bytes: raw.max_run_bytes,
+        terminal_barrier_timeout: positive_duration(
+            &raw.terminal_barrier_timeout,
+            "runtime.response_stream.terminal_barrier_timeout",
+        )?,
+        outbound_write_timeout: positive_duration(
+            &raw.outbound_write_timeout,
+            "runtime.response_stream.outbound_write_timeout",
+        )?,
     })
 }
 

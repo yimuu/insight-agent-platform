@@ -833,6 +833,7 @@ pub struct RaiseDescriptor {
 pub enum NodeKind {
     LlmTask(LeafTaskDescriptor),
     ActionTask(LeafTaskDescriptor),
+    RetrievalTask(LeafTaskDescriptor),
     HttpTask(LeafTaskDescriptor),
     ToolTask(LeafTaskDescriptor),
     Branch(BranchDescriptor),
@@ -856,6 +857,7 @@ impl NodeKind {
         match self {
             Self::LlmTask(_) => "llm_task",
             Self::ActionTask(_) => "action_task",
+            Self::RetrievalTask(_) => "retrieval_task",
             Self::HttpTask(_) => "http_task",
             Self::ToolTask(_) => "tool_task",
             Self::Branch(_) => "branch",

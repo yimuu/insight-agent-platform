@@ -11,7 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use super::{ArtifactId, ArtifactRef, ContentHash};
@@ -170,6 +170,22 @@ pub trait WorkerArtifactStore: Send + Sync {
         artifact: &ArtifactRef,
         bytes: &[u8],
     ) -> Result<(ContentHash, u64), RepositoryError>;
+
+    /// Reads one repository-authorized object under an explicit caller bound
+    /// and verifies the complete byte identity before returning any content.
+    ///
+    /// Authorization belongs to the durable metadata repository; stores must
+    /// only accept its private locator and must never derive a path from an
+    /// HTTP parameter. The default is deliberately unavailable so a write-only
+    /// adapter cannot accidentally become a public read adapter.
+    async fn read_and_verify(
+        &self,
+        _artifact: &ArtifactRef,
+        _locator: &StorageLocator,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        Err(storage_failure())
+    }
 
     /// Idempotent deletion used after a durable orphan-GC claim.
     async fn delete(
@@ -367,6 +383,61 @@ impl WorkerArtifactStore for LocalContentAddressedArtifactStore {
         Ok((actual_hash, actual_size))
     }
 
+    async fn read_and_verify(
+        &self,
+        artifact: &ArtifactRef,
+        locator: &StorageLocator,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        if max_bytes == 0
+            || artifact.size_bytes()
+                > u64::try_from(max_bytes).map_err(|_| RepositoryError::invalid_configuration())?
+        {
+            return Err(RepositoryError::invalid_configuration());
+        }
+        let path = self.locator_path(artifact, locator)?;
+        let link_metadata = tokio::fs::symlink_metadata(&path)
+            .await
+            .map_err(|_| storage_failure())?;
+        if !link_metadata.file_type().is_file()
+            || link_metadata.file_type().is_symlink()
+            || link_metadata.len() != artifact.size_bytes()
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(path)
+            .await
+            .map_err(|_| storage_failure())?;
+        let metadata = file.metadata().await.map_err(|_| storage_failure())?;
+        if !metadata.is_file() || metadata.len() != artifact.size_bytes() {
+            return Err(RepositoryError::invalid_data());
+        }
+
+        let read_limit = u64::try_from(max_bytes)
+            .map_err(|_| RepositoryError::invalid_configuration())?
+            .checked_add(1)
+            .ok_or_else(RepositoryError::invalid_configuration)?;
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(artifact.size_bytes()).map_err(|_| RepositoryError::invalid_data())?,
+        );
+        file.take(read_limit)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| storage_failure())?;
+        let actual_size =
+            u64::try_from(bytes.len()).map_err(|_| RepositoryError::invalid_data())?;
+        if actual_size != artifact.size_bytes()
+            || actual_size > u64::try_from(max_bytes).unwrap_or(u64::MAX)
+            || ContentHash::from_bytes(&bytes) != *artifact.content_hash()
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+        Ok(bytes)
+    }
+
     async fn delete(
         &self,
         artifact: &ArtifactRef,
@@ -505,6 +576,62 @@ mod tests {
         store.delete(&artifact, &locator).await.unwrap();
         assert!(!staging.exists());
         store.delete(&artifact, &locator).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authorized_read_is_bounded_and_revalidates_locator_size_and_hash() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalContentAddressedArtifactStore::open(directory.path().join("objects"), 8)
+            .await
+            .unwrap();
+        let bytes = b"public artifact";
+        let artifact = store
+            .artifact_for_bytes(bytes, Some("text/plain".to_owned()))
+            .unwrap();
+        let locator = store.storage_locator(&artifact).unwrap();
+        store.put_and_verify(&artifact, bytes).await.unwrap();
+
+        assert_eq!(
+            store
+                .read_and_verify(&artifact, &locator, bytes.len())
+                .await
+                .unwrap(),
+            bytes
+        );
+        assert_eq!(
+            store
+                .read_and_verify(&artifact, &locator, bytes.len() - 1)
+                .await
+                .unwrap_err()
+                .code(),
+            crate::engine::repository::REPOSITORY_CONFIGURATION_INVALID
+        );
+
+        let other = store.artifact_for_bytes(b"other", None).unwrap();
+        assert_eq!(
+            store
+                .read_and_verify(
+                    &artifact,
+                    &store.storage_locator(&other).unwrap(),
+                    bytes.len()
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            crate::engine::repository::REPOSITORY_DATA_INVALID
+        );
+
+        tokio::fs::write(store.path_for(&artifact).unwrap(), b"tampered value!")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .read_and_verify(&artifact, &locator, bytes.len())
+                .await
+                .unwrap_err()
+                .code(),
+            crate::engine::repository::REPOSITORY_DATA_INVALID
+        );
     }
 
     #[tokio::test]

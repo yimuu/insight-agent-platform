@@ -32,6 +32,14 @@ const POSTGRES_PUBLIC_DELIVERY_HEADS: &str = DURABLE_V3_MIGRATIONS[15].postgres_
 const SQLITE_PUBLIC_DELIVERY_HEADS: &str = DURABLE_V3_MIGRATIONS[15].sqlite_sql;
 const POSTGRES_ARTIFACT_STORE_AUTHORITY: &str = DURABLE_V3_MIGRATIONS[16].postgres_sql;
 const SQLITE_ARTIFACT_STORE_AUTHORITY: &str = DURABLE_V3_MIGRATIONS[16].sqlite_sql;
+const POSTGRES_LLM_TOOL_CALL_CHECKPOINTS: &str = DURABLE_V3_MIGRATIONS[18].postgres_sql;
+const SQLITE_LLM_TOOL_CALL_CHECKPOINTS: &str = DURABLE_V3_MIGRATIONS[18].sqlite_sql;
+const POSTGRES_MODEL_TOOL_PARENT_DEADLINE: &str = DURABLE_V3_MIGRATIONS[19].postgres_sql;
+const SQLITE_MODEL_TOOL_PARENT_DEADLINE: &str = DURABLE_V3_MIGRATIONS[19].sqlite_sql;
+const POSTGRES_ATOMIC_ARTIFACT_RETENTION: &str = DURABLE_V3_MIGRATIONS[21].postgres_sql;
+const SQLITE_ATOMIC_ARTIFACT_RETENTION: &str = DURABLE_V3_MIGRATIONS[21].sqlite_sql;
+const POSTGRES_RETRIEVAL_PUBLICATIONS: &str = DURABLE_V3_MIGRATIONS[22].postgres_sql;
+const SQLITE_RETRIEVAL_PUBLICATIONS: &str = DURABLE_V3_MIGRATIONS[22].sqlite_sql;
 const PUBLIC_OUTBOX_SOURCE: &str = include_str!("../src/engine/repository/public_outbox.rs");
 
 const REQUIRED_TABLES: &[&str] = &[
@@ -98,7 +106,7 @@ fn migration_file_names(directory: &Path) -> Vec<String> {
 
 #[test]
 fn durable_v3_manifest_is_contiguous_and_exactly_matches_both_backend_directories() {
-    assert_eq!(DURABLE_V3_MIGRATIONS.len(), 17);
+    assert_eq!(DURABLE_V3_MIGRATIONS.len(), 23);
     for (index, migration) in DURABLE_V3_MIGRATIONS.iter().enumerate() {
         assert_eq!(
             migration.version,
@@ -130,6 +138,82 @@ fn durable_v3_manifest_is_contiguous_and_exactly_matches_both_backend_directorie
         postgres_names, manifest_names,
         "on-disk migrations and the repository execution manifest diverged"
     );
+}
+
+#[test]
+fn retrieval_publications_are_append_only_and_success_authority_anchored() {
+    for migration in [
+        POSTGRES_RETRIEVAL_PUBLICATIONS,
+        SQLITE_RETRIEVAL_PUBLICATIONS,
+    ] {
+        let sql = normalize(migration);
+        assert!(sql.contains("workflow_retrieval_publications"));
+        assert!(sql.contains("effective_public_policy"));
+        assert!(sql.contains("public_projection"));
+        assert!(sql.contains("publication_hash"));
+        assert!(sql.contains("completion_transition_key"));
+        assert!(sql.contains("completion_intent_hash"));
+        assert!(sql.contains("completion_event_id"));
+        assert!(sql.contains("foreign key (run_id, task_id) references task_outbox"));
+        assert!(sql
+            .contains("foreign key (run_id, activation_id, attempt_no) references node_attempts"));
+        assert!(sql.contains("workflow retrieval publication is immutable"));
+        assert!(!sql.contains("drop table"));
+        assert!(!sql.contains("truncate "));
+    }
+}
+
+#[test]
+fn terminal_artifact_retention_policy_is_frozen_and_registration_is_typed() {
+    for migration in [
+        POSTGRES_ATOMIC_ARTIFACT_RETENTION,
+        SQLITE_ATOMIC_ARTIFACT_RETENTION,
+    ] {
+        let sql = normalize(migration);
+        assert!(sql.contains("alter table workflow_runs"));
+        assert!(sql.contains("artifact_reference_retention_seconds"));
+        assert!(sql.contains("alter table artifact_retention_releases"));
+        assert!(sql.contains("registration_kind"));
+        assert!(sql.contains("terminal_atomic"));
+        assert!(!sql.contains("drop "));
+        assert!(!sql.contains("truncate "));
+    }
+}
+
+#[test]
+fn model_tool_parent_deadline_is_forward_only_and_indexed_on_both_backends() {
+    for migration in [
+        POSTGRES_MODEL_TOOL_PARENT_DEADLINE,
+        SQLITE_MODEL_TOOL_PARENT_DEADLINE,
+    ] {
+        let sql = normalize(migration);
+        assert!(sql.contains("alter table model_tool_call_batches"));
+        assert!(sql.contains("parent_operation_deadline"));
+        assert!(sql.contains("idx_model_tool_batches_parent_deadline"));
+        assert!(!sql.contains("drop "));
+        assert!(!sql.contains("truncate "));
+    }
+}
+
+#[test]
+fn llm_tool_call_checkpoints_are_closed_and_foreign_key_anchored() {
+    for migration in [
+        POSTGRES_LLM_TOOL_CALL_CHECKPOINTS,
+        SQLITE_LLM_TOOL_CALL_CHECKPOINTS,
+    ] {
+        let sql = normalize(migration);
+        assert!(sql.contains("create table"));
+        assert!(sql.contains("model_tool_call_batches"));
+        assert!(sql.contains("model_tool_calls"));
+        assert!(sql.contains("batch_status text not null check (batch_status = 'checkpointed')"));
+        assert!(sql.contains("'pending','claimed','running','succeeded','failed','cancelled'"));
+        assert!(sql.contains("continuation_status"));
+        assert!(sql.contains("effect_outcome_unknown"));
+        assert!(sql.contains("foreign key (run_id, activation_id, attempt_no, model_call_no) references model_call_usage"));
+        assert!(sql.contains("foreign key (run_id, activation_id, attempt_no, model_call_no) references model_tool_call_batches"));
+        assert!(sql.contains("unique (run_id, activation_id, attempt_no, model_call_no, call_id)"));
+        assert!(sql.contains("arguments"));
+    }
 }
 
 #[test]

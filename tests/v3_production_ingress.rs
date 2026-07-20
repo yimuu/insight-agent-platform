@@ -967,7 +967,7 @@ async fn root_deadline_is_database_clocked_persists_restart_and_ignores_pause() 
         repository.clone() as Arc<dyn ProductionRunRepository>,
         WorkerExecutorRegistry::new(),
         RunServiceConfig::single_process_development(8, 2, 1, 32)
-            .with_run_timeout(Duration::from_millis(250)),
+            .with_run_timeout(Duration::from_secs(2)),
     )
     .await
     .unwrap();
@@ -1025,7 +1025,7 @@ async fn root_deadline_is_database_clocked_persists_restart_and_ignores_pause() 
     first.shutdown(Duration::from_secs(1)).await.unwrap();
     drop(first);
     drop(repository);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
 
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(

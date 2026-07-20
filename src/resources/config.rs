@@ -8,7 +8,7 @@ use std::{
 use serde::Deserialize;
 
 use super::{
-    models::{ModelCapability, ModelDeploymentIdentity, ModelRegistry},
+    models::{ModelCapability, ModelDeploymentIdentity, ModelRegistry, ModelRequestCapability},
     openai_chat::{OpenAiChatLimits, OpenAiChatModel, OpenAiTransportPolicy},
 };
 
@@ -85,14 +85,22 @@ pub fn load_model_registry_with_env(
                     .copied()
                     .map(ModelCapability::as_str)
                     .collect::<Vec<_>>();
+                let request_capability_names = [
+                    ModelRequestCapability::Complete,
+                    ModelRequestCapability::Streaming,
+                ]
+                .into_iter()
+                .map(ModelRequestCapability::as_str)
+                .collect::<Vec<_>>();
                 let deployment = ModelDeploymentIdentity::new(
-                    "openai-chat-adapter-1.0.0",
+                    "openai-chat-adapter-2.0.0",
                     serde_json::json!({
                         "adapter": "openai_chat",
-                        "adapter_version": "1.0.0",
+                        "adapter_version": "2.0.0",
                         "base_url": base_url.clone(),
                         "model": model_name.clone(),
                         "capabilities": capability_names,
+                        "request_capabilities": request_capability_names,
                         "connect_timeout_ms": connect_timeout.as_millis().to_string(),
                         "request_timeout_ms": request_timeout.as_millis().to_string(),
                         "limits": {

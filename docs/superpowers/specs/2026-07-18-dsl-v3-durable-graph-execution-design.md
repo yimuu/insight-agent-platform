@@ -33,6 +33,7 @@
 | [PostgreSQL Exclusive Store Ownership](./2026-07-15-postgresql-exclusive-store-ownership-design.md) | 保留 fencing 原则；以多 runtime 的 lease、epoch 与 CAS 替代 singleton store owner |
 | [Durable Recovery Finalization](./2026-07-11-durable-recovery-finalization-design.md) | 保留权威终态收敛；以 Activation checkpoint resume 替代启动时统一标记 interrupted |
 | [Live-only SSE](./2026-07-11-live-only-sse-design.md) | 保留 Attached live-only、terminal 后 EOF 与无 replay；内部 execution ledger 不成为公共 replay API |
+| [Response 实时流与 LLM 发布控制规范](./2026-07-19-response-streaming-and-llm-publication-design.md) | Implemented / Verified 窄增量：增加 OpenAI-aligned 实时回答、LLM `stream`/`publish`、工具/RAG 安全投影与 durable final snapshot |
 | [Production Lifecycle V1](./2026-07-15-production-lifecycle-v1-design.md) | 保留健康检查、admission 和 drain；替代 singleton ownership readiness |
 | [Authoritative Stop Semantics](./2026-07-11-authoritative-stop-semantics-design.md) | 保留 runtime first-winner stop authority；改由 durable termination intent 承载 |
 | [Terminal CAS](./2026-07-15-independent-connection-terminal-cas-race-design.md) 与 [Public Agent Contract](./2026-07-15-public-agent-contract-design.md) | 保留唯一终态 CAS 和公共输入 Schema；v3 内部状态通过明确映射投影到现有公共状态/事件 |
@@ -359,7 +360,7 @@ SemanticHash
 
 Plan 节点分为：
 
-- 叶子任务：`LlmTask`、`ActionTask`、`HttpTask`、`ToolTask`；
+- 叶子任务：`LlmTask`、`ActionTask`、`HttpTask`、`ToolTask`、`RetrievalTask`；
 - 控制节点：`Branch`、`Merge`、`Fork`、`Join`、`Map`、`Collect`、`Loop`、`ErrorBoundary`；
 - 生命周期节点：`SubflowCall`、`WaitSignal`、`Timer`、`Return`、`Raise`。
 
@@ -706,6 +707,13 @@ event 顺序。
 17. object store 保存字节但不自行决定可达性或删除资格；Artifact/reference/retention、数据库时钟、
     GC claim/fence 才是引用和删除 authority。相同 content hash 被多个 Run 引用时，任何单个 Run 的
     release 都不得授权删除共享对象。
+
+Attached 用户响应的实时正文、工具/RAG 扩展事件和 LLM `stream`/`publish` 目标合同由
+[Response 实时流与 LLM 发布控制规范](./2026-07-19-response-streaming-and-llm-publication-design.md)
+定义。该增量已经实现并完成切换：第 7 条现细化为 durable lifecycle、terminal snapshot 与 terminal
+delivery 仍由 projection/outbox 产生；transient response delta 由独立、非持久化的 Live Response
+Broker 产生。多 runtime 的公开流要求共享 broker，并在 deployment publication 与 admission 阶段
+fail closed；默认二进制的 `RetrievalRegistry` 为空，只执行部署方已经注册的 retrieval 实现。
 
 当前 v3 中，大值字节由 content-addressed object 承载，ArtifactRef 固定其身份与 hash；数据库
 中的 Artifact、reference 与 retention 记录是元数据、引用和 GC authority。当前实现还必须在

@@ -7,8 +7,12 @@ use serde_json::{json, Value};
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use crate::engine::worker::{
+    ModelCallAuthority, ModelCallCompletion, ModelContinuationTurn, ModelToolCall,
+    ModelToolCallBatch, ModelToolResult, ResponseItemAuthority,
+};
 use crate::engine::{
-    plan::{DataPortId, Plan, PlanType},
+    plan::{DataPortId, DescriptorValue, Plan, PlanType},
     scheduler::{TaskFailureFact, TaskOutcomeFact},
     ActivationId, ArtifactRef, AttemptNo, ContentHash, EffectEvidence, EffectId,
     ExecutionControlFrame, ExecutionEventContext, ExecutionEventPayload, ExecutionValueSummary,
@@ -21,28 +25,46 @@ use crate::engine::{
 use super::activation::{effect_evidence_str, effect_idempotency_str, parse_effect_evidence};
 use super::common::{
     canonical_intent_hash, canonical_json, canonical_value, decode_execution_event_schema_version,
-    durable_public_event_envelope, event_id, fencing_token, i64_from_u64, payload_id,
-    public_event_id, public_event_ordinal, scheduler_checkpoint_content_hash, u64_from_i64,
-    validate_inline_payload, ValidatedInlinePayload,
+    durable_public_event_envelope, event_id, fencing_token, function_call_response_item_id,
+    i64_from_u64, payload_id, prepare_model_call_completion, public_event_id, public_event_ordinal,
+    response_item_id, scheduler_checkpoint_content_hash, u64_from_i64,
+    validate_incomplete_function_call_item, validate_inline_payload, ValidatedInlinePayload,
 };
 use super::model::termination_reason_as_str;
+use super::model_tool_parent_resume::{
+    classify_parent_task_claim, LatestParentModelCall, ParentTaskClaimClass,
+};
+use super::model_tool_queue::{
+    parse_frozen_model_tool_contract, prepare_model_function_call_publications,
+};
 use super::postgres::{
     allocate_event_seq, decode_execution_event_row, insert_event, insert_or_get_payload,
     load_replay, lock_run_for_event_write, lock_runs_for_event_write, PostgresDurableRepository,
     Replay,
+};
+use super::postgres_model_tool_queue::{
+    activate_model_tool_call_batch_postgres, claim_model_tool_calls_postgres,
+    commit_model_tool_call_outcome_postgres, heartbeat_model_tool_call_postgres,
+    mark_model_tool_call_started_postgres,
 };
 use super::postgres_projection::{
     append_projection_mutation_event, finalize_projection_checkpoints,
 };
 use super::scheduler_repository::{
     validate_runtime_value_ref, validate_subflow_admission, DurableTaskExecutionRequest,
-    SchedulerCommitReceipt, SchedulerDurableRepository, SchedulerFailureDisposition,
-    SchedulerStoredValue, SchedulerTaskClaim, SchedulerTaskClaimMode, SchedulerTaskCommitOutcome,
-    SchedulerTaskCompletionReceipt, SchedulerTaskHeartbeatOutcome, SchedulerTaskOutcome,
-    SchedulerTaskSuccess, SCHEDULER_CHECKPOINT_SCHEMA_VERSION,
+    ModelToolCallCheckpoint, SchedulerCommitReceipt, SchedulerDurableRepository,
+    SchedulerFailureDisposition, SchedulerStoredValue, SchedulerTaskClaim, SchedulerTaskClaimMode,
+    SchedulerTaskCommitOutcome, SchedulerTaskCompletionReceipt, SchedulerTaskHeartbeatOutcome,
+    SchedulerTaskOutcome, SchedulerTaskSuccess, SCHEDULER_CHECKPOINT_SCHEMA_VERSION,
     SCHEDULER_TASK_ENVELOPE_SCHEMA_VERSION,
 };
 use super::{FencedSchedulerRunCommand, RepositoryError};
+use super::{
+    ModelToolBatchActivationOutcome, ModelToolParentResume, ModelToolTaskClaim,
+    ModelToolTaskCommitReceipt, ModelToolTaskHeartbeatOutcome, ModelToolTaskOutcome,
+    ModelToolTaskTransitionOutcome,
+};
+use crate::runtime::WorkflowToolPublicProjection;
 
 const MAX_CLAIM_SECONDS: u32 = 3_600;
 const MAX_CLAIM_LIMIT: u32 = 1_000;
@@ -2877,6 +2899,7 @@ async fn resolve_reuse_at_admission_postgres(
         descriptor_version,
         worker_version,
         effect_policy,
+        deployment_binding,
         public_configuration,
         secret_configuration,
         inputs,
@@ -2937,6 +2960,7 @@ async fn resolve_reuse_at_admission_postgres(
         descriptor_version,
         worker_version,
         effect_policy,
+        deployment_binding,
         public_configuration,
         secret_configuration,
         inputs,
@@ -4442,6 +4466,59 @@ async fn apply_scheduler_action(
         }
     }
 
+    let terminal_snapshot = match action.intent().action() {
+        SchedulerAction::FailRunPlanning { failure } => {
+            Some((RunLifecycle::Failed, None, Some(failure.public_code())))
+        }
+        SchedulerAction::CompleteRun { output, .. } => {
+            Some((RunLifecycle::Succeeded, Some(output.value()), None))
+        }
+        SchedulerAction::FailRun { error, .. } => Some((
+            RunLifecycle::Failed,
+            None,
+            error
+                .value()
+                .as_object()
+                .and_then(|value| value.get("code"))
+                .and_then(Value::as_str),
+        )),
+        SchedulerAction::FailRunInternal { failure, .. } => {
+            Some((RunLifecycle::Failed, None, Some(failure.code())))
+        }
+        SchedulerAction::CancelRun { reason, .. } => Some(match reason {
+            TerminationReason::Failure => {
+                (RunLifecycle::Failed, None, Some("RUN_TERMINATED_FAILURE"))
+            }
+            TerminationReason::Cancelled => {
+                (RunLifecycle::Cancelled, None, Some("SCHEDULER_CANCELLED"))
+            }
+            TerminationReason::Interrupted => {
+                (RunLifecycle::Interrupted, None, Some("RUN_INTERRUPTED"))
+            }
+            TerminationReason::TimedOut => (RunLifecycle::TimedOut, None, Some("RUN_TIMEOUT")),
+        }),
+        _ => None,
+    };
+    if let Some((lifecycle, output, error_code)) = terminal_snapshot {
+        super::postgres_model_tool_queue::close_model_tool_work_for_terminal_run_postgres(
+            tx, run_id,
+        )
+        .await?;
+        super::postgres::persist_terminal_response_snapshot_postgres(
+            tx, run_id, lifecycle, output, error_code,
+        )
+        .await?;
+        super::postgres::register_terminal_artifact_retention_postgres(
+            tx,
+            run_id,
+            action.transition_key(),
+            action.intent_hash().as_str(),
+            event_id_value,
+            event_seq,
+        )
+        .await?;
+    }
+
     if !matches!(
         action.intent().action(),
         SchedulerAction::FailRunPlanning { .. }
@@ -5365,6 +5442,16 @@ async fn load_facts(
                     || started.fencing_token.is_empty()
                     || started.claim_token.is_empty()
                     || started.claimed_by.is_empty()
+                    || TransitionKey::derive(
+                        "scheduler.task.started.v1",
+                        &[
+                            run_id.as_str(),
+                            started.task_id.as_str(),
+                            &started.claim_token,
+                        ],
+                    )
+                    .map_err(|_| RepositoryError::invalid_data())?
+                        != transition
                 {
                     return Err(RepositoryError::invalid_data());
                 }
@@ -5377,8 +5464,13 @@ async fn load_facts(
                 .await
                 .map_err(RepositoryError::storage)?
                 .ok_or_else(RepositoryError::invalid_data)?;
-                let attempt_worker = sqlx::query_scalar::<_, Option<String>>(
-                    "SELECT worker_id FROM node_attempts
+                let attempt_started_projection = sqlx::query_scalar::<_, bool>(
+                    "SELECT worker_id IS NOT NULL AND started_at IS NOT NULL
+                            AND lifecycle IN (
+                                'running','succeeded','failed','timed_out','abandoned','cancelled'
+                            )
+                            AND effect_evidence IN ('started','committed','unknown')
+                     FROM node_attempts
                      WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND lease_epoch=$4
                        AND fencing_token=$5",
                 )
@@ -5394,8 +5486,7 @@ async fn load_facts(
                 .await
                 .map_err(RepositoryError::storage)?
                 .ok_or_else(RepositoryError::invalid_data)?;
-                if task_activation != started.activation_id.as_str()
-                    || attempt_worker.as_deref() != Some(started.claimed_by.as_str())
+                if task_activation != started.activation_id.as_str() || !attempt_started_projection
                 {
                     return Err(RepositoryError::invalid_data());
                 }
@@ -6104,6 +6195,62 @@ fn validate_claim_parameters(
     Ok(())
 }
 
+async fn load_latest_parent_model_call_postgres(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    activation_id: &ActivationId,
+    attempt_no: AttemptNo,
+) -> Result<Option<LatestParentModelCall>, RepositoryError> {
+    let row = sqlx::query(
+        "SELECT u.model_call_no,u.task_id,u.lease_epoch,u.fencing_token,
+                u.call_status,u.finish_reason,b.execution_status,b.continuation_status
+         FROM model_call_usage u
+         LEFT JOIN model_tool_call_batches b ON b.run_id=u.run_id
+           AND b.activation_id=u.activation_id AND b.attempt_no=u.attempt_no
+           AND b.model_call_no=u.model_call_no
+         WHERE u.run_id=$1 AND u.activation_id=$2 AND u.attempt_no=$3
+         ORDER BY u.model_call_no DESC LIMIT 1",
+    )
+    .bind(run_id.as_str())
+    .bind(activation_id.as_str())
+    .bind(i32::try_from(attempt_no.get()).map_err(|_| RepositoryError::invalid_data())?)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    row.map(|row| {
+        Ok(LatestParentModelCall {
+            model_call_no: u32::try_from(
+                row.try_get::<i32, _>("model_call_no")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .map_err(|_| RepositoryError::invalid_data())?,
+            task_id: row
+                .try_get("task_id")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            lease_epoch: u64_from_i64(
+                row.try_get("lease_epoch")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )?,
+            fencing_token: row
+                .try_get("fencing_token")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            call_status: row
+                .try_get("call_status")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            finish_reason: row
+                .try_get("finish_reason")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            execution_status: row
+                .try_get("execution_status")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            continuation_status: row
+                .try_get("continuation_status")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        })
+    })
+    .transpose()
+}
+
 async fn claim_tasks(
     repository: &PostgresDurableRepository,
     claimed_by: &str,
@@ -6135,10 +6282,43 @@ async fn claim_tasks(
                   OR (r.lifecycle='terminating'
                     AND o.task_envelope #>> '{request,admission_class}'='termination_finalizer')))
             OR o.task_state='published')
+           AND NOT EXISTS (
+               SELECT 1 FROM model_tool_call_batches latest_waiting
+               WHERE latest_waiting.run_id=o.run_id
+                 AND latest_waiting.activation_id=o.activation_id
+                 AND latest_waiting.attempt_no=o.attempt_no
+                 AND latest_waiting.model_call_no=(
+                     SELECT MAX(latest_usage.model_call_no) FROM model_call_usage latest_usage
+                     WHERE latest_usage.run_id=o.run_id
+                       AND latest_usage.activation_id=o.activation_id
+                       AND latest_usage.attempt_no=o.attempt_no
+                 )
+                 AND latest_waiting.execution_status='active'
+                 AND latest_waiting.continuation_status='waiting_tools'
+           )
            AND (o.task_state='published' OR (
                SELECT COUNT(*) FROM task_outbox active
                WHERE active.run_id=o.run_id AND active.task_state='claimed'
                  AND active.claim_expires_at>clock_timestamp()
+                 AND NOT EXISTS (
+                     SELECT 1 FROM model_tool_call_batches waiting_parent
+                     WHERE waiting_parent.run_id=active.run_id
+                       AND waiting_parent.parent_task_id=active.task_id
+                       AND waiting_parent.execution_status='active'
+                       AND waiting_parent.continuation_status='waiting_tools'
+                 )
+           ) + (
+               SELECT COUNT(*) FROM model_tool_calls active_tool
+               JOIN model_tool_call_batches active_batch
+                 ON active_batch.run_id=active_tool.run_id
+                AND active_batch.activation_id=active_tool.activation_id
+                AND active_batch.attempt_no=active_tool.attempt_no
+                AND active_batch.model_call_no=active_tool.model_call_no
+               WHERE active_tool.run_id=o.run_id
+                 AND active_batch.execution_status='active'
+                 AND active_batch.continuation_status='waiting_tools'
+                 AND active_tool.call_status IN ('claimed','running')
+                 AND active_tool.claim_expires_at>clock_timestamp()
            ) < $2)
          ORDER BY CASE o.task_state WHEN 'published' THEN 0 ELSE 1 END,
                   o.available_at,o.run_id,o.task_id
@@ -6171,8 +6351,8 @@ async fn claim_tasks(
     let mut candidates = Vec::with_capacity(discovered.len());
     for (run_id, task_id) in discovered {
         let candidate = sqlx::query(
-            "SELECT o.run_id,o.task_id,o.task_state,o.task_envelope,
-                    a.effect_evidence AS attempt_effect_evidence
+            "SELECT o.run_id,o.task_id,o.task_state,o.task_envelope,o.projection_version,
+                    a.lifecycle AS attempt_lifecycle,a.effect_evidence AS attempt_effect_evidence
              FROM task_outbox o JOIN workflow_runs r ON r.run_id=o.run_id
              JOIN node_attempts a ON a.run_id=o.run_id AND a.activation_id=o.activation_id
                AND a.attempt_no=o.attempt_no AND a.lease_epoch=o.lease_epoch
@@ -6184,10 +6364,43 @@ async fn claim_tasks(
                       OR (r.lifecycle='terminating'
                         AND o.task_envelope #>> '{request,admission_class}'='termination_finalizer')))
                 OR o.task_state='published')
+               AND NOT EXISTS (
+                   SELECT 1 FROM model_tool_call_batches latest_waiting
+                   WHERE latest_waiting.run_id=o.run_id
+                     AND latest_waiting.activation_id=o.activation_id
+                     AND latest_waiting.attempt_no=o.attempt_no
+                     AND latest_waiting.model_call_no=(
+                         SELECT MAX(latest_usage.model_call_no) FROM model_call_usage latest_usage
+                         WHERE latest_usage.run_id=o.run_id
+                           AND latest_usage.activation_id=o.activation_id
+                           AND latest_usage.attempt_no=o.attempt_no
+                     )
+                     AND latest_waiting.execution_status='active'
+                     AND latest_waiting.continuation_status='waiting_tools'
+               )
                AND (o.task_state='published' OR (
                    SELECT COUNT(*) FROM task_outbox active
                    WHERE active.run_id=o.run_id AND active.task_state='claimed'
                      AND active.claim_expires_at>clock_timestamp()
+                     AND NOT EXISTS (
+                         SELECT 1 FROM model_tool_call_batches waiting_parent
+                         WHERE waiting_parent.run_id=active.run_id
+                           AND waiting_parent.parent_task_id=active.task_id
+                           AND waiting_parent.execution_status='active'
+                           AND waiting_parent.continuation_status='waiting_tools'
+                     )
+               ) + (
+                   SELECT COUNT(*) FROM model_tool_calls active_tool
+                   JOIN model_tool_call_batches active_batch
+                     ON active_batch.run_id=active_tool.run_id
+                    AND active_batch.activation_id=active_tool.activation_id
+                    AND active_batch.attempt_no=active_tool.attempt_no
+                    AND active_batch.model_call_no=active_tool.model_call_no
+                   WHERE active_tool.run_id=o.run_id
+                     AND active_batch.execution_status='active'
+                     AND active_batch.continuation_status='waiting_tools'
+                     AND active_tool.call_status IN ('claimed','running')
+                     AND active_tool.claim_expires_at>clock_timestamp()
                ) < $3)
              FOR UPDATE OF o,a SKIP LOCKED",
         )
@@ -6228,12 +6441,42 @@ async fn claim_tasks(
         {
             return Err(RepositoryError::invalid_data());
         }
-        let mode = if state == "published" {
-            SchedulerTaskClaimMode::Acknowledge
-        } else if state == "claimed" {
-            SchedulerTaskClaimMode::FinalizeLeaseLoss
-        } else {
-            SchedulerTaskClaimMode::Execute
+        let attempt_lifecycle: String = candidate
+            .try_get("attempt_lifecycle")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let attempt_effect_evidence = parse_effect_evidence(
+            &candidate
+                .try_get::<String, _>("attempt_effect_evidence")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )?;
+        let latest = load_latest_parent_model_call_postgres(
+            &mut tx,
+            &run_id,
+            envelope.request().activation_id(),
+            envelope.attempt_no(),
+        )
+        .await?;
+        if let Some(latest) = &latest {
+            if latest.task_id != task_id.as_str()
+                || latest.lease_epoch != envelope.lease_epoch().get()
+                || latest.fencing_token != envelope.fencing_token()
+            {
+                return Err(RepositoryError::invalid_data());
+            }
+        }
+        let claim_class = classify_parent_task_claim(
+            &state,
+            &attempt_lifecycle,
+            attempt_effect_evidence,
+            latest.as_ref(),
+        );
+        let mode = match claim_class {
+            ParentTaskClaimClass::InitialExecute
+            | ParentTaskClaimClass::ActivateCheckpointed
+            | ParentTaskClaimClass::ContinueReady => SchedulerTaskClaimMode::Execute,
+            ParentTaskClaimClass::FinalizeLeaseLoss => SchedulerTaskClaimMode::FinalizeLeaseLoss,
+            ParentTaskClaimClass::Acknowledge => SchedulerTaskClaimMode::Acknowledge,
+            ParentTaskClaimClass::Ineligible => continue,
         };
         let token = format!("claim_{}", Uuid::new_v4().simple());
         let claimed_row = sqlx::query(
@@ -6244,6 +6487,97 @@ async fn claim_tasks(
                 claim_mode=$4,publish_attempts=publish_attempts+1,
                 projection_version=projection_version+1
              WHERE run_id=$5 AND task_id=$6
+               AND projection_version=$8 AND task_state=$9
+               AND ((task_state='pending' AND available_at<=clock_timestamp())
+                 OR (task_state='claimed' AND claim_expires_at<=clock_timestamp())
+                 OR task_state='published')
+               AND NOT EXISTS (
+                   SELECT 1 FROM model_tool_call_batches latest_waiting
+                   WHERE latest_waiting.run_id=task_outbox.run_id
+                     AND latest_waiting.activation_id=task_outbox.activation_id
+                     AND latest_waiting.attempt_no=task_outbox.attempt_no
+                     AND latest_waiting.model_call_no=(
+                         SELECT MAX(latest_usage.model_call_no) FROM model_call_usage latest_usage
+                         WHERE latest_usage.run_id=task_outbox.run_id
+                           AND latest_usage.activation_id=task_outbox.activation_id
+                           AND latest_usage.attempt_no=task_outbox.attempt_no
+                     )
+                     AND latest_waiting.execution_status='active'
+                     AND latest_waiting.continuation_status='waiting_tools'
+               )
+               AND CASE $10
+                 WHEN 'initial_execute' THEN task_state='pending'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM model_call_usage initial_usage
+                       WHERE initial_usage.run_id=task_outbox.run_id
+                         AND initial_usage.activation_id=task_outbox.activation_id
+                         AND initial_usage.attempt_no=task_outbox.attempt_no
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM node_attempts initial_attempt
+                       WHERE initial_attempt.run_id=task_outbox.run_id
+                         AND initial_attempt.activation_id=task_outbox.activation_id
+                         AND initial_attempt.attempt_no=task_outbox.attempt_no
+                         AND initial_attempt.lease_epoch=task_outbox.lease_epoch
+                         AND initial_attempt.fencing_token=task_outbox.fencing_token
+                         AND initial_attempt.lifecycle='leased'
+                         AND initial_attempt.effect_evidence='not_started'
+                         AND initial_attempt.started_at IS NULL
+                   )
+                 WHEN 'activate_checkpointed' THEN task_state='claimed'
+                   AND EXISTS (
+                       SELECT 1 FROM model_call_usage resume_usage
+                       JOIN model_tool_call_batches resume_batch
+                         ON resume_batch.run_id=resume_usage.run_id
+                        AND resume_batch.activation_id=resume_usage.activation_id
+                        AND resume_batch.attempt_no=resume_usage.attempt_no
+                        AND resume_batch.model_call_no=resume_usage.model_call_no
+                       WHERE resume_usage.run_id=task_outbox.run_id
+                         AND resume_usage.activation_id=task_outbox.activation_id
+                         AND resume_usage.attempt_no=task_outbox.attempt_no
+                         AND resume_usage.model_call_no=(
+                             SELECT MAX(latest_usage.model_call_no)
+                             FROM model_call_usage latest_usage
+                             WHERE latest_usage.run_id=task_outbox.run_id
+                               AND latest_usage.activation_id=task_outbox.activation_id
+                               AND latest_usage.attempt_no=task_outbox.attempt_no
+                         )
+                         AND resume_usage.call_status='completed'
+                         AND resume_usage.finish_reason='tool_calls'
+                         AND resume_batch.execution_status='checkpointed'
+                         AND resume_batch.continuation_status='checkpointed'
+                   )
+                 WHEN 'continue_ready' THEN task_state='pending'
+                   AND EXISTS (
+                       SELECT 1 FROM model_call_usage resume_usage
+                       JOIN model_tool_call_batches resume_batch
+                         ON resume_batch.run_id=resume_usage.run_id
+                        AND resume_batch.activation_id=resume_usage.activation_id
+                        AND resume_batch.attempt_no=resume_usage.attempt_no
+                        AND resume_batch.model_call_no=resume_usage.model_call_no
+                       WHERE resume_usage.run_id=task_outbox.run_id
+                         AND resume_usage.activation_id=task_outbox.activation_id
+                         AND resume_usage.attempt_no=task_outbox.attempt_no
+                         AND resume_usage.model_call_no=(
+                             SELECT MAX(latest_usage.model_call_no)
+                             FROM model_call_usage latest_usage
+                             WHERE latest_usage.run_id=task_outbox.run_id
+                               AND latest_usage.activation_id=task_outbox.activation_id
+                               AND latest_usage.attempt_no=task_outbox.attempt_no
+                         )
+                         AND resume_usage.call_status='completed'
+                         AND resume_usage.finish_reason='tool_calls'
+                         AND ((resume_batch.execution_status='succeeded'
+                                AND resume_batch.continuation_status='ready_continue')
+                           OR (resume_batch.execution_status='failed'
+                                AND resume_batch.continuation_status='ready_failed')
+                           OR (resume_batch.execution_status='cancelled'
+                                AND resume_batch.continuation_status='ready_cancelled'))
+                   )
+                 WHEN 'finalize_lease_loss' THEN task_state='claimed'
+                 WHEN 'acknowledge' THEN task_state='published'
+                 ELSE FALSE
+               END
                AND (task_state='published' OR EXISTS (
                    SELECT 1 FROM workflow_runs r WHERE r.run_id=task_outbox.run_id
                      AND (r.lifecycle IN ('created','active','waiting')
@@ -6260,9 +6594,19 @@ async fn claim_tasks(
         .bind(run_id.as_str())
         .bind(task_id.as_str())
         .bind(envelope.request().admission_class().as_str())
-        .fetch_one(&mut *tx)
+        .bind(
+            candidate
+                .try_get::<i64, _>("projection_version")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )
+        .bind(&state)
+        .bind(claim_class.as_str())
+        .fetch_optional(&mut *tx)
         .await
         .map_err(RepositoryError::storage)?;
+        let Some(claimed_row) = claimed_row else {
+            continue;
+        };
         let version = claimed_row
             .try_get::<i64, _>("projection_version")
             .map_err(|_| RepositoryError::invalid_data())?;
@@ -6270,25 +6614,54 @@ async fn claim_tasks(
             .try_get::<DateTime<Utc>, _>("claim_expires_at")
             .map_err(|_| RepositoryError::invalid_data())?;
         if mode == SchedulerTaskClaimMode::Execute {
-            let attempt_rows = sqlx::query(
-                "UPDATE node_attempts SET lease_expires_at=$1,heartbeat_at=clock_timestamp(),
-                    projection_version=projection_version+1
-                 WHERE run_id=$2 AND activation_id=$3 AND attempt_no=$4 AND lease_epoch=$5
-                   AND fencing_token=$6 AND lifecycle='leased' AND effect_evidence='not_started'",
-            )
-            .bind(expires)
-            .bind(run_id.as_str())
-            .bind(envelope.request().activation_id().as_str())
-            .bind(
-                i32::try_from(envelope.attempt_no().get())
-                    .map_err(|_| RepositoryError::invalid_data())?,
-            )
-            .bind(i64_from_u64(envelope.lease_epoch().get())?)
-            .bind(envelope.fencing_token())
-            .execute(&mut *tx)
-            .await
-            .map_err(RepositoryError::storage)?
-            .rows_affected();
+            let resume_running = matches!(
+                claim_class,
+                ParentTaskClaimClass::ActivateCheckpointed | ParentTaskClaimClass::ContinueReady
+            );
+            let attempt_rows = if resume_running {
+                sqlx::query(
+                    "UPDATE node_attempts SET lease_expires_at=$1,heartbeat_at=clock_timestamp(),
+                        worker_id=$2,projection_version=projection_version+1
+                     WHERE run_id=$3 AND activation_id=$4 AND attempt_no=$5 AND lease_epoch=$6
+                       AND fencing_token=$7 AND lifecycle='running' AND effect_evidence='started'
+                       AND started_at IS NOT NULL",
+                )
+                .bind(expires)
+                .bind(claimed_by)
+                .bind(run_id.as_str())
+                .bind(envelope.request().activation_id().as_str())
+                .bind(
+                    i32::try_from(envelope.attempt_no().get())
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .bind(i64_from_u64(envelope.lease_epoch().get())?)
+                .bind(envelope.fencing_token())
+                .execute(&mut *tx)
+                .await
+                .map_err(RepositoryError::storage)?
+                .rows_affected()
+            } else {
+                sqlx::query(
+                    "UPDATE node_attempts SET lease_expires_at=$1,heartbeat_at=clock_timestamp(),
+                        projection_version=projection_version+1
+                     WHERE run_id=$2 AND activation_id=$3 AND attempt_no=$4 AND lease_epoch=$5
+                       AND fencing_token=$6 AND lifecycle='leased' AND effect_evidence='not_started'
+                       AND started_at IS NULL",
+                )
+                .bind(expires)
+                .bind(run_id.as_str())
+                .bind(envelope.request().activation_id().as_str())
+                .bind(
+                    i32::try_from(envelope.attempt_no().get())
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+                .bind(i64_from_u64(envelope.lease_epoch().get())?)
+                .bind(envelope.fencing_token())
+                .execute(&mut *tx)
+                .await
+                .map_err(RepositoryError::storage)?
+                .rows_affected()
+            };
             if attempt_rows != 1 {
                 return Err(RepositoryError::invalid_data());
             }
@@ -6349,6 +6722,19 @@ async fn claim_tasks(
             return Ok(Vec::new());
         };
         if !authority.is_fresh() {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(Vec::new());
+        }
+        if load_latest_parent_model_call_postgres(
+            &mut tx,
+            claim.run_id(),
+            claim.activation_id(),
+            claim.envelope().attempt_no(),
+        )
+        .await?
+        .as_ref()
+        .is_some_and(LatestParentModelCall::is_waiting_tools)
+        {
             tx.rollback().await.map_err(RepositoryError::storage)?;
             return Ok(Vec::new());
         }
@@ -8533,6 +8919,26 @@ async fn exact_task_outcome_receipt(
             );
         }
     }
+    let expected_retrieval = match outcome {
+        SchedulerTaskOutcome::Succeeded(success) => {
+            super::retrieval_publication::prepare_retrieval_publication(
+                claim,
+                success,
+                transition.as_str(),
+                intent_hash,
+                replay.event_id(),
+                replay.event_seq(),
+            )?
+        }
+        SchedulerTaskOutcome::Failed(_) => None,
+    };
+    super::postgres_retrieval_publication::validate_exact_retrieval_publication_postgres(
+        tx,
+        claim.run_id(),
+        claim.task_id().as_str(),
+        expected_retrieval.as_ref(),
+    )
+    .await?;
     Ok(SchedulerTaskCompletionReceipt::new(
         SchedulerCommitReceipt::new(
             replay.event_seq(),
@@ -8649,6 +9055,14 @@ async fn commit_success(
     current_run_version: u64,
 ) -> Result<SchedulerTaskCompletionReceipt, RepositoryError> {
     validate_success(claim, success)?;
+    let retrieval_publication = super::retrieval_publication::prepare_retrieval_publication(
+        claim,
+        success,
+        transition.as_str(),
+        intent_hash,
+        event_id_value,
+        event_seq,
+    )?;
     let output_value = Value::Object(
         success
             .result()
@@ -8767,6 +9181,13 @@ async fn commit_success(
         }
         output_versions.insert(port_id.clone(), receipt.canonical_projection_version);
         output_receipts.insert(port_id.clone(), receipt);
+    }
+    if let Some(publication) = retrieval_publication.as_ref() {
+        super::postgres_retrieval_publication::insert_retrieval_publication_postgres(
+            tx,
+            publication,
+        )
+        .await?;
     }
     let task_rows = sqlx::query(
         "UPDATE task_outbox SET task_state='published',claim_mode='acknowledge',
@@ -9554,6 +9975,1668 @@ async fn acknowledge_task(
     Ok(true)
 }
 
+fn model_call_operation_deadline(
+    authority: &AuthoritativeTaskClaim,
+) -> Result<DateTime<Utc>, RepositoryError> {
+    let timeout = chrono::Duration::milliseconds(
+        i64::try_from(
+            authority
+                .claim
+                .envelope()
+                .request()
+                .effect_policy()
+                .timeout_ms(),
+        )
+        .map_err(|_| RepositoryError::invalid_data())?,
+    );
+    authority
+        .started_at
+        .and_then(|started_at| started_at.checked_add_signed(timeout))
+        .ok_or_else(RepositoryError::invalid_data)
+}
+
+fn latest_model_call_matches_claim(
+    latest: &LatestParentModelCall,
+    claim: &SchedulerTaskClaim,
+) -> bool {
+    latest.task_id == claim.task_id().as_str()
+        && latest.lease_epoch == claim.envelope().lease_epoch().get()
+        && latest.fencing_token == claim.envelope().fencing_token()
+}
+
+async fn load_ready_continuation_turn_postgres(
+    tx: &mut Transaction<'_, Postgres>,
+    claim: &SchedulerTaskClaim,
+    model_call_no: u32,
+) -> Result<ModelContinuationTurn, RepositoryError> {
+    let assistant_content = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT assistant_content FROM model_tool_call_batches
+         WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+           AND execution_status='succeeded' AND continuation_status='ready_continue'",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(
+        i32::try_from(claim.envelope().attempt_no().get())
+            .map_err(|_| RepositoryError::invalid_data())?,
+    )
+    .bind(i32::try_from(model_call_no).map_err(|_| RepositoryError::invalid_data())?)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(RepositoryError::storage)?
+    .ok_or_else(RepositoryError::invalid_data)?;
+    let rows = sqlx::query(
+        "SELECT call_index,call_id,tool_name,arguments,result_json,call_status,effect_evidence
+         FROM model_tool_calls
+         WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+         ORDER BY call_index",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(
+        i32::try_from(claim.envelope().attempt_no().get())
+            .map_err(|_| RepositoryError::invalid_data())?,
+    )
+    .bind(i32::try_from(model_call_no).map_err(|_| RepositoryError::invalid_data())?)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if rows.is_empty() {
+        return Err(RepositoryError::invalid_data());
+    }
+    let mut calls = Vec::with_capacity(rows.len());
+    let mut results = Vec::with_capacity(rows.len());
+    for (expected_index, row) in rows.into_iter().enumerate() {
+        if row
+            .try_get::<String, _>("call_status")
+            .map_err(|_| RepositoryError::invalid_data())?
+            != "succeeded"
+            || row
+                .try_get::<String, _>("effect_evidence")
+                .map_err(|_| RepositoryError::invalid_data())?
+                != "committed"
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+        let index = u32::try_from(
+            row.try_get::<i32, _>("call_index")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )
+        .map_err(|_| RepositoryError::invalid_data())?;
+        if index != u32::try_from(expected_index).map_err(|_| RepositoryError::invalid_data())? {
+            return Err(RepositoryError::invalid_data());
+        }
+        let call_id: String = row
+            .try_get("call_id")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let result = row
+            .try_get::<Option<Value>, _>("result_json")
+            .map_err(|_| RepositoryError::invalid_data())?
+            .ok_or_else(RepositoryError::invalid_data)?;
+        calls.push(
+            ModelToolCall::new(
+                index,
+                call_id.clone(),
+                row.try_get::<String, _>("tool_name")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                row.try_get::<Value, _>("arguments")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .map_err(|_| RepositoryError::invalid_data())?,
+        );
+        results.push(
+            ModelToolResult::new(call_id, result).map_err(|_| RepositoryError::invalid_data())?,
+        );
+    }
+    ModelContinuationTurn::new(model_call_no, assistant_content, calls, results)
+        .map_err(|_| RepositoryError::invalid_data())
+}
+
+async fn validate_parent_model_round_chain_postgres(
+    tx: &mut Transaction<'_, Postgres>,
+    claim: &SchedulerTaskClaim,
+    latest: &LatestParentModelCall,
+) -> Result<Vec<ModelContinuationTurn>, RepositoryError> {
+    let rows = sqlx::query(
+        "SELECT u.model_call_no,u.task_id,u.lease_epoch,u.fencing_token,u.call_status,
+                u.finish_reason,b.execution_status,b.continuation_status
+         FROM model_call_usage u
+         LEFT JOIN model_tool_call_batches b ON b.run_id=u.run_id
+           AND b.activation_id=u.activation_id AND b.attempt_no=u.attempt_no
+           AND b.model_call_no=u.model_call_no
+         WHERE u.run_id=$1 AND u.activation_id=$2 AND u.attempt_no=$3
+         ORDER BY u.model_call_no",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(
+        i32::try_from(claim.envelope().attempt_no().get())
+            .map_err(|_| RepositoryError::invalid_data())?,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if rows.len()
+        != usize::try_from(latest.model_call_no).map_err(|_| RepositoryError::invalid_data())?
+    {
+        return Err(RepositoryError::invalid_data());
+    }
+    let mut turns = Vec::new();
+    for (index, row) in rows.into_iter().enumerate() {
+        let expected_no = u32::try_from(index)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(RepositoryError::invalid_data)?;
+        let actual_no = u32::try_from(
+            row.try_get::<i32, _>("model_call_no")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )
+        .map_err(|_| RepositoryError::invalid_data())?;
+        if actual_no != expected_no
+            || row
+                .try_get::<String, _>("task_id")
+                .map_err(|_| RepositoryError::invalid_data())?
+                != claim.task_id().as_str()
+            || u64_from_i64(
+                row.try_get("lease_epoch")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )? != claim.envelope().lease_epoch().get()
+            || row
+                .try_get::<String, _>("fencing_token")
+                .map_err(|_| RepositoryError::invalid_data())?
+                != claim.envelope().fencing_token()
+            || row
+                .try_get::<String, _>("call_status")
+                .map_err(|_| RepositoryError::invalid_data())?
+                != "completed"
+            || row
+                .try_get::<Option<String>, _>("finish_reason")
+                .map_err(|_| RepositoryError::invalid_data())?
+                .as_deref()
+                != Some("tool_calls")
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+        let execution_status = row
+            .try_get::<Option<String>, _>("execution_status")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let continuation_status = row
+            .try_get::<Option<String>, _>("continuation_status")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        if actual_no < latest.model_call_no
+            || latest.continuation_status.as_deref() == Some("ready_continue")
+        {
+            if execution_status.as_deref() != Some("succeeded")
+                || continuation_status.as_deref() != Some("ready_continue")
+            {
+                return Err(RepositoryError::invalid_data());
+            }
+            turns.push(load_ready_continuation_turn_postgres(tx, claim, actual_no).await?);
+        } else if execution_status != latest.execution_status
+            || continuation_status != latest.continuation_status
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+    }
+    Ok(turns)
+}
+
+async fn validate_terminal_tool_batch_postgres(
+    tx: &mut Transaction<'_, Postgres>,
+    claim: &SchedulerTaskClaim,
+    latest: &LatestParentModelCall,
+) -> Result<bool, RepositoryError> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE call_status IN ('succeeded','failed','cancelled')) AS terminal,
+                COUNT(*) FILTER (WHERE failure_class='effect_outcome_unknown'
+                                  OR effect_evidence='unknown') AS unknown,
+                COUNT(*) FILTER (WHERE call_status='failed') AS failed,
+                COUNT(*) FILTER (WHERE call_status='cancelled') AS cancelled
+         FROM model_tool_calls
+         WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(
+        i32::try_from(claim.envelope().attempt_no().get())
+            .map_err(|_| RepositoryError::invalid_data())?,
+    )
+    .bind(i32::try_from(latest.model_call_no).map_err(|_| RepositoryError::invalid_data())?)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let total: i64 = row
+        .try_get("total")
+        .map_err(|_| RepositoryError::invalid_data())?;
+    let terminal: i64 = row
+        .try_get("terminal")
+        .map_err(|_| RepositoryError::invalid_data())?;
+    let failed: i64 = row
+        .try_get("failed")
+        .map_err(|_| RepositoryError::invalid_data())?;
+    let cancelled: i64 = row
+        .try_get("cancelled")
+        .map_err(|_| RepositoryError::invalid_data())?;
+    let expected_terminal = match latest.continuation_status.as_deref() {
+        Some("ready_failed") => failed > 0,
+        Some("ready_cancelled") => failed == 0 && cancelled > 0,
+        _ => false,
+    };
+    if total == 0 || terminal != total || !expected_terminal {
+        return Err(RepositoryError::invalid_data());
+    }
+    Ok(row
+        .try_get::<i64, _>("unknown")
+        .map_err(|_| RepositoryError::invalid_data())?
+        > 0)
+}
+
+async fn load_model_tool_parent_resume_postgres(
+    repository: &PostgresDurableRepository,
+    claim: &SchedulerTaskClaim,
+) -> Result<SchedulerTaskCommitOutcome<Option<ModelToolParentResume>>, RepositoryError> {
+    if claim.mode() != SchedulerTaskClaimMode::Execute
+        || claim.envelope().request().task_kind() != crate::engine::SchedulerTaskKind::Llm
+    {
+        return Err(RepositoryError::invalid_configuration());
+    }
+    let mut tx = repository
+        .pool
+        .begin()
+        .await
+        .map_err(RepositoryError::storage)?;
+    let Some(authority) =
+        load_authoritative_task_claim_postgres(&mut tx, claim, TaskClaimComparison::Exact).await?
+    else {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    };
+    if authority.task_state != "claimed" || !authority.is_fresh() || !authority.permits_execution()
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    }
+    if authority.attempt_lifecycle != "running"
+        || authority.activation_lifecycle != "running"
+        || authority.current_effect_evidence != EffectEvidence::Started
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::Committed { result: None });
+    }
+    let operation_deadline = model_call_operation_deadline(&authority)?;
+    if authority.database_now >= operation_deadline {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::OperationDeadlineElapsed);
+    }
+    let latest = load_latest_parent_model_call_postgres(
+        &mut tx,
+        claim.run_id(),
+        claim.activation_id(),
+        claim.envelope().attempt_no(),
+    )
+    .await?;
+    let Some(latest) = latest else {
+        tx.commit().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::Committed { result: None });
+    };
+    if !latest_model_call_matches_claim(&latest, claim) || latest.is_waiting_tools() {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    }
+    let resume = if latest.is_checkpointed() {
+        validate_parent_model_round_chain_postgres(&mut tx, claim, &latest).await?;
+        ModelToolParentResume::activate_checkpointed(latest.model_call_no, operation_deadline)?
+    } else if latest.is_ready() {
+        let turns = validate_parent_model_round_chain_postgres(&mut tx, claim, &latest).await?;
+        match latest.continuation_status.as_deref() {
+            Some("ready_continue") => {
+                ModelToolParentResume::ready_continue(turns, operation_deadline)?
+            }
+            Some("ready_failed") => ModelToolParentResume::ready_failed(
+                latest.model_call_no,
+                operation_deadline,
+                validate_terminal_tool_batch_postgres(&mut tx, claim, &latest).await?,
+            )?,
+            Some("ready_cancelled") => {
+                validate_terminal_tool_batch_postgres(&mut tx, claim, &latest).await?;
+                ModelToolParentResume::ready_cancelled(latest.model_call_no, operation_deadline)?
+            }
+            _ => return Err(RepositoryError::invalid_data()),
+        }
+    } else {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    };
+    tx.commit().await.map_err(RepositoryError::storage)?;
+    Ok(SchedulerTaskCommitOutcome::Committed {
+        result: Some(resume),
+    })
+}
+
+fn response_item_authority(
+    item_id: String,
+    output_index: i32,
+) -> Result<ResponseItemAuthority, RepositoryError> {
+    ResponseItemAuthority::new(
+        item_id,
+        u32::try_from(output_index).map_err(|_| RepositoryError::invalid_data())?,
+    )
+    .map_err(|_| RepositoryError::invalid_data())
+}
+
+fn frozen_model_publish(claim: &SchedulerTaskClaim) -> Result<bool, RepositoryError> {
+    match claim
+        .envelope()
+        .request()
+        .public_configuration()
+        .get("publish")
+    {
+        Some(DescriptorValue::Boolean(publish)) => Ok(*publish),
+        _ => Err(RepositoryError::invalid_data()),
+    }
+}
+
+async fn reserve_model_call_postgres(
+    repository: &PostgresDurableRepository,
+    claim: &SchedulerTaskClaim,
+    model_call_no: u32,
+    publish: bool,
+) -> Result<SchedulerTaskCommitOutcome<ModelCallAuthority>, RepositoryError> {
+    if claim.mode() != SchedulerTaskClaimMode::Execute
+        || claim.envelope().request().task_kind() != crate::engine::SchedulerTaskKind::Llm
+        || model_call_no == 0
+        || frozen_model_publish(claim)? != publish
+    {
+        return Err(RepositoryError::invalid_configuration());
+    }
+    let mut tx = repository
+        .pool
+        .begin()
+        .await
+        .map_err(RepositoryError::storage)?;
+    let Some(authority) =
+        load_authoritative_task_claim_postgres(&mut tx, claim, TaskClaimComparison::Exact).await?
+    else {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    };
+    if authority.task_state != "claimed" || !authority.is_fresh() || !authority.permits_execution()
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    }
+    if authority.claim.mode() != SchedulerTaskClaimMode::Execute
+        || authority.attempt_lifecycle != "running"
+        || authority.activation_lifecycle != "running"
+        || authority.current_effect_evidence != EffectEvidence::Started
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    }
+    let operation_deadline = model_call_operation_deadline(&authority)?;
+    if authority.database_now >= operation_deadline {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::OperationDeadlineElapsed);
+    }
+    let response_id =
+        sqlx::query_scalar::<_, String>("SELECT response_id FROM workflow_runs WHERE run_id=$1")
+            .bind(claim.run_id().as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(RepositoryError::storage)?
+            .ok_or_else(RepositoryError::invalid_data)?;
+    let existing = sqlx::query(
+        "SELECT task_id,lease_epoch,fencing_token,call_status
+         FROM model_call_usage
+         WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+         FOR UPDATE",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(
+        i32::try_from(claim.envelope().attempt_no().get())
+            .map_err(|_| RepositoryError::invalid_data())?,
+    )
+    .bind(i32::try_from(model_call_no).map_err(|_| RepositoryError::invalid_configuration())?)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if let Some(existing) = existing {
+        if existing
+            .try_get::<String, _>("task_id")
+            .map_err(|_| RepositoryError::invalid_data())?
+            != claim.task_id().as_str()
+            || u64_from_i64(
+                existing
+                    .try_get("lease_epoch")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )? != claim.envelope().lease_epoch().get()
+            || existing
+                .try_get::<String, _>("fencing_token")
+                .map_err(|_| RepositoryError::invalid_data())?
+                != claim.envelope().fencing_token()
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+        let item = sqlx::query(
+            "SELECT item_id,output_index,node_id,item_kind FROM response_public_items
+             WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+               AND item_ordinal=0",
+        )
+        .bind(claim.run_id().as_str())
+        .bind(claim.activation_id().as_str())
+        .bind(
+            i32::try_from(claim.envelope().attempt_no().get())
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )
+        .bind(i32::try_from(model_call_no).map_err(|_| RepositoryError::invalid_configuration())?)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        let public_item = item
+            .map(|item| {
+                let item_id: String = item
+                    .try_get("item_id")
+                    .map_err(|_| RepositoryError::invalid_data())?;
+                if item_id
+                    != response_item_id(
+                        claim.run_id(),
+                        claim.activation_id(),
+                        claim.envelope().attempt_no(),
+                        model_call_no,
+                    )
+                    || item
+                        .try_get::<String, _>("node_id")
+                        .map_err(|_| RepositoryError::invalid_data())?
+                        != claim.envelope().request().node_id().as_str()
+                    || item
+                        .try_get::<String, _>("item_kind")
+                        .map_err(|_| RepositoryError::invalid_data())?
+                        != "message"
+                {
+                    return Err(RepositoryError::invalid_data());
+                }
+                response_item_authority(
+                    item_id,
+                    item.try_get("output_index")
+                        .map_err(|_| RepositoryError::invalid_data())?,
+                )
+            })
+            .transpose()?;
+        if !sqlx::query_scalar::<_, bool>("SELECT clock_timestamp()<$1 AND clock_timestamp()<$2")
+            .bind(claim.claim_expires_at())
+            .bind(operation_deadline)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(RepositoryError::storage)?
+        {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(SchedulerTaskCommitOutcome::StaleLease);
+        }
+        let authority = ModelCallAuthority::new_with_publication(
+            response_id,
+            model_call_no,
+            publish,
+            public_item,
+        )
+        .map_err(|_| RepositoryError::invalid_data())?;
+        tx.commit().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::ExactReplay {
+            authoritative: authority,
+        });
+    }
+    let previous_call_no = sqlx::query_scalar::<_, i32>(
+        "SELECT COALESCE(MAX(model_call_no),0) FROM model_call_usage
+         WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(
+        i32::try_from(claim.envelope().attempt_no().get())
+            .map_err(|_| RepositoryError::invalid_data())?,
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if previous_call_no
+        .checked_add(1)
+        .and_then(|value| u32::try_from(value).ok())
+        != Some(model_call_no)
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    }
+    if model_call_no > 1 {
+        let ready_rounds = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM model_call_usage u
+             JOIN model_tool_call_batches b ON b.run_id=u.run_id
+               AND b.activation_id=u.activation_id AND b.attempt_no=u.attempt_no
+               AND b.model_call_no=u.model_call_no
+             WHERE u.run_id=$1 AND u.activation_id=$2 AND u.attempt_no=$3
+               AND u.model_call_no<$4 AND u.call_status='completed'
+               AND u.finish_reason='tool_calls' AND b.execution_status='succeeded'
+               AND b.continuation_status='ready_continue'
+               AND EXISTS (
+                   SELECT 1 FROM model_tool_calls c
+                   WHERE c.run_id=u.run_id AND c.activation_id=u.activation_id
+                     AND c.attempt_no=u.attempt_no AND c.model_call_no=u.model_call_no
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM model_tool_calls c
+                   WHERE c.run_id=u.run_id AND c.activation_id=u.activation_id
+                     AND c.attempt_no=u.attempt_no AND c.model_call_no=u.model_call_no
+                     AND (c.call_status<>'succeeded' OR c.effect_evidence IS NULL
+                          OR c.effect_evidence<>'committed'
+                          OR c.result_json IS NULL)
+               )",
+        )
+        .bind(claim.run_id().as_str())
+        .bind(claim.activation_id().as_str())
+        .bind(
+            i32::try_from(claim.envelope().attempt_no().get())
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )
+        .bind(i32::try_from(model_call_no).map_err(|_| RepositoryError::invalid_configuration())?)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        if ready_rounds != i64::from(model_call_no - 1) {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(SchedulerTaskCommitOutcome::StateConflict);
+        }
+    }
+    sqlx::query(
+        "INSERT INTO model_call_usage (
+            run_id,activation_id,attempt_no,model_call_no,task_id,lease_epoch,
+            fencing_token,call_status,finish_reason,usage,usage_complete,
+            created_at,updated_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,'started',NULL,NULL,FALSE,
+                   clock_timestamp(),clock_timestamp())",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(
+        i32::try_from(claim.envelope().attempt_no().get())
+            .map_err(|_| RepositoryError::invalid_data())?,
+    )
+    .bind(i32::try_from(model_call_no).map_err(|_| RepositoryError::invalid_configuration())?)
+    .bind(claim.task_id().as_str())
+    .bind(i64_from_u64(claim.envelope().lease_epoch().get())?)
+    .bind(claim.envelope().fencing_token())
+    .execute(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if !sqlx::query_scalar::<_, bool>("SELECT clock_timestamp()<$1")
+        .bind(claim.claim_expires_at())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    }
+    if !sqlx::query_scalar::<_, bool>("SELECT clock_timestamp()<$1")
+        .bind(operation_deadline)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::OperationDeadlineElapsed);
+    }
+    let authority =
+        ModelCallAuthority::new_with_publication(response_id, model_call_no, publish, None)
+            .map_err(|_| RepositoryError::invalid_data())?;
+    tx.commit().await.map_err(RepositoryError::storage)?;
+    Ok(SchedulerTaskCommitOutcome::Committed { result: authority })
+}
+
+async fn reserve_model_call_public_item_postgres(
+    repository: &PostgresDurableRepository,
+    claim: &SchedulerTaskClaim,
+    model_call_no: u32,
+) -> Result<SchedulerTaskCommitOutcome<ResponseItemAuthority>, RepositoryError> {
+    if claim.mode() != SchedulerTaskClaimMode::Execute
+        || claim.envelope().request().task_kind() != crate::engine::SchedulerTaskKind::Llm
+        || model_call_no == 0
+        || !frozen_model_publish(claim)?
+    {
+        return Err(RepositoryError::invalid_configuration());
+    }
+    let mut tx = repository
+        .pool
+        .begin()
+        .await
+        .map_err(RepositoryError::storage)?;
+    // This is the append-only output-index authority for the whole Run. It
+    // must be acquired before any model-call/item row to share one lock order
+    // with every other PostgreSQL response item allocator.
+    lock_run_for_event_write(&mut tx, claim.run_id()).await?;
+    let Some(authority) =
+        load_authoritative_task_claim_postgres(&mut tx, claim, TaskClaimComparison::Exact).await?
+    else {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    };
+    if authority.task_state != "claimed" || !authority.is_fresh() || !authority.permits_execution()
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    }
+    if authority.claim.mode() != SchedulerTaskClaimMode::Execute
+        || authority.attempt_lifecycle != "running"
+        || authority.activation_lifecycle != "running"
+        || authority.current_effect_evidence != EffectEvidence::Started
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    }
+    let operation_deadline = model_call_operation_deadline(&authority)?;
+    if authority.database_now >= operation_deadline {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::OperationDeadlineElapsed);
+    }
+    let parent_attempt = i32::try_from(claim.envelope().attempt_no().get())
+        .map_err(|_| RepositoryError::invalid_data())?;
+    let call_no =
+        i32::try_from(model_call_no).map_err(|_| RepositoryError::invalid_configuration())?;
+    let call = sqlx::query(
+        "SELECT task_id,lease_epoch,fencing_token,call_status
+         FROM model_call_usage
+         WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+         FOR UPDATE",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(parent_attempt)
+    .bind(call_no)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let Some(call) = call else {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    };
+    if call
+        .try_get::<String, _>("task_id")
+        .map_err(|_| RepositoryError::invalid_data())?
+        != claim.task_id().as_str()
+        || u64_from_i64(
+            call.try_get("lease_epoch")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )? != claim.envelope().lease_epoch().get()
+        || call
+            .try_get::<String, _>("fencing_token")
+            .map_err(|_| RepositoryError::invalid_data())?
+            != claim.envelope().fencing_token()
+    {
+        return Err(RepositoryError::invalid_data());
+    }
+    if call
+        .try_get::<String, _>("call_status")
+        .map_err(|_| RepositoryError::invalid_data())?
+        != "started"
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    }
+    let existing = sqlx::query(
+        "SELECT item_id,output_index,node_id,item_kind,item_status
+         FROM response_public_items
+         WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+           AND item_ordinal=0 FOR UPDATE",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(parent_attempt)
+    .bind(call_no)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if let Some(existing) = existing {
+        let item_id: String = existing
+            .try_get("item_id")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        if item_id
+            != response_item_id(
+                claim.run_id(),
+                claim.activation_id(),
+                claim.envelope().attempt_no(),
+                model_call_no,
+            )
+            || existing
+                .try_get::<String, _>("node_id")
+                .map_err(|_| RepositoryError::invalid_data())?
+                != claim.envelope().request().node_id().as_str()
+            || existing
+                .try_get::<String, _>("item_kind")
+                .map_err(|_| RepositoryError::invalid_data())?
+                != "message"
+            || existing
+                .try_get::<String, _>("item_status")
+                .map_err(|_| RepositoryError::invalid_data())?
+                != "reserved"
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+        let item = response_item_authority(
+            item_id,
+            existing
+                .try_get("output_index")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )?;
+        tx.commit().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::ExactReplay {
+            authoritative: item,
+        });
+    }
+    let previous_output_index = sqlx::query_scalar::<_, i32>(
+        "SELECT COALESCE(MAX(output_index),-1) FROM response_public_items WHERE run_id=$1",
+    )
+    .bind(claim.run_id().as_str())
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let output_index = previous_output_index
+        .checked_add(1)
+        .ok_or_else(RepositoryError::invalid_data)?;
+    let item_id = response_item_id(
+        claim.run_id(),
+        claim.activation_id(),
+        claim.envelope().attempt_no(),
+        model_call_no,
+    );
+    sqlx::query(
+        "INSERT INTO response_public_items (
+            run_id,activation_id,attempt_no,model_call_no,item_ordinal,item_id,
+            output_index,node_id,item_kind,item_status,seal_index,safe_item,
+            created_at,updated_at
+         ) VALUES ($1,$2,$3,$4,0,$5,$6,$7,'message','reserved',NULL,NULL,
+                   clock_timestamp(),clock_timestamp())",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(parent_attempt)
+    .bind(call_no)
+    .bind(&item_id)
+    .bind(output_index)
+    .bind(claim.envelope().request().node_id().as_str())
+    .execute(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if !sqlx::query_scalar::<_, bool>("SELECT clock_timestamp()<$1")
+        .bind(claim.claim_expires_at())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    }
+    if !sqlx::query_scalar::<_, bool>("SELECT clock_timestamp()<$1")
+        .bind(operation_deadline)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::OperationDeadlineElapsed);
+    }
+    let item = response_item_authority(item_id, output_index)?;
+    tx.commit().await.map_err(RepositoryError::storage)?;
+    Ok(SchedulerTaskCommitOutcome::Committed { result: item })
+}
+
+async fn reserve_model_call_public_function_item_postgres(
+    repository: &PostgresDurableRepository,
+    claim: &SchedulerTaskClaim,
+    model_call_no: u32,
+    call_index: u32,
+    call_id: &str,
+    tool_name: &str,
+) -> Result<SchedulerTaskCommitOutcome<ResponseItemAuthority>, RepositoryError> {
+    if claim.mode() != SchedulerTaskClaimMode::Execute
+        || claim.envelope().request().task_kind() != crate::engine::SchedulerTaskKind::Llm
+        || model_call_no == 0
+        || !frozen_model_publish(claim)?
+        || call_id.is_empty()
+        || call_id.len() > 256
+        || call_id
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        || tool_name.is_empty()
+        || tool_name.len() > 64
+        || !tool_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(RepositoryError::invalid_configuration());
+    }
+    let contract =
+        parse_frozen_model_tool_contract(claim.envelope().request().deployment_binding())?;
+    let action = contract
+        .tools
+        .get(tool_name)
+        .ok_or_else(RepositoryError::invalid_data)?;
+    let projection = WorkflowToolPublicProjection::from_frozen_effective_policy(
+        action.effective_public_policy(),
+    )
+    .map_err(|_| RepositoryError::invalid_data())?;
+    if call_index >= contract.max_calls || !projection.raw_argument_deltas_authorized() {
+        return Err(RepositoryError::invalid_configuration());
+    }
+
+    let mut tx = repository
+        .pool
+        .begin()
+        .await
+        .map_err(RepositoryError::storage)?;
+    // All response item allocators acquire the Run row before model-call or
+    // item rows, preventing output-index races and lock-order inversions.
+    lock_run_for_event_write(&mut tx, claim.run_id()).await?;
+    let Some(authority) =
+        load_authoritative_task_claim_postgres(&mut tx, claim, TaskClaimComparison::Exact).await?
+    else {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    };
+    if authority.task_state != "claimed" || !authority.is_fresh() || !authority.permits_execution()
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    }
+    if authority.claim.mode() != SchedulerTaskClaimMode::Execute
+        || authority.attempt_lifecycle != "running"
+        || authority.activation_lifecycle != "running"
+        || authority.current_effect_evidence != EffectEvidence::Started
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    }
+    let operation_deadline = model_call_operation_deadline(&authority)?;
+    if authority.database_now >= operation_deadline {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::OperationDeadlineElapsed);
+    }
+    let parent_attempt = i32::try_from(claim.envelope().attempt_no().get())
+        .map_err(|_| RepositoryError::invalid_data())?;
+    let call_no =
+        i32::try_from(model_call_no).map_err(|_| RepositoryError::invalid_configuration())?;
+    let call = sqlx::query(
+        "SELECT task_id,lease_epoch,fencing_token,call_status
+         FROM model_call_usage
+         WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+         FOR UPDATE",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(parent_attempt)
+    .bind(call_no)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let Some(call) = call else {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    };
+    if call
+        .try_get::<String, _>("task_id")
+        .map_err(|_| RepositoryError::invalid_data())?
+        != claim.task_id().as_str()
+        || u64_from_i64(
+            call.try_get("lease_epoch")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )? != claim.envelope().lease_epoch().get()
+        || call
+            .try_get::<String, _>("fencing_token")
+            .map_err(|_| RepositoryError::invalid_data())?
+            != claim.envelope().fencing_token()
+    {
+        return Err(RepositoryError::invalid_data());
+    }
+    if call
+        .try_get::<String, _>("call_status")
+        .map_err(|_| RepositoryError::invalid_data())?
+        != "started"
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    }
+
+    let item_ordinal = i32::try_from(call_index)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(RepositoryError::invalid_data)?;
+    let item_id = function_call_response_item_id(
+        claim.run_id(),
+        claim.activation_id(),
+        claim.envelope().attempt_no(),
+        model_call_no,
+        call_index,
+        call_id,
+        tool_name,
+    );
+    let incomplete_item = json!({
+        "id": item_id,
+        "type": "function_call",
+        "status": "incomplete",
+        "call_id": call_id,
+        "name": tool_name,
+        "arguments": "",
+    });
+    validate_incomplete_function_call_item(&incomplete_item, &item_id)?;
+    let existing = sqlx::query(
+        "SELECT item_id,output_index,node_id,item_kind,item_status,seal_index,safe_item
+         FROM response_public_items
+         WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+           AND item_ordinal=$5 FOR UPDATE",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(parent_attempt)
+    .bind(call_no)
+    .bind(item_ordinal)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if let Some(existing) = existing {
+        if existing
+            .try_get::<String, _>("item_id")
+            .map_err(|_| RepositoryError::invalid_data())?
+            != item_id
+            || existing
+                .try_get::<String, _>("node_id")
+                .map_err(|_| RepositoryError::invalid_data())?
+                != claim.envelope().request().node_id().as_str()
+            || existing
+                .try_get::<String, _>("item_kind")
+                .map_err(|_| RepositoryError::invalid_data())?
+                != "function_call"
+            || existing
+                .try_get::<String, _>("item_status")
+                .map_err(|_| RepositoryError::invalid_data())?
+                != "reserved"
+            || existing
+                .try_get::<Option<i64>, _>("seal_index")
+                .map_err(|_| RepositoryError::invalid_data())?
+                .is_some()
+            || existing
+                .try_get::<Option<Value>, _>("safe_item")
+                .map_err(|_| RepositoryError::invalid_data())?
+                .as_ref()
+                != Some(&incomplete_item)
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+        let item = response_item_authority(
+            item_id,
+            existing
+                .try_get("output_index")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )?;
+        tx.commit().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::ExactReplay {
+            authoritative: item,
+        });
+    }
+    let previous_output_index = sqlx::query_scalar::<_, i32>(
+        "SELECT COALESCE(MAX(output_index),-1) FROM response_public_items WHERE run_id=$1",
+    )
+    .bind(claim.run_id().as_str())
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let output_index = previous_output_index
+        .checked_add(1)
+        .ok_or_else(RepositoryError::invalid_data)?;
+    sqlx::query(
+        "INSERT INTO response_public_items (
+            run_id,activation_id,attempt_no,model_call_no,item_ordinal,item_id,
+            output_index,node_id,item_kind,item_status,seal_index,safe_item,
+            created_at,updated_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'function_call','reserved',NULL,$9,
+                   clock_timestamp(),clock_timestamp())",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(parent_attempt)
+    .bind(call_no)
+    .bind(item_ordinal)
+    .bind(&item_id)
+    .bind(output_index)
+    .bind(claim.envelope().request().node_id().as_str())
+    .bind(incomplete_item)
+    .execute(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if !sqlx::query_scalar::<_, bool>("SELECT clock_timestamp()<$1")
+        .bind(claim.claim_expires_at())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    }
+    if !sqlx::query_scalar::<_, bool>("SELECT clock_timestamp()<$1")
+        .bind(operation_deadline)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::OperationDeadlineElapsed);
+    }
+    let item = response_item_authority(item_id, output_index)?;
+    tx.commit().await.map_err(RepositoryError::storage)?;
+    Ok(SchedulerTaskCommitOutcome::Committed { result: item })
+}
+
+async fn checkpoint_model_call_completion_postgres(
+    repository: &PostgresDurableRepository,
+    claim: &SchedulerTaskClaim,
+    completion: &ModelCallCompletion,
+) -> Result<SchedulerTaskCommitOutcome<()>, RepositoryError> {
+    if completion.finish_reason() == crate::engine::worker::ModelFinishReason::ToolCalls {
+        // A tool-call finish is only durable together with its exact batch.
+        return Err(RepositoryError::invalid_configuration());
+    }
+    checkpoint_model_call_completion_with_batch_postgres(repository, claim, completion, None).await
+}
+
+async fn checkpoint_model_tool_call_batch_postgres(
+    repository: &PostgresDurableRepository,
+    claim: &SchedulerTaskClaim,
+    checkpoint: &ModelToolCallCheckpoint,
+) -> Result<SchedulerTaskCommitOutcome<()>, RepositoryError> {
+    checkpoint_model_call_completion_with_batch_postgres(
+        repository,
+        claim,
+        checkpoint.completion(),
+        Some(checkpoint.batch()),
+    )
+    .await
+}
+
+async fn checkpoint_model_call_completion_with_batch_postgres(
+    repository: &PostgresDurableRepository,
+    claim: &SchedulerTaskClaim,
+    completion: &ModelCallCompletion,
+    batch: Option<&ModelToolCallBatch>,
+) -> Result<SchedulerTaskCommitOutcome<()>, RepositoryError> {
+    if claim.mode() != SchedulerTaskClaimMode::Execute
+        || claim.envelope().request().task_kind() != crate::engine::SchedulerTaskKind::Llm
+        || completion.model_call_no() == 0
+        || (batch.is_none()
+            && completion.finish_reason() == crate::engine::worker::ModelFinishReason::ToolCalls)
+        || batch.is_some_and(|batch| {
+            completion.finish_reason() != crate::engine::worker::ModelFinishReason::ToolCalls
+                || batch.model_call_no() != completion.model_call_no()
+                || batch.calls().is_empty()
+                || batch
+                    .assistant_content()
+                    .is_some_and(|content| content.len() > 1_048_576)
+        })
+    {
+        return Err(RepositoryError::invalid_configuration());
+    }
+    let mut tx = repository
+        .pool
+        .begin()
+        .await
+        .map_err(RepositoryError::storage)?;
+    let Some(authority) =
+        load_authoritative_task_claim_postgres(&mut tx, claim, TaskClaimComparison::Exact).await?
+    else {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    };
+    if authority.task_state != "claimed" || !authority.is_fresh() || !authority.permits_execution()
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    }
+    if authority.claim.mode() != SchedulerTaskClaimMode::Execute
+        || authority.attempt_lifecycle != "running"
+        || authority.activation_lifecycle != "running"
+        || authority.current_effect_evidence != EffectEvidence::Started
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    }
+    let operation_deadline = model_call_operation_deadline(&authority)?;
+    if authority.database_now >= operation_deadline {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::OperationDeadlineElapsed);
+    }
+    let call = sqlx::query(
+        "SELECT task_id,lease_epoch,fencing_token,call_status,finish_reason,usage,usage_complete
+         FROM model_call_usage
+         WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+         FOR UPDATE",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(
+        i32::try_from(claim.envelope().attempt_no().get())
+            .map_err(|_| RepositoryError::invalid_data())?,
+    )
+    .bind(
+        i32::try_from(completion.model_call_no())
+            .map_err(|_| RepositoryError::invalid_configuration())?,
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let Some(call) = call else {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    };
+    if call
+        .try_get::<String, _>("task_id")
+        .map_err(|_| RepositoryError::invalid_data())?
+        != claim.task_id().as_str()
+        || u64_from_i64(
+            call.try_get("lease_epoch")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )? != claim.envelope().lease_epoch().get()
+        || call
+            .try_get::<String, _>("fencing_token")
+            .map_err(|_| RepositoryError::invalid_data())?
+            != claim.envelope().fencing_token()
+    {
+        return Err(RepositoryError::invalid_data());
+    }
+    let item = sqlx::query(
+        "SELECT item_id,item_status,seal_index,safe_item FROM response_public_items
+         WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+           AND item_ordinal=0 FOR UPDATE",
+    )
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(
+        i32::try_from(claim.envelope().attempt_no().get())
+            .map_err(|_| RepositoryError::invalid_data())?,
+    )
+    .bind(
+        i32::try_from(completion.model_call_no())
+            .map_err(|_| RepositoryError::invalid_configuration())?,
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let expected_item_id = item
+        .as_ref()
+        .map(|item| {
+            item.try_get::<String, _>("item_id")
+                .map_err(|_| RepositoryError::invalid_data())
+        })
+        .transpose()?;
+    let mut prepared = prepare_model_call_completion(
+        completion,
+        expected_item_id.as_deref(),
+        claim.run_id(),
+        claim.activation_id(),
+        claim.envelope().attempt_no(),
+    )?;
+    let expected_item_status = if prepared.safe_item.is_some() {
+        "completed"
+    } else if prepared.seal_index.is_some() {
+        "incomplete"
+    } else {
+        "incomplete_unsealed"
+    };
+    let prepared_function_items = match batch {
+        Some(batch) => prepare_model_function_call_publications(
+            claim.run_id(),
+            claim.activation_id(),
+            claim.envelope().attempt_no(),
+            batch,
+            claim.envelope().request().deployment_binding(),
+            frozen_model_publish(claim)?,
+        )?,
+        None => std::mem::take(&mut prepared.function_items),
+    };
+    let call_status: String = call
+        .try_get("call_status")
+        .map_err(|_| RepositoryError::invalid_data())?;
+    if call_status != "started" {
+        let batch_matches = if let Some(batch) = batch {
+            let stored = sqlx::query(
+                "SELECT batch_status,assistant_content FROM model_tool_call_batches
+                 WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+                 FOR UPDATE",
+            )
+            .bind(claim.run_id().as_str())
+            .bind(claim.activation_id().as_str())
+            .bind(
+                i32::try_from(claim.envelope().attempt_no().get())
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .bind(
+                i32::try_from(completion.model_call_no())
+                    .map_err(|_| RepositoryError::invalid_configuration())?,
+            )
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(RepositoryError::storage)?;
+            match stored {
+                None => false,
+                Some(stored) => {
+                    if stored
+                        .try_get::<String, _>("batch_status")
+                        .map_err(|_| RepositoryError::invalid_data())?
+                        != "checkpointed"
+                        || stored
+                            .try_get::<Option<String>, _>("assistant_content")
+                            .map_err(|_| RepositoryError::invalid_data())?
+                            .as_deref()
+                            != batch.assistant_content()
+                    {
+                        false
+                    } else {
+                        let rows = sqlx::query(
+                            "SELECT call_index,call_id,tool_name,arguments
+                     FROM model_tool_calls
+                     WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+                     ORDER BY call_index FOR UPDATE",
+                        )
+                        .bind(claim.run_id().as_str())
+                        .bind(claim.activation_id().as_str())
+                        .bind(
+                            i32::try_from(claim.envelope().attempt_no().get())
+                                .map_err(|_| RepositoryError::invalid_data())?,
+                        )
+                        .bind(
+                            i32::try_from(completion.model_call_no())
+                                .map_err(|_| RepositoryError::invalid_configuration())?,
+                        )
+                        .fetch_all(&mut *tx)
+                        .await
+                        .map_err(RepositoryError::storage)?;
+                        rows.len() == batch.calls().len()
+                            && rows.iter().zip(batch.calls()).all(|(row, expected)| {
+                                row.try_get::<i32, _>("call_index").ok()
+                                    == i32::try_from(expected.index()).ok()
+                                    && row.try_get::<String, _>("call_id").ok().as_deref()
+                                        == Some(expected.call_id())
+                                    && row.try_get::<String, _>("tool_name").ok().as_deref()
+                                        == Some(expected.name())
+                                    && row.try_get::<Value, _>("arguments").ok().as_ref()
+                                        == Some(expected.arguments())
+                            })
+                    }
+                }
+            }
+        } else {
+            true
+        };
+        let call_matches = call_status == prepared.call_status
+            && call
+                .try_get::<Option<String>, _>("finish_reason")
+                .map_err(|_| RepositoryError::invalid_data())?
+                .as_deref()
+                == Some(prepared.finish_reason)
+            && call
+                .try_get::<Option<Value>, _>("usage")
+                .map_err(|_| RepositoryError::invalid_data())?
+                == prepared.usage
+            && call
+                .try_get::<bool, _>("usage_complete")
+                .map_err(|_| RepositoryError::invalid_data())?
+                == prepared.usage_complete;
+        let item_matches = match item.as_ref() {
+            Some(item) => {
+                item.try_get::<String, _>("item_status")
+                    .map_err(|_| RepositoryError::invalid_data())?
+                    == expected_item_status
+                    && item
+                        .try_get::<Option<i64>, _>("seal_index")
+                        .map_err(|_| RepositoryError::invalid_data())?
+                        == prepared.seal_index.map(i64_from_u64).transpose()?
+                    && item
+                        .try_get::<Option<Value>, _>("safe_item")
+                        .map_err(|_| RepositoryError::invalid_data())?
+                        == prepared.safe_item
+            }
+            None => prepared.seal_index.is_none() && prepared.safe_item.is_none(),
+        };
+        let function_rows = sqlx::query(
+            "SELECT item_ordinal,item_id,output_index,item_status,seal_index,safe_item
+             FROM response_public_items
+             WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+               AND item_ordinal>0 ORDER BY item_ordinal FOR UPDATE",
+        )
+        .bind(claim.run_id().as_str())
+        .bind(claim.activation_id().as_str())
+        .bind(
+            i32::try_from(claim.envelope().attempt_no().get())
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )
+        .bind(
+            i32::try_from(completion.model_call_no())
+                .map_err(|_| RepositoryError::invalid_configuration())?,
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        let function_items_match = function_rows.len() == prepared_function_items.len()
+            && function_rows
+                .iter()
+                .zip(&prepared_function_items)
+                .all(|(row, expected)| {
+                    row.try_get::<i32, _>("item_ordinal").ok()
+                        == i32::try_from(expected.call_index)
+                            .ok()
+                            .and_then(|value| value.checked_add(1))
+                        && row.try_get::<String, _>("item_id").ok().as_deref()
+                            == Some(expected.item.item_id())
+                        && row.try_get::<i32, _>("output_index").ok()
+                            == i32::try_from(expected.item.output_index()).ok()
+                        && row.try_get::<String, _>("item_status").ok().as_deref()
+                            == Some(expected.terminal_item_status)
+                        && row.try_get::<Option<i64>, _>("seal_index").ok().flatten()
+                            == i64::try_from(expected.seal_index).ok()
+                        && row
+                            .try_get::<Option<Value>, _>("safe_item")
+                            .ok()
+                            .flatten()
+                            .as_ref()
+                            == Some(&expected.terminal_safe_item)
+                });
+        if !sqlx::query_scalar::<_, bool>("SELECT clock_timestamp()<$1 AND clock_timestamp()<$2")
+            .bind(claim.claim_expires_at())
+            .bind(operation_deadline)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(RepositoryError::storage)?
+        {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(SchedulerTaskCommitOutcome::StaleLease);
+        }
+        tx.commit().await.map_err(RepositoryError::storage)?;
+        return if call_matches && item_matches && batch_matches && function_items_match {
+            Ok(SchedulerTaskCommitOutcome::ExactReplay { authoritative: () })
+        } else {
+            Ok(SchedulerTaskCommitOutcome::StateConflict)
+        };
+    }
+    if call
+        .try_get::<Option<String>, _>("finish_reason")
+        .map_err(|_| RepositoryError::invalid_data())?
+        .is_some()
+        || call
+            .try_get::<Option<Value>, _>("usage")
+            .map_err(|_| RepositoryError::invalid_data())?
+            .is_some()
+        || call
+            .try_get::<bool, _>("usage_complete")
+            .map_err(|_| RepositoryError::invalid_data())?
+    {
+        return Err(RepositoryError::invalid_data());
+    }
+    if batch.is_some()
+        && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                SELECT 1 FROM model_tool_call_batches
+                WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+            )",
+        )
+        .bind(claim.run_id().as_str())
+        .bind(claim.activation_id().as_str())
+        .bind(
+            i32::try_from(claim.envelope().attempt_no().get())
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )
+        .bind(
+            i32::try_from(completion.model_call_no())
+                .map_err(|_| RepositoryError::invalid_configuration())?,
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    }
+    let call_rows = sqlx::query(
+        "UPDATE model_call_usage SET call_status=$1,finish_reason=$2,usage=$3,
+             usage_complete=$4,updated_at=clock_timestamp()
+         WHERE run_id=$5 AND activation_id=$6 AND attempt_no=$7 AND model_call_no=$8
+           AND task_id=$9 AND lease_epoch=$10 AND fencing_token=$11 AND call_status='started'",
+    )
+    .bind(prepared.call_status)
+    .bind(prepared.finish_reason)
+    .bind(&prepared.usage)
+    .bind(prepared.usage_complete)
+    .bind(claim.run_id().as_str())
+    .bind(claim.activation_id().as_str())
+    .bind(
+        i32::try_from(claim.envelope().attempt_no().get())
+            .map_err(|_| RepositoryError::invalid_data())?,
+    )
+    .bind(
+        i32::try_from(completion.model_call_no())
+            .map_err(|_| RepositoryError::invalid_configuration())?,
+    )
+    .bind(claim.task_id().as_str())
+    .bind(i64_from_u64(claim.envelope().lease_epoch().get())?)
+    .bind(claim.envelope().fencing_token())
+    .execute(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?
+    .rows_affected();
+    if call_rows != 1 {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StateConflict);
+    }
+    if let Some(batch) = batch {
+        let batch_rows = sqlx::query(
+            "INSERT INTO model_tool_call_batches (
+                run_id,activation_id,attempt_no,model_call_no,batch_status,assistant_content
+             ) VALUES ($1,$2,$3,$4,'checkpointed',$5)",
+        )
+        .bind(claim.run_id().as_str())
+        .bind(claim.activation_id().as_str())
+        .bind(
+            i32::try_from(claim.envelope().attempt_no().get())
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )
+        .bind(
+            i32::try_from(completion.model_call_no())
+                .map_err(|_| RepositoryError::invalid_configuration())?,
+        )
+        .bind(batch.assistant_content())
+        .execute(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?
+        .rows_affected();
+        if batch_rows != 1 {
+            return Err(RepositoryError::invalid_data());
+        }
+        for tool_call in batch.calls() {
+            let call_rows = sqlx::query(
+                "INSERT INTO model_tool_calls (
+                    run_id,activation_id,attempt_no,model_call_no,call_index,call_id,tool_name,
+                    arguments,call_status
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending')",
+            )
+            .bind(claim.run_id().as_str())
+            .bind(claim.activation_id().as_str())
+            .bind(
+                i32::try_from(claim.envelope().attempt_no().get())
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .bind(
+                i32::try_from(completion.model_call_no())
+                    .map_err(|_| RepositoryError::invalid_configuration())?,
+            )
+            .bind(
+                i32::try_from(tool_call.index())
+                    .map_err(|_| RepositoryError::invalid_configuration())?,
+            )
+            .bind(tool_call.call_id())
+            .bind(tool_call.name())
+            .bind(tool_call.arguments())
+            .execute(&mut *tx)
+            .await
+            .map_err(RepositoryError::storage)?
+            .rows_affected();
+            if call_rows != 1 {
+                return Err(RepositoryError::invalid_data());
+            }
+        }
+    }
+    if let Some(item) = item {
+        if item
+            .try_get::<String, _>("item_status")
+            .map_err(|_| RepositoryError::invalid_data())?
+            != "reserved"
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+        let item_rows = sqlx::query(
+            "UPDATE response_public_items SET item_status=$1,seal_index=$2,safe_item=$3,
+                 updated_at=clock_timestamp()
+             WHERE run_id=$4 AND activation_id=$5 AND attempt_no=$6 AND model_call_no=$7
+               AND item_ordinal=0 AND item_status='reserved'",
+        )
+        .bind(expected_item_status)
+        .bind(prepared.seal_index.map(i64_from_u64).transpose()?)
+        .bind(&prepared.safe_item)
+        .bind(claim.run_id().as_str())
+        .bind(claim.activation_id().as_str())
+        .bind(
+            i32::try_from(claim.envelope().attempt_no().get())
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )
+        .bind(
+            i32::try_from(completion.model_call_no())
+                .map_err(|_| RepositoryError::invalid_configuration())?,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?
+        .rows_affected();
+        if item_rows != 1 {
+            return Err(RepositoryError::invalid_data());
+        }
+    }
+    {
+        let existing_function_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM response_public_items
+             WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+               AND item_ordinal>0",
+        )
+        .bind(claim.run_id().as_str())
+        .bind(claim.activation_id().as_str())
+        .bind(
+            i32::try_from(claim.envelope().attempt_no().get())
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )
+        .bind(
+            i32::try_from(completion.model_call_no())
+                .map_err(|_| RepositoryError::invalid_configuration())?,
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        if usize::try_from(existing_function_count).ok() != Some(prepared_function_items.len())
+            || batch.is_some_and(|batch| {
+                batch.public_function_calls().len() != prepared_function_items.len()
+            })
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+        for expected in &prepared_function_items {
+            let ordinal = i32::try_from(expected.call_index)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(RepositoryError::invalid_data)?;
+            let row = sqlx::query(
+                "SELECT item_id,output_index,item_status,seal_index,safe_item
+                 FROM response_public_items
+                 WHERE run_id=$1 AND activation_id=$2 AND attempt_no=$3 AND model_call_no=$4
+                   AND item_ordinal=$5 FOR UPDATE",
+            )
+            .bind(claim.run_id().as_str())
+            .bind(claim.activation_id().as_str())
+            .bind(
+                i32::try_from(claim.envelope().attempt_no().get())
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .bind(
+                i32::try_from(completion.model_call_no())
+                    .map_err(|_| RepositoryError::invalid_configuration())?,
+            )
+            .bind(ordinal)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(RepositoryError::storage)?
+            .ok_or_else(RepositoryError::invalid_data)?;
+            if row.try_get::<String, _>("item_id").ok().as_deref() != Some(expected.item.item_id())
+                || row.try_get::<i32, _>("output_index").ok()
+                    != i32::try_from(expected.item.output_index()).ok()
+                || row.try_get::<String, _>("item_status").ok().as_deref() != Some("reserved")
+                || row
+                    .try_get::<Option<i64>, _>("seal_index")
+                    .ok()
+                    .flatten()
+                    .is_some()
+                || row
+                    .try_get::<Option<Value>, _>("safe_item")
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                    != Some(&expected.reserved_safe_item)
+            {
+                return Err(RepositoryError::invalid_data());
+            }
+            let updated = sqlx::query(
+                "UPDATE response_public_items
+                 SET item_status=$1,seal_index=$2,safe_item=$3,
+                     updated_at=clock_timestamp()
+                 WHERE run_id=$4 AND activation_id=$5 AND attempt_no=$6 AND model_call_no=$7
+                   AND item_ordinal=$8 AND item_status='reserved'",
+            )
+            .bind(expected.terminal_item_status)
+            .bind(i64_from_u64(expected.seal_index)?)
+            .bind(&expected.terminal_safe_item)
+            .bind(claim.run_id().as_str())
+            .bind(claim.activation_id().as_str())
+            .bind(
+                i32::try_from(claim.envelope().attempt_no().get())
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .bind(
+                i32::try_from(completion.model_call_no())
+                    .map_err(|_| RepositoryError::invalid_configuration())?,
+            )
+            .bind(ordinal)
+            .execute(&mut *tx)
+            .await
+            .map_err(RepositoryError::storage)?
+            .rows_affected();
+            if updated != 1 {
+                return Err(RepositoryError::invalid_data());
+            }
+        }
+    }
+    if !sqlx::query_scalar::<_, bool>("SELECT clock_timestamp()<$1 AND clock_timestamp()<$2")
+        .bind(claim.claim_expires_at())
+        .bind(operation_deadline)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?
+    {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(SchedulerTaskCommitOutcome::StaleLease);
+    }
+    tx.commit().await.map_err(RepositoryError::storage)?;
+    Ok(SchedulerTaskCommitOutcome::Committed { result: () })
+}
+
 #[async_trait]
 impl SchedulerDurableRepository for PostgresDurableRepository {
     async fn load_scheduler_facts(
@@ -9596,6 +11679,107 @@ impl SchedulerDurableRepository for PostgresDurableRepository {
         claim: &SchedulerTaskClaim,
     ) -> Result<TransitionOutcome<SchedulerCommitReceipt>, RepositoryError> {
         start_task(self, claim).await
+    }
+
+    async fn reserve_model_call(
+        &self,
+        claim: &SchedulerTaskClaim,
+        model_call_no: u32,
+        publish: bool,
+    ) -> Result<SchedulerTaskCommitOutcome<ModelCallAuthority>, RepositoryError> {
+        reserve_model_call_postgres(self, claim, model_call_no, publish).await
+    }
+
+    async fn reserve_model_call_public_item(
+        &self,
+        claim: &SchedulerTaskClaim,
+        model_call_no: u32,
+    ) -> Result<SchedulerTaskCommitOutcome<ResponseItemAuthority>, RepositoryError> {
+        reserve_model_call_public_item_postgres(self, claim, model_call_no).await
+    }
+
+    async fn reserve_model_call_public_function_item(
+        &self,
+        claim: &SchedulerTaskClaim,
+        model_call_no: u32,
+        call_index: u32,
+        call_id: &str,
+        tool_name: &str,
+    ) -> Result<SchedulerTaskCommitOutcome<ResponseItemAuthority>, RepositoryError> {
+        reserve_model_call_public_function_item_postgres(
+            self,
+            claim,
+            model_call_no,
+            call_index,
+            call_id,
+            tool_name,
+        )
+        .await
+    }
+
+    async fn checkpoint_model_call_completion(
+        &self,
+        claim: &SchedulerTaskClaim,
+        completion: &ModelCallCompletion,
+    ) -> Result<SchedulerTaskCommitOutcome<()>, RepositoryError> {
+        checkpoint_model_call_completion_postgres(self, claim, completion).await
+    }
+
+    async fn checkpoint_model_tool_call_batch(
+        &self,
+        claim: &SchedulerTaskClaim,
+        checkpoint: &ModelToolCallCheckpoint,
+    ) -> Result<SchedulerTaskCommitOutcome<()>, RepositoryError> {
+        checkpoint_model_tool_call_batch_postgres(self, claim, checkpoint).await
+    }
+
+    async fn load_model_tool_parent_resume(
+        &self,
+        claim: &SchedulerTaskClaim,
+    ) -> Result<SchedulerTaskCommitOutcome<Option<ModelToolParentResume>>, RepositoryError> {
+        load_model_tool_parent_resume_postgres(self, claim).await
+    }
+
+    async fn activate_model_tool_call_batch(
+        &self,
+        parent_claim: &SchedulerTaskClaim,
+        model_call_no: u32,
+    ) -> Result<ModelToolBatchActivationOutcome, RepositoryError> {
+        activate_model_tool_call_batch_postgres(self, parent_claim, model_call_no).await
+    }
+
+    async fn claim_model_tool_calls(
+        &self,
+        claimed_by: &str,
+        claim_seconds: u32,
+        limit: u32,
+        max_claimed_per_run: u32,
+    ) -> Result<Vec<ModelToolTaskClaim>, RepositoryError> {
+        claim_model_tool_calls_postgres(self, claimed_by, claim_seconds, limit, max_claimed_per_run)
+            .await
+    }
+
+    async fn mark_model_tool_call_started(
+        &self,
+        claim: &ModelToolTaskClaim,
+    ) -> Result<ModelToolTaskTransitionOutcome<()>, RepositoryError> {
+        mark_model_tool_call_started_postgres(self, claim).await
+    }
+
+    async fn heartbeat_model_tool_call(
+        &self,
+        claim: &ModelToolTaskClaim,
+        claim_seconds: u32,
+    ) -> Result<ModelToolTaskHeartbeatOutcome, RepositoryError> {
+        heartbeat_model_tool_call_postgres(self, claim, claim_seconds).await
+    }
+
+    async fn commit_model_tool_call_outcome(
+        &self,
+        claim: &ModelToolTaskClaim,
+        outcome: &ModelToolTaskOutcome,
+    ) -> Result<ModelToolTaskTransitionOutcome<ModelToolTaskCommitReceipt>, RepositoryError> {
+        commit_model_tool_call_outcome_postgres(self, claim, outcome).await
     }
 
     async fn heartbeat_scheduler_task(

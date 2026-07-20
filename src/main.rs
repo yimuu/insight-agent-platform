@@ -6,17 +6,25 @@ use insight_agent_platform::{
         compile_enabled_v3_agents, deploy_v3_agents, OwnedProductionLeafDeploymentResolver,
         ProductionLeafDeploymentResolver,
     },
-    config::{ArtifactStoreProvider, DeploymentMode, HistoryConfig, PlatformConfig},
+    config::{
+        ArtifactStoreProvider, DeploymentMode, HistoryConfig, LiveResponseBrokerProvider,
+        PlatformConfig, ResponseStreamConfig,
+    },
     engine::{
-        production_worker_registry,
+        production_worker_registry_with_live_response_and_retrievals,
         repository::{PostgresDurableRepository, SqliteDurableRepository},
         LocalContentAddressedArtifactStore,
     },
     resources::{
         builtin_actions::{builtin_action_registry, RestrictedHttpGetAction},
         config::load_model_registry,
+        retrievals::RetrievalRegistry,
     },
-    runtime::{DeployedAgentCatalog, ProductionRunRepository, RunService, RunServiceConfig},
+    runtime::{
+        DeployedAgentCatalog, InMemoryLiveResponseBroker, LiveResponseBroker,
+        LiveResponseByteLimits, PostgresLiveResponseBroker, PostgresLiveResponseBrokerOptions,
+        ProductionRunRepository, RunService, RunServiceConfig,
+    },
 };
 
 type MainResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -48,18 +56,38 @@ async fn main() -> MainResult<()> {
         &config.actions.enabled.iter().cloned().collect::<Vec<_>>(),
         http_get,
     )?;
+    let retrievals = RetrievalRegistry::default();
 
     let published = compile_enabled_v3_agents(&config.agents.directory, &config.agents.enabled)?;
     let resolver = ProductionLeafDeploymentResolver::new(&models, &actions)
-        .with_operation_timeout(config.runtime.operation_timeout)?;
+        .with_retrievals(&retrievals)
+        .with_llm_tool_continuation_capability()
+        .with_operation_timeout(config.runtime.operation_timeout)?
+        .with_llm_tool_limits(
+            config.runtime.max_llm_tool_rounds,
+            config.runtime.max_llm_tool_calls,
+        )?;
     let graph_publication_resolver = Arc::new(
         OwnedProductionLeafDeploymentResolver::new(&models, &actions)
-            .with_operation_timeout(config.runtime.operation_timeout)?,
+            .with_retrievals(&retrievals)
+            .with_llm_tool_continuation_capability()
+            .with_operation_timeout(config.runtime.operation_timeout)?
+            .with_llm_tool_limits(
+                config.runtime.max_llm_tool_rounds,
+                config.runtime.max_llm_tool_calls,
+            )?,
     );
     let deployed = deploy_v3_agents(&published, &resolver)?;
     let agents = DeployedAgentCatalog::new(deployed)?;
-    let workers = production_worker_registry(&models, &actions)?;
-    let repository = initialize_repository(&config.history).await?;
+    let (repository, live_response_broker) =
+        initialize_repository_and_live_response(&config.history, config.runtime.response_stream)
+            .await?;
+    let workers = production_worker_registry_with_live_response_and_retrievals(
+        &models,
+        &actions,
+        &retrievals,
+        Arc::clone(&live_response_broker),
+    )?;
     let artifact_store = Arc::new(match config.artifacts.provider {
         ArtifactStoreProvider::LocalFilesystem => {
             LocalContentAddressedArtifactStore::open(
@@ -106,11 +134,24 @@ async fn main() -> MainResult<()> {
         config.artifacts.reference_retention,
         config.artifacts.gc_interval,
         config.artifacts.deletion_claim_seconds,
+    )
+    .with_artifact_read_limit(config.artifacts.max_read_bytes)
+    .with_live_response_limits(
+        config.runtime.response_stream.body_queue_capacity,
+        config.runtime.response_stream.control_queue_capacity,
+        config.runtime.response_stream.terminal_barrier_timeout,
+        config.runtime.response_stream.outbound_write_timeout,
+    )
+    .with_live_response_byte_limits(
+        config.runtime.response_stream.max_frame_bytes,
+        config.runtime.response_stream.max_item_bytes,
+        config.runtime.response_stream.max_run_bytes,
     );
-    let service = RunService::start_with_artifact_store_and_graph_publication(
+    let service = RunService::start_with_artifact_store_graph_publication_and_live_response(
         agents,
         repository,
         workers,
+        live_response_broker,
         artifact_store,
         graph_publication_resolver,
         service_config,
@@ -188,22 +229,72 @@ fn build_api_auth(config: &PlatformConfig) -> MainResult<ApiAuth> {
     Ok(base.with_human_principal_resolver(Arc::new(resolver)))
 }
 
-async fn initialize_repository(
+async fn initialize_repository_and_live_response(
     config: &HistoryConfig,
-) -> MainResult<Arc<dyn ProductionRunRepository>> {
+    response_stream: ResponseStreamConfig,
+) -> MainResult<(
+    Arc<dyn ProductionRunRepository>,
+    Arc<dyn LiveResponseBroker>,
+)> {
     match config {
         HistoryConfig::Sqlite { path } => {
+            if response_stream.broker != LiveResponseBrokerProvider::InProcess {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "SQLite history supports only the in-process live response broker",
+                )
+                .into());
+            }
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            Ok(Arc::new(SqliteDurableRepository::connect_path(path).await?))
+            let repository = Arc::new(SqliteDurableRepository::connect_path(path).await?)
+                as Arc<dyn ProductionRunRepository>;
+            let broker = Arc::new(InMemoryLiveResponseBroker::new_with_limits(
+                response_stream.body_queue_capacity,
+                response_stream.control_queue_capacity,
+                LiveResponseByteLimits::new(
+                    response_stream.max_frame_bytes,
+                    response_stream.max_item_bytes,
+                    response_stream.max_run_bytes,
+                )?,
+            )?) as Arc<dyn LiveResponseBroker>;
+            Ok((repository, broker))
         }
         HistoryConfig::Postgres { database_url } => {
             let repository = PostgresDurableRepository::connect(database_url.expose()).await?;
             // Migration is part of PostgreSQL startup authority and must finish
             // before RunService performs any catalog or runtime table reads.
             repository.migrate_schema().await?;
-            Ok(Arc::new(repository))
+            let broker: Arc<dyn LiveResponseBroker> = match response_stream.broker {
+                LiveResponseBrokerProvider::InProcess => {
+                    Arc::new(InMemoryLiveResponseBroker::new_with_limits(
+                        response_stream.body_queue_capacity,
+                        response_stream.control_queue_capacity,
+                        LiveResponseByteLimits::new(
+                            response_stream.max_frame_bytes,
+                            response_stream.max_item_bytes,
+                            response_stream.max_run_bytes,
+                        )?,
+                    )?)
+                }
+                LiveResponseBrokerProvider::PostgresNotify => Arc::new(
+                    PostgresLiveResponseBroker::start(
+                        repository.connection_pool(),
+                        PostgresLiveResponseBrokerOptions::new(
+                            response_stream.body_queue_capacity,
+                            response_stream.control_queue_capacity,
+                            response_stream.max_frame_bytes,
+                        )?
+                        .with_publication_limits(
+                            response_stream.max_item_bytes,
+                            response_stream.max_run_bytes,
+                        )?,
+                    )
+                    .await?,
+                ),
+            };
+            Ok((Arc::new(repository), broker))
         }
     }
 }

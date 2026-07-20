@@ -1332,6 +1332,18 @@ async fn repair_subject(
     if rows != 1 {
         return Err(RepositoryError::invalid_data());
     }
+    if subject.kind() == ProjectionSubjectKind::Run
+        && matches!(
+            value.get("lifecycle").and_then(Value::as_str),
+            Some("succeeded" | "failed" | "cancelled" | "interrupted" | "timed_out")
+        )
+    {
+        super::postgres_model_tool_queue::close_model_tool_work_for_terminal_run_postgres(
+            transaction,
+            run_id,
+        )
+        .await?;
+    }
     Ok(())
 }
 

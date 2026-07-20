@@ -29,8 +29,8 @@ use uuid::Uuid;
 
 use crate::{
     catalog_v3::{
-        subflow_registry_for_available, subflow_registry_for_stored, DeployedV3Agent,
-        DeploymentRiskDiagnostic, LeafDeploymentResolver, PublishedV3Agent,
+        subflow_registry_for_available, subflow_registry_for_stored, AgentStreamingSourceKind,
+        DeployedV3Agent, DeploymentRiskDiagnostic, LeafDeploymentResolver, PublishedV3Agent,
     },
     dsl::v3::{
         GraphAuthorDocument, GraphSemanticEditBatch, GraphSurfaceRepository, StoredGraphView,
@@ -39,18 +39,20 @@ use crate::{
     engine::{
         plan::{DataPort, DataPortId, NodeKind, PlanIndex, PortDirection},
         repository::{
-            consume_scheduler_task_once, consume_scheduler_task_once_with_artifact_store,
-            drive_scheduler_until_quiescent, AcknowledgeArtifactDeletionCommand,
-            BeginMigrationCommand, BindArtifactStoreAuthorityCommand, ClaimHumanWorkItemCommand,
-            ClaimSchedulerRunCommand, CompleteHumanWorkItemCommand, ContinueAsNewCommand,
-            CreateRunCommand, FencedSchedulerRunCommand, FinalizeMigrationCommand,
+            consume_model_tool_task_once_with_observer,
+            consume_scheduler_task_once_with_artifact_store_and_retrieval_observer,
+            consume_scheduler_task_once_with_retrieval_observer, drive_scheduler_until_quiescent,
+            AcknowledgeArtifactDeletionCommand, BeginMigrationCommand,
+            BindArtifactStoreAuthorityCommand, ClaimHumanWorkItemCommand, ClaimSchedulerRunCommand,
+            CompleteHumanWorkItemCommand, ContinueAsNewCommand, CreateRunCommand,
+            DurableResponseSnapshot, FencedSchedulerRunCommand, FinalizeMigrationCommand,
             FireTimerCommand, ForkRunCommand, FrozenSchedulerWorkerFailurePolicy,
             HumanTaskDurableRepository, HumanTaskPrincipal, HumanWorkItem, HumanWorkItemId,
-            MigrationMappingCompatibility, NoSchedulerCrash, OrderedPublicEventRead,
-            OrphanSweepCommand, PlanPublicationOutcome, PublicEventOutboxRepository,
-            PublicEventPosition, PublicRunAttachment, PublicationHead, PublicationOrigin,
-            PublishVersionedPlanCommand, ReceiveSignalCommand, RecoveryDurableRepository,
-            RecoveryRevisionSpec, RecoveryRunReceipt, RedriveRunCommand,
+            MigrationMappingCompatibility, ModelToolBatchActivation, ModelToolWorkerPumpOutcome,
+            NoSchedulerCrash, OrderedPublicEventRead, OrphanSweepCommand, PlanPublicationOutcome,
+            PublicEventOutboxRepository, PublicEventPosition, PublicRunAttachment, PublicationHead,
+            PublicationOrigin, PublishVersionedPlanCommand, ReceiveSignalCommand,
+            RecoveryDurableRepository, RecoveryRevisionSpec, RecoveryRunReceipt, RedriveRunCommand,
             ReleaseRunArtifactRetentionCommand, RepositoryError, ResolveSignalCommand,
             RunProjection, RunTransitionCommand, RuntimeIngressDurableRepository,
             SchedulerDurableRepository, SchedulerLeaseRepository, SchedulerRecoveryOutcome,
@@ -58,16 +60,22 @@ use crate::{
             REPOSITORY_ARTIFACT_STORE_CONFLICT, REPOSITORY_CONSTRAINT_CONFLICT,
             REPOSITORY_INTENT_CONFLICT, REPOSITORY_REDRIVE_REQUIRES_FORK,
         },
-        AdmissionState, ArtifactStoreDeploymentCapability, ContentHash, DefinitionRevisionId,
-        ExecutionEventContext, ExecutionEventPayload, ExecutionRevisionPin, MigrationNodeMapping,
-        NodeId, PendingExecutionEvent, PublicEventEnvelope, PublicEventPayload, PublicFailureKind,
-        RunId, RunLifecycle as EngineRunLifecycle, RunLineageKind, RuntimeValue,
-        SchedulerCheckpointId, TerminationReason, TransitionKey, TransitionOutcome,
-        WorkerArtifactStore, WorkerExecutorRegistry,
+        AdmissionState, ArtifactId, ArtifactRef, ArtifactStoreDeploymentCapability, ContentHash,
+        DefinitionRevisionId, ExecutionEventContext, ExecutionEventPayload, ExecutionRevisionPin,
+        MigrationNodeMapping, NodeId, PendingExecutionEvent, PublicEventEnvelope,
+        PublicEventPayload, PublicFailureKind, RunId, RunLifecycle as EngineRunLifecycle,
+        RunLineageKind, RuntimeValue, SchedulerCheckpointId, TerminationReason, TransitionKey,
+        TransitionOutcome, WorkerArtifactStore, WorkerExecutorRegistry,
     },
     events::protocol::{RunEvent, RunEventScope, RunEventType},
     history::types::{summarize_input, RunAttachment, RunLifecycle, RunRecord, StopError},
     outcome::{FailureKind, RunFailure, RunOutput},
+};
+
+use super::{
+    CompletedFunctionCallTailPublication, InMemoryLiveResponseBroker, LiveResponseBroker,
+    LiveResponseBrokerCapability, LiveResponseByteLimits, LiveResponseItemIdentity,
+    LiveResponseSubscriber,
 };
 
 const PRODUCTION_TRANSITION_DOMAIN: &str = "production.v3.run-service";
@@ -79,6 +87,8 @@ const MAX_PUBLIC_EVENT_RETENTION: Duration = Duration::from_secs(10 * 365 * 24 *
 const MAX_RUNTIME_INGRESS_BATCH: u32 = 256;
 const MAX_HUMAN_TASK_LIST: u32 = 1_024;
 const MAX_SIGNAL_PAYLOAD_BYTES: usize = 1024 * 1024;
+const MAX_PUBLIC_ARTIFACT_SNAPSHOT_VALUES: usize = 100_000;
+const MAX_PUBLIC_ARTIFACT_SNAPSHOT_DEPTH: usize = 64;
 const PUBLIC_EVENT_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAX_TERMINATION_CAS_ATTEMPTS: usize = 32;
 const MAX_PUBLICATION_ADMISSION_ATTEMPTS: usize = 16;
@@ -89,6 +99,20 @@ const PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE: &str =
     "PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE";
 const PLATFORM_ARTIFACT_STORE_AUTHORITY_CONFLICT: &str =
     "PLATFORM_ARTIFACT_STORE_AUTHORITY_CONFLICT";
+const PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER: &str =
+    "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER";
+
+fn has_public_streaming_source(agent: &PublishedV3Agent) -> bool {
+    !agent.public_streaming_contract().sources().is_empty()
+}
+
+fn has_public_llm_streaming_source(agent: &PublishedV3Agent) -> bool {
+    agent
+        .public_streaming_contract()
+        .sources()
+        .iter()
+        .any(|source| source.kind() == AgentStreamingSourceKind::Llm)
+}
 
 /// Declares whether a Run repository can uphold the ownership and fencing
 /// contracts required by a production runtime.
@@ -823,8 +847,16 @@ pub struct RunServiceConfig {
     pub artifact_reference_retention: Duration,
     pub artifact_gc_interval: Duration,
     pub artifact_deletion_claim_seconds: u32,
+    pub artifact_read_max_bytes: usize,
     pub public_event_nonterminal_retention: Duration,
     pub public_event_prune_interval: Duration,
+    pub live_response_body_queue_capacity: usize,
+    pub live_response_control_queue_capacity: usize,
+    pub live_response_max_frame_bytes: usize,
+    pub live_response_max_item_bytes: usize,
+    pub live_response_max_run_bytes: usize,
+    pub terminal_barrier_timeout: Duration,
+    pub outbound_write_timeout: Duration,
 }
 
 impl RunServiceConfig {
@@ -849,8 +881,16 @@ impl RunServiceConfig {
             artifact_reference_retention: Duration::from_secs(30 * 24 * 60 * 60),
             artifact_gc_interval: Duration::from_secs(60),
             artifact_deletion_claim_seconds: 60,
+            artifact_read_max_bytes: 64 * 1024 * 1024,
             public_event_nonterminal_retention: Duration::from_secs(24 * 60 * 60),
             public_event_prune_interval: Duration::from_secs(60),
+            live_response_body_queue_capacity: 256,
+            live_response_control_queue_capacity: 32,
+            live_response_max_frame_bytes: 4 * 1_024,
+            live_response_max_item_bytes: 4 * 1_024 * 1_024,
+            live_response_max_run_bytes: 16 * 1_024 * 1_024,
+            terminal_barrier_timeout: Duration::from_secs(2),
+            outbound_write_timeout: Duration::from_secs(10),
         }
     }
 
@@ -887,6 +927,11 @@ impl RunServiceConfig {
         self
     }
 
+    pub fn with_artifact_read_limit(mut self, max_bytes: usize) -> Self {
+        self.artifact_read_max_bytes = max_bytes;
+        self
+    }
+
     pub fn with_run_timeout(mut self, timeout: Duration) -> Self {
         self.run_timeout = timeout;
         self
@@ -899,6 +944,32 @@ impl RunServiceConfig {
     ) -> Self {
         self.public_event_nonterminal_retention = nonterminal_retention;
         self.public_event_prune_interval = prune_interval;
+        self
+    }
+
+    pub fn with_live_response_limits(
+        mut self,
+        body_queue_capacity: usize,
+        control_queue_capacity: usize,
+        terminal_barrier_timeout: Duration,
+        outbound_write_timeout: Duration,
+    ) -> Self {
+        self.live_response_body_queue_capacity = body_queue_capacity;
+        self.live_response_control_queue_capacity = control_queue_capacity;
+        self.terminal_barrier_timeout = terminal_barrier_timeout;
+        self.outbound_write_timeout = outbound_write_timeout;
+        self
+    }
+
+    pub fn with_live_response_byte_limits(
+        mut self,
+        max_frame_bytes: usize,
+        max_item_bytes: usize,
+        max_run_bytes: usize,
+    ) -> Self {
+        self.live_response_max_frame_bytes = max_frame_bytes;
+        self.live_response_max_item_bytes = max_item_bytes;
+        self.live_response_max_run_bytes = max_run_bytes;
         self
     }
 
@@ -919,9 +990,18 @@ impl RunServiceConfig {
             || self.artifact_gc_interval.is_zero()
             || self.artifact_deletion_claim_seconds == 0
             || self.artifact_deletion_claim_seconds > 3_600
+            || self.artifact_read_max_bytes == 0
+            || self.artifact_read_max_bytes > 256 * 1024 * 1024
             || self.public_event_nonterminal_retention < Duration::from_secs(1)
             || self.public_event_nonterminal_retention > MAX_PUBLIC_EVENT_RETENTION
             || self.public_event_prune_interval.is_zero()
+            || self.live_response_body_queue_capacity == 0
+            || self.live_response_control_queue_capacity == 0
+            || self.live_response_max_frame_bytes == 0
+            || self.live_response_max_item_bytes < self.live_response_max_frame_bytes
+            || self.live_response_max_run_bytes < self.live_response_max_item_bytes
+            || self.terminal_barrier_timeout.is_zero()
+            || self.outbound_write_timeout.is_zero()
         {
             return Err(ServiceError::new(
                 "RUN_SERVICE_CONFIG_INVALID",
@@ -963,6 +1043,103 @@ impl From<RepositoryError> for ServiceError {
             "durable Run service is unavailable",
         )
     }
+}
+
+/// Verified bytes for one ArtifactRef already published by a Run's durable
+/// terminal response. The body is intentionally neither serializable nor
+/// printable so logs cannot accidentally capture Artifact contents.
+#[derive(PartialEq, Eq)]
+pub struct PublicArtifact {
+    artifact: ArtifactRef,
+    bytes: Vec<u8>,
+}
+
+impl PublicArtifact {
+    fn new(artifact: ArtifactRef, bytes: Vec<u8>) -> Self {
+        Self { artifact, bytes }
+    }
+
+    pub fn artifact(&self) -> &ArtifactRef {
+        &self.artifact
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl fmt::Debug for PublicArtifact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PublicArtifact")
+            .field("artifact", &self.artifact)
+            .field("body", &"<redacted>")
+            .finish()
+    }
+}
+
+fn public_artifact_reference(
+    snapshot: &DurableResponseSnapshot,
+    run_id: &RunId,
+    artifact_id: &ArtifactId,
+) -> Result<Option<ArtifactRef>, ServiceError> {
+    if snapshot.workflow().get("run_id").and_then(Value::as_str) != Some(run_id.as_str()) {
+        return Err(ServiceError::new(
+            "RUN_SERVICE_UNAVAILABLE",
+            "durable response snapshot is invalid",
+        ));
+    }
+
+    let mut pending = vec![(snapshot.response(), 0usize), (snapshot.workflow(), 0usize)];
+    let mut visited = 0usize;
+    let mut found: Option<ArtifactRef> = None;
+    while let Some((value, depth)) = pending.pop() {
+        visited = visited.checked_add(1).ok_or_else(|| {
+            ServiceError::new(
+                "RUN_SERVICE_UNAVAILABLE",
+                "durable response snapshot is invalid",
+            )
+        })?;
+        if visited > MAX_PUBLIC_ARTIFACT_SNAPSHOT_VALUES
+            || depth > MAX_PUBLIC_ARTIFACT_SNAPSHOT_DEPTH
+        {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_UNAVAILABLE",
+                "durable response snapshot exceeds Artifact authorization bounds",
+            ));
+        }
+        match value {
+            Value::Array(values) => {
+                pending.extend(values.iter().map(|value| (value, depth + 1)));
+            }
+            Value::Object(object) => {
+                if object.len() == 4
+                    && object.contains_key("artifact_id")
+                    && object.contains_key("content_hash")
+                    && object.contains_key("size_bytes")
+                    && object.contains_key("media_type")
+                {
+                    if let Ok(reference) = serde_json::from_value::<ArtifactRef>(value.clone()) {
+                        if reference.artifact_id() == artifact_id {
+                            if found
+                                .as_ref()
+                                .is_some_and(|existing| existing != &reference)
+                            {
+                                return Err(ServiceError::new(
+                                    "RUN_SERVICE_UNAVAILABLE",
+                                    "durable response snapshot has conflicting Artifact references",
+                                ));
+                            }
+                            found = Some(reference);
+                        }
+                    }
+                }
+                pending.extend(object.values().map(|value| (value, depth + 1)));
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+    Ok(found)
 }
 
 fn graph_surface_unavailable(_: RepositoryError) -> ServiceError {
@@ -1072,8 +1249,13 @@ pub struct RecoveryRunResult {
 
 pub struct AttachedRun {
     pub run_id: String,
+    pub response_id: String,
     pub request_id: String,
     pub subscription: RunSubscription,
+    pub live_response: Box<dyn LiveResponseSubscriber>,
+    pub live_response_broker: Arc<dyn LiveResponseBroker>,
+    pub terminal_barrier_timeout: Duration,
+    pub outbound_write_timeout: Duration,
 }
 
 #[derive(Debug)]
@@ -1100,6 +1282,24 @@ pub struct RunSubscription {
 impl RunSubscription {
     pub fn last_seq(&self) -> u64 {
         self.last_seq
+    }
+
+    pub async fn load_response_snapshot(
+        &self,
+    ) -> Result<DurableResponseSnapshot, SubscriptionError> {
+        let owner = self.owner.upgrade().ok_or(SubscriptionError {
+            code: "RUN_SERVICE_UNAVAILABLE",
+        })?;
+        owner
+            .repository
+            .load_response_snapshot(&self.run_id_model)
+            .await
+            .map_err(|_| SubscriptionError {
+                code: "RUN_SERVICE_UNAVAILABLE",
+            })?
+            .ok_or(SubscriptionError {
+                code: "RESPONSE_SNAPSHOT_UNAVAILABLE",
+            })
     }
 
     pub async fn recv(&mut self) -> Result<RunEvent, SubscriptionError> {
@@ -1208,11 +1408,16 @@ struct RunServiceInner {
     agents: DeployedAgentCatalog,
     repository: Arc<dyn ProductionRunRepository>,
     workers: Arc<WorkerExecutorRegistry>,
+    live_response_broker: Arc<dyn LiveResponseBroker>,
     artifact_store: Option<Arc<dyn WorkerArtifactStore>>,
     graph_publication_resolver: Option<Arc<dyn LeafDeploymentResolver>>,
     config: RunServiceConfig,
     owner: String,
     accepting: AtomicBool,
+    /// Alternates ordinary scheduler work and model-tool work across cycles.
+    /// Both queues therefore share the same process-global worker pool without
+    /// allowing either continuously-ready queue to starve the other.
+    model_tool_turn: AtomicBool,
     shutdown: CancellationToken,
     background: AsyncMutex<Vec<JoinHandle<()>>>,
     live: Mutex<BTreeMap<String, broadcast::Sender<()>>>,
@@ -1226,7 +1431,7 @@ impl RunService {
         workers: WorkerExecutorRegistry,
         config: RunServiceConfig,
     ) -> Result<Self, ServiceError> {
-        Self::start_inner(agents, repository, workers, None, None, config).await
+        Self::start_inner(agents, repository, workers, None, None, None, config).await
     }
 
     pub async fn start_with_artifact_store(
@@ -1240,6 +1445,7 @@ impl RunService {
             agents,
             repository,
             workers,
+            None,
             Some(artifact_store),
             None,
             config,
@@ -1259,6 +1465,7 @@ impl RunService {
             repository,
             workers,
             None,
+            None,
             Some(graph_publication_resolver),
             config,
         )
@@ -1277,6 +1484,28 @@ impl RunService {
             agents,
             repository,
             workers,
+            None,
+            Some(artifact_store),
+            Some(graph_publication_resolver),
+            config,
+        )
+        .await
+    }
+
+    pub async fn start_with_artifact_store_graph_publication_and_live_response(
+        agents: DeployedAgentCatalog,
+        repository: Arc<dyn ProductionRunRepository>,
+        workers: WorkerExecutorRegistry,
+        live_response_broker: Arc<dyn LiveResponseBroker>,
+        artifact_store: Arc<dyn WorkerArtifactStore>,
+        graph_publication_resolver: Arc<dyn LeafDeploymentResolver>,
+        config: RunServiceConfig,
+    ) -> Result<Self, ServiceError> {
+        Self::start_inner(
+            agents,
+            repository,
+            workers,
+            Some(live_response_broker),
             Some(artifact_store),
             Some(graph_publication_resolver),
             config,
@@ -1288,17 +1517,65 @@ impl RunService {
         agents: DeployedAgentCatalog,
         repository: Arc<dyn ProductionRunRepository>,
         workers: WorkerExecutorRegistry,
+        live_response_broker: Option<Arc<dyn LiveResponseBroker>>,
         artifact_store: Option<Arc<dyn WorkerArtifactStore>>,
         graph_publication_resolver: Option<Arc<dyn LeafDeploymentResolver>>,
         config: RunServiceConfig,
     ) -> Result<Self, ServiceError> {
         let config = config.validate()?;
+        let live_response_broker = match live_response_broker {
+            Some(broker) => broker,
+            None => Arc::new(
+                InMemoryLiveResponseBroker::new_with_limits(
+                    config.live_response_body_queue_capacity,
+                    config.live_response_control_queue_capacity,
+                    LiveResponseByteLimits::new(
+                        config.live_response_max_frame_bytes,
+                        config.live_response_max_item_bytes,
+                        config.live_response_max_run_bytes,
+                    )
+                    .map_err(|_| {
+                        ServiceError::new(
+                            "RUN_SERVICE_CONFIG_INVALID",
+                            "live response broker byte limits are invalid",
+                        )
+                    })?,
+                )
+                .map_err(|_| {
+                    ServiceError::new(
+                        "RUN_SERVICE_CONFIG_INVALID",
+                        "live response broker configuration is invalid",
+                    )
+                })?,
+            ) as Arc<dyn LiveResponseBroker>,
+        };
         if config.deployment_mode == RunServiceDeploymentMode::Production
             && repository.run_repository_capability() != RunRepositoryCapability::Production
         {
             return Err(ServiceError::new(
                 PLATFORM_PRODUCTION_REQUIRES_POSTGRES,
                 "production Run service requires a production-capable PostgreSQL repository",
+            ));
+        }
+        if agents
+            .list()
+            .any(|agent| has_public_llm_streaming_source(agent.published()))
+            && !workers.supports_public_llm_response()
+        {
+            return Err(ServiceError::new(
+                "RUN_DEPLOYMENT_UNAVAILABLE",
+                "public streaming Agents require an LLM worker bound to the live response broker",
+            ));
+        }
+        if config.deployment_mode == RunServiceDeploymentMode::Production
+            && live_response_broker.deployment_capability() != LiveResponseBrokerCapability::Shared
+            && agents
+                .list()
+                .any(|agent| has_public_streaming_source(agent.published()))
+        {
+            return Err(ServiceError::new(
+                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER,
+                "production Agents with public streaming sources require a shared live response broker",
             ));
         }
         if config.deployment_mode == RunServiceDeploymentMode::Production {
@@ -1381,11 +1658,13 @@ impl RunService {
                 agents,
                 repository,
                 workers: Arc::new(workers),
+                live_response_broker,
                 artifact_store,
                 graph_publication_resolver,
                 config,
                 owner: format!("runtime_{}", Uuid::new_v4().simple()),
                 accepting: AtomicBool::new(true),
+                model_tool_turn: AtomicBool::new(true),
                 shutdown: CancellationToken::new(),
                 background: AsyncMutex::new(Vec::new()),
                 live: Mutex::new(BTreeMap::new()),
@@ -1461,6 +1740,16 @@ impl RunService {
                     ServiceError::new("RUN_SERVICE_UNAVAILABLE", "v3 background pump panicked")
                 })?;
             }
+            self.inner
+                .live_response_broker
+                .shutdown(grace)
+                .await
+                .map_err(|_| {
+                    ServiceError::new(
+                        "RUN_SERVICE_UNAVAILABLE",
+                        "live response broker shutdown failed",
+                    )
+                })?;
             Ok(())
         })
         .await
@@ -1481,6 +1770,16 @@ impl RunService {
             .map_err(|_| {
                 ServiceError::new("RUN_SERVICE_UNAVAILABLE", "repository probe timed out")
             })??;
+        self.inner
+            .live_response_broker
+            .check_readiness(timeout)
+            .await
+            .map_err(|_| {
+                ServiceError::new(
+                    "RUN_SERVICE_UNAVAILABLE",
+                    "live response broker readiness probe failed",
+                )
+            })?;
         if !self.inner.accepting.load(Ordering::Acquire) {
             return Err(ServiceError::new(
                 "RUN_SERVICE_STOPPING",
@@ -1641,6 +1940,24 @@ impl RunService {
                 },
             )?,
         );
+        if self.inner.config.deployment_mode == RunServiceDeploymentMode::Production
+            && self.inner.live_response_broker.deployment_capability()
+                != LiveResponseBrokerCapability::Shared
+            && has_public_streaming_source(deployed.published())
+        {
+            return Err(ServiceError::new(
+                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER,
+                "production Graph publication with public streaming sources requires a shared live response broker",
+            ));
+        }
+        if has_public_llm_streaming_source(deployed.published())
+            && !self.inner.workers.supports_public_llm_response()
+        {
+            return Err(ServiceError::new(
+                "GRAPH_PUBLICATION_INVALID",
+                "graph publication requires a live-response-capable LLM worker",
+            ));
+        }
         if !deployed.workers_available(self.inner.workers.as_ref()) {
             return Err(ServiceError::new(
                 "GRAPH_PUBLICATION_INVALID",
@@ -1820,7 +2137,7 @@ impl RunService {
         input: Value,
         request: RequestMetadata,
     ) -> Result<RunRecord, ServiceError> {
-        let (projection, _) = self
+        let (projection, _, _) = self
             .create_run(
                 agent_id,
                 input,
@@ -1852,7 +2169,7 @@ impl RunService {
                 "graph deployment revision was not found for this agent",
             ));
         }
-        let (projection, _) = self
+        let (projection, _, _) = self
             .create_run_with_agent(
                 agent,
                 input,
@@ -1871,7 +2188,7 @@ impl RunService {
         input: Value,
         request: RequestMetadata,
     ) -> Result<AttachedRun, ServiceError> {
-        let (projection, receiver) = self
+        let (projection, receiver, live_response) = self
             .create_run(
                 agent_id,
                 input,
@@ -1881,8 +2198,11 @@ impl RunService {
             )
             .await?;
         let receiver = receiver.expect("attached creation opens a live receiver");
+        let live_response =
+            live_response.expect("attached creation opens a live response receiver");
         Ok(AttachedRun {
             run_id: projection.run_id().as_str().to_owned(),
+            response_id: projection.response_id().to_owned(),
             request_id: projection.request_id().to_owned(),
             subscription: RunSubscription {
                 run_id: projection.run_id().as_str().to_owned(),
@@ -1893,6 +2213,10 @@ impl RunService {
                 last_seq: 0,
                 terminal: false,
             },
+            live_response,
+            live_response_broker: Arc::clone(&self.inner.live_response_broker),
+            terminal_barrier_timeout: self.inner.config.terminal_barrier_timeout,
+            outbound_write_timeout: self.inner.config.outbound_write_timeout,
         })
     }
 
@@ -1903,7 +2227,14 @@ impl RunService {
         request: RequestMetadata,
         attachment: PublicRunAttachment,
         subscribe: bool,
-    ) -> Result<(RunProjection, Option<broadcast::Receiver<()>>), ServiceError> {
+    ) -> Result<
+        (
+            RunProjection,
+            Option<broadcast::Receiver<()>>,
+            Option<Box<dyn LiveResponseSubscriber>>,
+        ),
+        ServiceError,
+    > {
         if !self.inner.accepting.load(Ordering::Acquire) {
             return Err(ServiceError::new(
                 "RUN_SERVICE_STOPPING",
@@ -1961,7 +2292,32 @@ impl RunService {
         attachment: PublicRunAttachment,
         subscribe: bool,
         expected_publication_head: Option<PublicationHead>,
-    ) -> Result<(RunProjection, Option<broadcast::Receiver<()>>), ServiceError> {
+    ) -> Result<
+        (
+            RunProjection,
+            Option<broadcast::Receiver<()>>,
+            Option<Box<dyn LiveResponseSubscriber>>,
+        ),
+        ServiceError,
+    > {
+        if self.inner.config.deployment_mode == RunServiceDeploymentMode::Production
+            && self.inner.live_response_broker.deployment_capability()
+                != LiveResponseBrokerCapability::Shared
+            && has_public_streaming_source(agent.published())
+        {
+            return Err(ServiceError::new(
+                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER,
+                "public streaming admission requires a shared live response broker",
+            ));
+        }
+        if has_public_llm_streaming_source(agent.published())
+            && !self.inner.workers.supports_public_llm_response()
+        {
+            return Err(ServiceError::new(
+                "RUN_DEPLOYMENT_UNAVAILABLE",
+                "public streaming admission requires a live-response-capable LLM worker",
+            ));
+        }
         let normalized = agent
             .published()
             .normalize_input(input)
@@ -1991,6 +2347,22 @@ impl RunService {
             })
             .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple()));
         let receiver = subscribe.then(|| self.inner.open_subscription(&run_id));
+        let live_response = if subscribe {
+            Some(
+                self.inner
+                    .live_response_broker
+                    .subscribe(run_id.clone())
+                    .await
+                    .map_err(|_| {
+                        ServiceError::new(
+                            "LIVE_RESPONSE_UNAVAILABLE",
+                            "live response broker subscription is unavailable",
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
         let mut live_run = subscribe.then(|| LiveRunGuard::new(&self.inner, &run_id));
         let alias_admission = expected_publication_head.is_some();
         let command = CreateRunCommand::new(
@@ -1999,6 +2371,7 @@ impl RunService {
             normalized.value().clone(),
         )?
         .with_run_timeout(self.inner.config.run_timeout)?
+        .with_artifact_reference_retention(self.inner.config.artifact_reference_retention)?
         .with_public_metadata(request_id, attachment)?;
         let command = match expected_publication_head {
             Some(head) => command.with_expected_publication_head(head)?,
@@ -2043,7 +2416,7 @@ impl RunService {
         if let Some(live_run) = &mut live_run {
             live_run.retain();
         }
-        Ok((projection, receiver))
+        Ok((projection, receiver, live_response))
     }
 
     /// Create a new Run pinned to the source's exact immutable revision. When
@@ -2676,6 +3049,56 @@ impl RunService {
         self.inner.record(&projection).await
     }
 
+    /// Reads one Artifact only when its exact ArtifactRef is already present
+    /// in this Run's hashed durable public terminal snapshot. The repository
+    /// independently enforces Run ownership, referenced state and retention;
+    /// the store then revalidates size and content hash under a hard bound.
+    pub async fn read_public_artifact(
+        &self,
+        run_id: &str,
+        artifact_id: &str,
+    ) -> Result<PublicArtifact, ServiceError> {
+        let not_found = || ServiceError::new("ARTIFACT_NOT_FOUND", "Artifact not found");
+        let run_id = RunId::new(run_id.to_owned()).map_err(|_| not_found())?;
+        let artifact_id = ArtifactId::new(artifact_id.to_owned()).map_err(|_| not_found())?;
+        let snapshot = self
+            .inner
+            .repository
+            .load_response_snapshot(&run_id)
+            .await?
+            .ok_or_else(not_found)?;
+        let published =
+            public_artifact_reference(&snapshot, &run_id, &artifact_id)?.ok_or_else(not_found)?;
+        let retained = self
+            .inner
+            .repository
+            .get_retained_artifact(&run_id, &artifact_id)
+            .await?
+            .ok_or_else(not_found)?;
+        if retained.run_id() != &run_id || retained.artifact() != &published {
+            return Err(not_found());
+        }
+        if retained.artifact().size_bytes()
+            > u64::try_from(self.inner.config.artifact_read_max_bytes).unwrap_or(u64::MAX)
+        {
+            return Err(ServiceError::new(
+                "ARTIFACT_TOO_LARGE",
+                "Artifact exceeds the authorized read size",
+            ));
+        }
+        let store = self.inner.artifact_store.as_deref().ok_or_else(|| {
+            ServiceError::new("RUN_SERVICE_UNAVAILABLE", "Artifact storage is unavailable")
+        })?;
+        let bytes = store
+            .read_and_verify(
+                retained.artifact(),
+                retained.storage_locator(),
+                self.inner.config.artifact_read_max_bytes,
+            )
+            .await?;
+        Ok(PublicArtifact::new(published, bytes))
+    }
+
     /// Submit one typed durable signal. `message_id` is the public
     /// idempotency key; the target Activation and Signal identity are always
     /// resolved from scheduler-owned wait state.
@@ -3141,12 +3564,32 @@ impl RunService {
     }
 
     async fn cancel_model(&self, run_id: RunId) -> Result<RunRecord, ServiceError> {
+        self.terminate_model(run_id, TerminationReason::Cancelled, "cancel")
+            .await
+    }
+
+    /// Records a runtime-owned interruption through the same durable,
+    /// first-winner termination authority as cancellation and root timeout.
+    /// A terminal Run is returned unchanged.
+    pub async fn interrupt(&self, run_id: &str) -> Result<RunRecord, ServiceError> {
+        let run_id = RunId::new(run_id.to_owned())
+            .map_err(|_| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
+        self.terminate_model(run_id, TerminationReason::Interrupted, "interrupt")
+            .await
+    }
+
+    async fn terminate_model(
+        &self,
+        run_id: RunId,
+        reason: TerminationReason,
+        operation: &str,
+    ) -> Result<RunRecord, ServiceError> {
         self.inner
-            .claim_termination(&run_id, TerminationReason::Cancelled, "cancel")
+            .claim_termination(&run_id, reason, operation)
             .await?;
-        // Cancellation is a draining operation, so it must not be stranded by
-        // the ordinary admission limit. A process may temporarily exceed the
-        // limit only to drive an existing Run toward its terminal state.
+        // Control termination is a draining operation, so it must not be
+        // stranded by the ordinary admission limit. A process may temporarily
+        // exceed the limit only to drive an existing Run toward terminal.
         self.inner.resume_run(&run_id, true).await?;
         self.inner.flush_public_events().await?;
         let projection = self
@@ -3240,6 +3683,47 @@ impl Drop for LiveRunGuard<'_> {
 }
 
 impl RunServiceInner {
+    /// Publishes the completed function-call item only after its durable
+    /// checkpoint and tool-batch activation have committed. Exact activation
+    /// replay carries the same frozen identity and canonical arguments, so
+    /// the live broker can deterministically deduplicate every frame and seal.
+    /// Observation remains best-effort and never changes durable execution.
+    fn publish_completed_function_calls(&self, activation: &ModelToolBatchActivation) {
+        for task in activation.tasks() {
+            let (Some(public_item), Some(arguments_jcs), Some(seal_index)) = (
+                task.public_item(),
+                task.public_arguments_jcs(),
+                task.public_seal_index(),
+            ) else {
+                continue;
+            };
+            let Ok(identity) = LiveResponseItemIdentity::new(
+                activation.run_id().clone(),
+                activation.activation_id().clone(),
+                activation.parent_attempt_no(),
+                activation.model_call_no(),
+                public_item.item_id(),
+                public_item.output_index(),
+            ) else {
+                continue;
+            };
+            let Ok(publication) = CompletedFunctionCallTailPublication::build(
+                identity,
+                task.call_id(),
+                task.action().name(),
+                arguments_jcs,
+                seal_index,
+            ) else {
+                continue;
+            };
+            let (frames, seal) = publication.into_parts();
+            for frame in frames {
+                let _ = self.live_response_broker.publish(frame);
+            }
+            let _ = self.live_response_broker.seal(seal);
+        }
+    }
+
     /// Resolve one immutable deployment from the process-local archive or,
     /// when another runtime published it after startup, from one durable
     /// catalog snapshot. Restoring from that snapshot recursively installs the
@@ -3659,9 +4143,27 @@ impl RunServiceInner {
                 "per-Run worker concurrency is invalid",
             )
         })?;
+        let model_tool_first = self.model_tool_turn.fetch_xor(true, Ordering::AcqRel);
+        if model_tool_first {
+            let outcome = consume_model_tool_task_once_with_observer(
+                self.repository.as_ref(),
+                self.workers.as_ref(),
+                &claimant,
+                self.config.task_claim_seconds,
+                per_run,
+                self.shutdown.child_token(),
+                self.live_response_broker.as_ref(),
+                &NoSchedulerCrash,
+            )
+            .await?;
+            if !matches!(outcome, ModelToolWorkerPumpOutcome::NoTask) {
+                self.recovery_cycle().await?;
+                return Ok(());
+            }
+        }
         let outcome = match self.artifact_store.as_deref() {
             Some(store) => {
-                consume_scheduler_task_once_with_artifact_store(
+                consume_scheduler_task_once_with_artifact_store_and_retrieval_observer(
                     self.repository.as_ref(),
                     self.workers.as_ref(),
                     &FrozenSchedulerWorkerFailurePolicy,
@@ -3670,12 +4172,13 @@ impl RunServiceInner {
                     per_run,
                     self.shutdown.child_token(),
                     store,
+                    self.live_response_broker.as_ref(),
                     &NoSchedulerCrash,
                 )
                 .await?
             }
             None => {
-                consume_scheduler_task_once(
+                consume_scheduler_task_once_with_retrieval_observer(
                     self.repository.as_ref(),
                     self.workers.as_ref(),
                     &FrozenSchedulerWorkerFailurePolicy,
@@ -3683,13 +4186,34 @@ impl RunServiceInner {
                     self.config.task_claim_seconds,
                     per_run,
                     self.shutdown.child_token(),
+                    self.live_response_broker.as_ref(),
                     &NoSchedulerCrash,
                 )
                 .await?
             }
         };
+        if let SchedulerWorkerPumpOutcome::SuspendedForTools { activation, .. } = &outcome {
+            self.publish_completed_function_calls(activation);
+        }
         if !matches!(outcome, SchedulerWorkerPumpOutcome::NoTask) {
             self.recovery_cycle().await?;
+            return Ok(());
+        }
+        if !model_tool_first {
+            let outcome = consume_model_tool_task_once_with_observer(
+                self.repository.as_ref(),
+                self.workers.as_ref(),
+                &claimant,
+                self.config.task_claim_seconds,
+                per_run,
+                self.shutdown.child_token(),
+                self.live_response_broker.as_ref(),
+                &NoSchedulerCrash,
+            )
+            .await?;
+            if !matches!(outcome, ModelToolWorkerPumpOutcome::NoTask) {
+                self.recovery_cycle().await?;
+            }
         }
         Ok(())
     }
@@ -3932,6 +4456,7 @@ impl RunServiceInner {
         };
         Ok(RunRecord {
             run_id: projection.run_id().as_str().to_owned(),
+            response_id: projection.response_id().to_owned(),
             projection_version: projection.projection_version(),
             request_id: projection.request_id().to_owned(),
             agent_id: projection.agent_id().to_owned(),
@@ -4568,6 +5093,143 @@ fn spawn_artifact_gc_pump(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod public_artifact_authorization_tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::engine::repository::{ResponseTerminalKind, ResponseUsageStatus};
+
+    fn snapshot(run_id: &RunId, workflow: Value) -> DurableResponseSnapshot {
+        let response_id = format!("resp_{}", run_id.as_str());
+        let response = json!({
+            "id": response_id,
+            "object": "response",
+            "status": "completed",
+            "output": [],
+            "usage": null,
+            "error": null
+        });
+        let manifest = json!([]);
+        let projection = json!({
+            "response_id": response_id,
+            "terminal_kind": "response.completed",
+            "response": response,
+            "workflow": workflow,
+            "public_item_manifest": manifest,
+            "usage": Value::Null,
+            "usage_status": "unavailable",
+        });
+        let hash = ContentHash::from_bytes(&serde_jcs::to_vec(&projection).unwrap());
+        DurableResponseSnapshot::new(
+            response_id,
+            ResponseTerminalKind::Completed,
+            response,
+            workflow,
+            manifest,
+            None,
+            ResponseUsageStatus::Unavailable,
+            hash,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn only_exact_refs_in_the_hashed_public_snapshot_authorize_a_handle() {
+        let run_id = RunId::new("run_public_artifact").unwrap();
+        let bytes = b"image bytes";
+        let reference = ArtifactRef::new(
+            ArtifactId::new("artifact_public_image").unwrap(),
+            ContentHash::from_bytes(bytes),
+            bytes.len() as u64,
+            Some("image/png".to_owned()),
+        )
+        .unwrap();
+        let snapshot = snapshot(
+            &run_id,
+            json!({
+                "run_id": run_id.as_str(),
+                "result": {"answer": "done"},
+                "tool_results": [{
+                    "content": [{"type": "output_image", "artifact": reference}]
+                }],
+                "retrievals": [],
+                "usage_status": "unavailable"
+            }),
+        );
+        assert_eq!(
+            public_artifact_reference(&snapshot, &run_id, reference.artifact_id()).unwrap(),
+            Some(reference.clone())
+        );
+        assert!(public_artifact_reference(
+            &snapshot,
+            &run_id,
+            &ArtifactId::new("artifact_other").unwrap()
+        )
+        .unwrap()
+        .is_none());
+
+        let other_run = RunId::new("run_other").unwrap();
+        assert_eq!(
+            public_artifact_reference(&snapshot, &other_run, reference.artifact_id())
+                .unwrap_err()
+                .code(),
+            "RUN_SERVICE_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn conflicting_public_refs_fail_closed_and_artifact_body_is_not_debuggable() {
+        let run_id = RunId::new("run_conflicting_artifact").unwrap();
+        let artifact_id = ArtifactId::new("artifact_conflict").unwrap();
+        let first = ArtifactRef::new(
+            artifact_id.clone(),
+            ContentHash::from_bytes(b"first"),
+            5,
+            Some("text/plain".to_owned()),
+        )
+        .unwrap();
+        let second = ArtifactRef::new(
+            artifact_id.clone(),
+            ContentHash::from_bytes(b"second"),
+            6,
+            Some("text/plain".to_owned()),
+        )
+        .unwrap();
+        let snapshot = snapshot(
+            &run_id,
+            json!({
+                "run_id": run_id.as_str(),
+                "result": [first, second],
+                "tool_results": [],
+                "retrievals": [],
+                "usage_status": "unavailable"
+            }),
+        );
+        assert_eq!(
+            public_artifact_reference(&snapshot, &run_id, &artifact_id)
+                .unwrap_err()
+                .code(),
+            "RUN_SERVICE_UNAVAILABLE"
+        );
+
+        let body = b"body must stay private".to_vec();
+        let public = PublicArtifact::new(
+            ArtifactRef::new(
+                artifact_id,
+                ContentHash::from_bytes(&body),
+                body.len() as u64,
+                None,
+            )
+            .unwrap(),
+            body,
+        );
+        let debug = format!("{public:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("body must stay private"));
+    }
 }
 
 #[cfg(test)]

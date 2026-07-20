@@ -59,6 +59,8 @@ workflow:
         - type: llm
           id: answer
           model: vision_chat
+          stream: true
+          publish: true
           messages:
             - role: system
               content:
@@ -82,6 +84,8 @@ workflow:
         - type: llm
           id: abnormal_indicators
           model: vision_chat
+          stream: true
+          publish: true
           messages:
             - role: system
               content:
@@ -97,6 +101,8 @@ workflow:
         - type: llm
           id: comprehensive_interpretation
           model: vision_chat
+          stream: true
+          publish: true
           messages:
             - role: system
               content:
@@ -112,6 +118,8 @@ workflow:
         - type: llm
           id: health_advice
           model: vision_chat
+          stream: true
+          publish: true
           messages:
             - role: system
               content:

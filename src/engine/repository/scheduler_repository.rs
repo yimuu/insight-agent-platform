@@ -12,7 +12,11 @@ use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
 use crate::engine::{
     plan::{DataPortId, NodeKind, Plan, PlanIndex, PlanType, VersionTag},
-    worker::{TaskExecutionRequest, TaskExecutionResult, WorkerFailure, WorkerFailureClass},
+    worker::{
+        ModelCallAuthority, ModelCallCompletion, ModelFinishReason, ModelToolCallBatch,
+        ResponseItemAuthority, TaskExecutionRequest, TaskExecutionResult, WorkerFailure,
+        WorkerFailureClass,
+    },
     ActivationId, AttemptNo, ContentHash, DefinitionRevisionId, DeploymentRevisionId,
     EffectEvidence, ExecutionRevisionPin, LeaseEpoch, LeaseFence, NodeId, PlannedSchedulerAction,
     RunId, RuntimeValue, SafeError, SchedulerAction, SchedulerCheckpointId, SchedulerFacts,
@@ -24,12 +28,50 @@ use crate::engine::EffectIdempotency;
 
 use super::{
     ArtifactDurableRepository, DurableRepository, FencedSchedulerRunCommand,
-    ProjectionDurableRepository, RepositoryError,
+    ModelToolBatchActivationOutcome, ModelToolParentResume, ModelToolTaskClaim,
+    ModelToolTaskCommitReceipt, ModelToolTaskHeartbeatOutcome, ModelToolTaskOutcome,
+    ModelToolTaskTransitionOutcome, ProjectionDurableRepository, RepositoryError,
 };
 
 pub const SCHEDULER_CHECKPOINT_SCHEMA_VERSION: u32 = 2;
-pub const SCHEDULER_TASK_ENVELOPE_SCHEMA_VERSION: u32 = 2;
+pub const SCHEDULER_TASK_ENVELOPE_SCHEMA_VERSION: u32 = 3;
 pub(crate) const SCHEDULER_WORKER_DEADLINE_EXCEEDED: &str = "WORKER_DEADLINE_EXCEEDED";
+
+/// Closed durable record for a model call which stopped to request tools.
+///
+/// This deliberately records only the model boundary: it neither changes an
+/// activation/task state nor starts a tool.  The later scheduler handoff owns
+/// those transitions.  Keeping the completion and batch inseparable here is
+/// what prevents a crash from leaving an apparently completed `tool_calls`
+/// model call without the exact calls needed to continue it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelToolCallCheckpoint {
+    completion: ModelCallCompletion,
+    batch: ModelToolCallBatch,
+}
+
+impl ModelToolCallCheckpoint {
+    pub fn new(
+        completion: ModelCallCompletion,
+        batch: ModelToolCallBatch,
+    ) -> Result<Self, &'static str> {
+        if completion.finish_reason() != ModelFinishReason::ToolCalls
+            || completion.model_call_no() != batch.model_call_no()
+            || batch.calls().is_empty()
+        {
+            return Err("MODEL_TOOL_CALL_CHECKPOINT_INVALID");
+        }
+        Ok(Self { completion, batch })
+    }
+
+    pub fn completion(&self) -> &ModelCallCompletion {
+        &self.completion
+    }
+
+    pub fn batch(&self) -> &ModelToolCallBatch {
+        &self.batch
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -534,6 +576,7 @@ pub(crate) fn scheduler_validation_fixture(
             WorkerCancellation::Cooperative,
         )
         .unwrap(),
+        deployment_binding: serde_json::json!({}),
         public_configuration: BTreeMap::new(),
         secret_configuration: BTreeMap::new(),
         inputs: Vec::new(),
@@ -1005,6 +1048,145 @@ pub trait SchedulerDurableRepository:
         &self,
         claim: &SchedulerTaskClaim,
     ) -> Result<TransitionOutcome<SchedulerCommitReceipt>, RepositoryError>;
+
+    /// Reserves the durable identity for one Provider request before that
+    /// request is sent. When `publish` is true this atomically freezes the
+    /// response item identity and append-only output index as well.
+    ///
+    /// The exact running Attempt claim is the authority. Replaying the same
+    /// identity returns the original reservation; a stale/expired/terminal
+    /// claim can never mint or recover write authority.
+    async fn reserve_model_call(
+        &self,
+        claim: &SchedulerTaskClaim,
+        model_call_no: u32,
+        publish: bool,
+    ) -> Result<SchedulerTaskCommitOutcome<ModelCallAuthority>, RepositoryError> {
+        let _ = (claim, model_call_no, publish);
+        Err(RepositoryError::invalid_configuration())
+    }
+
+    /// Lazily allocates the append-only public message identity for a model
+    /// call after the Provider has produced the first non-empty text. The
+    /// current renewable claim is the only authority; reservation is a
+    /// fenced CAS and exact replay returns the original item/index.
+    async fn reserve_model_call_public_item(
+        &self,
+        claim: &SchedulerTaskClaim,
+        model_call_no: u32,
+    ) -> Result<SchedulerTaskCommitOutcome<ResponseItemAuthority>, RepositoryError> {
+        let _ = (claim, model_call_no);
+        Err(RepositoryError::invalid_configuration())
+    }
+
+    /// Lazily allocates one standard function-call output item after the
+    /// Provider has supplied stable call identity, but before any argument
+    /// fragment is published. The repository rechecks the frozen
+    /// `call:true, arguments:all` policy under the current renewable claim.
+    async fn reserve_model_call_public_function_item(
+        &self,
+        claim: &SchedulerTaskClaim,
+        model_call_no: u32,
+        call_index: u32,
+        call_id: &str,
+        tool_name: &str,
+    ) -> Result<SchedulerTaskCommitOutcome<ResponseItemAuthority>, RepositoryError> {
+        let _ = (claim, model_call_no, call_index, call_id, tool_name);
+        Err(RepositoryError::invalid_configuration())
+    }
+
+    /// Fenced, idempotent checkpoint for normalized finish reason, Provider
+    /// usage and the completed (or explicitly incomplete) public item.
+    /// Transient deltas are deliberately outside this durable boundary.
+    async fn checkpoint_model_call_completion(
+        &self,
+        claim: &SchedulerTaskClaim,
+        completion: &ModelCallCompletion,
+    ) -> Result<SchedulerTaskCommitOutcome<()>, RepositoryError> {
+        let _ = (claim, completion);
+        Err(RepositoryError::invalid_configuration())
+    }
+
+    /// Atomically checkpoints a `tool_calls` model completion and its exact
+    /// assistant/tool-call batch as a non-executable durable handoff intent.
+    /// No child has execution authority in this state. Recovery must classify
+    /// the parent as `ActivateCheckpointed`, never call the Provider again,
+    /// and complete materialization through `activate_model_tool_call_batch`.
+    async fn checkpoint_model_tool_call_batch(
+        &self,
+        claim: &SchedulerTaskClaim,
+        checkpoint: &ModelToolCallCheckpoint,
+    ) -> Result<SchedulerTaskCommitOutcome<()>, RepositoryError> {
+        let _ = (claim, checkpoint);
+        Err(RepositoryError::invalid_configuration())
+    }
+
+    /// Loads the only durable continuation state authorized by this exact,
+    /// fresh parent task claim. `Committed { result: None }` denotes the
+    /// initial model call; every recovery state is returned as `Some`.
+    ///
+    /// The repository must derive this from the latest model-call row for the
+    /// current Attempt. Older ready batches are never continuation authority.
+    async fn load_model_tool_parent_resume(
+        &self,
+        claim: &SchedulerTaskClaim,
+    ) -> Result<SchedulerTaskCommitOutcome<Option<ModelToolParentResume>>, RepositoryError> {
+        let _ = claim;
+        Err(RepositoryError::invalid_configuration())
+    }
+
+    /// Atomically upgrades an immutable model tool-call checkpoint into all
+    /// executable tool-task authorities and the parent's `waiting_tools`
+    /// barrier using only the parent LLM's frozen deployment binding. There
+    /// must be no durable state in which a proper subset is executable or the
+    /// children are executable without the parent barrier. This method never
+    /// executes an Action.
+    async fn activate_model_tool_call_batch(
+        &self,
+        parent_claim: &SchedulerTaskClaim,
+        model_call_no: u32,
+    ) -> Result<ModelToolBatchActivationOutcome, RepositoryError> {
+        let _ = (parent_claim, model_call_no);
+        Err(RepositoryError::invalid_configuration())
+    }
+
+    /// Claims ready tool calls with a hard per-Run concurrency bound.
+    async fn claim_model_tool_calls(
+        &self,
+        claimed_by: &str,
+        claim_seconds: u32,
+        limit: u32,
+        max_claimed_per_run: u32,
+    ) -> Result<Vec<ModelToolTaskClaim>, RepositoryError> {
+        let _ = (claimed_by, claim_seconds, limit, max_claimed_per_run);
+        Err(RepositoryError::invalid_configuration())
+    }
+
+    async fn mark_model_tool_call_started(
+        &self,
+        claim: &ModelToolTaskClaim,
+    ) -> Result<ModelToolTaskTransitionOutcome<()>, RepositoryError> {
+        let _ = claim;
+        Err(RepositoryError::invalid_configuration())
+    }
+
+    async fn heartbeat_model_tool_call(
+        &self,
+        claim: &ModelToolTaskClaim,
+        claim_seconds: u32,
+    ) -> Result<ModelToolTaskHeartbeatOutcome, RepositoryError> {
+        let _ = (claim, claim_seconds);
+        Err(RepositoryError::invalid_configuration())
+    }
+
+    async fn commit_model_tool_call_outcome(
+        &self,
+        claim: &ModelToolTaskClaim,
+        outcome: &ModelToolTaskOutcome,
+    ) -> Result<ModelToolTaskTransitionOutcome<ModelToolTaskCommitReceipt>, RepositoryError> {
+        let _ = (claim, outcome);
+        Err(RepositoryError::invalid_configuration())
+    }
 
     /// Renews both the task-outbox claim and the exact Attempt lease with one
     /// CAS. The returned claim carries the new task projection version and is

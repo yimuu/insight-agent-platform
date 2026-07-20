@@ -548,6 +548,7 @@ async fn derive_reuse_candidates_sqlite(
             request.descriptor_version(),
             request.worker_version(),
             request.effect_policy(),
+            request.deployment_binding(),
             request.public_configuration(),
             request.secret_configuration(),
             request.inputs(),
@@ -2373,6 +2374,28 @@ async fn terminalize_source(
     .execute(&mut **tx)
     .await
     .map_err(RepositoryError::storage)?;
+    super::sqlite_model_tool_queue::close_model_tool_work_for_terminal_run_sqlite(
+        tx,
+        &source.run_id,
+    )
+    .await?;
+    super::sqlite::persist_terminal_response_snapshot_sqlite(
+        tx,
+        &source.run_id,
+        RunLifecycle::Cancelled,
+        None,
+        Some(public_error_code),
+    )
+    .await?;
+    super::sqlite::register_terminal_artifact_retention_sqlite(
+        tx,
+        &source.run_id,
+        transition_key,
+        intent_hash,
+        &id,
+        seq,
+    )
+    .await?;
     Ok(Some(recovery_event(
         &source.run_id,
         seq,

@@ -484,6 +484,7 @@ fn drive(input: serde_json::Value) -> (Vec<&'static str>, SchedulerFacts) {
                         trace.push(match task_kind {
                             SchedulerTaskKind::Llm => "dispatch_llm",
                             SchedulerTaskKind::Action => "dispatch_action",
+                            SchedulerTaskKind::Retrieval => "dispatch_retrieval",
                             SchedulerTaskKind::Http => "dispatch_http",
                             SchedulerTaskKind::Tool => "dispatch_tool",
                         });
