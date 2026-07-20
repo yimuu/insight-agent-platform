@@ -394,11 +394,16 @@ impl Error for WorkflowPublicResultError {}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum WorkflowToolContentWire {
-    OutputText { text: String },
-    OutputJson { json: Value },
-    OutputImage { artifact: ArtifactRef },
-    OutputFile { artifact: ArtifactRef },
-    OutputAudio { artifact: ArtifactRef },
+    #[serde(rename = "output_text")]
+    Text { text: String },
+    #[serde(rename = "output_json")]
+    Json { json: Value },
+    #[serde(rename = "output_image")]
+    Image { artifact: ArtifactRef },
+    #[serde(rename = "output_file")]
+    File { artifact: ArtifactRef },
+    #[serde(rename = "output_audio")]
+    Audio { artifact: ArtifactRef },
 }
 
 /// Closed public content union for a completed workflow tool call.
@@ -419,62 +424,61 @@ impl WorkflowToolContent {
             "workflow tool text must be non-empty and bounded",
         )?;
         Ok(Self {
-            wire: WorkflowToolContentWire::OutputText { text },
+            wire: WorkflowToolContentWire::Text { text },
         })
     }
 
     pub fn output_json(json: Value) -> Result<Self, WorkflowPublicResultError> {
         validate_bounded_public_json(&json, MAX_WORKFLOW_PUBLIC_JSON_BYTES)?;
         Ok(Self {
-            wire: WorkflowToolContentWire::OutputJson { json },
+            wire: WorkflowToolContentWire::Json { json },
         })
     }
 
     pub fn output_image(artifact: ArtifactRef) -> Self {
         Self {
-            wire: WorkflowToolContentWire::OutputImage { artifact },
+            wire: WorkflowToolContentWire::Image { artifact },
         }
     }
 
     pub fn output_file(artifact: ArtifactRef) -> Self {
         Self {
-            wire: WorkflowToolContentWire::OutputFile { artifact },
+            wire: WorkflowToolContentWire::File { artifact },
         }
     }
 
     pub fn output_audio(artifact: ArtifactRef) -> Self {
         Self {
-            wire: WorkflowToolContentWire::OutputAudio { artifact },
+            wire: WorkflowToolContentWire::Audio { artifact },
         }
     }
 
     pub fn text(&self) -> Option<&str> {
         match &self.wire {
-            WorkflowToolContentWire::OutputText { text } => Some(text),
-            WorkflowToolContentWire::OutputJson { .. }
-            | WorkflowToolContentWire::OutputImage { .. }
-            | WorkflowToolContentWire::OutputFile { .. }
-            | WorkflowToolContentWire::OutputAudio { .. } => None,
+            WorkflowToolContentWire::Text { text } => Some(text),
+            WorkflowToolContentWire::Json { .. }
+            | WorkflowToolContentWire::Image { .. }
+            | WorkflowToolContentWire::File { .. }
+            | WorkflowToolContentWire::Audio { .. } => None,
         }
     }
 
     pub fn json(&self) -> Option<&Value> {
         match &self.wire {
-            WorkflowToolContentWire::OutputJson { json } => Some(json),
-            WorkflowToolContentWire::OutputText { .. }
-            | WorkflowToolContentWire::OutputImage { .. }
-            | WorkflowToolContentWire::OutputFile { .. }
-            | WorkflowToolContentWire::OutputAudio { .. } => None,
+            WorkflowToolContentWire::Json { json } => Some(json),
+            WorkflowToolContentWire::Text { .. }
+            | WorkflowToolContentWire::Image { .. }
+            | WorkflowToolContentWire::File { .. }
+            | WorkflowToolContentWire::Audio { .. } => None,
         }
     }
 
     pub fn artifact(&self) -> Option<&ArtifactRef> {
         match &self.wire {
-            WorkflowToolContentWire::OutputImage { artifact }
-            | WorkflowToolContentWire::OutputFile { artifact }
-            | WorkflowToolContentWire::OutputAudio { artifact } => Some(artifact),
-            WorkflowToolContentWire::OutputText { .. }
-            | WorkflowToolContentWire::OutputJson { .. } => None,
+            WorkflowToolContentWire::Image { artifact }
+            | WorkflowToolContentWire::File { artifact }
+            | WorkflowToolContentWire::Audio { artifact } => Some(artifact),
+            WorkflowToolContentWire::Text { .. } | WorkflowToolContentWire::Json { .. } => None,
         }
     }
 }
@@ -494,15 +498,15 @@ impl<'de> Deserialize<'de> for WorkflowToolContent {
         D: Deserializer<'de>,
     {
         match WorkflowToolContentWire::deserialize(deserializer)? {
-            WorkflowToolContentWire::OutputText { text } => {
+            WorkflowToolContentWire::Text { text } => {
                 Self::output_text(text).map_err(D::Error::custom)
             }
-            WorkflowToolContentWire::OutputJson { json } => {
+            WorkflowToolContentWire::Json { json } => {
                 Self::output_json(json).map_err(D::Error::custom)
             }
-            WorkflowToolContentWire::OutputImage { artifact } => Ok(Self::output_image(artifact)),
-            WorkflowToolContentWire::OutputFile { artifact } => Ok(Self::output_file(artifact)),
-            WorkflowToolContentWire::OutputAudio { artifact } => Ok(Self::output_audio(artifact)),
+            WorkflowToolContentWire::Image { artifact } => Ok(Self::output_image(artifact)),
+            WorkflowToolContentWire::File { artifact } => Ok(Self::output_file(artifact)),
+            WorkflowToolContentWire::Audio { artifact } => Ok(Self::output_audio(artifact)),
         }
     }
 }

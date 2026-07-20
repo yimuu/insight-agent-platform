@@ -639,7 +639,7 @@ pub enum ModelToolTaskTransitionOutcome<T> {
 
 #[derive(Clone, PartialEq)]
 pub enum ModelToolTaskHeartbeatOutcome {
-    Renewed(ModelToolTaskClaim),
+    Renewed(Box<ModelToolTaskClaim>),
     StaleLease,
     StateConflict,
     RunTerminal,
@@ -920,16 +920,19 @@ fn valid_qualified_name(value: &str) -> bool {
 }
 
 pub(crate) fn parse_action_from_stored_evidence(
-    name: String,
-    action_id: String,
-    action_version: String,
-    descriptor_hash: String,
-    input_schema: Value,
-    output_schema: Value,
-    effect_policy: WorkerEffectPolicy,
-    deployment_binding: Value,
-    effective_public_policy: Value,
+    evidence: StoredModelToolActionEvidence,
 ) -> Result<FrozenModelToolAction, RepositoryError> {
+    let StoredModelToolActionEvidence {
+        name,
+        action_id,
+        action_version,
+        descriptor_hash,
+        input_schema,
+        output_schema,
+        effect_policy,
+        deployment_binding,
+        effective_public_policy,
+    } = evidence;
     let synthetic = json!({
         "adapter": "core.llm",
         "tool_limits": {"max_rounds": 1, "max_calls": 1},
@@ -954,4 +957,16 @@ pub(crate) fn parse_action_from_stored_evidence(
         .into_values()
         .next()
         .ok_or_else(RepositoryError::invalid_data)
+}
+
+pub(crate) struct StoredModelToolActionEvidence {
+    pub name: String,
+    pub action_id: String,
+    pub action_version: String,
+    pub descriptor_hash: String,
+    pub input_schema: Value,
+    pub output_schema: Value,
+    pub effect_policy: WorkerEffectPolicy,
+    pub deployment_binding: Value,
+    pub effective_public_policy: Value,
 }

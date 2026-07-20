@@ -1124,18 +1124,21 @@ async fn assert_durable_authority(
     assert!(effect_id.starts_with("effect_"));
 
     assert_eq!(action.calls.load(Ordering::SeqCst), 1);
-    let records = action.records.lock().unwrap();
-    assert_eq!(records.len(), 1);
+    let record = {
+        let records = action.records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        records[0].clone()
+    };
     assert_eq!(
-        records[0].input,
+        record.input,
         json!({
             "query": "durable",
             "server_token": SERVER_ONLY_SECRET_SENTINEL
         })
     );
-    assert_eq!(records[0].run_id, transcript.run_id);
+    assert_eq!(record.run_id, transcript.run_id);
     assert_eq!(
-        records[0].operation_id,
+        record.operation_id,
         format!(
             "model_tool_{}",
             tool_task_id
@@ -1143,8 +1146,8 @@ async fn assert_durable_authority(
                 .expect("durable tool task uses its closed task namespace")
         )
     );
-    assert_eq!(records[0].attempt, 1);
-    assert_eq!(records[0].idempotency_key, effect_id);
+    assert_eq!(record.attempt, 1);
+    assert_eq!(record.idempotency_key, effect_id);
 
     let function_item = sqlx::query(
         "SELECT item_id,item_status,seal_index,safe_item FROM response_public_items \

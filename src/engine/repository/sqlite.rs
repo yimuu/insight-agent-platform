@@ -28,7 +28,7 @@ use super::{
         parse_run_lifecycle, payload_id, project_terminal_tool_results, public_event_id,
         public_event_ordinal, u64_from_i64, validate_inline_payload, StoredExecutionEventRow,
         StoredModelCallUsage, StoredPublicProjectionDecision, StoredResponseItem,
-        StoredSucceededModelToolCall,
+        StoredSucceededModelToolCall, TerminalResponseSnapshotInput,
     },
     CommitReceipt, CreateRunCommand, DurableRepository, DurableResponseSnapshot,
     PlanInstallOutcome, PlanPublicationOutcome, PublicationHead, PublicationOrigin,
@@ -859,7 +859,7 @@ pub(crate) async fn persist_terminal_response_snapshot_sqlite(
         super::sqlite_retrieval_publication::load_terminal_retrievals_sqlite(transaction, run_id)
             .await?;
     validate_terminal_retrieval_artifacts_sqlite(transaction, run_id, &retrievals).await?;
-    let snapshot = build_terminal_response_snapshot(
+    let snapshot = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
         run_id,
         lifecycle,
         output,
@@ -868,7 +868,7 @@ pub(crate) async fn persist_terminal_response_snapshot_sqlite(
         model_calls,
         tool_results,
         retrievals,
-    )?;
+    })?;
     sqlx::query(
         "INSERT INTO response_snapshots (
             run_id,response_id,terminal_kind,response_status,response_payload,

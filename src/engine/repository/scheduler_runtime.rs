@@ -1193,7 +1193,7 @@ where
                     success
                 }
             };
-            PendingWorkerOutcome::Succeeded(success)
+            PendingWorkerOutcome::Succeeded(Box::new(success))
         }
         Some(Err(failure)) => PendingWorkerOutcome::Failed(failure),
         None => {
@@ -1234,7 +1234,7 @@ where
             .await;
     }
     let outcome = match pending_outcome {
-        PendingWorkerOutcome::Succeeded(success) => SchedulerTaskOutcome::Succeeded(success),
+        PendingWorkerOutcome::Succeeded(success) => SchedulerTaskOutcome::Succeeded(*success),
         PendingWorkerOutcome::Failed(failure) => {
             SchedulerTaskOutcome::Failed(failure_policy.freeze(&claim, &failure)?)
         }
@@ -1460,7 +1460,7 @@ where
         .heartbeat_model_tool_task(&claim, claim_seconds)
         .await?
     {
-        ModelToolTaskHeartbeatOutcome::Renewed(renewed) => claim = renewed,
+        ModelToolTaskHeartbeatOutcome::Renewed(renewed) => claim = *renewed,
         ModelToolTaskHeartbeatOutcome::StaleLease => {
             return Ok(ModelToolWorkerPumpOutcome::LeaseLost {
                 effect_evidence: EffectEvidence::Unknown,
@@ -1583,7 +1583,7 @@ where
                         false,
                     ).expect("the closed executor-panic failure is valid")),
                 };
-                break ModelToolExecutionExit::Worker(result);
+                break ModelToolExecutionExit::Worker(Box::new(result));
             }
             _ = cancellation.cancelled() => {
                 task_cancellation.cancel();
@@ -1594,7 +1594,7 @@ where
                     .heartbeat_model_tool_task(&claim, claim_seconds)
                     .await?
                 {
-                    ModelToolTaskHeartbeatOutcome::Renewed(renewed) => claim = renewed,
+                    ModelToolTaskHeartbeatOutcome::Renewed(renewed) => claim = *renewed,
                     ModelToolTaskHeartbeatOutcome::StaleLease => {
                         task_cancellation.cancel();
                         break ModelToolExecutionExit::StaleLease;
@@ -1633,12 +1633,10 @@ where
             ModelToolTaskOutcome::cancelled(MODEL_TOOL_DEADLINE_EXCEEDED, EffectEvidence::Unknown)
                 .map_err(|_| RepositoryError::invalid_data())?
         }
-        ModelToolExecutionExit::Worker(Err(failure)) => {
-            model_tool_outcome_from_worker_failure(&failure)?
-        }
-        ModelToolExecutionExit::Worker(Ok(result)) => {
-            model_tool_outcome_from_worker_success(&claim, &result)?
-        }
+        ModelToolExecutionExit::Worker(result) => match *result {
+            Err(failure) => model_tool_outcome_from_worker_failure(&failure)?,
+            Ok(result) => model_tool_outcome_from_worker_success(&claim, &result)?,
+        },
     };
 
     let completion = commit_model_tool_outcome(
@@ -1656,7 +1654,7 @@ where
 }
 
 enum ModelToolExecutionExit {
-    Worker(Result<crate::engine::worker::TaskExecutionResult, WorkerFailure>),
+    Worker(Box<Result<crate::engine::worker::TaskExecutionResult, WorkerFailure>>),
     Deadline,
     Shutdown,
     StaleLease,
@@ -1994,7 +1992,7 @@ where
         .heartbeat_model_tool_task(claim, claim_seconds)
         .await?
     {
-        ModelToolTaskHeartbeatOutcome::Renewed(renewed) => *claim = renewed,
+        ModelToolTaskHeartbeatOutcome::Renewed(renewed) => *claim = *renewed,
         ModelToolTaskHeartbeatOutcome::StaleLease => {
             return Ok(ModelToolCommitCompletion {
                 pump_outcome: ModelToolWorkerPumpOutcome::LeaseLost {
@@ -2095,7 +2093,7 @@ fn worker_result_effect_evidence(
 }
 
 enum PendingWorkerOutcome {
-    Succeeded(SchedulerTaskSuccess),
+    Succeeded(Box<SchedulerTaskSuccess>),
     Failed(WorkerFailure),
 }
 
@@ -2860,9 +2858,9 @@ mod tests {
                 .pop_front()
                 .unwrap_or(MockModelToolHeartbeat::Renewed);
             Ok(match step {
-                MockModelToolHeartbeat::Renewed => {
-                    ModelToolTaskHeartbeatOutcome::Renewed(renewed_model_tool_claim(claim))
-                }
+                MockModelToolHeartbeat::Renewed => ModelToolTaskHeartbeatOutcome::Renewed(
+                    Box::new(renewed_model_tool_claim(claim)),
+                ),
                 MockModelToolHeartbeat::StaleLease => ModelToolTaskHeartbeatOutcome::StaleLease,
                 MockModelToolHeartbeat::StateConflict => {
                     ModelToolTaskHeartbeatOutcome::StateConflict
@@ -3058,25 +3056,27 @@ mod tests {
             "public": descriptor_public_policy,
         });
         let action = crate::engine::repository::parse_action_from_stored_evidence(
-            "lookup".to_owned(),
-            "lookup".to_owned(),
-            "1.2.3".to_owned(),
-            descriptor_hash,
-            json!({
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
-                "$defs": {},
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "detail": {"type": "string"}
-                },
-                "required": ["query", "detail"],
-                "additionalProperties": false
-            }),
-            output_schema,
-            effect_policy,
-            deployment_binding,
-            effective_public_policy,
+            crate::engine::repository::StoredModelToolActionEvidence {
+                name: "lookup".to_owned(),
+                action_id: "lookup".to_owned(),
+                action_version: "1.2.3".to_owned(),
+                descriptor_hash,
+                input_schema: json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "$defs": {},
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "detail": {"type": "string"}
+                    },
+                    "required": ["query", "detail"],
+                    "additionalProperties": false
+                }),
+                output_schema,
+                effect_policy,
+                deployment_binding,
+                effective_public_policy,
+            },
         )
         .unwrap();
         let run_id = RunId::new("run_model_tool_pump").unwrap();

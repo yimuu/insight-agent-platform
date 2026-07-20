@@ -94,7 +94,9 @@ pub use model::{
 };
 pub use model_tool_parent_resume::ModelToolParentResume;
 #[cfg(test)]
-pub(crate) use model_tool_queue::{deterministic_tool_identity, parse_action_from_stored_evidence};
+pub(crate) use model_tool_queue::{
+    deterministic_tool_identity, parse_action_from_stored_evidence, StoredModelToolActionEvidence,
+};
 pub use model_tool_queue::{
     FrozenModelToolAction, ModelToolBatchActivation, ModelToolBatchActivationOutcome,
     ModelToolContinuationStatus, ModelToolFailureClass, ModelToolTaskClaim,

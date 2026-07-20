@@ -1795,6 +1795,7 @@ mod tests {
         plan::{PlanType, PortName},
         repository::{
             deterministic_tool_identity, parse_action_from_stored_evidence, ModelToolTaskClaim,
+            StoredModelToolActionEvidence,
         },
         scheduler::TaskOutputContract,
     };
@@ -1848,17 +1849,21 @@ mod tests {
             "required_capabilities": [],
             "public": {"call": false, "arguments": "private", "result": null},
         });
-        let action = parse_action_from_stored_evidence(
-            "lookup".to_owned(),
-            "lookup".to_owned(),
-            "1.2.3".to_owned(),
+        let action = parse_action_from_stored_evidence(StoredModelToolActionEvidence {
+            name: "lookup".to_owned(),
+            action_id: "lookup".to_owned(),
+            action_version: "1.2.3".to_owned(),
             descriptor_hash,
-            json!({"type": "object"}),
-            json!({}),
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({}),
             effect_policy,
             deployment_binding,
-            json!({"call": false, "arguments": "private", "result": null}),
-        )
+            effective_public_policy: json!({
+                "call": false,
+                "arguments": "private",
+                "result": null
+            }),
+        })
         .unwrap();
         let run_id = RunId::new("run_model_tool").unwrap();
         let parent_activation = ActivationId::new("activation_model_parent").unwrap();

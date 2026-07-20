@@ -1430,8 +1430,10 @@ async fn a_real_tcp_client_that_stops_reading_hits_the_outbound_deadline_and_can
     // small test-listener send buffer and client receive buffer. Every frame,
     // the single item, and the Run remain comfortably below the configured
     // 4 KiB / 4 MiB / 16 MiB live limits.
-    assert!(TCP_BACKPRESSURE_DELTA_BYTES < 4 * 1_024);
-    assert!(TCP_BACKPRESSURE_DELTA_BYTES * TCP_BACKPRESSURE_EVENT_COUNT < 4 * 1_024 * 1_024);
+    const {
+        assert!(TCP_BACKPRESSURE_DELTA_BYTES < 4 * 1_024);
+        assert!(TCP_BACKPRESSURE_DELTA_BYTES * TCP_BACKPRESSURE_EVENT_COUNT < 4 * 1_024 * 1_024);
+    }
     let server_socket = tokio::net::TcpSocket::new_v4().unwrap();
     server_socket.set_reuseaddr(true).unwrap();
     server_socket.set_send_buffer_size(4 * 1_024).unwrap();

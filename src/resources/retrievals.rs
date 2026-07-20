@@ -588,9 +588,7 @@ fn is_qualified_identifier(value: &str) -> bool {
     if value.is_empty() || value.len() > 128 || !value.is_ascii() {
         return false;
     }
-    value
-        .split('.')
-        .all(|segment| is_schema_identifier(segment))
+    value.split('.').all(is_schema_identifier)
 }
 
 fn is_closed_object_schema(schema: &Value) -> bool {

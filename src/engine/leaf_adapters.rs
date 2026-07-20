@@ -2294,6 +2294,7 @@ mod tests {
             plan::{DataPortId, LeafTaskDescriptor, PlanProperty, PortName},
             repository::{
                 deterministic_tool_identity, parse_action_from_stored_evidence, ModelToolTaskClaim,
+                StoredModelToolActionEvidence,
             },
             scheduler::{
                 BoundTaskInput, SchedulerAction, SchedulerCheckpointId, SchedulerIntent,
@@ -4175,17 +4176,21 @@ mod tests {
         )
         .unwrap();
         let deployment_binding = frozen_action_binding(registered.as_ref());
-        let frozen_action = parse_action_from_stored_evidence(
-            identity.id.clone(),
-            identity.id.clone(),
-            identity.version.to_string(),
-            identity.descriptor_hash.clone(),
-            descriptor.input_schema.clone(),
-            descriptor.output_schema.clone(),
+        let frozen_action = parse_action_from_stored_evidence(StoredModelToolActionEvidence {
+            name: identity.id.clone(),
+            action_id: identity.id.clone(),
+            action_version: identity.version.to_string(),
+            descriptor_hash: identity.descriptor_hash.clone(),
+            input_schema: descriptor.input_schema.clone(),
+            output_schema: descriptor.output_schema.clone(),
             effect_policy,
             deployment_binding,
-            json!({"call": false, "arguments": "private", "result": null}),
-        )
+            effective_public_policy: json!({
+                "call": false,
+                "arguments": "private",
+                "result": null
+            }),
+        })
         .unwrap();
         let run_id = RunId::new("run_synthetic_tool").unwrap();
         let parent_activation = ActivationId::new("activation_synthetic_parent").unwrap();
@@ -4233,11 +4238,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             calls.lock().unwrap().as_slice(),
-            &[((
+            &[(
                 json!({"text": "$literal-tool-result"}),
                 claim.identity().effect_id().as_str().to_owned(),
                 2,
-            ))]
+            )]
         );
 
         let mut tampered_binding = serde_json::to_value(&request).unwrap();
@@ -4294,17 +4299,21 @@ mod tests {
             )
             .unwrap();
             let deployment_binding = frozen_action_binding(registered.as_ref());
-            let frozen_action = parse_action_from_stored_evidence(
-                identity.id.clone(),
-                identity.id.clone(),
-                identity.version.to_string(),
-                identity.descriptor_hash.clone(),
-                descriptor.input_schema.clone(),
-                descriptor.output_schema.clone(),
+            let frozen_action = parse_action_from_stored_evidence(StoredModelToolActionEvidence {
+                name: identity.id.clone(),
+                action_id: identity.id.clone(),
+                action_version: identity.version.to_string(),
+                descriptor_hash: identity.descriptor_hash.clone(),
+                input_schema: descriptor.input_schema.clone(),
+                output_schema: descriptor.output_schema.clone(),
                 effect_policy,
                 deployment_binding,
-                json!({"call": true, "arguments": "all", "result": null}),
-            )
+                effective_public_policy: json!({
+                    "call": true,
+                    "arguments": "all",
+                    "result": null
+                }),
+            })
             .unwrap();
             let run_id = RunId::new("run_server_injection").unwrap();
             let parent_activation = ActivationId::new("activation_server_injection").unwrap();

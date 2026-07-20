@@ -902,6 +902,7 @@ async fn database_clock_timer_fires_while_paused_and_downstream_waits_for_resume
     );
     service.resume(&created.run_id).await.unwrap();
     wait_for_completed(&service, &created.run_id).await;
+    service.shutdown(Duration::from_secs(1)).await.unwrap();
     let timer_id: String =
         sqlx::query_scalar("SELECT timer_id FROM timers WHERE run_id=? AND timer_kind='wait'")
             .bind(&created.run_id)
@@ -940,7 +941,6 @@ async fn database_clock_timer_fires_while_paused_and_downstream_waits_for_resume
         .await
         .unwrap()
         .repaired());
-    service.shutdown(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]

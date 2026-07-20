@@ -319,16 +319,30 @@ pub(crate) struct PendingResponseSnapshot {
     pub snapshot_hash: ContentHash,
 }
 
+pub(crate) struct TerminalResponseSnapshotInput<'a> {
+    pub run_id: &'a RunId,
+    pub lifecycle: RunLifecycle,
+    pub output: Option<&'a Value>,
+    pub error_code: Option<&'a str>,
+    pub items: Vec<StoredResponseItem>,
+    pub model_calls: Vec<StoredModelCallUsage>,
+    pub tool_results: Vec<WorkflowToolResult>,
+    pub retrievals: Vec<crate::runtime::response_stream::WorkflowRetrieval>,
+}
+
 pub(crate) fn build_terminal_response_snapshot(
-    run_id: &RunId,
-    lifecycle: RunLifecycle,
-    output: Option<&Value>,
-    error_code: Option<&str>,
-    items: Vec<StoredResponseItem>,
-    model_calls: Vec<StoredModelCallUsage>,
-    tool_results: Vec<WorkflowToolResult>,
-    retrievals: Vec<crate::runtime::response_stream::WorkflowRetrieval>,
+    input: TerminalResponseSnapshotInput<'_>,
 ) -> Result<PendingResponseSnapshot, RepositoryError> {
+    let TerminalResponseSnapshotInput {
+        run_id,
+        lifecycle,
+        output,
+        error_code,
+        items,
+        model_calls,
+        tool_results,
+        retrievals,
+    } = input;
     let response_id = format!("resp_{}", run_id.as_str());
     let (terminal_kind, response_status) = match lifecycle {
         RunLifecycle::Succeeded => (ResponseTerminalKind::Completed, "completed"),
@@ -1199,7 +1213,7 @@ mod tests {
     use super::{
         build_terminal_response_snapshot, project_terminal_tool_results, public_event_id,
         public_event_ordinal, validate_completed_function_call_item, StoredModelCallUsage,
-        StoredResponseItem, StoredSucceededModelToolCall,
+        StoredResponseItem, StoredSucceededModelToolCall, TerminalResponseSnapshotInput,
     };
 
     fn normalized_public_result_schema() -> Value {
@@ -1363,16 +1377,17 @@ mod tests {
                 json!({"indicator": "WBC"}),
             )])
             .unwrap();
-            let snapshot = build_terminal_response_snapshot(
-                &run_id,
+            let snapshot = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+                run_id: &run_id,
                 lifecycle,
-                (lifecycle == RunLifecycle::Succeeded).then_some(&json!({"answer": "safe"})),
-                (lifecycle == RunLifecycle::Failed).then_some("RUN_FAILED"),
-                Vec::new(),
-                Vec::new(),
+                output: (lifecycle == RunLifecycle::Succeeded)
+                    .then_some(&json!({"answer": "safe"})),
+                error_code: (lifecycle == RunLifecycle::Failed).then_some("RUN_FAILED"),
+                items: Vec::new(),
+                model_calls: Vec::new(),
                 tool_results,
-                Vec::new(),
-            )
+                retrievals: Vec::new(),
+            })
             .unwrap();
             observed.push(snapshot.workflow["tool_results"].clone());
         }
@@ -1381,22 +1396,22 @@ mod tests {
         assert_eq!(observed[0][0]["content"][0]["json"]["indicator"], "WBC");
 
         let build_replay = || {
-            build_terminal_response_snapshot(
-                &run_id,
-                RunLifecycle::Cancelled,
-                None,
-                Some("SCHEDULER_CANCELLED"),
-                Vec::new(),
-                Vec::new(),
-                project_terminal_tool_results(vec![stored_tool_call(
+            build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+                run_id: &run_id,
+                lifecycle: RunLifecycle::Cancelled,
+                output: None,
+                error_code: Some("SCHEDULER_CANCELLED"),
+                items: Vec::new(),
+                model_calls: Vec::new(),
+                tool_results: project_terminal_tool_results(vec![stored_tool_call(
                     "activation_a",
                     0,
                     frozen_policy(true, Some(normalized_public_result_schema())),
                     json!({"indicator": "WBC"}),
                 )])
                 .unwrap(),
-                Vec::new(),
-            )
+                retrievals: Vec::new(),
+            })
             .unwrap()
         };
         let first = build_replay();
@@ -1441,16 +1456,16 @@ mod tests {
         });
 
         for lifecycle in [RunLifecycle::Failed, RunLifecycle::Cancelled] {
-            let snapshot = build_terminal_response_snapshot(
-                &run_id,
+            let snapshot = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+                run_id: &run_id,
                 lifecycle,
-                None,
-                (lifecycle == RunLifecycle::Failed).then_some("PROVIDER_FAILED"),
-                Vec::new(),
-                complete_calls(),
-                Vec::new(),
-                Vec::new(),
-            )
+                output: None,
+                error_code: (lifecycle == RunLifecycle::Failed).then_some("PROVIDER_FAILED"),
+                items: Vec::new(),
+                model_calls: complete_calls(),
+                tool_results: Vec::new(),
+                retrievals: Vec::new(),
+            })
             .unwrap();
             assert_eq!(snapshot.response["usage"], expected);
             assert_eq!(snapshot.workflow["usage_status"], "complete");
@@ -1461,28 +1476,28 @@ mod tests {
     #[test]
     fn terminal_usage_marks_provider_omission_without_fabricating_zeroes() {
         let run_id = RunId::new("run_terminal_usage_missing").unwrap();
-        let unavailable = build_terminal_response_snapshot(
-            &run_id,
-            RunLifecycle::Cancelled,
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
+        let unavailable = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+            run_id: &run_id,
+            lifecycle: RunLifecycle::Cancelled,
+            output: None,
+            error_code: None,
+            items: Vec::new(),
+            model_calls: Vec::new(),
+            tool_results: Vec::new(),
+            retrievals: Vec::new(),
+        })
         .unwrap();
         assert_eq!(unavailable.response["usage"], Value::Null);
         assert_eq!(unavailable.workflow["usage_status"], "unavailable");
         assert_eq!(unavailable.usage, None);
 
-        let partial = build_terminal_response_snapshot(
-            &run_id,
-            RunLifecycle::Failed,
-            None,
-            Some("PROVIDER_FAILED"),
-            Vec::new(),
-            vec![
+        let partial = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+            run_id: &run_id,
+            lifecycle: RunLifecycle::Failed,
+            output: None,
+            error_code: Some("PROVIDER_FAILED"),
+            items: Vec::new(),
+            model_calls: vec![
                 StoredModelCallUsage {
                     usage: Some(json!({
                         "input_tokens": 10,
@@ -1498,9 +1513,9 @@ mod tests {
                     usage_complete: false,
                 },
             ],
-            Vec::new(),
-            Vec::new(),
-        )
+            tool_results: Vec::new(),
+            retrievals: Vec::new(),
+        })
         .unwrap();
         assert_eq!(partial.response["usage"], Value::Null);
         assert_eq!(partial.workflow["usage_status"], "partial");
@@ -1529,31 +1544,33 @@ mod tests {
                 "arguments": arguments,
             })),
         };
-        let snapshot = build_terminal_response_snapshot(
-            &run_id,
-            RunLifecycle::Cancelled,
-            None,
-            Some("SCHEDULER_CANCELLED"),
-            vec![item("")],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
+        let snapshot = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+            run_id: &run_id,
+            lifecycle: RunLifecycle::Cancelled,
+            output: None,
+            error_code: Some("SCHEDULER_CANCELLED"),
+            items: vec![item("")],
+            model_calls: Vec::new(),
+            tool_results: Vec::new(),
+            retrievals: Vec::new(),
+        })
         .unwrap();
         assert_eq!(snapshot.response["output"][0]["status"], "incomplete");
         assert_eq!(snapshot.response["output"][0]["arguments"], "");
         assert_eq!(snapshot.manifest[0]["status"], "incomplete_unsealed");
 
-        assert!(build_terminal_response_snapshot(
-            &run_id,
-            RunLifecycle::Cancelled,
-            None,
-            Some("SCHEDULER_CANCELLED"),
-            vec![item(r#"{"secret":"#)],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
-        .is_err());
+        assert!(
+            build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+                run_id: &run_id,
+                lifecycle: RunLifecycle::Cancelled,
+                output: None,
+                error_code: Some("SCHEDULER_CANCELLED"),
+                items: vec![item(r#"{"secret":"#)],
+                model_calls: Vec::new(),
+                tool_results: Vec::new(),
+                retrievals: Vec::new(),
+            })
+            .is_err()
+        );
     }
 }

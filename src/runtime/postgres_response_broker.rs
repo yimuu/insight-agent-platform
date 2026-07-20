@@ -669,11 +669,8 @@ fn take_idle_outbound(
 ) -> Vec<Arc<OutboundRegistration>> {
     let expired = registrations
         .iter()
-        .filter_map(|(run_id, registration)| {
-            registration
-                .is_idle_at(now, idle_timeout)
-                .then(|| run_id.clone())
-        })
+        .filter(|(_, registration)| registration.is_idle_at(now, idle_timeout))
+        .map(|(run_id, _)| run_id.clone())
         .collect::<Vec<_>>();
     expired
         .into_iter()

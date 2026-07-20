@@ -20,7 +20,7 @@ use super::{
         ModelToolContinuationStatus, ModelToolFailureClass, ModelToolTaskClaim,
         ModelToolTaskCommitReceipt, ModelToolTaskDisposition, ModelToolTaskHeartbeatOutcome,
         ModelToolTaskIdentity, ModelToolTaskOutcome, ModelToolTaskStatus,
-        ModelToolTaskTransitionOutcome,
+        ModelToolTaskTransitionOutcome, StoredModelToolActionEvidence,
     },
     scheduler_repository::{
         DurableTaskExecutionRequest, SchedulerTaskClaim, SchedulerTaskClaimMode,
@@ -270,21 +270,25 @@ fn decode_action(row: &sqlx::sqlite::SqliteRow) -> Result<FrozenModelToolAction,
     let effect_policy: WorkerEffectPolicy =
         serde_json::from_value(decode_json_text(row, "action_effect_policy")?)
             .map_err(|_| RepositoryError::invalid_data())?;
-    parse_action_from_stored_evidence(
-        row.try_get("tool_name")
+    parse_action_from_stored_evidence(StoredModelToolActionEvidence {
+        name: row
+            .try_get("tool_name")
             .map_err(|_| RepositoryError::invalid_data())?,
-        row.try_get("action_id")
+        action_id: row
+            .try_get("action_id")
             .map_err(|_| RepositoryError::invalid_data())?,
-        row.try_get("action_version")
+        action_version: row
+            .try_get("action_version")
             .map_err(|_| RepositoryError::invalid_data())?,
-        row.try_get("action_descriptor_hash")
+        descriptor_hash: row
+            .try_get("action_descriptor_hash")
             .map_err(|_| RepositoryError::invalid_data())?,
-        decode_json_text(row, "action_input_schema")?,
-        decode_json_text(row, "action_output_schema")?,
+        input_schema: decode_json_text(row, "action_input_schema")?,
+        output_schema: decode_json_text(row, "action_output_schema")?,
         effect_policy,
-        decode_json_text(row, "action_deployment_binding")?,
-        decode_json_text(row, "effective_public_policy")?,
-    )
+        deployment_binding: decode_json_text(row, "action_deployment_binding")?,
+        effective_public_policy: decode_json_text(row, "effective_public_policy")?,
+    })
 }
 
 fn decode_public_item(
@@ -1934,7 +1938,7 @@ pub(crate) async fn heartbeat_model_tool_call_sqlite(
     };
     let renewed = decode_claim(&renewed)?;
     tx.commit().await.map_err(RepositoryError::storage)?;
-    Ok(ModelToolTaskHeartbeatOutcome::Renewed(renewed))
+    Ok(ModelToolTaskHeartbeatOutcome::Renewed(Box::new(renewed)))
 }
 
 fn retry_delay_ms(policy: &WorkerEffectPolicy, attempt_no: AttemptNo) -> u64 {

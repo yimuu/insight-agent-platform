@@ -1355,6 +1355,25 @@ async fn prepare_sqlite_task(
     (claim, fence)
 }
 
+async fn expire_sqlite_scheduler_task_claim(control: &SqlitePool, run_id: &RunId) {
+    let expired_at = sqlx::query_scalar::<_, String>("SELECT datetime('now','-1 second')")
+        .fetch_one(control)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE task_outbox SET claim_expires_at=? WHERE run_id=?")
+        .bind(&expired_at)
+        .bind(run_id.as_str())
+        .execute(control)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE node_attempts SET lease_expires_at=? WHERE run_id=?")
+        .bind(&expired_at)
+        .bind(run_id.as_str())
+        .execute(control)
+        .await
+        .unwrap();
+}
+
 async fn prepare_postgres_task(
     repository: &PostgresDurableRepository,
     control: &PgPool,
@@ -1850,20 +1869,7 @@ async fn sqlite_deadline_authority_rejects_premature_and_lost_leases_and_commits
         0,
     );
 
-    sqlx::query(
-        "UPDATE task_outbox SET claim_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(lost_run.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE node_attempts SET lease_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(lost_run.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
+    expire_sqlite_scheduler_task_claim(&control, &lost_run).await;
     assert_eq!(
         repository
             .heartbeat_scheduler_task(&lost, 60)
@@ -2119,20 +2125,7 @@ async fn sqlite_model_call_reservation_and_checkpoint_are_fenced_append_only_and
     let stale_run_id = RunId::new("run_sqlite_model_call_stale").unwrap();
     let (stale, _) =
         prepare_sqlite_task(&repository, &control, &versioned, &linked, &stale_run_id).await;
-    sqlx::query(
-        "UPDATE task_outbox SET claim_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(stale_run_id.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE node_attempts SET lease_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(stale_run_id.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
+    expire_sqlite_scheduler_task_claim(&control, &stale_run_id).await;
     assert_eq!(
         repository
             .reserve_model_call(&stale, 1, true)
@@ -2166,20 +2159,7 @@ async fn sqlite_model_call_reservation_and_checkpoint_are_fenced_append_only_and
             .unwrap(),
         SchedulerTaskCommitOutcome::Committed { .. }
     ));
-    sqlx::query(
-        "UPDATE task_outbox SET claim_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(stale_item_run_id.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE node_attempts SET lease_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(stale_item_run_id.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
+    expire_sqlite_scheduler_task_claim(&control, &stale_item_run_id).await;
     assert_eq!(
         repository
             .reserve_model_call_public_item(&stale_item, 1)
@@ -2294,20 +2274,7 @@ async fn sqlite_function_call_public_item_allocation_is_concurrent_fenced_and_de
             .unwrap(),
         SchedulerTaskCommitOutcome::Committed { .. }
     ));
-    sqlx::query(
-        "UPDATE task_outbox SET claim_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(stale_run.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE node_attempts SET lease_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(stale_run.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
+    expire_sqlite_scheduler_task_claim(&control, &stale_run).await;
     assert_eq!(
         repository
             .reserve_model_call_public_function_item(&stale_claim, 1, 0, "call_weather", "weather",)
@@ -2433,20 +2400,7 @@ async fn sqlite_failed_function_items_checkpoint_exactly_or_remain_unsealed_with
             other => panic!("function item was not reserved: {other:?}"),
         };
         if expire_lease {
-            sqlx::query(
-                "UPDATE task_outbox SET claim_expires_at=datetime('now','-1 second') WHERE run_id=?",
-            )
-            .bind(run_id.as_str())
-            .execute(&control)
-            .await
-            .unwrap();
-            sqlx::query(
-                "UPDATE node_attempts SET lease_expires_at=datetime('now','-1 second') WHERE run_id=?",
-            )
-            .bind(run_id.as_str())
-            .execute(&control)
-            .await
-            .unwrap();
+            expire_sqlite_scheduler_task_claim(&control, &run_id).await;
         } else {
             sqlx::query(
                 "UPDATE node_attempts SET started_at=datetime('now','-1 day') WHERE run_id=?",
@@ -3389,20 +3343,7 @@ async fn sqlite_terminal_run_preserves_checkpointed_model_tool_intent_and_fences
 
         // Make the parent claim recoverable before cancellation wins. A
         // terminal Run must fence both that reclaim path and direct activation.
-        sqlx::query(
-            "UPDATE task_outbox SET claim_expires_at=datetime('now','-1 second') WHERE run_id=?",
-        )
-        .bind(run_id.as_str())
-        .execute(&control)
-        .await
-        .unwrap();
-        sqlx::query(
-            "UPDATE node_attempts SET lease_expires_at=datetime('now','-1 second') WHERE run_id=?",
-        )
-        .bind(run_id.as_str())
-        .execute(&control)
-        .await
-        .unwrap();
+        expire_sqlite_scheduler_task_claim(&control, &run_id).await;
         let termination_key = key(&format!("checkpoint-terminal-{suffix}"), &run_id);
         assert_eq!(
             sqlx::query(
@@ -3646,20 +3587,7 @@ async fn sqlite_model_tool_materialization_commit_survives_restart_as_complete_w
         expected,
         "restart must observe all children and the waiting parent barrier together",
     );
-    sqlx::query(
-        "UPDATE task_outbox SET claim_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(run_id.as_str())
-    .execute(&restarted_control)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE node_attempts SET lease_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(run_id.as_str())
-    .execute(&restarted_control)
-    .await
-    .unwrap();
+    expire_sqlite_scheduler_task_claim(&restarted_control, &run_id).await;
     assert!(restarted
         .claim_scheduler_tasks("materialization-restart-parent", 60, 16)
         .await
@@ -4495,20 +4423,7 @@ async fn sqlite_parent_claim_excludes_waiting_tools_even_after_parent_lease_expi
         model_tool_queue_binding(),
     )
     .await;
-    sqlx::query(
-        "UPDATE task_outbox SET claim_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(run_id.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE node_attempts SET lease_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(run_id.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
+    expire_sqlite_scheduler_task_claim(&control, &run_id).await;
 
     assert!(repository
         .claim_scheduler_tasks("must-not-steal-waiting-parent", 60, 1)
@@ -4598,20 +4513,7 @@ async fn sqlite_checkpointed_parent_reclaim_renews_running_attempt_without_reset
     .fetch_one(&control)
     .await
     .unwrap();
-    sqlx::query(
-        "UPDATE task_outbox SET claim_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(run_id.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE node_attempts SET lease_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(run_id.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
+    expire_sqlite_scheduler_task_claim(&control, &run_id).await;
 
     let recovered = repository
         .claim_scheduler_tasks("checkpoint-activation-worker", 60, 1)
@@ -4780,20 +4682,7 @@ async fn sqlite_ready_parent_rebuilds_ordered_transcript_but_newer_started_call_
             .unwrap(),
         SchedulerTaskCommitOutcome::Committed { .. }
     ));
-    sqlx::query(
-        "UPDATE task_outbox SET claim_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(run_id.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE node_attempts SET lease_expires_at=datetime('now','-1 second') WHERE run_id=?",
-    )
-    .bind(run_id.as_str())
-    .execute(&control)
-    .await
-    .unwrap();
+    expire_sqlite_scheduler_task_claim(&control, &run_id).await;
     let lost = repository
         .claim_scheduler_tasks("must-not-repeat-provider", 60, 1)
         .await

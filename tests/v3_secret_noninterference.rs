@@ -374,13 +374,15 @@ workflow:
             break;
         }
     }
-    let captured = captured_requests.lock().unwrap();
-    assert_eq!(captured.len(), 1);
+    let provider_observed_rendered_message = {
+        let captured = captured_requests.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        captured[0].contains(&rendered)
+    };
     assert!(
-        captured[0].contains(&rendered),
+        provider_observed_rendered_message,
         "the Provider fixture must observe the fully materialized message"
     );
-    drop(captured);
     drop(attached);
 
     tokio::time::timeout(

@@ -19,7 +19,7 @@ use super::{
         ModelToolContinuationStatus, ModelToolFailureClass, ModelToolTaskClaim,
         ModelToolTaskCommitReceipt, ModelToolTaskDisposition, ModelToolTaskHeartbeatOutcome,
         ModelToolTaskIdentity, ModelToolTaskOutcome, ModelToolTaskStatus,
-        ModelToolTaskTransitionOutcome,
+        ModelToolTaskTransitionOutcome, StoredModelToolActionEvidence,
     },
     postgres::{lock_run_for_event_write, PostgresDurableRepository},
     scheduler_repository::{
@@ -256,25 +256,33 @@ fn decode_action(row: &PgRow) -> Result<FrozenModelToolAction, RepositoryError> 
             .map_err(|_| RepositoryError::invalid_data())?,
     )
     .map_err(|_| RepositoryError::invalid_data())?;
-    parse_action_from_stored_evidence(
-        row.try_get("tool_name")
+    parse_action_from_stored_evidence(StoredModelToolActionEvidence {
+        name: row
+            .try_get("tool_name")
             .map_err(|_| RepositoryError::invalid_data())?,
-        row.try_get("action_id")
+        action_id: row
+            .try_get("action_id")
             .map_err(|_| RepositoryError::invalid_data())?,
-        row.try_get("action_version")
+        action_version: row
+            .try_get("action_version")
             .map_err(|_| RepositoryError::invalid_data())?,
-        row.try_get("action_descriptor_hash")
+        descriptor_hash: row
+            .try_get("action_descriptor_hash")
             .map_err(|_| RepositoryError::invalid_data())?,
-        row.try_get("action_input_schema")
+        input_schema: row
+            .try_get("action_input_schema")
             .map_err(|_| RepositoryError::invalid_data())?,
-        row.try_get("action_output_schema")
+        output_schema: row
+            .try_get("action_output_schema")
             .map_err(|_| RepositoryError::invalid_data())?,
         effect_policy,
-        row.try_get("action_deployment_binding")
+        deployment_binding: row
+            .try_get("action_deployment_binding")
             .map_err(|_| RepositoryError::invalid_data())?,
-        row.try_get("effective_public_policy")
+        effective_public_policy: row
+            .try_get("effective_public_policy")
             .map_err(|_| RepositoryError::invalid_data())?,
-    )
+    })
 }
 
 fn decode_public_item(row: &PgRow) -> Result<Option<ResponseItemAuthority>, RepositoryError> {
@@ -1955,7 +1963,7 @@ pub(crate) async fn heartbeat_model_tool_call_postgres(
     };
     let renewed = decode_claim(&renewed)?;
     tx.commit().await.map_err(RepositoryError::storage)?;
-    Ok(ModelToolTaskHeartbeatOutcome::Renewed(renewed))
+    Ok(ModelToolTaskHeartbeatOutcome::Renewed(Box::new(renewed)))
 }
 
 fn retry_delay_ms(policy: &WorkerEffectPolicy, attempt_no: AttemptNo) -> u64 {

@@ -1239,7 +1239,7 @@ async fn sqlite_restart_rejects_llm_descriptor_v1_without_applying_v2_defaults_a
         .load_versioned_plan_catalog()
         .await
         .unwrap();
-    assert_eq!(stored_legacy.plans(), &[legacy_plan.clone()]);
+    assert_eq!(stored_legacy.plans(), std::slice::from_ref(&legacy_plan));
     let legacy_wire = serde_json::to_value(&stored_legacy.plans()[0]).unwrap();
     let legacy_llm = legacy_wire["canonical_plan"]["nodes"]
         .as_array()
