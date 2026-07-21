@@ -60,7 +60,7 @@ report_matches \
   "active configuration contains a deleted runtime setting" \
   -nEH \
   '(operation_cancel_grace_period|max_template_output_bytes|journal_capacity|journal_batch_size|journal_operation_timeout)' \
-  src config agents README.md docs/superpowers/README.md
+  src config agents README.md docs/README.md docs/current/*.md
 
 # Author-controlled positive surfaces must be v3-only. Negative fixtures are
 # selected by name and intentionally excluded from this scan.
@@ -80,13 +80,13 @@ if ((${#positive_files[@]} > 0)); then
     "${positive_files[@]}"
 fi
 
-# These are the two active entry documents. Dated specs/plans remain historical
-# records and may name removed concepts when explaining why they were removed.
+# These are the active user-facing documents. Current normative specifications
+# and archived records may name removed concepts when explaining cutover history.
 report_matches \
   "active documentation describes a deleted production contract" \
   -nEH \
   '(Region/SSA|RegionYield|Branch/Phi|runtime-local-only|scope_scheduler|mark_incomplete_interrupted|api_version:[[:space:]]*insight\.agent/v2|type:[[:space:]]*switch([[:space:]]|$)|core\.branch_end|formal_v2|legacy scheduler)' \
-  README.md docs/superpowers/README.md
+  README.md docs/README.md docs/current/*.md
 
 if ((failed != 0)); then
   exit 1
