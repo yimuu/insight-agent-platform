@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::runtime::ServiceError;
+use insight_runtime::ServiceError;
 
 #[derive(Debug, Serialize)]
 pub struct ApiResponse<T> {

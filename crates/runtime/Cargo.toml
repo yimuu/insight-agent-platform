@@ -7,3 +7,27 @@ publish = false
 
 [lib]
 path = "src/lib.rs"
+
+[features]
+test-support = []
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+futures.workspace = true
+insight-dsl.workspace = true
+insight-durable.workspace = true
+insight-engine.workspace = true
+insight-resources.workspace = true
+serde.workspace = true
+serde_jcs.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio.workspace = true

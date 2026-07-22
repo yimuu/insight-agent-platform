@@ -2,7 +2,6 @@ mod activation;
 mod artifact;
 mod common;
 mod control_repository;
-mod error;
 mod human_task;
 mod ingress;
 #[doc(hidden)]
@@ -48,7 +47,6 @@ pub use control_repository::{
     ReuseCompatibility, RevokeControlTokenCommand, SchedulerLeaseRepository, SchedulerRunLease,
     SettleScopeCommand, TokenConsumerKind,
 };
-pub(crate) use error::RepositoryErrorExt;
 pub use human_task::{
     ClaimHumanWorkItemCommand, CompleteHumanWorkItemCommand, HumanTaskDurableRepository,
     HumanTaskPrincipal, HumanWorkItem, HumanWorkItemClaim, HumanWorkItemCompletionAuthority,
@@ -77,12 +75,7 @@ pub use model::{
     PublicationOrigin, PublishVersionedPlanCommand, ResponseTerminalKind, ResponseUsageStatus,
     RunProjection, RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
 };
-pub(crate) use model::{
-    PublicEventIntentAdapter, RunTransitionCommandAdapter, VersionedPlanAdapter,
-};
 pub use model_tool_parent_resume::ModelToolParentResume;
-#[cfg(test)]
-pub(crate) use model_tool_queue::{deterministic_tool_identity, parse_action_from_stored_evidence};
 pub use model_tool_queue::{
     FrozenModelToolAction, ModelToolBatchActivation, ModelToolBatchActivationOutcome,
     ModelToolContinuationStatus, ModelToolFailureClass, ModelToolTaskClaim,

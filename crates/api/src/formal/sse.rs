@@ -6,19 +6,19 @@ use std::{
 
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::Stream;
+use insight_engine::{
+    events::protocol::{RunEvent, RunEventType},
+    response::{
+        DurableResponseSnapshot, LiveResponseDelivery, PublicResponse, ResponseObjectKind,
+        ResponseStatus, ResponseStreamEvent, ResponseTerminalKind, WorkflowCompleted,
+        WorkflowFailure, WorkflowStopReason, WorkflowStopped, WorkflowStreamGapAction,
+    },
+    RunId,
+};
+use insight_runtime::AttachedRun;
 use serde::de::DeserializeOwned;
 use tokio::{sync::mpsc, time::Instant};
 use tokio_stream::wrappers::ReceiverStream;
-
-use crate::{
-    engine::{repository::ResponseTerminalKind, RunId},
-    events::protocol::{RunEvent, RunEventType},
-    runtime::{
-        AttachedRun, LiveResponseDelivery, PublicResponse, ResponseObjectKind, ResponseStatus,
-        ResponseStreamEvent, WorkflowCompleted, WorkflowFailure, WorkflowStopReason,
-        WorkflowStopped, WorkflowStreamGapAction,
-    },
-};
 
 const OUTBOUND_EVENT_CAPACITY: usize = 32;
 
@@ -86,7 +86,7 @@ struct ResponseDispatcher {
     attached: AttachedRun,
     pending: VecDeque<ResponseStreamEvent>,
     next_sequence: u64,
-    terminal_snapshot: Option<crate::engine::repository::DurableResponseSnapshot>,
+    terminal_snapshot: Option<DurableResponseSnapshot>,
     terminal_barrier_deadline: Option<Instant>,
     live_open: bool,
     seen_sealed_items: BTreeSet<String>,
@@ -361,7 +361,7 @@ fn manifest_items_without_terminal_evidence(
 }
 
 fn terminal_event(
-    snapshot: crate::engine::repository::DurableResponseSnapshot,
+    snapshot: DurableResponseSnapshot,
     sequence_number: u64,
 ) -> Result<ResponseStreamEvent, ()> {
     let response: PublicResponse = decode(snapshot.response())?;

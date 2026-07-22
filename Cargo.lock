@@ -1249,6 +1249,19 @@ dependencies = [
 [[package]]
 name = "insight-api"
 version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures",
+ "insight-dsl",
+ "insight-engine",
+ "insight-runtime",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tracing",
+]
 
 [[package]]
 name = "insight-dsl"
@@ -1322,6 +1335,23 @@ dependencies = [
 [[package]]
 name = "insight-runtime"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "insight-dsl",
+ "insight-durable",
+ "insight-engine",
+ "insight-resources",
+ "semver",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "insight-storage"
