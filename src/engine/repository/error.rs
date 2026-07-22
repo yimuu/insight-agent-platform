@@ -16,7 +16,6 @@ pub(crate) trait RepositoryErrorExt {
     fn canonicalization() -> Self;
     fn invalid_configuration() -> Self;
     fn invalid_data() -> Self;
-    fn scheduler_crash_injected() -> Self;
     fn intent_conflict() -> Self;
     fn activation_not_found() -> Self;
     fn run_migrating() -> Self;
@@ -55,10 +54,6 @@ impl RepositoryErrorExt for RepositoryError {
 
     fn invalid_data() -> Self {
         repository_adapter::invalid_data()
-    }
-
-    fn scheduler_crash_injected() -> Self {
-        repository_adapter::scheduler_crash_injected()
     }
 
     fn intent_conflict() -> Self {

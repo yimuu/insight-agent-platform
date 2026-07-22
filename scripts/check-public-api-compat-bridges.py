@@ -31,7 +31,8 @@ class BridgeRule:
     generic_name: str
     concrete_path: str
     view_path: str
-    has_receiver: bool
+    input_index: int
+    existing_impl_into_string_generics: int
 
 
 BRIDGE_RULES = (
@@ -46,7 +47,8 @@ BRIDGE_RULES = (
             "insight_agent_platform::resources::retrievals::RegisteredRetrieval"
         ),
         view_path="insight_engine::retrieval::RegisteredRetrievalView",
-        has_receiver=True,
+        input_index=1,
+        existing_impl_into_string_generics=0,
     ),
     BridgeRule(
         name="model-tool claim view",
@@ -59,7 +61,19 @@ BRIDGE_RULES = (
             "insight_agent_platform::engine::repository::ModelToolTaskClaim"
         ),
         view_path="insight_engine::worker::ModelToolTaskClaimView",
-        has_receiver=False,
+        input_index=0,
+        existing_impl_into_string_generics=0,
+    ),
+    BridgeRule(
+        name="verified author plan view",
+        paths=(
+            "insight_agent_platform::engine::repository::VersionedPlan::from_verified_graph",
+        ),
+        generic_name="G",
+        concrete_path="insight_agent_platform::dsl::v3::GraphAuthorDocument",
+        view_path="insight_engine::internal::VerifiedAuthorPlanView",
+        input_index=5,
+        existing_impl_into_string_generics=4,
     ),
 )
 
@@ -74,61 +88,93 @@ def borrowed(type_: dict[str, object]) -> dict[str, object]:
     }
 
 
-def baseline_inputs(rule: BridgeRule) -> list[dict[str, object]]:
-    inputs = []
-    if rule.has_receiver:
-        inputs.append(borrowed({"generic": "Self"}))
-    inputs.append(
-        borrowed({"resolved_path": {"args": None, "path": rule.concrete_path}})
-    )
-    return inputs
+def synthetic_into_string_generic() -> dict[str, object]:
+    return {
+        "kind": {
+            "type": {
+                "bounds": [
+                    {
+                        "trait_bound": {
+                            "generic_params": [],
+                            "modifier": "none",
+                            "trait": {
+                                "args": {
+                                    "angle_bracketed": {
+                                        "args": [
+                                            {
+                                                "type": {
+                                                    "resolved_path": {
+                                                        "args": None,
+                                                        "path": "alloc::string::String",
+                                                    }
+                                                }
+                                            }
+                                        ],
+                                        "constraints": [],
+                                    }
+                                },
+                                "path": "core::convert::Into",
+                            },
+                        }
+                    }
+                ],
+                "default": None,
+                "is_synthetic": True,
+            }
+        },
+        "name": "impl Into<String>",
+    }
 
 
-def bridged_generics(rule: BridgeRule) -> dict[str, object]:
+def baseline_generics(rule: BridgeRule) -> dict[str, object]:
     return {
         "params": [
-            {
-                "kind": {
-                    "type": {
-                        "bounds": [
-                            {
-                                "trait_bound": {
-                                    "generic_params": [],
-                                    "modifier": "maybe",
-                                    "trait": {
-                                        "args": None,
-                                        "path": "core::marker::Sized",
-                                    },
-                                }
-                            },
-                            {
-                                "trait_bound": {
-                                    "generic_params": [],
-                                    "modifier": "none",
-                                    "trait": {
-                                        "args": None,
-                                        "path": rule.view_path,
-                                    },
-                                }
-                            },
-                        ],
-                        "default": None,
-                        "is_synthetic": False,
-                    }
-                },
-                "name": rule.generic_name,
-            }
+            synthetic_into_string_generic()
+            for _ in range(rule.existing_impl_into_string_generics)
         ],
         "where_predicates": [],
     }
 
 
-def bridged_inputs(rule: BridgeRule) -> list[dict[str, object]]:
-    inputs = []
-    if rule.has_receiver:
-        inputs.append(borrowed({"generic": "Self"}))
-    inputs.append(borrowed({"generic": rule.generic_name}))
-    return inputs
+def bridged_generics(rule: BridgeRule) -> dict[str, object]:
+    generics = baseline_generics(rule)
+    # rustdoc lists explicit named type parameters before the synthetic
+    # parameters created for argument-position `impl Trait`.
+    generics["params"].insert(
+        0,
+        {
+            "kind": {
+                "type": {
+                    "bounds": [
+                        {
+                            "trait_bound": {
+                                "generic_params": [],
+                                "modifier": "maybe",
+                                "trait": {
+                                    "args": None,
+                                    "path": "core::marker::Sized",
+                                },
+                            }
+                        },
+                        {
+                            "trait_bound": {
+                                "generic_params": [],
+                                "modifier": "none",
+                                "trait": {
+                                    "args": None,
+                                    "path": rule.view_path,
+                                },
+                            }
+                        },
+                    ],
+                    "default": None,
+                    "is_synthetic": False,
+                }
+            },
+            "name": rule.generic_name,
+        },
+    )
+    return generics
 
 
 def audited_expected_inventory(baseline: str) -> tuple[str, int]:
@@ -166,7 +212,7 @@ def audited_expected_inventory(baseline: str) -> tuple[str, int]:
                 f"invalid declaration JSON for {path}: {error}"
             ) from error
 
-        expected_generics = {"params": [], "where_predicates": []}
+        expected_generics = baseline_generics(rule)
         if declaration.get("generics") != expected_generics:
             raise BridgeConfigurationError(
                 f"baseline generics changed for audited bridge {path}"
@@ -174,13 +220,21 @@ def audited_expected_inventory(baseline: str) -> tuple[str, int]:
         signature = declaration.get("sig")
         if not isinstance(signature, dict):
             raise BridgeConfigurationError(f"baseline signature is missing for {path}")
-        if signature.get("inputs") != baseline_inputs(rule):
+        inputs = signature.get("inputs")
+        if not isinstance(inputs, list) or rule.input_index >= len(inputs):
             raise BridgeConfigurationError(
-                f"baseline inputs changed for audited bridge {path}"
+                f"baseline input {rule.input_index} is missing for {path}"
+            )
+        expected_input = borrowed(
+            {"resolved_path": {"args": None, "path": rule.concrete_path}}
+        )
+        if inputs[rule.input_index] != expected_input:
+            raise BridgeConfigurationError(
+                f"baseline input {rule.input_index} changed for audited bridge {path}"
             )
 
         declaration["generics"] = bridged_generics(rule)
-        signature["inputs"] = bridged_inputs(rule)
+        inputs[rule.input_index] = borrowed({"generic": rule.generic_name})
         canonical = json.dumps(declaration, ensure_ascii=False, separators=(",", ":"))
         transformed.append(f"{path}\t{kind}\t{canonical}{ending}")
 
@@ -226,15 +280,22 @@ def check_inventory(baseline: str, actual: str, baseline_name: str, actual_name:
 
     print(
         "accepted source-compatible bridge count: "
-        f"{accepted_count} declarations ({len(BRIDGE_RULES)} signatures, flat+nested)"
+        f"{accepted_count} declarations across {len(BRIDGE_RULES)} signatures"
     )
     return 0
 
 
 def self_test() -> None:
     def baseline_declaration(rule: BridgeRule) -> dict[str, object]:
+        inputs = [
+            {"primitive": f"fixture-input-{index}"}
+            for index in range(rule.input_index + 1)
+        ]
+        inputs[rule.input_index] = borrowed(
+            {"resolved_path": {"args": None, "path": rule.concrete_path}}
+        )
         return {
-            "generics": {"params": [], "where_predicates": []},
+            "generics": baseline_generics(rule),
             "has_body": True,
             "header": {
                 "abi": "Rust",
@@ -243,7 +304,7 @@ def self_test() -> None:
                 "is_unsafe": False,
             },
             "sig": {
-                "inputs": baseline_inputs(rule),
+                "inputs": inputs,
                 "is_c_variadic": False,
                 "output": None,
             },
@@ -259,11 +320,28 @@ def self_test() -> None:
     lines.append("fixture::unchanged\tstruct\t{}\n")
     baseline = "".join(lines)
     expected, count = audited_expected_inventory(baseline)
-    assert count == 4
+    assert count == sum(len(rule.paths) for rule in BRIDGE_RULES)
+    graph_path = BRIDGE_RULES[-1].paths[0]
+    graph_line = next(
+        line for line in expected.splitlines() if line.startswith(f"{graph_path}\t")
+    )
+    graph_declaration = json.loads(graph_line.split("\t", 2)[2])
+    assert [
+        parameter["name"] for parameter in graph_declaration["generics"]["params"]
+    ] == [
+        "G",
+        "impl Into<String>",
+        "impl Into<String>",
+        "impl Into<String>",
+        "impl Into<String>",
+    ]
     accepted_output = io.StringIO()
     with contextlib.redirect_stdout(accepted_output):
         assert check_inventory(baseline, expected, "baseline", "actual") == 0
-    assert "accepted source-compatible bridge count: 4" in accepted_output.getvalue()
+    assert (
+        f"accepted source-compatible bridge count: {count}"
+        in accepted_output.getvalue()
+    )
 
     unexpected = expected + "fixture::leak\tstruct\t{}\n"
     rejected_output = io.StringIO()

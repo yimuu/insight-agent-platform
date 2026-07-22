@@ -3,6 +3,13 @@ use super::RepositoryErrorExt as _;
 use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
+use insight_durable::common::adapter::{
+    canonical_value, decode_execution_event_schema_version, event_id, i64_from_u64, u64_from_i64,
+};
+use insight_durable::projection::adapter::{
+    self as projection_adapter, checkpoint_manifest_hash, decode_hex_subject_components,
+    parse_attempt_subject_id,
+};
 use serde_json::Value;
 use sqlx::{AssertSqlSafe, PgPool, Postgres, Row, Transaction};
 
@@ -11,15 +18,10 @@ use crate::engine::{
     RunId, TransitionKey,
 };
 
-use super::common::{
-    canonical_value, decode_execution_event_schema_version, event_id, i64_from_u64, u64_from_i64,
-};
 use super::postgres::{allocate_event_seq, insert_event, PostgresDurableRepository};
 use super::projection::{
-    checkpoint_manifest_hash, decode_hex_subject_components, parse_attempt_subject_id,
-    CheckpointRecord, ProjectionAudit, ProjectionDurableRepository, ProjectionLedgerBatch,
-    ProjectionRebuildSnapshot, ProjectionRepairReceipt, ProjectionSubject, ProjectionSubjectKind,
-    PROJECTION_CHECKPOINT_SCHEMA_VERSION,
+    ProjectionAudit, ProjectionDurableRepository, ProjectionRebuildSnapshot,
+    ProjectionRepairReceipt, ProjectionSubject, ProjectionSubjectKind,
 };
 use super::RepositoryError;
 
@@ -680,7 +682,7 @@ fn required_subject_suffix(subject_id: &str, prefix: &str) -> Result<String, Rep
 async fn changed_records(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
-) -> Result<Vec<CheckpointRecord>, RepositoryError> {
+) -> Result<Vec<Value>, RepositoryError> {
     let mut records = Vec::new();
     for table in TABLES {
         let query = format!(
@@ -715,7 +717,7 @@ async fn changed_records(
                 row.try_get("projection_version")
                     .map_err(|_| RepositoryError::invalid_data())?,
             )?;
-            records.push(CheckpointRecord::from_value(
+            records.push(projection_adapter::checkpoint_record(
                 subject,
                 projection_version,
                 row.try_get("canonical_projection")
@@ -723,10 +725,7 @@ async fn changed_records(
             )?);
         }
     }
-    records.sort_by(|left, right| {
-        (left.subject.kind().as_str(), left.subject.subject_id())
-            .cmp(&(right.subject.kind().as_str(), right.subject.subject_id()))
-    });
+    projection_adapter::sort_checkpoint_records(&mut records)?;
     Ok(records)
 }
 
@@ -751,14 +750,14 @@ async fn insert_checkpoint_batch(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
     event_id: &str,
-    records: &[CheckpointRecord],
+    records: &[Value],
 ) -> Result<(), RepositoryError> {
-    let ledger_batch = ProjectionLedgerBatch::from_records(records)?;
+    let ledger_batch = projection_adapter::projection_ledger_batch(records)?;
     let updated = sqlx::query(
         "UPDATE execution_events SET projection_ledger_batch=$1
          WHERE run_id=$2 AND event_id=$3 AND projection_ledger_batch IS NULL",
     )
-    .bind(serde_json::to_value(&ledger_batch).map_err(|_| RepositoryError::invalid_data())?)
+    .bind(&ledger_batch)
     .bind(run_id.as_str())
     .bind(event_id)
     .execute(&mut **transaction)
@@ -775,7 +774,7 @@ async fn insert_checkpoint_batch(
     .bind(run_id.as_str())
     .bind(event_id)
     .bind(
-        i32::try_from(PROJECTION_CHECKPOINT_SCHEMA_VERSION)
+        i32::try_from(projection_adapter::projection_checkpoint_schema_version())
             .map_err(|_| RepositoryError::invalid_data())?,
     )
     .bind(i64::try_from(records.len()).map_err(|_| RepositoryError::invalid_data())?)
@@ -784,6 +783,8 @@ async fn insert_checkpoint_batch(
     .await
     .map_err(RepositoryError::storage)?;
     for record in records {
+        let (subject, projection_version, canonical_projection, projection_hash) =
+            projection_adapter::checkpoint_record_parts(record)?;
         sqlx::query(
             "INSERT INTO projection_checkpoints (
                 run_id,event_id,subject_kind,subject_id,checkpoint_schema_version,
@@ -792,15 +793,15 @@ async fn insert_checkpoint_batch(
         )
         .bind(run_id.as_str())
         .bind(event_id)
-        .bind(record.subject.kind().as_str())
-        .bind(record.subject.subject_id())
+        .bind(subject.kind().as_str())
+        .bind(subject.subject_id())
         .bind(
-            i32::try_from(PROJECTION_CHECKPOINT_SCHEMA_VERSION)
+            i32::try_from(projection_adapter::projection_checkpoint_schema_version())
                 .map_err(|_| RepositoryError::invalid_data())?,
         )
-        .bind(i64_from_u64(record.projection_version)?)
-        .bind(&record.projection_hash)
-        .bind(&record.canonical_projection)
+        .bind(i64_from_u64(projection_version)?)
+        .bind(projection_hash)
+        .bind(canonical_projection)
         .execute(&mut **transaction)
         .await
         .map_err(RepositoryError::storage)?;
@@ -830,9 +831,7 @@ pub(crate) async fn verify_projection_checkpoint_batch(
     let encoded_ledger = row
         .try_get::<Value, _>("projection_ledger_batch")
         .map_err(|_| RepositoryError::invalid_data())?;
-    let ledger: ProjectionLedgerBatch =
-        serde_json::from_value(encoded_ledger).map_err(|_| RepositoryError::invalid_data())?;
-    ledger.validate()?;
+    projection_adapter::validate_projection_ledger_batch(&encoded_ledger)?;
     Ok(())
 }
 
@@ -945,12 +944,13 @@ async fn authoritative_snapshot_tx(
         let value: Value = row
             .try_get("projection_ledger_batch")
             .map_err(|_| RepositoryError::invalid_data())?;
-        let batch: ProjectionLedgerBatch =
-            serde_json::from_value(value).map_err(|_| RepositoryError::invalid_data())?;
-        let Some(record) = batch.record_for(subject)? else {
+        let Some(record) = projection_adapter::projection_ledger_record_for(&value, subject)?
+        else {
             continue;
         };
-        return Ok(Some(ProjectionRebuildSnapshot::new(
+        let (_, projection_version, canonical_projection, projection_hash) =
+            projection_adapter::checkpoint_record_parts(&record)?;
+        return Ok(Some(projection_adapter::projection_rebuild_snapshot(
             subject.clone(),
             row.try_get("event_id")
                 .map_err(|_| RepositoryError::invalid_data())?,
@@ -958,9 +958,9 @@ async fn authoritative_snapshot_tx(
                 row.try_get("seq")
                     .map_err(|_| RepositoryError::invalid_data())?,
             )?,
-            record.projection_version,
-            record.projection_hash,
-            record.canonical_projection,
+            projection_version,
+            projection_hash,
+            canonical_projection,
         )));
     }
     Ok(None)
@@ -995,18 +995,18 @@ async fn authoritative_snapshots_tx(
         let value: Value = row
             .try_get("projection_ledger_batch")
             .map_err(|_| RepositoryError::invalid_data())?;
-        let batch: ProjectionLedgerBatch =
-            serde_json::from_value(value).map_err(|_| RepositoryError::invalid_data())?;
-        for record in batch.validate()? {
+        for record in projection_adapter::validate_projection_ledger_batch(&value)? {
+            let (subject, projection_version, canonical_projection, projection_hash) =
+                projection_adapter::checkpoint_record_parts(&record)?;
             latest.insert(
-                record.subject.clone(),
-                ProjectionRebuildSnapshot::new(
-                    record.subject,
+                subject.clone(),
+                projection_adapter::projection_rebuild_snapshot(
+                    subject,
                     event_id.clone(),
                     event_seq,
-                    record.projection_version,
-                    record.projection_hash,
-                    record.canonical_projection,
+                    projection_version,
+                    projection_hash,
+                    canonical_projection,
                 ),
             );
         }
@@ -1377,7 +1377,10 @@ async fn repair_snapshot_tx(
         .transpose()?
         .map(|(_, hash)| hash);
     if current_hash.as_ref().map(|hash| hash.as_str()) == Some(authoritative.projection_hash()) {
-        return Ok(ProjectionRepairReceipt::new(false, authoritative));
+        return Ok(projection_adapter::projection_repair_receipt(
+            false,
+            authoritative,
+        ));
     }
     if current.is_some() {
         repair_subject(
@@ -1403,7 +1406,10 @@ async fn repair_snapshot_tx(
     if repaired_hash.as_str() != authoritative.projection_hash() {
         return Err(RepositoryError::invalid_data());
     }
-    Ok(ProjectionRepairReceipt::new(true, authoritative))
+    Ok(projection_adapter::projection_repair_receipt(
+        true,
+        authoritative,
+    ))
 }
 
 #[async_trait]
@@ -1484,7 +1490,7 @@ mod tests {
     use super::*;
 
     fn scope_snapshot(id: &str, parent: Option<&str>) -> ProjectionRebuildSnapshot {
-        ProjectionRebuildSnapshot::new(
+        projection_adapter::projection_rebuild_snapshot(
             ProjectionSubject::scope(id).unwrap(),
             format!("event-{id}"),
             1,

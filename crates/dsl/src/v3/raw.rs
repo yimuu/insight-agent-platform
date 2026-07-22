@@ -7,7 +7,7 @@ use yaml_rust2::{
     scanner::Marker,
 };
 
-use crate::dsl::{DslParseError, DslPath};
+use crate::{DslParseError, DslPath};
 use insight_engine::author::adapter as author_adapter;
 
 use super::{DUPLICATE_KEY, PARSE_FAILED};
@@ -213,7 +213,7 @@ fn error_path(rendered: &str) -> Option<DslPath> {
 #[cfg(test)]
 mod tests {
     use super::parse;
-    use crate::dsl::v3::DUPLICATE_KEY;
+    use crate::v3::DUPLICATE_KEY;
 
     #[test]
     fn duplicate_keys_are_rejected_before_materialization() {

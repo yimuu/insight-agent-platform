@@ -15,8 +15,13 @@ use std::{
     time::Duration,
 };
 
+use crate::engine::repository::{
+    PublicEventIntentAdapter as _, RunTransitionCommandAdapter as _, VersionedPlanAdapter as _,
+};
 use async_trait::async_trait;
 use futures::FutureExt;
+use insight_durable::production::adapter as production_contract_adapter;
+use insight_durable::recovery_repository::adapter as recovery_contract_adapter;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -29,14 +34,16 @@ use uuid::Uuid;
 
 use crate::engine::repository::RepositoryErrorExt as _;
 
+pub use insight_durable::{PendingMigrationWait, ProductionRunRepository, RunRepositoryCapability};
+
 use crate::{
     catalog_v3::{
         subflow_registry_for_available, subflow_registry_for_stored, AgentStreamingSourceKind,
         DeployedV3Agent, DeploymentRiskDiagnostic, LeafDeploymentResolver, PublishedV3Agent,
     },
     dsl::v3::{
-        GraphAuthorDocument, GraphSemanticEditBatch, GraphSurfaceRepository, StoredGraphView,
-        TraceOverlay, ViewDocument, GRAPH_EDIT_CONFLICT,
+        GraphAuthorDocument, GraphSemanticEditBatch, StoredGraphView, TraceOverlay, ViewDocument,
+        GRAPH_EDIT_CONFLICT,
     },
     engine::{
         plan::{DataPort, DataPortId, NodeKind, PlanIndex, PortDirection},
@@ -49,18 +56,17 @@ use crate::{
             CompleteHumanWorkItemCommand, ContinueAsNewCommand, CreateRunCommand,
             DurableResponseSnapshot, FencedSchedulerRunCommand, FinalizeMigrationCommand,
             FireTimerCommand, ForkRunCommand, FrozenSchedulerWorkerFailurePolicy,
-            HumanTaskDurableRepository, HumanTaskPrincipal, HumanWorkItem, HumanWorkItemId,
-            MigrationMappingCompatibility, ModelToolBatchActivation, ModelToolWorkerPumpOutcome,
-            NoSchedulerCrash, OrderedPublicEventRead, OrphanSweepCommand, PlanPublicationOutcome,
-            PublicEventOutboxRepository, PublicEventPosition, PublicRunAttachment, PublicationHead,
-            PublicationOrigin, PublishVersionedPlanCommand, ReceiveSignalCommand,
-            RecoveryDurableRepository, RecoveryRevisionSpec, RecoveryRunReceipt, RedriveRunCommand,
-            ReleaseRunArtifactRetentionCommand, RepositoryError, ResolveSignalCommand,
-            RunProjection, RunTransitionCommand, RuntimeIngressDurableRepository,
-            SchedulerDurableRepository, SchedulerLeaseRepository, SchedulerRecoveryOutcome,
-            SchedulerWorkerPumpOutcome, SignalInboxState, VersionedPlanCatalog,
-            REPOSITORY_ARTIFACT_STORE_CONFLICT, REPOSITORY_CONSTRAINT_CONFLICT,
-            REPOSITORY_INTENT_CONFLICT, REPOSITORY_REDRIVE_REQUIRES_FORK,
+            HumanTaskPrincipal, HumanWorkItem, HumanWorkItemId, MigrationMappingCompatibility,
+            ModelToolBatchActivation, ModelToolWorkerPumpOutcome, NoSchedulerCrash,
+            OrderedPublicEventRead, OrphanSweepCommand, PlanPublicationOutcome,
+            PublicEventPosition, PublicRunAttachment, PublicationHead, PublicationOrigin,
+            PublishVersionedPlanCommand, ReceiveSignalCommand, RecoveryRevisionSpec,
+            RecoveryRunReceipt, RedriveRunCommand, ReleaseRunArtifactRetentionCommand,
+            RepositoryError, ResolveSignalCommand, RunProjection, RunTransitionCommand,
+            SchedulerLeaseRepository, SchedulerRecoveryOutcome, SchedulerWorkerPumpOutcome,
+            SignalInboxState, VersionedPlanCatalog, REPOSITORY_ARTIFACT_STORE_CONFLICT,
+            REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_INTENT_CONFLICT,
+            REPOSITORY_REDRIVE_REQUIRES_FORK,
         },
         AdmissionState, ArtifactId, ArtifactRef, ArtifactStoreDeploymentCapability, ContentHash,
         DefinitionRevisionId, ExecutionEventContext, ExecutionEventPayload, ExecutionRevisionPin,
@@ -114,79 +120,6 @@ fn has_public_llm_streaming_source(agent: &PublishedV3Agent) -> bool {
         .sources()
         .iter()
         .any(|source| source.kind() == AgentStreamingSourceKind::Llm)
-}
-
-/// Declares whether a Run repository can uphold the ownership and fencing
-/// contracts required by a production runtime.
-///
-/// The default is deliberately fail-closed so a new repository implementation
-/// cannot become production-capable merely by implementing the data methods.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunRepositoryCapability {
-    SingleProcessOnly,
-    Production,
-}
-
-#[async_trait]
-pub trait ProductionRunRepository:
-    SchedulerDurableRepository
-    + PublicEventOutboxRepository
-    + RuntimeIngressDurableRepository
-    + RecoveryDurableRepository
-    + HumanTaskDurableRepository
-    + GraphSurfaceRepository
-{
-    fn run_repository_capability(&self) -> RunRepositoryCapability {
-        RunRepositoryCapability::SingleProcessOnly
-    }
-
-    async fn check_production_health(&self) -> Result<(), RepositoryError>;
-
-    /// Load the immutable canonical input through the Run's payload authority.
-    /// Public history queries must not depend on a live scheduler checkpoint.
-    async fn load_production_run_input(
-        &self,
-        run_id: &RunId,
-    ) -> Result<Option<Value>, RepositoryError>;
-
-    async fn claim_production_scheduler_run(
-        &self,
-        transition_key: TransitionKey,
-        command: ClaimSchedulerRunCommand,
-    ) -> Result<Option<FencedSchedulerRunCommand>, RepositoryError>;
-
-    async fn release_production_scheduler_run(
-        &self,
-        transition_key: TransitionKey,
-        fence: FencedSchedulerRunCommand,
-    ) -> Result<(), RepositoryError>;
-
-    /// Read-only evidence used to reject incomplete public migration mappings
-    /// before `begin_migration` can write a source termination intent.
-    async fn load_pending_migration_waits(
-        &self,
-        run_id: &RunId,
-    ) -> Result<Vec<PendingMigrationWait>, RepositoryError>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingMigrationWait {
-    node_id: NodeId,
-    has_signal: bool,
-    has_timer: bool,
-}
-
-impl PendingMigrationWait {
-    fn new(node_id: NodeId, has_signal: bool, has_timer: bool) -> Result<Self, RepositoryError> {
-        if !has_signal && !has_timer {
-            return Err(RepositoryError::invalid_data());
-        }
-        Ok(Self {
-            node_id,
-            has_signal,
-            has_timer,
-        })
-    }
 }
 
 #[async_trait]
@@ -325,7 +258,7 @@ impl ProductionRunRepository for crate::engine::repository::SqliteDurableReposit
                 {
                     return Err(RepositoryError::invalid_data());
                 }
-                PendingMigrationWait::new(
+                production_contract_adapter::pending_migration_wait(
                     NodeId::new(wait_node).map_err(|_| RepositoryError::invalid_data())?,
                     row.try_get::<Option<String>, _>("signal_id")
                         .map_err(|_| RepositoryError::invalid_data())?
@@ -427,7 +360,7 @@ impl ProductionRunRepository for crate::engine::repository::PostgresDurableRepos
                 {
                     return Err(RepositoryError::invalid_data());
                 }
-                PendingMigrationWait::new(
+                production_contract_adapter::pending_migration_wait(
                     NodeId::new(wait_node).map_err(|_| RepositoryError::invalid_data())?,
                     row.try_get::<Option<String>, _>("signal_id")
                         .map_err(|_| RepositoryError::invalid_data())?
@@ -2798,9 +2731,11 @@ impl RunService {
             })
             .map_err(|_| recovery_conflict())?;
             let replay = if let Some(agent_id) = pending.expected_target_publication_agent() {
-                replay
-                    .with_expected_target_publication_agent(agent_id.to_owned())
-                    .map_err(|_| recovery_conflict())?
+                recovery_contract_adapter::with_expected_target_publication_agent(
+                    replay,
+                    agent_id.to_owned(),
+                )
+                .map_err(|_| recovery_conflict())?
             } else {
                 replay
             };
@@ -4863,14 +4798,16 @@ fn validate_pending_migration_waits(
     mappings: &[MigrationMappingCompatibility],
 ) -> Result<(), ServiceError> {
     for wait in pending {
+        let (node_id, has_signal, has_timer) =
+            production_contract_adapter::pending_migration_wait_parts(wait);
         let mapping = mappings
             .iter()
-            .find(|mapping| mapping.source().source_node_id() == &wait.node_id)
+            .find(|mapping| mapping.source().source_node_id() == node_id)
             .ok_or_else(migration_mapping_incompatible)?;
-        if (wait.has_signal
+        if (has_signal
             && (!mapping.source().signal_wait_rebuild_declared()
                 || !mapping.target().signal_wait_rebuild_declared()))
-            || (wait.has_timer
+            || (has_timer
                 && (!mapping.source().timer_rebuild_declared()
                     || !mapping.target().timer_rebuild_declared()))
         {
@@ -5247,14 +5184,14 @@ mod public_event_multiruntime_tests {
     use crate::engine::{
         repository::{
             DurableRepository, PostgresDurableRepository, PublicEventIntent,
-            SqliteDurableRepository, VersionedPlan,
+            PublicEventOutboxRepository, SqliteDurableRepository, VersionedPlan,
         },
         ContentHash, DefinitionRevisionId, DeploymentRevisionId,
         LocalContentAddressedArtifactStore,
     };
 
     fn plan(suffix: &str) -> VersionedPlan {
-        VersionedPlan::new_for_test(
+        insight_durable::model::adapter::versioned_plan_for_test(
             format!("definition_public_listener_{suffix}"),
             format!("agent_public_listener_{suffix}"),
             "Public listener test",

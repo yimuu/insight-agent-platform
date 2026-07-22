@@ -1,12 +1,10 @@
-use insight_agent_platform::{
-    dsl::v3::{compile_source, validate, CompileOptions, INVALID_STEP},
-    engine::{
-        plan::{
-            AuthorFormat, DescriptorValue, ExpressionLanguage, NodeKind, PlanBuilder, PlanMetadata,
-            SourceMap, ValueSource, VersionTag,
-        },
-        DefinitionRevisionId,
+use insight_dsl::v3::{compile_source, validate, CompileOptions, INVALID_STEP};
+use insight_engine::{
+    plan::{
+        AuthorFormat, DescriptorValue, ExpressionLanguage, NodeKind, PlanBuilder, PlanMetadata,
+        SourceMap, ValueSource, VersionTag,
     },
+    DefinitionRevisionId,
 };
 
 fn options(source: &str) -> CompileOptions {
@@ -19,7 +17,7 @@ fn options(source: &str) -> CompileOptions {
 
 #[test]
 fn compiles_linear_leaf_and_return_to_verified_plan() {
-    let source = include_str!("fixtures/v3/linear.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
     let plan = compile_source(source, options(source)).unwrap();
     let NodeKind::ActionTask(descriptor) = plan.nodes()[0].kind() else {
         panic!("expected action task");
@@ -41,7 +39,7 @@ fn compiles_linear_leaf_and_return_to_verified_plan() {
 
 #[test]
 fn lowers_ordered_if_elif_else_to_branch_merge_and_typed_phi() {
-    let source = include_str!("fixtures/v3/if.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/if.yaml");
     let plan = compile_source(source, options(source)).unwrap();
     let branch = plan
         .nodes()
@@ -68,7 +66,7 @@ fn lowers_ordered_if_elif_else_to_branch_merge_and_typed_phi() {
 
 #[test]
 fn lowers_parallel_to_flat_fork_join_collect() {
-    let source = include_str!("fixtures/v3/parallel.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/parallel.yaml");
     let plan = compile_source(source, options(source)).unwrap();
     assert_eq!(
         plan.nodes()
@@ -89,7 +87,7 @@ fn lowers_parallel_to_flat_fork_join_collect() {
 
 #[test]
 fn parallel_all_settled_freezes_typed_result_envelopes() {
-    let source = include_str!("fixtures/v3/parallel.yaml")
+    let source = include_str!("../../../tests/fixtures/v3/parallel.yaml")
         .replace("settle: all_success", "settle: all_settled");
     let plan = compile_source(&source, options(&source)).unwrap();
     let collect = plan
@@ -133,7 +131,7 @@ workflow:
         ValueSource::Expression { expression }
             if expression.language == ExpressionLanguage::Match
                 && expression.result_type.is_assignable_to(
-                    &insight_agent_platform::engine::plan::PlanType::String
+                    &insight_engine::plan::PlanType::String
                 )
     )));
 }
@@ -170,7 +168,7 @@ workflow:
     );
     assert_eq!(
         condition.result_type,
-        insight_agent_platform::engine::plan::PlanType::Boolean
+        insight_engine::plan::PlanType::Boolean
     );
 }
 
@@ -217,7 +215,7 @@ workflow:
 
 #[test]
 fn normalized_hash_matches_an_equivalent_programmatic_plan() {
-    let source = include_str!("fixtures/v3/linear.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
     let compiled = compile_source(source, options(source)).unwrap();
     let metadata = PlanMetadata::new(
         DefinitionRevisionId::new("manual_equivalent").unwrap(),
@@ -284,20 +282,20 @@ workflow:
       response: string
     - return: $answer
 "#;
-    let document = validate(insight_agent_platform::dsl::v3::parse(source).unwrap()).unwrap();
-    let insight_agent_platform::dsl::v3::ast::Step::Leaf(leaf) = &document.steps[0] else {
+    let document = validate(insight_dsl::v3::parse(source).unwrap()).unwrap();
+    let insight_dsl::v3::ast::Step::Leaf(leaf) = &document.steps[0] else {
         panic!("expected llm leaf");
     };
     let llm = leaf.llm.as_ref().unwrap();
     assert!(matches!(
         llm.messages[0],
-        insight_agent_platform::dsl::v3::ast::MessageExpr::Message { .. }
+        insight_dsl::v3::ast::MessageExpr::Message { .. }
     ));
     assert!(matches!(
         llm.messages[1],
-        insight_agent_platform::dsl::v3::ast::MessageExpr::Splice(_)
+        insight_dsl::v3::ast::MessageExpr::Splice(_)
     ));
-    let plan = insight_agent_platform::dsl::v3::compile(document, options(source)).unwrap();
+    let plan = insight_dsl::v3::compile(document, options(source)).unwrap();
     let NodeKind::LlmTask(descriptor) = plan.nodes()[0].kind() else {
         panic!("expected LLM task");
     };
@@ -358,8 +356,8 @@ workflow:
       response: string
     - return: $answer
 "#;
-    let document = validate(insight_agent_platform::dsl::v3::parse(source).unwrap()).unwrap();
-    let insight_agent_platform::dsl::v3::ast::Step::Leaf(leaf) = &document.steps[0] else {
+    let document = validate(insight_dsl::v3::parse(source).unwrap()).unwrap();
+    let insight_dsl::v3::ast::Step::Leaf(leaf) = &document.steps[0] else {
         panic!("expected llm leaf");
     };
     let llm = leaf.llm.as_ref().unwrap();
@@ -368,14 +366,14 @@ workflow:
     assert_eq!(llm.tools, ["lookup", "summarize"]);
     assert_eq!(
         llm.tool_choice,
-        insight_agent_platform::dsl::v3::ast::LlmToolChoice::Tool("summarize".to_owned())
+        insight_dsl::v3::ast::LlmToolChoice::Tool("summarize".to_owned())
     );
     assert_eq!(
         (llm.tool_limits.max_rounds, llm.tool_limits.max_calls),
         (3, 32)
     );
 
-    let plan = insight_agent_platform::dsl::v3::compile(document, options(source)).unwrap();
+    let plan = insight_dsl::v3::compile(document, options(source)).unwrap();
     let NodeKind::LlmTask(descriptor) = plan.nodes()[0].kind() else {
         panic!("expected LLM task");
     };
@@ -490,7 +488,7 @@ workflow:
         "tool_limits: {max_rounds: 1, future: 2}",
     ] {
         let source = base.replace("CONTROL", control);
-        let error = validate(insight_agent_platform::dsl::v3::parse(&source).unwrap()).unwrap_err();
+        let error = validate(insight_dsl::v3::parse(&source).unwrap()).unwrap_err();
         assert_eq!(error.code(), INVALID_STEP, "control={control}");
     }
 }
@@ -507,7 +505,7 @@ workflow:
     - return: fixed
 "#;
     let error = compile_source(source, options(source)).unwrap_err();
-    assert_eq!(error.code(), insight_agent_platform::dsl::v3::INVALID_TYPE);
+    assert_eq!(error.code(), insight_dsl::v3::INVALID_TYPE);
     assert!(error.message().contains("fully constrained type"));
 }
 
@@ -525,32 +523,30 @@ workflow:
         answer: $answer
         lines: [fixed, "{{ answer }}"]
 "#;
-    let document = validate(insight_agent_platform::dsl::v3::parse(source).unwrap()).unwrap();
-    let insight_agent_platform::dsl::v3::ast::Step::Return(value) = &document.steps[0] else {
+    let document = validate(insight_dsl::v3::parse(source).unwrap()).unwrap();
+    let insight_dsl::v3::ast::Step::Return(value) = &document.steps[0] else {
         panic!("expected return");
     };
-    let insight_agent_platform::dsl::v3::ast::ValueExpr::Object(fields) = value else {
+    let insight_dsl::v3::ast::ValueExpr::Object(fields) = value else {
         panic!("natural mapping must remain a typed Object AST");
     };
     assert!(matches!(
         fields["answer"],
-        insight_agent_platform::dsl::v3::ast::ValueExpr::Reference(_)
+        insight_dsl::v3::ast::ValueExpr::Reference(_)
     ));
     assert!(matches!(
         fields["lines"],
-        insight_agent_platform::dsl::v3::ast::ValueExpr::Array(_)
+        insight_dsl::v3::ast::ValueExpr::Array(_)
     ));
 
     let raised = source.replace(
         "- return:\n        answer: $answer\n        lines: [fixed, \"{{ answer }}\"]",
         "- raise: rejected",
     );
-    let document = validate(insight_agent_platform::dsl::v3::parse(&raised).unwrap()).unwrap();
+    let document = validate(insight_dsl::v3::parse(&raised).unwrap()).unwrap();
     assert!(matches!(
         document.steps[0],
-        insight_agent_platform::dsl::v3::ast::Step::Raise(
-            insight_agent_platform::dsl::v3::ast::ValueExpr::ErrorRef(_)
-        )
+        insight_dsl::v3::ast::Step::Raise(insight_dsl::v3::ast::ValueExpr::ErrorRef(_))
     ));
 }
 
@@ -565,13 +561,13 @@ workflow:
   steps:
     - return: $question
 "#;
-    let document = validate(insight_agent_platform::dsl::v3::parse(source).unwrap()).unwrap();
+    let document = validate(insight_dsl::v3::parse(source).unwrap()).unwrap();
     assert_eq!(
         document.inputs["question"].value_type.constraints[&Vec::<String>::new()].min_length,
         Some(1)
     );
     let plan = compile_source(source, options(source)).unwrap();
-    let insight_agent_platform::engine::plan::PlanType::Object { properties, .. } =
+    let insight_engine::plan::PlanType::Object { properties, .. } =
         plan.metadata().input_contract().accepted_type()
     else {
         panic!("workflow input must be an object");
@@ -601,7 +597,7 @@ workflow:
     - return: done
 "#;
     let plan = compile_source(source, options(source)).unwrap();
-    let insight_agent_platform::engine::plan::PlanType::Object { properties, .. } =
+    let insight_engine::plan::PlanType::Object { properties, .. } =
         plan.metadata().input_contract().accepted_type()
     else {
         panic!("workflow input must be an object");
@@ -619,18 +615,18 @@ workflow:
 #[test]
 fn legacy_control_and_child_result_are_not_in_the_positive_surface() {
     for source in [
-        include_str!("fixtures/v3/negative-switch.yaml"),
-        include_str!("fixtures/v3/negative-core.yaml"),
-        include_str!("fixtures/v3/negative-child-result.yaml"),
+        include_str!("../../../tests/fixtures/v3/negative-switch.yaml"),
+        include_str!("../../../tests/fixtures/v3/negative-core.yaml"),
+        include_str!("../../../tests/fixtures/v3/negative-child-result.yaml"),
     ] {
-        let raw = insight_agent_platform::dsl::v3::parse(source).unwrap();
+        let raw = insight_dsl::v3::parse(source).unwrap();
         assert_eq!(validate(raw).unwrap_err().code(), INVALID_STEP);
     }
 }
 
 #[test]
 fn checked_in_agents_and_markdown_prompts_compile_through_v3() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agents");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../agents");
     for agent in [
         "action_demo",
         "medical_report_interpreter",

@@ -18,6 +18,9 @@ use tokio_util::sync::CancellationToken;
 use insight_engine::worker::adapter::{
     self as worker_adapter, ModelCallPublicItemAllocator, ModelCallPublicItemReservationError,
 };
+use insight_resources::models::adapter::{
+    select_structured_output_capability, validate_chat_request,
+};
 
 use crate::{
     catalog_v3::VersionedLeafAdapterRegistry,
@@ -25,11 +28,10 @@ use crate::{
     resources::{
         actions::{ActionContext, ActionRegistry, EffectClass, IdempotencyClass, ToolPublicPolicy},
         models::{
-            model_response_too_large, select_structured_output_capability, validate_chat_request,
-            ChatContent, ChatContentPart, ChatFinishReason, ChatMessage, ChatRequest,
-            ChatRequestMode, ChatResponseFormat, ChatRole, ChatToolCall, ChatToolCallDelta,
-            ChatToolChoice, ChatToolDefinition, ChatUsage, ModelCapability, ModelRegistry,
-            ModelRequestCapability,
+            model_response_too_large, ChatContent, ChatContentPart, ChatFinishReason, ChatMessage,
+            ChatRequest, ChatRequestMode, ChatResponseFormat, ChatRole, ChatToolCall,
+            ChatToolCallDelta, ChatToolChoice, ChatToolDefinition, ChatUsage, ModelCapability,
+            ModelRegistry, ModelRequestCapability,
         },
     },
     runtime::{
@@ -2289,6 +2291,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use futures::stream;
+    use insight_durable::model_tool_queue::adapter::model_tool_task_claim_new;
     use serde_json::{json, Value};
 
     use super::*;
@@ -2296,10 +2299,7 @@ mod tests {
         catalog_v3::{LeafDeploymentResolver, ProductionLeafDeploymentResolver},
         engine::{
             plan::{DataPortId, LeafTaskDescriptor, PlanProperty, PortName},
-            repository::{
-                deterministic_tool_identity, parse_action_from_stored_evidence, ModelToolTaskClaim,
-                StoredModelToolActionEvidence,
-            },
+            repository::{deterministic_tool_identity, parse_action_from_stored_evidence},
             scheduler::{BoundTaskInput, SchedulerAction, SchedulerCheckpointId, SchedulerTaskId},
             worker::{
                 ModelCallAuthority, ModelContinuationTurn, ModelToolResult, ResponseItemAuthority,
@@ -4183,21 +4183,21 @@ mod tests {
         )
         .unwrap();
         let deployment_binding = frozen_action_binding(registered.as_ref());
-        let frozen_action = parse_action_from_stored_evidence(StoredModelToolActionEvidence {
-            name: identity.id.clone(),
-            action_id: identity.id.clone(),
-            action_version: identity.version.to_string(),
-            descriptor_hash: identity.descriptor_hash.clone(),
-            input_schema: descriptor.input_schema.clone(),
-            output_schema: descriptor.output_schema.clone(),
+        let frozen_action = parse_action_from_stored_evidence(
+            identity.id.clone(),
+            identity.id.clone(),
+            identity.version.to_string(),
+            identity.descriptor_hash.clone(),
+            descriptor.input_schema.clone(),
+            descriptor.output_schema.clone(),
             effect_policy,
             deployment_binding,
-            effective_public_policy: json!({
+            json!({
                 "call": false,
                 "arguments": "private",
                 "result": null
             }),
-        })
+        )
         .unwrap();
         let run_id = RunId::new("run_synthetic_tool").unwrap();
         let parent_activation = ActivationId::new("activation_synthetic_parent").unwrap();
@@ -4214,7 +4214,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let claim = ModelToolTaskClaim::new(
+        let claim = model_tool_task_claim_new(
             run_id,
             parent_activation,
             AttemptNo::FIRST,
@@ -4306,21 +4306,21 @@ mod tests {
             )
             .unwrap();
             let deployment_binding = frozen_action_binding(registered.as_ref());
-            let frozen_action = parse_action_from_stored_evidence(StoredModelToolActionEvidence {
-                name: identity.id.clone(),
-                action_id: identity.id.clone(),
-                action_version: identity.version.to_string(),
-                descriptor_hash: identity.descriptor_hash.clone(),
-                input_schema: descriptor.input_schema.clone(),
-                output_schema: descriptor.output_schema.clone(),
+            let frozen_action = parse_action_from_stored_evidence(
+                identity.id.clone(),
+                identity.id.clone(),
+                identity.version.to_string(),
+                identity.descriptor_hash.clone(),
+                descriptor.input_schema.clone(),
+                descriptor.output_schema.clone(),
                 effect_policy,
                 deployment_binding,
-                effective_public_policy: json!({
+                json!({
                     "call": true,
                     "arguments": "all",
                     "result": null
                 }),
-            })
+            )
             .unwrap();
             let run_id = RunId::new("run_server_injection").unwrap();
             let parent_activation = ActivationId::new("activation_server_injection").unwrap();
@@ -4339,7 +4339,7 @@ mod tests {
                 Some(3),
             )
             .unwrap();
-            let claim = ModelToolTaskClaim::new(
+            let claim = model_tool_task_claim_new(
                 run_id,
                 parent_activation,
                 AttemptNo::FIRST,

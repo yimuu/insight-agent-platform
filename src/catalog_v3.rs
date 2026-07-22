@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 
+use crate::engine::repository::VersionedPlanAdapter as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 

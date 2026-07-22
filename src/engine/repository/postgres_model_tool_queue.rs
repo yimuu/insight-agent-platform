@@ -5,6 +5,16 @@ use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use insight_durable::common::adapter::{
+    canonical_json, function_call_response_item_id, i64_from_u64, u64_from_i64,
+};
+use insight_durable::model_tool_queue::adapter::{
+    model_tool_batch_activation_new, model_tool_continuation_status_as_str,
+    model_tool_continuation_status_parse, model_tool_task_claim_new,
+    model_tool_task_commit_receipt_new, model_tool_task_disposition_parse,
+    model_tool_task_outcome_canonical_hash, model_tool_task_status_parse,
+};
+
 use crate::engine::{
     ActivationId, AttemptNo, ContentHash, EffectEvidence, EffectIdempotency, LeaseEpoch,
     ResponseItemAuthority, RunId, SchedulerTaskId, SchedulerTaskKind, WorkerCancellation,
@@ -13,7 +23,6 @@ use crate::engine::{
 use crate::runtime::{WorkflowToolPublicProjection, WorkflowToolResult};
 
 use super::{
-    common::{canonical_json, function_call_response_item_id, i64_from_u64, u64_from_i64},
     model_tool_queue::{
         deterministic_tool_identity, parse_action_from_stored_evidence,
         parse_frozen_model_tool_contract, validate_tool_arguments, validate_tool_result,
@@ -21,7 +30,7 @@ use super::{
         ModelToolContinuationStatus, ModelToolFailureClass, ModelToolTaskClaim,
         ModelToolTaskCommitReceipt, ModelToolTaskDisposition, ModelToolTaskHeartbeatOutcome,
         ModelToolTaskIdentity, ModelToolTaskOutcome, ModelToolTaskStatus,
-        ModelToolTaskTransitionOutcome, StoredModelToolActionEvidence,
+        ModelToolTaskTransitionOutcome,
     },
     postgres::{lock_run_for_event_write, PostgresDurableRepository},
     scheduler_repository::{
@@ -258,33 +267,25 @@ fn decode_action(row: &PgRow) -> Result<FrozenModelToolAction, RepositoryError> 
             .map_err(|_| RepositoryError::invalid_data())?,
     )
     .map_err(|_| RepositoryError::invalid_data())?;
-    parse_action_from_stored_evidence(StoredModelToolActionEvidence {
-        name: row
-            .try_get("tool_name")
+    parse_action_from_stored_evidence(
+        row.try_get("tool_name")
             .map_err(|_| RepositoryError::invalid_data())?,
-        action_id: row
-            .try_get("action_id")
+        row.try_get("action_id")
             .map_err(|_| RepositoryError::invalid_data())?,
-        action_version: row
-            .try_get("action_version")
+        row.try_get("action_version")
             .map_err(|_| RepositoryError::invalid_data())?,
-        descriptor_hash: row
-            .try_get("action_descriptor_hash")
+        row.try_get("action_descriptor_hash")
             .map_err(|_| RepositoryError::invalid_data())?,
-        input_schema: row
-            .try_get("action_input_schema")
+        row.try_get("action_input_schema")
             .map_err(|_| RepositoryError::invalid_data())?,
-        output_schema: row
-            .try_get("action_output_schema")
+        row.try_get("action_output_schema")
             .map_err(|_| RepositoryError::invalid_data())?,
         effect_policy,
-        deployment_binding: row
-            .try_get("action_deployment_binding")
+        row.try_get("action_deployment_binding")
             .map_err(|_| RepositoryError::invalid_data())?,
-        effective_public_policy: row
-            .try_get("effective_public_policy")
+        row.try_get("effective_public_policy")
             .map_err(|_| RepositoryError::invalid_data())?,
-    })
+    )
 }
 
 fn decode_public_item(row: &PgRow) -> Result<Option<ResponseItemAuthority>, RepositoryError> {
@@ -390,7 +391,7 @@ async fn load_activation(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    ModelToolBatchActivation::new(
+    model_tool_batch_activation_new(
         claim.run_id().clone(),
         claim.activation_id().clone(),
         claim.envelope().attempt_no(),
@@ -494,7 +495,7 @@ pub(crate) async fn activate_model_tool_call_batch_postgres(
         }
     }
     let parent_operation_deadline = parent_operation_deadline_postgres(&mut tx, claim).await?;
-    let contract =
+    let (max_rounds, max_calls, tools) =
         parse_frozen_model_tool_contract(claim.envelope().request().deployment_binding())?;
     let prior_rounds = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM model_tool_call_batches
@@ -507,9 +508,7 @@ pub(crate) async fn activate_model_tool_call_batch_postgres(
     .fetch_one(&mut *tx)
     .await
     .map_err(RepositoryError::storage)?;
-    if u32::try_from(prior_rounds).map_err(|_| RepositoryError::invalid_data())?
-        > contract.max_rounds
-    {
+    if u32::try_from(prior_rounds).map_err(|_| RepositoryError::invalid_data())? > max_rounds {
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(ModelToolBatchActivationOutcome::RoundLimitExceeded);
     }
@@ -523,8 +522,7 @@ pub(crate) async fn activate_model_tool_call_batch_postgres(
     .fetch_one(&mut *tx)
     .await
     .map_err(RepositoryError::storage)?;
-    if u32::try_from(total_calls).map_err(|_| RepositoryError::invalid_data())? > contract.max_calls
-    {
+    if u32::try_from(total_calls).map_err(|_| RepositoryError::invalid_data())? > max_calls {
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(ModelToolBatchActivationOutcome::CallLimitExceeded);
     }
@@ -555,8 +553,7 @@ pub(crate) async fn activate_model_tool_call_batch_postgres(
         let tool_name: String = row
             .try_get("tool_name")
             .map_err(|_| RepositoryError::invalid_data())?;
-        let action = contract
-            .tools
+        let action = tools
             .get(&tool_name)
             .cloned()
             .ok_or_else(RepositoryError::invalid_data)?;
@@ -815,7 +812,7 @@ fn decode_claim(row: &PgRow) -> Result<ModelToolTaskClaim, RepositoryError> {
         parent_attempt_no,
         model_call_no,
     )?;
-    ModelToolTaskClaim::new(
+    model_tool_task_claim_new(
         run_id,
         activation_id,
         parent_attempt_no,
@@ -1112,7 +1109,7 @@ async fn finalize_batch_barrier_postgres(
            AND execution_status='active' AND continuation_status='waiting_tools'",
     )
     .bind(execution)
-    .bind(continuation.as_str())
+    .bind(model_tool_continuation_status_as_str(continuation))
     .bind(run_id)
     .bind(activation_id)
     .bind(attempt_no)
@@ -1767,7 +1764,7 @@ pub(crate) async fn mark_model_tool_call_started_postgres(
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(ModelToolTaskTransitionOutcome::StaleLease);
     }
-    let status = ModelToolTaskStatus::parse(
+    let status = model_tool_task_status_parse(
         &row.try_get::<String, _>("call_status")
             .map_err(|_| RepositoryError::invalid_data())?,
     )?;
@@ -1890,7 +1887,7 @@ pub(crate) async fn heartbeat_model_tool_call_postgres(
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(ModelToolTaskHeartbeatOutcome::RunTerminal);
     }
-    let status = ModelToolTaskStatus::parse(
+    let status = model_tool_task_status_parse(
         &row.try_get::<String, _>("call_status")
             .map_err(|_| RepositoryError::invalid_data())?,
     )?;
@@ -1982,7 +1979,7 @@ fn decode_last_receipt(row: &PgRow) -> Result<ModelToolTaskCommitReceipt, Reposi
             .map_err(|_| RepositoryError::invalid_data())?,
     )
     .map_err(|_| RepositoryError::invalid_data())?;
-    let disposition = ModelToolTaskDisposition::parse(
+    let disposition = model_tool_task_disposition_parse(
         &row.try_get::<String, _>("last_outcome_disposition")
             .map_err(|_| RepositoryError::invalid_data())?,
     )?;
@@ -2002,11 +1999,11 @@ fn decode_last_receipt(row: &PgRow) -> Result<ModelToolTaskCommitReceipt, Reposi
     let available = row
         .try_get::<Option<DateTime<Utc>>, _>("last_outcome_available_at")
         .map_err(|_| RepositoryError::invalid_data())?;
-    let continuation = ModelToolContinuationStatus::parse(
+    let continuation = model_tool_continuation_status_parse(
         &row.try_get::<String, _>("continuation_status")
             .map_err(|_| RepositoryError::invalid_data())?,
     )?;
-    ModelToolTaskCommitReceipt::new(
+    model_tool_task_commit_receipt_new(
         task_id,
         disposition,
         attempt_no,
@@ -2042,7 +2039,7 @@ pub(crate) async fn commit_model_tool_call_outcome_postgres(
     claim: &ModelToolTaskClaim,
     outcome: &ModelToolTaskOutcome,
 ) -> Result<ModelToolTaskTransitionOutcome<ModelToolTaskCommitReceipt>, RepositoryError> {
-    let outcome_hash = outcome.canonical_hash()?;
+    let outcome_hash = model_tool_task_outcome_canonical_hash(outcome)?;
     let mut tx = repository
         .pool
         .begin()
@@ -2122,7 +2119,7 @@ pub(crate) async fn commit_model_tool_call_outcome_postgres(
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(ModelToolTaskTransitionOutcome::StaleLease);
     }
-    let status = ModelToolTaskStatus::parse(
+    let status = model_tool_task_status_parse(
         &row.try_get::<String, _>("call_status")
             .map_err(|_| RepositoryError::invalid_data())?,
     )?;
@@ -2461,7 +2458,7 @@ pub(crate) async fn commit_model_tool_call_outcome_postgres(
         )
         .await?
     };
-    let receipt = ModelToolTaskCommitReceipt::new(
+    let receipt = model_tool_task_commit_receipt_new(
         claim.identity().tool_task_id().clone(),
         disposition,
         claim.tool_attempt_no(),

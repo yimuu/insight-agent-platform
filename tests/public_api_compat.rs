@@ -13,7 +13,7 @@ use insight_agent_platform::{
     },
     config::AuthConfig,
     dsl::{
-        v3::{compile_source, CompileOptions, GraphSurfaceRepository},
+        v3::{compile_source, CompileOptions, GraphAuthorDocument, GraphSurfaceRepository},
         CompileError,
     },
     engine::{
@@ -22,9 +22,10 @@ use insight_agent_platform::{
             ClaimSchedulerRunCommand, FencedSchedulerRunCommand, HumanTaskDurableRepository,
             ModelToolTaskClaim, PostgresDurableRepository, PublicEventOutboxRepository,
             RecoveryDurableRepository, RepositoryError, RuntimeIngressDurableRepository,
-            SchedulerDurableRepository, SqliteDurableRepository,
+            SchedulerDurableRepository, SqliteDurableRepository, VersionedPlan,
         },
-        FrozenRetrievalTarget, Plan, RunId, TaskExecutionRequest, TransitionKey,
+        DeploymentRevisionId, FrozenRetrievalTarget, Plan, RunId, TaskExecutionRequest,
+        TransitionKey,
     },
     resources::retrievals::RegisteredRetrieval,
     runtime::{
@@ -77,6 +78,24 @@ fn assert_production_associated_items<R: ProductionRunRepository>(
 
 fn assert_production_impl<T: ProductionRunRepository>() {}
 
+#[allow(dead_code)]
+fn assert_verified_graph_constructor_call(
+    graph: &GraphAuthorDocument,
+    deployment_revision_id: DeploymentRevisionId,
+) {
+    let _: Result<VersionedPlan, RepositoryError> = VersionedPlan::from_verified_graph(
+        "phase0-definition",
+        "phase0-agent",
+        "Phase 0 agent",
+        deployment_revision_id,
+        "phase0-expression-engine",
+        graph,
+        serde_json::Value::Null,
+        serde_json::Value::Null,
+        serde_json::Value::Null,
+    );
+}
+
 // A representative downstream-owned implementation proves that the facade
 // still exposes implementable traits, not merely nameable trait objects.
 struct DownstreamPrincipalResolver;
@@ -100,7 +119,7 @@ fn root_facade_keeps_key_paths_signatures_and_type_identity() {
     fn accept_run_service(_: RunService) {}
     let _ = accept_run_service as fn(RunService);
 
-    // These two inherent methods currently cross the intended engine crate
+    // These inherent methods currently cross the intended workspace crate
     // boundary.  Their exact downstream call signatures must remain usable
     // while ownership is split across engine/durable/resources crates.
     let _: fn(&ModelToolTaskClaim) -> Result<TaskExecutionRequest, &'static str> =

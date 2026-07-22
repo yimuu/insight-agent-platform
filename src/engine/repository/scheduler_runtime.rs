@@ -11,6 +11,21 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::FutureExt;
+#[cfg(test)]
+use insight_durable::model_tool_parent_resume::adapter::{
+    model_tool_parent_resume_activate_checkpointed, model_tool_parent_resume_ready_cancelled,
+    model_tool_parent_resume_ready_continue, model_tool_parent_resume_ready_failed,
+};
+#[cfg(test)]
+use insight_durable::model_tool_queue::adapter::{
+    model_tool_batch_activation_new, model_tool_task_claim_new, model_tool_task_commit_receipt_new,
+};
+use insight_durable::scheduler_repository::adapter::SchedulerTaskFailureAdapter as _;
+#[cfg(test)]
+use insight_durable::scheduler_repository::adapter::{
+    DurableTaskExecutionRequestAdapter as _, SchedulerCommitReceiptAdapter as _,
+    SchedulerTaskClaimAdapter as _, SchedulerTaskCompletionReceiptAdapter as _,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::worker::WorkerRuntimeServices;
@@ -2754,7 +2769,7 @@ mod tests {
         let claim = claim(policy, 1);
         let forged = WorkerFailure::new(
             WorkerFailureClass::EffectOutcomeUnknown,
-            super::super::scheduler_repository::SCHEDULER_WORKER_DEADLINE_EXCEEDED,
+            insight_durable::scheduler_repository::adapter::WORKER_DEADLINE_EXCEEDED,
             false,
         )
         .unwrap();
@@ -2818,7 +2833,7 @@ mod tests {
     }
 
     fn renewed_model_tool_claim(claim: &ModelToolTaskClaim) -> ModelToolTaskClaim {
-        ModelToolTaskClaim::new(
+        model_tool_task_claim_new(
             claim.run_id().clone(),
             claim.parent_activation_id().clone(),
             claim.parent_attempt_no(),
@@ -2917,7 +2932,7 @@ mod tests {
                     super::super::ModelToolContinuationStatus::ReadyCancelled,
                 ),
             };
-            let receipt = ModelToolTaskCommitReceipt::new(
+            let receipt = model_tool_task_commit_receipt_new(
                 claim.identity().tool_task_id().clone(),
                 disposition,
                 claim.tool_attempt_no(),
@@ -3067,27 +3082,25 @@ mod tests {
             "public": descriptor_public_policy,
         });
         let action = crate::engine::repository::parse_action_from_stored_evidence(
-            crate::engine::repository::StoredModelToolActionEvidence {
-                name: "lookup".to_owned(),
-                action_id: "lookup".to_owned(),
-                action_version: "1.2.3".to_owned(),
-                descriptor_hash,
-                input_schema: json!({
-                    "$schema": "https://json-schema.org/draft/2020-12/schema",
-                    "$defs": {},
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "detail": {"type": "string"}
-                    },
-                    "required": ["query", "detail"],
-                    "additionalProperties": false
-                }),
-                output_schema,
-                effect_policy,
-                deployment_binding,
-                effective_public_policy,
-            },
+            "lookup".to_owned(),
+            "lookup".to_owned(),
+            "1.2.3".to_owned(),
+            descriptor_hash,
+            json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$defs": {},
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "detail": {"type": "string"}
+                },
+                "required": ["query", "detail"],
+                "additionalProperties": false
+            }),
+            output_schema,
+            effect_policy,
+            deployment_binding,
+            effective_public_policy,
         )
         .unwrap();
         let run_id = RunId::new("run_model_tool_pump").unwrap();
@@ -3105,7 +3118,7 @@ mod tests {
             None,
         )
         .unwrap();
-        ModelToolTaskClaim::new(
+        model_tool_task_claim_new(
             run_id,
             parent_activation_id,
             AttemptNo::FIRST,
@@ -4287,7 +4300,7 @@ mod tests {
         let identity = model_tool_worker_claim(30_000, json!({"type": "object"}))
             .identity()
             .clone();
-        ModelToolBatchActivation::new(
+        model_tool_batch_activation_new(
             claim.run_id().clone(),
             claim.activation_id().clone(),
             claim.envelope().attempt_no(),
@@ -4674,7 +4687,7 @@ mod tests {
         let original_deadline = Utc::now() + Duration::seconds(45);
         let turn = parent_continuation_turn();
         let resume =
-            ModelToolParentResume::ready_continue(vec![turn.clone()], original_deadline).unwrap();
+            model_tool_parent_resume_ready_continue(vec![turn.clone()], original_deadline).unwrap();
         let repository = MockParentContinuationRepository::new(claim, Some(resume), []);
         let (registry, provider_calls, contexts) = parent_llm_registry(Ok(parent_stop_result(2)));
 
@@ -4732,19 +4745,19 @@ mod tests {
         let deadline = Utc::now() + Duration::seconds(45);
         let cases = [
             (
-                ModelToolParentResume::ready_failed(1, deadline, false).unwrap(),
+                model_tool_parent_resume_ready_failed(1, deadline, false).unwrap(),
                 WorkerFailureClass::InfrastructureFailure,
                 LLM_TOOL_EXECUTION_FAILED,
                 EffectEvidence::Started,
             ),
             (
-                ModelToolParentResume::ready_failed(1, deadline, true).unwrap(),
+                model_tool_parent_resume_ready_failed(1, deadline, true).unwrap(),
                 WorkerFailureClass::EffectOutcomeUnknown,
                 LLM_TOOL_EFFECT_OUTCOME_UNKNOWN,
                 EffectEvidence::Unknown,
             ),
             (
-                ModelToolParentResume::ready_cancelled(1, deadline).unwrap(),
+                model_tool_parent_resume_ready_cancelled(1, deadline).unwrap(),
                 WorkerFailureClass::ControlTermination,
                 LLM_TOOL_EXECUTION_CANCELLED,
                 EffectEvidence::Started,
@@ -4807,9 +4820,11 @@ mod tests {
             } else {
                 ModelToolBatchActivationOutcome::Activated(expected.clone())
             };
-            let resume =
-                ModelToolParentResume::activate_checkpointed(1, Utc::now() + Duration::seconds(45))
-                    .unwrap();
+            let resume = model_tool_parent_resume_activate_checkpointed(
+                1,
+                Utc::now() + Duration::seconds(45),
+            )
+            .unwrap();
             let repository =
                 MockParentContinuationRepository::new(claim, Some(resume), [activation]);
             let (registry, provider_calls, contexts) =
@@ -4858,9 +4873,11 @@ mod tests {
                 LLM_TOOL_CALL_LIMIT,
             ),
         ] {
-            let resume =
-                ModelToolParentResume::activate_checkpointed(1, Utc::now() + Duration::seconds(45))
-                    .unwrap();
+            let resume = model_tool_parent_resume_activate_checkpointed(
+                1,
+                Utc::now() + Duration::seconds(45),
+            )
+            .unwrap();
             let repository = MockParentContinuationRepository::new(
                 parent_llm_claim(120_000),
                 Some(resume),
@@ -4909,9 +4926,11 @@ mod tests {
             ModelToolBatchActivationOutcome::StaleParentLease,
             ModelToolBatchActivationOutcome::RunTerminal,
         ] {
-            let resume =
-                ModelToolParentResume::activate_checkpointed(1, Utc::now() + Duration::seconds(45))
-                    .unwrap();
+            let resume = model_tool_parent_resume_activate_checkpointed(
+                1,
+                Utc::now() + Duration::seconds(45),
+            )
+            .unwrap();
             let repository = MockParentContinuationRepository::new(
                 parent_llm_claim(120_000),
                 Some(resume),
@@ -4941,7 +4960,7 @@ mod tests {
         }
 
         let resume =
-            ModelToolParentResume::activate_checkpointed(1, Utc::now() + Duration::seconds(45))
+            model_tool_parent_resume_activate_checkpointed(1, Utc::now() + Duration::seconds(45))
                 .unwrap();
         let repository = MockParentContinuationRepository::new(
             parent_llm_claim(120_000),
@@ -5088,7 +5107,7 @@ mod tests {
         let recovered_claim = parent_llm_claim(120_000);
         let activation = parent_activation(&recovered_claim, 1);
         let resume =
-            ModelToolParentResume::activate_checkpointed(1, Utc::now() + Duration::seconds(45))
+            model_tool_parent_resume_activate_checkpointed(1, Utc::now() + Duration::seconds(45))
                 .unwrap();
         let recovered_repository = MockParentContinuationRepository::new(
             recovered_claim,
@@ -5295,7 +5314,7 @@ mod tests {
     #[tokio::test]
     async fn parent_resume_deadline_authority_precedes_tool_terminal_state() {
         let expired_deadline = Utc::now() - Duration::seconds(1);
-        let resume = ModelToolParentResume::ready_failed(1, expired_deadline, false).unwrap();
+        let resume = model_tool_parent_resume_ready_failed(1, expired_deadline, false).unwrap();
         let repository =
             MockParentContinuationRepository::new(parent_llm_claim(120_000), Some(resume), [])
                 .with_heartbeats([ParentHeartbeatStep::DeadlineElapsed]);
@@ -5339,7 +5358,7 @@ mod tests {
 
     #[tokio::test]
     async fn parent_resume_initial_heartbeat_lease_loss_never_reserves_or_calls_provider() {
-        let resume = ModelToolParentResume::ready_continue(
+        let resume = model_tool_parent_resume_ready_continue(
             vec![parent_continuation_turn()],
             Utc::now() + Duration::seconds(45),
         )

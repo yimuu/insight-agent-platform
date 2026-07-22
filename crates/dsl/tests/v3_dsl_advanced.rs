@@ -1,11 +1,7 @@
-use insight_agent_platform::{
-    dsl::v3::{compile_source, CompileOptions, INVALID_CONTROL_FLOW},
-    engine::{
-        plan::{
-            CatchFailureKind, CollectSource, LoopFlavor, NodeKind, PlanIndex, PlanType, ScopeKind,
-        },
-        DefinitionRevisionId,
-    },
+use insight_dsl::v3::{compile_source, CompileOptions, INVALID_CONTROL_FLOW};
+use insight_engine::{
+    plan::{CatchFailureKind, CollectSource, LoopFlavor, NodeKind, PlanIndex, PlanType, ScopeKind},
+    DefinitionRevisionId,
 };
 
 fn options(source: &str) -> CompileOptions {
@@ -259,7 +255,7 @@ workflow:
         compile_source(&invalid, options(&invalid))
             .unwrap_err()
             .code(),
-        insight_agent_platform::dsl::v3::INVALID_STEP
+        insight_dsl::v3::INVALID_STEP
     );
 }
 

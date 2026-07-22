@@ -9,6 +9,24 @@ use serde_json::{json, Value};
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use insight_durable::activation::adapter::{
+    effect_evidence_str, effect_idempotency_str, parse_effect_evidence,
+};
+use insight_durable::common::adapter::{
+    self as common_contract_adapter, canonical_intent_hash, canonical_json, canonical_value,
+    decode_execution_event_schema_version, durable_public_event_envelope, event_id, fencing_token,
+    function_call_response_item_id, i64_from_u64, payload_id, prepare_model_call_completion,
+    public_event_id, public_event_ordinal, response_item_id, scheduler_checkpoint_content_hash,
+    u64_from_i64, validate_incomplete_function_call_item, validate_inline_payload,
+    ValidatedInlinePayload,
+};
+use insight_durable::control_repository::adapter::{
+    decode_durable_reuse_provenance, reuse_matches_admission_contract,
+};
+use insight_durable::model::adapter::termination_reason_as_str;
+use insight_durable::model_tool_parent_resume::adapter::*;
+use insight_durable::model_tool_queue::adapter::*;
+use insight_durable::scheduler_repository::adapter::*;
 use insight_engine::scheduler_adapter;
 
 use crate::engine::worker::{
@@ -26,20 +44,11 @@ use crate::engine::{
     TransitionKey, TransitionOutcome, ValueRef,
 };
 
-use super::activation::{effect_evidence_str, effect_idempotency_str, parse_effect_evidence};
-use super::common::{
-    canonical_intent_hash, canonical_json, canonical_value, decode_execution_event_schema_version,
-    durable_public_event_envelope, event_id, fencing_token, function_call_response_item_id,
-    i64_from_u64, payload_id, prepare_model_call_completion, public_event_id, public_event_ordinal,
-    response_item_id, scheduler_checkpoint_content_hash, u64_from_i64,
-    validate_incomplete_function_call_item, validate_inline_payload, ValidatedInlinePayload,
-};
-use super::model::termination_reason_as_str;
 use super::model_tool_parent_resume::{
-    classify_parent_task_claim, LatestParentModelCall, ParentTaskClaimClass,
-};
-use super::model_tool_queue::{
-    parse_frozen_model_tool_contract, prepare_model_function_call_publications,
+    classify_parent_task_claim, latest_continuation_status, latest_execution_status,
+    latest_fencing_token, latest_is_checkpointed, latest_is_ready, latest_is_waiting_tools,
+    latest_lease_epoch, latest_model_call_no, latest_parent_model_call_view, latest_task_id,
+    LatestParentModelCallView,
 };
 use super::postgres::{
     allocate_event_seq, decode_execution_event_row, insert_event, insert_or_get_payload,
@@ -55,11 +64,11 @@ use super::postgres_projection::{
     append_projection_mutation_event, finalize_projection_checkpoints,
 };
 use super::scheduler_repository::{
-    validate_runtime_value_ref, validate_subflow_admission, DurableTaskExecutionRequest,
-    ModelToolCallCheckpoint, SchedulerCommitReceipt, SchedulerDurableRepository,
-    SchedulerFailureDisposition, SchedulerStoredValue, SchedulerTaskClaim, SchedulerTaskClaimMode,
-    SchedulerTaskCommitOutcome, SchedulerTaskCompletionReceipt, SchedulerTaskHeartbeatOutcome,
-    SchedulerTaskOutcome, SchedulerTaskSuccess, SCHEDULER_CHECKPOINT_SCHEMA_VERSION,
+    DurableTaskExecutionRequest, ModelToolCallCheckpoint, SchedulerCommitReceipt,
+    SchedulerDurableRepository, SchedulerFailureDisposition, SchedulerStoredValue,
+    SchedulerTaskClaim, SchedulerTaskClaimMode, SchedulerTaskCommitOutcome,
+    SchedulerTaskCompletionReceipt, SchedulerTaskHeartbeatOutcome, SchedulerTaskOutcome,
+    SchedulerTaskSuccess, SCHEDULER_CHECKPOINT_SCHEMA_VERSION,
     SCHEDULER_TASK_ENVELOPE_SCHEMA_VERSION,
 };
 use super::{FencedSchedulerRunCommand, RepositoryError};
@@ -2312,9 +2321,9 @@ async fn settle_subflow_postgres(
             .try_get::<Option<String>, _>("expected_payload_hash")
             .map_err(|_| RepositoryError::invalid_data())?
             .as_deref()
-            != inline_payload
-                .as_ref()
-                .map(|payload| payload.content_hash().as_str())
+            != inline_payload.as_ref().map(|payload| {
+                common_contract_adapter::validated_inline_payload_content_hash(payload).as_str()
+            })
     {
         return Err(RepositoryError::invalid_data());
     }
@@ -2325,7 +2334,9 @@ async fn settle_subflow_postgres(
             .map_err(|_| RepositoryError::invalid_data())?,
         &lifecycle,
         error_code.as_deref(),
-        inline_payload.map(|payload| payload.value().clone()),
+        inline_payload.map(|payload| {
+            common_contract_adapter::validated_inline_payload_value(&payload).clone()
+        }),
     )
     .await?;
     if observed != *outcome {
@@ -2646,7 +2657,8 @@ async fn resolve_reuse_at_admission_postgres(
     let Some(target_contract) = admission.contract() else {
         reject!("node_class_forbidden");
     };
-    if !postgres_candidate_contract(&candidate)?.matches_admission_contract(target_contract) {
+    if !reuse_matches_admission_contract(&postgres_candidate_contract(&candidate)?, target_contract)
+    {
         reject!("target_contract_mismatch");
     }
     let target_scope = sqlx::query(
@@ -2825,14 +2837,13 @@ async fn resolve_reuse_at_admission_postgres(
             reject!("scope_contract_mismatch");
         }
     }
-    let provenance = serde_json::from_value::<super::control_repository::DurableReuseProvenance>(
-        candidate
-            .try_get::<Value, _>("source_control_provenance")
-            .map_err(|_| RepositoryError::invalid_data())?,
-    )
-    .map_err(|_| RepositoryError::invalid_data())?;
-    if provenance.control().run_id() != &source_run_id
-        || provenance.control().source_activation_id() != &source_activation_id
+    let provenance_value = candidate
+        .try_get::<Value, _>("source_control_provenance")
+        .map_err(|_| RepositoryError::invalid_data())?;
+    let (control_provenance, data_dependencies) =
+        decode_durable_reuse_provenance(&provenance_value)?;
+    if control_provenance.run_id() != &source_run_id
+        || control_provenance.source_activation_id() != &source_activation_id
     {
         reject!("control_provenance_mismatch");
     }
@@ -2842,15 +2853,15 @@ async fn resolve_reuse_at_admission_postgres(
     )
     .bind(source_run_id.as_str())
     .bind(source_activation_id.as_str())
-    .bind(provenance.control().source_port().as_str())
-    .bind(provenance.control().scope_instance_id().as_str())
+    .bind(control_provenance.source_port().as_str())
+    .bind(control_provenance.scope_instance_id().as_str())
     .fetch_optional(&mut **tx)
     .await
     .map_err(RepositoryError::storage)?;
     if provenance_exists.is_none() {
         reject!("control_provenance_missing");
     }
-    for dependency in provenance.source_data_dependencies() {
+    for dependency in &data_dependencies {
         let rows = sqlx::query(
             "SELECT c.candidate_state,c.materialized_activation_id,
                     a.lifecycle,a.reused_from_run_id,a.reused_from_activation_id
@@ -3075,8 +3086,10 @@ async fn resolve_reuse_at_admission_postgres(
                         .map_err(|_| RepositoryError::invalid_data())?
                         .is_none(),
                 )?;
-                if validated.content_hash() != value_ref.content_hash()
-                    || validated.value() != runtime_value.value()
+                if common_contract_adapter::validated_inline_payload_content_hash(&validated)
+                    != value_ref.content_hash()
+                    || common_contract_adapter::validated_inline_payload_value(&validated)
+                        != runtime_value.value()
                 {
                     reject!("source_value_payload_mismatch");
                 }
@@ -5099,9 +5112,11 @@ async fn validate_value_ref_resource_postgres(
             .ok_or_else(RepositoryError::invalid_data)?;
             let payload = restored_inline_payload_postgres(&row)?
                 .ok_or_else(RepositoryError::invalid_data)?;
-            if payload.value() != inline.value()
-                || payload.content_hash() != inline.content_hash()
-                || payload.canonical_bytes() != inline.canonical_bytes()
+            if common_contract_adapter::validated_inline_payload_value(&payload) != inline.value()
+                || common_contract_adapter::validated_inline_payload_content_hash(&payload)
+                    != inline.content_hash()
+                || common_contract_adapter::validated_inline_payload_canonical_bytes(&payload)
+                    != inline.canonical_bytes()
             {
                 return Err(RepositoryError::invalid_data());
             }
@@ -5176,10 +5191,11 @@ async fn load_facts(
                 .map_err(|_| RepositoryError::invalid_data())?,
         )?,
         scheduler_data(RuntimeValue::new(
-            restored_inline_payload_postgres(&run)?
-                .ok_or_else(RepositoryError::invalid_data)?
-                .value()
-                .clone(),
+            common_contract_adapter::validated_inline_payload_value(
+                &restored_inline_payload_postgres(&run)?
+                    .ok_or_else(RepositoryError::invalid_data)?,
+            )
+            .clone(),
         ))?,
     );
     facts.set_observed_time_ms(u64_from_i64(
@@ -5696,10 +5712,11 @@ async fn load_facts(
                     row.try_get::<String, _>("winner_signal_id")
                         .map_err(|_| RepositoryError::invalid_data())?,
                 ))?;
-                let value = restored_inline_payload_postgres(&row)?
-                    .ok_or_else(RepositoryError::invalid_data)?
-                    .value()
-                    .clone();
+                let value = common_contract_adapter::validated_inline_payload_value(
+                    &restored_inline_payload_postgres(&row)?
+                        .ok_or_else(RepositoryError::invalid_data)?,
+                )
+                .clone();
                 (
                     crate::engine::scheduler::WaitSubjectFact::Signal { signal_id },
                     Some(scheduler_data(RuntimeValue::new(value))?),
@@ -5762,11 +5779,14 @@ async fn load_facts(
                     .try_get::<Option<String>, _>("expected_payload_hash")
                     .map_err(|_| RepositoryError::invalid_data())?
                     .as_deref()
-                    != Some(payload.content_hash().as_str())
+                    != Some(
+                        common_contract_adapter::validated_inline_payload_content_hash(&payload)
+                            .as_str(),
+                    )
                 {
                     return Err(RepositoryError::invalid_data());
                 }
-                let raw = payload.value().clone();
+                let raw = common_contract_adapter::validated_inline_payload_value(&payload).clone();
                 let mut outputs = BTreeMap::new();
                 for contract in &contracts {
                     let selected = raw
@@ -6212,7 +6232,7 @@ async fn load_latest_parent_model_call_postgres(
     run_id: &RunId,
     activation_id: &ActivationId,
     attempt_no: AttemptNo,
-) -> Result<Option<LatestParentModelCall>, RepositoryError> {
+) -> Result<Option<LatestParentModelCallView>, RepositoryError> {
     let row = sqlx::query(
         "SELECT u.model_call_no,u.task_id,u.lease_epoch,u.fencing_token,
                 u.call_status,u.finish_reason,b.execution_status,b.continuation_status
@@ -6230,35 +6250,29 @@ async fn load_latest_parent_model_call_postgres(
     .await
     .map_err(RepositoryError::storage)?;
     row.map(|row| {
-        Ok(LatestParentModelCall {
-            model_call_no: u32::try_from(
+        Ok(latest_parent_model_call_view(
+            u32::try_from(
                 row.try_get::<i32, _>("model_call_no")
                     .map_err(|_| RepositoryError::invalid_data())?,
             )
             .map_err(|_| RepositoryError::invalid_data())?,
-            task_id: row
-                .try_get("task_id")
+            row.try_get("task_id")
                 .map_err(|_| RepositoryError::invalid_data())?,
-            lease_epoch: u64_from_i64(
+            u64_from_i64(
                 row.try_get("lease_epoch")
                     .map_err(|_| RepositoryError::invalid_data())?,
             )?,
-            fencing_token: row
-                .try_get("fencing_token")
+            row.try_get("fencing_token")
                 .map_err(|_| RepositoryError::invalid_data())?,
-            call_status: row
-                .try_get("call_status")
+            row.try_get("call_status")
                 .map_err(|_| RepositoryError::invalid_data())?,
-            finish_reason: row
-                .try_get("finish_reason")
+            row.try_get("finish_reason")
                 .map_err(|_| RepositoryError::invalid_data())?,
-            execution_status: row
-                .try_get("execution_status")
+            row.try_get("execution_status")
                 .map_err(|_| RepositoryError::invalid_data())?,
-            continuation_status: row
-                .try_get("continuation_status")
+            row.try_get("continuation_status")
                 .map_err(|_| RepositoryError::invalid_data())?,
-        })
+        ))
     })
     .transpose()
 }
@@ -6469,9 +6483,9 @@ async fn claim_tasks(
         )
         .await?;
         if let Some(latest) = &latest {
-            if latest.task_id != task_id.as_str()
-                || latest.lease_epoch != envelope.lease_epoch().get()
-                || latest.fencing_token != envelope.fencing_token()
+            if latest_task_id(latest) != task_id.as_str()
+                || latest_lease_epoch(latest) != envelope.lease_epoch().get()
+                || latest_fencing_token(latest) != envelope.fencing_token()
             {
                 return Err(RepositoryError::invalid_data());
             }
@@ -6483,12 +6497,13 @@ async fn claim_tasks(
             latest.as_ref(),
         );
         let mode = match claim_class {
-            ParentTaskClaimClass::InitialExecute
-            | ParentTaskClaimClass::ActivateCheckpointed
-            | ParentTaskClaimClass::ContinueReady => SchedulerTaskClaimMode::Execute,
-            ParentTaskClaimClass::FinalizeLeaseLoss => SchedulerTaskClaimMode::FinalizeLeaseLoss,
-            ParentTaskClaimClass::Acknowledge => SchedulerTaskClaimMode::Acknowledge,
-            ParentTaskClaimClass::Ineligible => continue,
+            "initial_execute" | "activate_checkpointed" | "continue_ready" => {
+                SchedulerTaskClaimMode::Execute
+            }
+            "finalize_lease_loss" => SchedulerTaskClaimMode::FinalizeLeaseLoss,
+            "acknowledge" => SchedulerTaskClaimMode::Acknowledge,
+            "ineligible" => continue,
+            _ => return Err(RepositoryError::invalid_data()),
         };
         let token = format!("claim_{}", Uuid::new_v4().simple());
         let claimed_row = sqlx::query(
@@ -6612,7 +6627,7 @@ async fn claim_tasks(
                 .map_err(|_| RepositoryError::invalid_data())?,
         )
         .bind(&state)
-        .bind(claim_class.as_str())
+        .bind(claim_class)
         .fetch_optional(&mut *tx)
         .await
         .map_err(RepositoryError::storage)?;
@@ -6626,10 +6641,7 @@ async fn claim_tasks(
             .try_get::<DateTime<Utc>, _>("claim_expires_at")
             .map_err(|_| RepositoryError::invalid_data())?;
         if mode == SchedulerTaskClaimMode::Execute {
-            let resume_running = matches!(
-                claim_class,
-                ParentTaskClaimClass::ActivateCheckpointed | ParentTaskClaimClass::ContinueReady
-            );
+            let resume_running = matches!(claim_class, "activate_checkpointed" | "continue_ready");
             let attempt_rows = if resume_running {
                 sqlx::query(
                     "UPDATE node_attempts SET lease_expires_at=$1,heartbeat_at=clock_timestamp(),
@@ -6745,7 +6757,7 @@ async fn claim_tasks(
         )
         .await?
         .as_ref()
-        .is_some_and(LatestParentModelCall::is_waiting_tools)
+        .is_some_and(latest_is_waiting_tools)
         {
             tx.rollback().await.map_err(RepositoryError::storage)?;
             return Ok(Vec::new());
@@ -10008,12 +10020,12 @@ fn model_call_operation_deadline(
 }
 
 fn latest_model_call_matches_claim(
-    latest: &LatestParentModelCall,
+    latest: &LatestParentModelCallView,
     claim: &SchedulerTaskClaim,
 ) -> bool {
-    latest.task_id == claim.task_id().as_str()
-        && latest.lease_epoch == claim.envelope().lease_epoch().get()
-        && latest.fencing_token == claim.envelope().fencing_token()
+    latest_task_id(latest) == claim.task_id().as_str()
+        && latest_lease_epoch(latest) == claim.envelope().lease_epoch().get()
+        && latest_fencing_token(latest) == claim.envelope().fencing_token()
 }
 
 async fn load_ready_continuation_turn_postgres(
@@ -10107,7 +10119,7 @@ async fn load_ready_continuation_turn_postgres(
 async fn validate_parent_model_round_chain_postgres(
     tx: &mut Transaction<'_, Postgres>,
     claim: &SchedulerTaskClaim,
-    latest: &LatestParentModelCall,
+    latest: &LatestParentModelCallView,
 ) -> Result<Vec<ModelContinuationTurn>, RepositoryError> {
     let rows = sqlx::query(
         "SELECT u.model_call_no,u.task_id,u.lease_epoch,u.fencing_token,u.call_status,
@@ -10129,7 +10141,8 @@ async fn validate_parent_model_round_chain_postgres(
     .await
     .map_err(RepositoryError::storage)?;
     if rows.len()
-        != usize::try_from(latest.model_call_no).map_err(|_| RepositoryError::invalid_data())?
+        != usize::try_from(latest_model_call_no(latest))
+            .map_err(|_| RepositoryError::invalid_data())?
     {
         return Err(RepositoryError::invalid_data());
     }
@@ -10175,8 +10188,8 @@ async fn validate_parent_model_round_chain_postgres(
         let continuation_status = row
             .try_get::<Option<String>, _>("continuation_status")
             .map_err(|_| RepositoryError::invalid_data())?;
-        if actual_no < latest.model_call_no
-            || latest.continuation_status.as_deref() == Some("ready_continue")
+        if actual_no < latest_model_call_no(latest)
+            || latest_continuation_status(latest) == Some("ready_continue")
         {
             if execution_status.as_deref() != Some("succeeded")
                 || continuation_status.as_deref() != Some("ready_continue")
@@ -10184,8 +10197,8 @@ async fn validate_parent_model_round_chain_postgres(
                 return Err(RepositoryError::invalid_data());
             }
             turns.push(load_ready_continuation_turn_postgres(tx, claim, actual_no).await?);
-        } else if execution_status != latest.execution_status
-            || continuation_status != latest.continuation_status
+        } else if execution_status.as_deref() != latest_execution_status(latest)
+            || continuation_status.as_deref() != latest_continuation_status(latest)
         {
             return Err(RepositoryError::invalid_data());
         }
@@ -10196,7 +10209,7 @@ async fn validate_parent_model_round_chain_postgres(
 async fn validate_terminal_tool_batch_postgres(
     tx: &mut Transaction<'_, Postgres>,
     claim: &SchedulerTaskClaim,
-    latest: &LatestParentModelCall,
+    latest: &LatestParentModelCallView,
 ) -> Result<bool, RepositoryError> {
     let row = sqlx::query(
         "SELECT COUNT(*) AS total,
@@ -10214,7 +10227,10 @@ async fn validate_terminal_tool_batch_postgres(
         i32::try_from(claim.envelope().attempt_no().get())
             .map_err(|_| RepositoryError::invalid_data())?,
     )
-    .bind(i32::try_from(latest.model_call_no).map_err(|_| RepositoryError::invalid_data())?)
+    .bind(
+        i32::try_from(latest_model_call_no(latest))
+            .map_err(|_| RepositoryError::invalid_data())?,
+    )
     .fetch_one(&mut **tx)
     .await
     .map_err(RepositoryError::storage)?;
@@ -10230,7 +10246,7 @@ async fn validate_terminal_tool_batch_postgres(
     let cancelled: i64 = row
         .try_get("cancelled")
         .map_err(|_| RepositoryError::invalid_data())?;
-    let expected_terminal = match latest.continuation_status.as_deref() {
+    let expected_terminal = match latest_continuation_status(latest) {
         Some("ready_failed") => failed > 0,
         Some("ready_cancelled") => failed == 0 && cancelled > 0,
         _ => false,
@@ -10292,27 +10308,33 @@ async fn load_model_tool_parent_resume_postgres(
         tx.commit().await.map_err(RepositoryError::storage)?;
         return Ok(SchedulerTaskCommitOutcome::Committed { result: None });
     };
-    if !latest_model_call_matches_claim(&latest, claim) || latest.is_waiting_tools() {
+    if !latest_model_call_matches_claim(&latest, claim) || latest_is_waiting_tools(&latest) {
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(SchedulerTaskCommitOutcome::StateConflict);
     }
-    let resume = if latest.is_checkpointed() {
+    let resume = if latest_is_checkpointed(&latest) {
         validate_parent_model_round_chain_postgres(&mut tx, claim, &latest).await?;
-        ModelToolParentResume::activate_checkpointed(latest.model_call_no, operation_deadline)?
-    } else if latest.is_ready() {
+        model_tool_parent_resume_activate_checkpointed(
+            latest_model_call_no(&latest),
+            operation_deadline,
+        )?
+    } else if latest_is_ready(&latest) {
         let turns = validate_parent_model_round_chain_postgres(&mut tx, claim, &latest).await?;
-        match latest.continuation_status.as_deref() {
+        match latest_continuation_status(&latest) {
             Some("ready_continue") => {
-                ModelToolParentResume::ready_continue(turns, operation_deadline)?
+                model_tool_parent_resume_ready_continue(turns, operation_deadline)?
             }
-            Some("ready_failed") => ModelToolParentResume::ready_failed(
-                latest.model_call_no,
+            Some("ready_failed") => model_tool_parent_resume_ready_failed(
+                latest_model_call_no(&latest),
                 operation_deadline,
                 validate_terminal_tool_batch_postgres(&mut tx, claim, &latest).await?,
             )?,
             Some("ready_cancelled") => {
                 validate_terminal_tool_batch_postgres(&mut tx, claim, &latest).await?;
-                ModelToolParentResume::ready_cancelled(latest.model_call_no, operation_deadline)?
+                model_tool_parent_resume_ready_cancelled(
+                    latest_model_call_no(&latest),
+                    operation_deadline,
+                )?
             }
             _ => return Err(RepositoryError::invalid_data()),
         }
@@ -10825,17 +10847,16 @@ async fn reserve_model_call_public_function_item_postgres(
     {
         return Err(RepositoryError::invalid_configuration());
     }
-    let contract =
+    let (_, max_calls, tools) =
         parse_frozen_model_tool_contract(claim.envelope().request().deployment_binding())?;
-    let action = contract
-        .tools
+    let action = tools
         .get(tool_name)
         .ok_or_else(RepositoryError::invalid_data)?;
     let projection = WorkflowToolPublicProjection::from_frozen_effective_policy(
         action.effective_public_policy(),
     )
     .map_err(|_| RepositoryError::invalid_data())?;
-    if call_index >= contract.max_calls || !projection.raw_argument_deltas_authorized() {
+    if call_index >= max_calls || !projection.raw_argument_deltas_authorized() {
         return Err(RepositoryError::invalid_configuration());
     }
 
@@ -11872,13 +11893,20 @@ mod integrity_tests {
     use super::*;
     use crate::engine::{ArtifactId, EffectIdempotency, WorkerFailure, WorkerFailureClass};
 
-    use super::super::scheduler_repository::{
-        scheduler_success_validation_fixture, scheduler_validation_fixture, SchedulerTaskFailure,
+    use super::super::scheduler_repository::SchedulerTaskFailure;
+    use insight_durable::scheduler_repository::adapter::{
+        scheduler_success_validation_fixture, scheduler_task_failure_unchecked,
+        scheduler_task_success_unchecked, scheduler_validation_fixture,
     };
+
+    fn fixture_claim_expires_at() -> DateTime<Utc> {
+        Utc::now() + chrono::Duration::minutes(1)
+    }
 
     #[test]
     fn postgres_validate_success_rejects_forged_value_reference_hash() {
-        let (claim, port_id, result) = scheduler_success_validation_fixture();
+        let (claim, port_id, result) =
+            scheduler_success_validation_fixture(fixture_claim_expires_at());
         assert!(validate_success(
             &claim,
             &SchedulerTaskSuccess::inline(result.clone()).unwrap()
@@ -11904,7 +11932,7 @@ mod integrity_tests {
         )
         .is_ok());
 
-        let forged = SchedulerTaskSuccess::unchecked_for_test(
+        let forged = scheduler_task_success_unchecked(
             result,
             BTreeMap::from([(
                 port_id,
@@ -11924,7 +11952,11 @@ mod integrity_tests {
 
     #[test]
     fn postgres_outcome_boundary_rejects_forged_retry_policy() {
-        let (claim, _, _) = scheduler_validation_fixture(EffectIdempotency::NonIdempotent, 2);
+        let (claim, _, _) = scheduler_validation_fixture(
+            EffectIdempotency::NonIdempotent,
+            2,
+            fixture_claim_expires_at(),
+        );
         let retry_at = Utc::now() + chrono::Duration::seconds(1);
         let worker_failure = WorkerFailure::new(
             WorkerFailureClass::InfrastructureFailure,
@@ -11950,7 +11982,7 @@ mod integrity_tests {
         .is_ok());
 
         for forged in [
-            SchedulerTaskFailure::unchecked_for_test(
+            scheduler_task_failure_unchecked(
                 &claim,
                 WorkerFailureClass::InfrastructureFailure,
                 "RETRYABLE_FAILURE",
@@ -11961,7 +11993,7 @@ mod integrity_tests {
                     remaining_attempts: 1,
                 },
             ),
-            SchedulerTaskFailure::unchecked_for_test(
+            scheduler_task_failure_unchecked(
                 &claim,
                 WorkerFailureClass::EffectOutcomeUnknown,
                 "UNKNOWN_EFFECT",
@@ -11972,7 +12004,7 @@ mod integrity_tests {
                     remaining_attempts: 1,
                 },
             ),
-            SchedulerTaskFailure::unchecked_for_test(
+            scheduler_task_failure_unchecked(
                 &claim,
                 WorkerFailureClass::ControlTermination,
                 "CONTROL_RETRY",
@@ -11983,7 +12015,7 @@ mod integrity_tests {
                     remaining_attempts: 1,
                 },
             ),
-            SchedulerTaskFailure::unchecked_for_test(
+            scheduler_task_failure_unchecked(
                 &claim,
                 WorkerFailureClass::InfrastructureFailure,
                 "WRONG_REMAINING",
@@ -12049,15 +12081,14 @@ mod integrity_tests {
             validate_task_outcome(&finalize_claim, EffectEvidence::Started, &valid_finalize)
                 .is_ok()
         );
-        let mismatched_finalize =
-            SchedulerTaskOutcome::Failed(SchedulerTaskFailure::unchecked_for_test(
-                &finalize_claim,
-                WorkerFailureClass::InfrastructureFailure,
-                "WORKER_LEASE_LOST",
-                false,
-                EffectEvidence::Started,
-                SchedulerFailureDisposition::Terminal,
-            ));
+        let mismatched_finalize = SchedulerTaskOutcome::Failed(scheduler_task_failure_unchecked(
+            &finalize_claim,
+            WorkerFailureClass::InfrastructureFailure,
+            "WORKER_LEASE_LOST",
+            false,
+            EffectEvidence::Started,
+            SchedulerFailureDisposition::Terminal,
+        ));
         assert!(validate_task_outcome(
             &finalize_claim,
             EffectEvidence::Started,

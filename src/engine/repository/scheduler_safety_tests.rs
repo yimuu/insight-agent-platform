@@ -29,6 +29,7 @@ use crate::{
     },
 };
 use chrono::{DateTime, Duration, Utc};
+use insight_durable::scheduler_repository::adapter::SchedulerTaskFailureAdapter as _;
 use serde_json::{json, Value};
 use sqlx::{
     postgres::PgPoolOptions, sqlite::SqliteConnectOptions, AssertSqlSafe, PgPool, SqlitePool,

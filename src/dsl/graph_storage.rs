@@ -7,7 +7,6 @@
 //! projections and is never persisted as another execution truth.
 
 use async_trait::async_trait;
-use serde::Serialize;
 use serde_json::Value;
 use sqlx::Row;
 
@@ -15,108 +14,14 @@ use crate::engine::repository::RepositoryErrorExt as _;
 
 use crate::engine::{
     repository::{PostgresDurableRepository, RepositoryError, SqliteDurableRepository},
-    ActivationId, DefinitionRevisionId, DeploymentRevisionId, NodeId, Plan, RunId,
-    TransitionOutcome,
+    ActivationId, DefinitionRevisionId, NodeId, Plan, RunId, TransitionOutcome,
 };
 
-use super::graph::{
-    ActivationTrace, GraphAuthorDocument, GraphDocumentId, TraceActivationState, TraceOverlay,
+use insight_dsl::v3::{
+    graph_repository::adapter as graph_repository_adapter, ActivationTrace, GraphAuthorDocument,
+    GraphDocumentId, GraphSurfaceRepository, StoredGraphView, TraceActivationState, TraceOverlay,
     ViewDocument,
 };
-
-impl crate::engine::repository::VersionedPlan {
-    /// Publication constructor that cannot pair one GraphAuthorDocument with
-    /// an unrelated Canonical Plan. The immutable revision stores the explicit
-    /// graph wire and the Plan rebuilt from that exact document.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_verified_graph(
-        definition_id: impl Into<String>,
-        agent_id: impl Into<String>,
-        display_name: impl Into<String>,
-        deployment_revision_id: DeploymentRevisionId,
-        expression_engine_version: impl Into<String>,
-        graph: &GraphAuthorDocument,
-        descriptor_contracts: Value,
-        resolved_bindings: Value,
-        worker_contracts: Value,
-    ) -> Result<Self, RepositoryError> {
-        let bytes = graph
-            .encode_json()
-            .map_err(|_| RepositoryError::invalid_data())?;
-        let author_document =
-            serde_json::from_slice(&bytes).map_err(|_| RepositoryError::canonicalization())?;
-        Self::from_verified_plan(
-            definition_id,
-            agent_id,
-            display_name,
-            deployment_revision_id,
-            expression_engine_version,
-            author_document,
-            graph.plan(),
-            descriptor_contracts,
-            resolved_bindings,
-            worker_contracts,
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct StoredGraphView {
-    version: u64,
-    document: ViewDocument,
-}
-
-impl StoredGraphView {
-    fn new(version: u64, document: ViewDocument) -> Self {
-        Self { version, document }
-    }
-
-    pub fn version(&self) -> u64 {
-        self.version
-    }
-
-    pub fn document(&self) -> &ViewDocument {
-        &self.document
-    }
-
-    pub fn into_document(self) -> ViewDocument {
-        self.document
-    }
-}
-
-/// Persistence boundary consumed by the formal Graph Author product service.
-///
-/// `expected_version == 0` creates the first View. Subsequent writes use the
-/// last returned version. An exact retry is `ExactReplay`; a competing
-/// write is `StateConflict` and cannot silently overwrite another editor.
-#[async_trait]
-pub trait GraphSurfaceRepository: Send + Sync {
-    async fn load_graph_author(
-        &self,
-        definition_id: &str,
-        definition_revision_id: &DefinitionRevisionId,
-    ) -> Result<Option<GraphAuthorDocument>, RepositoryError>;
-
-    async fn save_graph_view(
-        &self,
-        definition_id: &str,
-        graph: &GraphAuthorDocument,
-        expected_version: u64,
-        view: &ViewDocument,
-    ) -> Result<TransitionOutcome<StoredGraphView>, RepositoryError>;
-
-    async fn load_graph_view(
-        &self,
-        definition_id: &str,
-        definition_revision_id: &DefinitionRevisionId,
-    ) -> Result<Option<StoredGraphView>, RepositoryError>;
-
-    async fn load_trace_overlay(
-        &self,
-        graph_document_id: &GraphDocumentId,
-        run_id: &RunId,
-    ) -> Result<Option<TraceOverlay>, RepositoryError>;
-}
 
 fn invalid_data<T>() -> Result<T, RepositoryError> {
     Err(RepositoryError::invalid_data())
@@ -255,7 +160,9 @@ fn decode_view_json(value: &[u8], version: i64) -> Result<StoredGraphView, Repos
         .filter(|version| *version > 0)
         .ok_or_else(RepositoryError::invalid_data)?;
     let document = ViewDocument::decode_json(value).map_err(|_| RepositoryError::invalid_data())?;
-    Ok(StoredGraphView::new(version, document))
+    Ok(graph_repository_adapter::stored_graph_view(
+        version, document,
+    ))
 }
 
 fn trace_state(value: &str) -> Result<TraceActivationState, RepositoryError> {
@@ -367,14 +274,14 @@ impl GraphSurfaceRepository for SqliteDurableRepository {
                     row.try_get::<i64, _>("view_version")
                         .map_err(|_| RepositoryError::invalid_data())?,
                 )?;
-                if current.document == *view
-                    && (current.version == expected_version
-                        || current.version == expected_version.saturating_add(1))
+                if current.document() == view
+                    && (current.version() == expected_version
+                        || current.version() == expected_version.saturating_add(1))
                 {
                     TransitionOutcome::ExactReplay {
                         authoritative: current,
                     }
-                } else if current.version != expected_version {
+                } else if current.version() != expected_version {
                     TransitionOutcome::StateConflict
                 } else {
                     let next = expected
@@ -395,7 +302,7 @@ impl GraphSurfaceRepository for SqliteDurableRepository {
                     .await
                     .map_err(RepositoryError::storage)?;
                     TransitionOutcome::Committed {
-                        result: StoredGraphView::new(
+                        result: graph_repository_adapter::stored_graph_view(
                             u64::try_from(next).expect("positive view version"),
                             view.clone(),
                         ),
@@ -417,7 +324,7 @@ impl GraphSurfaceRepository for SqliteDurableRepository {
                 .await
                 .map_err(RepositoryError::storage)?;
                 TransitionOutcome::Committed {
-                    result: StoredGraphView::new(1, view.clone()),
+                    result: graph_repository_adapter::stored_graph_view(1, view.clone()),
                 }
             }
             None => TransitionOutcome::StateConflict,
@@ -462,7 +369,7 @@ impl GraphSurfaceRepository for SqliteDurableRepository {
                 .map_err(|_| RepositoryError::invalid_data())?,
         )?;
         stored
-            .document
+            .document()
             .validate_against(&graph)
             .map_err(|_| RepositoryError::invalid_data())?;
         Ok(Some(stored))
@@ -621,14 +528,14 @@ impl GraphSurfaceRepository for PostgresDurableRepository {
                     row.try_get::<i64, _>("view_version")
                         .map_err(|_| RepositoryError::invalid_data())?,
                 )?;
-                if current.document == *view
-                    && (current.version == expected_version
-                        || current.version == expected_version.saturating_add(1))
+                if current.document() == view
+                    && (current.version() == expected_version
+                        || current.version() == expected_version.saturating_add(1))
                 {
                     TransitionOutcome::ExactReplay {
                         authoritative: current,
                     }
-                } else if current.version != expected_version {
+                } else if current.version() != expected_version {
                     TransitionOutcome::StateConflict
                 } else {
                     let next = expected
@@ -649,7 +556,7 @@ impl GraphSurfaceRepository for PostgresDurableRepository {
                     .await
                     .map_err(RepositoryError::storage)?;
                     TransitionOutcome::Committed {
-                        result: StoredGraphView::new(
+                        result: graph_repository_adapter::stored_graph_view(
                             u64::try_from(next).expect("positive view version"),
                             view.clone(),
                         ),
@@ -671,7 +578,7 @@ impl GraphSurfaceRepository for PostgresDurableRepository {
                 .await
                 .map_err(RepositoryError::storage)?;
                 TransitionOutcome::Committed {
-                    result: StoredGraphView::new(1, view.clone()),
+                    result: graph_repository_adapter::stored_graph_view(1, view.clone()),
                 }
             }
             None => TransitionOutcome::StateConflict,
@@ -719,7 +626,7 @@ impl GraphSurfaceRepository for PostgresDurableRepository {
                 .map_err(|_| RepositoryError::invalid_data())?,
         )?;
         stored
-            .document
+            .document()
             .validate_against(&graph)
             .map_err(|_| RepositoryError::invalid_data())?;
         Ok(Some(stored))

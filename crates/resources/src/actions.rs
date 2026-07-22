@@ -11,10 +11,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub use insight_engine::resource_policy::{ToolPublicArguments, ToolPublicPolicy};
-
-use crate::{
-    dsl::CompileError,
-    runtime::{ExecutionControl, RunError},
+use insight_engine::{
+    author::CompileError,
+    execution::{ExecutionControl, RunError, RunErrorKind},
     schema::{compile_schema_2020, JsonSchemaValidator},
 };
 
@@ -292,16 +291,16 @@ impl RegisteredAction {
 /// infrastructure bodies with closed platform errors.
 fn sanitize_model_tool_error(error: RunError) -> RunError {
     match error.kind() {
-        crate::runtime::RunErrorKind::Operation => RunError::operation(
+        RunErrorKind::Operation => RunError::operation(
             "MODEL_TOOL_ACTION_FAILED",
             "model tool action execution failed",
         ),
-        crate::runtime::RunErrorKind::Infrastructure => RunError::infrastructure(
+        RunErrorKind::Infrastructure => RunError::infrastructure(
             "MODEL_TOOL_ACTION_UNAVAILABLE",
             "model tool action execution is unavailable",
         ),
-        crate::runtime::RunErrorKind::Timeout => RunError::operation_timeout(),
-        crate::runtime::RunErrorKind::Stop => RunError::stopped(
+        RunErrorKind::Timeout => RunError::operation_timeout(),
+        RunErrorKind::Stop => RunError::stopped(
             error
                 .stop_reason()
                 .expect("RunErrorKind::Stop always carries a stop reason"),
@@ -662,7 +661,7 @@ mod tests {
         ActionDescriptor, ActionRegistry, CancellationClass, EffectClass, IdempotencyClass,
         ToolPublicArguments, ToolPublicPolicy,
     };
-    use crate::runtime::{stop_pair, ExecutionControl, RunError};
+    use insight_engine::execution::{stop_pair, ExecutionControl, RunError};
 
     const MODEL_TOOL_SECRET_SENTINEL: &str = "server-only-sentinel-do-not-persist";
 

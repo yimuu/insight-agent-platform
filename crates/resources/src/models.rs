@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{dsl::CompileError, runtime::RunError};
+use insight_engine::{author::CompileError, execution::RunError, schema::compile_schema_2020};
 
 use super::image::validate_image_url;
 
@@ -460,7 +460,7 @@ pub(crate) fn validate_chat_request(request: &ChatRequest) -> Result<(), RunErro
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
             || !schema.is_object()
-            || crate::schema::compile_schema_2020(schema).is_err()
+            || compile_schema_2020(schema).is_err()
         {
             return Err(invalid_chat_request(
                 LLM_RESPONSE_FORMAT_INVALID,
@@ -666,7 +666,7 @@ fn validate_assistant_tool_calls(
                     "chat provider assistant tool call is outside the declared whitelist",
                 )
             })?;
-        let validator = crate::schema::compile_schema_2020(&tool.input_schema).map_err(|_| {
+        let validator = compile_schema_2020(&tool.input_schema).map_err(|_| {
             invalid_chat_request(
                 LLM_TOOL_CONFIG_INVALID,
                 "chat provider tool definition is invalid",
@@ -713,7 +713,7 @@ fn validate_chat_tools(request: &ChatRequest) -> Result<(), RunError> {
                 .as_deref()
                 .is_some_and(|description| description.trim().is_empty())
             || !tool.input_schema.is_object()
-            || crate::schema::compile_schema_2020(&tool.input_schema).is_err()
+            || compile_schema_2020(&tool.input_schema).is_err()
             || !schema_requires_object_root(&tool.input_schema)
         {
             return Err(invalid_chat_request(
@@ -1138,6 +1138,30 @@ impl ModelRegistry {
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.models.keys().map(String::as_str)
+    }
+}
+
+/// Workspace-internal entry points consumed by runtime adapters.
+///
+/// These functions intentionally live outside the root compatibility facade;
+/// they are not part of the platform's stable public resource surface.
+#[doc(hidden)]
+pub mod adapter {
+    use std::collections::BTreeSet;
+
+    use insight_engine::execution::RunError;
+
+    use super::{ChatRequest, ModelCapability};
+
+    pub fn select_structured_output_capability(
+        capabilities: &BTreeSet<ModelCapability>,
+        json_object_compatible: bool,
+    ) -> Option<ModelCapability> {
+        super::select_structured_output_capability(capabilities, json_object_compatible)
+    }
+
+    pub fn validate_chat_request(request: &ChatRequest) -> Result<(), RunError> {
+        super::validate_chat_request(request)
     }
 }
 

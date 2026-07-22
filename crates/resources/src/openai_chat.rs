@@ -11,12 +11,13 @@ use reqwest::{redirect::Policy, Client, Response, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::{
-    dsl::CompileError,
-    observability::{elapsed_ms, json_size_bytes},
-    runtime::RunError,
+use insight_engine::{
+    author::CompileError,
+    execution::RunError,
     schema::{compile_schema, JsonSchemaValidator},
 };
+
+use crate::observability::{elapsed_ms, json_size_bytes};
 
 use super::models::{
     model_response_too_large, serialized_json_within_limit, validate_chat_request, ChatChunk,

@@ -7,3 +7,15 @@ publish = false
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+cel.workspace = true
+handlebars.workspace = true
+insight-engine.workspace = true
+serde.workspace = true
+serde_jcs.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+yaml-rust2.workspace = true
+yaml_serde.workspace = true

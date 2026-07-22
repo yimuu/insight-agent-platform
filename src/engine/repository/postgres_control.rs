@@ -1,8 +1,23 @@
 use super::RepositoryErrorExt as _;
 
+#[cfg(test)]
+use super::model::RunTransitionCommandAdapter as _;
 use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Serialize};
 use sqlx::{Postgres, Row, Transaction};
+
+#[cfg(test)]
+use insight_durable::common::adapter::payload_id;
+use insight_durable::common::adapter::{
+    self as common_contract_adapter, canonical_intent_hash, event_id, validate_inline_payload,
+};
+use insight_durable::{
+    activation::adapter::execution_kind_fields,
+    control_repository::adapter::{
+        self as control_adapter, event_control_frames, join_mode_str, parse_settlement,
+        scope_storage, settlement_str,
+    },
+};
 
 use crate::engine::{
     control::{ControlEmissionSlot, ControlFrame},
@@ -12,10 +27,7 @@ use crate::engine::{
     ProjectionMutationKind, RunId, ScopeInstanceId, TransitionKey, TransitionOutcome,
 };
 
-use super::activation::execution_kind_fields;
-use super::common::{canonical_intent_hash, event_id, validate_inline_payload};
 use super::control_repository::{
-    event_control_frames, join_mode_str, parse_settlement, scope_storage, settlement_str,
     ClaimSchedulerRunCommand, CloseScopeAdmissionCommand, ConsumeControlTokenCommand,
     ControlCommitReceipt, ControlDurableRepository, CreateChildScopeCommand, CreateForkCommand,
     CreateReuseCandidateCommand, EmitControlTokenCommand, FencedSchedulerRunCommand,
@@ -395,8 +407,8 @@ impl ControlDurableRepository for PostgresDurableRepository {
                 .map_err(RepositoryError::storage)?;
             return Ok(TransitionOutcome::StateConflict);
         }
-        let storage = scope_storage(command.scope())?;
-        let event_scope_kind = storage.event_kind;
+        let (static_scope_id, stable_dynamic_key, scope_kind, event_scope_kind) =
+            scope_storage(command.scope())?;
         sqlx::query(
             "INSERT INTO scope_instances (
                 run_id,scope_instance_id,parent_scope_instance_id,static_scope_id,
@@ -407,9 +419,9 @@ impl ControlDurableRepository for PostgresDurableRepository {
         .bind(command.run_id().as_str())
         .bind(command.scope().id().as_str())
         .bind(parent_id.as_str())
-        .bind(storage.static_scope_id)
-        .bind(storage.stable_dynamic_key)
-        .bind(storage.scope_kind)
+        .bind(static_scope_id)
+        .bind(stable_dynamic_key)
+        .bind(scope_kind)
         .execute(&mut *transaction)
         .await
         .map_err(RepositoryError::storage)?;
@@ -453,7 +465,7 @@ impl ControlDurableRepository for PostgresDurableRepository {
             &event,
         )
         .await?;
-        let receipt = ControlCommitReceipt::new(seq, id.clone(), 0);
+        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), 0);
         finalize(
             &mut transaction,
             command.run_id(),
@@ -596,7 +608,7 @@ impl ControlDurableRepository for PostgresDurableRepository {
                 .map_err(RepositoryError::storage)?;
             return Ok(TransitionOutcome::StateConflict);
         }
-        let receipt = ControlCommitReceipt::new(seq, id.clone(), next);
+        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), next);
         finalize(
             &mut transaction,
             command.run_id(),
@@ -753,7 +765,7 @@ impl ControlDurableRepository for PostgresDurableRepository {
                 return Ok(TransitionOutcome::StateConflict);
             }
         }
-        let receipt = ControlCommitReceipt::new(seq, id.clone(), next);
+        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), next);
         finalize(
             &mut transaction,
             command.run_id(),
@@ -865,7 +877,7 @@ impl ControlDurableRepository for PostgresDurableRepository {
             &transition_key,
         )
         .await?;
-        let receipt = ControlCommitReceipt::new(seq, id.clone(), 0);
+        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), 0);
         finalize(
             &mut transaction,
             command.run_id(),
@@ -1082,7 +1094,7 @@ async fn mutate_token_terminal<T: Serialize>(
             .map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     }
-    let receipt = ControlCommitReceipt::new(seq, id.clone(), next);
+    let receipt = control_adapter::control_commit_receipt(seq, id.clone(), next);
     finalize(
         &mut transaction,
         run_id,
@@ -1395,7 +1407,7 @@ async fn create_fork(
             return Ok(TransitionOutcome::StateConflict);
         }
     }
-    let receipt = ControlCommitReceipt::new(seq, id.clone(), 0);
+    let receipt = control_adapter::control_commit_receipt(seq, id.clone(), 0);
     finalize(
         &mut tx,
         command.run_id(),
@@ -1414,7 +1426,7 @@ async fn insert_scope_row_pg(
     run_id: &RunId,
     scope: &crate::engine::ScopeInstance,
 ) -> Result<(), RepositoryError> {
-    let storage = scope_storage(scope)?;
+    let (static_scope_id, stable_dynamic_key, scope_kind, _) = scope_storage(scope)?;
     sqlx::query(
         "INSERT INTO scope_instances (
             run_id, scope_instance_id, parent_scope_instance_id, static_scope_id,
@@ -1426,9 +1438,9 @@ async fn insert_scope_row_pg(
     .bind(run_id.as_str())
     .bind(scope.id().as_str())
     .bind(scope.parent().ok_or_else(invalid_data)?.as_str())
-    .bind(storage.static_scope_id)
-    .bind(storage.stable_dynamic_key)
-    .bind(storage.scope_kind)
+    .bind(static_scope_id)
+    .bind(stable_dynamic_key)
+    .bind(scope_kind)
     .execute(&mut **tx)
     .await
     .map_err(RepositoryError::storage)?;
@@ -1962,8 +1974,8 @@ async fn record_join_arrival(
         .await
         .map_err(RepositoryError::storage)?;
     }
-    let receipt = JoinArrivalReceipt::new(
-        ControlCommitReceipt::new(seq, id.clone(), next_group_version),
+    let receipt = control_adapter::join_arrival_receipt(
+        control_adapter::control_commit_receipt(seq, id.clone(), next_group_version),
         authority,
     );
     finalize(
@@ -2318,10 +2330,7 @@ async fn create_reuse_candidate(
         &event,
     )
     .await?;
-    let provenance = serde_json::to_value(
-        super::control_repository::DurableReuseProvenance::from_command(&command),
-    )
-    .map_err(|_| RepositoryError::canonicalization())?;
+    let provenance = control_adapter::durable_reuse_provenance(&command)?;
     sqlx::query(
         "INSERT INTO run_reuse_candidates (
             run_id, candidate_id, target_scope_instance_id, target_node_id,
@@ -2359,7 +2368,7 @@ async fn create_reuse_candidate(
     .execute(&mut *tx)
     .await
     .map_err(RepositoryError::storage)?;
-    let receipt = ControlCommitReceipt::new(seq, id.clone(), 0);
+    let receipt = control_adapter::control_commit_receipt(seq, id.clone(), 0);
     finalize(
         &mut tx,
         command.run_id(),
@@ -2433,7 +2442,7 @@ async fn reject_reuse_candidate(
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     }
-    let receipt = ControlCommitReceipt::new(seq, id.clone(), next_version);
+    let receipt = control_adapter::control_commit_receipt(seq, id.clone(), next_version);
     finalize(
         &mut tx,
         command.run_id(),
@@ -2771,7 +2780,7 @@ async fn materialize_reuse_candidate(
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     }
-    let receipt = ControlCommitReceipt::new(seq, id.clone(), next_version);
+    let receipt = control_adapter::control_commit_receipt(seq, id.clone(), next_version);
     finalize(
         &mut tx,
         command.run_id(),
@@ -2861,7 +2870,10 @@ pub(crate) async fn source_output_exists_pg(
                     .map_err(|_| invalid_data())?
                     .is_none(),
             )?;
-            Ok(validated.content_hash().as_str() == hash)
+            Ok(
+                common_contract_adapter::validated_inline_payload_content_hash(&validated).as_str()
+                    == hash,
+            )
         }
         (None, Some(artifact), Some(hash)) => Ok(sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM artifacts
@@ -2932,7 +2944,9 @@ pub(crate) async fn copy_source_output_pg(
                     .map_err(|_| invalid_data())?
                     .is_none(),
             )?;
-            if validated.content_hash().as_str() != value_hash {
+            if common_contract_adapter::validated_inline_payload_content_hash(&validated).as_str()
+                != value_hash
+            {
                 return Err(invalid_data());
             }
             sqlx::query(
@@ -2944,8 +2958,12 @@ pub(crate) async fn copy_source_output_pg(
             .bind(target_run.as_str())
             .bind(payload_id)
             .bind(&value_hash)
-            .bind(i64_from_u64(validated.canonical_bytes())?)
-            .bind(validated.value())
+            .bind(i64_from_u64(
+                common_contract_adapter::validated_inline_payload_canonical_bytes(&validated),
+            )?)
+            .bind(common_contract_adapter::validated_inline_payload_value(
+                &validated,
+            ))
             .bind(
                 row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("retain_until")
                     .map_err(|_| invalid_data())?,
@@ -2957,7 +2975,9 @@ pub(crate) async fn copy_source_output_pg(
                 payload_id: Some(payload_id.clone()),
                 artifact_id: None,
                 value_hash,
-                size_bytes: validated.canonical_bytes(),
+                size_bytes: common_contract_adapter::validated_inline_payload_canonical_bytes(
+                    &validated,
+                ),
             })
         }
         (None, Some(artifact_id)) => {
@@ -3070,7 +3090,7 @@ impl SchedulerLeaseRepository for PostgresDurableRepository {
                 .map_err(RepositoryError::storage)?;
             return Ok(TransitionOutcome::StateConflict);
         };
-        let lease = SchedulerRunLease::new(
+        let lease = control_adapter::scheduler_run_lease(
             command.run_id().clone(),
             command.owner(),
             u64::try_from(
@@ -3170,7 +3190,7 @@ impl SchedulerLeaseRepository for PostgresDurableRepository {
                 .map_err(RepositoryError::storage)?;
             return Ok(TransitionOutcome::StaleLease);
         };
-        let lease = SchedulerRunLease::new(
+        let lease = control_adapter::scheduler_run_lease(
             run_id.clone(),
             command.fence().owner(),
             command.fence().lease_epoch(),
@@ -3262,7 +3282,7 @@ impl SchedulerLeaseRepository for PostgresDurableRepository {
                 .map_err(RepositoryError::storage)?;
             return Ok(TransitionOutcome::StaleLease);
         }
-        let receipt = ControlCommitReceipt::new(seq, id.clone(), projection_version);
+        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), projection_version);
         finalize(
             &mut transaction,
             command.run_id(),
@@ -3325,7 +3345,7 @@ mod tests {
     }
 
     fn test_plan(label: &str) -> VersionedPlan {
-        VersionedPlan::new_for_test(
+        insight_durable::model::adapter::versioned_plan_for_test(
             format!("definition_{label}"),
             format!("agent_{label}"),
             "PostgreSQL control repository test",
@@ -3422,7 +3442,7 @@ mod tests {
     ) -> ContentHash {
         let canonical = serde_jcs::to_string(&value).unwrap();
         let hash = ContentHash::from_bytes(canonical.as_bytes());
-        let payload_id = super::super::common::payload_id(&hash);
+        let payload_id = payload_id(&hash);
         sqlx::query(
             "INSERT INTO payloads (
                 run_id, payload_id, content_hash, canonical_bytes, encoding,
@@ -3524,7 +3544,7 @@ mod tests {
             .await
             .unwrap();
         initialize_once(&repository).await;
-        let plan = VersionedPlan::new_for_test(
+        let plan = insight_durable::model::adapter::versioned_plan_for_test(
             "definition_scheduler_lease",
             "agent_scheduler_lease",
             "Scheduler lease test",
@@ -4203,7 +4223,7 @@ mod tests {
             0
         );
         let reused_activation = ActivationId::new("activation_pg_reused").unwrap();
-        let source_payload_id = super::super::common::payload_id(&output_hash);
+        let source_payload_id = payload_id(&output_hash);
         sqlx::query("UPDATE payloads SET inline_value=$1 WHERE run_id=$2 AND payload_id=$3")
             .bind(json!({"answer": 43}))
             .bind(run_id.as_str())

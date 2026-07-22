@@ -3,29 +3,27 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::{
-    dsl::CompileError,
-    engine::{
-        plan::{
-            expression::{
-                analyze_cel_expression, analyze_match_program, analyze_value_program, MatchProgram,
-                MatchValue, TemplatePart, ValueProgram,
-            },
-            AuthorFormat, BranchCase, BranchCaseId, BranchDescriptor, CatchFailureKind,
-            CollectDescriptor, CollectSource, ControlEdge, ControlEdgeId, ControlPort,
-            ControlPortId, DataBinding, DataBindingId, DataPort, DataPortId, DescriptorValue,
-            ErrorBoundaryDescriptor, ExpressionLanguage, ForkDescriptor, ForkLegDescriptor,
-            JoinDescriptor, LeafTaskDescriptor, LoopDescriptor, LoopFlavor as PlanLoopFlavor,
-            MapDescriptor, MergeDescriptor, Node, NodeKind, PhiBinding, PhiBindingId, Plan,
-            PlanBuilder, PlanJoinMode, PlanMetadata, PlanProperty, PlanType, PortDirection,
-            PortName, PureExpression, RaiseDescriptor, ReturnDescriptor, ScopeId, ScopeKind,
-            ScopeMetadata, SourceDocumentId, SourceMap, SourcePosition, SourceSpan,
-            StableNodeIdGenerator, SubflowCallDescriptor, TimerDescriptor, ValueSource, VersionTag,
-            WaitSignalDescriptor, CEL_EXPRESSION_ENGINE_VERSION, LITERAL_EXPRESSION_ENGINE_VERSION,
-            MATCH_EXPRESSION_ENGINE_VERSION, VALUE_EXPRESSION_ENGINE_VERSION,
+use crate::CompileError;
+use insight_engine::{
+    plan::{
+        expression::{
+            analyze_cel_expression, analyze_match_program, analyze_value_program, MatchProgram,
+            MatchValue, TemplatePart, ValueProgram,
         },
-        ContentHash, DefinitionRevisionId, LegId, NodeId,
+        AuthorFormat, BranchCase, BranchCaseId, BranchDescriptor, CatchFailureKind,
+        CollectDescriptor, CollectSource, ControlEdge, ControlEdgeId, ControlPort, ControlPortId,
+        DataBinding, DataBindingId, DataPort, DataPortId, DescriptorValue, ErrorBoundaryDescriptor,
+        ExpressionLanguage, ForkDescriptor, ForkLegDescriptor, JoinDescriptor, LeafTaskDescriptor,
+        LoopDescriptor, LoopFlavor as PlanLoopFlavor, MapDescriptor, MergeDescriptor, Node,
+        NodeKind, PhiBinding, PhiBindingId, Plan, PlanBuilder, PlanJoinMode, PlanMetadata,
+        PlanProperty, PlanType, PortDirection, PortName, PureExpression, RaiseDescriptor,
+        ReturnDescriptor, ScopeId, ScopeKind, ScopeMetadata, SourceDocumentId, SourceMap,
+        SourcePosition, SourceSpan, StableNodeIdGenerator, SubflowCallDescriptor, TimerDescriptor,
+        ValueSource, VersionTag, WaitSignalDescriptor, CEL_EXPRESSION_ENGINE_VERSION,
+        LITERAL_EXPRESSION_ENGINE_VERSION, MATCH_EXPRESSION_ENGINE_VERSION,
+        VALUE_EXPRESSION_ENGINE_VERSION,
     },
+    ContentHash, DefinitionRevisionId, LegId, NodeId,
 };
 
 use super::{
@@ -283,7 +281,7 @@ impl GraphCompiler {
             version(V3_COMPILER_VERSION)?,
             AuthorFormat::Structured,
             entry,
-            crate::engine::plan::PlanInputContract::new(input_type).with_defaults(input_defaults),
+            insight_engine::plan::PlanInputContract::new(input_type).with_defaults(input_defaults),
             output_type,
             safe_error_type()?,
         );
@@ -870,7 +868,7 @@ impl GraphCompiler {
         self.add_node(
             id.clone(),
             scope.clone(),
-            NodeKind::HumanTask(crate::engine::plan::HumanTaskDescriptor {
+            NodeKind::HumanTask(insight_engine::plan::HumanTaskDescriptor {
                 completion_signal: step.signal_name.clone(),
                 request_input,
                 request_type: request.value_type,
@@ -3933,11 +3931,11 @@ fn version(value: &str) -> Result<VersionTag, CompileError> {
     VersionTag::new(value.to_owned()).map_err(plan_error)
 }
 
-fn plan_error(error: crate::engine::plan::PlanError) -> CompileError {
+fn plan_error(error: insight_engine::plan::PlanError) -> CompileError {
     CompileError::new(error.code(), error.message().to_owned())
 }
 
-fn model_error(error: crate::engine::ModelError) -> CompileError {
+fn model_error(error: insight_engine::ModelError) -> CompileError {
     CompileError::new(INVALID_DOCUMENT, error.to_string())
 }
 

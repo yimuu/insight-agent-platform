@@ -9,7 +9,8 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use crate::{dsl::CompileError, engine::plan::PlanType};
+use crate::CompileError;
+use insight_engine::plan::PlanType;
 
 use super::{ast::ValueExpr, EXPRESSION_ENGINE_BLOCKED, INVALID_TYPE};
 
@@ -140,7 +141,7 @@ fn blocked(message: &'static str) -> CompileError {
 #[cfg(test)]
 mod tests {
     use super::{compile_condition, fold_static_match};
-    use crate::dsl::v3::ast::parse_value_expr;
+    use crate::v3::ast::parse_value_expr;
     use serde_json::json;
 
     #[test]

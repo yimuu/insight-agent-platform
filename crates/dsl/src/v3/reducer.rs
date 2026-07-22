@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Map, Value};
 
-use crate::engine::{
+use insight_engine::{
     plan::{
         expression::{MatchProgram, MatchValue, TemplatePart, ValueProgram},
         BranchCaseId, CollectSource, ControlPortId, DataPortId, DescriptorValue,
@@ -406,7 +406,7 @@ impl<'a> Reducer<'a> {
     fn reduce_branch(
         &mut self,
         node: &Node,
-        descriptor: &crate::engine::plan::BranchDescriptor,
+        descriptor: &insight_engine::plan::BranchDescriptor,
     ) -> ReductionResult<(Value, ReducedNodeFlow)> {
         let Some(first) = descriptor.cases.first() else {
             return Err(format!("Branch '{}' has no cases", node.id()));
@@ -685,7 +685,7 @@ impl<'a> Reducer<'a> {
     fn reduce_map(
         &mut self,
         node: &Node,
-        descriptor: &crate::engine::plan::MapDescriptor,
+        descriptor: &insight_engine::plan::MapDescriptor,
     ) -> ReductionResult<(Value, ReducedNodeFlow)> {
         let (collect_node, collect, key_field, empty_output, body_input, empty_input) =
             exactly_one(
@@ -782,7 +782,7 @@ impl<'a> Reducer<'a> {
     fn reduce_loop(
         &mut self,
         node: &Node,
-        descriptor: &crate::engine::plan::LoopDescriptor,
+        descriptor: &insight_engine::plan::LoopDescriptor,
     ) -> ReductionResult<(Value, ReducedNodeFlow)> {
         let (collect_node, collect, source) = exactly_one(
             self.plan
@@ -930,7 +930,7 @@ impl<'a> Reducer<'a> {
         &self,
         node_id: &NodeId,
         name: &str,
-    ) -> ReductionResult<&crate::engine::plan::DataPort> {
+    ) -> ReductionResult<&insight_engine::plan::DataPort> {
         self.plan
             .data_ports()
             .iter()
@@ -1223,7 +1223,7 @@ trait CollectControlOutput {
     fn output_port_owner_control(&self, reducer: &Reducer<'_>) -> ReductionResult<ControlPortId>;
 }
 
-impl CollectControlOutput for crate::engine::plan::CollectDescriptor {
+impl CollectControlOutput for insight_engine::plan::CollectDescriptor {
     fn output_port_owner_control(&self, reducer: &Reducer<'_>) -> ReductionResult<ControlPortId> {
         let owner = reducer
             .index

@@ -9,9 +9,10 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     plan::{
-        DataPortId, Node, PlanIndex, PlanInputContract, PlanType, PortName, ScopeId,
+        DataPortId, Node, Plan, PlanIndex, PlanInputContract, PlanType, PortName, ScopeId,
         SubflowCallDescriptor,
     },
+    repository::RepositoryError,
     scheduler::{
         BoundTaskInput, LogicalOccurrence, PlannedSchedulerAction, RuntimeValue, SchedulerAction,
         SchedulerCheckpointId, SchedulerError, SchedulerFacts, SchedulerIntent,
@@ -23,6 +24,18 @@ use crate::{
     TerminalActivationProof, TerminalActivationResult, TimerId, TransitionKey, ValueRef,
     WaitResolutionProof, WaitResolutionSubject,
 };
+
+/// Workspace-internal bridge for author formats that have already produced a
+/// verified Canonical Plan.
+///
+/// Keeping this view in the lowest common dependency lets durable models
+/// preserve their source-level convenience constructor without taking a
+/// dependency on a concrete DSL document type.
+pub trait VerifiedAuthorPlanView {
+    fn encode_author_document(&self) -> Result<Vec<u8>, RepositoryError>;
+
+    fn verified_plan(&self) -> &Plan;
+}
 
 pub fn model_error(code: &'static str, message: impl Into<String>) -> ModelError {
     ModelError::new(code, message)

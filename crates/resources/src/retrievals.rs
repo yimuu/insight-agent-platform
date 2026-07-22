@@ -20,11 +20,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub use insight_engine::resource_policy::RetrievalPublicPolicy;
-use insight_engine::retrieval::RegisteredRetrievalView;
-
-use crate::{
-    dsl::CompileError,
-    runtime::{ExecutionControl, RunError},
+use insight_engine::{
+    author::CompileError,
+    execution::{ExecutionControl, RunError},
+    retrieval::RegisteredRetrievalView,
     schema::{compile_schema_2020, JsonSchemaValidator},
 };
 
@@ -137,13 +136,13 @@ impl RetrievalContext {
 /// values are private until their separate consumers validate them.
 ///
 /// ```compile_fail
-/// # use insight_agent_platform::resources::retrievals::RetrievalExecutionResult;
+/// # use insight_resources::retrievals::RetrievalExecutionResult;
 /// fn requires_debug<T: std::fmt::Debug>() {}
 /// requires_debug::<RetrievalExecutionResult>();
 /// ```
 ///
 /// ```compile_fail
-/// # use insight_agent_platform::resources::retrievals::RetrievalExecutionResult;
+/// # use insight_resources::retrievals::RetrievalExecutionResult;
 /// fn requires_serialize<T: serde::Serialize>() {}
 /// requires_serialize::<RetrievalExecutionResult>();
 /// ```
@@ -792,7 +791,7 @@ mod tests {
         RetrievalContext, RetrievalDescriptor, RetrievalExecutionResult, RetrievalPublicPolicy,
         RetrievalRegistry,
     };
-    use crate::runtime::{stop_pair, ExecutionControl, RunError};
+    use insight_engine::execution::{stop_pair, ExecutionControl, RunError};
 
     #[derive(Clone)]
     struct StaticRetrieval {

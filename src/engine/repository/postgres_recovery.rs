@@ -1,10 +1,29 @@
 use super::RepositoryErrorExt as _;
 
+#[cfg(test)]
+use super::model::{
+    PublicEventIntentAdapter as _, PublicationHeadAdapter as _, RunTransitionCommandAdapter as _,
+};
 use chrono::{DateTime, Utc};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use sqlx::{Postgres, Row, Transaction};
 use std::time::Duration;
+
+use insight_durable::common::adapter::{
+    self as common_contract_adapter, canonical_intent_hash, canonical_value,
+    decode_execution_event_schema_version, durable_public_event_envelope, event_id, i64_from_u64,
+    parse_admission_state, parse_run_lifecycle, payload_id, public_event_id, public_event_ordinal,
+    scheduler_checkpoint_content_hash, u64_from_i64, validate_inline_payload,
+};
+use insight_durable::{
+    activation::adapter::{
+        parse_activation_lifecycle, parse_effect_evidence, parse_effect_idempotency,
+    },
+    control_repository::adapter as control_adapter,
+    projection::adapter as projection_adapter,
+    recovery_repository::adapter as recovery_adapter,
+};
 
 use crate::engine::{
     control::{ControlEmissionSlot, ControlFrame},
@@ -19,20 +38,11 @@ use crate::engine::{
     SchedulerCheckpointId, ScopeInstanceId, TransitionKey, TransitionOutcome,
 };
 
-use super::activation::{
-    parse_activation_lifecycle, parse_effect_evidence, parse_effect_idempotency,
-};
-use super::common::{
-    canonical_intent_hash, canonical_value, decode_execution_event_schema_version,
-    durable_public_event_envelope, event_id, i64_from_u64, parse_admission_state,
-    parse_run_lifecycle, public_event_id, public_event_ordinal, scheduler_checkpoint_content_hash,
-    u64_from_i64, validate_inline_payload,
-};
 use super::postgres::{allocate_event_seq, insert_event, insert_or_get_payload};
 use super::postgres_projection::{
     finalize_projection_checkpoints, verify_projection_checkpoint_batch,
 };
-use super::projection::{ProjectionLedgerBatch, ProjectionSubject, ProjectionSubjectKind};
+use super::projection::{ProjectionSubject, ProjectionSubjectKind};
 use super::{
     BeginMigrationCommand, ContinueAsNewCommand, CreateReuseCandidateCommand,
     DurableTaskExecutionRequest, FinalizeMigrationCommand, ForkRunCommand, MigrationIntentReceipt,
@@ -235,16 +245,17 @@ async fn authoritative_scheduler_checkpoint(
     else {
         return Ok(false);
     };
-    let ledger_batch: ProjectionLedgerBatch = serde_json::from_value(encoded_ledger_batch)
-        .map_err(|_| RepositoryError::invalid_data())?;
     let subject = ProjectionSubject::new(ProjectionSubjectKind::Scheduler, checkpoint_id.clone())?;
-    let Some(checkpoint_record) = ledger_batch.record_for(&subject)? else {
+    let Some(checkpoint_record) =
+        projection_adapter::projection_ledger_record_for(&encoded_ledger_batch, &subject)?
+    else {
         return Ok(false);
     };
-    if checkpoint_record.projection_version != projection_version {
+    let (_, checkpoint_projection_version, checkpoint_projection, _) =
+        projection_adapter::checkpoint_record_parts(&checkpoint_record)?;
+    if checkpoint_projection_version != projection_version {
         return Ok(false);
     }
-    let checkpoint_projection = checkpoint_record.canonical_projection;
     if checkpoint_projection
         .get("content_hash")
         .and_then(Value::as_str)
@@ -470,7 +481,7 @@ async fn derive_reuse_candidates_postgres(
             continue;
         }
         let completion_id =
-            super::recovery_repository::recovery_task_completion_checkpoint(request.task_id());
+            recovery_adapter::recovery_task_completion_checkpoint(request.task_id());
         let completion_hash = sqlx::query_scalar::<_, String>(
             "SELECT content_hash FROM scheduler_checkpoints
              WHERE run_id=$1 AND checkpoint_id=$2 AND checkpoint_kind='task_completed'
@@ -577,7 +588,7 @@ async fn derive_reuse_candidates_postgres(
         candidates.push(
             CreateReuseCandidateCommand::new(
                 target_run_id.clone(),
-                super::recovery_repository::recovery_candidate_id(
+                recovery_adapter::recovery_candidate_id(
                     &source.run_id,
                     target_run_id,
                     &activation_id,
@@ -599,9 +610,9 @@ async fn derive_reuse_candidates_postgres(
             .with_source_data_dependencies(dependencies)?,
         );
     }
-    Ok(Some(
-        super::recovery_repository::dependency_closed_reuse_candidates(candidates),
-    ))
+    Ok(Some(recovery_adapter::dependency_closed_reuse_candidates(
+        candidates,
+    )))
 }
 
 impl SourceRun {
@@ -770,7 +781,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
         transition_key: TransitionKey,
         command: RedriveRunCommand,
     ) -> Result<TransitionOutcome<RecoveryRunReceipt>, RepositoryError> {
-        command.validate()?;
+        recovery_adapter::validate_redrive(&command)?;
         let intent_hash = canonical_intent_hash(&command)?;
         let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
         lock_transition(&mut tx, command.source_run_id(), &transition_key).await?;
@@ -816,7 +827,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
             tx.rollback().await.map_err(RepositoryError::storage)?;
             return Ok(TransitionOutcome::StateConflict);
         };
-        let receipt = RecoveryRunReceipt::new(
+        let receipt = recovery_adapter::recovery_run_receipt(
             target.lineage,
             None,
             target.created.clone(),
@@ -842,7 +853,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
         transition_key: TransitionKey,
         command: ForkRunCommand,
     ) -> Result<TransitionOutcome<RecoveryRunReceipt>, RepositoryError> {
-        command.validate()?;
+        recovery_adapter::validate_fork(&command)?;
         let intent_hash = canonical_intent_hash(&command)?;
         let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
         lock_transition(&mut tx, command.source_run_id(), &transition_key).await?;
@@ -899,7 +910,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
             tx.rollback().await.map_err(RepositoryError::storage)?;
             return Ok(TransitionOutcome::StateConflict);
         };
-        let receipt = RecoveryRunReceipt::new(
+        let receipt = recovery_adapter::recovery_run_receipt(
             target.lineage,
             None,
             target.created.clone(),
@@ -983,7 +994,8 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
         if canonical_intent_hash(&command)?.as_str() == stored_intent_hash {
             return Ok(Some(command));
         }
-        let fenced = command.with_expected_target_publication_agent(
+        let fenced = recovery_adapter::with_expected_target_publication_agent(
+            command,
             row.try_get::<String, _>("target_publication_agent_id")
                 .map_err(|_| RepositoryError::invalid_data())?,
         )?;
@@ -998,7 +1010,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
         transition_key: TransitionKey,
         command: BeginMigrationCommand,
     ) -> Result<TransitionOutcome<MigrationIntentReceipt>, RepositoryError> {
-        command.validate()?;
+        recovery_adapter::validate_begin_migration(&command)?;
         let intent_hash = canonical_intent_hash(&command)?;
         let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
         lock_transition(&mut tx, command.source_run_id(), &transition_key).await?;
@@ -1095,7 +1107,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
         let (_, target_input_hash) = canonical_value(command.target_input())?;
         let mappings = serde_json::to_value(command.mappings())
             .map_err(|_| RepositoryError::canonicalization())?;
-        let mapping_hash = super::recovery_repository::migration_mapping_hash(command.mappings())?;
+        let mapping_hash = recovery_adapter::migration_mapping_hash(command.mappings())?;
         let candidates = serde_json::to_value(command.reuse_candidates())
             .map_err(|_| RepositoryError::canonicalization())?;
         sqlx::query(
@@ -1138,7 +1150,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
         .await
         .map_err(RepositoryError::storage)?;
         finalize_projection_checkpoints(&mut tx, &source.run_id, &id).await?;
-        let receipt = MigrationIntentReceipt::new(
+        let receipt = recovery_adapter::migration_intent_receipt(
             recovery_event(&source.run_id, seq, &id, next_version)?,
             command.target_run_id().clone(),
             command.target_revision().clone(),
@@ -1164,7 +1176,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
         transition_key: TransitionKey,
         command: FinalizeMigrationCommand,
     ) -> Result<TransitionOutcome<RecoveryRunReceipt>, RepositoryError> {
-        command.validate()?;
+        recovery_adapter::validate_finalize_migration(&command)?;
         let intent_hash = canonical_intent_hash(&command)?;
         let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
         lock_transition(&mut tx, command.source_run_id(), &transition_key).await?;
@@ -1266,7 +1278,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
             source_terminal.event_id().as_str(),
         )
         .await?;
-        let receipt = RecoveryRunReceipt::new(
+        let receipt = recovery_adapter::recovery_run_receipt(
             target.lineage,
             Some(source_terminal.clone()),
             target.created,
@@ -1292,7 +1304,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
         transition_key: TransitionKey,
         command: ContinueAsNewCommand,
     ) -> Result<TransitionOutcome<RecoveryRunReceipt>, RepositoryError> {
-        command.validate()?;
+        recovery_adapter::validate_continue_as_new(&command)?;
         let intent_hash = canonical_intent_hash(&command)?;
         let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
         lock_transition(&mut tx, command.source_run_id(), &transition_key).await?;
@@ -1358,7 +1370,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
             source_terminal.event_id().as_str(),
         )
         .await?;
-        let receipt = RecoveryRunReceipt::new(
+        let receipt = recovery_adapter::recovery_run_receipt(
             target.lineage,
             Some(source_terminal.clone()),
             target.created,
@@ -1429,9 +1441,8 @@ async fn load_source(
             row.try_get::<Option<Vec<u8>>, _>("input_binary_value")
                 .map_err(|_| RepositoryError::invalid_data())?
                 .is_none(),
-        )?
-        .value()
-        .clone();
+        )?;
+        let input = common_contract_adapter::validated_inline_payload_value(&input).clone();
         Ok(SourceRun {
             run_id: run_id.clone(),
             definition_id: row
@@ -1791,7 +1802,7 @@ async fn insert_target_run(
     run_deadline_at: DateTime<Utc>,
 ) -> Result<Option<(String, String)>, RepositoryError> {
     let (_, input_hash) = canonical_value(target_input)?;
-    let input_payload_id = super::common::payload_id(&input_hash);
+    let input_payload_id = payload_id(&input_hash);
     let database_lineage = match lineage.kind() {
         RunLineageKind::Redrive => "redrive",
         RunLineageKind::Fork => "fork",
@@ -2075,10 +2086,7 @@ async fn insert_reuse_candidate(
         &event,
     )
     .await?;
-    let provenance = serde_json::to_value(
-        super::control_repository::DurableReuseProvenance::from_command(candidate),
-    )
-    .map_err(|_| RepositoryError::canonicalization())?;
+    let provenance = control_adapter::durable_reuse_provenance(candidate)?;
     sqlx::query(
         "INSERT INTO run_reuse_candidates (
             run_id,candidate_id,target_scope_instance_id,target_node_id,stable_activation_key,
@@ -2194,7 +2202,10 @@ async fn source_output_valid(
                     .map_err(|_| RepositoryError::invalid_data())?
                     .is_none(),
             )?;
-            Ok(validated.content_hash() == expected_hash)
+            Ok(
+                common_contract_adapter::validated_inline_payload_content_hash(&validated)
+                    == expected_hash,
+            )
         }
         (None, Some(artifact)) => {
             let row = sqlx::query(
@@ -2425,7 +2436,7 @@ fn recovery_event(
     id: &str,
     projection_version: u64,
 ) -> Result<RecoveryEventReceipt, RepositoryError> {
-    Ok(RecoveryEventReceipt::new(
+    Ok(recovery_adapter::recovery_event_receipt(
         run_id.clone(),
         seq,
         model_data(ExecutionEventId::parse(id.to_owned()))?,
@@ -2641,7 +2652,7 @@ mod tests {
     }
 
     fn publication_revision(agent_id: &str, label: &str) -> VersionedPlan {
-        VersionedPlan::new_for_test(
+        insight_durable::model::adapter::versioned_plan_for_test(
             format!("definition_{agent_id}"),
             agent_id,
             format!("Publication {label}"),

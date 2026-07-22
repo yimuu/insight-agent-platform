@@ -2,10 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
-use crate::{
-    dsl::{CompileError, DslPath},
-    engine::plan::{PlanProperty, PlanType},
-};
+use crate::{CompileError, DslPath};
+use insight_engine::plan::{PlanProperty, PlanType};
 
 use super::{
     raw::RawDocument, API_VERSION, DOCUMENT_KIND, INVALID_CONTROL_FLOW, INVALID_DOCUMENT,
@@ -1993,7 +1991,7 @@ fn error(code: &'static str, message: &'static str, path: DslPath) -> CompileErr
 #[cfg(test)]
 mod tests {
     use super::{parse_value_expr, validate, Step, ValueExpr};
-    use crate::dsl::v3::raw::parse;
+    use crate::v3::raw::parse;
     use serde_json::json;
 
     #[test]

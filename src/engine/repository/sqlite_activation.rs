@@ -3,8 +3,19 @@ use super::RepositoryErrorExt as _;
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use insight_durable::activation::adapter::{
+    self as activation_adapter, effect_evidence_str, execution_kind_fields,
+    parse_activation_lifecycle, parse_effect_evidence,
+};
 use sqlx::{sqlite::SqliteRow, Row, Sqlite, Transaction};
 use uuid::Uuid;
+
+use insight_durable::common::adapter::{
+    self as common_contract_adapter, canonical_intent_hash, canonical_json,
+    companion_event_intent_hash, companion_transition_key, decode_execution_event_schema_version,
+    event_id, fencing_token, i64_from_u64, task_id, timer_id, u64_from_i64,
+    validate_inline_payload, wait_late_audit_identity,
+};
 
 use crate::engine::{
     ActivationLifecycle, ActivationTerminationReason, ArtifactId, ArtifactRef, AttemptNo,
@@ -13,15 +24,6 @@ use crate::engine::{
     RunId, SignalId, TimerId, TransitionKey, TransitionOutcome, ValueRef,
 };
 
-use super::activation::{
-    effect_evidence_str, execution_kind_fields, parse_activation_lifecycle, parse_effect_evidence,
-    WaitLateAuditOutcome,
-};
-use super::common::{
-    canonical_intent_hash, canonical_json, companion_event_intent_hash, companion_transition_key,
-    decode_execution_event_schema_version, event_id, fencing_token, i64_from_u64, task_id,
-    timer_id, u64_from_i64, validate_inline_payload, wait_late_audit_identity,
-};
 use super::sqlite::{
     allocate_event_seq, decode_execution_event_row as decode_closed_execution_event_row,
     insert_event, insert_or_get_payload, load_replay, Replay,
@@ -66,7 +68,7 @@ fn make_receipt(
     activation_projection_version: u64,
     scope_projection_version: Option<u64>,
 ) -> ActivationCommitReceipt {
-    ActivationCommitReceipt::new(
+    activation_adapter::activation_commit_receipt(
         replay.event_seq(),
         replay.event_id().to_owned(),
         activation_projection_version,
@@ -131,7 +133,7 @@ async fn insert_closed_event(
         &event,
     )
     .await?;
-    Ok(ActivationCommitReceipt::new(
+    Ok(activation_adapter::activation_commit_receipt(
         seq,
         id,
         projection_version,
@@ -302,7 +304,9 @@ async fn stored_value_ref(
                 .map_err(|_| RepositoryError::invalid_data())?
                 .is_none(),
         )?;
-        return model_data(ValueRef::inline(validated.value().clone()));
+        return model_data(ValueRef::inline(
+            common_contract_adapter::validated_inline_payload_value(&validated).clone(),
+        ));
     }
     let artifact_id = artifact_id.ok_or_else(RepositoryError::invalid_data)?;
     let row = sqlx::query(
@@ -410,7 +414,9 @@ impl ActivationDurableRepository for SqliteDurableRepository {
         .bind(command.activation_id().as_str())
         .bind(command.scope_instance_id().as_str())
         .bind(command.node_id().as_str())
-        .bind(command.stable_activation_key())
+        .bind(activation_adapter::activation_admission_stable_key(
+            &command,
+        ))
         .fetch_optional(&mut *transaction)
         .await
         .map_err(RepositoryError::storage)?;
@@ -462,7 +468,9 @@ impl ActivationDurableRepository for SqliteDurableRepository {
         .bind(command.activation_id().as_str())
         .bind(command.scope_instance_id().as_str())
         .bind(command.node_id().as_str())
-        .bind(command.stable_activation_key())
+        .bind(activation_adapter::activation_admission_stable_key(
+            &command,
+        ))
         .bind(execution_kind)
         .bind(effect_id.as_str())
         .bind(idempotency)
@@ -489,7 +497,7 @@ impl ActivationDurableRepository for SqliteDurableRepository {
             event,
         )
         .await?;
-        let receipt = ActivationCommitReceipt::new(
+        let receipt = activation_adapter::activation_commit_receipt(
             receipt.event_seq(),
             receipt.event_id().to_owned(),
             receipt.activation_projection_version(),
@@ -890,7 +898,7 @@ async fn grant_attempt_lease(
                 &timer_event,
             )
             .await?;
-            let authority = LeaseGrantAuthority::new(
+            let authority = activation_adapter::lease_grant_authority(
                 make_receipt(
                     &replay,
                     u64_from_i64(
@@ -1071,7 +1079,7 @@ async fn grant_attempt_lease(
     let scope_id = row
         .try_get::<String, _>("scope_instance_id")
         .map_err(|_| RepositoryError::invalid_data())?;
-    let task_envelope = TaskEnvelope::new(
+    let task_envelope = activation_adapter::task_envelope(
         command.run_id().clone(),
         command.activation_id().clone(),
         node_id.clone(),
@@ -1168,7 +1176,7 @@ async fn grant_attempt_lease(
         timer_event,
     )
     .await?;
-    let authority = LeaseGrantAuthority::new(
+    let authority = activation_adapter::lease_grant_authority(
         receipt,
         command.run_id().clone(),
         command.activation_id().clone(),
@@ -1532,7 +1540,7 @@ async fn heartbeat_attempt(
         .begin()
         .await
         .map_err(RepositoryError::storage)?;
-    let transition_key = command.transition_key()?;
+    let transition_key = activation_adapter::heartbeat_transition_key(&command)?;
     let intent_hash = canonical_intent_hash(&command)?;
     match load_replay(
         &mut transaction,
@@ -1901,7 +1909,7 @@ async fn complete_attempt(
                     artifact_id.as_deref(),
                 )
                 .await?;
-                let terminal = super::CommittedTerminalActivationAuthority::new(
+                let terminal = activation_adapter::committed_terminal_activation_authority(
                     receipt,
                     command.run_id().clone(),
                     scope_id,
@@ -1930,7 +1938,7 @@ async fn complete_attempt(
                 .fetch_one(&mut *transaction)
                 .await
                 .map_err(RepositoryError::storage)?;
-                let retry = RetryScheduleAuthority::new(
+                let retry = activation_adapter::retry_schedule_authority(
                     command.run_id().clone(),
                     command.activation_id().clone(),
                     authority.fence(),
@@ -1957,7 +1965,7 @@ async fn complete_attempt(
                         return Err(RepositoryError::invalid_data());
                     }
                 };
-                let terminal = super::CommittedTerminalActivationAuthority::new(
+                let terminal = activation_adapter::committed_terminal_activation_authority(
                     receipt,
                     command.run_id().clone(),
                     scope_id,
@@ -2107,7 +2115,7 @@ async fn complete_attempt(
                 .execute(&mut *transaction)
                 .await
                 .map_err(RepositoryError::storage)?;
-                Some(RetryScheduleAuthority::new(
+                Some(activation_adapter::retry_schedule_authority(
                     command.run_id().clone(),
                     command.activation_id().clone(),
                     authority.fence(),
@@ -2311,7 +2319,7 @@ async fn complete_attempt(
     let checkpoint_event_id = receipt.event_id().to_owned();
     let result = match command.completion() {
         AttemptCompletion::Succeeded { output } => {
-            let terminal = super::CommittedTerminalActivationAuthority::new(
+            let terminal = activation_adapter::committed_terminal_activation_authority(
                 receipt,
                 command.run_id().clone(),
                 model_data(crate::engine::ScopeInstanceId::new(scope_id))?,
@@ -2333,7 +2341,7 @@ async fn complete_attempt(
             if let Some(retry) = retry_authority {
                 AttemptCompletionAuthority::RetryScheduled { receipt, retry }
             } else {
-                let terminal = super::CommittedTerminalActivationAuthority::new(
+                let terminal = activation_adapter::committed_terminal_activation_authority(
                     receipt,
                     command.run_id().clone(),
                     model_data(crate::engine::ScopeInstanceId::new(scope_id))?,
@@ -2673,7 +2681,7 @@ async fn schedule_activation_timer(
     }
     let id = model_data(TimerId::new(timer_id(
         &transition_key,
-        command.kind().as_str(),
+        activation_adapter::activation_timer_kind_str(command.kind()),
     )))?;
     let now = now_text(Utc::now());
     sqlx::query(
@@ -2688,7 +2696,9 @@ async fn schedule_activation_timer(
     .bind(command.run_id().as_str())
     .bind(id.as_str())
     .bind(command.activation_id().as_str())
-    .bind(command.kind().as_str())
+    .bind(activation_adapter::activation_timer_kind_str(
+        command.kind(),
+    ))
     .bind(now_text(*command.deadline()))
     .bind(transition_key.as_str())
     .bind(now)
@@ -2769,7 +2779,7 @@ async fn receive_signal(
             .map_err(|_| RepositoryError::invalid_data())?;
         let value =
             stored_value_ref(&mut transaction, command.run_id(), Some(&payload_id), None).await?;
-        let receipt = SignalReceipt::new(
+        let receipt = activation_adapter::signal_receipt(
             model_data(SignalId::new(
                 row.try_get::<String, _>("signal_id")
                     .map_err(|_| RepositoryError::invalid_data())?,
@@ -2836,7 +2846,7 @@ async fn receive_signal(
     .execute(&mut *transaction)
     .await
     .map_err(RepositoryError::storage)?;
-    let receipt = SignalReceipt::new(
+    let receipt = activation_adapter::signal_receipt(
         command.signal_id().clone(),
         payload_id,
         model_data(crate::engine::ContentHash::parse(hash))?,
@@ -2919,7 +2929,7 @@ async fn is_timer_late_replay(
 async fn append_timer_late_if_wait_loser(
     transaction: &mut Transaction<'_, Sqlite>,
     command: &FireTimerCommand,
-) -> Result<WaitLateAuditOutcome, RepositoryError> {
+) -> Result<Option<bool>, RepositoryError> {
     let row = sqlx::query(
         "SELECT a.activation_id,a.scope_instance_id,a.node_id,a.projection_version,
                 s.consumed_event_id AS winner_event_id
@@ -2939,7 +2949,7 @@ async fn append_timer_late_if_wait_loser(
     .await
     .map_err(RepositoryError::storage)?;
     let Some(row) = row else {
-        return Ok(WaitLateAuditOutcome::NotApplicable);
+        return Ok(None);
     };
     let (transition_key, intent_hash) =
         wait_late_audit_identity("timer", command.run_id(), command.timer_id().as_str())?;
@@ -2955,7 +2965,7 @@ async fn append_timer_late_if_wait_loser(
             if !is_timer_late_replay(transaction, command, replay.event_id()).await? {
                 return Err(RepositoryError::invalid_data());
             }
-            return Ok(WaitLateAuditOutcome::AlreadyRecorded);
+            return Ok(Some(false));
         }
         Replay::Vacant => {}
     }
@@ -2999,7 +3009,7 @@ async fn append_timer_late_if_wait_loser(
     .await?;
     finalize_empty_projection_checkpoints(transaction, command.run_id(), receipt.event_id())
         .await?;
-    Ok(WaitLateAuditOutcome::Appended)
+    Ok(Some(true))
 }
 
 async fn is_signal_late_replay(
@@ -3049,7 +3059,7 @@ async fn is_signal_late_replay(
 async fn append_signal_late_if_wait_loser(
     transaction: &mut Transaction<'_, Sqlite>,
     command: &ResolveSignalCommand,
-) -> Result<WaitLateAuditOutcome, RepositoryError> {
+) -> Result<Option<bool>, RepositoryError> {
     let row = sqlx::query(
         "SELECT a.scope_instance_id,a.node_id,a.projection_version,s.payload_id,
                 t.fired_event_id AS winner_event_id
@@ -3069,7 +3079,7 @@ async fn append_signal_late_if_wait_loser(
     .await
     .map_err(RepositoryError::storage)?;
     let Some(row) = row else {
-        return Ok(WaitLateAuditOutcome::NotApplicable);
+        return Ok(None);
     };
     let (transition_key, intent_hash) =
         wait_late_audit_identity("signal", command.run_id(), command.signal_id().as_str())?;
@@ -3085,7 +3095,7 @@ async fn append_signal_late_if_wait_loser(
             if !is_signal_late_replay(transaction, command, replay.event_id()).await? {
                 return Err(RepositoryError::invalid_data());
             }
-            return Ok(WaitLateAuditOutcome::AlreadyRecorded);
+            return Ok(Some(false));
         }
         Replay::Vacant => {}
     }
@@ -3137,7 +3147,7 @@ async fn append_signal_late_if_wait_loser(
     .await?;
     finalize_empty_projection_checkpoints(transaction, command.run_id(), receipt.event_id())
         .await?;
-    Ok(WaitLateAuditOutcome::Appended)
+    Ok(Some(true))
 }
 
 pub(super) async fn reconcile_wait_late_audits(
@@ -3248,7 +3258,7 @@ pub(super) async fn reconcile_wait_late_audits(
             }
             _ => return Err(RepositoryError::invalid_data()),
         };
-        if outcome.was_appended() {
+        if outcome == Some(true) {
             transaction
                 .commit()
                 .await
@@ -3422,7 +3432,7 @@ async fn fire_timer(
                         .fetch_one(&mut *transaction)
                         .await
                         .map_err(RepositoryError::storage)?;
-                        Some(RetryScheduleAuthority::new(
+                        Some(activation_adapter::retry_schedule_authority(
                             command.run_id().clone(),
                             activation_id.clone(),
                             fence,
@@ -3455,7 +3465,7 @@ async fn fire_timer(
                     };
                     verify_primary_timer_payload(&row, &primary)?;
                     let terminal = if retry.is_none() {
-                        Some(super::CommittedTerminalActivationAuthority::new(
+                        Some(activation_adapter::committed_terminal_activation_authority(
                             receipt.clone(),
                             command.run_id().clone(),
                             scope_identity.clone(),
@@ -3505,7 +3515,7 @@ async fn fire_timer(
                             &row,
                             &ExecutionEventPayload::ActivationTimedOut,
                         )?;
-                        let terminal = super::CommittedTerminalActivationAuthority::new(
+                        let terminal = activation_adapter::committed_terminal_activation_authority(
                             receipt.clone(),
                             command.run_id().clone(),
                             scope_identity,
@@ -3538,16 +3548,20 @@ async fn fire_timer(
                                 output: Some(value_summary(&output)),
                             },
                         )?;
-                        TimerFireAuthority::WaitResolved(WaitResolutionAuthority::new(
-                            receipt,
-                            command.run_id().clone(),
-                            scope_identity.clone(),
-                            activation_id,
-                            registration,
-                            crate::engine::WaitResolutionSubject::Timer(command.timer_id().clone()),
-                            transition_key,
-                            output,
-                        )?)
+                        TimerFireAuthority::WaitResolved(
+                            activation_adapter::wait_resolution_authority(
+                                receipt,
+                                command.run_id().clone(),
+                                scope_identity.clone(),
+                                activation_id,
+                                registration,
+                                crate::engine::WaitResolutionSubject::Timer(
+                                    command.timer_id().clone(),
+                                ),
+                                transition_key,
+                                output,
+                            )?,
+                        )
                     }
                 }
                 "activation_timeout" => {
@@ -3588,7 +3602,7 @@ async fn fire_timer(
                         )
                         .await?;
                     }
-                    let terminal = super::CommittedTerminalActivationAuthority::new(
+                    let terminal = activation_adapter::committed_terminal_activation_authority(
                         receipt.clone(),
                         command.run_id().clone(),
                         scope_identity,
@@ -3649,7 +3663,7 @@ async fn fire_timer(
         || observed < deadline
     {
         let late = append_timer_late_if_wait_loser(&mut transaction, &command).await?;
-        if late.is_loser() {
+        if late.is_some() {
             transaction
                 .commit()
                 .await
@@ -3913,7 +3927,7 @@ async fn fire_timer(
                 .execute(&mut *transaction)
                 .await
                 .map_err(RepositoryError::storage)?;
-                Some(RetryScheduleAuthority::new(
+                Some(activation_adapter::retry_schedule_authority(
                     command.run_id().clone(),
                     activation_id.clone(),
                     fence,
@@ -4302,7 +4316,7 @@ async fn fire_timer(
             evidence,
         } => {
             let terminal = if retry.is_none() {
-                Some(super::CommittedTerminalActivationAuthority::new(
+                Some(activation_adapter::committed_terminal_activation_authority(
                     receipt.clone(),
                     command.run_id().clone(),
                     scope_identity.clone(),
@@ -4336,7 +4350,7 @@ async fn fire_timer(
         TimerAuthoritySeed::Wait {
             registration,
             output,
-        } => TimerFireAuthority::WaitResolved(WaitResolutionAuthority::new(
+        } => TimerFireAuthority::WaitResolved(activation_adapter::wait_resolution_authority(
             receipt,
             command.run_id().clone(),
             scope_identity.clone(),
@@ -4347,7 +4361,7 @@ async fn fire_timer(
             output,
         )?),
         TimerAuthoritySeed::WaitSignalTimeout => {
-            let terminal = super::CommittedTerminalActivationAuthority::new(
+            let terminal = activation_adapter::committed_terminal_activation_authority(
                 receipt.clone(),
                 command.run_id().clone(),
                 scope_identity,
@@ -4357,7 +4371,7 @@ async fn fire_timer(
             TimerFireAuthority::ActivationTimedOut { receipt, terminal }
         }
         TimerAuthoritySeed::ActivationTimeout { .. } => {
-            let terminal = super::CommittedTerminalActivationAuthority::new(
+            let terminal = activation_adapter::committed_terminal_activation_authority(
                 receipt.clone(),
                 command.run_id().clone(),
                 scope_identity,
@@ -4539,7 +4553,7 @@ async fn resolve_wait_signal(
                 &companion,
             )
             .await?;
-            let authority = WaitResolutionAuthority::new(
+            let authority = activation_adapter::wait_resolution_authority(
                 make_receipt(
                     &replay,
                     u64_from_i64(
@@ -4611,7 +4625,7 @@ async fn resolve_wait_signal(
         || registration_text.is_none()
     {
         let late = append_signal_late_if_wait_loser(&mut transaction, &command).await?;
-        if late.is_loser() {
+        if late.is_some() {
             transaction
                 .commit()
                 .await
@@ -4767,7 +4781,7 @@ async fn resolve_wait_signal(
     .execute(&mut *transaction)
     .await
     .map_err(RepositoryError::storage)?;
-    let authority = WaitResolutionAuthority::new(
+    let authority = activation_adapter::wait_resolution_authority(
         receipt,
         command.run_id().clone(),
         scope_id,
@@ -4873,7 +4887,7 @@ async fn claim_task_outbox(
                 .entry(run_text.clone())
                 .or_default()
                 .push(token.clone());
-            claims.push(TaskClaim::new(
+            claims.push(activation_adapter::task_claim(
                 run_id,
                 task,
                 token,
@@ -5079,7 +5093,7 @@ async fn load_activation(
         .map(TransitionKey::parse)
         .transpose()
         .map_err(|_| RepositoryError::invalid_data())?;
-    Ok(Some(ActivationProjection::new(
+    Ok(Some(activation_adapter::activation_projection(
         run_id.clone(),
         activation_id.clone(),
         parse_activation_lifecycle(
@@ -5107,14 +5121,13 @@ mod tests {
     use serde_json::json;
 
     use crate::engine::{
-        ActivationId, ContentHash, DefinitionRevisionId, DeploymentRevisionId, EffectIdempotency,
-        ExecutionKind, NodeId, ScopeInstanceId, WorkerCancellation, WorkerExecutionPolicy,
+        scheduler::LogicalOccurrence, ActivationId, ContentHash, DefinitionRevisionId,
+        DeploymentRevisionId, EffectIdempotency, ExecutionKind, NodeId, ScopeInstanceId,
+        WorkerCancellation, WorkerExecutionPolicy,
     };
 
     use super::*;
-    use crate::engine::repository::{
-        CreateRunCommand, DurableRepository, PlanInstallOutcome, VersionedPlan,
-    };
+    use crate::engine::repository::{CreateRunCommand, DurableRepository, PlanInstallOutcome};
 
     fn key(label: &str) -> TransitionKey {
         TransitionKey::derive("repository.activation.test", &[label]).unwrap()
@@ -5122,7 +5135,7 @@ mod tests {
 
     async fn repository_with_run(label: &str) -> (SqliteDurableRepository, RunId) {
         let repository = SqliteDurableRepository::in_memory().await.unwrap();
-        let plan = VersionedPlan::new_for_test(
+        let plan = insight_durable::model::adapter::versioned_plan_for_test(
             format!("definition_{label}"),
             format!("agent_{label}"),
             "Activation repository test",
@@ -5553,6 +5566,24 @@ mod tests {
             .await
             .unwrap();
         let timer = TimerId::new(timer_id(&registration_key, "wait")).unwrap();
+        sqlx::query(
+            "INSERT INTO scheduler_wait_registrations (
+                run_id,wait_id,activation_id,node_id,occurrence_key,signal_name,signal_id,
+                timer_id,due_at_ms,payload_type,winner_kind,winner_signal_id,winner_timer_id,
+                projection_version,created_at,resolved_at
+             ) SELECT a.run_id,?,a.activation_id,a.node_id,?,'resume',?,?,0,NULL,
+                      NULL,NULL,NULL,0,CURRENT_TIMESTAMP,NULL
+               FROM node_activations a WHERE a.run_id=? AND a.activation_id=?",
+        )
+        .bind("wait_race")
+        .bind(serde_json::to_string(&LogicalOccurrence::entry()).unwrap())
+        .bind(signal_id.as_str())
+        .bind(timer.as_str())
+        .bind(run_id.as_str())
+        .bind(activation_id.as_str())
+        .execute(&repository.pool)
+        .await
+        .unwrap();
         let signal_repository = repository.clone();
         let timer_repository = repository.clone();
         let signal_key = key("wait_race.signal");

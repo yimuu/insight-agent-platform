@@ -18,19 +18,17 @@ use serde::{
 };
 use serde_json::Value;
 
-use crate::{
-    dsl::{CompileError, DslPath, SourceSpan as DslSourceSpan},
-    engine::{
-        plan::{
-            AuthorFormat, BranchDescriptor, ControlEdge, ControlEdgeId, ControlPort, ControlPortId,
-            DataBinding, DataBindingId, DataPort, DataPortId, ForkDescriptor, JoinDescriptor,
-            LoopDescriptor, MapDescriptor, Node, NodeKind, PhiBinding, PhiBindingId, Plan,
-            PlanBuilder, PlanDiagnosticTarget, PlanError, PlanMetadata, Policy, PolicyId, ScopeId,
-            ScopeMetadata, SemanticHash, SourceDocumentId, SourceMap, SourceMapPolicy,
-            SourcePosition, SourceSpan as PlanSourceSpan, PLAN_HASH_MISMATCH,
-        },
-        ActivationId, ContentHash, DefinitionRevisionId, NodeId, RunId,
+use crate::{CompileError, DslPath, SourceSpan as DslSourceSpan};
+use insight_engine::{
+    plan::{
+        AuthorFormat, BranchDescriptor, ControlEdge, ControlEdgeId, ControlPort, ControlPortId,
+        DataBinding, DataBindingId, DataPort, DataPortId, ForkDescriptor, JoinDescriptor,
+        LoopDescriptor, MapDescriptor, Node, NodeKind, PhiBinding, PhiBindingId, Plan, PlanBuilder,
+        PlanDiagnosticTarget, PlanError, PlanMetadata, Policy, PolicyId, ScopeId, ScopeMetadata,
+        SemanticHash, SourceDocumentId, SourceMap, SourceMapPolicy, SourcePosition,
+        SourceSpan as PlanSourceSpan, PLAN_HASH_MISMATCH,
     },
+    ActivationId, ContentHash, DefinitionRevisionId, NodeId, RunId,
 };
 
 use super::{
@@ -2143,5 +2141,18 @@ impl TraceOverlay {
             }
         }
         Ok(())
+    }
+}
+
+impl insight_engine::internal::VerifiedAuthorPlanView for GraphAuthorDocument {
+    fn encode_author_document(
+        &self,
+    ) -> Result<Vec<u8>, insight_engine::repository::RepositoryError> {
+        self.encode_json()
+            .map_err(|_| insight_engine::repository::adapter::invalid_data())
+    }
+
+    fn verified_plan(&self) -> &Plan {
+        self.plan()
     }
 }

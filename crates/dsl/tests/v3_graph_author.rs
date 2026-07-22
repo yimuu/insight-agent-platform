@@ -1,28 +1,26 @@
 use std::collections::BTreeMap;
 
-use insight_agent_platform::{
-    dsl::v3::{
-        compile_source,
-        graph::{
-            ActivationTrace, GraphAuthorDocument, GraphDocumentId, GraphSemanticEdit,
-            GraphSemanticEditBatch, NodeView, TraceActivationState, TraceOverlay, ViewDocument,
-            Viewport, GRAPH_DOCUMENT_INVALID, GRAPH_EDIT_CONFLICT, GRAPH_EDIT_KIND_MISMATCH,
-            GRAPH_IRREDUCIBLE, GRAPH_PLAN_INVALID,
-        },
-        parse, validate, CompileOptions,
+use insight_dsl::v3::{
+    compile_source,
+    graph::{
+        ActivationTrace, GraphAuthorDocument, GraphDocumentId, GraphSemanticEdit,
+        GraphSemanticEditBatch, NodeView, TraceActivationState, TraceOverlay, ViewDocument,
+        Viewport, GRAPH_DOCUMENT_INVALID, GRAPH_EDIT_CONFLICT, GRAPH_EDIT_KIND_MISMATCH,
+        GRAPH_IRREDUCIBLE, GRAPH_PLAN_INVALID,
     },
-    engine::{
-        plan::{
-            AuthorFormat, BranchCase, BranchCaseId, BranchDescriptor, BudgetPolicy, ControlEdge,
-            ControlEdgeId, ControlPort, ControlPortId, DataBinding, DataBindingId, DataPort,
-            DataPortId, ExpressionLanguage, MergeDescriptor, Node, NodeKind, PlanBuilder,
-            PlanDiagnosticTarget, PlanInputContract, PlanMetadata, PlanProperty, PlanType, Policy,
-            PolicyId, PolicyKind, PortDirection, PortName, PureExpression, RetryPolicy,
-            ReturnDescriptor, ScopeId, ScopeMetadata, SourceMap, TimeoutPolicy, ValueSource,
-            VersionTag, CEL_EXPRESSION_ENGINE_VERSION, PLAN_MERGE_INVALID, PLAN_POLICY_INVALID,
-        },
-        ActivationId, DefinitionRevisionId, NodeId, RunId,
+    parse, validate, CompileOptions,
+};
+use insight_engine::{
+    plan::{
+        AuthorFormat, BranchCase, BranchCaseId, BranchDescriptor, BudgetPolicy, ControlEdge,
+        ControlEdgeId, ControlPort, ControlPortId, DataBinding, DataBindingId, DataPort,
+        DataPortId, ExpressionLanguage, MergeDescriptor, Node, NodeKind, PlanBuilder,
+        PlanDiagnosticTarget, PlanInputContract, PlanMetadata, PlanProperty, PlanType, Policy,
+        PolicyId, PolicyKind, PortDirection, PortName, PureExpression, RetryPolicy,
+        ReturnDescriptor, ScopeId, ScopeMetadata, SourceMap, TimeoutPolicy, ValueSource,
+        VersionTag, CEL_EXPRESSION_ENGINE_VERSION, PLAN_MERGE_INVALID, PLAN_POLICY_INVALID,
     },
+    ActivationId, DefinitionRevisionId, NodeId, RunId,
 };
 
 fn options(source_id: &str, source: &str) -> CompileOptions {
@@ -196,7 +194,7 @@ fn topology_edits(from: &GraphAuthorDocument, to: &GraphAuthorDocument) -> Vec<G
 
 #[test]
 fn layout_only_changes_cannot_change_graph_semantic_hash() {
-    let source = include_str!("fixtures/v3/linear.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
     let graph = structured_graph(source);
     let before = graph.semantic_hash().clone();
     let node_id = graph.plan().nodes()[0].id().clone();
@@ -208,7 +206,7 @@ fn layout_only_changes_cannot_change_graph_semantic_hash() {
     node_view.annotation = Some("only presentation state".to_owned());
     view.set_node(node_id, node_view).unwrap();
     view.set_viewport(Viewport {
-        origin: insight_agent_platform::dsl::v3::graph::CanvasPoint::new(45.0, 80.0),
+        origin: insight_dsl::v3::graph::CanvasPoint::new(45.0, 80.0),
         zoom: 1.75,
     })
     .unwrap();
@@ -226,7 +224,7 @@ fn layout_only_changes_cannot_change_graph_semantic_hash() {
 
 #[test]
 fn graph_wire_contains_explicit_parts_and_never_serializes_plan_or_hash() {
-    let source = include_str!("fixtures/v3/linear.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
     let graph = structured_graph(source);
     let encoded = graph.encode_json().unwrap();
     let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
@@ -256,7 +254,7 @@ fn graph_wire_contains_explicit_parts_and_never_serializes_plan_or_hash() {
 
 #[test]
 fn authoritative_graph_decode_rejects_unknown_duplicate_and_plan_shaped_fields() {
-    let source = include_str!("fixtures/v3/linear.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
     let graph = structured_graph(source);
     let encoded = graph.encode_json().unwrap();
     let mut wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
@@ -307,7 +305,7 @@ fn authoritative_graph_decode_rejects_unknown_duplicate_and_plan_shaped_fields()
 
 #[test]
 fn graph_plan_diagnostics_target_exact_canvas_nodes_ports_and_edges() {
-    let source = include_str!("fixtures/v3/linear.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
     let graph = structured_graph(source);
     let encoded = graph.encode_json().unwrap();
     let canonical: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
@@ -388,7 +386,7 @@ fn structured_graph_conversion_preserves_structured_parse_diagnostics() {
     .unwrap_err();
     assert_eq!(
         error.code(),
-        insight_agent_platform::dsl::v3::graph::GRAPH_STRUCTURED_COMPILE_FAILED
+        insight_dsl::v3::graph::GRAPH_STRUCTURED_COMPILE_FAILED
     );
     assert_eq!(error.source_path().unwrap().to_string(), "$.kind");
     assert!(error.structured_source_span().is_some());
@@ -396,7 +394,7 @@ fn structured_graph_conversion_preserves_structured_parse_diagnostics() {
 
 #[test]
 fn authoritative_graph_decode_recompiles_and_rejects_invalid_tampering() {
-    let source = include_str!("fixtures/v3/linear.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
     let graph = structured_graph(source);
     let expected = graph.semantic_hash().clone();
     let mut wire: serde_json::Value =
@@ -425,9 +423,18 @@ workflow:
     - return: $reply
 "#;
     let sources = [
-        ("linear.yaml", include_str!("fixtures/v3/linear.yaml")),
-        ("if.yaml", include_str!("fixtures/v3/if.yaml")),
-        ("parallel.yaml", include_str!("fixtures/v3/parallel.yaml")),
+        (
+            "linear.yaml",
+            include_str!("../../../tests/fixtures/v3/linear.yaml"),
+        ),
+        (
+            "if.yaml",
+            include_str!("../../../tests/fixtures/v3/if.yaml"),
+        ),
+        (
+            "parallel.yaml",
+            include_str!("../../../tests/fixtures/v3/parallel.yaml"),
+        ),
         ("wait.yaml", WAIT),
     ];
 
@@ -518,9 +525,18 @@ workflow:
     - return: $final_state
 "#;
     let sources = [
-        ("native_linear", include_str!("fixtures/v3/linear.yaml")),
-        ("native_if", include_str!("fixtures/v3/if.yaml")),
-        ("native_parallel", include_str!("fixtures/v3/parallel.yaml")),
+        (
+            "native_linear",
+            include_str!("../../../tests/fixtures/v3/linear.yaml"),
+        ),
+        (
+            "native_if",
+            include_str!("../../../tests/fixtures/v3/if.yaml"),
+        ),
+        (
+            "native_parallel",
+            include_str!("../../../tests/fixtures/v3/parallel.yaml"),
+        ),
         ("native_map", MAP),
         ("native_loop", LOOP),
     ];
@@ -580,8 +596,7 @@ workflow:
     let graph = GraphAuthorDocument::decode_json(&graph.encode_json().unwrap()).unwrap();
 
     let reduced = graph.to_structured().unwrap();
-    let insight_agent_platform::dsl::v3::ast::Step::Leaf(leaf) = &reduced.document().steps[0]
-    else {
+    let insight_dsl::v3::ast::Step::Leaf(leaf) = &reduced.document().steps[0] else {
         panic!("expected reduced LLM leaf");
     };
     let llm = leaf.llm.as_ref().unwrap();
@@ -590,7 +605,7 @@ workflow:
     assert_eq!(llm.tools, ["lookup"]);
     assert_eq!(
         llm.tool_choice,
-        insight_agent_platform::dsl::v3::ast::LlmToolChoice::Required
+        insight_dsl::v3::ast::LlmToolChoice::Required
     );
     assert_eq!(
         (llm.tool_limits.max_rounds, llm.tool_limits.max_calls),
@@ -676,7 +691,7 @@ workflow:
 
 #[test]
 fn native_nullable_required_input_is_not_inferred_to_be_optional() {
-    let source = include_str!("fixtures/v3/linear.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
     let plan = compile_source(source, options("native_nullable_input.yaml", source)).unwrap();
     let PlanType::Object {
         mut properties,
@@ -749,7 +764,7 @@ fn native_nullable_required_input_is_not_inferred_to_be_optional() {
 
 #[test]
 fn native_linear_graph_with_policy_remains_graph_with_a_stable_diagnostic() {
-    let source = include_str!("fixtures/v3/linear.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
     let plan = compile_source(source, options("native_policy.yaml", source)).unwrap();
     let task = plan
         .nodes()
@@ -800,7 +815,7 @@ fn native_linear_graph_with_policy_remains_graph_with_a_stable_diagnostic() {
 
 #[test]
 fn graph_policy_edits_reject_unexecutable_contracts_before_publication() {
-    let source = include_str!("fixtures/v3/linear.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
     let mut graph = structured_graph(source);
     let task = graph
         .nodes()
@@ -1230,7 +1245,7 @@ fn valid_graphs_without_a_lossless_structured_inverse_remain_graphs() {
 
 #[test]
 fn trace_overlay_links_stable_run_activation_and_node_ids_without_semantic_effect() {
-    let source = include_str!("fixtures/v3/parallel.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/parallel.yaml");
     let graph = structured_graph(source);
     let before = graph.semantic_hash().clone();
     let node_id = graph.plan().nodes()[0].id().clone();
@@ -1258,7 +1273,7 @@ fn trace_overlay_links_stable_run_activation_and_node_ids_without_semantic_effec
 
 #[test]
 fn branch_canvas_edits_are_atomic_verified_and_preserve_stable_node_identity() {
-    let source = include_str!("fixtures/v3/if.yaml");
+    let source = include_str!("../../../tests/fixtures/v3/if.yaml");
     let mut graph = structured_graph(source);
     let (branch_id, mut descriptor) = graph
         .plan()
@@ -1338,7 +1353,7 @@ workflow:
       response: string
     - return: $route
 "#;
-    const BRANCHED: &str = include_str!("fixtures/v3/if.yaml");
+    const BRANCHED: &str = include_str!("../../../tests/fixtures/v3/if.yaml");
 
     let mut graph = graph_for_revision(DIRECT, "semantic_edit_revision_1");
     let branched = graph_for_revision(BRANCHED, "semantic_edit_revision_2");
@@ -1419,7 +1434,7 @@ workflow:
 
 #[test]
 fn parallel_map_and_loop_canvas_edit_surfaces_reverify_the_complete_plan() {
-    let mut parallel = structured_graph(include_str!("fixtures/v3/parallel.yaml"));
+    let mut parallel = structured_graph(include_str!("../../../tests/fixtures/v3/parallel.yaml"));
     let (fork_node_id, mut fork) = parallel
         .plan()
         .nodes()

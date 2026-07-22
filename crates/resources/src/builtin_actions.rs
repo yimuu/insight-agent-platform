@@ -8,7 +8,7 @@ use reqwest::{redirect::Policy, Url};
 use serde_json::{json, Value};
 use tokio::time::sleep;
 
-use crate::{dsl::CompileError, runtime::RunError};
+use insight_engine::{author::CompileError, execution::RunError};
 
 use super::actions::{
     Action, ActionCapability, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass,

@@ -10,6 +10,16 @@ use sqlx::{
 };
 use tokio::sync::Mutex;
 
+use insight_durable::common::adapter::{
+    self as common_contract_adapter, build_terminal_response_snapshot, canonical_intent_hash,
+    canonical_json, canonical_value, decode_public_projection_decision,
+    decode_stored_execution_event, durable_public_event_envelope, event_id, i64_from_u64,
+    parse_admission_state, parse_run_lifecycle, payload_id, project_terminal_tool_results,
+    public_event_id, public_event_ordinal, u64_from_i64, validate_inline_payload,
+    StoredExecutionEventRow, StoredModelCallUsage, StoredPublicProjectionDecision,
+    StoredResponseItem, StoredSucceededModelToolCall, TerminalResponseSnapshotInput,
+};
+use insight_durable::model::adapter as model_adapter;
 use insight_engine::response::adapter::{
     durable_response_snapshot_new, response_terminal_kind_parse, response_usage_status_parse,
 };
@@ -21,21 +31,16 @@ use crate::engine::{
 };
 
 use super::migration_manifest::{DurableV3Migration, SqliteMigrationGuard, DURABLE_V3_MIGRATIONS};
-use super::model::PublicRunAttachment;
-use super::model::TerminalRunMutation;
+use super::model::{
+    CommitReceiptAdapter as _, CreateRunCommandAdapter as _, PublicEventIntentAdapter as _,
+    PublicRunAttachment, PublicRunAttachmentAdapter as _, PublicationHeadAdapter as _,
+    PublicationOriginAdapter as _, RunProjectionAdapter as _, RunTransitionCommandAdapter as _,
+    VersionedPlanAdapter as _, VersionedPlanCatalogAdapter as _,
+};
 use super::sqlite_projection::{
     finalize_projection_checkpoints, verify_projection_checkpoint_batch,
 };
 use super::{
-    common::{
-        build_terminal_response_snapshot, canonical_intent_hash, canonical_json, canonical_value,
-        decode_public_projection_decision, decode_stored_execution_event,
-        durable_public_event_envelope, event_id, i64_from_u64, parse_admission_state,
-        parse_run_lifecycle, payload_id, project_terminal_tool_results, public_event_id,
-        public_event_ordinal, u64_from_i64, validate_inline_payload, StoredExecutionEventRow,
-        StoredModelCallUsage, StoredPublicProjectionDecision, StoredResponseItem,
-        StoredSucceededModelToolCall, TerminalResponseSnapshotInput,
-    },
     CommitReceipt, CreateRunCommand, DurableRepository, DurableResponseSnapshot,
     PlanInstallOutcome, PlanPublicationOutcome, PublicationHead, PublicationOrigin,
     PublishVersionedPlanCommand, RepositoryError, RunProjection, RunTransitionCommand,
@@ -506,10 +511,8 @@ impl DurableRepository for SqliteDurableRepository {
             return Ok(TransitionOutcome::StateConflict);
         }
 
-        if let Some(TerminalRunMutation::Failed { reason, .. }) = command.terminal() {
-            if current.termination_intent_reason.as_deref()
-                != Some(super::model::termination_reason_as_str(*reason))
-            {
+        if let Some(reason) = model_adapter::run_transition_terminal_reason(&command) {
+            if current.termination_intent_reason.as_deref() != Some(reason) {
                 transaction
                     .rollback()
                     .await
@@ -529,7 +532,7 @@ impl DurableRepository for SqliteDurableRepository {
         });
 
         let terminal_output =
-            if let Some(output) = command.terminal().and_then(TerminalRunMutation::output) {
+            if let Some(output) = model_adapter::run_transition_terminal_output(&command) {
                 Some(insert_or_get_payload(&mut transaction, command.run_id(), output).await?)
             } else {
                 None
@@ -612,8 +615,8 @@ impl DurableRepository for SqliteDurableRepository {
                 &mut transaction,
                 command.run_id(),
                 command.next_lifecycle(),
-                command.terminal().and_then(TerminalRunMutation::output),
-                command.terminal().and_then(TerminalRunMutation::error_code),
+                model_adapter::run_transition_terminal_output(&command),
+                model_adapter::run_transition_terminal_error_code(&command),
             )
             .await?;
             register_terminal_artifact_retention_sqlite(
@@ -1829,9 +1832,9 @@ pub(crate) async fn insert_or_get_payload(
                 .map_err(|_| RepositoryError::invalid_data())?
                 .is_none(),
         )?;
-        if validated.content_hash() != &hash
-            || validated.canonical() != canonical
-            || validated.value() != value
+        if common_contract_adapter::validated_inline_payload_content_hash(&validated) != &hash
+            || common_contract_adapter::validated_inline_payload_canonical(&validated) != canonical
+            || common_contract_adapter::validated_inline_payload_value(&validated) != value
         {
             return Err(RepositoryError::invalid_data());
         }
@@ -1866,8 +1869,11 @@ async fn update_run(
     terminal_public_event_id: Option<&str>,
     terminal_output: Option<&(String, String)>,
 ) -> Result<u64, RepositoryError> {
-    let result = match command.terminal() {
-        Some(TerminalRunMutation::Succeeded { .. }) => {
+    let result = match (
+        model_adapter::run_transition_terminal_output(command),
+        model_adapter::run_transition_terminal_reason(command),
+    ) {
+        (Some(_), None) => {
             let (payload_id, value_hash) =
                 terminal_output.ok_or_else(RepositoryError::invalid_data)?;
             sqlx::query(
@@ -1898,7 +1904,7 @@ async fn update_run(
             .execute(&mut **transaction)
             .await
         }
-        Some(terminal @ TerminalRunMutation::Failed { .. }) => {
+        (None, Some(reason)) => {
             sqlx::query(
                 "UPDATE workflow_runs
                  SET lifecycle = ?, admission_state = ?,
@@ -1913,7 +1919,7 @@ async fn update_run(
             )
             .bind(command.next_lifecycle().as_str())
             .bind(command.next_admission().as_str())
-            .bind(terminal.error_code())
+            .bind(model_adapter::run_transition_terminal_error_code(command))
             .bind(terminal_event_id)
             .bind(terminal_public_event_id)
             .bind(i64_from_u64(next_version)?)
@@ -1921,11 +1927,11 @@ async fn update_run(
             .bind(expected_version)
             .bind(command.expected_lifecycle().as_str())
             .bind(command.expected_admission().as_str())
-            .bind(terminal.reason())
+            .bind(reason)
             .execute(&mut **transaction)
             .await
         }
-        None if command.next_lifecycle() == RunLifecycle::Terminating => {
+        (None, None) if command.next_lifecycle() == RunLifecycle::Terminating => {
             sqlx::query(
                 "UPDATE workflow_runs
                  SET lifecycle = 'terminating', admission_state = 'draining',
@@ -1947,7 +1953,7 @@ async fn update_run(
             .execute(&mut **transaction)
             .await
         }
-        None => {
+        (None, None) => {
             sqlx::query(
                 "UPDATE workflow_runs
                  SET lifecycle = ?, admission_state = ?, projection_version = ?,
@@ -1970,6 +1976,7 @@ async fn update_run(
             .execute(&mut **transaction)
             .await
         }
+        (Some(_), Some(_)) => return Err(RepositoryError::invalid_data()),
     }
     .map_err(RepositoryError::storage)?;
     Ok(result.rows_affected())
@@ -2019,11 +2026,13 @@ fn projection_from_row(run_id: &RunId, row: &SqliteRow) -> Result<RunProjection,
             .try_get::<Option<String>, _>("expected_output_value_hash")
             .map_err(|_| RepositoryError::invalid_data())?
             .as_deref()
-            != Some(validated.content_hash().as_str())
+            != Some(
+                common_contract_adapter::validated_inline_payload_content_hash(&validated).as_str(),
+            )
         {
             return Err(RepositoryError::invalid_data());
         }
-        Some(validated.value().clone())
+        Some(common_contract_adapter::validated_inline_payload_value(&validated).clone())
     } else {
         if row
             .try_get::<Option<String>, _>("output_payload_id")
