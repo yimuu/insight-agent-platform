@@ -1,12 +1,19 @@
+use super::RepositoryErrorExt as _;
+
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use sqlx::{postgres::PgRow, Postgres, Row, Sqlite, Transaction};
 
+use insight_engine::human::adapter as human_adapter;
+pub use insight_engine::human::{
+    HumanTaskPrincipal, HumanWorkItem, HumanWorkItemId, HumanWorkItemState,
+};
+
 use crate::engine::{
-    plan::PlanType, ActivationId, ContentHash, ProjectionMutationKind, RunId, RuntimeValue,
-    SignalId, TransitionKey, TransitionOutcome,
+    ActivationId, ContentHash, ProjectionMutationKind, RunId, RuntimeValue, SignalId,
+    TransitionKey, TransitionOutcome,
 };
 
 use super::{
@@ -24,144 +31,6 @@ use super::{
 
 const MAX_WORK_ITEM_LIST: u32 = 1_024;
 const MAX_COMPLETION_VALUE_BYTES: usize = 1024 * 1024;
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct HumanWorkItemId(String);
-
-impl HumanWorkItemId {
-    pub fn new(value: impl Into<String>) -> Result<Self, RepositoryError> {
-        let value = value.into();
-        validate_label(&value)?;
-        Ok(Self(value))
-    }
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HumanWorkItemState {
-    Open,
-    Claimed,
-    Completed,
-    Cancelled,
-    Expired,
-}
-
-impl HumanWorkItemState {
-    fn parse(value: &str) -> Result<Self, RepositoryError> {
-        match value {
-            "open" => Ok(Self::Open),
-            "claimed" => Ok(Self::Claimed),
-            "completed" => Ok(Self::Completed),
-            "cancelled" => Ok(Self::Cancelled),
-            "expired" => Ok(Self::Expired),
-            _ => Err(RepositoryError::invalid_data()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct HumanTaskPrincipal {
-    identity: String,
-    groups: Vec<String>,
-}
-
-impl HumanTaskPrincipal {
-    pub fn new(
-        identity: impl Into<String>,
-        groups: impl IntoIterator<Item = String>,
-    ) -> Result<Self, RepositoryError> {
-        let identity = identity.into();
-        validate_label(&identity)?;
-        let mut groups = groups.into_iter().collect::<Vec<_>>();
-        for group in &groups {
-            validate_label(group)?;
-        }
-        groups.sort();
-        groups.dedup();
-        Ok(Self { identity, groups })
-    }
-    pub fn identity(&self) -> &str {
-        &self.identity
-    }
-    pub fn groups(&self) -> &[String] {
-        &self.groups
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct HumanWorkItem {
-    work_item_id: HumanWorkItemId,
-    run_id: RunId,
-    activation_id: ActivationId,
-    signal_name: String,
-    request: Value,
-    response_type: PlanType,
-    assignees: Vec<String>,
-    candidate_groups: Vec<String>,
-    state: HumanWorkItemState,
-    claim_fence: u64,
-    claimed_by: Option<String>,
-    claim_expires_at: Option<String>,
-    projection_version: u64,
-}
-
-impl HumanWorkItem {
-    pub fn work_item_id(&self) -> &HumanWorkItemId {
-        &self.work_item_id
-    }
-    pub fn run_id(&self) -> &RunId {
-        &self.run_id
-    }
-    pub fn activation_id(&self) -> &ActivationId {
-        &self.activation_id
-    }
-    pub fn signal_name(&self) -> &str {
-        &self.signal_name
-    }
-    pub fn request(&self) -> &Value {
-        &self.request
-    }
-    pub fn response_type(&self) -> &PlanType {
-        &self.response_type
-    }
-    pub fn assignees(&self) -> &[String] {
-        &self.assignees
-    }
-    pub fn candidate_groups(&self) -> &[String] {
-        &self.candidate_groups
-    }
-    pub fn state(&self) -> HumanWorkItemState {
-        self.state
-    }
-    pub fn claim_fence(&self) -> u64 {
-        self.claim_fence
-    }
-    pub fn claimed_by(&self) -> Option<&str> {
-        self.claimed_by.as_deref()
-    }
-    pub fn claim_expires_at(&self) -> Option<&str> {
-        self.claim_expires_at.as_deref()
-    }
-    pub fn projection_version(&self) -> u64 {
-        self.projection_version
-    }
-
-    fn assigned_to(&self, principal: &HumanTaskPrincipal) -> bool {
-        (self.assignees.is_empty() && self.candidate_groups.is_empty())
-            || self
-                .assignees
-                .iter()
-                .any(|value| value == principal.identity())
-            || self
-                .candidate_groups
-                .iter()
-                .any(|candidate| principal.groups().iter().any(|group| group == candidate))
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ClaimHumanWorkItemCommand {
@@ -432,61 +301,63 @@ fn parse_json_text<T: serde::de::DeserializeOwned>(value: String) -> Result<T, R
 }
 
 fn parse_sqlite_work_item(row: &sqlx::sqlite::SqliteRow) -> Result<HumanWorkItem, RepositoryError> {
-    Ok(HumanWorkItem {
-        work_item_id: HumanWorkItemId::new(
-            row.try_get::<String, _>("work_item_id")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )?,
-        run_id: RunId::new(
-            row.try_get::<String, _>("run_id")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )
-        .map_err(|_| RepositoryError::invalid_data())?,
-        activation_id: ActivationId::new(
-            row.try_get::<String, _>("activation_id")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )
-        .map_err(|_| RepositoryError::invalid_data())?,
-        signal_name: row
-            .try_get("signal_name")
+    Ok(human_adapter::from_validated_storage_parts(
+        human_adapter::HumanWorkItemParts {
+            work_item_id: HumanWorkItemId::new(
+                row.try_get::<String, _>("work_item_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )?,
+            run_id: RunId::new(
+                row.try_get::<String, _>("run_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
             .map_err(|_| RepositoryError::invalid_data())?,
-        request: parse_json_text(
-            row.try_get("request_value")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )?,
-        response_type: parse_json_text(
-            row.try_get("response_type")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )?,
-        assignees: parse_json_text(
-            row.try_get("assignees")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )?,
-        candidate_groups: parse_json_text(
-            row.try_get("candidate_groups")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )?,
-        state: HumanWorkItemState::parse(
-            &row.try_get::<String, _>("work_state")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )?,
-        claim_fence: u64::try_from(
-            row.try_get::<i64, _>("claim_fence")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )
-        .map_err(|_| RepositoryError::invalid_data())?,
-        claimed_by: row
-            .try_get("claimed_by")
+            activation_id: ActivationId::new(
+                row.try_get::<String, _>("activation_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
             .map_err(|_| RepositoryError::invalid_data())?,
-        claim_expires_at: row
-            .try_get("claim_expires_at")
-            .map_err(|_| RepositoryError::invalid_data())?,
-        projection_version: u64::try_from(
-            row.try_get::<i64, _>("projection_version")
+            signal_name: row
+                .try_get("signal_name")
                 .map_err(|_| RepositoryError::invalid_data())?,
-        )
-        .map_err(|_| RepositoryError::invalid_data())?,
-    })
+            request: parse_json_text(
+                row.try_get("request_value")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )?,
+            response_type: parse_json_text(
+                row.try_get("response_type")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )?,
+            assignees: parse_json_text(
+                row.try_get("assignees")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )?,
+            candidate_groups: parse_json_text(
+                row.try_get("candidate_groups")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )?,
+            state: human_adapter::parse_state(
+                &row.try_get::<String, _>("work_state")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )?,
+            claim_fence: u64::try_from(
+                row.try_get::<i64, _>("claim_fence")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .map_err(|_| RepositoryError::invalid_data())?,
+            claimed_by: row
+                .try_get("claimed_by")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            claim_expires_at: row
+                .try_get("claim_expires_at")
+                .map_err(|_| RepositoryError::invalid_data())?,
+            projection_version: u64::try_from(
+                row.try_get::<i64, _>("projection_version")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .map_err(|_| RepositoryError::invalid_data())?,
+        },
+    ))
 }
 
 const SQLITE_LOAD_WORK_ITEM: &str = "SELECT work_item_id,run_id,activation_id,signal_name,request_value,response_type,assignees,candidate_groups,work_state,claim_fence,claimed_by,claim_expires_at,projection_version FROM human_work_items WHERE work_item_id=?";
@@ -618,7 +489,7 @@ impl HumanTaskDurableRepository for SqliteDurableRepository {
             tx.rollback().await.map_err(RepositoryError::storage)?;
             return Ok(TransitionOutcome::StateConflict);
         };
-        if current.state == HumanWorkItemState::Claimed
+        if current.state() == HumanWorkItemState::Claimed
             && current.claimed_by() == Some(command.principal().identity())
         {
             let stored_request = sqlx::query_scalar::<_, Option<String>>(
@@ -635,7 +506,9 @@ impl HumanTaskDurableRepository for SqliteDurableRepository {
                 });
             }
         }
-        if current.state != HumanWorkItemState::Open || !current.assigned_to(command.principal()) {
+        if current.state() != HumanWorkItemState::Open
+            || !human_adapter::assigned_to(&current, command.principal())
+        {
             tx.rollback().await.map_err(RepositoryError::storage)?;
             return Ok(TransitionOutcome::StateConflict);
         }
@@ -689,7 +562,7 @@ impl HumanTaskDurableRepository for SqliteDurableRepository {
             && item.claimed_by() == Some(command.principal().identity())
             && item.claim_fence() == command.claim_fence();
         if !exact_replay {
-            if item.state != HumanWorkItemState::Claimed
+            if item.state() != HumanWorkItemState::Claimed
                 || item.claimed_by() != Some(command.principal().identity())
                 || item.claim_fence() != command.claim_fence()
             {
@@ -869,64 +742,66 @@ const POSTGRES_LOCK_WORK_ITEM: &str = "SELECT work_item_id,run_id,activation_id,
 const POSTGRES_LIST_WORK_ITEMS: &str = "SELECT work_item_id,run_id,activation_id,signal_name,request_value,response_type,assignees,candidate_groups,work_state,claim_fence,claimed_by,claim_expires_at,projection_version FROM human_work_items h WHERE work_state IN ('open','claimed') AND ((h.work_state='open' AND ((jsonb_array_length(h.assignees)=0 AND jsonb_array_length(h.candidate_groups)=0) OR h.assignees ? $1 OR h.candidate_groups ?| $2::text[])) OR (h.work_state='claimed' AND h.claimed_by=$1)) ORDER BY created_at,work_item_id LIMIT $3";
 
 fn parse_postgres_work_item(row: &PgRow) -> Result<HumanWorkItem, RepositoryError> {
-    Ok(HumanWorkItem {
-        work_item_id: HumanWorkItemId::new(
-            row.try_get::<String, _>("work_item_id")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )?,
-        run_id: RunId::new(
-            row.try_get::<String, _>("run_id")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )
-        .map_err(|_| RepositoryError::invalid_data())?,
-        activation_id: ActivationId::new(
-            row.try_get::<String, _>("activation_id")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )
-        .map_err(|_| RepositoryError::invalid_data())?,
-        signal_name: row
-            .try_get("signal_name")
+    Ok(human_adapter::from_validated_storage_parts(
+        human_adapter::HumanWorkItemParts {
+            work_item_id: HumanWorkItemId::new(
+                row.try_get::<String, _>("work_item_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )?,
+            run_id: RunId::new(
+                row.try_get::<String, _>("run_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
             .map_err(|_| RepositoryError::invalid_data())?,
-        request: row
-            .try_get("request_value")
+            activation_id: ActivationId::new(
+                row.try_get::<String, _>("activation_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
             .map_err(|_| RepositoryError::invalid_data())?,
-        response_type: serde_json::from_value(
-            row.try_get::<Value, _>("response_type")
+            signal_name: row
+                .try_get("signal_name")
                 .map_err(|_| RepositoryError::invalid_data())?,
-        )
-        .map_err(|_| RepositoryError::invalid_data())?,
-        assignees: serde_json::from_value(
-            row.try_get::<Value, _>("assignees")
+            request: row
+                .try_get("request_value")
                 .map_err(|_| RepositoryError::invalid_data())?,
-        )
-        .map_err(|_| RepositoryError::invalid_data())?,
-        candidate_groups: serde_json::from_value(
-            row.try_get::<Value, _>("candidate_groups")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )
-        .map_err(|_| RepositoryError::invalid_data())?,
-        state: HumanWorkItemState::parse(
-            &row.try_get::<String, _>("work_state")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )?,
-        claim_fence: u64::try_from(
-            row.try_get::<i64, _>("claim_fence")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )
-        .map_err(|_| RepositoryError::invalid_data())?,
-        claimed_by: row
-            .try_get("claimed_by")
+            response_type: serde_json::from_value(
+                row.try_get::<Value, _>("response_type")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
             .map_err(|_| RepositoryError::invalid_data())?,
-        claim_expires_at: row
-            .try_get::<Option<DateTime<Utc>>, _>("claim_expires_at")
-            .map_err(|_| RepositoryError::invalid_data())?
-            .map(sqlite_time),
-        projection_version: u64::try_from(
-            row.try_get::<i64, _>("projection_version")
+            assignees: serde_json::from_value(
+                row.try_get::<Value, _>("assignees")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .map_err(|_| RepositoryError::invalid_data())?,
+            candidate_groups: serde_json::from_value(
+                row.try_get::<Value, _>("candidate_groups")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .map_err(|_| RepositoryError::invalid_data())?,
+            state: human_adapter::parse_state(
+                &row.try_get::<String, _>("work_state")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )?,
+            claim_fence: u64::try_from(
+                row.try_get::<i64, _>("claim_fence")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .map_err(|_| RepositoryError::invalid_data())?,
+            claimed_by: row
+                .try_get("claimed_by")
                 .map_err(|_| RepositoryError::invalid_data())?,
-        )
-        .map_err(|_| RepositoryError::invalid_data())?,
-    })
+            claim_expires_at: row
+                .try_get::<Option<DateTime<Utc>>, _>("claim_expires_at")
+                .map_err(|_| RepositoryError::invalid_data())?
+                .map(sqlite_time),
+            projection_version: u64::try_from(
+                row.try_get::<i64, _>("projection_version")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .map_err(|_| RepositoryError::invalid_data())?,
+        },
+    ))
 }
 
 async fn load_postgres_work_item(
@@ -1061,7 +936,7 @@ impl HumanTaskDurableRepository for PostgresDurableRepository {
             tx.rollback().await.map_err(RepositoryError::storage)?;
             return Ok(TransitionOutcome::StateConflict);
         };
-        if current.state == HumanWorkItemState::Claimed
+        if current.state() == HumanWorkItemState::Claimed
             && current.claimed_by() == Some(command.principal().identity())
         {
             let stored_request = sqlx::query_scalar::<_, Option<String>>(
@@ -1078,7 +953,9 @@ impl HumanTaskDurableRepository for PostgresDurableRepository {
                 });
             }
         }
-        if current.state != HumanWorkItemState::Open || !current.assigned_to(command.principal()) {
+        if current.state() != HumanWorkItemState::Open
+            || !human_adapter::assigned_to(&current, command.principal())
+        {
             tx.rollback().await.map_err(RepositoryError::storage)?;
             return Ok(TransitionOutcome::StateConflict);
         }
@@ -1155,7 +1032,7 @@ impl HumanTaskDurableRepository for PostgresDurableRepository {
             && item.claimed_by() == Some(command.principal().identity())
             && item.claim_fence() == command.claim_fence();
         if !exact_replay {
-            if item.state != HumanWorkItemState::Claimed
+            if item.state() != HumanWorkItemState::Claimed
                 || item.claimed_by() != Some(command.principal().identity())
                 || item.claim_fence() != command.claim_fence()
             {

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::engine::{
+use crate::{
     plan::{BranchCaseId, ControlPortId, DataPortId, LoopFlavor, PlanJoinMode, PlanType, ScopeId},
     ActivationId, ControlTokenId, ForkGroupId, LegId, MapItemIdentity, NodeId, PublicErrorCode,
     RunId, ScopeInstanceId, SignalId, TerminationReason, TimerId, WorkerFailureClass,
@@ -361,7 +361,7 @@ pub struct RedriveEffectFact {
     source_activation_id: ActivationId,
     target_node_id: NodeId,
     occurrence: LogicalOccurrence,
-    effect_id: crate::engine::EffectId,
+    effect_id: crate::EffectId,
 }
 
 impl RedriveEffectFact {
@@ -369,7 +369,7 @@ impl RedriveEffectFact {
         source_activation_id: ActivationId,
         target_node_id: NodeId,
         occurrence: LogicalOccurrence,
-        effect_id: crate::engine::EffectId,
+        effect_id: crate::EffectId,
     ) -> Self {
         Self {
             source_activation_id,
@@ -391,7 +391,7 @@ impl RedriveEffectFact {
         &self.occurrence
     }
 
-    pub fn effect_id(&self) -> &crate::engine::EffectId {
+    pub fn effect_id(&self) -> &crate::EffectId {
         &self.effect_id
     }
 }
@@ -2734,7 +2734,7 @@ fn inconsistent(message: &'static str) -> SchedulerError {
 #[cfg(test)]
 mod tests {
     use super::{RuntimeValue, SafeError, TaskFailureFact};
-    use crate::engine::{plan::PlanType, WorkerFailureClass};
+    use crate::{plan::PlanType, WorkerFailureClass};
     use serde_json::json;
 
     #[test]

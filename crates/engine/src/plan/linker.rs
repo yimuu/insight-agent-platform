@@ -4,7 +4,7 @@ use super::{
     DescriptorValue, LeafTaskKind, Plan, PlanError, PlanIndex, PlanInputContract, PlanType,
     PortName, VersionTag, PLAN_CONTEXT_LINK_INVALID,
 };
-use crate::engine::{
+use crate::{
     DefinitionRevisionId, EffectIdempotency, ExecutionRevisionPin, NodeId, WorkerCancellation,
     WorkerEffectClass, WorkerEffectPolicy,
 };

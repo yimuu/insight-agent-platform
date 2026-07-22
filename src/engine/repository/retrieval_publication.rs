@@ -5,6 +5,8 @@
 //! by the Retrieval adapter; raw input, model output and executor candidates
 //! are structurally unavailable.
 
+use super::RepositoryErrorExt as _;
+
 use std::fmt::Write as _;
 
 use serde_json::{json, Value};

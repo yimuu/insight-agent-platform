@@ -27,6 +27,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::engine::repository::RepositoryErrorExt as _;
+
 use crate::{
     catalog_v3::{
         subflow_registry_for_available, subflow_registry_for_stored, AgentStreamingSourceKind,
@@ -5099,6 +5101,8 @@ fn spawn_artifact_gc_pump(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
 mod public_artifact_authorization_tests {
     use serde_json::json;
 
+    use insight_engine::response::adapter::durable_response_snapshot_new;
+
     use super::*;
     use crate::engine::repository::{ResponseTerminalKind, ResponseUsageStatus};
 
@@ -5123,7 +5127,7 @@ mod public_artifact_authorization_tests {
             "usage_status": "unavailable",
         });
         let hash = ContentHash::from_bytes(&serde_jcs::to_vec(&projection).unwrap());
-        DurableResponseSnapshot::new(
+        durable_response_snapshot_new(
             response_id,
             ResponseTerminalKind::Completed,
             response,

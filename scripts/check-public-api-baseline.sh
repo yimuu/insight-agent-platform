@@ -93,5 +93,6 @@ if [[ ! -f "$baseline" ]]; then
   exit 1
 fi
 
-diff -u "$baseline" "$actual"
-echo "root public API baseline matches"
+python3 "$repo_root/scripts/check-public-api-compat-bridges.py" \
+  "$baseline" "$actual"
+echo "root public API baseline matches with audited source-compatible bridges"

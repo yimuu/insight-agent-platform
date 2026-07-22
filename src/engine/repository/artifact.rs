@@ -4,10 +4,13 @@
 //! an object in an external object store remains an at-least-once integration
 //! concern; this module deliberately does not claim external exactly-once I/O.
 
+use super::RepositoryErrorExt as _;
+
 use std::{collections::HashSet, fmt};
 
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
+use insight_engine::repository::adapter as repository_adapter;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{postgres::PgRow, sqlite::SqliteRow, PgPool, Postgres, Row, Sqlite, Transaction};
@@ -23,10 +26,9 @@ use super::{
         canonical_intent_hash, canonical_json, event_id, i64_from_u64, payload_id, u64_from_i64,
     },
     DurableRepository, PostgresDurableRepository, RepositoryError, SqliteDurableRepository,
-    REPOSITORY_ARTIFACT_STORE_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
+    StorageLocator, REPOSITORY_ARTIFACT_STORE_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
 };
 
-const MAX_STORAGE_LOCATOR_BYTES: usize = 16 * 1024;
 const MAX_SWEEP_BATCH: u32 = 1_000;
 const MAX_CLAIMANT_BYTES: usize = 256;
 const MAX_CLAIM_SECONDS: u32 = 3_600;
@@ -268,37 +270,6 @@ impl PayloadId {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-/// A storage locator is intentionally neither serializable nor printable.
-///
-/// Locators can contain bucket topology or short-lived credentials. They are
-/// persisted privately and returned only to the object-store deletion adapter;
-/// they have no representation in public execution events.
-#[derive(Clone, PartialEq, Eq)]
-pub struct StorageLocator(String);
-
-impl StorageLocator {
-    pub fn new(value: impl Into<String>) -> Result<Self, RepositoryError> {
-        let value = value.into();
-        if value.is_empty()
-            || value.len() > MAX_STORAGE_LOCATOR_BYTES
-            || value.chars().any(char::is_control)
-        {
-            return Err(invalid_command());
-        }
-        Ok(Self(value))
-    }
-
-    pub fn expose_to_storage_adapter(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for StorageLocator {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("StorageLocator(<redacted>)")
     }
 }
 
@@ -1292,7 +1263,7 @@ async fn load_sqlite_artifact_candidates(
                     row.try_get("media_type")
                         .map_err(|_| RepositoryError::invalid_data())?,
                 )?,
-                storage_locator: StorageLocator(
+                storage_locator: repository_adapter::storage_locator_from_validated_parts(
                     row.try_get("storage_uri")
                         .map_err(|_| RepositoryError::invalid_data())?,
                 ),
@@ -1340,7 +1311,7 @@ async fn load_postgres_artifact_candidates(
                     row.try_get("media_type")
                         .map_err(|_| RepositoryError::invalid_data())?,
                 )?,
-                storage_locator: StorageLocator(
+                storage_locator: repository_adapter::storage_locator_from_validated_parts(
                     row.try_get("storage_uri")
                         .map_err(|_| RepositoryError::invalid_data())?,
                 ),
@@ -2296,7 +2267,7 @@ impl ArtifactDurableRepository for SqliteDurableRepository {
                 row.try_get("media_type")
                     .map_err(|_| RepositoryError::invalid_data())?,
             )?;
-            let storage_locator = StorageLocator(
+            let storage_locator = repository_adapter::storage_locator_from_validated_parts(
                 row.try_get("storage_uri")
                     .map_err(|_| RepositoryError::invalid_data())?,
             );
@@ -2533,7 +2504,7 @@ async fn load_sqlite_sweep_claims(
                     row.try_get("media_type")
                         .map_err(|_| RepositoryError::invalid_data())?,
                 )?,
-                storage_locator: StorageLocator(
+                storage_locator: repository_adapter::storage_locator_from_validated_parts(
                     row.try_get("storage_uri")
                         .map_err(|_| RepositoryError::invalid_data())?,
                 ),
@@ -2579,7 +2550,7 @@ async fn acknowledge_sqlite_deletion(
         &row.try_get::<String, _>("artifact_state")
             .map_err(|_| RepositoryError::invalid_data())?,
     )?;
-    let storage_locator = StorageLocator(
+    let storage_locator = repository_adapter::storage_locator_from_validated_parts(
         row.try_get("storage_uri")
             .map_err(|_| RepositoryError::invalid_data())?,
     );
@@ -3501,7 +3472,7 @@ impl ArtifactDurableRepository for PostgresDurableRepository {
                 row.try_get("media_type")
                     .map_err(|_| RepositoryError::invalid_data())?,
             )?;
-            let storage_locator = StorageLocator(
+            let storage_locator = repository_adapter::storage_locator_from_validated_parts(
                 row.try_get("storage_uri")
                     .map_err(|_| RepositoryError::invalid_data())?,
             );
@@ -3717,7 +3688,7 @@ async fn load_postgres_sweep_claims(
                     row.try_get("media_type")
                         .map_err(|_| RepositoryError::invalid_data())?,
                 )?,
-                storage_locator: StorageLocator(
+                storage_locator: repository_adapter::storage_locator_from_validated_parts(
                     row.try_get("storage_uri")
                         .map_err(|_| RepositoryError::invalid_data())?,
                 ),
@@ -3761,7 +3732,7 @@ async fn acknowledge_postgres_deletion(
             .try_get::<String, _>("content_hash")
             .map_err(|_| RepositoryError::invalid_data())?,
     ))?;
-    let storage_locator = StorageLocator(
+    let storage_locator = repository_adapter::storage_locator_from_validated_parts(
         object_identity
             .try_get("storage_uri")
             .map_err(|_| RepositoryError::invalid_data())?,

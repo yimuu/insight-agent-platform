@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::{
-    resources::actions::{ToolPublicArguments, ToolPublicPolicy},
+    resource_policy::{ToolPublicArguments, ToolPublicPolicy},
     schema::{compile_schema_2020, JsonSchemaValidator},
 };
 
@@ -463,7 +463,7 @@ mod tests {
 
     use serde_json::{json, Value};
 
-    use crate::resources::actions::{ToolPublicArguments, ToolPublicPolicy};
+    use crate::resource_policy::{ToolPublicArguments, ToolPublicPolicy};
 
     use super::WorkflowToolPublicProjection;
 

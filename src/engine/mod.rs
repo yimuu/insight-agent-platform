@@ -5,24 +5,22 @@
 //! so the compiler, durable repository, scheduler, and workers share one set of
 //! identities and state-machine contracts during the clean cutover.
 
-pub mod aggregate;
 pub mod artifact_store;
-pub mod control;
-pub mod error;
-pub mod event;
-pub mod identity;
 pub mod leaf_adapters;
-pub mod plan;
-pub mod recovery;
 pub mod repository;
-pub mod retrieval;
 pub mod retrieval_adapter;
-pub mod run;
-pub mod scheduler;
-pub mod scope;
-pub mod state;
-pub mod value;
 pub mod worker;
+
+pub use insight_engine::{
+    aggregate, control, error, event, identity, plan, recovery, run, scheduler, scope, state, value,
+};
+
+pub mod retrieval {
+    pub use insight_engine::retrieval::{
+        deterministic_retrieval_id, FrozenRetrievalTarget, RetrievalCompletion,
+        RETRIEVAL_BINDING_INVALID, RETRIEVAL_COMPLETION_INVALID,
+    };
+}
 
 pub use aggregate::{
     ActivationAttemptAggregate, AttemptFailureDisposition, CommittedOutputProof, ExecutionKind,

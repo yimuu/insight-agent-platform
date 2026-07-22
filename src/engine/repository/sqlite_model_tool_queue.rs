@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};

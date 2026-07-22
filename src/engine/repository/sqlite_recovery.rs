@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use sqlx::{Row, Sqlite, Transaction};
@@ -423,7 +425,7 @@ async fn derive_reuse_candidates_sqlite(
             .map_err(|_| RepositoryError::invalid_data())?;
         let occurrence: LogicalOccurrence = serde_json::from_str(&stable_activation_key)
             .map_err(|_| RepositoryError::invalid_data())?;
-        let target_scope_instance_id = crate::engine::scheduler::scope_instance_for_occurrence(
+        let target_scope_instance_id = insight_engine::internal::scope_instance_for_occurrence(
             &target_index,
             target_run_id,
             target_node,
@@ -1933,7 +1935,7 @@ async fn insert_reuse_candidate(
     };
     let occurrence: LogicalOccurrence = serde_json::from_str(candidate.stable_activation_key())
         .map_err(|_| RepositoryError::invalid_data())?;
-    let expected_scope = crate::engine::scheduler::scope_instance_for_occurrence(
+    let expected_scope = insight_engine::internal::scope_instance_for_occurrence(
         &target_index,
         target_run_id,
         target_node,

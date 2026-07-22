@@ -591,7 +591,7 @@ impl MigrationReadiness {
 pub struct MigrationNodeMapping {
     source_node_id: NodeId,
     target_node_id: NodeId,
-    port_mapping: BTreeMap<crate::engine::plan::DataPortId, crate::engine::plan::DataPortId>,
+    port_mapping: BTreeMap<crate::plan::DataPortId, crate::plan::DataPortId>,
     input_schema_hash: ContentHash,
     output_schema_hash: ContentHash,
     effect_policy_hash: ContentHash,
@@ -604,7 +604,7 @@ impl MigrationNodeMapping {
     pub fn new(
         source_node_id: NodeId,
         target_node_id: NodeId,
-        port_mapping: BTreeMap<crate::engine::plan::DataPortId, crate::engine::plan::DataPortId>,
+        port_mapping: BTreeMap<crate::plan::DataPortId, crate::plan::DataPortId>,
         input_schema_hash: ContentHash,
         output_schema_hash: ContentHash,
         effect_policy_hash: ContentHash,
@@ -641,9 +641,7 @@ impl MigrationNodeMapping {
         &self.target_node_id
     }
 
-    pub fn port_mapping(
-        &self,
-    ) -> &BTreeMap<crate::engine::plan::DataPortId, crate::engine::plan::DataPortId> {
+    pub fn port_mapping(&self) -> &BTreeMap<crate::plan::DataPortId, crate::plan::DataPortId> {
         &self.port_mapping
     }
 

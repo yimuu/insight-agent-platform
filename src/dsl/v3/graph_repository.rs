@@ -11,6 +11,8 @@ use serde::Serialize;
 use serde_json::Value;
 use sqlx::Row;
 
+use crate::engine::repository::RepositoryErrorExt as _;
+
 use crate::engine::{
     repository::{PostgresDurableRepository, RepositoryError, SqliteDurableRepository},
     ActivationId, DefinitionRevisionId, DeploymentRevisionId, NodeId, Plan, RunId,

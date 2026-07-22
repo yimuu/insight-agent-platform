@@ -14,11 +14,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    resources::retrievals::{RegisteredRetrieval, RetrievalPublicPolicy},
-    runtime::response_stream::{WorkflowRetrieval, WorkflowRetrievalPublicProjection},
-};
-
-use super::{
+    resource_policy::RetrievalPublicPolicy,
+    response::{WorkflowRetrieval, WorkflowRetrievalPublicProjection},
     ActivationId, EffectIdempotency, RunId, WorkerCancellation, WorkerEffectClass,
     WorkerEffectPolicy,
 };
@@ -28,6 +25,26 @@ pub const RETRIEVAL_COMPLETION_INVALID: &str = "ENGINE_RETRIEVAL_COMPLETION_INVA
 
 const MAX_RETRIEVAL_PUBLIC_PROJECTION_BYTES: usize = 1024 * 1024;
 const RETRIEVAL_ID_DOMAIN: &[u8] = b"insight-agent-platform/retrieval-public-id/v1\0";
+
+/// Workspace-internal, read-only evidence required to prove that a registered
+/// Retrieval still matches an immutable deployment binding.
+///
+/// Resource registries implement this view without moving provider objects or
+/// registry ownership into the engine crate.
+#[doc(hidden)]
+pub trait RegisteredRetrievalView {
+    fn resource_id(&self) -> &str;
+    fn resource_version(&self) -> &Version;
+    fn descriptor_hash(&self) -> &str;
+    fn input_schema(&self) -> &Value;
+    fn output_schema(&self) -> &Value;
+    fn query_field(&self) -> &str;
+    fn effect(&self) -> &str;
+    fn idempotency(&self) -> &str;
+    fn cancellation(&self) -> &str;
+    fn required_capabilities(&self) -> Vec<&str>;
+    fn public_policy(&self) -> &RetrievalPublicPolicy;
+}
 
 /// Safe worker sidecar for one completed Retrieval task.
 ///
@@ -237,27 +254,24 @@ impl FrozenRetrievalTarget {
         })
     }
 
-    pub fn validate_registered(
+    pub fn validate_registered<R: RegisteredRetrievalView + ?Sized>(
         &self,
-        registered: &RegisteredRetrieval,
+        registered: &R,
     ) -> Result<(), &'static str> {
-        let identity = registered.identity();
-        let descriptor = registered.descriptor();
         let public = serde_json::to_value(registered.public_policy())
             .map_err(|_| RETRIEVAL_BINDING_INVALID)?;
-        if identity.id != self.resource_id
-            || identity.version != self.resource_version
-            || identity.descriptor_hash != self.descriptor_hash
-            || descriptor.input_schema != self.input_schema
-            || descriptor.output_schema != self.output_schema
-            || descriptor.query_field != self.query_field
-            || enum_wire(descriptor.effect)? != self.effect
-            || enum_wire(descriptor.idempotency)? != self.idempotency
-            || enum_wire(descriptor.cancellation)? != self.cancellation
-            || descriptor
-                .required_capabilities
-                .iter()
-                .map(|value| value.as_str())
+        if registered.resource_id() != self.resource_id
+            || registered.resource_version() != &self.resource_version
+            || registered.descriptor_hash() != self.descriptor_hash
+            || registered.input_schema() != &self.input_schema
+            || registered.output_schema() != &self.output_schema
+            || registered.query_field() != self.query_field
+            || registered.effect() != self.effect
+            || registered.idempotency() != self.idempotency
+            || registered.cancellation() != self.cancellation
+            || registered
+                .required_capabilities()
+                .into_iter()
                 .ne(self.required_capabilities.iter().map(String::as_str))
             || public != self.descriptor_public_policy
         {
@@ -345,13 +359,6 @@ impl FrozenRetrievalTarget {
     pub fn effective_public_policy(&self) -> &Value {
         &self.effective_public_policy
     }
-}
-
-fn enum_wire<T: Serialize>(value: T) -> Result<String, &'static str> {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .ok_or(RETRIEVAL_BINDING_INVALID)
 }
 
 fn normalized_policy(value: &Value) -> Result<Value, &'static str> {

@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
@@ -430,6 +432,33 @@ impl ModelToolTaskClaim {
     }
     pub fn projection_version(&self) -> u64 {
         self.projection_version
+    }
+}
+
+impl insight_engine::worker::ModelToolTaskClaimView for ModelToolTaskClaim {
+    fn model_tool_execution_spec(
+        &self,
+    ) -> Result<insight_engine::worker::ModelToolExecutionSpec, &'static str> {
+        let identity = self.identity();
+        let action = identity.action();
+        let action = insight_engine::worker::ModelToolActionExecutionSpec::new(
+            action.action_id(),
+            action.action_version(),
+            action.descriptor_hash(),
+            action.input_schema().clone(),
+            action.effect_policy().clone(),
+            action.deployment_binding().clone(),
+        );
+        insight_engine::worker::ModelToolExecutionSpec::new(
+            self.run_id().clone(),
+            self.parent_activation_id().clone(),
+            self.model_call_no(),
+            identity.tool_task_id().clone(),
+            identity.effect_id().clone(),
+            identity.call_index(),
+            action,
+            self.arguments().clone(),
+        )
     }
 }
 

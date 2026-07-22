@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use std::collections::BTreeSet;
 
 use async_trait::async_trait;
@@ -6,6 +8,10 @@ use serde_json::Value;
 use sqlx::{
     postgres::{PgPoolOptions, PgRow},
     PgPool, Postgres, Row, Transaction,
+};
+
+use insight_engine::response::adapter::{
+    durable_response_snapshot_new, response_terminal_kind_parse, response_usage_status_parse,
 };
 
 use crate::engine::{
@@ -32,9 +38,8 @@ use super::{
     },
     CommitReceipt, CreateRunCommand, DurableRepository, DurableResponseSnapshot,
     PlanInstallOutcome, PlanPublicationOutcome, PublicationHead, PublicationOrigin,
-    PublishVersionedPlanCommand, RepositoryError, ResponseTerminalKind, ResponseUsageStatus,
-    RunProjection, RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
-    REPOSITORY_PLAN_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
+    PublishVersionedPlanCommand, RepositoryError, RunProjection, RunTransitionCommand,
+    VersionedPlan, VersionedPlanCatalog, REPOSITORY_PLAN_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
 };
 
 const POSTGRES_MIGRATION_ADVISORY_LOCK: i64 = 0x4941_505f_4456_3301;
@@ -1195,10 +1200,10 @@ async fn load_response_snapshot_postgres(
     .await
     .map_err(RepositoryError::storage)?;
     row.map(|row| {
-        DurableResponseSnapshot::new(
+        durable_response_snapshot_new(
             row.try_get("response_id")
                 .map_err(|_| RepositoryError::invalid_data())?,
-            ResponseTerminalKind::parse(
+            response_terminal_kind_parse(
                 &row.try_get::<String, _>("terminal_kind")
                     .map_err(|_| RepositoryError::invalid_data())?,
             )?,
@@ -1210,7 +1215,7 @@ async fn load_response_snapshot_postgres(
                 .map_err(|_| RepositoryError::invalid_data())?,
             row.try_get("usage")
                 .map_err(|_| RepositoryError::invalid_data())?,
-            ResponseUsageStatus::parse(
+            response_usage_status_parse(
                 &row.try_get::<String, _>("usage_status")
                     .map_err(|_| RepositoryError::invalid_data())?,
             )?,

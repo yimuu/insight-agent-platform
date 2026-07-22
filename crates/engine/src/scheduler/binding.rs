@@ -2,12 +2,12 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use crate::engine::plan::{
+use crate::plan::{
     expression::{MatchProgram, MatchValue, TemplatePart, ValueProgram},
     DataPortId, ExpressionLanguage, Node, NodeKind, PlanIndex, PortDirection, PureExpression,
     ValueSource,
 };
-use crate::engine::ActivationId;
+use crate::ActivationId;
 
 use super::{
     LogicalOccurrence, RuntimeValue, SchedulerError, SchedulerFacts, SCHEDULER_EXPRESSION_INVALID,
@@ -712,7 +712,7 @@ fn enforce_input_presence(
 
 pub(crate) fn require_type(
     value: &RuntimeValue,
-    expected: &crate::engine::plan::PlanType,
+    expected: &crate::plan::PlanType,
     subject: &str,
 ) -> Result<(), SchedulerError> {
     if value.matches(expected) {

@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use sqlx::{AssertSqlSafe, Row, Sqlite, Transaction};
 
 use crate::engine::{ActivationId, AttemptNo, RunId};

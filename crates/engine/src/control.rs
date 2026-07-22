@@ -3999,14 +3999,14 @@ mod tests {
                 reason: ActivationTerminationReason::Failure,
                 failure: Some(InternalFailureSummary::new(
                     InternalFailureKind::Infrastructure,
-                    crate::engine::InternalFailureCode::new("INFRASTRUCTURE_FAILURE").unwrap(),
+                    crate::InternalFailureCode::new("INFRASTRUCTURE_FAILURE").unwrap(),
                 )),
             },
             LegSettlement::Panic => TerminalActivationResult::Failed {
                 reason: ActivationTerminationReason::Failure,
                 failure: Some(InternalFailureSummary::new(
                     InternalFailureKind::Invariant,
-                    crate::engine::InternalFailureCode::new("INVARIANT_FAILURE").unwrap(),
+                    crate::InternalFailureCode::new("INVARIANT_FAILURE").unwrap(),
                 )),
             },
             LegSettlement::Cancelled => TerminalActivationResult::Cancelled,
@@ -4975,7 +4975,7 @@ mod tests {
                 reason: ActivationTerminationReason::Failure,
                 failure: Some(InternalFailureSummary::new(
                     InternalFailureKind::Business,
-                    crate::engine::InternalFailureCode::new("ANALYSIS_FAILED").unwrap(),
+                    crate::InternalFailureCode::new("ANALYSIS_FAILED").unwrap(),
                 )),
             },
         )

@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Serialize};
 use sqlx::{Row, Sqlite, Transaction};

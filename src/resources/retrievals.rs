@@ -15,9 +15,12 @@ use std::{
 
 use async_trait::async_trait;
 use semver::Version;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+pub use insight_engine::resource_policy::RetrievalPublicPolicy;
+use insight_engine::retrieval::RegisteredRetrievalView;
 
 use crate::{
     dsl::CompileError,
@@ -43,30 +46,6 @@ impl RetrievalCapability {
 
     pub fn as_str(&self) -> &'static str {
         self.0
-    }
-}
-
-/// Retrieval-side half of the caller-visible publication contract.
-///
-/// Both fields are private by default. `result` is the closed schema for one
-/// public retrieval result, not the raw provider result and not the complete
-/// model-facing output schema.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RetrievalPublicPolicy {
-    #[serde(default)]
-    pub query: bool,
-    #[serde(default, rename = "result")]
-    pub result_schema: Option<Value>,
-}
-
-impl RetrievalPublicPolicy {
-    pub fn private() -> Self {
-        Self::default()
-    }
-
-    pub fn is_fully_private(&self) -> bool {
-        !self.query && self.result_schema.is_none()
     }
 }
 
@@ -245,6 +224,66 @@ impl RegisteredRetrieval {
         // Deliberately do not inspect `public_candidate` here. The pure public
         // projection owns that check and skips it entirely for private policy.
         Ok(result)
+    }
+}
+
+impl RegisteredRetrievalView for RegisteredRetrieval {
+    fn resource_id(&self) -> &str {
+        &self.identity.id
+    }
+
+    fn resource_version(&self) -> &Version {
+        &self.identity.version
+    }
+
+    fn descriptor_hash(&self) -> &str {
+        &self.identity.descriptor_hash
+    }
+
+    fn input_schema(&self) -> &Value {
+        &self.descriptor.input_schema
+    }
+
+    fn output_schema(&self) -> &Value {
+        &self.descriptor.output_schema
+    }
+
+    fn query_field(&self) -> &str {
+        self.descriptor.query_field
+    }
+
+    fn effect(&self) -> &str {
+        match self.descriptor.effect {
+            EffectClass::Pure => "pure",
+            EffectClass::ReadOnly => "read_only",
+            EffectClass::Mutating => "mutating",
+        }
+    }
+
+    fn idempotency(&self) -> &str {
+        match self.descriptor.idempotency {
+            IdempotencyClass::Idempotent => "idempotent",
+            IdempotencyClass::NonIdempotent => "non_idempotent",
+        }
+    }
+
+    fn cancellation(&self) -> &str {
+        match self.descriptor.cancellation {
+            CancellationClass::Cooperative => "cooperative",
+            CancellationClass::NotSupported => "not_supported",
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<&str> {
+        self.descriptor
+            .required_capabilities
+            .iter()
+            .map(RetrievalCapability::as_str)
+            .collect()
+    }
+
+    fn public_policy(&self) -> &RetrievalPublicPolicy {
+        &self.public_policy
     }
 }
 

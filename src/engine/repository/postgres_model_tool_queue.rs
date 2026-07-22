@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, Postgres, Row, Transaction};

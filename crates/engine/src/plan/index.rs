@@ -6,7 +6,7 @@ use super::{
     PhiBinding, Plan, PlanError, Policy, PolicyId, PortDirection, PortName, ScopeId, ScopeMetadata,
     ValueSource, PLAN_INDEX_INVALID,
 };
-use crate::engine::NodeId;
+use crate::NodeId;
 
 /// Closed leaf categories understood by worker registries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-use crate::engine::NodeId;
+use crate::NodeId;
 
 use super::{ControlEdgeId, ControlPortId, DataPortId, SourceSpan};
 

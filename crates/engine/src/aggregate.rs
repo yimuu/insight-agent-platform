@@ -632,28 +632,6 @@ pub struct TerminalActivationProof {
 }
 
 impl TerminalActivationProof {
-    #[cfg(not(test))]
-    fn mint(
-        run_id: RunId,
-        scope_instance_id: ScopeInstanceId,
-        activation_id: ActivationId,
-        terminal: ActivationLifecycle,
-        attempts_drained: bool,
-        result: TerminalActivationResult,
-    ) -> Result<Self, ModelError> {
-        Self::validate_and_mint(
-            run_id,
-            scope_instance_id,
-            activation_id,
-            terminal,
-            attempts_drained,
-            result,
-        )
-    }
-
-    // Unit tests exercise rejection paths directly. This wider constructor is
-    // absent from production and integration-test library builds.
-    #[cfg(test)]
     pub(crate) fn mint(
         run_id: RunId,
         scope_instance_id: ScopeInstanceId,
@@ -2384,7 +2362,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::engine::{InternalFailureCode, InternalFailureKind};
+    use crate::{InternalFailureCode, InternalFailureKind};
 
     fn run() -> RunId {
         RunId::new("run_aggregate").unwrap()

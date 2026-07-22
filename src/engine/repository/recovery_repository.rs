@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use std::{collections::BTreeSet, time::Duration};
 
 use async_trait::async_trait;
@@ -156,7 +158,7 @@ impl MigrationMappingCompatibility {
             || source.target_node_id() != target.target_node_id()
             || !source.is_compatible_with(&target)
         {
-            return Err(ModelError::new(
+            return Err(insight_engine::internal::model_error(
                 RECOVERY_MIGRATION_SCHEMA_INCOMPATIBLE,
                 "migration node schemas, effect policy, or wait/timer rebuild contract differ",
             ));
@@ -908,13 +910,15 @@ pub trait RecoveryDurableRepository:
 
 #[cfg(test)]
 pub(crate) mod dynamic_scope_test_contract {
+    use insight_engine::internal::{
+        scope_instance_for_occurrence, scope_instance_for_runtime_scope,
+    };
+
     use crate::{
         dsl::v3::{compile_source, CompileOptions},
         engine::{
             plan::{NodeKind, Plan, PlanIndex, ScopeKind},
-            scheduler::{
-                scope_instance_for_occurrence, scope_instance_for_runtime_scope, LogicalOccurrence,
-            },
+            scheduler::LogicalOccurrence,
             DefinitionRevisionId, RunId, ScopeInstanceId,
         },
     };

@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
@@ -892,7 +894,7 @@ pub(crate) fn durable_public_event_envelope(
     let causation_event_id = ExecutionEventId::parse(causation_event_id.to_owned())
         .map_err(|_| RepositoryError::invalid_data())?;
     let seq = EventSeq::new(seq).map_err(|_| RepositoryError::invalid_data())?;
-    Ok(PublicEventEnvelope::new(
+    Ok(insight_engine::internal::public_event_envelope(
         PublicEventContext::new(public_event_id, run_id.clone(), causation_event_id),
         seq,
         occurred_at,

@@ -17,4 +17,7 @@ pub use facts::*;
 pub use id::*;
 pub use planner::*;
 #[allow(unused_imports)]
-pub(crate) use planner::{derive_subflow_admission, derive_subflow_invocation};
+pub(crate) use planner::{
+    derive_subflow_admission, derive_subflow_invocation, scope_instance_for_occurrence,
+    scope_instance_for_runtime_scope,
+};

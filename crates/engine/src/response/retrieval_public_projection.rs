@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use crate::{
-    resources::retrievals::RetrievalPublicPolicy,
+    resource_policy::RetrievalPublicPolicy,
     schema::{compile_schema_2020, JsonSchemaValidator},
 };
 
@@ -430,12 +430,9 @@ fn invalid_result() -> WorkflowPublicResultError {
 mod tests {
     use serde_json::{json, Value};
 
-    use crate::{
-        resources::retrievals::RetrievalPublicPolicy,
-        runtime::response_stream::MAX_WORKFLOW_RETRIEVAL_RESULTS,
-    };
+    use crate::resource_policy::RetrievalPublicPolicy;
 
-    use super::WorkflowRetrievalPublicProjection;
+    use super::{WorkflowRetrievalPublicProjection, MAX_WORKFLOW_RETRIEVAL_RESULTS};
 
     fn normalized_schema(properties: Value, required: &[&str]) -> Value {
         json!({

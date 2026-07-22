@@ -4,7 +4,7 @@ use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
 use super::{PlanError, PLAN_STABLE_ID_COLLISION, PLAN_WIRE_INVALID};
-use crate::engine::NodeId;
+use crate::NodeId;
 
 const PLAN_ID_MAX_BYTES: usize = 128;
 const SOURCE_ID_MAX_BYTES: usize = 512;

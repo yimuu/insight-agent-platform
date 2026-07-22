@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -756,7 +758,7 @@ impl LeaseGrantAuthority {
 
     #[allow(dead_code)]
     pub(crate) fn mint_proof(&self) -> crate::engine::LeaseGrantProof {
-        crate::engine::LeaseGrantProof::mint(
+        insight_engine::internal::lease_grant_proof(
             self.run_id.clone(),
             self.activation_id.clone(),
             self.fence.lease_epoch(),
@@ -811,7 +813,7 @@ impl RetryScheduleAuthority {
     pub(crate) fn mint_proof(
         &self,
     ) -> Result<crate::engine::RetryScheduleProof, crate::engine::ModelError> {
-        crate::engine::RetryScheduleProof::mint(
+        insight_engine::internal::retry_schedule_proof(
             self.run_id.clone(),
             self.activation_id.clone(),
             self.previous_fence,
@@ -1073,13 +1075,13 @@ impl WaitResolutionAuthority {
         &self,
     ) -> Result<crate::engine::WaitResolutionProof, crate::engine::ModelError> {
         let event_id = ExecutionEventId::parse(self.receipt().event_id().to_owned())?;
-        let output = crate::engine::CommittedOutputProof::mint(
+        let output = insight_engine::internal::committed_output_proof(
             self.terminal.run_id.clone(),
             self.terminal.activation_id.clone(),
             None,
             self.output.clone(),
         );
-        crate::engine::WaitResolutionProof::mint(
+        insight_engine::internal::wait_resolution_proof(
             self.terminal.run_id.clone(),
             self.terminal.activation_id.clone(),
             self.registration_transition_key.clone(),
@@ -1412,7 +1414,7 @@ mod tests {
             },
         )
         .unwrap();
-        let matching = crate::engine::TerminalActivationProof::mint(
+        let matching = insight_engine::internal::terminal_activation_proof(
             run_id.clone(),
             scope_id.clone(),
             activation_id.clone(),
@@ -1433,7 +1435,7 @@ mod tests {
             4
         );
 
-        let mismatched = crate::engine::TerminalActivationProof::mint(
+        let mismatched = insight_engine::internal::terminal_activation_proof(
             run_id,
             scope_id,
             activation_id,

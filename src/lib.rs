@@ -3,11 +3,9 @@ pub mod catalog_v3;
 pub mod config;
 pub mod dsl;
 pub mod engine;
-pub mod events;
-pub mod history;
 pub(crate) mod observability;
-pub mod outcome;
 pub mod resources;
 pub mod runtime;
-pub mod schema;
 pub(crate) mod yaml;
+
+pub use insight_engine::{events, history, outcome, schema};

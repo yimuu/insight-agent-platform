@@ -3,7 +3,7 @@ use super::{
     DataPort, Node, NodeKind, PhiBinding, Plan, PlanDiagnosticTarget, PlanError, PlanMetadata,
     Policy, ScopeMetadata, SemanticHash, SourceMap, PLAN_REFERENCE_INVALID,
 };
-use crate::engine::NodeId;
+use crate::NodeId;
 
 /// Programmatic fixture/compiler builder. It only yields an authoritative
 /// `Plan` after normalization, verification, and semantic-hash computation.

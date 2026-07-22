@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
@@ -6,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
+
+use insight_engine::scheduler_adapter;
 
 use crate::engine::worker::{
     ModelCallAuthority, ModelCallCompletion, ModelContinuationTurn, ModelToolCall,
@@ -18,8 +22,8 @@ use crate::engine::{
     ExecutionControlFrame, ExecutionEventContext, ExecutionEventPayload, ExecutionValueSummary,
     LeaseEpoch, PendingExecutionEvent, PlannedSchedulerAction, ProjectionMutationKind,
     PublicEventPayload, RunId, RunLifecycle, RunTerminalFact, RuntimeValue, SchedulerAction,
-    SchedulerCheckpointId, SchedulerFacts, SchedulerIntent, SchedulerPrecondition, SchedulerTaskId,
-    TerminationReason, TransitionKey, TransitionOutcome, ValueRef,
+    SchedulerCheckpointId, SchedulerFacts, SchedulerIntent, SchedulerTaskId, TerminationReason,
+    TransitionKey, TransitionOutcome, ValueRef,
 };
 
 use super::activation::{effect_evidence_str, effect_idempotency_str, parse_effect_evidence};
@@ -1238,8 +1242,8 @@ async fn event_for_action(
             },
         ),
         SchedulerAction::RegisterWait { registration } => {
-            let (scope, node) =
-                activation_identity(tx, run_id, &registration.activation_id).await?;
+            let registration = scheduler_adapter::wait_registration_parts(registration);
+            let (scope, node) = activation_identity(tx, run_id, registration.activation_id).await?;
             (
                 ExecutionEventContext::for_run(run_id.clone()).for_activation(
                     scope,
@@ -1426,8 +1430,8 @@ async fn validated_planned_action_checkpoint_postgres(
         }
         Replay::Exact(_) | Replay::Vacant => return Err(RepositoryError::invalid_data()),
     };
-    let action = PlannedSchedulerAction::new(
-        SchedulerPrecondition::new(
+    let action = insight_engine::internal::planned_scheduler_action(
+        insight_engine::internal::scheduler_precondition(
             scheduler_version
                 .checked_sub(1)
                 .ok_or_else(RepositoryError::invalid_data)?,
@@ -1954,7 +1958,7 @@ async fn start_subflow_postgres(
     let request_id = format!(
         "subflow:{}:{}",
         parent_run_id.as_str(),
-        invocation.parent_activation_id.as_str()
+        invocation.parent_activation_id().as_str()
     );
     let child_deadline_at = sqlx::query_scalar::<_, DateTime<Utc>>(
         "SELECT LEAST(
@@ -2071,10 +2075,10 @@ async fn start_subflow_postgres(
     )
     .bind(parent_run_id.as_str())
     .bind(child_run_id.as_str())
-    .bind(invocation.parent_activation_id.as_str())
-    .bind(invocation.node_id.as_str())
+    .bind(invocation.parent_activation_id().as_str())
+    .bind(invocation.node_id().as_str())
     .bind(
-        serde_json::to_value(&invocation.occurrence)
+        serde_json::to_value(invocation.occurrence())
             .map_err(|_| RepositoryError::canonicalization())?,
     )
     .bind(invocation.invocation_scope_instance_id().as_str())
@@ -3871,9 +3875,12 @@ async fn apply_scheduler_action(
         }
         SchedulerAction::OpenFork { admission } => {
             let group = admission.group();
+            let group_parts = scheduler_adapter::fork_group_parts(group);
             let (fork_scope, fork_node) =
-                activation_identity(tx, run_id, &group.fork_activation_id).await?;
-            if fork_scope != group.parent_scope_instance_id || fork_node != group.fork_node_id {
+                activation_identity(tx, run_id, group_parts.fork_activation_id).await?;
+            if fork_scope != *group_parts.parent_scope_instance_id
+                || fork_node != *group_parts.fork_node_id
+            {
                 return Err(RepositoryError::invalid_data());
             }
             let join_mode = match group.mode() {
@@ -3890,11 +3897,14 @@ async fn apply_scheduler_action(
                            CURRENT_TIMESTAMP,NULL)",
             )
             .bind(run_id.as_str())
-            .bind(group.group_id.as_str())
-            .bind(group.fork_activation_id.as_str())
-            .bind(group.parent_scope_instance_id.as_str())
+            .bind(group_parts.group_id.as_str())
+            .bind(group_parts.fork_activation_id.as_str())
+            .bind(group_parts.parent_scope_instance_id.as_str())
             .bind(join_mode)
-            .bind(i32::try_from(group.members.len()).map_err(|_| RepositoryError::invalid_data())?)
+            .bind(
+                i32::try_from(group_parts.members.len())
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
             .execute(&mut **tx)
             .await
             .map_err(RepositoryError::storage)?;
@@ -3903,7 +3913,7 @@ async fn apply_scheduler_action(
                 create_dynamic_child(
                     tx,
                     run_id,
-                    &group.fork_activation_id,
+                    group_parts.fork_activation_id,
                     leg.scope_instance_id(),
                     leg.static_scope_id(),
                     "parallel_leg",
@@ -3917,8 +3927,8 @@ async fn apply_scheduler_action(
                 )
                 .await?;
                 let frames = serde_json::to_value(vec![ExecutionControlFrame::ForkLeg {
-                    fork_activation_id: group.fork_activation_id.clone(),
-                    fork_group_id: group.group_id.clone(),
+                    fork_activation_id: group_parts.fork_activation_id.clone(),
+                    fork_group_id: group_parts.group_id.clone(),
                     leg_id: leg.key().leg_id().clone(),
                     scope_instance_id: leg.scope_instance_id().clone(),
                 }])
@@ -3929,7 +3939,7 @@ async fn apply_scheduler_action(
                        AND fork_leg_id IS NULL",
                 )
                 .bind(frames)
-                .bind(group.group_id.as_str())
+                .bind(group_parts.group_id.as_str())
                 .bind(leg.key().leg_id().as_str())
                 .bind(run_id.as_str())
                 .bind(leg.token_id().as_str())
@@ -3949,7 +3959,7 @@ async fn apply_scheduler_action(
                                CURRENT_TIMESTAMP,NULL)",
                 )
                 .bind(run_id.as_str())
-                .bind(group.group_id.as_str())
+                .bind(group_parts.group_id.as_str())
                 .bind(leg.key().leg_id().as_str())
                 .bind(
                     i32::try_from(declaration_index)
@@ -4250,16 +4260,17 @@ async fn apply_scheduler_action(
                 action.transition_key(),
             )
             .await?;
-            let value_ref = model_data(ValueRef::inline(iteration.state.value().clone()))?;
+            let iteration_state = scheduler_adapter::loop_iteration_state(iteration);
+            let value_ref = model_data(ValueRef::inline(iteration_state.value().clone()))?;
             upsert_occurrence_value(
                 tx,
                 run_id,
                 iteration.occurrence(),
                 iteration.child_activation_id(),
                 state_port,
-                &iteration.state,
+                iteration_state,
                 &value_ref,
-                iteration.state.value_type(),
+                iteration_state.value_type(),
             )
             .await?;
         }
@@ -4286,6 +4297,7 @@ async fn apply_scheduler_action(
             succeed_native_activation(tx, run_id, loop_activation_id, state.value()).await?;
         }
         SchedulerAction::RegisterWait { registration } => {
+            let registration_parts = scheduler_adapter::wait_registration_parts(registration);
             let rows = sqlx::query(
                 "UPDATE node_activations SET execution_kind='durable_wait',lifecycle='waiting',
                     wait_registration_transition_key=$1,
@@ -4294,7 +4306,7 @@ async fn apply_scheduler_action(
             )
             .bind(action.transition_key().as_str())
             .bind(run_id.as_str())
-            .bind(registration.activation_id.as_str())
+            .bind(registration_parts.activation_id.as_str())
             .execute(&mut **tx)
             .await
             .map_err(RepositoryError::storage)?
@@ -4303,7 +4315,7 @@ async fn apply_scheduler_action(
                 return Err(RepositoryError::invalid_data());
             }
             if let (Some(timer_id), Some(due_at_ms)) =
-                (registration.timer_id.as_ref(), registration.due_at_ms)
+                (registration_parts.timer_id, registration_parts.due_at_ms)
             {
                 let due = DateTime::<Utc>::from_timestamp_millis(
                     i64::try_from(due_at_ms).map_err(|_| RepositoryError::invalid_data())?,
@@ -4320,7 +4332,7 @@ async fn apply_scheduler_action(
                 )
                 .bind(run_id.as_str())
                 .bind(timer_id.as_str())
-                .bind(registration.activation_id.as_str())
+                .bind(registration_parts.activation_id.as_str())
                 .bind(due)
                 .bind(action.transition_key().as_str())
                 .execute(&mut **tx)
@@ -4336,27 +4348,26 @@ async fn apply_scheduler_action(
                            CURRENT_TIMESTAMP,NULL)",
             )
             .bind(run_id.as_str())
-            .bind(registration.wait_id.as_str())
-            .bind(registration.activation_id.as_str())
-            .bind(registration.node_id.as_str())
+            .bind(registration_parts.wait_id.as_str())
+            .bind(registration_parts.activation_id.as_str())
+            .bind(registration_parts.node_id.as_str())
             .bind(
-                serde_json::to_value(&registration.occurrence)
+                serde_json::to_value(registration_parts.occurrence)
                     .map_err(|_| RepositoryError::canonicalization())?,
             )
-            .bind(registration.signal_name.as_deref())
-            .bind(registration.signal_id.as_ref().map(|value| value.as_str()))
-            .bind(registration.timer_id.as_ref().map(|value| value.as_str()))
+            .bind(registration_parts.signal_name)
+            .bind(registration_parts.signal_id.map(|value| value.as_str()))
+            .bind(registration_parts.timer_id.map(|value| value.as_str()))
             .bind(
-                registration
+                registration_parts
                     .due_at_ms
                     .map(i64::try_from)
                     .transpose()
                     .map_err(|_| RepositoryError::invalid_data())?,
             )
             .bind(
-                registration
+                registration_parts
                     .payload_type
-                    .as_ref()
                     .map(serde_json::to_value)
                     .transpose()
                     .map_err(|_| RepositoryError::canonicalization())?,
@@ -4558,7 +4569,8 @@ async fn insert_human_work_item_postgres(
     run_id: &RunId,
     registration: &crate::engine::scheduler::WaitRegistrationFact,
 ) -> Result<(), RepositoryError> {
-    let Some(human_task) = registration.human_task.as_ref() else {
+    let registration = scheduler_adapter::wait_registration_parts(registration);
+    let Some(human_task) = registration.human_task else {
         return Ok(());
     };
     sqlx::query(
@@ -4576,35 +4588,35 @@ async fn insert_human_work_item_postgres(
     .bind(
         registration
             .signal_id
-            .as_ref()
             .ok_or_else(RepositoryError::invalid_data)?
             .as_str(),
     )
     .bind(
         registration
             .signal_name
-            .as_deref()
             .ok_or_else(RepositoryError::invalid_data)?,
     )
-    .bind(human_task.request.value().clone())
+    .bind(human_task.request().value().clone())
     .bind(
         serde_json::to_value(
             registration
                 .payload_type
-                .as_ref()
                 .ok_or_else(RepositoryError::invalid_data)?,
         )
         .map_err(|_| RepositoryError::canonicalization())?,
     )
     .bind(
-        serde_json::to_value(&human_task.assignees)
+        serde_json::to_value(human_task.assignees())
             .map_err(|_| RepositoryError::canonicalization())?,
     )
     .bind(
-        serde_json::to_value(&human_task.candidate_groups)
+        serde_json::to_value(human_task.candidate_groups())
             .map_err(|_| RepositoryError::canonicalization())?,
     )
-    .bind(i64::try_from(human_task.claim_lease_ms).map_err(|_| RepositoryError::invalid_data())?)
+    .bind(
+        i64::try_from(human_task.claim_lease_ms())
+            .map_err(|_| RepositoryError::invalid_data())?,
+    )
     .execute(&mut **tx)
     .await
     .map_err(RepositoryError::storage)?;

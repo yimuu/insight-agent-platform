@@ -1,6 +1,6 @@
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::engine::{
+use crate::{
     plan::{ControlPortId, ScopeId, SemanticHash},
     ActivationId, ContentHash, ControlTokenId, EffectId, ForkGroupId, ModelError, NodeId, RunId,
     ScopeInstanceId, SignalId, TimerId,

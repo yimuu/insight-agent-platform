@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
@@ -7,6 +9,10 @@ use sqlx::{
     Row, Sqlite, SqlitePool, Transaction,
 };
 use tokio::sync::Mutex;
+
+use insight_engine::response::adapter::{
+    durable_response_snapshot_new, response_terminal_kind_parse, response_usage_status_parse,
+};
 
 use crate::engine::{
     ContentHash, DefinitionRevisionId, DeploymentRevisionId, ExecutionEventContext,
@@ -32,9 +38,8 @@ use super::{
     },
     CommitReceipt, CreateRunCommand, DurableRepository, DurableResponseSnapshot,
     PlanInstallOutcome, PlanPublicationOutcome, PublicationHead, PublicationOrigin,
-    PublishVersionedPlanCommand, RepositoryError, ResponseTerminalKind, ResponseUsageStatus,
-    RunProjection, RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
-    REPOSITORY_PLAN_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
+    PublishVersionedPlanCommand, RepositoryError, RunProjection, RunTransitionCommand,
+    VersionedPlan, VersionedPlanCatalog, REPOSITORY_PLAN_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
 };
 
 fn plan_conflict() -> RepositoryError {
@@ -1067,10 +1072,10 @@ async fn load_response_snapshot_sqlite(
             .map_err(|_| RepositoryError::invalid_data())?
             .map(|value| serde_json::from_str(&value).map_err(|_| RepositoryError::invalid_data()))
             .transpose()?;
-        DurableResponseSnapshot::new(
+        durable_response_snapshot_new(
             row.try_get("response_id")
                 .map_err(|_| RepositoryError::invalid_data())?,
-            ResponseTerminalKind::parse(
+            response_terminal_kind_parse(
                 &row.try_get::<String, _>("terminal_kind")
                     .map_err(|_| RepositoryError::invalid_data())?,
             )?,
@@ -1078,7 +1083,7 @@ async fn load_response_snapshot_sqlite(
             decode("workflow_payload")?,
             decode("public_item_manifest")?,
             usage,
-            ResponseUsageStatus::parse(
+            response_usage_status_parse(
                 &row.try_get::<String, _>("usage_status")
                     .map_err(|_| RepositoryError::invalid_data())?,
             )?,

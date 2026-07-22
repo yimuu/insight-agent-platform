@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use async_trait::async_trait;
 use serde_json::Value;
 use sqlx::Row;

@@ -1,6 +1,8 @@
 //! Production orchestration around the pure planner and durable scheduler
 //! repository. Every crash hook is on the actual side-effect path.
 
+use super::RepositoryErrorExt as _;
+
 use std::{
     cell::Cell, collections::BTreeMap, future::Future, panic::AssertUnwindSafe, pin::Pin,
     sync::Once,
@@ -11,11 +13,7 @@ use chrono::Utc;
 use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::worker::{
-    model_call_public_item_reservation_channel, ModelCallPublicItemReservationError,
-    ModelCallPublicItemReservationKind, ModelCallPublicItemReservationRequest,
-    WorkerRuntimeServices,
-};
+use crate::engine::worker::WorkerRuntimeServices;
 use crate::{
     engine::{
         plan::{DescriptorValue, LinkedPlan},
@@ -28,6 +26,10 @@ use crate::{
         LiveResponsePublishOutcome, LiveWorkflowObservationIdentity, WorkflowPublicError,
         WorkflowToolPublicProjection,
     },
+};
+use insight_engine::worker::adapter::{
+    self as worker_adapter, ModelCallPublicItemReservationError,
+    ModelCallPublicItemReservationKind, ModelCallPublicItemReservationRequest,
 };
 
 use super::{
@@ -911,9 +913,13 @@ where
     };
     let (runtime_services, mut public_item_requests) = match model_call.as_ref() {
         Some(authority) if authority.publication_enabled() && authority.public_item().is_none() => {
-            let (allocator, requests) = model_call_public_item_reservation_channel();
+            let (allocator, requests) =
+                worker_adapter::model_call_public_item_reservation_channel();
             (
-                WorkerRuntimeServices::default().with_model_call_public_item_allocator(allocator),
+                worker_adapter::services_with_model_call_public_item_allocator(
+                    WorkerRuntimeServices::default(),
+                    allocator,
+                ),
                 Some(requests),
             )
         }
@@ -947,7 +953,8 @@ where
     // policy explicitly proves that safe.
     let mut worker = Box::pin(
         AssertUnwindSafe(redact_executor_panic_payload(
-            registry.execute_with_runtime_services(
+            worker_adapter::execute_with_runtime_services(
+                registry,
                 &context,
                 &request,
                 &runtime_services,
@@ -1002,7 +1009,8 @@ where
                 };
                 let model_call_no = public_item_model_call_no
                     .ok_or_else(RepositoryError::invalid_data)?;
-                let reservation_outcome = match reservation.kind() {
+                let reservation_kind = worker_adapter::reservation_kind(&reservation).clone();
+                let reservation_outcome = match reservation_kind {
                     ModelCallPublicItemReservationKind::Message => repository
                         .reserve_model_call_public_item(&claim, model_call_no)
                         .await?,
@@ -1014,9 +1022,9 @@ where
                         .reserve_model_call_public_function_item(
                             &claim,
                             model_call_no,
-                            *call_index,
-                            call_id,
-                            tool_name,
+                            call_index,
+                            &call_id,
+                            &tool_name,
                         )
                         .await?,
                 };
@@ -1025,29 +1033,32 @@ where
                     | SchedulerTaskCommitOutcome::ExactReplay {
                         authoritative: result,
                     } => {
-                        reservation.respond(Ok(result));
+                        worker_adapter::respond_reservation(reservation, Ok(result));
                     }
                     SchedulerTaskCommitOutcome::OperationDeadlineElapsed => {
-                        reservation.respond(Err(
-                            ModelCallPublicItemReservationError::OperationDeadlineElapsed,
-                        ));
+                        worker_adapter::respond_reservation(
+                            reservation,
+                            Err(ModelCallPublicItemReservationError::OperationDeadlineElapsed),
+                        );
                         task_cancellation.cancel();
                         deadline_authority_observed = true;
                         break None;
                     }
                     SchedulerTaskCommitOutcome::StaleLease => {
-                        reservation.respond(Err(
-                            ModelCallPublicItemReservationError::StaleLease,
-                        ));
+                        worker_adapter::respond_reservation(
+                            reservation,
+                            Err(ModelCallPublicItemReservationError::StaleLease),
+                        );
                         task_cancellation.cancel();
                         return Ok(SchedulerWorkerPumpOutcome::LeaseLost {
                             effect_evidence: EffectEvidence::Started,
                         });
                     }
                     SchedulerTaskCommitOutcome::StateConflict => {
-                        reservation.respond(Err(
-                            ModelCallPublicItemReservationError::StateConflict,
-                        ));
+                        worker_adapter::respond_reservation(
+                            reservation,
+                            Err(ModelCallPublicItemReservationError::StateConflict),
+                        );
                         task_cancellation.cancel();
                         return Err(RepositoryError::invalid_data());
                     }
@@ -2549,7 +2560,7 @@ mod tests {
             inputs: Vec::new(),
             outputs: Vec::new(),
         };
-        SchedulerIntent::new(
+        insight_engine::internal::scheduler_intent(
             RunId::new("run_retry_test").unwrap(),
             SchedulerCheckpointId::parse(format!("checkpoint_{}", "2".repeat(64))).unwrap(),
             action,
@@ -4152,7 +4163,7 @@ mod tests {
             WorkerCancellation::Cooperative,
         )
         .unwrap();
-        let intent = SchedulerIntent::new(
+        let intent = insight_engine::internal::scheduler_intent(
             RunId::new("run_parent_continuation_runtime").unwrap(),
             SchedulerCheckpointId::parse(format!("checkpoint_{}", "8".repeat(64))).unwrap(),
             SchedulerAction::DispatchTask {

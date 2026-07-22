@@ -57,7 +57,7 @@ pub use artifact::{
     ArtifactState, ArtifactStoreAuthority, BindArtifactStoreAuthorityCommand, OrphanSweepBatch,
     OrphanSweepCommand, PayloadId, PayloadReceipt, PutInlinePayloadCommand,
     ReferenceArtifactCommand, ReleaseRunArtifactRetentionCommand, RetainedArtifact,
-    StageArtifactCommand, StorageLocator, StoredInlinePayload, VerifyArtifactCommand,
+    StageArtifactCommand, StoredInlinePayload, VerifyArtifactCommand,
 };
 pub use control_repository::{
     ClaimSchedulerRunCommand, CloseScopeAdmissionCommand, ConsumeControlTokenCommand,
@@ -68,14 +68,16 @@ pub use control_repository::{
     ReuseCompatibility, RevokeControlTokenCommand, SchedulerLeaseRepository, SchedulerRunLease,
     SettleScopeCommand, TokenConsumerKind,
 };
+pub(crate) use error::RepositoryErrorExt;
 #[allow(unused_imports)]
 pub use error::{
-    RepositoryError, REPOSITORY_ACTIVATION_NOT_FOUND, REPOSITORY_ARTIFACT_STORE_CONFLICT,
-    REPOSITORY_CANONICALIZATION_FAILED, REPOSITORY_CONFIGURATION_INVALID,
-    REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_DATA_INVALID, REPOSITORY_INTENT_CONFLICT,
-    REPOSITORY_MIGRATION_FAILED, REPOSITORY_PLAN_CONFLICT, REPOSITORY_REDRIVE_REQUIRES_FORK,
-    REPOSITORY_RUN_MIGRATING, REPOSITORY_RUN_NOT_FOUND, REPOSITORY_SCHEDULER_ACTION_UNSUPPORTED,
-    REPOSITORY_SCHEDULER_CRASH_INJECTED, REPOSITORY_STORAGE_FAILURE,
+    RepositoryError, StorageLocator, REPOSITORY_ACTIVATION_NOT_FOUND,
+    REPOSITORY_ARTIFACT_STORE_CONFLICT, REPOSITORY_CANONICALIZATION_FAILED,
+    REPOSITORY_CONFIGURATION_INVALID, REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_DATA_INVALID,
+    REPOSITORY_INTENT_CONFLICT, REPOSITORY_MIGRATION_FAILED, REPOSITORY_PLAN_CONFLICT,
+    REPOSITORY_REDRIVE_REQUIRES_FORK, REPOSITORY_RUN_MIGRATING, REPOSITORY_RUN_NOT_FOUND,
+    REPOSITORY_SCHEDULER_ACTION_UNSUPPORTED, REPOSITORY_SCHEDULER_CRASH_INJECTED,
+    REPOSITORY_STORAGE_FAILURE,
 };
 pub use human_task::{
     ClaimHumanWorkItemCommand, CompleteHumanWorkItemCommand, HumanTaskDurableRepository,

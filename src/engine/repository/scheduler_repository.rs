@@ -1,6 +1,8 @@
 //! Durable boundary between the pure scheduler planner and repository-owned
 //! projections, task delivery, and recovery.
 
+use super::RepositoryErrorExt as _;
+
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicBool, Ordering},
@@ -555,8 +557,8 @@ pub(crate) fn scheduler_validation_fixture(
 
     use crate::engine::{
         plan::{PortName, VersionTag},
-        ActivationId, EffectId, NodeId, SchedulerAction, SchedulerIntent, SchedulerTaskKind,
-        TaskAdmissionClass, TaskOutputContract, WorkerCancellation, WorkerEffectPolicy,
+        ActivationId, EffectId, NodeId, SchedulerAction, SchedulerTaskKind, TaskAdmissionClass,
+        WorkerCancellation, WorkerEffectPolicy,
     };
 
     let port_id = DataPortId::new("integrity_output").unwrap();
@@ -580,19 +582,20 @@ pub(crate) fn scheduler_validation_fixture(
         public_configuration: BTreeMap::new(),
         secret_configuration: BTreeMap::new(),
         inputs: Vec::new(),
-        outputs: vec![TaskOutputContract::new(
+        outputs: vec![insight_engine::internal::task_output_contract(
             port_id.clone(),
             PortName::new("output").unwrap(),
             PlanType::Any,
             true,
         )],
     };
-    let request = TaskExecutionRequest::from_scheduler_intent(&SchedulerIntent::new(
-        RunId::new("run_integrity_test").unwrap(),
-        SchedulerCheckpointId::parse(format!("checkpoint_{}", "b".repeat(64))).unwrap(),
-        action,
-    ))
-    .unwrap();
+    let request =
+        TaskExecutionRequest::from_scheduler_intent(&insight_engine::internal::scheduler_intent(
+            RunId::new("run_integrity_test").unwrap(),
+            SchedulerCheckpointId::parse(format!("checkpoint_{}", "b".repeat(64))).unwrap(),
+            action,
+        ))
+        .unwrap();
     let claim = SchedulerTaskClaim::new(
         DurableTaskExecutionRequest::new(
             request,
@@ -713,7 +716,8 @@ impl SchedulerTaskFailure {
             class: failure.class(),
             code: failure.code().to_owned(),
             retryable: failure.retryable(),
-            safe_error: failure.typed_safe_error().cloned(),
+            safe_error: insight_engine::worker::adapter::worker_failure_typed_safe_error(failure)
+                .cloned(),
             effect_evidence,
             disposition,
         };
@@ -1336,7 +1340,7 @@ pub(crate) async fn validate_subflow_admission<R: SchedulerDurableRepository + ?
     let NodeKind::SubflowCall(descriptor) = node.kind() else {
         return Err(RepositoryError::invalid_data());
     };
-    let derived_invocation = crate::engine::scheduler::derive_subflow_invocation(
+    let derived_invocation = insight_engine::internal::derive_subflow_invocation(
         &index,
         &facts,
         node,
@@ -1375,7 +1379,7 @@ pub(crate) async fn validate_subflow_admission<R: SchedulerDurableRepository + ?
     }
     let child_plan = serde_json::from_value::<Plan>(child.canonical_plan().clone())
         .map_err(|_| RepositoryError::invalid_data())?;
-    let derived = crate::engine::scheduler::derive_subflow_admission(
+    let (derived_run_input, derived_outputs) = insight_engine::internal::derive_subflow_admission(
         &index,
         &facts,
         node,
@@ -1384,10 +1388,10 @@ pub(crate) async fn validate_subflow_admission<R: SchedulerDurableRepository + ?
         child_plan.metadata().input_contract(),
     )
     .map_err(|_| RepositoryError::invalid_data())?;
-    if derived.run_input != *run_input || derived.outputs != *outputs {
+    if derived_run_input != *run_input || derived_outputs != *outputs {
         return Err(RepositoryError::invalid_data());
     }
-    let [output] = derived.outputs.as_slice() else {
+    let [output] = derived_outputs.as_slice() else {
         return Err(RepositoryError::invalid_data());
     };
     if output.name().as_str() != "result"

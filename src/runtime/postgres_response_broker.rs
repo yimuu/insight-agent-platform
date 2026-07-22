@@ -21,6 +21,8 @@ use sqlx::{postgres::PgListener, PgPool};
 use tokio::{runtime::Handle, task::JoinHandle, time};
 use tokio_util::sync::CancellationToken;
 
+use insight_engine::response::adapter::{publication_from_source, publication_payload, RunQueue};
+
 use crate::engine::{ActivationId, AttemptNo, ContentHash, RunId};
 
 use super::response_stream::{
@@ -29,8 +31,8 @@ use super::response_stream::{
     LiveResponseItemIdentity, LiveResponsePayload, LiveResponsePublication,
     LiveResponsePublishOutcome, LiveResponseSeal, LiveResponseSealStatus,
     LiveResponseSourceIdentity, LiveResponseSubscriber, LiveWorkflowObservationIdentity,
-    ResponseContentPart, ResponseOutputItem, RunQueue, WorkflowPublicError,
-    WorkflowRetrievalResult, WorkflowToolContent,
+    ResponseContentPart, ResponseOutputItem, WorkflowPublicError, WorkflowRetrievalResult,
+    WorkflowToolContent,
 };
 
 const POSTGRES_LIVE_RESPONSE_CONFIG_INVALID: &str = "POSTGRES_LIVE_RESPONSE_CONFIG_INVALID";
@@ -886,7 +888,7 @@ impl PostgresLiveResponseWire {
             } => {
                 validate_wire_version(schema_version)?;
                 let source = source.into_live(expected_run_id)?;
-                LiveResponsePublication::from_source(source, local_sequence, payload.into_live())
+                publication_from_source(source, local_sequence, payload.into_live())
                     .map(LiveResponseDelivery::Publication)
                     .map_err(|_| WireError)
             }
@@ -940,7 +942,7 @@ fn encode_publication(
             schema_version: POSTGRES_LIVE_RESPONSE_WIRE_VERSION,
             source: WireSourceRef::from_live(publication.source()),
             local_sequence: publication.local_sequence(),
-            payload: WirePayloadRef::from_live(publication.payload()),
+            payload: WirePayloadRef::from_live(publication_payload(publication)),
         },
         max_notify_payload_bytes,
     )

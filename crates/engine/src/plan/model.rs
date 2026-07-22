@@ -12,7 +12,7 @@ use super::{
     PortName, ScopeId, SecretRef, SourceDocumentId, VersionTag, PLAN_HASH_MISMATCH,
     PLAN_WIRE_INVALID,
 };
-use crate::engine::{ContentHash, DefinitionRevisionId, LegId, NodeId};
+use crate::{ContentHash, DefinitionRevisionId, LegId, NodeId};
 
 pub const PLAN_WIRE_VERSION: u32 = 4;
 pub const PLAN_SEMANTIC_PROJECTION_VERSION: u32 = 4;

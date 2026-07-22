@@ -7,7 +7,8 @@ use yaml_rust2::{
     scanner::Marker,
 };
 
-use crate::dsl::{DslParseError, DslPath, SourceSpan};
+use crate::dsl::{DslParseError, DslPath};
+use insight_engine::author::adapter as author_adapter;
 
 use super::{DUPLICATE_KEY, PARSE_FAILED};
 
@@ -55,7 +56,7 @@ pub fn parse(source: &str) -> Result<RawDocument, DslParseError> {
         let path = error_path(&error.to_string()).unwrap_or_default();
         let span = error
             .location()
-            .map(|location| SourceSpan::point(source, location.index()));
+            .map(|location| author_adapter::source_span_point(source, location.index()));
         DslParseError::new(PARSE_FAILED, "failed to parse the v3 agent document").at(path, span)
     })
 }
@@ -77,7 +78,7 @@ fn reject_duplicate_keys(source: &str) -> Result<(), DslParseError> {
     parser.load(&mut collector, true).map_err(|error| {
         DslParseError::new(PARSE_FAILED, "failed to parse the v3 agent document").at(
             DslPath::root(),
-            Some(SourceSpan::point(
+            Some(author_adapter::source_span_point(
                 source,
                 marker_byte(source, error.marker()),
             )),
@@ -164,7 +165,10 @@ impl EventCursor<'_> {
                             DUPLICATE_KEY,
                             "v3 documents must not contain duplicate mapping keys",
                         )
-                        .at(key_path, Some(SourceSpan::point(self.source, key_byte))));
+                        .at(
+                            key_path,
+                            Some(author_adapter::source_span_point(self.source, key_byte)),
+                        ));
                     }
                     self.read_node(&key_path, depth + 1)?;
                 }
@@ -185,8 +189,10 @@ impl EventCursor<'_> {
     }
 
     fn error(&self, path: DslPath, byte: usize) -> DslParseError {
-        DslParseError::new(PARSE_FAILED, "failed to parse the v3 agent document")
-            .at(path, Some(SourceSpan::point(self.source, byte)))
+        DslParseError::new(PARSE_FAILED, "failed to parse the v3 agent document").at(
+            path,
+            Some(author_adapter::source_span_point(self.source, byte)),
+        )
     }
 }
 
@@ -201,7 +207,7 @@ fn marker_byte(source: &str, marker: &Marker) -> usize {
 
 fn error_path(rendered: &str) -> Option<DslPath> {
     let (path, _) = rendered.split_once(": ")?;
-    DslPath::from_serde_path(path)
+    author_adapter::dsl_path_from_serde_path(path)
 }
 
 #[cfg(test)]

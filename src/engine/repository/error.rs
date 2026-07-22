@@ -1,139 +1,83 @@
-use std::{error::Error, fmt};
+pub use insight_engine::repository::{
+    RepositoryError, StorageLocator, REPOSITORY_ACTIVATION_NOT_FOUND,
+    REPOSITORY_ARTIFACT_STORE_CONFLICT, REPOSITORY_CANONICALIZATION_FAILED,
+    REPOSITORY_CONFIGURATION_INVALID, REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_DATA_INVALID,
+    REPOSITORY_INTENT_CONFLICT, REPOSITORY_MIGRATION_FAILED, REPOSITORY_PLAN_CONFLICT,
+    REPOSITORY_REDRIVE_REQUIRES_FORK, REPOSITORY_RUN_MIGRATING, REPOSITORY_RUN_NOT_FOUND,
+    REPOSITORY_SCHEDULER_ACTION_UNSUPPORTED, REPOSITORY_SCHEDULER_CRASH_INJECTED,
+    REPOSITORY_STORAGE_FAILURE,
+};
 
-pub const REPOSITORY_CONFIGURATION_INVALID: &str = "ENGINE_REPOSITORY_CONFIGURATION_INVALID";
-pub const REPOSITORY_CANONICALIZATION_FAILED: &str = "ENGINE_REPOSITORY_CANONICALIZATION_FAILED";
-pub const REPOSITORY_PLAN_CONFLICT: &str = "ENGINE_REPOSITORY_PLAN_CONFLICT";
-pub const REPOSITORY_RUN_NOT_FOUND: &str = "ENGINE_REPOSITORY_RUN_NOT_FOUND";
-pub const REPOSITORY_RUN_MIGRATING: &str = "RUN_MIGRATING";
-pub const REPOSITORY_ACTIVATION_NOT_FOUND: &str = "ENGINE_REPOSITORY_ACTIVATION_NOT_FOUND";
-pub const REPOSITORY_CONSTRAINT_CONFLICT: &str = "ENGINE_REPOSITORY_CONSTRAINT_CONFLICT";
-pub const REPOSITORY_INTENT_CONFLICT: &str = "ENGINE_REPOSITORY_INTENT_CONFLICT";
-pub const REPOSITORY_DATA_INVALID: &str = "ENGINE_REPOSITORY_DATA_INVALID";
-pub const REPOSITORY_STORAGE_FAILURE: &str = "ENGINE_REPOSITORY_STORAGE_FAILURE";
-pub const REPOSITORY_MIGRATION_FAILED: &str = "ENGINE_REPOSITORY_MIGRATION_FAILED";
-pub const REPOSITORY_ARTIFACT_STORE_CONFLICT: &str = "ENGINE_REPOSITORY_ARTIFACT_STORE_CONFLICT";
-pub const REPOSITORY_SCHEDULER_ACTION_UNSUPPORTED: &str =
-    "ENGINE_REPOSITORY_SCHEDULER_ACTION_UNSUPPORTED";
-pub const REPOSITORY_SCHEDULER_CRASH_INJECTED: &str = "ENGINE_REPOSITORY_SCHEDULER_CRASH_INJECTED";
-pub const REPOSITORY_REDRIVE_REQUIRES_FORK: &str = "ENGINE_REDRIVE_REQUIRES_FORK";
+use insight_engine::repository::adapter as repository_adapter;
 
-/// Stable, body-free repository failure.
-///
-/// Database diagnostics are deliberately not retained: constraint details can
-/// contain IDs or payload fragments and must not cross the durable-kernel API.
-#[derive(Clone, PartialEq, Eq)]
-pub struct RepositoryError {
-    code: &'static str,
-    message: &'static str,
+pub(crate) trait RepositoryErrorExt {
+    fn new(code: &'static str, message: &'static str) -> Self;
+    fn storage(error: sqlx::Error) -> Self;
+    fn canonicalization() -> Self;
+    fn invalid_configuration() -> Self;
+    fn invalid_data() -> Self;
+    fn scheduler_crash_injected() -> Self;
+    fn intent_conflict() -> Self;
+    fn activation_not_found() -> Self;
+    fn run_migrating() -> Self;
+    fn migration_failed() -> Self;
+    fn redrive_requires_fork() -> Self;
 }
 
-impl RepositoryError {
-    pub(crate) const fn new(code: &'static str, message: &'static str) -> Self {
-        Self { code, message }
+impl RepositoryErrorExt for RepositoryError {
+    fn new(code: &'static str, message: &'static str) -> Self {
+        repository_adapter::repository_error(code, message)
     }
 
-    pub fn code(&self) -> &'static str {
-        self.code
-    }
-
-    pub fn message(&self) -> &'static str {
-        self.message
-    }
-
-    pub(crate) fn storage(error: sqlx::Error) -> Self {
+    fn storage(error: sqlx::Error) -> Self {
         if error
             .as_database_error()
             .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
         {
-            return Self::new(
+            return repository_adapter::repository_error(
                 REPOSITORY_CONSTRAINT_CONFLICT,
                 "durable repository constraint conflict",
             );
         }
-        Self::new(
+        repository_adapter::repository_error(
             REPOSITORY_STORAGE_FAILURE,
             "durable repository operation failed",
         )
     }
 
-    pub(crate) const fn canonicalization() -> Self {
-        Self::new(
-            REPOSITORY_CANONICALIZATION_FAILED,
-            "repository intent could not be canonicalized",
-        )
+    fn canonicalization() -> Self {
+        repository_adapter::canonicalization()
     }
 
-    pub(crate) const fn invalid_configuration() -> Self {
-        Self::new(
-            REPOSITORY_CONFIGURATION_INVALID,
-            "durable repository configuration is invalid",
-        )
+    fn invalid_configuration() -> Self {
+        repository_adapter::invalid_configuration()
     }
 
-    pub(crate) const fn invalid_data() -> Self {
-        Self::new(
-            REPOSITORY_DATA_INVALID,
-            "durable repository data is invalid",
-        )
+    fn invalid_data() -> Self {
+        repository_adapter::invalid_data()
     }
 
-    pub(crate) const fn scheduler_crash_injected() -> Self {
-        Self::new(
-            REPOSITORY_SCHEDULER_CRASH_INJECTED,
-            "scheduler crash injection interrupted execution",
-        )
+    fn scheduler_crash_injected() -> Self {
+        repository_adapter::scheduler_crash_injected()
     }
 
-    pub(crate) const fn intent_conflict() -> Self {
-        Self::new(
-            REPOSITORY_INTENT_CONFLICT,
-            "transition key is already bound to a different canonical intent",
-        )
+    fn intent_conflict() -> Self {
+        repository_adapter::intent_conflict()
     }
 
-    pub(crate) const fn activation_not_found() -> Self {
-        Self::new(
-            REPOSITORY_ACTIVATION_NOT_FOUND,
-            "durable activation was not found",
-        )
+    fn activation_not_found() -> Self {
+        repository_adapter::activation_not_found()
     }
 
-    pub(crate) const fn run_migrating() -> Self {
-        Self::new(
-            REPOSITORY_RUN_MIGRATING,
-            "workflow run is migrating and no longer accepts signals",
-        )
+    fn run_migrating() -> Self {
+        repository_adapter::run_migrating()
     }
 
-    pub(crate) const fn migration_failed() -> Self {
-        Self::new(
-            REPOSITORY_MIGRATION_FAILED,
-            "durable PostgreSQL migration authority is invalid",
-        )
+    fn migration_failed() -> Self {
+        repository_adapter::migration_failed()
     }
 
-    pub(crate) const fn redrive_requires_fork() -> Self {
-        Self::new(
-            REPOSITORY_REDRIVE_REQUIRES_FORK,
-            "redrive is unsafe for a non-idempotent effect and requires a fork",
-        )
+    fn redrive_requires_fork() -> Self {
+        repository_adapter::redrive_requires_fork()
     }
 }
-
-impl fmt::Debug for RepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RepositoryError")
-            .field("code", &self.code)
-            .field("message", &self.message)
-            .finish()
-    }
-}
-
-impl fmt::Display for RepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}: {}", self.code, self.message)
-    }
-}
-
-impl Error for RepositoryError {}

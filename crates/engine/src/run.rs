@@ -1025,7 +1025,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::engine::{
+    use crate::{
         CommittedOutputProof, ExecutionEventId, SignalId, TransitionOutcome, WaitResolutionProof,
         WaitResolutionSubject,
     };
@@ -1172,7 +1172,7 @@ mod tests {
 
     #[test]
     fn termination_is_first_winner_and_waits_for_live_attempt_drain() {
-        use crate::engine::{
+        use crate::{
             EffectIdempotency, LeaseEpoch, LeaseGrantProof, WorkerCancellation,
             WorkerExecutionPolicy,
         };
@@ -1202,7 +1202,7 @@ mod tests {
             run.run_id().clone(),
             worker_id.clone(),
             LeaseEpoch::FIRST,
-            crate::engine::TimerId::new("lease_timer").unwrap(),
+            crate::TimerId::new("lease_timer").unwrap(),
             Utc::now() + Duration::minutes(1),
         );
         let fence = run
@@ -1314,10 +1314,7 @@ mod tests {
         let error = run
             .request_termination(run_key, TerminationReason::Cancelled)
             .unwrap_err();
-        assert_eq!(
-            error.code(),
-            crate::engine::aggregate::AGGREGATE_INTENT_CONFLICT
-        );
+        assert_eq!(error.code(), crate::aggregate::AGGREGATE_INTENT_CONFLICT);
         assert_eq!(run.state().lifecycle(), RunLifecycle::Waiting);
         assert_eq!(run.state().admission(), AdmissionState::Open);
         assert_eq!(

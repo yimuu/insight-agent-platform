@@ -1261,6 +1261,21 @@ version = "0.1.0"
 [[package]]
 name = "insight-engine"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cel",
+ "chrono",
+ "jsonschema",
+ "regex",
+ "semver",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
 
 [[package]]
 name = "insight-resources"

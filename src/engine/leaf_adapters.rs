@@ -15,6 +15,10 @@ use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
+use insight_engine::worker::adapter::{
+    self as worker_adapter, ModelCallPublicItemAllocator, ModelCallPublicItemReservationError,
+};
+
 use crate::{
     catalog_v3::VersionedLeafAdapterRegistry,
     dsl::{v3::template::compile_template, CompileError},
@@ -39,8 +43,7 @@ use crate::{
 use super::{
     plan::{DescriptorValue, PlanType, VersionTag},
     worker::{
-        LeafTaskExecutor, ModelCallCompletion, ModelCallPublicItemAllocator,
-        ModelCallPublicItemReservationError, ModelFinishReason, ModelFunctionCallPublication,
+        LeafTaskExecutor, ModelCallCompletion, ModelFinishReason, ModelFunctionCallPublication,
         ModelIncompleteFunctionCallPublication, ModelTokenUsage, ModelToolCall, ModelToolCallBatch,
         ResponseItemAuthority, TaskExecutionOrigin, TaskExecutionRequest, TaskExecutionResult,
         WorkerExecutionContext, WorkerExecutorRegistry, WorkerFailure, WorkerFailureClass,
@@ -1199,7 +1202,7 @@ impl LlmPublication {
         }
         Ok(Self {
             broker: broker.cloned(),
-            allocator: services.model_call_public_item_allocator().cloned(),
+            allocator: worker_adapter::services_model_call_public_item_allocator(services).cloned(),
             seed: Some(LlmPublicationSeed {
                 run_id: request.run_id().clone(),
                 activation_id: request.activation_id().clone(),
@@ -1233,10 +1236,11 @@ impl LlmPublication {
         ) else {
             return Ok(());
         };
-        let authority = allocator
-            .reserve_function_call(call_index, call_id, tool_name)
-            .await
-            .map_err(public_item_reservation_failure)?;
+        let authority = worker_adapter::reserve_public_function_call(
+            &allocator, call_index, call_id, tool_name,
+        )
+        .await
+        .map_err(public_item_reservation_failure)?;
         let identity = LiveResponseItemIdentity::new(
             seed.run_id,
             seed.activation_id,
@@ -1354,13 +1358,13 @@ impl LlmPublication {
         }
         let item = match self.reserved_item.take() {
             Some(item) => item,
-            None => self
-                .allocator
-                .as_ref()
-                .ok_or_else(|| invariant(LLM_DESCRIPTOR_INVALID))?
-                .reserve()
-                .await
-                .map_err(public_item_reservation_failure)?,
+            None => worker_adapter::reserve_public_item(
+                self.allocator
+                    .as_ref()
+                    .ok_or_else(|| invariant(LLM_DESCRIPTOR_INVALID))?,
+            )
+            .await
+            .map_err(public_item_reservation_failure)?,
         };
         let seed = self
             .seed
@@ -1664,7 +1668,7 @@ impl LeafTaskExecutor for V3ActionTaskExecutor {
         validate_frozen_action_binding(action.as_ref(), request)?;
         let descriptor = action.descriptor();
         validate_frozen_action_policy(descriptor, request.effect_policy())?;
-        let model_tool_request = request.is_model_tool_action_request();
+        let model_tool_request = worker_adapter::is_model_tool_action_request(request);
         if matches!(request.origin(), TaskExecutionOrigin::ModelTool { .. }) && !model_tool_request
         {
             return Err(invariant(ACTION_BINDING_INVALID));
@@ -2296,10 +2300,7 @@ mod tests {
                 deterministic_tool_identity, parse_action_from_stored_evidence, ModelToolTaskClaim,
                 StoredModelToolActionEvidence,
             },
-            scheduler::{
-                BoundTaskInput, SchedulerAction, SchedulerCheckpointId, SchedulerIntent,
-                SchedulerTaskId, TaskOutputContract,
-            },
+            scheduler::{BoundTaskInput, SchedulerAction, SchedulerCheckpointId, SchedulerTaskId},
             worker::{
                 ModelCallAuthority, ModelContinuationTurn, ModelToolResult, ResponseItemAuthority,
             },
@@ -2825,14 +2826,14 @@ mod tests {
             public_configuration: configuration,
             secret_configuration: BTreeMap::new(),
             inputs,
-            outputs: vec![TaskOutputContract::new(
+            outputs: vec![insight_engine::internal::task_output_contract(
                 DataPortId::new("leaf_result").unwrap(),
                 PortName::new("result").unwrap(),
                 output_type,
                 true,
             )],
         };
-        let intent = SchedulerIntent::new(
+        let intent = insight_engine::internal::scheduler_intent(
             RunId::new("run_leaf").unwrap(),
             SchedulerCheckpointId::parse(format!("checkpoint_{}", "2".repeat(64))).unwrap(),
             action,
@@ -3497,15 +3498,18 @@ mod tests {
             .await
             .unwrap();
         let (allocator, mut requests) =
-            crate::engine::worker::model_call_public_item_reservation_channel();
+            worker_adapter::model_call_public_item_reservation_channel();
         let responder = tokio::spawn(async move {
             let request = requests.recv().await.unwrap();
-            request.respond(Ok(
-                ResponseItemAuthority::new("fc_complete_request", 0).unwrap()
-            ));
+            worker_adapter::respond_reservation(
+                request,
+                Ok(ResponseItemAuthority::new("fc_complete_request", 0).unwrap()),
+            );
         });
-        let services =
-            WorkerRuntimeServices::default().with_model_call_public_item_allocator(allocator);
+        let services = worker_adapter::services_with_model_call_public_item_allocator(
+            WorkerRuntimeServices::default(),
+            allocator,
+        );
         let publication_broker = broker.clone() as Arc<dyn LiveResponseBroker>;
         let context = worker_context(1).with_model_call(
             ModelCallAuthority::new_with_publication("response_complete_function", 1, true, None)
@@ -3577,15 +3581,18 @@ mod tests {
             .await
             .unwrap();
         let (allocator, mut requests) =
-            crate::engine::worker::model_call_public_item_reservation_channel();
+            worker_adapter::model_call_public_item_reservation_channel();
         let responder = tokio::spawn(async move {
             let request = requests.recv().await.unwrap();
-            request.respond(Ok(
-                ResponseItemAuthority::new("fc_failed_request", 0).unwrap()
-            ));
+            worker_adapter::respond_reservation(
+                request,
+                Ok(ResponseItemAuthority::new("fc_failed_request", 0).unwrap()),
+            );
         });
-        let services =
-            WorkerRuntimeServices::default().with_model_call_public_item_allocator(allocator);
+        let services = worker_adapter::services_with_model_call_public_item_allocator(
+            WorkerRuntimeServices::default(),
+            allocator,
+        );
         let publication_broker = broker.clone() as Arc<dyn LiveResponseBroker>;
         let context = worker_context(1).with_model_call(
             ModelCallAuthority::new_with_publication("response_failed_function", 1, true, None)
@@ -3863,7 +3870,7 @@ mod tests {
             ),
         ]);
         let inputs = vec![
-            BoundTaskInput::new(
+            insight_engine::internal::bound_task_input(
                 DataPortId::new("input_history").unwrap(),
                 PortName::new("history").unwrap(),
                 RuntimeValue::new(json!([
@@ -3878,7 +3885,7 @@ mod tests {
                 ]))
                 .unwrap(),
             ),
-            BoundTaskInput::new(
+            insight_engine::internal::bound_task_input(
                 DataPortId::new("input_question").unwrap(),
                 PortName::new("question").unwrap(),
                 RuntimeValue::new(json!("What now?")).unwrap(),
@@ -3976,7 +3983,7 @@ mod tests {
             "core.llm",
             "model-worker-1",
             configuration.clone(),
-            vec![BoundTaskInput::new(
+            vec![insight_engine::internal::bound_task_input(
                 DataPortId::new("input_image_url").unwrap(),
                 PortName::new("image_url").unwrap(),
                 RuntimeValue::new(json!("")).unwrap(),
@@ -4003,7 +4010,7 @@ mod tests {
             "core.llm",
             "model-worker-1",
             configuration,
-            vec![BoundTaskInput::new(
+            vec![insight_engine::internal::bound_task_input(
                 DataPortId::new("input_image_url").unwrap(),
                 PortName::new("image_url").unwrap(),
                 RuntimeValue::new(Value::Null).unwrap(),
@@ -4124,7 +4131,7 @@ mod tests {
             "example.capture",
             "1.2.3",
             configuration,
-            vec![BoundTaskInput::new(
+            vec![insight_engine::internal::bound_task_input(
                 DataPortId::new("input_payload").unwrap(),
                 PortName::new("payload").unwrap(),
                 RuntimeValue::new(json!("real value")).unwrap(),

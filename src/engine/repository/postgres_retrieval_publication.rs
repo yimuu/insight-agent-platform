@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use sqlx::{AssertSqlSafe, Postgres, Row, Transaction};
 
 use crate::engine::{ActivationId, AttemptNo, RunId};

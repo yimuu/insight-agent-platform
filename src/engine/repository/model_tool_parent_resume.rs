@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use std::{collections::BTreeSet, fmt};
 
 use chrono::{DateTime, Utc};

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map as JsonMap, Value};
 
-use crate::engine::{
+use crate::{
     plan::{
         CollectDescriptor, CollectSource, ControlPortId, DataPortId, ErrorBoundaryDescriptor,
         LeafTaskKind, LinkedPlan, LoopDescriptor, MapDescriptor, Node, NodeKind, PlanIndex,
@@ -46,7 +46,7 @@ pub(crate) fn derive_subflow_admission(
     index: &PlanIndex<'_>,
     facts: &SchedulerFacts,
     node: &Node,
-    descriptor: &crate::engine::plan::SubflowCallDescriptor,
+    descriptor: &crate::plan::SubflowCallDescriptor,
     occurrence: &LogicalOccurrence,
     input_contract: &PlanInputContract,
 ) -> Result<DerivedSubflowAdmission, SchedulerError> {
@@ -98,7 +98,7 @@ pub(crate) fn derive_subflow_invocation(
     index: &PlanIndex<'_>,
     facts: &SchedulerFacts,
     node: &Node,
-    descriptor: &crate::engine::plan::SubflowCallDescriptor,
+    descriptor: &crate::plan::SubflowCallDescriptor,
     occurrence: &LogicalOccurrence,
 ) -> Result<SubflowInvocationFact, SchedulerError> {
     let parent_scope_instance_id =
@@ -135,7 +135,7 @@ pub(crate) fn derive_subflow_invocation(
 /// prevents a second, subtly different identity algorithm.
 pub(crate) fn scope_instance_for_occurrence(
     index: &PlanIndex<'_>,
-    run_id: &crate::engine::RunId,
+    run_id: &crate::RunId,
     node: &Node,
     occurrence: &LogicalOccurrence,
 ) -> Result<ScopeInstanceId, SchedulerError> {
@@ -176,7 +176,7 @@ pub(crate) fn scope_instance_for_occurrence(
 /// [`scope_instance_for_occurrence`].
 pub(crate) fn scope_instance_for_runtime_scope(
     index: &PlanIndex<'_>,
-    run_id: &crate::engine::RunId,
+    run_id: &crate::RunId,
     scope_id: &ScopeId,
     occurrence: &LogicalOccurrence,
 ) -> Result<ScopeInstanceId, SchedulerError> {
@@ -406,7 +406,7 @@ impl<'linked, 'plan> SchedulerPlanner<'linked, 'plan> {
     /// terminal identity from the minimal authoritative Run projection.
     pub fn fail_closed_action_at(
         &self,
-        run_id: &crate::engine::RunId,
+        run_id: &crate::RunId,
         projection_version: u64,
         failure: super::SchedulerPlanningFailure,
     ) -> Result<PlannedSchedulerAction, SchedulerError> {
@@ -431,13 +431,12 @@ impl<'linked, 'plan> SchedulerPlanner<'linked, 'plan> {
             checkpoint.clone(),
             SchedulerAction::FailRunPlanning { failure },
         );
-        let intent_hash =
-            crate::engine::IntentHash::from_serializable(&intent).map_err(|error| {
-                SchedulerError::new(
-                    SCHEDULER_GRAPH_INVALID,
-                    format!("planning failure intent could not be canonicalized: {error}"),
-                )
-            })?;
+        let intent_hash = crate::IntentHash::from_serializable(&intent).map_err(|error| {
+            SchedulerError::new(
+                SCHEDULER_GRAPH_INVALID,
+                format!("planning failure intent could not be canonicalized: {error}"),
+            )
+        })?;
         let transition_key = TransitionKey::derive(
             SCHEDULER_TRANSITION_DOMAIN,
             &[
@@ -1022,7 +1021,7 @@ impl<'linked, 'plan> SchedulerPlanner<'linked, 'plan> {
                         ids,
                         index,
                         node,
-                        &crate::engine::plan::WaitSignalDescriptor {
+                        &crate::plan::WaitSignalDescriptor {
                             signal_name: descriptor.completion_signal.clone(),
                             payload_type: descriptor.response_type.clone(),
                         },
@@ -1684,7 +1683,7 @@ impl<'linked, 'plan> SchedulerPlanner<'linked, 'plan> {
         ids: &DeterministicIds<'_>,
         index: &PlanIndex<'plan>,
         node: &Node,
-        descriptor: &crate::engine::plan::ForkDescriptor,
+        descriptor: &crate::plan::ForkDescriptor,
         scope_instance_id: ScopeInstanceId,
         activation_id: ActivationId,
         occurrence: LogicalOccurrence,
@@ -2433,8 +2432,8 @@ impl<'linked, 'plan> SchedulerPlanner<'linked, 'plan> {
             );
         }
         let dynamic_marker = match descriptor.flavor {
-            crate::engine::plan::LoopFlavor::Workflow => "loop_iteration",
-            crate::engine::plan::LoopFlavor::Agent => "agent_loop_turn",
+            crate::plan::LoopFlavor::Workflow => "loop_iteration",
+            crate::plan::LoopFlavor::Agent => "agent_loop_turn",
         };
         let base = occurrence.child(format!("{dynamic_marker}:{}", instance.next_iteration()))?;
         let route = route_for_output(index, &descriptor.body_output)?;
@@ -2888,12 +2887,12 @@ impl<'linked, 'plan> SchedulerPlanner<'linked, 'plan> {
         ids: &DeterministicIds<'_>,
         index: &PlanIndex<'plan>,
         node: &Node,
-        descriptor: &crate::engine::plan::WaitSignalDescriptor,
+        descriptor: &crate::plan::WaitSignalDescriptor,
         scope_instance_id: ScopeInstanceId,
         activation_id: ActivationId,
         occurrence: LogicalOccurrence,
         context: PathContext,
-        human_task: Option<&crate::engine::plan::HumanTaskDescriptor>,
+        human_task: Option<&crate::plan::HumanTaskDescriptor>,
     ) -> Result<SchedulerDecision, SchedulerError> {
         let wait_id = ids.wait(node.id(), &scope_instance_id, &occurrence);
         let signal_id = ids
@@ -3074,7 +3073,7 @@ impl<'linked, 'plan> SchedulerPlanner<'linked, 'plan> {
         ids: &DeterministicIds<'_>,
         index: &PlanIndex<'plan>,
         node: &Node,
-        descriptor: &crate::engine::plan::TimerDescriptor,
+        descriptor: &crate::plan::TimerDescriptor,
         scope_instance_id: ScopeInstanceId,
         activation_id: ActivationId,
         occurrence: LogicalOccurrence,
@@ -3196,7 +3195,7 @@ impl<'linked, 'plan> SchedulerPlanner<'linked, 'plan> {
         ids: &DeterministicIds<'_>,
         index: &PlanIndex<'plan>,
         node: &Node,
-        descriptor: &crate::engine::plan::SubflowCallDescriptor,
+        descriptor: &crate::plan::SubflowCallDescriptor,
         scope_instance_id: ScopeInstanceId,
         activation_id: ActivationId,
         occurrence: LogicalOccurrence,
@@ -4010,7 +4009,7 @@ impl<'linked, 'plan> SchedulerPlanner<'linked, 'plan> {
         &self,
         index: &PlanIndex<'plan>,
         node: &Node,
-    ) -> Result<&'plan crate::engine::plan::ScopeMetadata, SchedulerError> {
+    ) -> Result<&'plan crate::plan::ScopeMetadata, SchedulerError> {
         let mut scope_id = node.scope_id();
         loop {
             let scope = index.scope(scope_id).ok_or_else(|| {
@@ -4054,13 +4053,12 @@ impl<'linked, 'plan> SchedulerPlanner<'linked, 'plan> {
             ));
         }
         let intent = SchedulerIntent::new(facts.run_id().clone(), checkpoint.clone(), action);
-        let intent_hash =
-            crate::engine::IntentHash::from_serializable(&intent).map_err(|error| {
-                SchedulerError::new(
-                    SCHEDULER_GRAPH_INVALID,
-                    format!("scheduler intent could not be canonicalized: {error}"),
-                )
-            })?;
+        let intent_hash = crate::IntentHash::from_serializable(&intent).map_err(|error| {
+            SchedulerError::new(
+                SCHEDULER_GRAPH_INVALID,
+                format!("scheduler intent could not be canonicalized: {error}"),
+            )
+        })?;
         let transition_key = TransitionKey::derive(
             SCHEDULER_TRANSITION_DOMAIN,
             &[
@@ -4137,7 +4135,7 @@ fn node_is_owned_by_error_finalizer(
 struct ControlRoute {
     node_id: NodeId,
     input_port: ControlPortId,
-    edge_id: crate::engine::plan::ControlEdgeId,
+    edge_id: crate::plan::ControlEdgeId,
 }
 
 fn route_for_output(

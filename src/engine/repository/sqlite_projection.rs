@@ -1,3 +1,5 @@
+use super::RepositoryErrorExt as _;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;

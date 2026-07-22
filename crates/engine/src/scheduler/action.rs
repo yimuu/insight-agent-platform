@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::engine::{
+use crate::{
     plan::{ControlPortId, DataPortId, DescriptorValue, PortName, SecretRef, VersionTag},
     ActivationId, ControlTokenId, EffectId, ExecutionRevisionPin, ForkGroupId, IntentHash, NodeId,
     RunId, ScopeInstanceId, TerminationReason, TransitionKey, WorkerEffectPolicy,
@@ -23,23 +23,23 @@ pub const SCHEDULER_INTENT_SCHEMA_VERSION: u32 = 11;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReuseAdmissionContract {
-    node_config_hash: crate::engine::ContentHash,
-    descriptor_hash: crate::engine::ContentHash,
-    input_value_hash: crate::engine::ContentHash,
-    output_schema_hash: crate::engine::ContentHash,
-    effect_policy_hash: crate::engine::ContentHash,
-    data_dependencies_hash: crate::engine::ContentHash,
+    node_config_hash: crate::ContentHash,
+    descriptor_hash: crate::ContentHash,
+    input_value_hash: crate::ContentHash,
+    output_schema_hash: crate::ContentHash,
+    effect_policy_hash: crate::ContentHash,
+    data_dependencies_hash: crate::ContentHash,
 }
 
 impl ReuseAdmissionContract {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        node_config_hash: crate::engine::ContentHash,
-        descriptor_hash: crate::engine::ContentHash,
-        input_value_hash: crate::engine::ContentHash,
-        output_schema_hash: crate::engine::ContentHash,
-        effect_policy_hash: crate::engine::ContentHash,
-        data_dependencies_hash: crate::engine::ContentHash,
+        node_config_hash: crate::ContentHash,
+        descriptor_hash: crate::ContentHash,
+        input_value_hash: crate::ContentHash,
+        output_schema_hash: crate::ContentHash,
+        effect_policy_hash: crate::ContentHash,
+        data_dependencies_hash: crate::ContentHash,
     ) -> Self {
         Self {
             node_config_hash,
@@ -51,22 +51,22 @@ impl ReuseAdmissionContract {
         }
     }
 
-    pub fn node_config_hash(&self) -> &crate::engine::ContentHash {
+    pub fn node_config_hash(&self) -> &crate::ContentHash {
         &self.node_config_hash
     }
-    pub fn descriptor_hash(&self) -> &crate::engine::ContentHash {
+    pub fn descriptor_hash(&self) -> &crate::ContentHash {
         &self.descriptor_hash
     }
-    pub fn input_value_hash(&self) -> &crate::engine::ContentHash {
+    pub fn input_value_hash(&self) -> &crate::ContentHash {
         &self.input_value_hash
     }
-    pub fn output_schema_hash(&self) -> &crate::engine::ContentHash {
+    pub fn output_schema_hash(&self) -> &crate::ContentHash {
         &self.output_schema_hash
     }
-    pub fn effect_policy_hash(&self) -> &crate::engine::ContentHash {
+    pub fn effect_policy_hash(&self) -> &crate::ContentHash {
         &self.effect_policy_hash
     }
-    pub fn data_dependencies_hash(&self) -> &crate::engine::ContentHash {
+    pub fn data_dependencies_hash(&self) -> &crate::ContentHash {
         &self.data_dependencies_hash
     }
 }
@@ -190,7 +190,7 @@ pub struct BoundTaskInput {
 pub struct TaskOutputContract {
     port_id: DataPortId,
     name: PortName,
-    value_type: crate::engine::plan::PlanType,
+    value_type: crate::plan::PlanType,
     required: bool,
 }
 
@@ -198,7 +198,7 @@ impl TaskOutputContract {
     pub(crate) fn new(
         port_id: DataPortId,
         name: PortName,
-        value_type: crate::engine::plan::PlanType,
+        value_type: crate::plan::PlanType,
         required: bool,
     ) -> Self {
         Self {
@@ -217,7 +217,7 @@ impl TaskOutputContract {
         &self.name
     }
 
-    pub fn value_type(&self) -> &crate::engine::plan::PlanType {
+    pub fn value_type(&self) -> &crate::plan::PlanType {
         &self.value_type
     }
 
@@ -227,16 +227,6 @@ impl TaskOutputContract {
 }
 
 impl BoundTaskInput {
-    #[cfg(test)]
-    pub(crate) fn new(port_id: DataPortId, name: PortName, value: RuntimeValue) -> Self {
-        Self {
-            port_id,
-            name,
-            value,
-            source_activations: BTreeSet::new(),
-        }
-    }
-
     pub(crate) fn with_source_activations(
         port_id: DataPortId,
         name: PortName,
@@ -270,9 +260,9 @@ impl BoundTaskInput {
 
 fn contract_hash<T: Serialize + ?Sized>(
     value: &T,
-) -> Result<crate::engine::ContentHash, super::SchedulerError> {
+) -> Result<crate::ContentHash, super::SchedulerError> {
     serde_jcs::to_vec(value)
-        .map(|encoded| crate::engine::ContentHash::from_bytes(&encoded))
+        .map(|encoded| crate::ContentHash::from_bytes(&encoded))
         .map_err(|_| {
             super::SchedulerError::new(
                 super::SCHEDULER_FACT_INCONSISTENT,

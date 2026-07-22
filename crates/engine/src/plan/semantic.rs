@@ -8,7 +8,7 @@ use super::{
     PlanInputContract, PlanType, Policy, ScopeMetadata, SemanticHash,
     PLAN_SEMANTIC_PROJECTION_VERSION, PLAN_WIRE_INVALID,
 };
-use crate::engine::NodeId;
+use crate::NodeId;
 
 const SEMANTIC_HASH_DOMAIN: &[u8] = b"insight-agent/canonical-typed-plan/semantic/v4";
 
