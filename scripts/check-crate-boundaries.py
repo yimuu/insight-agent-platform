@@ -232,6 +232,21 @@ def check(metadata, baseline_path, workspace_root):
     role_by_id = {}
     id_by_role = {}
 
+    expected_workspace_names = set(INTERNAL_ROLES)
+    actual_workspace_names = {
+        packages[package_id]["name"] for package_id in workspace_ids
+    }
+    if actual_workspace_names != expected_workspace_names or len(workspace_ids) != len(
+        expected_workspace_names
+    ):
+        missing = sorted(expected_workspace_names - actual_workspace_names)
+        unexpected = sorted(actual_workspace_names - expected_workspace_names)
+        errors.append(
+            "workspace package set must contain exactly the eight declared packages; "
+            f"missing={missing or 'none'}, unexpected={unexpected or 'none'}, "
+            f"package_count={len(workspace_ids)}"
+        )
+
     for package_id in sorted(workspace_ids):
         package = packages[package_id]
         role = INTERNAL_ROLES.get(package["name"])

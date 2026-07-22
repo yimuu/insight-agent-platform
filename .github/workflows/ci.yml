@@ -40,8 +40,10 @@ jobs:
         run: CARGO_TARGET_DIR=target bash scripts/check-public-api-baseline.sh
       - name: Format
         run: cargo fmt --all -- --check
+      - name: Check
+        run: cargo check --locked --workspace --all-targets --all-features
       - name: Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: Test
@@ -80,7 +82,9 @@ jobs:
           cache-targets: "false"
           cache-on-failure: "false"
       - name: Test
-        run: cargo test --locked --all-targets
+        run: cargo test --locked --workspace --all-targets --all-features
+      - name: Documentation tests
+        run: cargo test --locked --workspace --doc --all-features
 
   policy:
     name: Dependency policy

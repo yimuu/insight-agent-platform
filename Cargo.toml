@@ -1,10 +1,22 @@
-[package]
-name = "insight-agent-platform"
-version = "0.1.0"
-edition = "2021"
-publish = false
+[workspace]
+members = [
+    ".",
+    "crates/engine",
+    "crates/dsl",
+    "crates/durable",
+    "crates/resources",
+    "crates/storage",
+    "crates/runtime",
+    "crates/api",
+]
+default-members = ["."]
+resolver = "2"
 
-[dependencies]
+[workspace.package]
+edition = "2021"
+rust-version = "1.94.1"
+
+[workspace.dependencies]
 async-trait = "0.1"
 axum = "0.8"
 bytes = "1"
@@ -16,23 +28,76 @@ futures = "0.3"
 handlebars = "6"
 humantime = "2"
 jsonschema = { version = "0.47", default-features = false }
-reqwest = { version = "0.13", features = ["json", "stream", "rustls"], default-features = false }
 regex = "=1.13.0"
+reqwest = { version = "0.13", features = ["json", "stream", "rustls"], default-features = false }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.2"
 serde_json = "1"
 sha2 = "0.11"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "postgres", "chrono", "json", "migrate", "macros", "tls-rustls-ring-webpki"], default-features = false }
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
+tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 yaml-rust2 = { version = "0.11", default-features = false }
 yaml_serde = "0.10.4"
 
+insight-api = { path = "crates/api" }
+insight-dsl = { path = "crates/dsl" }
+insight-durable = { path = "crates/durable" }
+insight-engine = { path = "crates/engine" }
+insight-resources = { path = "crates/resources" }
+insight-runtime = { path = "crates/runtime" }
+insight-storage = { path = "crates/storage" }
+
+[package]
+name = "insight-agent-platform"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+bytes.workspace = true
+cel.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+dotenvy.workspace = true
+futures.workspace = true
+handlebars.workspace = true
+humantime.workspace = true
+insight-api.workspace = true
+insight-dsl.workspace = true
+insight-durable.workspace = true
+insight-engine.workspace = true
+insight-resources.workspace = true
+insight-runtime.workspace = true
+insight-storage.workspace = true
+jsonschema.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_jcs.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+yaml-rust2.workspace = true
+yaml_serde.workspace = true
+
 [dev-dependencies]
-tower = "0.5"
-tempfile = "3"
+tempfile.workspace = true
+tower.workspace = true

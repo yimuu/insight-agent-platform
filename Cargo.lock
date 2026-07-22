@@ -1218,6 +1218,13 @@ dependencies = [
  "futures",
  "handlebars",
  "humantime",
+ "insight-api",
+ "insight-dsl",
+ "insight-durable",
+ "insight-engine",
+ "insight-resources",
+ "insight-runtime",
+ "insight-storage",
  "jsonschema",
  "regex",
  "reqwest",
@@ -1238,6 +1245,34 @@ dependencies = [
  "yaml-rust2",
  "yaml_serde",
 ]
+
+[[package]]
+name = "insight-api"
+version = "0.1.0"
+
+[[package]]
+name = "insight-dsl"
+version = "0.1.0"
+
+[[package]]
+name = "insight-durable"
+version = "0.1.0"
+
+[[package]]
+name = "insight-engine"
+version = "0.1.0"
+
+[[package]]
+name = "insight-resources"
+version = "0.1.0"
+
+[[package]]
+name = "insight-runtime"
+version = "0.1.0"
+
+[[package]]
+name = "insight-storage"
+version = "0.1.0"
 
 [[package]]
 name = "ipnet"
