@@ -5136,14 +5136,22 @@ async fn sqlite_model_tool_activation_freezes_parent_operation_deadline_exactly_
     .fetch_one(&control)
     .await
     .unwrap();
-    let expected = super::sqlite::parse_run_timestamp(&started_at)
-        .unwrap()
+    let parse_timestamp = |value: &str| {
+        DateTime::parse_from_rfc3339(value)
+            .map(|value| value.with_timezone(&Utc))
+            .or_else(|_| {
+                chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+                    .map(|value| value.and_utc())
+            })
+            .unwrap()
+    };
+    let expected = parse_timestamp(&started_at)
         .checked_add_signed(Duration::milliseconds(
             i64::try_from(parent.envelope().request().effect_policy().timeout_ms()).unwrap(),
         ))
         .unwrap();
     assert_eq!(
-        super::sqlite::parse_run_timestamp(&deadline).unwrap(),
+        parse_timestamp(&deadline),
         expected,
         "the tool batch inherits the original LLM attempt budget",
     );

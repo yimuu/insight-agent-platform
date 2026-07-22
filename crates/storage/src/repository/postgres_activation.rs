@@ -18,7 +18,7 @@ use insight_durable::common::adapter::{
     wait_late_audit_identity,
 };
 
-use crate::engine::{
+use insight_engine::{
     ActivationId, ActivationLifecycle, ArtifactId, ArtifactRef, AttemptNo, EffectEvidence,
     ExecutionEventContext, ExecutionEventId, ExecutionEventPayload, ExecutionValueSummary,
     LeaseEpoch, LeaseFence, PendingExecutionEvent, ProjectionMutationKind, RunId, SignalId,
@@ -45,7 +45,7 @@ use super::{
     WaitResolutionAuthority,
 };
 
-fn model_data<T>(value: Result<T, crate::engine::ModelError>) -> Result<T, RepositoryError> {
+fn model_data<T>(value: Result<T, insight_engine::ModelError>) -> Result<T, RepositoryError> {
     value.map_err(|_| RepositoryError::invalid_data())
 }
 
@@ -179,8 +179,8 @@ fn activation_context(
 ) -> Result<ExecutionEventContext, RepositoryError> {
     Ok(
         ExecutionEventContext::for_run(run_id.clone()).for_activation(
-            model_data(crate::engine::ScopeInstanceId::new(scope_id))?,
-            model_data(crate::engine::NodeId::new(node_id))?,
+            model_data(insight_engine::ScopeInstanceId::new(scope_id))?,
+            model_data(insight_engine::NodeId::new(node_id))?,
             activation_id.clone(),
         ),
     )
@@ -194,8 +194,8 @@ fn attempt_context(
     attempt_no: AttemptNo,
 ) -> Result<ExecutionEventContext, RepositoryError> {
     Ok(ExecutionEventContext::for_run(run_id.clone()).for_attempt(
-        model_data(crate::engine::ScopeInstanceId::new(scope_id))?,
-        model_data(crate::engine::NodeId::new(node_id))?,
+        model_data(insight_engine::ScopeInstanceId::new(scope_id))?,
+        model_data(insight_engine::NodeId::new(node_id))?,
         activation_id.clone(),
         attempt_no,
     ))
@@ -298,7 +298,7 @@ async fn stored_value_ref(
     .await
     .map_err(RepositoryError::storage)?
     .ok_or_else(RepositoryError::invalid_data)?;
-    let content_hash = model_data(crate::engine::ContentHash::parse(
+    let content_hash = model_data(insight_engine::ContentHash::parse(
         row.try_get::<String, _>("content_hash")
             .map_err(|_| RepositoryError::invalid_data())?,
     ))?;
@@ -885,11 +885,11 @@ async fn lease_replay_authority(
     {
         return Err(RepositoryError::invalid_data());
     }
-    let scope = model_data(crate::engine::ScopeInstanceId::new(
+    let scope = model_data(insight_engine::ScopeInstanceId::new(
         row.try_get::<String, _>("scope_instance_id")
             .map_err(|_| RepositoryError::invalid_data())?,
     ))?;
-    let node = model_data(crate::engine::NodeId::new(
+    let node = model_data(insight_engine::NodeId::new(
         row.try_get::<String, _>("node_id")
             .map_err(|_| RepositoryError::invalid_data())?,
     ))?;
@@ -1127,12 +1127,12 @@ async fn grant_attempt_lease(
     let node_id_text = row
         .try_get::<String, _>("node_id")
         .map_err(|_| RepositoryError::invalid_data())?;
-    let node_id = model_data(crate::engine::NodeId::new(&node_id_text))?;
+    let node_id = model_data(insight_engine::NodeId::new(&node_id_text))?;
     let task_envelope = activation_adapter::task_envelope(
         command.run_id().clone(),
         command.activation_id().clone(),
         node_id.clone(),
-        model_data(crate::engine::EffectId::new(&effect_id))?,
+        model_data(insight_engine::EffectId::new(&effect_id))?,
         fence,
         token.clone(),
         command.task(),
@@ -1158,7 +1158,7 @@ async fn grant_attempt_lease(
     .execute(&mut *transaction)
     .await
     .map_err(RepositoryError::storage)?;
-    let scope = model_data(crate::engine::ScopeInstanceId::new(
+    let scope = model_data(insight_engine::ScopeInstanceId::new(
         row.try_get::<String, _>("scope_instance_id")
             .map_err(|_| RepositoryError::invalid_data())?,
     ))?;
@@ -1380,8 +1380,8 @@ async fn fenced_state_change(
     .execute(&mut *transaction)
     .await
     .map_err(RepositoryError::storage)?;
-    let scope = model_data(crate::engine::ScopeInstanceId::new(&scope_id))?;
-    let node = model_data(crate::engine::NodeId::new(&node_id))?;
+    let scope = model_data(insight_engine::ScopeInstanceId::new(&scope_id))?;
+    let node = model_data(insight_engine::NodeId::new(&node_id))?;
     let event = if mark_running {
         model_data(PendingExecutionEvent::new(
             ExecutionEventContext::for_run(command.run_id().clone()).for_activation(
@@ -1497,11 +1497,11 @@ async fn replay_fenced_receipt(
         let companion = model_data(PendingExecutionEvent::new(
             ExecutionEventContext::for_run(command.run_id().clone())
                 .for_attempt(
-                    model_data(crate::engine::ScopeInstanceId::new(
+                    model_data(insight_engine::ScopeInstanceId::new(
                         row.try_get::<String, _>("scope_instance_id")
                             .map_err(|_| RepositoryError::invalid_data())?,
                     ))?,
-                    model_data(crate::engine::NodeId::new(
+                    model_data(insight_engine::NodeId::new(
                         row.try_get::<String, _>("node_id")
                             .map_err(|_| RepositoryError::invalid_data())?,
                     ))?,
@@ -1773,11 +1773,11 @@ async fn completion_replay_authority(
         &row.try_get::<String, _>("activation_lifecycle")
             .map_err(|_| RepositoryError::invalid_data())?,
     )?;
-    let scope_id = model_data(crate::engine::ScopeInstanceId::new(
+    let scope_id = model_data(insight_engine::ScopeInstanceId::new(
         row.try_get::<String, _>("scope_instance_id")
             .map_err(|_| RepositoryError::invalid_data())?,
     ))?;
-    let node_id = model_data(crate::engine::NodeId::new(
+    let node_id = model_data(insight_engine::NodeId::new(
         row.try_get::<String, _>("node_id")
             .map_err(|_| RepositoryError::invalid_data())?,
     ))?;
@@ -2231,7 +2231,7 @@ async fn complete_attempt(
         return Err(RepositoryError::invalid_data());
     }
     let checkpoint_event_id = receipt.event_id().to_owned();
-    let scope = model_data(crate::engine::ScopeInstanceId::new(scope_id))?;
+    let scope = model_data(insight_engine::ScopeInstanceId::new(scope_id))?;
     let result = match command.completion() {
         AttemptCompletion::Succeeded { output } => {
             let terminal = activation_adapter::committed_terminal_activation_authority(
@@ -2388,11 +2388,11 @@ async fn register_wait(
     )
     .await?;
     if let Some(deadline) = command.wait_deadline() {
-        let scope = model_data(crate::engine::ScopeInstanceId::new(
+        let scope = model_data(insight_engine::ScopeInstanceId::new(
             row.try_get::<String, _>("scope_instance_id")
                 .map_err(|_| RepositoryError::invalid_data())?,
         ))?;
-        let node = model_data(crate::engine::NodeId::new(
+        let node = model_data(insight_engine::NodeId::new(
             row.try_get::<String, _>("node_id")
                 .map_err(|_| RepositoryError::invalid_data())?,
         ))?;
@@ -2484,11 +2484,11 @@ async fn replay_wait_receipt(
         let companion = model_data(PendingExecutionEvent::new(
             ExecutionEventContext::for_run(command.run_id().clone())
                 .for_activation(
-                    model_data(crate::engine::ScopeInstanceId::new(
+                    model_data(insight_engine::ScopeInstanceId::new(
                         row.try_get::<String, _>("scope_instance_id")
                             .map_err(|_| RepositoryError::invalid_data())?,
                     ))?,
-                    model_data(crate::engine::NodeId::new(
+                    model_data(insight_engine::NodeId::new(
                         row.try_get::<String, _>("node_id")
                             .map_err(|_| RepositoryError::invalid_data())?,
                     ))?,
@@ -2764,7 +2764,7 @@ async fn receive_signal(
     let receipt = activation_adapter::signal_receipt(
         command.signal_id().clone(),
         payload,
-        model_data(crate::engine::ContentHash::parse(hash))?,
+        model_data(insight_engine::ContentHash::parse(hash))?,
     );
     let transition_key = model_data(TransitionKey::derive(
         "repository.projection_mutation",
@@ -2837,7 +2837,7 @@ async fn signal_replay_authority(
     {
         return Err(RepositoryError::invalid_data());
     }
-    let scope = model_data(crate::engine::ScopeInstanceId::new(
+    let scope = model_data(insight_engine::ScopeInstanceId::new(
         row.try_get::<String, _>("scope_instance_id")
             .map_err(|_| RepositoryError::invalid_data())?,
     ))?;
@@ -2845,7 +2845,7 @@ async fn signal_replay_authority(
         ExecutionEventContext::for_run(command.run_id().clone())
             .for_activation(
                 scope.clone(),
-                model_data(crate::engine::NodeId::new(
+                model_data(insight_engine::NodeId::new(
                     row.try_get::<String, _>("node_id")
                         .map_err(|_| RepositoryError::invalid_data())?,
                 ))?,
@@ -2881,7 +2881,7 @@ async fn signal_replay_authority(
         scope,
         command.activation_id().clone(),
         registration,
-        crate::engine::WaitResolutionSubject::Signal(command.signal_id().clone()),
+        insight_engine::WaitResolutionSubject::Signal(command.signal_id().clone()),
         transition_key.clone(),
         output,
     )
@@ -2991,11 +2991,11 @@ async fn append_timer_late_if_wait_loser(
     }
     let context = ExecutionEventContext::for_run(command.run_id().clone())
         .for_activation(
-            model_data(crate::engine::ScopeInstanceId::new(
+            model_data(insight_engine::ScopeInstanceId::new(
                 row.try_get::<String, _>("scope_instance_id")
                     .map_err(|_| RepositoryError::invalid_data())?,
             ))?,
-            model_data(crate::engine::NodeId::new(
+            model_data(insight_engine::NodeId::new(
                 row.try_get::<String, _>("node_id")
                     .map_err(|_| RepositoryError::invalid_data())?,
             ))?,
@@ -3134,11 +3134,11 @@ async fn append_signal_late_if_wait_loser(
     let output = stored_value_ref(transaction, command.run_id(), Some(&payload_id), None).await?;
     let context = ExecutionEventContext::for_run(command.run_id().clone())
         .for_activation(
-            model_data(crate::engine::ScopeInstanceId::new(
+            model_data(insight_engine::ScopeInstanceId::new(
                 row.try_get::<String, _>("scope_instance_id")
                     .map_err(|_| RepositoryError::invalid_data())?,
             ))?,
-            model_data(crate::engine::NodeId::new(
+            model_data(insight_engine::NodeId::new(
                 row.try_get::<String, _>("node_id")
                     .map_err(|_| RepositoryError::invalid_data())?,
             ))?,
@@ -3449,11 +3449,11 @@ async fn resolve_wait_signal(
     .execute(&mut *transaction)
     .await
     .map_err(RepositoryError::storage)?;
-    let scope = model_data(crate::engine::ScopeInstanceId::new(
+    let scope = model_data(insight_engine::ScopeInstanceId::new(
         row.try_get::<String, _>("scope_instance_id")
             .map_err(|_| RepositoryError::invalid_data())?,
     ))?;
-    let node = model_data(crate::engine::NodeId::new(
+    let node = model_data(insight_engine::NodeId::new(
         row.try_get::<String, _>("node_id")
             .map_err(|_| RepositoryError::invalid_data())?,
     ))?;
@@ -3572,7 +3572,7 @@ async fn resolve_wait_signal(
         scope,
         command.activation_id().clone(),
         registration,
-        crate::engine::WaitResolutionSubject::Signal(command.signal_id().clone()),
+        insight_engine::WaitResolutionSubject::Signal(command.signal_id().clone()),
         transition_key,
         output,
     )?;
@@ -3621,12 +3621,12 @@ fn timer_fence_from_pg_row(row: &PgRow) -> Result<LeaseFence, RepositoryError> {
     ))
 }
 
-fn lease_terminal_reason(evidence: EffectEvidence) -> crate::engine::ActivationTerminationReason {
+fn lease_terminal_reason(evidence: EffectEvidence) -> insight_engine::ActivationTerminationReason {
     match evidence {
         EffectEvidence::Unknown | EffectEvidence::Started | EffectEvidence::Committed => {
-            crate::engine::ActivationTerminationReason::EffectOutcomeUnknown
+            insight_engine::ActivationTerminationReason::EffectOutcomeUnknown
         }
-        EffectEvidence::NotStarted => crate::engine::ActivationTerminationReason::Failure,
+        EffectEvidence::NotStarted => insight_engine::ActivationTerminationReason::Failure,
     }
 }
 
@@ -3689,11 +3689,11 @@ async fn timer_replay_authority(
     let observed = row
         .try_get::<DateTime<Utc>, _>("fired_at")
         .map_err(|_| RepositoryError::invalid_data())?;
-    let scope = model_data(crate::engine::ScopeInstanceId::new(
+    let scope = model_data(insight_engine::ScopeInstanceId::new(
         row.try_get::<String, _>("scope_instance_id")
             .map_err(|_| RepositoryError::invalid_data())?,
     ))?;
-    let node = model_data(crate::engine::NodeId::new(
+    let node = model_data(insight_engine::NodeId::new(
         row.try_get::<String, _>("node_id")
             .map_err(|_| RepositoryError::invalid_data())?,
     ))?;
@@ -3884,7 +3884,7 @@ async fn timer_replay_authority(
                     scope,
                     activation_id,
                     registration,
-                    crate::engine::WaitResolutionSubject::Timer(command.timer_id().clone()),
+                    insight_engine::WaitResolutionSubject::Timer(command.timer_id().clone()),
                     transition_key.clone(),
                     output,
                 )?,
@@ -4472,8 +4472,8 @@ async fn fire_timer(
         }
         _ => return Err(RepositoryError::invalid_data()),
     };
-    let scope = model_data(crate::engine::ScopeInstanceId::new(scope_text))?;
-    let node = model_data(crate::engine::NodeId::new(node_text))?;
+    let scope = model_data(insight_engine::ScopeInstanceId::new(scope_text))?;
+    let node = model_data(insight_engine::NodeId::new(node_text))?;
     let primary = model_data(PendingExecutionEvent::new(
         ExecutionEventContext::for_run(command.run_id().clone()).for_activation(
             scope.clone(),
@@ -4692,7 +4692,7 @@ async fn fire_timer(
             scope.clone(),
             activation_id,
             registration,
-            crate::engine::WaitResolutionSubject::Timer(command.timer_id().clone()),
+            insight_engine::WaitResolutionSubject::Timer(command.timer_id().clone()),
             transition_key,
             output,
         )?),
@@ -5048,14 +5048,14 @@ mod tests {
     use serde_json::json;
     use sqlx::{postgres::PgPoolOptions, AssertSqlSafe};
 
-    use crate::engine::{
+    use insight_engine::{
         scheduler::LogicalOccurrence, ContentHash, DefinitionRevisionId, DeploymentRevisionId,
         EffectIdempotency, ExecutionKind, NodeId, ScopeInstanceId, WorkerCancellation,
         WorkerExecutionPolicy,
     };
 
     use super::*;
-    use crate::engine::repository::{
+    use insight_durable::{
         CreateRunCommand, DurableRepository, PlanInstallOutcome, TaskDispatchSpec, VersionedPlan,
     };
 
@@ -5211,7 +5211,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code(),
-            crate::engine::repository::REPOSITORY_DATA_INVALID
+            insight_engine::repository::REPOSITORY_DATA_INVALID
         );
         sqlx::query("UPDATE payloads SET inline_value=$1 WHERE run_id=$2 AND payload_id=$3")
             .bind(json!({"answer": 42}))
@@ -5240,7 +5240,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code(),
-            crate::engine::repository::REPOSITORY_DATA_INVALID
+            insight_engine::repository::REPOSITORY_DATA_INVALID
         );
         assert_eq!(
             repository
@@ -5426,7 +5426,7 @@ mod tests {
         let rejected = CompleteAttemptCommand::new(
             completion_fence.clone(),
             AttemptCompletion::Failed {
-                reason: crate::engine::ActivationTerminationReason::Failure,
+                reason: insight_engine::ActivationTerminationReason::Failure,
                 failure: None,
                 retry_at: Some(Utc::now() - Duration::seconds(1)),
             },

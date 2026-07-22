@@ -879,17 +879,38 @@ class Inventory:
         if impl_item is None:
             raise SystemExit("rustdoc impl item is missing")
         data = impl_item["inner"]["impl"]
+        normalized_target = self.normalize_type(data["for"], impl_node.document)
+        target_generic = normalized_target.get("generic")
         associated = []
         for associated_id in data.get("items", []):
             associated_node = Node(impl_node.document, str(associated_id))
             associated_item = self.item(associated_node)
             if associated_item is None:
                 continue
+            declaration = self.normalize_item_declaration(associated_node)
+            # `async-trait`'s generated lifetime bound is definitionally on
+            # the blanket impl target.  Rustdoc can spell that target either
+            # as the impl generic (`T`) or as `Self` after the implemented
+            # trait/type crosses a workspace crate boundary.  Canonicalize
+            # only this exact macro-shaped outlives predicate; all other
+            # generic and where-clause structure remains part of the snapshot.
+            if target_generic is not None:
+                for predicate in declaration.get("generics", {}).get(
+                    "where_predicates", []
+                ):
+                    bound = predicate.get("bound_predicate")
+                    if (
+                        bound is not None
+                        and bound.get("type") == {"generic": "Self"}
+                        and bound.get("bounds") == [{"outlives": "'async_trait"}]
+                        and not bound.get("generic_params")
+                    ):
+                        bound["type"] = {"generic": target_generic}
             associated.append(
                 {
                     "name": associated_item.get("name"),
                     "kind": item_kind(associated_item),
-                    "declaration": self.normalize_item_declaration(associated_node),
+                    "declaration": declaration,
                 }
             )
         return {
@@ -901,7 +922,7 @@ class Inventory:
                 if data.get("trait") is None
                 else self.normalize_path(data["trait"], impl_node.document)
             ),
-            "for": self.normalize_type(data["for"], impl_node.document),
+            "for": normalized_target,
             "items": sorted_values(associated),
         }
 

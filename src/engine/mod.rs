@@ -5,7 +5,9 @@
 //! so the compiler, durable repository, scheduler, and workers share one set of
 //! identities and state-machine contracts during the clean cutover.
 
-pub mod artifact_store;
+pub mod artifact_store {
+    pub use insight_storage::artifact_store::*;
+}
 pub mod leaf_adapters;
 pub mod repository;
 pub mod retrieval_adapter;

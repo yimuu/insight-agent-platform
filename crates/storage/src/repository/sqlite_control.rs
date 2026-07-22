@@ -1,15 +1,14 @@
 use super::RepositoryErrorExt as _;
 
-#[cfg(test)]
-use super::model::RunTransitionCommandAdapter as _;
 use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Serialize};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{Row, Sqlite, Transaction};
 
 #[cfg(test)]
 use insight_durable::common::adapter::payload_id;
 use insight_durable::common::adapter::{
-    self as common_contract_adapter, canonical_intent_hash, event_id, validate_inline_payload,
+    self as common_contract_adapter, canonical_intent_hash, canonical_json, event_id, i64_from_u64,
+    u64_from_i64, validate_inline_payload,
 };
 use insight_durable::{
     activation::adapter::execution_kind_fields,
@@ -19,7 +18,7 @@ use insight_durable::{
     },
 };
 
-use crate::engine::{
+use insight_engine::{
     control::{ControlEmissionSlot, ControlFrame},
     ActivationId, ChildRequirement, ContentHash, ControlTokenProvenance, ExecutionEventContext,
     ExecutionEventPayload, ExecutionForkLeg, ExecutionLegSettlementClass, ExecutionValueSummary,
@@ -35,63 +34,32 @@ use super::control_repository::{
     MaterializeReuseCandidateCommand, RecordJoinArrivalCommand, RejectReuseCandidateCommand,
     RevokeControlTokenCommand, SchedulerLeaseRepository, SchedulerRunLease, SettleScopeCommand,
 };
-use super::postgres::{
+use super::sqlite::{
     allocate_event_seq, decode_execution_event_row, insert_event, insert_or_get_payload,
-    load_replay, lock_run_for_event_write, lock_runs_for_event_write, PostgresDurableRepository,
-    Replay,
+    load_replay, Replay, SqliteDurableRepository,
 };
-use super::postgres_projection::finalize_projection_checkpoints;
-use super::RepositoryError;
+use super::sqlite_projection::{
+    finalize_projection_checkpoints, verify_projection_checkpoint_batch,
+};
+use super::{RepositoryError, REPOSITORY_CONFIGURATION_INVALID};
 
 fn invalid_data() -> RepositoryError {
     RepositoryError::invalid_data()
 }
 
-fn model_data<T, E>(result: Result<T, E>) -> Result<T, RepositoryError> {
+fn unsupported_sqlite_scheduler_lease() -> RepositoryError {
+    RepositoryError::new(
+        REPOSITORY_CONFIGURATION_INVALID,
+        "SQLite is a single-process control store and cannot own scheduler leases",
+    )
+}
+
+fn model_data<T>(result: Result<T, insight_engine::ModelError>) -> Result<T, RepositoryError> {
     result.map_err(|_| invalid_data())
 }
 
-fn u64_from_i64(value: i64) -> Result<u64, RepositoryError> {
-    u64::try_from(value).map_err(|_| invalid_data())
-}
-
-fn i64_from_u64(value: u64) -> Result<i64, RepositoryError> {
-    i64::try_from(value).map_err(|_| invalid_data())
-}
-
-/// Serializes only contenders using the same `(RunId, TransitionKey)`.
-///
-/// Aggregate row locks protect state CAS, while this transaction-scoped lock
-/// closes the smaller idempotency race in which two exact retries both observe
-/// an empty event slot before either has reached its aggregate row. Hash
-/// collisions merely serialize unrelated commands; they cannot change state.
-async fn lock_transition(
-    transaction: &mut Transaction<'_, Postgres>,
-    run_id: &RunId,
-    transition_key: &TransitionKey,
-) -> Result<(), RepositoryError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))")
-        .bind(run_id.as_str())
-        .bind(transition_key.as_str())
-        .execute(&mut **transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-    Ok(())
-}
-
-fn fencing_token(transition_key: &TransitionKey) -> String {
-    let hash = ContentHash::from_bytes(
-        format!(
-            "insight-agent/scheduler-lease/v1/{}",
-            transition_key.as_str()
-        )
-        .as_bytes(),
-    );
-    format!("scheduler_fence_{}", &hash.as_str()["sha256:".len()..])
-}
-
 async fn replay_result<T: DeserializeOwned>(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
     transition_key: &TransitionKey,
     intent_hash: &str,
@@ -103,7 +71,7 @@ async fn replay_result<T: DeserializeOwned>(
     };
     let row = sqlx::query(
         "SELECT intent_hash, primary_event_id, result_json
-         FROM control_transition_results WHERE run_id = $1 AND transition_key = $2",
+         FROM control_transition_results WHERE run_id = ? AND transition_key = ?",
     )
     .bind(run_id.as_str())
     .bind(transition_key.as_str())
@@ -122,22 +90,49 @@ async fn replay_result<T: DeserializeOwned>(
     {
         return Err(invalid_data());
     }
-    serde_json::from_value(
-        row.try_get::<serde_json::Value, _>("result_json")
+    serde_json::from_str(
+        &row.try_get::<String, _>("result_json")
             .map_err(|_| invalid_data())?,
     )
     .map(Some)
     .map_err(|_| invalid_data())
 }
 
+async fn store_result<T: Serialize>(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &RunId,
+    transition_key: &TransitionKey,
+    intent_hash: &str,
+    primary_event_id: &str,
+    result: &T,
+) -> Result<(), RepositoryError> {
+    let result_json = canonical_json(
+        &serde_json::to_value(result).map_err(|_| RepositoryError::canonicalization())?,
+    )?;
+    sqlx::query(
+        "INSERT INTO control_transition_results (
+            run_id, transition_key, intent_hash, primary_event_id, result_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+    )
+    .bind(run_id.as_str())
+    .bind(transition_key.as_str())
+    .bind(intent_hash)
+    .bind(primary_event_id)
+    .bind(result_json)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    Ok(())
+}
+
 async fn authoritative_result<T: DeserializeOwned>(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
     transition_key: &str,
 ) -> Result<T, RepositoryError> {
     let row = sqlx::query(
         "SELECT primary_event_id, result_json FROM control_transition_results
-         WHERE run_id = $1 AND transition_key = $2",
+         WHERE run_id = ? AND transition_key = ?",
     )
     .bind(run_id.as_str())
     .bind(transition_key)
@@ -148,27 +143,22 @@ async fn authoritative_result<T: DeserializeOwned>(
     let primary_event_id = row
         .try_get::<String, _>("primary_event_id")
         .map_err(|_| invalid_data())?;
-    super::postgres_projection::verify_projection_checkpoint_batch(
-        transaction,
-        run_id,
-        &primary_event_id,
-    )
-    .await?;
-    serde_json::from_value(
-        row.try_get::<serde_json::Value, _>("result_json")
+    verify_projection_checkpoint_batch(transaction, run_id, &primary_event_id).await?;
+    serde_json::from_str(
+        &row.try_get::<String, _>("result_json")
             .map_err(|_| invalid_data())?,
     )
     .map_err(|_| invalid_data())
 }
 
 async fn activation_context(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
     activation_id: &ActivationId,
-) -> Result<Option<(ScopeInstanceId, crate::engine::NodeId, i64, String)>, RepositoryError> {
+) -> Result<Option<(ScopeInstanceId, insight_engine::NodeId, i64, String)>, RepositoryError> {
     let row = sqlx::query(
         "SELECT scope_instance_id, node_id, projection_version, lifecycle
-         FROM node_activations WHERE run_id = $1 AND activation_id = $2 FOR UPDATE",
+         FROM node_activations WHERE run_id = ? AND activation_id = ?",
     )
     .bind(run_id.as_str())
     .bind(activation_id.as_str())
@@ -177,16 +167,14 @@ async fn activation_context(
     .map_err(RepositoryError::storage)?;
     row.map(|row| {
         Ok((
-            ScopeInstanceId::new(
+            model_data(ScopeInstanceId::new(
                 row.try_get::<String, _>("scope_instance_id")
                     .map_err(|_| invalid_data())?,
-            )
-            .map_err(|_| invalid_data())?,
-            crate::engine::NodeId::new(
+            ))?,
+            model_data(insight_engine::NodeId::new(
                 row.try_get::<String, _>("node_id")
                     .map_err(|_| invalid_data())?,
-            )
-            .map_err(|_| invalid_data())?,
+            ))?,
             row.try_get("projection_version")
                 .map_err(|_| invalid_data())?,
             row.try_get("lifecycle").map_err(|_| invalid_data())?,
@@ -196,11 +184,11 @@ async fn activation_context(
 }
 
 async fn append_primary_event(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
     transition_key: &TransitionKey,
     intent_hash: &str,
-    projection_version: u64,
+    projection_version_after: u64,
     event: &PendingExecutionEvent,
 ) -> Result<(u64, String), RepositoryError> {
     let seq = allocate_event_seq(transaction, run_id).await?;
@@ -212,71 +200,605 @@ async fn append_primary_event(
         &id,
         transition_key,
         intent_hash,
-        projection_version,
+        projection_version_after,
         event,
     )
     .await?;
     Ok((seq, id))
 }
 
-async fn append_event(
-    transaction: &mut Transaction<'_, Postgres>,
-    run_id: &RunId,
-    transition_key: &TransitionKey,
-    intent_hash: &str,
-    projection_version: u64,
-    mutation: ProjectionMutationKind,
-) -> Result<(u64, String), RepositoryError> {
-    let event = PendingExecutionEvent::new(
-        ExecutionEventContext::for_run(run_id.clone()),
-        ExecutionEventPayload::ProjectionMutated { mutation },
-    )
-    .map_err(|_| invalid_data())?;
-    append_primary_event(
-        transaction,
-        run_id,
-        transition_key,
-        intent_hash,
-        projection_version,
-        &event,
-    )
-    .await
-}
-
 async fn finalize<T: Serialize>(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
     transition_key: &TransitionKey,
     intent_hash: &str,
     event_id: &str,
     result: &T,
 ) -> Result<(), RepositoryError> {
-    let value = serde_json::to_value(result).map_err(|_| RepositoryError::canonicalization())?;
-    sqlx::query(
-        "INSERT INTO control_transition_results (
-            run_id, transition_key, intent_hash, primary_event_id, result_json, created_at
-         ) VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)",
+    store_result(
+        transaction,
+        run_id,
+        transition_key,
+        intent_hash,
+        event_id,
+        result,
     )
-    .bind(run_id.as_str())
-    .bind(transition_key.as_str())
-    .bind(intent_hash)
-    .bind(event_id)
-    .bind(value)
-    .execute(&mut **transaction)
-    .await
-    .map_err(RepositoryError::storage)?;
+    .await?;
     finalize_projection_checkpoints(transaction, run_id, event_id).await
 }
 
+#[async_trait]
+impl ControlDurableRepository for SqliteDurableRepository {
+    async fn create_child_scope(
+        &self,
+        transition_key: TransitionKey,
+        command: CreateChildScopeCommand,
+    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
+        let intent_hash = canonical_intent_hash(&command)?;
+        let _writer = self.writer.lock().await;
+        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
+            &mut tx,
+            command.run_id(),
+            &transition_key,
+            intent_hash.as_str(),
+        )
+        .await?
+        {
+            tx.commit().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::ExactReplay { authoritative });
+        }
+
+        let parent = command.scope().parent().ok_or_else(invalid_data)?;
+        let parent_row = sqlx::query(
+            "SELECT lifecycle, admission_state, projection_version
+             FROM scope_instances WHERE run_id = ? AND scope_instance_id = ?",
+        )
+        .bind(command.run_id().as_str())
+        .bind(parent.as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        let Some(parent_row) = parent_row else {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        };
+        if parent_row
+            .try_get::<String, _>("lifecycle")
+            .map_err(|_| invalid_data())?
+            != "active"
+            || parent_row
+                .try_get::<String, _>("admission_state")
+                .map_err(|_| invalid_data())?
+                != "open"
+            || u64_from_i64(
+                parent_row
+                    .try_get::<i64, _>("projection_version")
+                    .map_err(|_| invalid_data())?,
+            )? != command.expected_parent_projection_version()
+        {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        }
+        let duplicate: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM scope_instances WHERE run_id = ? AND scope_instance_id = ?",
+        )
+        .bind(command.run_id().as_str())
+        .bind(command.scope().id().as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        if duplicate.is_some() {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        }
+
+        let (static_scope_id, stable_dynamic_key, scope_kind, event_scope_kind) =
+            scope_storage(command.scope())?;
+        sqlx::query(
+            "INSERT INTO scope_instances (
+                run_id, scope_instance_id, parent_scope_instance_id, static_scope_id,
+                stable_dynamic_key, scope_kind, is_root, lifecycle, admission_state,
+                admitted_children, settled_children, projection_version, created_at, settled_at
+             ) VALUES (?, ?, ?, ?, ?, ?, 0, 'active', 'open', 0, 0, 0, CURRENT_TIMESTAMP, NULL)",
+        )
+        .bind(command.run_id().as_str())
+        .bind(command.scope().id().as_str())
+        .bind(parent.as_str())
+        .bind(static_scope_id)
+        .bind(stable_dynamic_key)
+        .bind(scope_kind)
+        .execute(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        let updated = sqlx::query(
+            "UPDATE scope_instances
+             SET admitted_children = admitted_children + 1,
+                 projection_version = projection_version + 1
+             WHERE run_id = ? AND scope_instance_id = ?
+               AND lifecycle = 'active' AND admission_state = 'open'
+               AND projection_version = ?",
+        )
+        .bind(command.run_id().as_str())
+        .bind(parent.as_str())
+        .bind(i64_from_u64(command.expected_parent_projection_version())?)
+        .execute(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        if updated.rows_affected() != 1 {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        }
+        let event = model_data(PendingExecutionEvent::new(
+            ExecutionEventContext::for_run(command.run_id().clone())
+                .in_scope(command.scope().id().clone()),
+            ExecutionEventPayload::ScopeCreated {
+                scope_kind: event_scope_kind,
+                parent_scope_instance_id: Some(parent.clone()),
+            },
+        ))?;
+        let (seq, id) = append_primary_event(
+            &mut tx,
+            command.run_id(),
+            &transition_key,
+            intent_hash.as_str(),
+            0,
+            &event,
+        )
+        .await?;
+        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), 0);
+        finalize(
+            &mut tx,
+            command.run_id(),
+            &transition_key,
+            intent_hash.as_str(),
+            &id,
+            &receipt,
+        )
+        .await?;
+        tx.commit().await.map_err(RepositoryError::storage)?;
+        Ok(TransitionOutcome::Committed { result: receipt })
+    }
+
+    async fn close_scope_admission(
+        &self,
+        transition_key: TransitionKey,
+        command: CloseScopeAdmissionCommand,
+    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
+        let intent_hash = canonical_intent_hash(&command)?;
+        let _writer = self.writer.lock().await;
+        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
+            &mut tx,
+            command.run_id(),
+            &transition_key,
+            intent_hash.as_str(),
+        )
+        .await?
+        {
+            tx.commit().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::ExactReplay { authoritative });
+        }
+        let row = sqlx::query(
+            "SELECT admitted_children, settled_children, lifecycle, admission_state,
+                    projection_version
+             FROM scope_instances WHERE run_id = ? AND scope_instance_id = ?",
+        )
+        .bind(command.run_id().as_str())
+        .bind(command.scope_instance_id().as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        let Some(row) = row else {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        };
+        if row
+            .try_get::<String, _>("lifecycle")
+            .map_err(|_| invalid_data())?
+            != "active"
+            || row
+                .try_get::<String, _>("admission_state")
+                .map_err(|_| invalid_data())?
+                != "open"
+            || u64_from_i64(
+                row.try_get::<i64, _>("projection_version")
+                    .map_err(|_| invalid_data())?,
+            )? != command.expected_projection_version()
+        {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        }
+        let admitted = u32::try_from(
+            row.try_get::<i64, _>("admitted_children")
+                .map_err(|_| invalid_data())?,
+        )
+        .map_err(|_| invalid_data())?;
+        let settled = u32::try_from(
+            row.try_get::<i64, _>("settled_children")
+                .map_err(|_| invalid_data())?,
+        )
+        .map_err(|_| invalid_data())?;
+        let live_attempts = u32::try_from(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM node_attempts a JOIN node_activations n
+             ON n.run_id = a.run_id AND n.activation_id = a.activation_id
+             WHERE n.run_id = ? AND n.scope_instance_id = ?
+               AND a.lifecycle IN ('created', 'leased', 'running')",
+            )
+            .bind(command.run_id().as_str())
+            .bind(command.scope_instance_id().as_str())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(RepositoryError::storage)?,
+        )
+        .map_err(|_| invalid_data())?;
+        let next_version = command
+            .expected_projection_version()
+            .checked_add(1)
+            .ok_or_else(invalid_data)?;
+        let event = model_data(PendingExecutionEvent::new(
+            ExecutionEventContext::for_run(command.run_id().clone())
+                .in_scope(command.scope_instance_id().clone()),
+            ExecutionEventPayload::ScopeDraining {
+                admitted_children: admitted,
+                settled_children: settled,
+                live_attempts,
+            },
+        ))?;
+        let (seq, id) = append_primary_event(
+            &mut tx,
+            command.run_id(),
+            &transition_key,
+            intent_hash.as_str(),
+            next_version,
+            &event,
+        )
+        .await?;
+        let updated = sqlx::query(
+            "UPDATE scope_instances SET lifecycle = 'settling', admission_state = 'closed',
+                    projection_version = projection_version + 1
+             WHERE run_id = ? AND scope_instance_id = ? AND lifecycle = 'active'
+               AND admission_state = 'open' AND projection_version = ?",
+        )
+        .bind(command.run_id().as_str())
+        .bind(command.scope_instance_id().as_str())
+        .bind(i64_from_u64(command.expected_projection_version())?)
+        .execute(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        if updated.rows_affected() != 1 {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        }
+        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), next_version);
+        finalize(
+            &mut tx,
+            command.run_id(),
+            &transition_key,
+            intent_hash.as_str(),
+            &id,
+            &receipt,
+        )
+        .await?;
+        tx.commit().await.map_err(RepositoryError::storage)?;
+        Ok(TransitionOutcome::Committed { result: receipt })
+    }
+
+    async fn settle_scope(
+        &self,
+        transition_key: TransitionKey,
+        command: SettleScopeCommand,
+    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
+        let intent_hash = canonical_intent_hash(&command)?;
+        let _writer = self.writer.lock().await;
+        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
+            &mut tx,
+            command.run_id(),
+            &transition_key,
+            intent_hash.as_str(),
+        )
+        .await?
+        {
+            tx.commit().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::ExactReplay { authoritative });
+        }
+        let row = sqlx::query(
+            "SELECT parent_scope_instance_id, admitted_children, settled_children, lifecycle,
+                    admission_state, projection_version
+             FROM scope_instances WHERE run_id = ? AND scope_instance_id = ?",
+        )
+        .bind(command.run_id().as_str())
+        .bind(command.scope_instance_id().as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        let Some(row) = row else {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        };
+        let admitted_i = row
+            .try_get::<i64, _>("admitted_children")
+            .map_err(|_| invalid_data())?;
+        let settled_i = row
+            .try_get::<i64, _>("settled_children")
+            .map_err(|_| invalid_data())?;
+        let live_attempts = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM node_attempts a JOIN node_activations n
+             ON n.run_id = a.run_id AND n.activation_id = a.activation_id
+             WHERE n.run_id = ? AND n.scope_instance_id = ?
+               AND a.lifecycle IN ('created', 'leased', 'running')",
+        )
+        .bind(command.run_id().as_str())
+        .bind(command.scope_instance_id().as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        if row
+            .try_get::<String, _>("lifecycle")
+            .map_err(|_| invalid_data())?
+            != "settling"
+            || row
+                .try_get::<String, _>("admission_state")
+                .map_err(|_| invalid_data())?
+                != "closed"
+            || admitted_i != settled_i
+            || live_attempts != 0
+            || u64_from_i64(
+                row.try_get::<i64, _>("projection_version")
+                    .map_err(|_| invalid_data())?,
+            )? != command.expected_projection_version()
+        {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        }
+        let next_version = command
+            .expected_projection_version()
+            .checked_add(1)
+            .ok_or_else(invalid_data)?;
+        let event = model_data(PendingExecutionEvent::new(
+            ExecutionEventContext::for_run(command.run_id().clone())
+                .in_scope(command.scope_instance_id().clone()),
+            ExecutionEventPayload::ScopeSettled {
+                admitted_children: u32::try_from(admitted_i).map_err(|_| invalid_data())?,
+                settled_children: u32::try_from(settled_i).map_err(|_| invalid_data())?,
+                live_attempts: 0,
+            },
+        ))?;
+        let (seq, id) = append_primary_event(
+            &mut tx,
+            command.run_id(),
+            &transition_key,
+            intent_hash.as_str(),
+            next_version,
+            &event,
+        )
+        .await?;
+        let updated = sqlx::query(
+            "UPDATE scope_instances SET lifecycle = 'settled', projection_version = projection_version + 1,
+                    settled_at = CURRENT_TIMESTAMP
+             WHERE run_id = ? AND scope_instance_id = ? AND lifecycle = 'settling'
+               AND admission_state = 'closed' AND admitted_children = settled_children
+               AND projection_version = ?",
+        ).bind(command.run_id().as_str()).bind(command.scope_instance_id().as_str())
+        .bind(i64_from_u64(command.expected_projection_version())?)
+        .execute(&mut *tx).await.map_err(RepositoryError::storage)?;
+        if updated.rows_affected() != 1 {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        }
+        if let Some(parent) = row
+            .try_get::<Option<String>, _>("parent_scope_instance_id")
+            .map_err(|_| invalid_data())?
+        {
+            let parent_update = sqlx::query(
+                "UPDATE scope_instances SET settled_children = settled_children + 1,
+                        projection_version = projection_version + 1
+                 WHERE run_id = ? AND scope_instance_id = ? AND settled_children < admitted_children",
+            ).bind(command.run_id().as_str()).bind(parent)
+            .execute(&mut *tx).await.map_err(RepositoryError::storage)?;
+            if parent_update.rows_affected() != 1 {
+                tx.rollback().await.map_err(RepositoryError::storage)?;
+                return Ok(TransitionOutcome::StateConflict);
+            }
+        }
+        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), next_version);
+        finalize(
+            &mut tx,
+            command.run_id(),
+            &transition_key,
+            intent_hash.as_str(),
+            &id,
+            &receipt,
+        )
+        .await?;
+        tx.commit().await.map_err(RepositoryError::storage)?;
+        Ok(TransitionOutcome::Committed { result: receipt })
+    }
+
+    async fn emit_control_token(
+        &self,
+        transition_key: TransitionKey,
+        command: EmitControlTokenCommand,
+    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
+        let intent_hash = canonical_intent_hash(&command)?;
+        let _writer = self.writer.lock().await;
+        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
+            &mut tx,
+            command.run_id(),
+            &transition_key,
+            intent_hash.as_str(),
+        )
+        .await?
+        {
+            tx.commit().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::ExactReplay { authoritative });
+        }
+        let Some((scope, node, version, _)) = activation_context(
+            &mut tx,
+            command.run_id(),
+            command.provenance().source_activation_id(),
+        )
+        .await?
+        else {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        };
+        if scope != *command.provenance().scope_instance_id()
+            || u64_from_i64(version)? != command.expected_source_projection_version()
+        {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        }
+        let duplicate: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM control_tokens WHERE run_id = ? AND
+             (token_id = ? OR (source_activation_id = ? AND emission_slot = ?))",
+        )
+        .bind(command.run_id().as_str())
+        .bind(command.token_id().as_str())
+        .bind(command.provenance().source_activation_id().as_str())
+        .bind(command.provenance().emission_slot().storage_key())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        if duplicate.is_some() {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        }
+        let event = model_data(PendingExecutionEvent::new(
+            ExecutionEventContext::for_run(command.run_id().clone()).for_activation(
+                scope.clone(),
+                node,
+                command.provenance().source_activation_id().clone(),
+            ),
+            ExecutionEventPayload::ControlTokenEmitted {
+                token_id: command.token_id().clone(),
+                source_port: command.provenance().source_port().clone(),
+                token_scope_instance_id: scope,
+                frames: event_control_frames(command.provenance()),
+            },
+        ))?;
+        let (seq, id) = append_primary_event(
+            &mut tx,
+            command.run_id(),
+            &transition_key,
+            intent_hash.as_str(),
+            0,
+            &event,
+        )
+        .await?;
+        insert_token(
+            &mut tx,
+            command.run_id(),
+            command.token_id(),
+            command.provenance(),
+            &transition_key,
+        )
+        .await?;
+        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), 0);
+        finalize(
+            &mut tx,
+            command.run_id(),
+            &transition_key,
+            intent_hash.as_str(),
+            &id,
+            &receipt,
+        )
+        .await?;
+        tx.commit().await.map_err(RepositoryError::storage)?;
+        Ok(TransitionOutcome::Committed { result: receipt })
+    }
+
+    async fn consume_control_token(
+        &self,
+        transition_key: TransitionKey,
+        command: ConsumeControlTokenCommand,
+    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
+        mutate_token_terminal(
+            self,
+            transition_key,
+            command.run_id(),
+            command.token_id(),
+            command.expected_token_projection_version(),
+            Some(command.consumer_activation_id()),
+            false,
+            &command,
+        )
+        .await
+    }
+
+    async fn revoke_control_token(
+        &self,
+        transition_key: TransitionKey,
+        command: RevokeControlTokenCommand,
+    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
+        mutate_token_terminal::<RevokeControlTokenCommand>(
+            self,
+            transition_key,
+            command.run_id(),
+            command.token_id(),
+            command.expected_token_projection_version(),
+            None,
+            true,
+            &command,
+        )
+        .await
+    }
+
+    async fn create_fork(
+        &self,
+        transition_key: TransitionKey,
+        command: CreateForkCommand,
+    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
+        create_fork(self, transition_key, command).await
+    }
+
+    async fn record_join_arrival(
+        &self,
+        transition_key: TransitionKey,
+        command: RecordJoinArrivalCommand,
+    ) -> Result<TransitionOutcome<JoinArrivalReceipt>, RepositoryError> {
+        record_join_arrival(self, transition_key, command).await
+    }
+
+    async fn create_reuse_candidate(
+        &self,
+        transition_key: TransitionKey,
+        command: CreateReuseCandidateCommand,
+    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
+        create_reuse_candidate(self, transition_key, command).await
+    }
+
+    async fn reject_reuse_candidate(
+        &self,
+        transition_key: TransitionKey,
+        command: RejectReuseCandidateCommand,
+    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
+        decide_reuse_candidate(self, transition_key, command).await
+    }
+
+    async fn materialize_reuse_candidate(
+        &self,
+        transition_key: TransitionKey,
+        command: MaterializeReuseCandidateCommand,
+    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
+        materialize_reuse_candidate(self, transition_key, command).await
+    }
+}
+
 async fn insert_token(
-    transaction: &mut Transaction<'_, Postgres>,
+    tx: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
-    token_id: &crate::engine::ControlTokenId,
-    provenance: &ControlTokenProvenance,
+    token_id: &insight_engine::ControlTokenId,
+    provenance: &insight_engine::ControlTokenProvenance,
     transition_key: &TransitionKey,
 ) -> Result<(), RepositoryError> {
-    let frames = serde_json::to_value(provenance.frames())
-        .map_err(|_| RepositoryError::canonicalization())?;
+    let frames = canonical_json(
+        &serde_json::to_value(provenance.frames())
+            .map_err(|_| RepositoryError::canonicalization())?,
+    )?;
     let branch = provenance
         .frames()
         .iter()
@@ -306,8 +828,8 @@ async fn insert_token(
             fork_group_id, fork_leg_id, token_state, consumed_by_activation_id,
             consumed_by_transition_key, consumed_at, revoked_by_transition_key, revoked_at,
             projection_version, created_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'available',
-                   NULL,NULL,NULL,NULL,NULL,0,CURRENT_TIMESTAMP)",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available',
+                   NULL, NULL, NULL, NULL, NULL, 0, CURRENT_TIMESTAMP)",
     )
     .bind(run_id.as_str())
     .bind(token_id.as_str())
@@ -322,735 +844,82 @@ async fn insert_token(
     .bind(branch.map(|value| value.1))
     .bind(fork.map(|value| value.0))
     .bind(fork.map(|value| value.1))
-    .execute(&mut **transaction)
+    .execute(&mut **tx)
     .await
     .map_err(RepositoryError::storage)?;
     Ok(())
 }
 
-#[async_trait]
-impl ControlDurableRepository for PostgresDurableRepository {
-    async fn create_child_scope(
-        &self,
-        transition_key: TransitionKey,
-        command: CreateChildScopeCommand,
-    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
-        let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
-        lock_transition(&mut transaction, command.run_id(), &transition_key).await?;
-        if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-        )
-        .await?
-        {
-            transaction
-                .commit()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::ExactReplay { authoritative });
-        }
-        lock_run_for_event_write(&mut transaction, command.run_id()).await?;
-        let parent_id = command.scope().parent().ok_or_else(invalid_data)?;
-        let parent = sqlx::query(
-            "SELECT lifecycle, admission_state, projection_version FROM scope_instances
-             WHERE run_id=$1 AND scope_instance_id=$2 FOR UPDATE",
-        )
-        .bind(command.run_id().as_str())
-        .bind(parent_id.as_str())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        let Some(parent) = parent else {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        };
-        if parent
-            .try_get::<String, _>("lifecycle")
-            .map_err(|_| invalid_data())?
-            != "active"
-            || parent
-                .try_get::<String, _>("admission_state")
-                .map_err(|_| invalid_data())?
-                != "open"
-            || u64::try_from(
-                parent
-                    .try_get::<i64, _>("projection_version")
-                    .map_err(|_| invalid_data())?,
-            )
-            .map_err(|_| invalid_data())?
-                != command.expected_parent_projection_version()
-        {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        }
-        let occupied: Option<i32> = sqlx::query_scalar(
-            "SELECT 1 FROM scope_instances WHERE run_id=$1 AND scope_instance_id=$2",
-        )
-        .bind(command.run_id().as_str())
-        .bind(command.scope().id().as_str())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        if occupied.is_some() {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        }
-        let (static_scope_id, stable_dynamic_key, scope_kind, event_scope_kind) =
-            scope_storage(command.scope())?;
-        sqlx::query(
-            "INSERT INTO scope_instances (
-                run_id,scope_instance_id,parent_scope_instance_id,static_scope_id,
-                stable_dynamic_key,scope_kind,is_root,lifecycle,admission_state,
-                admitted_children,settled_children,projection_version,created_at,settled_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,FALSE,'active','open',0,0,0,CURRENT_TIMESTAMP,NULL)",
-        )
-        .bind(command.run_id().as_str())
-        .bind(command.scope().id().as_str())
-        .bind(parent_id.as_str())
-        .bind(static_scope_id)
-        .bind(stable_dynamic_key)
-        .bind(scope_kind)
-        .execute(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        let updated = sqlx::query(
-            "UPDATE scope_instances SET admitted_children=admitted_children+1,
-                    projection_version=projection_version+1
-             WHERE run_id=$1 AND scope_instance_id=$2 AND lifecycle='active'
-               AND admission_state='open' AND projection_version=$3",
-        )
-        .bind(command.run_id().as_str())
-        .bind(parent_id.as_str())
-        .bind(
-            i64::try_from(command.expected_parent_projection_version())
-                .map_err(|_| invalid_data())?,
-        )
-        .execute(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        if updated.rows_affected() != 1 {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        }
-        let event = PendingExecutionEvent::new(
-            ExecutionEventContext::for_run(command.run_id().clone())
-                .in_scope(command.scope().id().clone()),
-            ExecutionEventPayload::ScopeCreated {
-                scope_kind: event_scope_kind,
-                parent_scope_instance_id: Some(parent_id.clone()),
-            },
-        )
-        .map_err(|_| invalid_data())?;
-        let (seq, id) = append_primary_event(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-            0,
-            &event,
-        )
-        .await?;
-        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), 0);
-        finalize(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-            &id,
-            &receipt,
-        )
-        .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(RepositoryError::storage)?;
-        Ok(TransitionOutcome::Committed { result: receipt })
-    }
-
-    async fn close_scope_admission(
-        &self,
-        transition_key: TransitionKey,
-        command: CloseScopeAdmissionCommand,
-    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
-        let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
-        lock_transition(&mut transaction, command.run_id(), &transition_key).await?;
-        if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-        )
-        .await?
-        {
-            transaction
-                .commit()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::ExactReplay { authoritative });
-        }
-        lock_run_for_event_write(&mut transaction, command.run_id()).await?;
-        let row = sqlx::query(
-            "SELECT admitted_children,settled_children,lifecycle,admission_state,projection_version
-             FROM scope_instances WHERE run_id=$1 AND scope_instance_id=$2 FOR UPDATE",
-        )
-        .bind(command.run_id().as_str())
-        .bind(command.scope_instance_id().as_str())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        let Some(row) = row else {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        };
-        if row
-            .try_get::<String, _>("lifecycle")
-            .map_err(|_| invalid_data())?
-            != "active"
-            || row
-                .try_get::<String, _>("admission_state")
-                .map_err(|_| invalid_data())?
-                != "open"
-            || u64::try_from(
-                row.try_get::<i64, _>("projection_version")
-                    .map_err(|_| invalid_data())?,
-            )
-            .map_err(|_| invalid_data())?
-                != command.expected_projection_version()
-        {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        }
-        let admitted = u32::try_from(
-            row.try_get::<i64, _>("admitted_children")
-                .map_err(|_| invalid_data())?,
-        )
-        .map_err(|_| invalid_data())?;
-        let settled = u32::try_from(
-            row.try_get::<i64, _>("settled_children")
-                .map_err(|_| invalid_data())?,
-        )
-        .map_err(|_| invalid_data())?;
-        let live = u32::try_from(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM node_attempts a JOIN node_activations n
-             ON n.run_id=a.run_id AND n.activation_id=a.activation_id
-             WHERE n.run_id=$1 AND n.scope_instance_id=$2
-               AND a.lifecycle IN ('created','leased','running')",
-            )
-            .bind(command.run_id().as_str())
-            .bind(command.scope_instance_id().as_str())
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(RepositoryError::storage)?,
-        )
-        .map_err(|_| invalid_data())?;
-        let next = command
-            .expected_projection_version()
-            .checked_add(1)
-            .ok_or_else(invalid_data)?;
-        let event = PendingExecutionEvent::new(
-            ExecutionEventContext::for_run(command.run_id().clone())
-                .in_scope(command.scope_instance_id().clone()),
-            ExecutionEventPayload::ScopeDraining {
-                admitted_children: admitted,
-                settled_children: settled,
-                live_attempts: live,
-            },
-        )
-        .map_err(|_| invalid_data())?;
-        let (seq, id) = append_primary_event(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-            next,
-            &event,
-        )
-        .await?;
-        let updated = sqlx::query(
-            "UPDATE scope_instances SET lifecycle='settling',admission_state='closed',
-                    projection_version=projection_version+1
-             WHERE run_id=$1 AND scope_instance_id=$2 AND lifecycle='active'
-               AND admission_state='open' AND projection_version=$3",
-        )
-        .bind(command.run_id().as_str())
-        .bind(command.scope_instance_id().as_str())
-        .bind(i64::try_from(command.expected_projection_version()).map_err(|_| invalid_data())?)
-        .execute(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        if updated.rows_affected() != 1 {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        }
-        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), next);
-        finalize(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-            &id,
-            &receipt,
-        )
-        .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(RepositoryError::storage)?;
-        Ok(TransitionOutcome::Committed { result: receipt })
-    }
-
-    async fn settle_scope(
-        &self,
-        transition_key: TransitionKey,
-        command: SettleScopeCommand,
-    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
-        let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
-        lock_transition(&mut transaction, command.run_id(), &transition_key).await?;
-        if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-        )
-        .await?
-        {
-            transaction
-                .commit()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::ExactReplay { authoritative });
-        }
-        lock_run_for_event_write(&mut transaction, command.run_id()).await?;
-        let row = sqlx::query(
-            "SELECT parent_scope_instance_id,admitted_children,settled_children,lifecycle,
-                    admission_state,projection_version FROM scope_instances
-             WHERE run_id=$1 AND scope_instance_id=$2 FOR UPDATE",
-        )
-        .bind(command.run_id().as_str())
-        .bind(command.scope_instance_id().as_str())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        let Some(row) = row else {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        };
-        let admitted = row
-            .try_get::<i64, _>("admitted_children")
-            .map_err(|_| invalid_data())?;
-        let settled = row
-            .try_get::<i64, _>("settled_children")
-            .map_err(|_| invalid_data())?;
-        let live = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM node_attempts a JOIN node_activations n
-             ON n.run_id=a.run_id AND n.activation_id=a.activation_id
-             WHERE n.run_id=$1 AND n.scope_instance_id=$2
-               AND a.lifecycle IN ('created','leased','running')",
-        )
-        .bind(command.run_id().as_str())
-        .bind(command.scope_instance_id().as_str())
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        if row
-            .try_get::<String, _>("lifecycle")
-            .map_err(|_| invalid_data())?
-            != "settling"
-            || row
-                .try_get::<String, _>("admission_state")
-                .map_err(|_| invalid_data())?
-                != "closed"
-            || admitted != settled
-            || live != 0
-            || u64::try_from(
-                row.try_get::<i64, _>("projection_version")
-                    .map_err(|_| invalid_data())?,
-            )
-            .map_err(|_| invalid_data())?
-                != command.expected_projection_version()
-        {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        }
-        let next = command
-            .expected_projection_version()
-            .checked_add(1)
-            .ok_or_else(invalid_data)?;
-        let event = PendingExecutionEvent::new(
-            ExecutionEventContext::for_run(command.run_id().clone())
-                .in_scope(command.scope_instance_id().clone()),
-            ExecutionEventPayload::ScopeSettled {
-                admitted_children: u32::try_from(admitted).map_err(|_| invalid_data())?,
-                settled_children: u32::try_from(settled).map_err(|_| invalid_data())?,
-                live_attempts: 0,
-            },
-        )
-        .map_err(|_| invalid_data())?;
-        let (seq, id) = append_primary_event(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-            next,
-            &event,
-        )
-        .await?;
-        let updated=sqlx::query(
-            "UPDATE scope_instances SET lifecycle='settled',projection_version=projection_version+1,
-                    settled_at=CURRENT_TIMESTAMP WHERE run_id=$1 AND scope_instance_id=$2
-               AND lifecycle='settling' AND admission_state='closed'
-               AND admitted_children=settled_children AND projection_version=$3",
-        ).bind(command.run_id().as_str()).bind(command.scope_instance_id().as_str())
-        .bind(i64::try_from(command.expected_projection_version()).map_err(|_|invalid_data())?)
-        .execute(&mut *transaction).await.map_err(RepositoryError::storage)?;
-        if updated.rows_affected() != 1 {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        }
-        if let Some(parent) = row
-            .try_get::<Option<String>, _>("parent_scope_instance_id")
-            .map_err(|_| invalid_data())?
-        {
-            let updated = sqlx::query(
-                "UPDATE scope_instances SET settled_children=settled_children+1,
-                    projection_version=projection_version+1 WHERE run_id=$1 AND scope_instance_id=$2
-                    AND settled_children<admitted_children",
-            )
-            .bind(command.run_id().as_str())
-            .bind(parent)
-            .execute(&mut *transaction)
-            .await
-            .map_err(RepositoryError::storage)?;
-            if updated.rows_affected() != 1 {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(RepositoryError::storage)?;
-                return Ok(TransitionOutcome::StateConflict);
-            }
-        }
-        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), next);
-        finalize(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-            &id,
-            &receipt,
-        )
-        .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(RepositoryError::storage)?;
-        Ok(TransitionOutcome::Committed { result: receipt })
-    }
-
-    async fn emit_control_token(
-        &self,
-        transition_key: TransitionKey,
-        command: EmitControlTokenCommand,
-    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
-        let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
-        lock_transition(&mut transaction, command.run_id(), &transition_key).await?;
-        if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-        )
-        .await?
-        {
-            transaction
-                .commit()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::ExactReplay { authoritative });
-        }
-        lock_run_for_event_write(&mut transaction, command.run_id()).await?;
-        let Some((scope, node, version, _)) = activation_context(
-            &mut transaction,
-            command.run_id(),
-            command.provenance().source_activation_id(),
-        )
-        .await?
-        else {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        };
-        if scope != *command.provenance().scope_instance_id()
-            || u64::try_from(version).map_err(|_| invalid_data())?
-                != command.expected_source_projection_version()
-        {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        }
-        let occupied: Option<i32> = sqlx::query_scalar(
-            "SELECT 1 FROM control_tokens WHERE run_id=$1 AND
-                (token_id=$2 OR (source_activation_id=$3 AND emission_slot=$4))",
-        )
-        .bind(command.run_id().as_str())
-        .bind(command.token_id().as_str())
-        .bind(command.provenance().source_activation_id().as_str())
-        .bind(command.provenance().emission_slot().storage_key())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        if occupied.is_some() {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        }
-        let event = PendingExecutionEvent::new(
-            ExecutionEventContext::for_run(command.run_id().clone()).for_activation(
-                scope.clone(),
-                node,
-                command.provenance().source_activation_id().clone(),
-            ),
-            ExecutionEventPayload::ControlTokenEmitted {
-                token_id: command.token_id().clone(),
-                source_port: command.provenance().source_port().clone(),
-                token_scope_instance_id: scope,
-                frames: event_control_frames(command.provenance()),
-            },
-        )
-        .map_err(|_| invalid_data())?;
-        let (seq, id) = append_primary_event(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-            0,
-            &event,
-        )
-        .await?;
-        insert_token(
-            &mut transaction,
-            command.run_id(),
-            command.token_id(),
-            command.provenance(),
-            &transition_key,
-        )
-        .await?;
-        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), 0);
-        finalize(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-            &id,
-            &receipt,
-        )
-        .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(RepositoryError::storage)?;
-        Ok(TransitionOutcome::Committed { result: receipt })
-    }
-
-    async fn consume_control_token(
-        &self,
-        transition_key: TransitionKey,
-        command: ConsumeControlTokenCommand,
-    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
-        mutate_token_terminal(
-            self,
-            transition_key,
-            command.run_id(),
-            command.token_id(),
-            command.expected_token_projection_version(),
-            Some(command.consumer_activation_id()),
-            false,
-            &command,
-        )
-        .await
-    }
-
-    async fn revoke_control_token(
-        &self,
-        transition_key: TransitionKey,
-        command: RevokeControlTokenCommand,
-    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
-        mutate_token_terminal(
-            self,
-            transition_key,
-            command.run_id(),
-            command.token_id(),
-            command.expected_token_projection_version(),
-            None,
-            true,
-            &command,
-        )
-        .await
-    }
-
-    async fn create_fork(
-        &self,
-        transition_key: TransitionKey,
-        command: CreateForkCommand,
-    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
-        create_fork(self, transition_key, command).await
-    }
-    async fn record_join_arrival(
-        &self,
-        transition_key: TransitionKey,
-        command: RecordJoinArrivalCommand,
-    ) -> Result<TransitionOutcome<JoinArrivalReceipt>, RepositoryError> {
-        record_join_arrival(self, transition_key, command).await
-    }
-    async fn create_reuse_candidate(
-        &self,
-        transition_key: TransitionKey,
-        command: CreateReuseCandidateCommand,
-    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
-        create_reuse_candidate(self, transition_key, command).await
-    }
-    async fn reject_reuse_candidate(
-        &self,
-        transition_key: TransitionKey,
-        command: RejectReuseCandidateCommand,
-    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
-        reject_reuse_candidate(self, transition_key, command).await
-    }
-    async fn materialize_reuse_candidate(
-        &self,
-        transition_key: TransitionKey,
-        command: MaterializeReuseCandidateCommand,
-    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
-        materialize_reuse_candidate(self, transition_key, command).await
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn mutate_token_terminal<T: Serialize>(
-    repository: &PostgresDurableRepository,
+    repository: &SqliteDurableRepository,
     transition_key: TransitionKey,
     run_id: &RunId,
-    token_id: &crate::engine::ControlTokenId,
-    expected: u64,
+    token_id: &insight_engine::ControlTokenId,
+    expected_version: u64,
     consumer: Option<&ActivationId>,
     revoke: bool,
     command: &T,
 ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(command)?;
-    let mut transaction = repository
+    let _writer = repository.writer.lock().await;
+    let mut tx = repository
         .pool
         .begin()
         .await
         .map_err(RepositoryError::storage)?;
-    lock_transition(&mut transaction, run_id, &transition_key).await?;
     if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
-        &mut transaction,
+        &mut tx,
         run_id,
         &transition_key,
         intent_hash.as_str(),
     )
     .await?
     {
-        transaction
-            .commit()
-            .await
-            .map_err(RepositoryError::storage)?;
+        tx.commit().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::ExactReplay { authoritative });
     }
-    lock_run_for_event_write(&mut transaction, run_id).await?;
     let token = sqlx::query(
-        "SELECT source_activation_id,projection_version,token_state FROM control_tokens
-            WHERE run_id=$1 AND token_id=$2 FOR UPDATE",
+        "SELECT source_activation_id, projection_version, token_state
+         FROM control_tokens WHERE run_id = ? AND token_id = ?",
     )
     .bind(run_id.as_str())
     .bind(token_id.as_str())
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(RepositoryError::storage)?;
     let Some(token) = token else {
-        transaction
-            .rollback()
-            .await
-            .map_err(RepositoryError::storage)?;
+        tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     };
     if token
         .try_get::<String, _>("token_state")
         .map_err(|_| invalid_data())?
         != "available"
-        || u64::try_from(
+        || u64_from_i64(
             token
                 .try_get::<i64, _>("projection_version")
                 .map_err(|_| invalid_data())?,
-        )
-        .map_err(|_| invalid_data())?
-            != expected
+        )? != expected_version
     {
-        transaction
-            .rollback()
-            .await
-            .map_err(RepositoryError::storage)?;
+        tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     }
-    let actor = consumer.cloned().unwrap_or(
-        ActivationId::new(
+    let event_activation = if let Some(consumer) = consumer {
+        consumer.clone()
+    } else {
+        model_data(ActivationId::new(
             token
                 .try_get::<String, _>("source_activation_id")
                 .map_err(|_| invalid_data())?,
-        )
-        .map_err(|_| invalid_data())?,
-    );
-    let Some((scope, node, _, _)) = activation_context(&mut transaction, run_id, &actor).await?
+        ))?
+    };
+    let Some((scope, node, _, _)) = activation_context(&mut tx, run_id, &event_activation).await?
     else {
-        transaction
-            .rollback()
-            .await
-            .map_err(RepositoryError::storage)?;
+        tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     };
-    let next = expected.checked_add(1).ok_or_else(invalid_data)?;
+    let next_version = expected_version.checked_add(1).ok_or_else(invalid_data)?;
     let payload = if revoke {
         ExecutionEventPayload::ControlTokenRevoked {
             token_id: token_id.clone(),
@@ -1060,43 +929,60 @@ async fn mutate_token_terminal<T: Serialize>(
             token_id: token_id.clone(),
         }
     };
-    let event = PendingExecutionEvent::new(
-        ExecutionEventContext::for_run(run_id.clone()).for_activation(scope, node, actor),
+    let event = model_data(PendingExecutionEvent::new(
+        ExecutionEventContext::for_run(run_id.clone()).for_activation(
+            scope,
+            node,
+            event_activation,
+        ),
         payload,
-    )
-    .map_err(|_| invalid_data())?;
+    ))?;
     let (seq, id) = append_primary_event(
-        &mut transaction,
+        &mut tx,
         run_id,
         &transition_key,
         intent_hash.as_str(),
-        next,
+        next_version,
         &event,
     )
     .await?;
-    let updated=if revoke{
-        sqlx::query("UPDATE control_tokens SET token_state='revoked',revoked_by_transition_key=$1,
-                revoked_at=CURRENT_TIMESTAMP,projection_version=projection_version+1
-             WHERE run_id=$2 AND token_id=$3 AND token_state='available' AND projection_version=$4")
-            .bind(transition_key.as_str()).bind(run_id.as_str()).bind(token_id.as_str()).bind(i64::try_from(expected).map_err(|_|invalid_data())?)
-            .execute(&mut *transaction).await
-    }else{
-        sqlx::query("UPDATE control_tokens SET token_state='consumed',consumed_by_activation_id=$1,
-                consumed_by_transition_key=$2,consumed_at=CURRENT_TIMESTAMP,projection_version=projection_version+1
-             WHERE run_id=$3 AND token_id=$4 AND token_state='available' AND projection_version=$5")
-            .bind(consumer.ok_or_else(invalid_data)?.as_str()).bind(transition_key.as_str()).bind(run_id.as_str()).bind(token_id.as_str())
-            .bind(i64::try_from(expected).map_err(|_|invalid_data())?).execute(&mut *transaction).await
-    }.map_err(RepositoryError::storage)?;
+    let updated = if revoke {
+        sqlx::query(
+            "UPDATE control_tokens SET token_state = 'revoked', revoked_by_transition_key = ?,
+                    revoked_at = CURRENT_TIMESTAMP, projection_version = projection_version + 1
+             WHERE run_id = ? AND token_id = ? AND token_state = 'available'
+               AND projection_version = ?",
+        )
+        .bind(transition_key.as_str())
+        .bind(run_id.as_str())
+        .bind(token_id.as_str())
+        .bind(i64_from_u64(expected_version)?)
+        .execute(&mut *tx)
+        .await
+    } else {
+        sqlx::query(
+            "UPDATE control_tokens SET token_state = 'consumed', consumed_by_activation_id = ?,
+                    consumed_by_transition_key = ?, consumed_at = CURRENT_TIMESTAMP,
+                    projection_version = projection_version + 1
+             WHERE run_id = ? AND token_id = ? AND token_state = 'available'
+               AND projection_version = ?",
+        )
+        .bind(consumer.expect("consume supplies consumer").as_str())
+        .bind(transition_key.as_str())
+        .bind(run_id.as_str())
+        .bind(token_id.as_str())
+        .bind(i64_from_u64(expected_version)?)
+        .execute(&mut *tx)
+        .await
+    }
+    .map_err(RepositoryError::storage)?;
     if updated.rows_affected() != 1 {
-        transaction
-            .rollback()
-            .await
-            .map_err(RepositoryError::storage)?;
+        tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     }
-    let receipt = control_adapter::control_commit_receipt(seq, id.clone(), next);
+    let receipt = control_adapter::control_commit_receipt(seq, id.clone(), next_version);
     finalize(
-        &mut transaction,
+        &mut tx,
         run_id,
         &transition_key,
         intent_hash.as_str(),
@@ -1104,25 +990,49 @@ async fn mutate_token_terminal<T: Serialize>(
         &receipt,
     )
     .await?;
-    transaction
-        .commit()
-        .await
-        .map_err(RepositoryError::storage)?;
+    tx.commit().await.map_err(RepositoryError::storage)?;
     Ok(TransitionOutcome::Committed { result: receipt })
 }
 
+#[async_trait]
+impl SchedulerLeaseRepository for SqliteDurableRepository {
+    async fn claim_scheduler_run(
+        &self,
+        _transition_key: TransitionKey,
+        _command: ClaimSchedulerRunCommand,
+    ) -> Result<TransitionOutcome<SchedulerRunLease>, RepositoryError> {
+        Err(unsupported_sqlite_scheduler_lease())
+    }
+    async fn heartbeat_scheduler_run(
+        &self,
+        _transition_key: TransitionKey,
+        _command: HeartbeatSchedulerRunCommand,
+    ) -> Result<TransitionOutcome<SchedulerRunLease>, RepositoryError> {
+        Err(unsupported_sqlite_scheduler_lease())
+    }
+    async fn release_scheduler_run(
+        &self,
+        _transition_key: TransitionKey,
+        _command: FencedSchedulerRunCommand,
+    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
+        Err(unsupported_sqlite_scheduler_lease())
+    }
+}
+
+// Structured operations are below so their transaction bodies remain isolated
+// from the small Scope/Token transitions above.
 async fn create_fork(
-    repository: &PostgresDurableRepository,
+    repository: &SqliteDurableRepository,
     transition_key: TransitionKey,
     command: CreateForkCommand,
 ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
+    let _writer = repository.writer.lock().await;
     let mut tx = repository
         .pool
         .begin()
         .await
         .map_err(RepositoryError::storage)?;
-    lock_transition(&mut tx, command.run_id(), &transition_key).await?;
     if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
         &mut tx,
         command.run_id(),
@@ -1134,7 +1044,6 @@ async fn create_fork(
         tx.commit().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::ExactReplay { authoritative });
     }
-    lock_run_for_event_write(&mut tx, command.run_id()).await?;
 
     if command.legs().is_empty()
         || command.inherited_token_id().is_some()
@@ -1159,7 +1068,7 @@ async fn create_fork(
     }
     let parent = sqlx::query(
         "SELECT lifecycle, admission_state, projection_version
-         FROM scope_instances WHERE run_id = $1 AND scope_instance_id = $2 FOR UPDATE",
+         FROM scope_instances WHERE run_id = ? AND scope_instance_id = ?",
     )
     .bind(command.run_id().as_str())
     .bind(command.parent_scope_instance_id().as_str())
@@ -1187,8 +1096,8 @@ async fn create_fork(
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     }
-    let occupied: Option<i32> =
-        sqlx::query_scalar("SELECT 1 FROM fork_groups WHERE run_id = $1 AND fork_group_id = $2")
+    let occupied: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM fork_groups WHERE run_id = ? AND fork_group_id = ?")
             .bind(command.run_id().as_str())
             .bind(command.fork_group_id().as_str())
             .fetch_optional(&mut *tx)
@@ -1202,7 +1111,7 @@ async fn create_fork(
     let inherited_frames = if let Some(token_id) = command.inherited_token_id() {
         let token = sqlx::query(
             "SELECT current_scope_instance_id, provenance_frames, token_state, projection_version
-             FROM control_tokens WHERE run_id = $1 AND token_id = $2 FOR UPDATE",
+             FROM control_tokens WHERE run_id = ? AND token_id = ?",
         )
         .bind(command.run_id().as_str())
         .bind(token_id.as_str())
@@ -1232,9 +1141,9 @@ async fn create_fork(
             tx.rollback().await.map_err(RepositoryError::storage)?;
             return Ok(TransitionOutcome::StateConflict);
         }
-        serde_json::from_value::<Vec<ControlFrame>>(
-            token
-                .try_get::<serde_json::Value, _>("provenance_frames")
+        serde_json::from_str::<Vec<ControlFrame>>(
+            &token
+                .try_get::<String, _>("provenance_frames")
                 .map_err(|_| invalid_data())?,
         )
         .map_err(|_| invalid_data())?
@@ -1307,22 +1216,22 @@ async fn create_fork(
             join_activation_id, join_mode, failure_leg_id, failure_settlement_class,
             expected_legs, group_state, admitted_legs, settled_legs,
             projection_version, created_at, settled_at
-         ) VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, $5, 'open', $6, 0, 0,
+         ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, 'open', ?, 0, 0,
                    CURRENT_TIMESTAMP, NULL)",
     )
     .bind(command.run_id().as_str())
     .bind(command.fork_group_id().as_str())
     .bind(command.fork_activation_id().as_str())
     .bind(command.parent_scope_instance_id().as_str())
-    .bind(i32::try_from(command.legs().len()).map_err(|_| invalid_data())?)
-    .bind(i32::try_from(command.legs().len()).map_err(|_| invalid_data())?)
+    .bind(i64::try_from(command.legs().len()).map_err(|_| invalid_data())?)
+    .bind(i64::try_from(command.legs().len()).map_err(|_| invalid_data())?)
     .execute(&mut *tx)
     .await
     .map_err(RepositoryError::storage)?;
 
     for (index, (admission, provenance)) in command.legs().iter().zip(&provenances).enumerate() {
-        insert_scope_row_pg(&mut tx, command.run_id(), admission.scope()).await?;
-        insert_activation_row_pg(
+        insert_scope_row(&mut tx, command.run_id(), admission.scope()).await?;
+        insert_activation_row(
             &mut tx,
             command.run_id(),
             admission.leg().child_activation_id(),
@@ -1345,29 +1254,28 @@ async fn create_fork(
                 run_id, fork_group_id, leg_id, declaration_index, scope_instance_id,
                 child_activation_id, token_id, is_required, leg_state, settlement_class,
                 projection_version, created_at, settled_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'admitted', NULL, 0,
-                       CURRENT_TIMESTAMP, NULL)",
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'admitted', NULL, 0, CURRENT_TIMESTAMP, NULL)",
         )
         .bind(command.run_id().as_str())
         .bind(command.fork_group_id().as_str())
         .bind(admission.leg().leg_id().as_str())
-        .bind(i32::try_from(index).map_err(|_| invalid_data())?)
+        .bind(i64::try_from(index).map_err(|_| invalid_data())?)
         .bind(admission.scope().id().as_str())
         .bind(admission.leg().child_activation_id().as_str())
         .bind(admission.token_id().as_str())
-        .bind(matches!(
+        .bind(i64::from(matches!(
             admission.leg().requirement(),
             ChildRequirement::Required
-        ))
+        )))
         .execute(&mut *tx)
         .await
         .map_err(RepositoryError::storage)?;
     }
     let parent_update = sqlx::query(
-        "UPDATE scope_instances SET admitted_children = admitted_children + $1,
+        "UPDATE scope_instances SET admitted_children = admitted_children + ?,
                 projection_version = projection_version + 1
-         WHERE run_id = $2 AND scope_instance_id = $3 AND lifecycle = 'active'
-           AND admission_state = 'open' AND projection_version = $4",
+         WHERE run_id = ? AND scope_instance_id = ? AND lifecycle = 'active'
+           AND admission_state = 'open' AND projection_version = ?",
     )
     .bind(i64::try_from(command.legs().len()).map_err(|_| invalid_data())?)
     .bind(command.run_id().as_str())
@@ -1384,11 +1292,11 @@ async fn create_fork(
     }
     if let Some(token_id) = command.inherited_token_id() {
         let consumed = sqlx::query(
-            "UPDATE control_tokens SET token_state = 'consumed', consumed_by_activation_id = $1,
-                    consumed_by_transition_key = $2, consumed_at = CURRENT_TIMESTAMP,
+            "UPDATE control_tokens SET token_state = 'consumed', consumed_by_activation_id = ?,
+                    consumed_by_transition_key = ?, consumed_at = CURRENT_TIMESTAMP,
                     projection_version = projection_version + 1
-             WHERE run_id = $3 AND token_id = $4 AND token_state = 'available'
-               AND projection_version = $5",
+             WHERE run_id = ? AND token_id = ? AND token_state = 'available'
+               AND projection_version = ?",
         )
         .bind(command.fork_activation_id().as_str())
         .bind(transition_key.as_str())
@@ -1421,10 +1329,10 @@ async fn create_fork(
     Ok(TransitionOutcome::Committed { result: receipt })
 }
 
-async fn insert_scope_row_pg(
-    tx: &mut Transaction<'_, Postgres>,
+async fn insert_scope_row(
+    tx: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
-    scope: &crate::engine::ScopeInstance,
+    scope: &insight_engine::ScopeInstance,
 ) -> Result<(), RepositoryError> {
     let (static_scope_id, stable_dynamic_key, scope_kind, _) = scope_storage(scope)?;
     sqlx::query(
@@ -1432,8 +1340,7 @@ async fn insert_scope_row_pg(
             run_id, scope_instance_id, parent_scope_instance_id, static_scope_id,
             stable_dynamic_key, scope_kind, is_root, lifecycle, admission_state,
             admitted_children, settled_children, projection_version, created_at, settled_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, FALSE, 'active', 'open', 0, 0, 0,
-                   CURRENT_TIMESTAMP, NULL)",
+         ) VALUES (?, ?, ?, ?, ?, ?, 0, 'active', 'open', 0, 0, 0, CURRENT_TIMESTAMP, NULL)",
     )
     .bind(run_id.as_str())
     .bind(scope.id().as_str())
@@ -1447,16 +1354,16 @@ async fn insert_scope_row_pg(
     Ok(())
 }
 
-async fn insert_activation_row_pg(
-    tx: &mut Transaction<'_, Postgres>,
+async fn insert_activation_row(
+    tx: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
     activation_id: &ActivationId,
     scope_id: &ScopeInstanceId,
-    node_id: &crate::engine::NodeId,
+    node_id: &insight_engine::NodeId,
     stable_activation_key: &str,
-    execution_kind: &crate::engine::ExecutionKind,
+    execution_kind: &insight_engine::ExecutionKind,
 ) -> Result<(), RepositoryError> {
-    let effect_id = crate::engine::EffectId::for_activation(run_id, activation_id);
+    let effect_id = insight_engine::EffectId::for_activation(run_id, activation_id);
     let (execution_kind_name, idempotency, retry_budget) = execution_kind_fields(execution_kind);
     sqlx::query(
         "INSERT INTO node_activations (
@@ -1468,9 +1375,9 @@ async fn insert_activation_row_pg(
             termination_intent_transition_key, termination_intent_at, output_payload_id,
             output_artifact_id, output_value_hash, winning_attempt_no, reused_from_run_id,
             reused_from_activation_id, projection_version, created_at, updated_at, terminal_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, 'created', $7, $8, 'not_started',
-                   NULL, NULL, NULL, NULL, NULL, $9, NULL, NULL, NULL, NULL, NULL, NULL,
-                   NULL, NULL, NULL, NULL, NULL, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)",
+         ) VALUES (?, ?, ?, ?, ?, ?, 'created', ?, ?, 'not_started', NULL, NULL, NULL,
+                   NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                   NULL, NULL, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)",
     )
     .bind(run_id.as_str())
     .bind(activation_id.as_str())
@@ -1480,24 +1387,25 @@ async fn insert_activation_row_pg(
     .bind(execution_kind_name)
     .bind(effect_id.as_str())
     .bind(idempotency)
-    .bind(i32::try_from(retry_budget).map_err(|_| invalid_data())?)
+    .bind(i64::from(retry_budget))
     .execute(&mut **tx)
     .await
     .map_err(RepositoryError::storage)?;
     Ok(())
 }
+
 async fn record_join_arrival(
-    repository: &PostgresDurableRepository,
+    repository: &SqliteDurableRepository,
     transition_key: TransitionKey,
     command: RecordJoinArrivalCommand,
 ) -> Result<TransitionOutcome<JoinArrivalReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
+    let _writer = repository.writer.lock().await;
     let mut tx = repository
         .pool
         .begin()
         .await
         .map_err(RepositoryError::storage)?;
-    lock_transition(&mut tx, command.run_id(), &transition_key).await?;
     if let Some(authoritative) = replay_result::<JoinArrivalReceipt>(
         &mut tx,
         command.run_id(),
@@ -1509,30 +1417,10 @@ async fn record_join_arrival(
         tx.commit().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::ExactReplay { authoritative });
     }
-    lock_run_for_event_write(&mut tx, command.run_id()).await?;
-
-    // The group row is the serialization point. Checking duplicate arrivals
-    // after acquiring it makes a concurrent retry observe the first commit and
-    // return its exact authority instead of degrading into a version conflict.
-    let group = sqlx::query(
-        "SELECT fork_activation_id, parent_scope_instance_id, join_activation_id, join_mode,
-                failure_leg_id, failure_settlement_class, expected_legs, admitted_legs,
-                settled_legs, group_state, projection_version
-         FROM fork_groups WHERE run_id = $1 AND fork_group_id = $2 FOR UPDATE",
-    )
-    .bind(command.run_id().as_str())
-    .bind(command.fork_group_id().as_str())
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(RepositoryError::storage)?;
-    let Some(group) = group else {
-        tx.rollback().await.map_err(RepositoryError::storage)?;
-        return Ok(TransitionOutcome::StateConflict);
-    };
 
     let duplicate = sqlx::query(
         "SELECT join_activation_id, token_id, arrival_transition_key
-         FROM join_arrivals WHERE run_id = $1 AND fork_group_id = $2 AND leg_id = $3",
+         FROM join_arrivals WHERE run_id = ? AND fork_group_id = ? AND leg_id = ?",
     )
     .bind(command.run_id().as_str())
     .bind(command.fork_group_id().as_str())
@@ -1565,6 +1453,21 @@ async fn record_join_arrival(
         return Ok(TransitionOutcome::StateConflict);
     }
 
+    let group = sqlx::query(
+        "SELECT fork_activation_id, parent_scope_instance_id, join_activation_id, join_mode,
+                failure_leg_id, failure_settlement_class, expected_legs, admitted_legs,
+                settled_legs, group_state, projection_version
+         FROM fork_groups WHERE run_id = ? AND fork_group_id = ?",
+    )
+    .bind(command.run_id().as_str())
+    .bind(command.fork_group_id().as_str())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let Some(group) = group else {
+        tx.rollback().await.map_err(RepositoryError::storage)?;
+        return Ok(TransitionOutcome::StateConflict);
+    };
     let group_state = group
         .try_get::<String, _>("group_state")
         .map_err(|_| invalid_data())?;
@@ -1608,7 +1511,7 @@ async fn record_join_arrival(
 
     let leg = sqlx::query(
         "SELECT scope_instance_id, child_activation_id, token_id, leg_state, projection_version
-         FROM fork_legs WHERE run_id = $1 AND fork_group_id = $2 AND leg_id = $3 FOR UPDATE",
+         FROM fork_legs WHERE run_id = ? AND fork_group_id = ? AND leg_id = ?",
     )
     .bind(command.run_id().as_str())
     .bind(command.fork_group_id().as_str())
@@ -1643,7 +1546,7 @@ async fn record_join_arrival(
     let token = sqlx::query(
         "SELECT token_state, projection_version, current_scope_instance_id,
                 fork_group_id, fork_leg_id
-         FROM control_tokens WHERE run_id = $1 AND token_id = $2 FOR UPDATE",
+         FROM control_tokens WHERE run_id = ? AND token_id = ?",
     )
     .bind(command.run_id().as_str())
     .bind(command.token_id().as_str())
@@ -1683,7 +1586,7 @@ async fn record_join_arrival(
         return Ok(TransitionOutcome::StateConflict);
     }
 
-    let terminal = derive_leg_terminal_pg(&mut tx, command.run_id(), &child_activation).await?;
+    let terminal = derive_leg_terminal(&mut tx, command.run_id(), &child_activation).await?;
     let Some(terminal) = terminal else {
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
@@ -1691,7 +1594,7 @@ async fn record_join_arrival(
     let live_attempts = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM node_attempts a JOIN node_activations n
          ON n.run_id = a.run_id AND n.activation_id = a.activation_id
-         WHERE n.run_id = $1 AND n.scope_instance_id = $2
+         WHERE n.run_id = ? AND n.scope_instance_id = ?
            AND a.lifecycle IN ('created', 'leased', 'running')",
     )
     .bind(command.run_id().as_str())
@@ -1702,7 +1605,7 @@ async fn record_join_arrival(
     let scope = sqlx::query(
         "SELECT parent_scope_instance_id, lifecycle, admission_state, admitted_children,
                 settled_children, projection_version
-         FROM scope_instances WHERE run_id = $1 AND scope_instance_id = $2 FOR UPDATE",
+         FROM scope_instances WHERE run_id = ? AND scope_instance_id = ?",
     )
     .bind(command.run_id().as_str())
     .bind(child_scope.as_str())
@@ -1739,13 +1642,13 @@ async fn record_join_arrival(
 
     let expected_legs = u32::try_from(
         group
-            .try_get::<i32, _>("expected_legs")
+            .try_get::<i64, _>("expected_legs")
             .map_err(|_| invalid_data())?,
     )
     .map_err(|_| invalid_data())?;
     let settled_before = u32::try_from(
         group
-            .try_get::<i32, _>("settled_legs")
+            .try_get::<i64, _>("settled_legs")
             .map_err(|_| invalid_data())?,
     )
     .map_err(|_| invalid_data())?;
@@ -1753,7 +1656,7 @@ async fn record_join_arrival(
     let prior_failure_leg = group
         .try_get::<Option<String>, _>("failure_leg_id")
         .map_err(|_| invalid_data())?
-        .map(|value| model_data(crate::engine::LegId::new(value)))
+        .map(|value| model_data(insight_engine::LegId::new(value)))
         .transpose()?;
     let prior_failure_class = group
         .try_get::<Option<String>, _>("failure_settlement_class")
@@ -1832,7 +1735,7 @@ async fn record_join_arrival(
         let scope_update = sqlx::query(
             "UPDATE scope_instances SET lifecycle = 'settled', admission_state = 'closed',
                     projection_version = projection_version + 1, settled_at = CURRENT_TIMESTAMP
-             WHERE run_id = $1 AND scope_instance_id = $2 AND lifecycle IN ('active', 'settling')
+             WHERE run_id = ? AND scope_instance_id = ? AND lifecycle IN ('active', 'settling')
                AND admitted_children = settled_children",
         )
         .bind(command.run_id().as_str())
@@ -1847,8 +1750,7 @@ async fn record_join_arrival(
         let parent_update = sqlx::query(
             "UPDATE scope_instances SET settled_children = settled_children + 1,
                     projection_version = projection_version + 1
-             WHERE run_id = $1 AND scope_instance_id = $2
-               AND settled_children < admitted_children",
+             WHERE run_id = ? AND scope_instance_id = ? AND settled_children < admitted_children",
         )
         .bind(command.run_id().as_str())
         .bind(parent_scope.as_str())
@@ -1861,9 +1763,9 @@ async fn record_join_arrival(
         }
     }
     let leg_update = sqlx::query(
-        "UPDATE fork_legs SET leg_state = 'settled', settlement_class = $1,
+        "UPDATE fork_legs SET leg_state = 'settled', settlement_class = ?,
                 projection_version = projection_version + 1, settled_at = CURRENT_TIMESTAMP
-         WHERE run_id = $2 AND fork_group_id = $3 AND leg_id = $4 AND leg_state = 'admitted'",
+         WHERE run_id = ? AND fork_group_id = ? AND leg_id = ? AND leg_state = 'admitted'",
     )
     .bind(settlement_str(terminal.class))
     .bind(command.run_id().as_str())
@@ -1878,11 +1780,11 @@ async fn record_join_arrival(
     }
     if token_state == "available" {
         let token_update = sqlx::query(
-            "UPDATE control_tokens SET token_state = 'consumed', consumed_by_activation_id = $1,
-                    consumed_by_transition_key = $2, consumed_at = CURRENT_TIMESTAMP,
+            "UPDATE control_tokens SET token_state = 'consumed', consumed_by_activation_id = ?,
+                    consumed_by_transition_key = ?, consumed_at = CURRENT_TIMESTAMP,
                     projection_version = projection_version + 1
-             WHERE run_id = $3 AND token_id = $4 AND token_state = 'available'
-               AND projection_version = $5",
+             WHERE run_id = ? AND token_id = ? AND token_state = 'available'
+               AND projection_version = ?",
         )
         .bind(command.join_activation_id().as_str())
         .bind(transition_key.as_str())
@@ -1902,8 +1804,7 @@ async fn record_join_arrival(
             run_id, join_activation_id, fork_group_id, leg_id, token_id,
             arrival_transition_key, arrival_event_id, settlement_class,
             value_payload_id, value_artifact_id, value_hash, projection_version, arrived_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0,
-                   CURRENT_TIMESTAMP)",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)",
     )
     .bind(command.run_id().as_str())
     .bind(command.join_activation_id().as_str())
@@ -1932,13 +1833,12 @@ async fn record_join_arrival(
         "open"
     };
     let group_update = sqlx::query(
-        "UPDATE fork_groups SET join_activation_id = $1, join_mode = $2, failure_leg_id = $3,
-                failure_settlement_class = $4, settled_legs = settled_legs + 1,
-                group_state = $5, projection_version = projection_version + 1,
-                settled_at = CASE WHEN $6 IN ('settled', 'cancelled')
-                                  THEN CURRENT_TIMESTAMP ELSE NULL END
-         WHERE run_id = $7 AND fork_group_id = $8 AND group_state IN ('open', 'settling')
-           AND projection_version = $9",
+        "UPDATE fork_groups SET join_activation_id = ?, join_mode = ?, failure_leg_id = ?,
+                failure_settlement_class = ?, settled_legs = settled_legs + 1,
+                group_state = ?, projection_version = projection_version + 1,
+                settled_at = CASE WHEN ? IN ('settled', 'cancelled') THEN CURRENT_TIMESTAMP ELSE NULL END
+         WHERE run_id = ? AND fork_group_id = ? AND group_state IN ('open', 'settling')
+           AND projection_version = ?",
     )
     .bind(command.join_activation_id().as_str())
     .bind(join_mode_str(command.mode()))
@@ -1961,10 +1861,9 @@ async fn record_join_arrival(
         && settled_after < expected_legs
     {
         sqlx::query(
-            "UPDATE control_tokens SET token_state = 'revoked', revoked_by_transition_key = $1,
+            "UPDATE control_tokens SET token_state = 'revoked', revoked_by_transition_key = ?,
                     revoked_at = CURRENT_TIMESTAMP, projection_version = projection_version + 1
-             WHERE run_id = $2 AND fork_group_id = $3 AND token_state = 'available'
-               AND token_id <> $4",
+             WHERE run_id = ? AND fork_group_id = ? AND token_state = 'available' AND token_id <> ?",
         )
         .bind(transition_key.as_str())
         .bind(command.run_id().as_str())
@@ -1991,7 +1890,7 @@ async fn record_join_arrival(
     Ok(TransitionOutcome::Committed { result: receipt })
 }
 
-struct DerivedLegTerminalPg {
+struct DerivedLegTerminal {
     class: ExecutionLegSettlementClass,
     payload_id: Option<String>,
     artifact_id: Option<String>,
@@ -1999,14 +1898,14 @@ struct DerivedLegTerminalPg {
     value_summary: Option<ExecutionValueSummary>,
 }
 
-async fn derive_leg_terminal_pg(
-    tx: &mut Transaction<'_, Postgres>,
+async fn derive_leg_terminal(
+    tx: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
     activation_id: &ActivationId,
-) -> Result<Option<DerivedLegTerminalPg>, RepositoryError> {
+) -> Result<Option<DerivedLegTerminal>, RepositoryError> {
     let row = sqlx::query(
         "SELECT lifecycle, output_payload_id, output_artifact_id, output_value_hash
-         FROM node_activations WHERE run_id = $1 AND activation_id = $2 FOR UPDATE",
+         FROM node_activations WHERE run_id = ? AND activation_id = ?",
     )
     .bind(run_id.as_str())
     .bind(activation_id.as_str())
@@ -2033,16 +1932,9 @@ async fn derive_leg_terminal_pg(
                 .ok_or_else(invalid_data)?;
             let size = match (&payload_id, &artifact_id) {
                 (Some(payload), None) => {
-                    let output = sqlx::query(
-                        "SELECT content_hash, canonical_bytes FROM payloads
-                         WHERE run_id = $1 AND payload_id = $2",
-                    )
-                    .bind(run_id.as_str())
-                    .bind(payload)
-                    .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(RepositoryError::storage)?
-                    .ok_or_else(invalid_data)?;
+                    let output = sqlx::query("SELECT content_hash, canonical_bytes FROM payloads WHERE run_id = ? AND payload_id = ?")
+                        .bind(run_id.as_str()).bind(payload).fetch_optional(&mut **tx).await
+                        .map_err(RepositoryError::storage)?.ok_or_else(invalid_data)?;
                     if output
                         .try_get::<String, _>("content_hash")
                         .map_err(|_| invalid_data())?
@@ -2057,16 +1949,9 @@ async fn derive_leg_terminal_pg(
                     )?
                 }
                 (None, Some(artifact)) => {
-                    let output = sqlx::query(
-                        "SELECT content_hash, size_bytes, artifact_state FROM artifacts
-                         WHERE run_id = $1 AND artifact_id = $2",
-                    )
-                    .bind(run_id.as_str())
-                    .bind(artifact)
-                    .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(RepositoryError::storage)?
-                    .ok_or_else(invalid_data)?;
+                    let output = sqlx::query("SELECT content_hash, size_bytes, artifact_state FROM artifacts WHERE run_id = ? AND artifact_id = ?")
+                        .bind(run_id.as_str()).bind(artifact).fetch_optional(&mut **tx).await
+                        .map_err(RepositoryError::storage)?.ok_or_else(invalid_data)?;
                     if output
                         .try_get::<String, _>("content_hash")
                         .map_err(|_| invalid_data())?
@@ -2090,7 +1975,7 @@ async fn derive_leg_terminal_pg(
                 _ => return Err(invalid_data()),
             };
             let hash = model_data(ContentHash::parse(value_hash.clone()))?;
-            Ok(Some(DerivedLegTerminalPg {
+            Ok(Some(DerivedLegTerminal {
                 class: ExecutionLegSettlementClass::Succeeded,
                 payload_id,
                 artifact_id,
@@ -2104,8 +1989,8 @@ async fn derive_leg_terminal_pg(
                         occurred_at,kind,node_id,scope_instance_id,activation_id,attempt_no,
                         causation_event_id,safe_payload
                  FROM execution_events
-                 WHERE run_id = $1 AND activation_id = $2 AND kind = 'activation.failed'
-                 ORDER BY seq DESC LIMIT 1",
+                 WHERE run_id = ? AND activation_id = ?
+                   AND kind = 'activation.failed' ORDER BY seq DESC LIMIT 1",
             )
             .bind(run_id.as_str())
             .bind(activation_id.as_str())
@@ -2115,12 +2000,12 @@ async fn derive_leg_terminal_pg(
             let payload = event
                 .map(|row| {
                     decode_execution_event_row(&row)?;
-                    row.try_get::<serde_json::Value, _>("safe_payload")
+                    row.try_get::<String, _>("safe_payload")
                         .map_err(|_| invalid_data())
                 })
                 .transpose()?;
             let failure = payload
-                .and_then(|payload| serde_json::from_value::<ExecutionEventPayload>(payload).ok())
+                .and_then(|payload| serde_json::from_str::<ExecutionEventPayload>(&payload).ok())
                 .and_then(|payload| match payload {
                     ExecutionEventPayload::ActivationFailed { failure, .. } => failure,
                     _ => None,
@@ -2132,7 +2017,7 @@ async fn derive_leg_terminal_pg(
                 let size = u64_from_i64(
                     sqlx::query_scalar::<_, i64>(
                         "SELECT canonical_bytes FROM payloads
-                         WHERE run_id = $1 AND payload_id = $2 AND content_hash = $3",
+                         WHERE run_id = ? AND payload_id = ? AND content_hash = ?",
                     )
                     .bind(run_id.as_str())
                     .bind(&payload_id)
@@ -2142,7 +2027,7 @@ async fn derive_leg_terminal_pg(
                     .map_err(RepositoryError::storage)?
                     .ok_or_else(invalid_data)?,
                 )?;
-                return Ok(Some(DerivedLegTerminalPg {
+                return Ok(Some(DerivedLegTerminal {
                     class: ExecutionLegSettlementClass::SafeFailure,
                     payload_id: Some(payload_id),
                     artifact_id: None,
@@ -2163,7 +2048,7 @@ async fn derive_leg_terminal_pg(
             } else {
                 ExecutionLegSettlementClass::InfrastructureFailure
             };
-            Ok(Some(DerivedLegTerminalPg {
+            Ok(Some(DerivedLegTerminal {
                 class,
                 payload_id: None,
                 artifact_id: None,
@@ -2171,14 +2056,14 @@ async fn derive_leg_terminal_pg(
                 value_summary: None,
             }))
         }
-        "cancelled" => Ok(Some(DerivedLegTerminalPg {
+        "cancelled" => Ok(Some(DerivedLegTerminal {
             class: ExecutionLegSettlementClass::Cancelled,
             payload_id: None,
             artifact_id: None,
             value_hash: None,
             value_summary: None,
         })),
-        "timed_out" => Ok(Some(DerivedLegTerminalPg {
+        "timed_out" => Ok(Some(DerivedLegTerminal {
             class: ExecutionLegSettlementClass::TimedOut,
             payload_id: None,
             artifact_id: None,
@@ -2188,18 +2073,19 @@ async fn derive_leg_terminal_pg(
         _ => Ok(None),
     }
 }
+
 async fn create_reuse_candidate(
-    repository: &PostgresDurableRepository,
+    repository: &SqliteDurableRepository,
     transition_key: TransitionKey,
     command: CreateReuseCandidateCommand,
 ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
+    let _writer = repository.writer.lock().await;
     let mut tx = repository
         .pool
         .begin()
         .await
         .map_err(RepositoryError::storage)?;
-    lock_transition(&mut tx, command.run_id(), &transition_key).await?;
     if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
         &mut tx,
         command.run_id(),
@@ -2218,10 +2104,9 @@ async fn create_reuse_candidate(
     {
         return Err(RepositoryError::invalid_configuration());
     }
-    lock_runs_for_event_write(&mut tx, &[command.run_id(), command.source_run_id()]).await?;
     let target = sqlx::query(
         "SELECT definition_revision_id, deployment_revision_id, plan_hash, binding_hash
-         FROM workflow_runs WHERE run_id = $1",
+         FROM workflow_runs WHERE run_id = ?",
     )
     .bind(command.run_id().as_str())
     .fetch_optional(&mut *tx)
@@ -2232,15 +2117,15 @@ async fn create_reuse_candidate(
                 a.node_id, a.lifecycle, a.effect_id, a.effect_evidence,
                 a.output_payload_id, a.output_artifact_id, a.output_value_hash
          FROM workflow_runs r JOIN node_activations a ON a.run_id = r.run_id
-         WHERE r.run_id = $1 AND a.activation_id = $2 FOR SHARE OF a",
+         WHERE r.run_id = ? AND a.activation_id = ?",
     )
     .bind(command.source_run_id().as_str())
     .bind(command.source_activation_id().as_str())
     .fetch_optional(&mut *tx)
     .await
     .map_err(RepositoryError::storage)?;
-    let scope_exists: Option<i32> = sqlx::query_scalar(
-        "SELECT 1 FROM scope_instances WHERE run_id = $1 AND scope_instance_id = $2 FOR SHARE",
+    let scope_exists: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM scope_instances WHERE run_id = ? AND scope_instance_id = ?",
     )
     .bind(command.run_id().as_str())
     .bind(command.target_scope_instance_id().as_str())
@@ -2251,7 +2136,7 @@ async fn create_reuse_candidate(
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     };
-    let pins_match = |row: &sqlx::postgres::PgRow| -> Result<bool, RepositoryError> {
+    let pins_match = |row: &sqlx::sqlite::SqliteRow| -> Result<bool, RepositoryError> {
         Ok(row
             .try_get::<String, _>("definition_revision_id")
             .map_err(|_| invalid_data())?
@@ -2293,15 +2178,15 @@ async fn create_reuse_candidate(
             .map_err(|_| invalid_data())?
             .as_deref()
             != Some(command.output_value_hash().as_str())
-        || !source_output_exists_pg(&mut tx, command.source_run_id(), &source).await?
+        || !source_output_exists(&mut tx, command.source_run_id(), &source).await?
     {
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     }
-    let occupied: Option<i32> = sqlx::query_scalar(
-        "SELECT 1 FROM run_reuse_candidates WHERE run_id = $1 AND
-         (candidate_id = $2 OR (target_scope_instance_id = $3 AND target_node_id = $4
-          AND stable_activation_key = $5))",
+    let occupied: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM run_reuse_candidates WHERE run_id = ? AND
+         (candidate_id = ? OR (target_scope_instance_id = ? AND target_node_id = ?
+          AND stable_activation_key = ?))",
     )
     .bind(command.run_id().as_str())
     .bind(command.candidate_id())
@@ -2330,7 +2215,7 @@ async fn create_reuse_candidate(
         &event,
     )
     .await?;
-    let provenance = control_adapter::durable_reuse_provenance(&command)?;
+    let provenance = canonical_json(&control_adapter::durable_reuse_provenance(&command)?)?;
     sqlx::query(
         "INSERT INTO run_reuse_candidates (
             run_id, candidate_id, target_scope_instance_id, target_node_id,
@@ -2341,8 +2226,8 @@ async fn create_reuse_candidate(
             data_dependencies_hash, created_by_transition_key, candidate_state,
             materialized_activation_id, decision_transition_key, projection_version,
             created_at, decided_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-                   $18,$19,$20,$21,'candidate',NULL,NULL,0,CURRENT_TIMESTAMP,NULL)",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   'candidate', NULL, NULL, 0, CURRENT_TIMESTAMP, NULL)",
     )
     .bind(command.run_id().as_str())
     .bind(command.candidate_id())
@@ -2381,18 +2266,19 @@ async fn create_reuse_candidate(
     tx.commit().await.map_err(RepositoryError::storage)?;
     Ok(TransitionOutcome::Committed { result: receipt })
 }
-async fn reject_reuse_candidate(
-    repository: &PostgresDurableRepository,
+
+async fn decide_reuse_candidate(
+    repository: &SqliteDurableRepository,
     transition_key: TransitionKey,
     command: RejectReuseCandidateCommand,
 ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
+    let _writer = repository.writer.lock().await;
     let mut tx = repository
         .pool
         .begin()
         .await
         .map_err(RepositoryError::storage)?;
-    lock_transition(&mut tx, command.run_id(), &transition_key).await?;
     if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
         &mut tx,
         command.run_id(),
@@ -2425,11 +2311,11 @@ async fn reject_reuse_candidate(
     .await?;
     let updated = sqlx::query(
         "UPDATE run_reuse_candidates SET candidate_state = 'rejected',
-                decision_transition_key = $1, rejection_reason='manual_rejection',
+                decision_transition_key = ?, rejection_reason='manual_rejection',
                 projection_version = projection_version + 1,
                 decided_at = CURRENT_TIMESTAMP
-         WHERE run_id = $2 AND candidate_id = $3 AND candidate_state = 'candidate'
-           AND projection_version = $4",
+         WHERE run_id = ? AND candidate_id = ? AND candidate_state = 'candidate'
+           AND projection_version = ?",
     )
     .bind(transition_key.as_str())
     .bind(command.run_id().as_str())
@@ -2455,18 +2341,19 @@ async fn reject_reuse_candidate(
     tx.commit().await.map_err(RepositoryError::storage)?;
     Ok(TransitionOutcome::Committed { result: receipt })
 }
+
 async fn materialize_reuse_candidate(
-    repository: &PostgresDurableRepository,
+    repository: &SqliteDurableRepository,
     transition_key: TransitionKey,
     command: MaterializeReuseCandidateCommand,
 ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
+    let _writer = repository.writer.lock().await;
     let mut tx = repository
         .pool
         .begin()
         .await
         .map_err(RepositoryError::storage)?;
-    lock_transition(&mut tx, command.run_id(), &transition_key).await?;
     if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
         &mut tx,
         command.run_id(),
@@ -2478,45 +2365,13 @@ async fn materialize_reuse_candidate(
         tx.commit().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::ExactReplay { authoritative });
     }
-    let source_run_id = sqlx::query_scalar::<_, String>(
-        "SELECT source_run_id FROM run_reuse_candidates
-         WHERE run_id = $1 AND candidate_id = $2",
-    )
-    .bind(command.run_id().as_str())
-    .bind(command.candidate_id())
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(RepositoryError::storage)?;
-    let Some(source_run_id) = source_run_id else {
-        tx.rollback().await.map_err(RepositoryError::storage)?;
-        return Ok(TransitionOutcome::StateConflict);
-    };
-    let source_run = model_data(RunId::new(source_run_id))?;
-    // This transaction writes the target event stream and validates a source
-    // Run. Lock both Runs in stable order before candidate/scope/Activation
-    // projections so reciprocal reuse operations cannot form a cross-Run cycle.
-    lock_runs_for_event_write(&mut tx, &[command.run_id(), &source_run]).await?;
-    let target = sqlx::query(
-        "SELECT definition_revision_id, deployment_revision_id, plan_hash, binding_hash
-         FROM workflow_runs WHERE run_id = $1",
-    )
-    .bind(command.run_id().as_str())
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(RepositoryError::storage)?;
-    let Some(target) = target else {
-        tx.rollback().await.map_err(RepositoryError::storage)?;
-        return Ok(TransitionOutcome::StateConflict);
-    };
-    let candidate = sqlx::query(
-        "SELECT * FROM run_reuse_candidates
-         WHERE run_id = $1 AND candidate_id = $2 FOR UPDATE",
-    )
-    .bind(command.run_id().as_str())
-    .bind(command.candidate_id())
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(RepositoryError::storage)?;
+    let candidate =
+        sqlx::query("SELECT * FROM run_reuse_candidates WHERE run_id = ? AND candidate_id = ?")
+            .bind(command.run_id().as_str())
+            .bind(command.candidate_id())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(RepositoryError::storage)?;
     let Some(candidate) = candidate else {
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
@@ -2530,7 +2385,7 @@ async fn materialize_reuse_candidate(
                 .try_get::<i64, _>("projection_version")
                 .map_err(|_| invalid_data())?,
         )? != command.expected_candidate_projection_version()
-        || !compatibility_matches_pg(&candidate, command.compatibility())?
+        || !compatibility_matches(&candidate, command.compatibility())?
     {
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
@@ -2540,7 +2395,7 @@ async fn materialize_reuse_candidate(
         .map_err(|_| invalid_data())?;
     let scope = sqlx::query(
         "SELECT lifecycle, admission_state, projection_version FROM scope_instances
-         WHERE run_id = $1 AND scope_instance_id = $2 FOR UPDATE",
+         WHERE run_id = ? AND scope_instance_id = ?",
     )
     .bind(command.run_id().as_str())
     .bind(&scope_id)
@@ -2568,13 +2423,11 @@ async fn materialize_reuse_candidate(
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     }
-    if candidate
-        .try_get::<String, _>("source_run_id")
-        .map_err(|_| invalid_data())?
-        != source_run.as_str()
-    {
-        return Err(invalid_data());
-    }
+    let source_run = model_data(RunId::new(
+        candidate
+            .try_get::<String, _>("source_run_id")
+            .map_err(|_| invalid_data())?,
+    ))?;
     let source_activation = model_data(ActivationId::new(
         candidate
             .try_get::<String, _>("source_activation_id")
@@ -2585,14 +2438,22 @@ async fn materialize_reuse_candidate(
                 a.node_id, a.lifecycle, a.execution_kind, a.effect_idempotency, a.effect_evidence,
                 a.output_payload_id, a.output_artifact_id, a.output_value_hash
          FROM workflow_runs r JOIN node_activations a ON a.run_id = r.run_id
-         WHERE r.run_id = $1 AND a.activation_id = $2 FOR SHARE OF a",
+         WHERE r.run_id = ? AND a.activation_id = ?",
     )
     .bind(source_run.as_str())
     .bind(source_activation.as_str())
     .fetch_optional(&mut *tx)
     .await
     .map_err(RepositoryError::storage)?;
-    let Some(source) = source else {
+    let target = sqlx::query(
+        "SELECT definition_revision_id, deployment_revision_id, plan_hash, binding_hash
+         FROM workflow_runs WHERE run_id = ?",
+    )
+    .bind(command.run_id().as_str())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let (Some(source), Some(target)) = (source, target) else {
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     };
@@ -2640,40 +2501,26 @@ async fn materialize_reuse_candidate(
                     .try_get::<String, _>("output_value_hash")
                     .map_err(|_| invalid_data())?,
             )
-        || !source_output_exists_pg(&mut tx, &source_run, &source).await?
+        || !source_output_exists(&mut tx, &source_run, &source).await?
     {
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     }
-    let occupied: Option<i32> = sqlx::query_scalar(
-        "SELECT 1 FROM node_activations WHERE run_id = $1 AND
-         (activation_id = $2 OR (scope_instance_id = $3 AND node_id = $4
-          AND stable_activation_key = $5))",
-    )
-    .bind(command.run_id().as_str())
-    .bind(command.activation_id().as_str())
-    .bind(&scope_id)
-    .bind(
-        candidate
-            .try_get::<String, _>("target_node_id")
-            .map_err(|_| invalid_data())?,
-    )
-    .bind(
-        candidate
-            .try_get::<String, _>("stable_activation_key")
-            .map_err(|_| invalid_data())?,
-    )
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(RepositoryError::storage)?;
+    let occupied: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM node_activations WHERE run_id = ? AND
+         (activation_id = ? OR (scope_instance_id = ? AND node_id = ? AND stable_activation_key = ?))",
+    ).bind(command.run_id().as_str()).bind(command.activation_id().as_str()).bind(&scope_id)
+    .bind(candidate.try_get::<String, _>("target_node_id").map_err(|_| invalid_data())?)
+    .bind(candidate.try_get::<String, _>("stable_activation_key").map_err(|_| invalid_data())?)
+    .fetch_optional(&mut *tx).await.map_err(RepositoryError::storage)?;
     if occupied.is_some() {
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(TransitionOutcome::StateConflict);
     }
-    let copied = copy_source_output_pg(&mut tx, &source_run, command.run_id(), &source).await?;
+    let copied = copy_source_output(&mut tx, &source_run, command.run_id(), &source).await?;
     let hash = model_data(ContentHash::parse(copied.value_hash.clone()))?;
     let scope_typed = model_data(ScopeInstanceId::new(scope_id.clone()))?;
-    let node_typed = model_data(crate::engine::NodeId::new(
+    let node_typed = model_data(insight_engine::NodeId::new(
         candidate
             .try_get::<String, _>("target_node_id")
             .map_err(|_| invalid_data())?,
@@ -2693,8 +2540,6 @@ async fn materialize_reuse_candidate(
         .expected_candidate_projection_version()
         .checked_add(1)
         .ok_or_else(invalid_data)?;
-    // Insert the projection before its event because execution_events has a
-    // composite FK to node_activations. Both remain in this transaction.
     sqlx::query(
         "INSERT INTO node_activations (
             run_id, activation_id, scope_instance_id, node_id, stable_activation_key,
@@ -2705,9 +2550,9 @@ async fn materialize_reuse_candidate(
             termination_intent_transition_key, termination_intent_at, output_payload_id,
             output_artifact_id, output_value_hash, winning_attempt_no, reused_from_run_id,
             reused_from_activation_id, projection_version, created_at, updated_at, terminal_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,'succeeded',$7,$8,$9,NULL,NULL,NULL,NULL,NULL,
-                   0,NULL,NULL,NULL,NULL,NULL,$10,$11,$12,NULL,$13,$14,0,
-                   CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",
+         ) VALUES (?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, ?, NULL, NULL, NULL, NULL, NULL,
+                   0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, NULL, ?, ?, 0,
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     )
     .bind(command.run_id().as_str())
     .bind(command.activation_id().as_str())
@@ -2761,10 +2606,10 @@ async fn materialize_reuse_candidate(
     .await?;
     let updated = sqlx::query(
         "UPDATE run_reuse_candidates SET candidate_state = 'materialized',
-                materialized_activation_id = $1, decision_transition_key = $2,
+                materialized_activation_id = ?, decision_transition_key = ?,
                 projection_version = projection_version + 1, decided_at = CURRENT_TIMESTAMP
-         WHERE run_id = $3 AND candidate_id = $4 AND candidate_state = 'candidate'
-           AND projection_version = $5",
+         WHERE run_id = ? AND candidate_id = ? AND candidate_state = 'candidate'
+           AND projection_version = ?",
     )
     .bind(command.activation_id().as_str())
     .bind(transition_key.as_str())
@@ -2794,8 +2639,8 @@ async fn materialize_reuse_candidate(
     Ok(TransitionOutcome::Committed { result: receipt })
 }
 
-fn compatibility_matches_pg(
-    row: &sqlx::postgres::PgRow,
+fn compatibility_matches(
+    row: &sqlx::sqlite::SqliteRow,
     value: &super::ReuseCompatibility,
 ) -> Result<bool, RepositoryError> {
     Ok(row
@@ -2824,10 +2669,10 @@ fn compatibility_matches_pg(
             == value.data_dependencies_hash().as_str())
 }
 
-pub(crate) async fn source_output_exists_pg(
-    tx: &mut Transaction<'_, Postgres>,
+pub(crate) async fn source_output_exists(
+    tx: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
-    row: &sqlx::postgres::PgRow,
+    row: &sqlx::sqlite::SqliteRow,
 ) -> Result<bool, RepositoryError> {
     let payload = row
         .try_get::<Option<String>, _>("output_payload_id")
@@ -2842,7 +2687,7 @@ pub(crate) async fn source_output_exists_pg(
         (Some(payload), None, Some(hash)) => {
             let row = sqlx::query(
                 "SELECT content_hash,canonical_bytes,encoding,inline_value,binary_value
-                 FROM payloads WHERE run_id=$1 AND payload_id=$2",
+                 FROM payloads WHERE run_id=? AND payload_id=?",
             )
             .bind(run_id.as_str())
             .bind(&payload)
@@ -2852,10 +2697,11 @@ pub(crate) async fn source_output_exists_pg(
             let Some(row) = row else {
                 return Ok(false);
             };
-            let value = row
-                .try_get::<Option<serde_json::Value>, _>("inline_value")
+            let encoded = row
+                .try_get::<Option<String>, _>("inline_value")
                 .map_err(|_| invalid_data())?
                 .ok_or_else(invalid_data)?;
+            let value = serde_json::from_str(&encoded).map_err(|_| invalid_data())?;
             let validated = validate_inline_payload(
                 &payload,
                 &row.try_get::<String, _>("content_hash")
@@ -2865,45 +2711,39 @@ pub(crate) async fn source_output_exists_pg(
                 &row.try_get::<String, _>("encoding")
                     .map_err(|_| invalid_data())?,
                 value,
-                None,
+                Some(&encoded),
                 row.try_get::<Option<Vec<u8>>, _>("binary_value")
                     .map_err(|_| invalid_data())?
                     .is_none(),
             )?;
             Ok(
-                common_contract_adapter::validated_inline_payload_content_hash(&validated).as_str()
+                common_contract_adapter::validated_inline_payload_content_hash(&validated)
+                    .as_str()
                     == hash,
             )
         }
         (None, Some(artifact), Some(hash)) => Ok(sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM artifacts
-             WHERE run_id = $1 AND artifact_id = $2 AND content_hash = $3
-               AND artifact_state IN ('verified', 'referenced')",
-        )
-        .bind(run_id.as_str())
-        .bind(artifact)
-        .bind(hash)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(RepositoryError::storage)?
-            == 1),
+            "SELECT COUNT(*) FROM artifacts WHERE run_id = ? AND artifact_id = ? AND content_hash = ?
+             AND artifact_state IN ('verified', 'referenced')",
+        ).bind(run_id.as_str()).bind(artifact).bind(hash).fetch_one(&mut **tx).await
+        .map_err(RepositoryError::storage)? == 1),
         _ => Ok(false),
     }
 }
 
-pub(crate) struct CopiedOutputPg {
+pub(crate) struct CopiedOutput {
     pub(crate) payload_id: Option<String>,
     pub(crate) artifact_id: Option<String>,
     pub(crate) value_hash: String,
     pub(crate) size_bytes: u64,
 }
 
-pub(crate) async fn copy_source_output_pg(
-    tx: &mut Transaction<'_, Postgres>,
+pub(crate) async fn copy_source_output(
+    tx: &mut Transaction<'_, Sqlite>,
     source_run: &RunId,
     target_run: &RunId,
-    source: &sqlx::postgres::PgRow,
-) -> Result<CopiedOutputPg, RepositoryError> {
+    source: &sqlx::sqlite::SqliteRow,
+) -> Result<CopiedOutput, RepositoryError> {
     let payload_id = source
         .try_get::<Option<String>, _>("output_payload_id")
         .map_err(|_| invalid_data())?;
@@ -2917,8 +2757,8 @@ pub(crate) async fn copy_source_output_pg(
     match (&payload_id, &artifact_id) {
         (Some(payload_id), None) => {
             let row = sqlx::query(
-                "SELECT content_hash,canonical_bytes,encoding,inline_value,binary_value,retain_until
-                 FROM payloads WHERE run_id=$1 AND payload_id=$2",
+                "SELECT content_hash, canonical_bytes, encoding, inline_value, binary_value,
+                    retain_until FROM payloads WHERE run_id = ? AND payload_id = ?",
             )
             .bind(source_run.as_str())
             .bind(payload_id)
@@ -2926,10 +2766,11 @@ pub(crate) async fn copy_source_output_pg(
             .await
             .map_err(RepositoryError::storage)?
             .ok_or_else(invalid_data)?;
-            let inline_value = row
-                .try_get::<Option<serde_json::Value>, _>("inline_value")
+            let encoded = row
+                .try_get::<Option<String>, _>("inline_value")
                 .map_err(|_| invalid_data())?
                 .ok_or_else(invalid_data)?;
+            let value = serde_json::from_str(&encoded).map_err(|_| invalid_data())?;
             let validated = validate_inline_payload(
                 payload_id,
                 &row.try_get::<String, _>("content_hash")
@@ -2938,8 +2779,8 @@ pub(crate) async fn copy_source_output_pg(
                     .map_err(|_| invalid_data())?,
                 &row.try_get::<String, _>("encoding")
                     .map_err(|_| invalid_data())?,
-                inline_value,
-                None,
+                value,
+                Some(&encoded),
                 row.try_get::<Option<Vec<u8>>, _>("binary_value")
                     .map_err(|_| invalid_data())?
                     .is_none(),
@@ -2950,10 +2791,9 @@ pub(crate) async fn copy_source_output_pg(
                 return Err(invalid_data());
             }
             sqlx::query(
-                "INSERT INTO payloads (
-                    run_id, payload_id, content_hash, canonical_bytes, encoding,
-                    inline_value, binary_value, created_at, retain_until
-                 ) VALUES ($1,$2,$3,$4,'json_jcs',$5,NULL,CURRENT_TIMESTAMP,$6)",
+                "INSERT INTO payloads (run_id, payload_id, content_hash, canonical_bytes,
+                    encoding, inline_value, binary_value, created_at, retain_until)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
             )
             .bind(target_run.as_str())
             .bind(payload_id)
@@ -2961,17 +2801,19 @@ pub(crate) async fn copy_source_output_pg(
             .bind(i64_from_u64(
                 common_contract_adapter::validated_inline_payload_canonical_bytes(&validated),
             )?)
-            .bind(common_contract_adapter::validated_inline_payload_value(
+            .bind("json_jcs")
+            .bind(common_contract_adapter::validated_inline_payload_canonical(
                 &validated,
             ))
+            .bind(Option::<Vec<u8>>::None)
             .bind(
-                row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("retain_until")
+                row.try_get::<Option<String>, _>("retain_until")
                     .map_err(|_| invalid_data())?,
             )
             .execute(&mut **tx)
             .await
             .map_err(RepositoryError::storage)?;
-            Ok(CopiedOutputPg {
+            Ok(CopiedOutput {
                 payload_id: Some(payload_id.clone()),
                 artifact_id: None,
                 value_hash,
@@ -2981,374 +2823,68 @@ pub(crate) async fn copy_source_output_pg(
             })
         }
         (None, Some(artifact_id)) => {
-            let size = sqlx::query_scalar::<_, i64>(
-                "INSERT INTO artifacts (
-                    run_id, artifact_id, content_hash, size_bytes, media_type, storage_uri,
-                    artifact_state, verified_at, referenced_at, retain_until, deletion_fence,
-                    deletion_claim_token, deletion_claimed_by, deletion_claim_request_key,
-                    deletion_claimed_at, deletion_claim_expires_at, created_at
-                 )
-                 SELECT $1, artifact_id, content_hash, size_bytes, media_type, storage_uri,
-                        'referenced', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, retain_until,
-                        NULL, NULL, NULL, NULL, NULL, NULL, CURRENT_TIMESTAMP
-                 FROM artifacts
-                 WHERE run_id = $2 AND artifact_id = $3 AND content_hash = $4
-                   AND artifact_state IN ('verified', 'referenced')
-                 RETURNING size_bytes",
-            )
-            .bind(target_run.as_str())
-            .bind(source_run.as_str())
-            .bind(artifact_id)
-            .bind(&value_hash)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(RepositoryError::storage)?
-            .ok_or_else(invalid_data)?;
-            Ok(CopiedOutputPg {
+            let row = sqlx::query("SELECT content_hash, size_bytes, media_type, storage_uri,
+                    artifact_state, verified_at, referenced_at, retain_until
+                 FROM artifacts WHERE run_id = ? AND artifact_id = ? AND artifact_state IN ('verified','referenced')")
+                .bind(source_run.as_str()).bind(artifact_id).fetch_optional(&mut **tx).await
+                .map_err(RepositoryError::storage)?.ok_or_else(invalid_data)?;
+            if row
+                .try_get::<String, _>("content_hash")
+                .map_err(|_| invalid_data())?
+                != value_hash
+            {
+                return Err(invalid_data());
+            }
+            sqlx::query("INSERT INTO artifacts (run_id, artifact_id, content_hash, size_bytes,
+                    media_type, storage_uri, artifact_state, verified_at, referenced_at, retain_until,
+                    deletion_fence, deletion_claim_token, deletion_claimed_by, deletion_claim_request_key,
+                    deletion_claimed_at, deletion_claim_expires_at, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, 'referenced', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?,
+                         NULL, NULL, NULL, NULL, NULL, NULL, CURRENT_TIMESTAMP)")
+                .bind(target_run.as_str()).bind(artifact_id).bind(&value_hash)
+                .bind(row.try_get::<i64, _>("size_bytes").map_err(|_| invalid_data())?)
+                .bind(row.try_get::<Option<String>, _>("media_type").map_err(|_| invalid_data())?)
+                .bind(row.try_get::<String, _>("storage_uri").map_err(|_| invalid_data())?)
+                .bind(row.try_get::<Option<String>, _>("retain_until").map_err(|_| invalid_data())?)
+                .execute(&mut **tx).await.map_err(RepositoryError::storage)?;
+            Ok(CopiedOutput {
                 payload_id: None,
                 artifact_id: Some(artifact_id.clone()),
                 value_hash,
-                size_bytes: u64_from_i64(size)?,
+                size_bytes: u64_from_i64(
+                    row.try_get::<i64, _>("size_bytes")
+                        .map_err(|_| invalid_data())?,
+                )?,
             })
         }
         _ => Err(invalid_data()),
     }
 }
 
-#[async_trait]
-impl SchedulerLeaseRepository for PostgresDurableRepository {
-    async fn claim_scheduler_run(
-        &self,
-        transition_key: TransitionKey,
-        command: ClaimSchedulerRunCommand,
-    ) -> Result<TransitionOutcome<SchedulerRunLease>, RepositoryError> {
-        let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
-        lock_transition(&mut transaction, command.run_id(), &transition_key).await?;
-        if let Some(authoritative) = replay_result::<SchedulerRunLease>(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-        )
-        .await?
-        {
-            transaction
-                .commit()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::ExactReplay { authoritative });
-        }
-        let projection_version = sqlx::query_scalar::<_, i64>(
-            "SELECT projection_version FROM workflow_runs WHERE run_id = $1",
-        )
-        .bind(command.run_id().as_str())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        let Some(projection_version) = projection_version else {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        };
-        let projection_version = u64::try_from(projection_version).map_err(|_| invalid_data())?;
-        let (seq, id) = append_event(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-            projection_version,
-            ProjectionMutationKind::SchedulerLeaseClaimed,
-        )
-        .await?;
-        let token = fencing_token(&transition_key);
-        let row = sqlx::query(
-            "UPDATE workflow_runs
-             SET scheduler_lease_epoch = scheduler_lease_epoch + 1,
-                 scheduler_lease_owner = $2, scheduler_fencing_token = $3,
-                 scheduler_lease_expires_at = CURRENT_TIMESTAMP + make_interval(secs => $4),
-                 scheduler_heartbeat_at = CURRENT_TIMESTAMP
-             WHERE run_id = $1 AND lifecycle IN ('active', 'waiting', 'terminating')
-               AND termination_intent_reason IS DISTINCT FROM 'migrated'
-               AND (admission_state = 'open' OR lifecycle = 'terminating')
-               AND (scheduler_lease_owner IS NULL OR scheduler_lease_expires_at <= CURRENT_TIMESTAMP)
-             RETURNING scheduler_lease_epoch, scheduler_lease_expires_at",
-        )
-        .bind(command.run_id().as_str())
-        .bind(command.owner())
-        .bind(&token)
-        .bind(i32::try_from(command.lease_seconds()).map_err(|_| invalid_data())?)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        let Some(row) = row else {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        };
-        let lease = control_adapter::scheduler_run_lease(
-            command.run_id().clone(),
-            command.owner(),
-            u64::try_from(
-                row.try_get::<i64, _>("scheduler_lease_epoch")
-                    .map_err(|_| invalid_data())?,
-            )
-            .map_err(|_| invalid_data())?,
-            &token,
-            row.try_get("scheduler_lease_expires_at")
-                .map_err(|_| invalid_data())?,
-        )?;
-        finalize(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-            &id,
-            &lease,
-        )
-        .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(RepositoryError::storage)?;
-        let _ = seq;
-        Ok(TransitionOutcome::Committed { result: lease })
-    }
-
-    async fn heartbeat_scheduler_run(
-        &self,
-        transition_key: TransitionKey,
-        command: HeartbeatSchedulerRunCommand,
-    ) -> Result<TransitionOutcome<SchedulerRunLease>, RepositoryError> {
-        let intent_hash = canonical_intent_hash(&command)?;
-        let run_id = command.fence().run_id();
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
-        lock_transition(&mut transaction, run_id, &transition_key).await?;
-        if let Some(authoritative) = replay_result::<SchedulerRunLease>(
-            &mut transaction,
-            run_id,
-            &transition_key,
-            intent_hash.as_str(),
-        )
-        .await?
-        {
-            transaction
-                .commit()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::ExactReplay { authoritative });
-        }
-        let projection_version = sqlx::query_scalar::<_, i64>(
-            "SELECT projection_version FROM workflow_runs WHERE run_id = $1",
-        )
-        .bind(run_id.as_str())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        let Some(projection_version) = projection_version else {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        };
-        let projection_version = u64::try_from(projection_version).map_err(|_| invalid_data())?;
-        let (_seq, id) = append_event(
-            &mut transaction,
-            run_id,
-            &transition_key,
-            intent_hash.as_str(),
-            projection_version,
-            ProjectionMutationKind::SchedulerLeaseHeartbeat,
-        )
-        .await?;
-        let row = sqlx::query(
-            "UPDATE workflow_runs
-             SET scheduler_lease_expires_at = CURRENT_TIMESTAMP + make_interval(secs => $5),
-                 scheduler_heartbeat_at = CURRENT_TIMESTAMP
-             WHERE run_id = $1 AND scheduler_lease_owner = $2
-               AND scheduler_lease_epoch = $3 AND scheduler_fencing_token = $4
-               AND scheduler_lease_expires_at > CURRENT_TIMESTAMP
-             RETURNING scheduler_lease_expires_at",
-        )
-        .bind(run_id.as_str())
-        .bind(command.fence().owner())
-        .bind(i64::try_from(command.fence().lease_epoch()).map_err(|_| invalid_data())?)
-        .bind(command.fence().fencing_token())
-        .bind(i32::try_from(command.lease_seconds()).map_err(|_| invalid_data())?)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        let Some(row) = row else {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StaleLease);
-        };
-        let lease = control_adapter::scheduler_run_lease(
-            run_id.clone(),
-            command.fence().owner(),
-            command.fence().lease_epoch(),
-            command.fence().fencing_token(),
-            row.try_get("scheduler_lease_expires_at")
-                .map_err(|_| invalid_data())?,
-        )?;
-        finalize(
-            &mut transaction,
-            run_id,
-            &transition_key,
-            intent_hash.as_str(),
-            &id,
-            &lease,
-        )
-        .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(RepositoryError::storage)?;
-        Ok(TransitionOutcome::Committed { result: lease })
-    }
-
-    async fn release_scheduler_run(
-        &self,
-        transition_key: TransitionKey,
-        command: FencedSchedulerRunCommand,
-    ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
-        let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
-        lock_transition(&mut transaction, command.run_id(), &transition_key).await?;
-        if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-        )
-        .await?
-        {
-            transaction
-                .commit()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::ExactReplay { authoritative });
-        }
-        let projection_version = sqlx::query_scalar::<_, i64>(
-            "SELECT projection_version FROM workflow_runs WHERE run_id = $1",
-        )
-        .bind(command.run_id().as_str())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        let Some(projection_version) = projection_version else {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StateConflict);
-        };
-        let projection_version = u64::try_from(projection_version).map_err(|_| invalid_data())?;
-        let (seq, id) = append_event(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-            projection_version,
-            ProjectionMutationKind::SchedulerLeaseReleased,
-        )
-        .await?;
-        let updated = sqlx::query(
-            "UPDATE workflow_runs
-             SET scheduler_lease_owner = NULL, scheduler_fencing_token = NULL,
-                 scheduler_lease_expires_at = NULL, scheduler_heartbeat_at = NULL
-             WHERE run_id = $1 AND scheduler_lease_owner = $2
-               AND scheduler_lease_epoch = $3 AND scheduler_fencing_token = $4
-               AND scheduler_lease_expires_at > CURRENT_TIMESTAMP",
-        )
-        .bind(command.run_id().as_str())
-        .bind(command.owner())
-        .bind(i64::try_from(command.lease_epoch()).map_err(|_| invalid_data())?)
-        .bind(command.fencing_token())
-        .execute(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        if updated.rows_affected() != 1 {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Ok(TransitionOutcome::StaleLease);
-        }
-        let receipt = control_adapter::control_commit_receipt(seq, id.clone(), projection_version);
-        finalize(
-            &mut transaction,
-            command.run_id(),
-            &transition_key,
-            intent_hash.as_str(),
-            &id,
-            &receipt,
-        )
-        .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(RepositoryError::storage)?;
-        Ok(TransitionOutcome::Committed { result: receipt })
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
-
     use serde_json::json;
-    use tokio::sync::{Barrier, OnceCell};
 
     use super::*;
-    use crate::engine::repository::{
+    use insight_durable::{
         ActivationAdmissionCommand, ActivationCasCommand, ActivationDurableRepository,
-        CreateRunCommand, DurableRepository, ForkLegAdmission, PlanInstallOutcome,
-        RunTransitionCommand, VersionedPlan,
+        CreateRunCommand, DurableRepository, ForkLegAdmission, PlanInstallOutcome, VersionedPlan,
     };
-    use crate::engine::{
-        control::ControlEmissionSlot, ActivationTerminationReason, AdmissionState,
-        ChildRequirement, DefinitionRevisionId, DeploymentRevisionId, DynamicKey, ExecutionKind,
-        ForkGroupId, ForkLeg, InternalFailureCode, InternalFailureSummary, JoinMode, LegId, NodeId,
-        PortId, RunLifecycle, ScopeInstance,
+    use insight_engine::{
+        control::ControlEmissionSlot, ActivationId, ChildRequirement, DefinitionRevisionId,
+        DeploymentRevisionId, DynamicKey, ExecutionKind, ForkGroupId, ForkLeg, LegId, NodeId,
+        PortId, ScopeInstance,
     };
-
-    static SCHEMA: OnceCell<()> = OnceCell::const_new();
 
     fn key(label: &str) -> TransitionKey {
-        TransitionKey::derive("repository.scheduler-lease.test", &[label]).unwrap()
-    }
-
-    fn postgres_test_url() -> Option<String> {
-        match std::env::var("TEST_POSTGRES_URL") {
-            Ok(value) => Some(value),
-            Err(error) if std::env::var_os("CI").is_some() => {
-                panic!("CI must set TEST_POSTGRES_URL for repository PostgreSQL tests: {error}")
-            }
-            Err(_) => None,
-        }
-    }
-
-    async fn initialize_once(repository: &PostgresDurableRepository) {
-        SCHEMA
-            .get_or_init(|| async {
-                repository.initialize_schema().await.unwrap();
-            })
-            .await;
+        TransitionKey::derive("repository.control.test", &[label]).unwrap()
     }
 
     fn test_plan(label: &str) -> VersionedPlan {
         insight_durable::model::adapter::versioned_plan_for_test(
             format!("definition_{label}"),
             format!("agent_{label}"),
-            "PostgreSQL control repository test",
+            "Control repository test",
             DefinitionRevisionId::new(format!("definition_revision_{label}")).unwrap(),
             DeploymentRevisionId::new(format!("deployment_revision_{label}")).unwrap(),
             ContentHash::from_bytes(format!("plan_{label}").as_bytes()),
@@ -3364,32 +2900,29 @@ mod tests {
         .unwrap()
     }
 
-    async fn install_run(
-        repository: &PostgresDurableRepository,
-        plan: &VersionedPlan,
-        label: &str,
-    ) -> RunId {
-        let installed = repository.install_versioned_plan(plan).await.unwrap();
-        assert!(matches!(
-            installed,
-            PlanInstallOutcome::Installed | PlanInstallOutcome::AlreadyInstalled
-        ));
+    async fn repository_with_run(label: &str) -> (SqliteDurableRepository, RunId) {
+        let repository = SqliteDurableRepository::in_memory().await.unwrap();
+        let plan = test_plan(label);
+        assert_eq!(
+            repository.install_versioned_plan(&plan).await.unwrap(),
+            PlanInstallOutcome::Installed
+        );
         let run_id = RunId::new(format!("run_{label}")).unwrap();
         repository
             .create_run(
                 key(&format!("{label}.run.create")),
-                CreateRunCommand::new(run_id.clone(), plan, json!({})).unwrap(),
+                CreateRunCommand::new(run_id.clone(), &plan, json!({})).unwrap(),
             )
             .await
             .unwrap();
-        run_id
+        (repository, run_id)
     }
 
-    async fn root_scope_version(repository: &PostgresDurableRepository, run_id: &RunId) -> u64 {
+    async fn scope_version(repository: &SqliteDurableRepository, run_id: &RunId) -> u64 {
         u64_from_i64(
             sqlx::query_scalar::<_, i64>(
                 "SELECT projection_version FROM scope_instances
-                 WHERE run_id = $1 AND scope_instance_id = 'scope_root'",
+                 WHERE run_id = ? AND scope_instance_id = 'scope_root'",
             )
             .bind(run_id.as_str())
             .fetch_one(&repository.pool)
@@ -3400,10 +2933,9 @@ mod tests {
     }
 
     async fn admit_ready(
-        repository: &PostgresDurableRepository,
+        repository: &SqliteDurableRepository,
         run_id: &RunId,
         label: &str,
-        node: &str,
         scope_version: u64,
     ) -> ActivationId {
         let activation_id = ActivationId::new(format!("activation_{label}")).unwrap();
@@ -3415,7 +2947,7 @@ mod tests {
                     ScopeInstanceId::root(),
                     scope_version,
                     activation_id.clone(),
-                    NodeId::new(node).unwrap(),
+                    NodeId::new(format!("node_{label}")).unwrap(),
                     format!("stable_{label}"),
                     ExecutionKind::SchedulerNative,
                 )
@@ -3433,477 +2965,154 @@ mod tests {
         activation_id
     }
 
-    async fn set_succeeded_payload(
-        repository: &PostgresDurableRepository,
-        run_id: &RunId,
-        activation_id: &ActivationId,
-        _payload_id: &str,
-        value: serde_json::Value,
-    ) -> ContentHash {
-        let canonical = serde_jcs::to_string(&value).unwrap();
-        let hash = ContentHash::from_bytes(canonical.as_bytes());
-        let payload_id = payload_id(&hash);
-        sqlx::query(
-            "INSERT INTO payloads (
-                run_id, payload_id, content_hash, canonical_bytes, encoding,
-                inline_value, binary_value, created_at, retain_until
-             ) VALUES ($1,$2,$3,$4,'json_jcs',$5,NULL,CURRENT_TIMESTAMP,NULL)",
-        )
-        .bind(run_id.as_str())
-        .bind(&payload_id)
-        .bind(hash.as_str())
-        .bind(i64::try_from(canonical.len()).unwrap())
-        .bind(value)
-        .execute(&repository.pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "UPDATE node_activations SET lifecycle = 'succeeded', output_payload_id = $1,
-                    output_value_hash = $2, terminal_at = CURRENT_TIMESTAMP,
-                    updated_at = CURRENT_TIMESTAMP
-             WHERE run_id = $3 AND activation_id = $4",
-        )
-        .bind(&payload_id)
-        .bind(hash.as_str())
-        .bind(run_id.as_str())
-        .bind(activation_id.as_str())
-        .execute(&repository.pool)
-        .await
-        .unwrap();
-        hash
-    }
-
-    async fn set_business_failure(
-        repository: &PostgresDurableRepository,
-        run_id: &RunId,
-        activation_id: &ActivationId,
-        label: &str,
-    ) {
-        let mut transaction = repository.pool.begin().await.unwrap();
-        let (scope_id, node_id, version, _) =
-            activation_context(&mut transaction, run_id, activation_id)
-                .await
-                .unwrap()
-                .unwrap();
-        let transition_key = key(&format!("{label}.business_failure"));
-        let event = PendingExecutionEvent::new(
-            ExecutionEventContext::for_run(run_id.clone()).for_activation(
-                scope_id,
-                node_id,
-                activation_id.clone(),
-            ),
-            ExecutionEventPayload::ActivationFailed {
-                attempt_no: None,
-                reason: ActivationTerminationReason::Failure,
-                failure: Some(InternalFailureSummary::new(
-                    InternalFailureKind::Business,
-                    InternalFailureCode::new("BUSINESS_REJECTED").unwrap(),
-                )),
-            },
-        )
-        .unwrap();
-        let next_version = u64_from_i64(version).unwrap() + 1;
-        let intent_hash = ContentHash::from_bytes(label.as_bytes());
-        sqlx::query(
-            "UPDATE node_activations SET lifecycle = 'failed',
-                    termination_intent_reason = 'failure',
-                    termination_intent_transition_key = $1,
-                    termination_intent_at = CURRENT_TIMESTAMP,
-                    projection_version = projection_version + 1,
-                    updated_at = CURRENT_TIMESTAMP, terminal_at = CURRENT_TIMESTAMP
-             WHERE run_id = $2 AND activation_id = $3 AND lifecycle IN ('created', 'ready')",
-        )
-        .bind(transition_key.as_str())
-        .bind(run_id.as_str())
-        .bind(activation_id.as_str())
-        .execute(&mut *transaction)
-        .await
-        .unwrap();
-        let (_, event_id) = append_primary_event(
-            &mut transaction,
-            run_id,
-            &transition_key,
-            intent_hash.as_str(),
-            next_version,
-            &event,
-        )
-        .await
-        .unwrap();
-        finalize_projection_checkpoints(&mut transaction, run_id, &event_id)
-            .await
-            .unwrap();
-        transaction.commit().await.unwrap();
-    }
-
     #[tokio::test]
-    async fn postgres_scheduler_lease_is_single_winner_and_fenced() {
-        let Some(database_url) = postgres_test_url() else {
-            return;
-        };
-        let repository = PostgresDurableRepository::connect(&database_url)
-            .await
-            .unwrap();
-        initialize_once(&repository).await;
-        let plan = insight_durable::model::adapter::versioned_plan_for_test(
-            "definition_scheduler_lease",
-            "agent_scheduler_lease",
-            "Scheduler lease test",
-            DefinitionRevisionId::new("definition_revision_scheduler_lease").unwrap(),
-            DeploymentRevisionId::new("deployment_revision_scheduler_lease").unwrap(),
-            ContentHash::from_bytes(b"scheduler-plan"),
-            ContentHash::from_bytes(b"scheduler-binding"),
-            "compiler-3.0.0",
-            "expression-3.0.0",
-            json!({"kind": "structured"}),
-            json!({"nodes": []}),
-            json!({}),
-            json!({}),
-            json!({"worker": "v1"}),
-        )
-        .unwrap();
-        assert_eq!(
-            repository.install_versioned_plan(&plan).await.unwrap(),
-            PlanInstallOutcome::Installed
-        );
-        let run_id = RunId::new("run_scheduler_lease").unwrap();
-        repository
-            .create_run(
-                key("run.create"),
-                CreateRunCommand::new(run_id.clone(), &plan, json!({})).unwrap(),
-            )
-            .await
-            .unwrap();
-        repository
-            .commit_run_transition(
-                key("run.activate"),
-                RunTransitionCommand::nonterminal(
-                    run_id.clone(),
-                    0,
-                    RunLifecycle::Created,
-                    AdmissionState::Open,
-                    RunLifecycle::Active,
-                    AdmissionState::Open,
-                    PendingExecutionEvent::new(
-                        ExecutionEventContext::for_run(run_id.clone()),
-                        ExecutionEventPayload::RunLifecycleChanged {
-                            lifecycle: RunLifecycle::Active,
-                        },
-                    )
-                    .unwrap(),
-                    None,
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let first_key = key("lease.claim.a");
-        let a = repository.clone();
-        let b = repository.clone();
-        let run_a = run_id.clone();
-        let run_b = run_id.clone();
-        let claim_a = tokio::spawn(async move {
-            a.claim_scheduler_run(
-                first_key.clone(),
-                ClaimSchedulerRunCommand::new(run_a, "scheduler-a", 60).unwrap(),
-            )
-            .await
-            .unwrap()
-        });
-        let claim_b = tokio::spawn(async move {
-            b.claim_scheduler_run(
-                key("lease.claim.b"),
-                ClaimSchedulerRunCommand::new(run_b, "scheduler-b", 60).unwrap(),
-            )
-            .await
-            .unwrap()
-        });
-        let (claim_a, claim_b) = tokio::join!(claim_a, claim_b);
-        let claim_a = claim_a.unwrap();
-        let claim_b = claim_b.unwrap();
-        let winner = match (&claim_a, &claim_b) {
-            (TransitionOutcome::Committed { result }, TransitionOutcome::StateConflict)
-            | (TransitionOutcome::StateConflict, TransitionOutcome::Committed { result }) => {
-                result.clone()
-            }
-            other => panic!("expected exactly one scheduler lease winner, got {other:?}"),
-        };
-        let heartbeat = repository
-            .heartbeat_scheduler_run(
-                key("lease.heartbeat"),
-                HeartbeatSchedulerRunCommand::new(winner.fence().unwrap(), 60).unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(heartbeat, TransitionOutcome::Committed { .. }));
-        let stale = FencedSchedulerRunCommand::new(
-            run_id.clone(),
-            winner.owner(),
-            winner.lease_epoch() + 1,
-            winner.fencing_token(),
-        )
-        .unwrap();
-        assert_eq!(
-            repository
-                .release_scheduler_run(key("lease.release.stale"), stale)
-                .await
-                .unwrap(),
-            TransitionOutcome::StaleLease
-        );
-        assert!(matches!(
-            repository
-                .release_scheduler_run(key("lease.release"), winner.fence().unwrap())
-                .await
-                .unwrap(),
-            TransitionOutcome::Committed { .. }
-        ));
-        let reclaimed = repository
-            .claim_scheduler_run(
-                key("lease.reclaim"),
-                ClaimSchedulerRunCommand::new(run_id, "scheduler-c", 60).unwrap(),
-            )
-            .await
-            .unwrap();
-        let reclaimed = reclaimed.committed_result().unwrap();
-        assert!(reclaimed.lease_epoch() > winner.lease_epoch());
-    }
-
-    #[tokio::test]
-    async fn postgres_control_scope_token_fork_join_reuse_are_atomic_and_fenced() {
-        let Some(database_url) = postgres_test_url() else {
-            return;
-        };
-        let repository = PostgresDurableRepository::connect(&database_url)
-            .await
-            .unwrap();
-        initialize_once(&repository).await;
-        let plan = test_plan("pg_control");
-        let run_id = install_run(&repository, &plan, "pg_control").await;
-
-        let child_scope = ScopeInstance::subflow(
+    async fn child_scope_counts_and_token_first_winners_are_transactional() {
+        let (repository, run_id) = repository_with_run("scope_token").await;
+        let child = ScopeInstance::subflow(
             &ScopeInstanceId::root(),
-            NodeId::new("scope_owner").unwrap(),
-            DynamicKey::new("invocation_one").unwrap(),
+            NodeId::new("owner").unwrap(),
+            DynamicKey::new("invocation_1").unwrap(),
         )
         .unwrap();
-        let child_create_key = key("pg_control.scope.create");
-        let child_create =
-            CreateChildScopeCommand::new(run_id.clone(), child_scope.clone(), 0).unwrap();
-        let create_a_repository = repository.clone();
-        let create_b_repository = repository.clone();
-        let create_a_key = child_create_key.clone();
-        let create_b_key = child_create_key;
-        let create_a_command = child_create.clone();
-        let create_b_command = child_create;
-        let create_a = tokio::spawn(async move {
-            create_a_repository
-                .create_child_scope(create_a_key, create_a_command)
-                .await
-                .unwrap()
-        });
-        let create_b = tokio::spawn(async move {
-            create_b_repository
-                .create_child_scope(create_b_key, create_b_command)
-                .await
-                .unwrap()
-        });
-        let (create_a, create_b) = tokio::join!(create_a, create_b);
-        assert!(matches!(
-            (create_a.unwrap(), create_b.unwrap()),
-            (
-                TransitionOutcome::Committed { .. },
-                TransitionOutcome::ExactReplay { .. }
-            ) | (
-                TransitionOutcome::ExactReplay { .. },
-                TransitionOutcome::Committed { .. }
-            )
-        ));
+        let create = CreateChildScopeCommand::new(run_id.clone(), child.clone(), 0).unwrap();
+        let create_key = key("scope_token.child.create");
+        let applied = repository
+            .create_child_scope(create_key.clone(), create.clone())
+            .await
+            .unwrap();
+        assert!(matches!(applied, TransitionOutcome::Committed { .. }));
         assert!(matches!(
             repository
-                .close_scope_admission(
-                    key("pg_control.scope.close"),
-                    CloseScopeAdmissionCommand::new(run_id.clone(), child_scope.id().clone(), 0),
-                )
+                .create_child_scope(create_key, create)
                 .await
                 .unwrap(),
-            TransitionOutcome::Committed { .. }
+            TransitionOutcome::ExactReplay { .. }
         ));
-        assert!(matches!(
-            repository
-                .settle_scope(
-                    key("pg_control.scope.settle"),
-                    SettleScopeCommand::new(run_id.clone(), child_scope.id().clone(), 1),
-                )
-                .await
-                .unwrap(),
-            TransitionOutcome::Committed { .. }
-        ));
+        let parent = sqlx::query(
+            "SELECT admitted_children, settled_children, projection_version
+             FROM scope_instances WHERE run_id = ? AND scope_instance_id = 'scope_root'",
+        )
+        .bind(run_id.as_str())
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        assert_eq!(parent.get::<i64, _>("admitted_children"), 1);
+        assert_eq!(parent.get::<i64, _>("settled_children"), 0);
+        assert_eq!(parent.get::<i64, _>("projection_version"), 1);
 
-        let token_source = admit_ready(
+        repository
+            .close_scope_admission(
+                key("scope_token.child.close"),
+                CloseScopeAdmissionCommand::new(run_id.clone(), child.id().clone(), 0),
+            )
+            .await
+            .unwrap();
+        repository
+            .settle_scope(
+                key("scope_token.child.settle"),
+                SettleScopeCommand::new(run_id.clone(), child.id().clone(), 1),
+            )
+            .await
+            .unwrap();
+        let parent = sqlx::query(
+            "SELECT admitted_children, settled_children FROM scope_instances
+             WHERE run_id = ? AND scope_instance_id = 'scope_root'",
+        )
+        .bind(run_id.as_str())
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        assert_eq!(parent.get::<i64, _>("admitted_children"), 1);
+        assert_eq!(parent.get::<i64, _>("settled_children"), 1);
+
+        let activation = admit_ready(
             &repository,
             &run_id,
-            "pg_control_token_source",
-            "node_token_source",
-            root_scope_version(&repository, &run_id).await,
+            "scope_token_source",
+            scope_version(&repository, &run_id).await,
         )
         .await;
-        let token_id = crate::engine::ControlTokenId::new("token_pg_first_winner").unwrap();
         let provenance = ControlTokenProvenance::new(
             run_id.clone(),
-            token_source.clone(),
+            activation.clone(),
             PortId::new("out").unwrap(),
             ControlEmissionSlot::ActivationOutput,
             ScopeInstanceId::root(),
             vec![],
         )
         .unwrap();
-        assert!(matches!(
+        let token_id = insight_engine::ControlTokenId::new("token_scope_token").unwrap();
+        repository
+            .emit_control_token(
+                key("scope_token.emit"),
+                EmitControlTokenCommand::new(token_id.clone(), provenance.clone(), 1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
             repository
                 .emit_control_token(
-                    key("pg_control.token.emit"),
-                    EmitControlTokenCommand::new(token_id.clone(), provenance, 1),
+                    key("scope_token.emit.other"),
+                    EmitControlTokenCommand::new(
+                        insight_engine::ControlTokenId::new("token_other").unwrap(),
+                        provenance,
+                        1,
+                    ),
                 )
+                .await
+                .unwrap(),
+            TransitionOutcome::StateConflict
+        );
+        let consume_key = key("scope_token.consume");
+        let consume = ConsumeControlTokenCommand::new(
+            run_id.clone(),
+            token_id.clone(),
+            activation,
+            super::super::TokenConsumerKind::Activation,
+            0,
+        );
+        assert!(matches!(
+            repository
+                .consume_control_token(consume_key.clone(), consume.clone())
                 .await
                 .unwrap(),
             TransitionOutcome::Committed { .. }
         ));
-        let consume_repository = repository.clone();
-        let revoke_repository = repository.clone();
-        let consume_run = run_id.clone();
-        let revoke_run = run_id.clone();
-        let consume_token = token_id.clone();
-        let revoke_token = token_id.clone();
-        let consumer = token_source.clone();
-        let consume = tokio::spawn(async move {
-            consume_repository
-                .consume_control_token(
-                    key("pg_control.token.consume"),
-                    ConsumeControlTokenCommand::new(
-                        consume_run,
-                        consume_token,
-                        consumer,
-                        super::super::TokenConsumerKind::Activation,
-                        0,
-                    ),
-                )
-                .await
-                .unwrap()
-        });
-        let revoke = tokio::spawn(async move {
-            revoke_repository
-                .revoke_control_token(
-                    key("pg_control.token.revoke"),
-                    RevokeControlTokenCommand::new(revoke_run, revoke_token, 0),
-                )
-                .await
-                .unwrap()
-        });
-        let (consume, revoke) = tokio::join!(consume, revoke);
         assert!(matches!(
-            (consume.unwrap(), revoke.unwrap()),
-            (
-                TransitionOutcome::Committed { .. },
-                TransitionOutcome::StateConflict
-            ) | (
-                TransitionOutcome::StateConflict,
-                TransitionOutcome::Committed { .. }
-            )
+            repository
+                .consume_control_token(consume_key, consume)
+                .await
+                .unwrap(),
+            TransitionOutcome::ExactReplay { .. }
         ));
+        assert_eq!(
+            repository
+                .revoke_control_token(
+                    key("scope_token.revoke_loser"),
+                    RevokeControlTokenCommand::new(run_id, token_id, 1),
+                )
+                .await
+                .unwrap(),
+            TransitionOutcome::StateConflict
+        );
+    }
 
-        let fork_activation = admit_ready(
-            &repository,
-            &run_id,
-            "pg_control_fork",
-            "node_fork",
-            root_scope_version(&repository, &run_id).await,
-        )
-        .await;
-        let bad_leg_id = LegId::new("bad").unwrap();
-        let bad_scope = ScopeInstance::parallel_leg(
-            &ScopeInstanceId::root(),
-            NodeId::new("bad_fork_owner").unwrap(),
-            bad_leg_id.clone(),
-        )
-        .unwrap();
-        let bad_group = ForkGroupId::new("fork_group_rollback").unwrap();
-        let bad_transition = key("pg_control.fork.rollback");
-        let bad_command = CreateForkCommand::new(
-            run_id.clone(),
-            bad_group.clone(),
-            fork_activation.clone(),
-            ScopeInstanceId::root(),
-            1,
-            root_scope_version(&repository, &run_id).await,
-            None,
-            vec![ForkLegAdmission::new(
-                ForkLeg::new(
-                    run_id.clone(),
-                    bad_leg_id,
-                    PortId::new("bad_out").unwrap(),
-                    bad_scope.id().clone(),
-                    ActivationId::new("activation_bad_child").unwrap(),
-                    ChildRequirement::Required,
-                ),
-                bad_scope.clone(),
-                NodeId::new("node_bad_child").unwrap(),
-                "stable_bad_child",
-                ExecutionKind::SchedulerNative,
-                token_id.clone(),
-            )
-            .unwrap()],
-        )
-        .unwrap();
-        assert!(repository
-            .create_fork(bad_transition.clone(), bad_command)
-            .await
-            .is_err());
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM fork_groups WHERE run_id = $1 AND fork_group_id = $2",
-            )
-            .bind(run_id.as_str())
-            .bind(bad_group.as_str())
-            .fetch_one(&repository.pool)
-            .await
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM execution_events
-                 WHERE run_id = $1 AND transition_key = $2",
-            )
-            .bind(run_id.as_str())
-            .bind(bad_transition.as_str())
-            .fetch_one(&repository.pool)
-            .await
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM scope_instances
-                 WHERE run_id = $1 AND scope_instance_id = $2",
-            )
-            .bind(run_id.as_str())
-            .bind(bad_scope.id().as_str())
-            .fetch_one(&repository.pool)
-            .await
-            .unwrap(),
-            0
-        );
-
-        let group_id = ForkGroupId::new("fork_group_pg").unwrap();
-        let owner = NodeId::new("fork_owner_pg").unwrap();
+    #[tokio::test]
+    async fn fork_and_join_commit_ordered_legs_tokens_scopes_and_barrier_atomically() {
+        let (repository, run_id) = repository_with_run("fork_join").await;
+        let fork_activation = admit_ready(&repository, &run_id, "fork", 0).await;
+        let owner = NodeId::new("fork_owner").unwrap();
+        let group_id = ForkGroupId::new("fork_group").unwrap();
         let mut admissions = Vec::new();
         for (index, leg_name) in ["a", "b"].into_iter().enumerate() {
-            let leg_id = LegId::new(format!("pg_{leg_name}")).unwrap();
+            let leg_id = LegId::new(leg_name).unwrap();
             let scope = ScopeInstance::parallel_leg(
                 &ScopeInstanceId::root(),
                 owner.clone(),
                 leg_id.clone(),
             )
             .unwrap();
+            let child = ActivationId::new(format!("activation_child_{leg_name}")).unwrap();
             admissions.push(
                 ForkLegAdmission::new(
                     ForkLeg::new(
@@ -3911,171 +3120,201 @@ mod tests {
                         leg_id,
                         PortId::new(format!("out_{leg_name}")).unwrap(),
                         scope.id().clone(),
-                        ActivationId::new(format!("activation_pg_child_{leg_name}")).unwrap(),
+                        child,
                         ChildRequirement::Required,
                     ),
                     scope,
-                    NodeId::new(format!("node_pg_child_{leg_name}")).unwrap(),
-                    format!("stable_pg_child_{index}"),
+                    NodeId::new(format!("child_{leg_name}")).unwrap(),
+                    format!("child_{index}"),
                     ExecutionKind::SchedulerNative,
-                    crate::engine::ControlTokenId::new(format!("token_pg_{leg_name}")).unwrap(),
+                    insight_engine::ControlTokenId::new(format!("token_{leg_name}")).unwrap(),
                 )
                 .unwrap(),
             );
         }
-        let fork_command = CreateForkCommand::new(
+        let command = CreateForkCommand::new(
             run_id.clone(),
             group_id.clone(),
             fork_activation,
             ScopeInstanceId::root(),
             1,
-            root_scope_version(&repository, &run_id).await,
+            0,
             None,
             admissions.clone(),
         )
         .unwrap();
-        let fork_key = key("pg_control.fork.create");
+        let fork_key = key("fork_join.create");
         assert!(matches!(
             repository
-                .create_fork(fork_key.clone(), fork_command.clone())
+                .create_fork(fork_key.clone(), command.clone())
                 .await
                 .unwrap(),
             TransitionOutcome::Committed { .. }
         ));
         assert!(matches!(
-            repository
-                .create_fork(fork_key, fork_command)
-                .await
-                .unwrap(),
+            repository.create_fork(fork_key, command).await.unwrap(),
             TransitionOutcome::ExactReplay { .. }
         ));
-        let join_activation = admit_ready(
-            &repository,
-            &run_id,
-            "pg_control_join",
-            "node_join",
-            root_scope_version(&repository, &run_id).await,
-        )
-        .await;
-        set_business_failure(
-            &repository,
-            &run_id,
-            admissions[0].leg().child_activation_id(),
-            "pg_control.child_a",
-        )
-        .await;
-        set_succeeded_payload(
-            &repository,
-            &run_id,
-            admissions[1].leg().child_activation_id(),
-            &format!("payload_{}", admissions[1].leg().leg_id().as_str()),
-            json!({"leg": admissions[1].leg().leg_id().as_str()}),
-        )
-        .await;
-        let first_arrival = RecordJoinArrivalCommand::new(
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM fork_legs WHERE run_id = ? AND fork_group_id = ?",
+            )
+            .bind(run_id.as_str())
+            .bind(group_id.as_str())
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap(),
+            2
+        );
+
+        let join_activation = admit_ready(&repository, &run_id, "join", 1).await;
+        for admission in &admissions {
+            let payload_id = format!("payload_{}", admission.leg().leg_id().as_str());
+            let value = json!({"leg": admission.leg().leg_id().as_str()});
+            let encoded = serde_jcs::to_string(&value).unwrap();
+            let hash = ContentHash::from_bytes(encoded.as_bytes());
+            sqlx::query(
+                "INSERT INTO payloads (run_id, payload_id, content_hash, canonical_bytes,
+                    encoding, inline_value, binary_value, created_at, retain_until)
+                 VALUES (?, ?, ?, ?, 'json_jcs', ?, NULL, CURRENT_TIMESTAMP, NULL)",
+            )
+            .bind(run_id.as_str())
+            .bind(&payload_id)
+            .bind(hash.as_str())
+            .bind(i64::try_from(encoded.len()).unwrap())
+            .bind(encoded)
+            .execute(&repository.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE node_activations SET lifecycle = 'succeeded', output_payload_id = ?,
+                    output_value_hash = ?, terminal_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                 WHERE run_id = ? AND activation_id = ?",
+            )
+            .bind(&payload_id)
+            .bind(hash.as_str())
+            .bind(run_id.as_str())
+            .bind(admission.leg().child_activation_id().as_str())
+            .execute(&repository.pool)
+            .await
+            .unwrap();
+        }
+        let first = RecordJoinArrivalCommand::new(
             run_id.clone(),
             join_activation.clone(),
             group_id.clone(),
             admissions[0].leg().leg_id().clone(),
             admissions[0].token_id().clone(),
-            JoinMode::AllSettled,
+            JoinMode::AllSuccess,
             0,
             0,
         );
-        let first_a_repository = repository.clone();
-        let first_b_repository = repository.clone();
-        let first_a = first_arrival.clone();
-        let first_b = first_arrival;
-        let first_a = tokio::spawn(async move {
-            first_a_repository
-                .record_join_arrival(key("pg_control.join.a.first"), first_a)
-                .await
-                .unwrap()
-        });
-        let first_b = tokio::spawn(async move {
-            first_b_repository
-                .record_join_arrival(key("pg_control.join.a.retry"), first_b)
-                .await
-                .unwrap()
-        });
-        let (first_a, first_b) = tokio::join!(first_a, first_b);
-        let first_a = first_a.unwrap();
-        let first_b = first_b.unwrap();
-        assert!(
-            matches!(
-                (&first_a, &first_b),
-                (
-                    TransitionOutcome::Committed { .. },
-                    TransitionOutcome::ExactReplay { .. }
-                ) | (
-                    TransitionOutcome::ExactReplay { .. },
-                    TransitionOutcome::Committed { .. }
-                )
-            ),
-            "unexpected concurrent join outcomes: {first_a:?}, {first_b:?}"
-        );
-        let safe_failure = sqlx::query(
-            "SELECT settlement_class, value_payload_id, value_hash
-             FROM join_arrivals
-             WHERE run_id = $1 AND fork_group_id = $2 AND leg_id = $3",
-        )
-        .bind(run_id.as_str())
-        .bind(group_id.as_str())
-        .bind(admissions[0].leg().leg_id().as_str())
-        .fetch_one(&repository.pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            safe_failure.get::<String, _>("settlement_class"),
-            "safe_failure"
-        );
-        assert!(safe_failure
-            .get::<Option<String>, _>("value_payload_id")
-            .is_some());
-        assert!(safe_failure
-            .get::<Option<String>, _>("value_hash")
-            .is_some());
-        let second_arrival = repository
-            .record_join_arrival(
-                key("pg_control.join.b"),
-                RecordJoinArrivalCommand::new(
-                    run_id.clone(),
-                    join_activation,
-                    group_id.clone(),
-                    admissions[1].leg().leg_id().clone(),
-                    admissions[1].token_id().clone(),
-                    JoinMode::AllSettled,
-                    1,
-                    0,
-                ),
-            )
+        let first_key = key("fork_join.arrive.a");
+        let first_result = repository
+            .record_join_arrival(first_key, first.clone())
             .await
             .unwrap();
         assert!(matches!(
-            second_arrival.committed_result().unwrap().authority(),
+            first_result.committed_result().unwrap().authority(),
+            JoinBarrierAuthority::Pending {
+                settled_legs: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            repository
+                .record_join_arrival(key("fork_join.arrive.a.duplicate"), first)
+                .await
+                .unwrap(),
+            TransitionOutcome::ExactReplay { .. }
+        ));
+        let second = RecordJoinArrivalCommand::new(
+            run_id.clone(),
+            join_activation,
+            group_id.clone(),
+            admissions[1].leg().leg_id().clone(),
+            admissions[1].token_id().clone(),
+            JoinMode::AllSuccess,
+            1,
+            0,
+        );
+        let second_result = repository
+            .record_join_arrival(key("fork_join.arrive.b"), second)
+            .await
+            .unwrap();
+        assert!(matches!(
+            second_result.committed_result().unwrap().authority(),
             JoinBarrierAuthority::Ready {
                 settled_legs: 2,
                 ..
             }
         ));
+        let group = sqlx::query(
+            "SELECT group_state, admitted_legs, settled_legs FROM fork_groups
+             WHERE run_id = ? AND fork_group_id = ?",
+        )
+        .bind(run_id.as_str())
+        .bind(group_id.as_str())
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        assert_eq!(group.get::<String, _>("group_state"), "settled");
+        assert_eq!(group.get::<i64, _>("admitted_legs"), 2);
+        assert_eq!(group.get::<i64, _>("settled_legs"), 2);
+    }
 
-        let source_activation = admit_ready(
-            &repository,
-            &run_id,
-            "pg_control_reuse_source",
-            "node_reuse_source",
-            root_scope_version(&repository, &run_id).await,
+    #[tokio::test]
+    async fn reuse_candidate_does_not_create_an_activation_until_materialization() {
+        let (repository, source_run) = repository_with_run("reuse").await;
+        let plan = test_plan("reuse");
+        let target_run = RunId::new("run_reuse_target").unwrap();
+        repository
+            .create_run(
+                key("reuse.target.create"),
+                CreateRunCommand::new(target_run.clone(), &plan, json!({})).unwrap(),
+            )
+            .await
+            .unwrap();
+        let source_activation = admit_ready(&repository, &source_run, "reuse_source", 0).await;
+        let encoded = serde_jcs::to_string(&json!({"answer": 42})).unwrap();
+        let output_hash = ContentHash::from_bytes(encoded.as_bytes());
+        let output_payload_id = payload_id(&output_hash);
+        sqlx::query(
+            "INSERT INTO payloads (run_id, payload_id, content_hash, canonical_bytes,
+                encoding, inline_value, binary_value, created_at, retain_until)
+             VALUES (?, ?, ?, ?, 'json_jcs', ?, NULL, CURRENT_TIMESTAMP, NULL)",
         )
-        .await;
-        let output_hash = set_succeeded_payload(
-            &repository,
-            &run_id,
-            &source_activation,
-            "payload_pg_reuse",
-            json!({"answer": 42}),
+        .bind(source_run.as_str())
+        .bind(&output_payload_id)
+        .bind(output_hash.as_str())
+        .bind(i64::try_from(encoded.len()).unwrap())
+        .bind(&encoded)
+        .execute(&repository.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE node_activations SET lifecycle = 'succeeded',
+                output_payload_id = ?, output_value_hash = ?,
+                updated_at = CURRENT_TIMESTAMP, terminal_at = CURRENT_TIMESTAMP
+             WHERE run_id = ? AND activation_id = ?",
         )
-        .await;
-        let target_run = install_run(&repository, &plan, "pg_control_target").await;
+        .bind(&output_payload_id)
+        .bind(output_hash.as_str())
+        .bind(source_run.as_str())
+        .bind(source_activation.as_str())
+        .execute(&repository.pool)
+        .await
+        .unwrap();
+        let provenance = ControlTokenProvenance::new(
+            source_run.clone(),
+            source_activation.clone(),
+            PortId::new("out").unwrap(),
+            ControlEmissionSlot::ActivationOutput,
+            ScopeInstanceId::root(),
+            vec![],
+        )
+        .unwrap();
         let compatibility = super::super::ReuseCompatibility::new(
             ContentHash::from_bytes(b"node-config"),
             ContentHash::from_bytes(b"descriptor"),
@@ -4084,162 +3323,56 @@ mod tests {
             ContentHash::from_bytes(b"effect-policy"),
             ContentHash::from_bytes(b"dependencies"),
         );
-        let source_provenance = ControlTokenProvenance::new(
-            run_id.clone(),
-            source_activation.clone(),
-            PortId::new("out").unwrap(),
-            ControlEmissionSlot::ActivationOutput,
-            ScopeInstanceId::root(),
-            vec![],
-        )
-        .unwrap();
-        let baseline_next_seq = sqlx::query_scalar::<_, i64>(
-            "SELECT next_event_seq FROM workflow_runs WHERE run_id = $1",
-        )
-        .bind(target_run.as_str())
-        .fetch_one(&repository.pool)
-        .await
-        .unwrap();
-        let candidate_a = CreateReuseCandidateCommand::new(
+        let candidate = CreateReuseCandidateCommand::new(
             target_run.clone(),
-            "candidate_pg_reuse",
+            "candidate_reuse",
             ScopeInstanceId::root(),
             NodeId::new("node_reuse_source").unwrap(),
-            "stable_pg_reused",
-            run_id.clone(),
+            "stable_reused",
+            source_run.clone(),
             source_activation.clone(),
-            source_provenance.clone(),
+            provenance,
             plan.definition_revision_id().clone(),
             plan.deployment_revision_id().clone(),
             plan.plan_hash().clone(),
             plan.binding_hash().clone(),
             output_hash.clone(),
-            crate::engine::EffectId::for_activation(&run_id, &source_activation),
+            insight_engine::EffectId::for_activation(&source_run, &source_activation),
             compatibility.clone(),
         )
         .unwrap();
-        let candidate_b = CreateReuseCandidateCommand::new(
-            target_run.clone(),
-            "candidate_pg_reuse_parallel",
-            ScopeInstanceId::root(),
-            NodeId::new("node_reuse_source").unwrap(),
-            "stable_pg_reused_parallel",
-            run_id.clone(),
-            source_activation.clone(),
-            source_provenance,
-            plan.definition_revision_id().clone(),
-            plan.deployment_revision_id().clone(),
-            plan.plan_hash().clone(),
-            plan.binding_hash().clone(),
-            output_hash.clone(),
-            crate::engine::EffectId::for_activation(&run_id, &source_activation),
-            compatibility.clone(),
-        )
-        .unwrap();
-        let competing_scope = ScopeInstance::subflow(
-            &ScopeInstanceId::root(),
-            NodeId::new("reuse_lock_order_scope_owner").unwrap(),
-            DynamicKey::new("reuse_lock_order_scope").unwrap(),
-        )
-        .unwrap();
-        let create_scope =
-            CreateChildScopeCommand::new(target_run.clone(), competing_scope, 0).unwrap();
-        let barrier = Arc::new(Barrier::new(4));
-        let repository_a = repository.clone();
-        let barrier_a = barrier.clone();
-        let create_a = tokio::spawn(async move {
-            barrier_a.wait().await;
-            repository_a
-                .create_reuse_candidate(key("pg_control.reuse.create"), candidate_a)
+        assert!(matches!(
+            repository
+                .create_reuse_candidate(key("reuse.candidate"), candidate)
                 .await
-        });
-        let repository_b = repository.clone();
-        let barrier_b = barrier.clone();
-        let create_b = tokio::spawn(async move {
-            barrier_b.wait().await;
-            repository_b
-                .create_reuse_candidate(key("pg_control.reuse.create.parallel"), candidate_b)
+                .unwrap(),
+            TransitionOutcome::Committed { .. }
+        ));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM node_activations WHERE run_id = ?",)
+                .bind(target_run.as_str())
+                .fetch_one(&repository.pool)
                 .await
-        });
-        let repository_scope = repository.clone();
-        let barrier_scope = barrier.clone();
-        let create_scope = tokio::spawn(async move {
-            barrier_scope.wait().await;
-            repository_scope
-                .create_child_scope(key("pg_control.reuse.scope.concurrent"), create_scope)
-                .await
-        });
-        barrier.wait().await;
-        let (create_a, create_b, create_scope) =
-            tokio::time::timeout(Duration::from_secs(10), async {
-                tokio::join!(create_a, create_b, create_scope)
-            })
-            .await
-            .expect("concurrent reuse candidate and scope creation must not deadlock");
-        let create_a = create_a.unwrap().unwrap();
-        let create_b = create_b.unwrap().unwrap();
-        let create_scope = create_scope.unwrap().unwrap();
-        let mut candidate_event_seqs = [
-            match create_a {
-                TransitionOutcome::Committed { result } => result.event_seq(),
-                other => panic!("first concurrent reuse candidate was not committed: {other:?}"),
-            },
-            match create_b {
-                TransitionOutcome::Committed { result } => result.event_seq(),
-                other => panic!("second concurrent reuse candidate was not committed: {other:?}"),
-            },
-            match create_scope {
-                TransitionOutcome::Committed { result } => result.event_seq(),
-                other => panic!("concurrent scope creation was not committed: {other:?}"),
-            },
-        ];
-        candidate_event_seqs.sort_unstable();
-        assert_eq!(
-            candidate_event_seqs,
-            [
-                u64_from_i64(baseline_next_seq).unwrap(),
-                u64_from_i64(baseline_next_seq + 1).unwrap(),
-                u64_from_i64(baseline_next_seq + 2).unwrap(),
-            ]
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT next_event_seq FROM workflow_runs WHERE run_id = $1",
-            )
-            .bind(target_run.as_str())
-            .fetch_one(&repository.pool)
-            .await
-            .unwrap(),
-            baseline_next_seq + 3
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM node_activations WHERE run_id = $1",
-            )
-            .bind(target_run.as_str())
-            .fetch_one(&repository.pool)
-            .await
-            .unwrap(),
+                .unwrap(),
             0
         );
-        let reused_activation = ActivationId::new("activation_pg_reused").unwrap();
-        let source_payload_id = payload_id(&output_hash);
-        sqlx::query("UPDATE payloads SET inline_value=$1 WHERE run_id=$2 AND payload_id=$3")
-            .bind(json!({"answer": 43}))
-            .bind(run_id.as_str())
-            .bind(&source_payload_id)
+        let materialized = ActivationId::new("activation_reused").unwrap();
+        sqlx::query("UPDATE payloads SET inline_value=? WHERE run_id=? AND payload_id=?")
+            .bind(serde_jcs::to_string(&json!({"answer": 43})).unwrap())
+            .bind(source_run.as_str())
+            .bind(&output_payload_id)
             .execute(&repository.pool)
             .await
             .unwrap();
         let corruption = repository
             .materialize_reuse_candidate(
-                key("pg_control.reuse.materialize"),
+                key("reuse.materialize"),
                 MaterializeReuseCandidateCommand::new(
                     target_run.clone(),
-                    "candidate_pg_reuse",
-                    reused_activation.clone(),
+                    "candidate_reuse",
+                    materialized.clone(),
                     0,
-                    1,
+                    0,
                     compatibility.clone(),
                 )
                 .unwrap(),
@@ -4248,30 +3381,30 @@ mod tests {
             .unwrap_err();
         assert_eq!(corruption.code(), super::super::REPOSITORY_DATA_INVALID);
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM node_activations WHERE run_id=$1",)
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM node_activations WHERE run_id=?")
                 .bind(target_run.as_str())
                 .fetch_one(&repository.pool)
                 .await
                 .unwrap(),
             0
         );
-        sqlx::query("UPDATE payloads SET inline_value=$1 WHERE run_id=$2 AND payload_id=$3")
-            .bind(json!({"answer": 42}))
-            .bind(run_id.as_str())
-            .bind(&source_payload_id)
+        sqlx::query("UPDATE payloads SET inline_value=? WHERE run_id=? AND payload_id=?")
+            .bind(&encoded)
+            .bind(source_run.as_str())
+            .bind(&output_payload_id)
             .execute(&repository.pool)
             .await
             .unwrap();
         assert!(matches!(
             repository
                 .materialize_reuse_candidate(
-                    key("pg_control.reuse.materialize"),
+                    key("reuse.materialize"),
                     MaterializeReuseCandidateCommand::new(
                         target_run.clone(),
-                        "candidate_pg_reuse",
-                        reused_activation.clone(),
+                        "candidate_reuse",
+                        materialized.clone(),
                         0,
-                        1,
+                        0,
                         compatibility,
                     )
                     .unwrap(),
@@ -4280,36 +3413,35 @@ mod tests {
                 .unwrap(),
             TransitionOutcome::Committed { .. }
         ));
-        let reused = sqlx::query(
+        let row = sqlx::query(
             "SELECT lifecycle, reused_from_run_id, reused_from_activation_id,
                     output_value_hash
-             FROM node_activations WHERE run_id = $1 AND activation_id = $2",
+             FROM node_activations WHERE run_id = ? AND activation_id = ?",
         )
         .bind(target_run.as_str())
-        .bind(reused_activation.as_str())
+        .bind(materialized.as_str())
         .fetch_one(&repository.pool)
         .await
         .unwrap();
-        assert_eq!(reused.get::<String, _>("lifecycle"), "succeeded");
+        assert_eq!(row.get::<String, _>("lifecycle"), "succeeded");
         assert_eq!(
-            reused.get::<String, _>("reused_from_run_id"),
-            run_id.as_str()
+            row.get::<String, _>("reused_from_run_id"),
+            source_run.as_str()
         );
         assert_eq!(
-            reused.get::<String, _>("reused_from_activation_id"),
+            row.get::<String, _>("reused_from_activation_id"),
             source_activation.as_str()
         );
         assert_eq!(
-            reused.get::<String, _>("output_value_hash"),
+            row.get::<String, _>("output_value_hash"),
             output_hash.as_str()
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM node_attempts
-                 WHERE run_id = $1 AND activation_id = $2",
+                "SELECT COUNT(*) FROM node_attempts WHERE run_id = ? AND activation_id = ?",
             )
             .bind(target_run.as_str())
-            .bind(reused_activation.as_str())
+            .bind(materialized.as_str())
             .fetch_one(&repository.pool)
             .await
             .unwrap(),

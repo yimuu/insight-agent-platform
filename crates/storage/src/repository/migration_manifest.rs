@@ -44,14 +44,16 @@ macro_rules! migration {
             version: $version,
             name: concat!(stringify!($version), "_", $name, ".sql"),
             postgres_sql: include_str!(concat!(
-                "../../../migrations/durable_v3/postgres/",
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../migrations/durable_v3/postgres/",
                 stringify!($version),
                 "_",
                 $name,
                 ".sql"
             )),
             sqlite_sql: include_str!(concat!(
-                "../../../migrations/durable_v3/sqlite/",
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../migrations/durable_v3/sqlite/",
                 stringify!($version),
                 "_",
                 $name,

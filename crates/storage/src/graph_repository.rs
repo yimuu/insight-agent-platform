@@ -10,17 +10,17 @@ use async_trait::async_trait;
 use serde_json::Value;
 use sqlx::Row;
 
-use crate::engine::repository::RepositoryErrorExt as _;
-
-use crate::engine::{
-    repository::{PostgresDurableRepository, RepositoryError, SqliteDurableRepository},
-    ActivationId, DefinitionRevisionId, NodeId, Plan, RunId, TransitionOutcome,
-};
+use insight_engine::repository::RepositoryError;
+use insight_engine::{ActivationId, DefinitionRevisionId, NodeId, Plan, RunId, TransitionOutcome};
 
 use insight_dsl::v3::{
     graph_repository::adapter as graph_repository_adapter, ActivationTrace, GraphAuthorDocument,
     GraphDocumentId, GraphSurfaceRepository, StoredGraphView, TraceActivationState, TraceOverlay,
     ViewDocument,
+};
+
+use crate::repository::{
+    PostgresDurableRepository, RepositoryErrorExt as _, SqliteDurableRepository,
 };
 
 fn invalid_data<T>() -> Result<T, RepositoryError> {

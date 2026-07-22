@@ -9,6 +9,7 @@ use sqlx::{
     Row, Sqlite, SqlitePool, Transaction,
 };
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use insight_durable::common::adapter::{
     self as common_contract_adapter, build_terminal_response_snapshot, canonical_intent_hash,
@@ -20,13 +21,18 @@ use insight_durable::common::adapter::{
     StoredResponseItem, StoredSucceededModelToolCall, TerminalResponseSnapshotInput,
 };
 use insight_durable::model::adapter as model_adapter;
+use insight_durable::production::adapter as production_contract_adapter;
+use insight_durable::{
+    ClaimSchedulerRunCommand, FencedSchedulerRunCommand, PendingMigrationWait,
+    ProductionRunRepository, RunRepositoryCapability,
+};
 use insight_engine::response::adapter::{
     durable_response_snapshot_new, response_terminal_kind_parse, response_usage_status_parse,
 };
 
-use crate::engine::{
+use insight_engine::{
     ContentHash, DefinitionRevisionId, DeploymentRevisionId, ExecutionEventContext,
-    ExecutionEventPayload, PendingExecutionEvent, RunId, RunLifecycle, TransitionKey,
+    ExecutionEventPayload, NodeId, PendingExecutionEvent, RunId, RunLifecycle, TransitionKey,
     TransitionOutcome, EXECUTION_EVENT_SCHEMA_VERSION,
 };
 
@@ -423,7 +429,7 @@ impl DurableRepository for SqliteDurableRepository {
             &event,
         )
         .await?;
-        let public_payload = crate::engine::PublicEventPayload::RunCreated;
+        let public_payload = insight_engine::PublicEventPayload::RunCreated;
         let public_kind = public_payload.kind();
         let public_event_id = public_event_id(command.run_id(), &transition_key, public_kind);
         let safe_envelope = durable_public_event_envelope(
@@ -902,7 +908,7 @@ pub(crate) async fn persist_terminal_response_snapshot_sqlite(
 async fn load_terminal_tool_results_sqlite(
     transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
-) -> Result<Vec<crate::runtime::WorkflowToolResult>, RepositoryError> {
+) -> Result<Vec<insight_engine::response::WorkflowToolResult>, RepositoryError> {
     let rows = sqlx::query(
         "SELECT activation_id,attempt_no,model_call_no,call_index,call_id,tool_name,
                 effective_public_policy,result_json
@@ -964,12 +970,12 @@ async fn load_terminal_tool_results_sqlite(
 async fn validate_terminal_tool_result_artifacts_sqlite(
     transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
-    tool_results: &[crate::runtime::WorkflowToolResult],
+    tool_results: &[insight_engine::response::WorkflowToolResult],
 ) -> Result<(), RepositoryError> {
     for artifact in tool_results
         .iter()
         .flat_map(|result| result.content())
-        .filter_map(crate::runtime::WorkflowToolContent::artifact)
+        .filter_map(insight_engine::response::WorkflowToolContent::artifact)
     {
         let row = sqlx::query(
             "SELECT content_hash,size_bytes,media_type,artifact_state
@@ -1008,12 +1014,12 @@ async fn validate_terminal_tool_result_artifacts_sqlite(
 async fn validate_terminal_retrieval_artifacts_sqlite(
     transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
-    retrievals: &[crate::runtime::response_stream::WorkflowRetrieval],
+    retrievals: &[insight_engine::response::WorkflowRetrieval],
 ) -> Result<(), RepositoryError> {
     for artifact in retrievals
         .iter()
         .flat_map(|retrieval| retrieval.results())
-        .filter_map(crate::runtime::response_stream::WorkflowRetrievalResult::artifact)
+        .filter_map(insight_engine::response::WorkflowRetrievalResult::artifact)
     {
         let row = sqlx::query(
             "SELECT content_hash,size_bytes,media_type,artifact_state
@@ -1468,7 +1474,7 @@ async fn install_plan(
 
 pub(crate) fn decode_execution_event_row(
     row: &SqliteRow,
-) -> Result<crate::engine::ExecutionEventEnvelope, RepositoryError> {
+) -> Result<insight_engine::ExecutionEventEnvelope, RepositoryError> {
     let safe_payload = serde_json::from_str(
         &row.try_get::<String, _>("safe_payload")
             .map_err(|_| RepositoryError::invalid_data())?,
@@ -1571,7 +1577,7 @@ async fn load_replay_public_projection(
     transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
     event_id: &str,
-    execution: &crate::engine::ExecutionEventEnvelope,
+    execution: &insight_engine::ExecutionEventEnvelope,
 ) -> Result<Option<String>, RepositoryError> {
     let rows = sqlx::query(
         "SELECT decision.run_id AS decision_run_id,
@@ -2115,6 +2121,156 @@ fn projection_from_row(run_id: &RunId, row: &SqliteRow) -> Result<RunProjection,
     ))
 }
 
+#[async_trait]
+impl ProductionRunRepository for SqliteDurableRepository {
+    fn run_repository_capability(&self) -> RunRepositoryCapability {
+        RunRepositoryCapability::SingleProcessOnly
+    }
+
+    async fn check_production_health(&self) -> Result<(), RepositoryError> {
+        self.check_health().await
+    }
+
+    async fn load_production_run_input(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<serde_json::Value>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT p.encoding,p.inline_value FROM workflow_runs r
+             JOIN payloads p ON p.run_id=r.run_id AND p.payload_id=r.input_payload_id
+             WHERE r.run_id=?",
+        )
+        .bind(run_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::storage)?;
+        row.map(|row| {
+            if row
+                .try_get::<String, _>("encoding")
+                .map_err(|_| RepositoryError::invalid_data())?
+                != "json_jcs"
+            {
+                return Err(RepositoryError::invalid_data());
+            }
+            serde_json::from_str(
+                &row.try_get::<String, _>("inline_value")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+            .map_err(|_| RepositoryError::invalid_data())
+        })
+        .transpose()
+    }
+
+    async fn claim_production_scheduler_run(
+        &self,
+        _transition_key: TransitionKey,
+        command: ClaimSchedulerRunCommand,
+    ) -> Result<Option<FencedSchedulerRunCommand>, RepositoryError> {
+        // SQLite is deliberately a single-process backend. Its writer mutex is
+        // the authority; these persisted fields only satisfy the scheduler's
+        // fenced CAS contract and make an ordinary single-process restart
+        // immediately recoverable. They do not provide multi-process safety.
+        let _writer = self.writer.lock().await;
+        let token = format!("sqlite_local_{}", Uuid::new_v4().simple());
+        let row = sqlx::query(
+            "UPDATE workflow_runs
+             SET scheduler_lease_epoch = scheduler_lease_epoch + 1,
+                 scheduler_lease_owner = ?, scheduler_fencing_token = ?,
+                 scheduler_lease_expires_at = datetime('now', '+' || ? || ' seconds'),
+                 scheduler_heartbeat_at = CURRENT_TIMESTAMP
+             WHERE run_id = ? AND lifecycle IN ('active','waiting','terminating')
+               AND (admission_state = 'open' OR lifecycle = 'terminating')
+             RETURNING scheduler_lease_epoch",
+        )
+        .bind(command.owner())
+        .bind(&token)
+        .bind(command.lease_seconds())
+        .bind(command.run_id().as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::storage)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let epoch = u64::try_from(
+            row.try_get::<i64, _>("scheduler_lease_epoch")
+                .map_err(|_| RepositoryError::invalid_data())?,
+        )
+        .map_err(|_| RepositoryError::invalid_data())?;
+        Ok(Some(FencedSchedulerRunCommand::new(
+            command.run_id().clone(),
+            command.owner(),
+            epoch,
+            token,
+        )?))
+    }
+
+    async fn release_production_scheduler_run(
+        &self,
+        _transition_key: TransitionKey,
+        fence: FencedSchedulerRunCommand,
+    ) -> Result<(), RepositoryError> {
+        let _writer = self.writer.lock().await;
+        sqlx::query(
+            "UPDATE workflow_runs
+             SET scheduler_lease_owner = NULL, scheduler_fencing_token = NULL,
+                 scheduler_lease_expires_at = NULL, scheduler_heartbeat_at = NULL
+             WHERE run_id = ? AND scheduler_lease_owner = ?
+               AND scheduler_lease_epoch = ? AND scheduler_fencing_token = ?",
+        )
+        .bind(fence.run_id().as_str())
+        .bind(fence.owner())
+        .bind(i64::try_from(fence.lease_epoch()).map_err(|_| RepositoryError::invalid_data())?)
+        .bind(fence.fencing_token())
+        .execute(&self.pool)
+        .await
+        .map_err(RepositoryError::storage)?;
+        Ok(())
+    }
+
+    async fn load_pending_migration_waits(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Vec<PendingMigrationWait>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT w.node_id AS wait_node_id,a.node_id AS activation_node_id,
+                    w.signal_id,w.timer_id
+             FROM scheduler_wait_registrations w
+             JOIN node_activations a
+               ON a.run_id=w.run_id AND a.activation_id=w.activation_id
+             WHERE w.run_id=? AND w.winner_kind IS NULL
+             ORDER BY w.node_id,w.wait_id",
+        )
+        .bind(run_id.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(RepositoryError::storage)?;
+        rows.into_iter()
+            .map(|row| {
+                let wait_node = row
+                    .try_get::<String, _>("wait_node_id")
+                    .map_err(|_| RepositoryError::invalid_data())?;
+                if wait_node
+                    != row
+                        .try_get::<String, _>("activation_node_id")
+                        .map_err(|_| RepositoryError::invalid_data())?
+                {
+                    return Err(RepositoryError::invalid_data());
+                }
+                production_contract_adapter::pending_migration_wait(
+                    NodeId::new(wait_node).map_err(|_| RepositoryError::invalid_data())?,
+                    row.try_get::<Option<String>, _>("signal_id")
+                        .map_err(|_| RepositoryError::invalid_data())?
+                        .is_some(),
+                    row.try_get::<Option<String>, _>("timer_id")
+                        .map_err(|_| RepositoryError::invalid_data())?
+                        .is_some(),
+                )
+            })
+            .collect()
+    }
+}
+
 pub(super) fn parse_run_timestamp(value: &str) -> Result<DateTime<Utc>, RepositoryError> {
     if let Ok(value) = DateTime::parse_from_rfc3339(value) {
         return Ok(value.with_timezone(&Utc));
@@ -2128,7 +2284,7 @@ pub(super) fn parse_run_timestamp(value: &str) -> Result<DateTime<Utc>, Reposito
 mod terminal_tool_result_tests {
     use serde_json::{json, Value};
 
-    use crate::resources::actions::{ToolPublicArguments, ToolPublicPolicy};
+    use insight_engine::resource_policy::{ToolPublicArguments, ToolPublicPolicy};
 
     use super::*;
 

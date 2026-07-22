@@ -8,21 +8,21 @@ use sqlx::{postgres::PgRow, Postgres, Row, Sqlite, Transaction};
 
 use insight_durable::common::adapter::canonical_intent_hash;
 use insight_durable::human_task::adapter as human_task_contract_adapter;
+use insight_durable::human_task::{
+    ClaimHumanWorkItemCommand, CompleteHumanWorkItemCommand, HumanTaskDurableRepository,
+    HumanWorkItemClaim, HumanWorkItemCompletionAuthority,
+};
 use insight_engine::human::adapter as human_adapter;
 pub use insight_engine::human::{
     HumanTaskPrincipal, HumanWorkItem, HumanWorkItemId, HumanWorkItemState,
 };
-
-use crate::engine::{
+use insight_engine::repository::RepositoryError;
+use insight_engine::{
     ActivationId, ContentHash, ProjectionMutationKind, RunId, RuntimeValue, SignalId,
     TransitionKey, TransitionOutcome,
 };
 
 use super::{
-    human_task::{
-        ClaimHumanWorkItemCommand, CompleteHumanWorkItemCommand, HumanTaskDurableRepository,
-        HumanWorkItemClaim, HumanWorkItemCompletionAuthority,
-    },
     postgres_projection::{
         append_projection_mutation_event as append_postgres_projection_mutation_event,
         finalize_projection_checkpoints as finalize_postgres_projection_checkpoints,
@@ -31,7 +31,7 @@ use super::{
         append_projection_mutation_event as append_sqlite_projection_mutation_event,
         finalize_projection_checkpoints as finalize_sqlite_projection_checkpoints,
     },
-    PostgresDurableRepository, RepositoryError, SqliteDurableRepository,
+    PostgresDurableRepository, SqliteDurableRepository,
 };
 
 const MAX_WORK_ITEM_LIST: u32 = 1_024;

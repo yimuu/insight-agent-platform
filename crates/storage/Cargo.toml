@@ -7,3 +7,21 @@ publish = false
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+insight-dsl.workspace = true
+insight-durable.workspace = true
+insight-engine.workspace = true
+serde.workspace = true
+serde_jcs.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio-util.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

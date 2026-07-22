@@ -2,7 +2,7 @@ use super::RepositoryErrorExt as _;
 
 #[cfg(test)]
 use super::model::{
-    PublicEventIntentAdapter as _, PublicationHeadAdapter as _, RunTransitionCommandAdapter as _,
+    PublicEventIntentAdapter, PublicationHeadAdapter as _, RunTransitionCommandAdapter as _,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -24,7 +24,7 @@ use insight_durable::{
     recovery_repository::adapter as recovery_adapter,
 };
 
-use crate::engine::{
+use insight_engine::{
     control::{ControlEmissionSlot, ControlFrame},
     decide_redrive_effect,
     scheduler::ReuseAdmissionContract,
@@ -50,7 +50,7 @@ use super::{
     ReuseCompatibility, SqliteDurableRepository, SCHEDULER_CHECKPOINT_SCHEMA_VERSION,
 };
 
-fn model_data<T>(value: Result<T, crate::engine::ModelError>) -> Result<T, RepositoryError> {
+fn model_data<T>(value: Result<T, insight_engine::ModelError>) -> Result<T, RepositoryError> {
     value.map_err(|_| RepositoryError::invalid_data())
 }
 
@@ -2544,25 +2544,26 @@ mod tests {
     use serde_json::json;
     use sqlx::Row;
 
-    use crate::engine::control::ControlEmissionSlot;
-    use crate::engine::plan::{
+    use insight_engine::control::ControlEmissionSlot;
+    use insight_engine::plan::{
         AuthorFormat, DataBinding, DataBindingId, DataPort, DataPortId, Node, NodeKind,
         PlanBuilder, PlanInputContract, PlanMetadata, PlanType, PortDirection, PortName,
         ReturnDescriptor, ScopeId, ScopeMetadata, ValueSource, VersionTag,
     };
-    use crate::engine::{
+    use insight_engine::{
         ActivationId, ContentHash, ControlTokenProvenance, DefinitionRevisionId,
         DeploymentRevisionId, EffectId, ExecutionKind, MigrationNodeMapping, NodeId, PortId,
         PublicFailureKind, RunLifecycle, SignalId, TerminationReason,
     };
 
     use super::*;
-    use crate::engine::repository::{
+    use insight_durable::{
         ActivationAdmissionCommand, ActivationCasCommand, ActivationDurableRepository,
         CreateRunCommand, DurableRepository, PublicEventIntent, PublicationHead, PublicationOrigin,
         PublishVersionedPlanCommand, ReceiveSignalCommand, ReuseCompatibility,
-        RunTransitionCommand, VersionedPlan, REPOSITORY_INTENT_CONFLICT, REPOSITORY_RUN_MIGRATING,
+        RunTransitionCommand, VersionedPlan,
     };
+    use insight_engine::repository::{REPOSITORY_INTENT_CONFLICT, REPOSITORY_RUN_MIGRATING};
 
     fn key(label: &str) -> TransitionKey {
         TransitionKey::derive("sqlite.recovery.test", &[label]).unwrap()
@@ -2802,7 +2803,9 @@ mod tests {
                         },
                     )
                     .unwrap(),
-                    PublicEventIntent::new(PublicEventPayload::RunFailed { failure }),
+                    <PublicEventIntent as PublicEventIntentAdapter>::new(
+                        PublicEventPayload::RunFailed { failure },
+                    ),
                 )
                 .unwrap(),
             )
@@ -2896,13 +2899,13 @@ mod tests {
     fn mapping(
         source_hash: &[u8],
         target_hash: &[u8],
-    ) -> Result<MigrationMappingCompatibility, crate::engine::ModelError> {
+    ) -> Result<MigrationMappingCompatibility, insight_engine::ModelError> {
         let source = MigrationNodeMapping::new(
             NodeId::new("analyze_v1").unwrap(),
             NodeId::new("analyze_v2").unwrap(),
             std::collections::BTreeMap::from([(
-                crate::engine::plan::DataPortId::new("analyze_v1.output").unwrap(),
-                crate::engine::plan::DataPortId::new("analyze_v2.output").unwrap(),
+                insight_engine::plan::DataPortId::new("analyze_v1.output").unwrap(),
+                insight_engine::plan::DataPortId::new("analyze_v2.output").unwrap(),
             )]),
             ContentHash::from_bytes(source_hash),
             ContentHash::from_bytes(b"output_schema"),
@@ -2914,8 +2917,8 @@ mod tests {
             NodeId::new("analyze_v1").unwrap(),
             NodeId::new("analyze_v2").unwrap(),
             std::collections::BTreeMap::from([(
-                crate::engine::plan::DataPortId::new("analyze_v1.output").unwrap(),
-                crate::engine::plan::DataPortId::new("analyze_v2.output").unwrap(),
+                insight_engine::plan::DataPortId::new("analyze_v1.output").unwrap(),
+                insight_engine::plan::DataPortId::new("analyze_v2.output").unwrap(),
             )]),
             ContentHash::from_bytes(target_hash),
             ContentHash::from_bytes(b"output_schema"),
@@ -2931,8 +2934,8 @@ mod tests {
         target_signal_rebuild: bool,
     ) -> MigrationMappingCompatibility {
         let ports = std::collections::BTreeMap::from([(
-            crate::engine::plan::DataPortId::new("wait_v1.output").unwrap(),
-            crate::engine::plan::DataPortId::new("wait_v2.output").unwrap(),
+            insight_engine::plan::DataPortId::new("wait_v1.output").unwrap(),
+            insight_engine::plan::DataPortId::new("wait_v2.output").unwrap(),
         )]);
         let source = MigrationNodeMapping::new(
             NodeId::new("wait_v1").unwrap(),
@@ -3156,7 +3159,9 @@ mod tests {
                             },
                         )
                         .unwrap(),
-                        PublicEventIntent::new(PublicEventPayload::RunCompleted),
+                        <PublicEventIntent as PublicEventIntentAdapter>::new(
+                            PublicEventPayload::RunCompleted,
+                        ),
                     )
                     .unwrap(),
                 )
@@ -3180,7 +3185,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             repository.load_run(&completed).await.unwrap_err().code(),
-            crate::engine::repository::REPOSITORY_DATA_INVALID
+            insight_engine::repository::REPOSITORY_DATA_INVALID
         );
         let mut tx = repository.test_pool().begin().await.unwrap();
         assert_eq!(
@@ -3194,7 +3199,7 @@ mod tests {
             .await
             .unwrap_err()
             .code(),
-            crate::engine::repository::REPOSITORY_DATA_INVALID
+            insight_engine::repository::REPOSITORY_DATA_INVALID
         );
         tx.rollback().await.unwrap();
 
@@ -3235,7 +3240,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.code(),
-            crate::engine::repository::REPOSITORY_DATA_INVALID
+            insight_engine::repository::REPOSITORY_DATA_INVALID
         );
         assert!(
             !run_exists(&mut repository.test_pool().begin().await.unwrap(), &target,)
@@ -3829,7 +3834,7 @@ mod tests {
     async fn sqlite_migration_is_ready_fenced_signal_safe_and_atomic() {
         assert_eq!(
             mapping(b"schema_v1", b"schema_v2").unwrap_err().code(),
-            crate::engine::RECOVERY_MIGRATION_SCHEMA_INCOMPATIBLE
+            insight_engine::RECOVERY_MIGRATION_SCHEMA_INCOMPATIBLE
         );
         let repository = SqliteDurableRepository::in_memory().await.unwrap();
         let v1 = plan("migration_v1");

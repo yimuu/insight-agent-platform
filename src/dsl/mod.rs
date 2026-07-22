@@ -1,5 +1,3 @@
-mod graph_storage;
-
 pub mod v3 {
     pub mod ast {
         pub use insight_dsl::v3::ast::*;

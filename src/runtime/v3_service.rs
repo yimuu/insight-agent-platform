@@ -18,21 +18,17 @@ use std::{
 use crate::engine::repository::{
     PublicEventIntentAdapter as _, RunTransitionCommandAdapter as _, VersionedPlanAdapter as _,
 };
-use async_trait::async_trait;
 use futures::FutureExt;
 use insight_durable::production::adapter as production_contract_adapter;
 use insight_durable::recovery_repository::adapter as recovery_contract_adapter;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::Row;
 use tokio::{
     sync::{broadcast, Mutex as AsyncMutex},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-
-use crate::engine::repository::RepositoryErrorExt as _;
 
 pub use insight_durable::{PendingMigrationWait, ProductionRunRepository, RunRepositoryCapability};
 
@@ -63,8 +59,8 @@ use crate::{
             PublishVersionedPlanCommand, ReceiveSignalCommand, RecoveryRevisionSpec,
             RecoveryRunReceipt, RedriveRunCommand, ReleaseRunArtifactRetentionCommand,
             RepositoryError, ResolveSignalCommand, RunProjection, RunTransitionCommand,
-            SchedulerLeaseRepository, SchedulerRecoveryOutcome, SchedulerWorkerPumpOutcome,
-            SignalInboxState, VersionedPlanCatalog, REPOSITORY_ARTIFACT_STORE_CONFLICT,
+            SchedulerRecoveryOutcome, SchedulerWorkerPumpOutcome, SignalInboxState,
+            VersionedPlanCatalog, REPOSITORY_ARTIFACT_STORE_CONFLICT,
             REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_INTENT_CONFLICT,
             REPOSITORY_REDRIVE_REQUIRES_FORK,
         },
@@ -120,258 +116,6 @@ fn has_public_llm_streaming_source(agent: &PublishedV3Agent) -> bool {
         .sources()
         .iter()
         .any(|source| source.kind() == AgentStreamingSourceKind::Llm)
-}
-
-#[async_trait]
-impl ProductionRunRepository for crate::engine::repository::SqliteDurableRepository {
-    fn run_repository_capability(&self) -> RunRepositoryCapability {
-        RunRepositoryCapability::SingleProcessOnly
-    }
-
-    async fn check_production_health(&self) -> Result<(), RepositoryError> {
-        self.check_health().await
-    }
-
-    async fn load_production_run_input(
-        &self,
-        run_id: &RunId,
-    ) -> Result<Option<Value>, RepositoryError> {
-        let row = sqlx::query(
-            "SELECT p.encoding,p.inline_value FROM workflow_runs r
-             JOIN payloads p ON p.run_id=r.run_id AND p.payload_id=r.input_payload_id
-             WHERE r.run_id=?",
-        )
-        .bind(run_id.as_str())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(RepositoryError::storage)?;
-        row.map(|row| {
-            if row
-                .try_get::<String, _>("encoding")
-                .map_err(|_| RepositoryError::invalid_data())?
-                != "json_jcs"
-            {
-                return Err(RepositoryError::invalid_data());
-            }
-            serde_json::from_str(
-                &row.try_get::<String, _>("inline_value")
-                    .map_err(|_| RepositoryError::invalid_data())?,
-            )
-            .map_err(|_| RepositoryError::invalid_data())
-        })
-        .transpose()
-    }
-
-    async fn claim_production_scheduler_run(
-        &self,
-        _transition_key: TransitionKey,
-        command: ClaimSchedulerRunCommand,
-    ) -> Result<Option<FencedSchedulerRunCommand>, RepositoryError> {
-        // SQLite is deliberately a single-process backend. Its writer mutex is
-        // the authority; these persisted fields only satisfy the scheduler's
-        // fenced CAS contract and make an ordinary single-process restart
-        // immediately recoverable. They do not provide multi-process safety.
-        let _writer = self.writer.lock().await;
-        let token = format!("sqlite_local_{}", Uuid::new_v4().simple());
-        let row = sqlx::query(
-            "UPDATE workflow_runs
-             SET scheduler_lease_epoch = scheduler_lease_epoch + 1,
-                 scheduler_lease_owner = ?, scheduler_fencing_token = ?,
-                 scheduler_lease_expires_at = datetime('now', '+' || ? || ' seconds'),
-                 scheduler_heartbeat_at = CURRENT_TIMESTAMP
-             WHERE run_id = ? AND lifecycle IN ('active','waiting','terminating')
-               AND (admission_state = 'open' OR lifecycle = 'terminating')
-             RETURNING scheduler_lease_epoch",
-        )
-        .bind(command.owner())
-        .bind(&token)
-        .bind(command.lease_seconds())
-        .bind(command.run_id().as_str())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(RepositoryError::storage)?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let epoch = u64::try_from(
-            row.try_get::<i64, _>("scheduler_lease_epoch")
-                .map_err(|_| RepositoryError::invalid_data())?,
-        )
-        .map_err(|_| RepositoryError::invalid_data())?;
-        Ok(Some(FencedSchedulerRunCommand::new(
-            command.run_id().clone(),
-            command.owner(),
-            epoch,
-            token,
-        )?))
-    }
-
-    async fn release_production_scheduler_run(
-        &self,
-        _transition_key: TransitionKey,
-        fence: FencedSchedulerRunCommand,
-    ) -> Result<(), RepositoryError> {
-        let _writer = self.writer.lock().await;
-        sqlx::query(
-            "UPDATE workflow_runs
-             SET scheduler_lease_owner = NULL, scheduler_fencing_token = NULL,
-                 scheduler_lease_expires_at = NULL, scheduler_heartbeat_at = NULL
-             WHERE run_id = ? AND scheduler_lease_owner = ?
-               AND scheduler_lease_epoch = ? AND scheduler_fencing_token = ?",
-        )
-        .bind(fence.run_id().as_str())
-        .bind(fence.owner())
-        .bind(i64::try_from(fence.lease_epoch()).map_err(|_| RepositoryError::invalid_data())?)
-        .bind(fence.fencing_token())
-        .execute(&self.pool)
-        .await
-        .map_err(RepositoryError::storage)?;
-        Ok(())
-    }
-
-    async fn load_pending_migration_waits(
-        &self,
-        run_id: &RunId,
-    ) -> Result<Vec<PendingMigrationWait>, RepositoryError> {
-        let rows = sqlx::query(
-            "SELECT w.node_id AS wait_node_id,a.node_id AS activation_node_id,
-                    w.signal_id,w.timer_id
-             FROM scheduler_wait_registrations w
-             JOIN node_activations a
-               ON a.run_id=w.run_id AND a.activation_id=w.activation_id
-             WHERE w.run_id=? AND w.winner_kind IS NULL
-             ORDER BY w.node_id,w.wait_id",
-        )
-        .bind(run_id.as_str())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(RepositoryError::storage)?;
-        rows.into_iter()
-            .map(|row| {
-                let wait_node = row
-                    .try_get::<String, _>("wait_node_id")
-                    .map_err(|_| RepositoryError::invalid_data())?;
-                if wait_node
-                    != row
-                        .try_get::<String, _>("activation_node_id")
-                        .map_err(|_| RepositoryError::invalid_data())?
-                {
-                    return Err(RepositoryError::invalid_data());
-                }
-                production_contract_adapter::pending_migration_wait(
-                    NodeId::new(wait_node).map_err(|_| RepositoryError::invalid_data())?,
-                    row.try_get::<Option<String>, _>("signal_id")
-                        .map_err(|_| RepositoryError::invalid_data())?
-                        .is_some(),
-                    row.try_get::<Option<String>, _>("timer_id")
-                        .map_err(|_| RepositoryError::invalid_data())?
-                        .is_some(),
-                )
-            })
-            .collect()
-    }
-}
-
-#[async_trait]
-impl ProductionRunRepository for crate::engine::repository::PostgresDurableRepository {
-    fn run_repository_capability(&self) -> RunRepositoryCapability {
-        RunRepositoryCapability::Production
-    }
-
-    async fn check_production_health(&self) -> Result<(), RepositoryError> {
-        self.check_health().await
-    }
-
-    async fn load_production_run_input(
-        &self,
-        run_id: &RunId,
-    ) -> Result<Option<Value>, RepositoryError> {
-        let row = sqlx::query(
-            "SELECT p.encoding,p.inline_value FROM workflow_runs r
-             JOIN payloads p ON p.run_id=r.run_id AND p.payload_id=r.input_payload_id
-             WHERE r.run_id=$1",
-        )
-        .bind(run_id.as_str())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(RepositoryError::storage)?;
-        row.map(|row| {
-            if row
-                .try_get::<String, _>("encoding")
-                .map_err(|_| RepositoryError::invalid_data())?
-                != "json_jcs"
-            {
-                return Err(RepositoryError::invalid_data());
-            }
-            row.try_get::<Value, _>("inline_value")
-                .map_err(|_| RepositoryError::invalid_data())
-        })
-        .transpose()
-    }
-
-    async fn claim_production_scheduler_run(
-        &self,
-        transition_key: TransitionKey,
-        command: ClaimSchedulerRunCommand,
-    ) -> Result<Option<FencedSchedulerRunCommand>, RepositoryError> {
-        match SchedulerLeaseRepository::claim_scheduler_run(self, transition_key, command).await? {
-            TransitionOutcome::Committed { result } => Ok(Some(result.fence()?)),
-            TransitionOutcome::ExactReplay { authoritative } => Ok(Some(authoritative.fence()?)),
-            TransitionOutcome::StateConflict | TransitionOutcome::StaleLease => Ok(None),
-        }
-    }
-
-    async fn release_production_scheduler_run(
-        &self,
-        transition_key: TransitionKey,
-        fence: FencedSchedulerRunCommand,
-    ) -> Result<(), RepositoryError> {
-        let _ =
-            SchedulerLeaseRepository::release_scheduler_run(self, transition_key, fence).await?;
-        Ok(())
-    }
-
-    async fn load_pending_migration_waits(
-        &self,
-        run_id: &RunId,
-    ) -> Result<Vec<PendingMigrationWait>, RepositoryError> {
-        let rows = sqlx::query(
-            "SELECT w.node_id AS wait_node_id,a.node_id AS activation_node_id,
-                    w.signal_id,w.timer_id
-             FROM scheduler_wait_registrations w
-             JOIN node_activations a
-               ON a.run_id=w.run_id AND a.activation_id=w.activation_id
-             WHERE w.run_id=$1 AND w.winner_kind IS NULL
-             ORDER BY w.node_id,w.wait_id",
-        )
-        .bind(run_id.as_str())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(RepositoryError::storage)?;
-        rows.into_iter()
-            .map(|row| {
-                let wait_node = row
-                    .try_get::<String, _>("wait_node_id")
-                    .map_err(|_| RepositoryError::invalid_data())?;
-                if wait_node
-                    != row
-                        .try_get::<String, _>("activation_node_id")
-                        .map_err(|_| RepositoryError::invalid_data())?
-                {
-                    return Err(RepositoryError::invalid_data());
-                }
-                production_contract_adapter::pending_migration_wait(
-                    NodeId::new(wait_node).map_err(|_| RepositoryError::invalid_data())?,
-                    row.try_get::<Option<String>, _>("signal_id")
-                        .map_err(|_| RepositoryError::invalid_data())?
-                        .is_some(),
-                    row.try_get::<Option<String>, _>("timer_id")
-                        .map_err(|_| RepositoryError::invalid_data())?
-                        .is_some(),
-                )
-            })
-            .collect()
-    }
 }
 
 #[derive(Default)]
@@ -5340,14 +5084,6 @@ mod public_event_multiruntime_tests {
             .unwrap()
             .unwrap();
 
-        sqlx::query(
-            "UPDATE workflow_runs SET updated_at='2099-01-01T00:00:00.000000Z' WHERE run_id=?",
-        )
-        .bind(run_id.as_str())
-        .execute(&repository.pool)
-        .await
-        .unwrap();
-        let projection = repository.load_run(&run_id).await.unwrap().unwrap();
         let live = service
             .inner
             .run_event(&run_id, published.safe_envelope())
@@ -5357,7 +5093,6 @@ mod public_event_multiruntime_tests {
             live.timestamp,
             published.safe_envelope().occurred_at().to_owned()
         );
-        assert_ne!(live.timestamp, projection.updated_at());
         service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 

@@ -11,32 +11,28 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use insight_durable::artifact::adapter as artifact_contract_adapter;
+use insight_durable::artifact::{
+    AcknowledgeArtifactDeletionCommand, ArtifactDeletionClaim, ArtifactDurableRepository,
+    ArtifactReceipt, ArtifactReferenceAuthority, ArtifactReferenceTarget, ArtifactRetentionRelease,
+    ArtifactState, ArtifactStoreAuthority, BindArtifactStoreAuthorityCommand, OrphanSweepBatch,
+    OrphanSweepCommand, PayloadId, PayloadReceipt, PutInlinePayloadCommand,
+    ReferenceArtifactCommand, ReleaseRunArtifactRetentionCommand, RetainedArtifact,
+    StageArtifactCommand, StoredInlinePayload, VerifyArtifactCommand,
+};
 use insight_durable::common::adapter::{
     canonical_intent_hash, canonical_json, event_id, i64_from_u64, u64_from_i64,
 };
 use insight_engine::repository::adapter as repository_adapter;
-use serde_json::Value;
-use sqlx::{postgres::PgRow, sqlite::SqliteRow, PgPool, Postgres, Row, Sqlite, Transaction};
-
-use crate::engine::{
+use insight_engine::repository::{RepositoryError, StorageLocator, REPOSITORY_RUN_NOT_FOUND};
+use insight_engine::{
     ArtifactId, ArtifactRef, ContentHash, ExecutionEventContext, ExecutionEventPayload,
     InlineValueRef, PendingExecutionEvent, ProjectionMutationKind, RunId, TransitionKey,
     TransitionOutcome,
 };
+use serde_json::Value;
+use sqlx::{postgres::PgRow, sqlite::SqliteRow, PgPool, Postgres, Row, Sqlite, Transaction};
 
-use super::{
-    artifact::{
-        AcknowledgeArtifactDeletionCommand, ArtifactDeletionClaim, ArtifactDurableRepository,
-        ArtifactReceipt, ArtifactReferenceAuthority, ArtifactReferenceTarget,
-        ArtifactRetentionRelease, ArtifactState, ArtifactStoreAuthority,
-        BindArtifactStoreAuthorityCommand, OrphanSweepBatch, OrphanSweepCommand, PayloadId,
-        PayloadReceipt, PutInlinePayloadCommand, ReferenceArtifactCommand,
-        ReleaseRunArtifactRetentionCommand, RetainedArtifact, StageArtifactCommand,
-        StoredInlinePayload, VerifyArtifactCommand,
-    },
-    PostgresDurableRepository, RepositoryError, SqliteDurableRepository, StorageLocator,
-    REPOSITORY_RUN_NOT_FOUND,
-};
+use super::{PostgresDurableRepository, SqliteDurableRepository};
 
 const MAX_RETENTION_SECONDS: u32 = 10 * 365 * 24 * 60 * 60;
 const MAX_RETENTION_RELEASE_BATCH: u32 = 1_000;
@@ -142,7 +138,7 @@ fn run_not_found() -> RepositoryError {
     )
 }
 
-fn model_data<T>(value: Result<T, crate::engine::ModelError>) -> Result<T, RepositoryError> {
+fn model_data<T>(value: Result<T, insight_engine::ModelError>) -> Result<T, RepositoryError> {
     value.map_err(|_| RepositoryError::invalid_data())
 }
 

@@ -22,10 +22,9 @@ use tokio::{runtime::Handle, task::JoinHandle, time};
 use tokio_util::sync::CancellationToken;
 
 use insight_engine::response::adapter::{publication_from_source, publication_payload, RunQueue};
-
-use crate::engine::{ActivationId, AttemptNo, ContentHash, RunId};
-
-use super::response_stream::{
+#[cfg(test)]
+use insight_engine::response::ResponseStreamEvent;
+use insight_engine::response::{
     LiveResponseBroker, LiveResponseBrokerCapability, LiveResponseBrokerError,
     LiveResponseByteLimits, LiveResponseCloseOutcome, LiveResponseDelivery, LiveResponseGap,
     LiveResponseItemIdentity, LiveResponsePayload, LiveResponsePublication,
@@ -34,6 +33,7 @@ use super::response_stream::{
     ResponseContentPart, ResponseOutputItem, WorkflowPublicError, WorkflowRetrievalResult,
     WorkflowToolContent,
 };
+use insight_engine::{ActivationId, AttemptNo, ContentHash, RunId};
 
 const POSTGRES_LIVE_RESPONSE_CONFIG_INVALID: &str = "POSTGRES_LIVE_RESPONSE_CONFIG_INVALID";
 const POSTGRES_LIVE_RESPONSE_UNAVAILABLE: &str = "POSTGRES_LIVE_RESPONSE_UNAVAILABLE";
@@ -1863,7 +1863,7 @@ mod tests {
         let public = publication.into_public_event(2);
         assert!(matches!(
             public,
-            super::super::response_stream::ResponseStreamEvent::ResponseOutputTextDelta {
+            ResponseStreamEvent::ResponseOutputTextDelta {
                 delta,
                 ..
             } if delta == "cross-broker-body"

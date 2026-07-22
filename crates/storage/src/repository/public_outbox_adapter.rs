@@ -9,6 +9,16 @@ use insight_durable::common::adapter::{
 #[cfg(test)]
 use insight_durable::common::adapter::{durable_public_event_envelope, event_id, public_event_id};
 use insight_durable::public_outbox::adapter as public_outbox_contract_adapter;
+use insight_durable::public_outbox::{
+    OrderedPublicEventRead, PublicEventClaim, PublicEventNotificationStream,
+    PublicEventOutboxRepository, PublicEventPosition, PublishedPublicEvent,
+    PUBLIC_EVENT_NOTIFY_CHANNEL,
+};
+use insight_engine::repository::RepositoryError;
+use insight_engine::{
+    ExecutionEventEnvelope, ExecutionEventPayload, InternalFailureKind, PublicEventEnvelope,
+    PublicEventKind, PublicEventPayload, PublicFailureKind, RunId, RunLifecycle,
+};
 use serde_json::Value;
 use sqlx::{
     postgres::{PgListener, PgRow},
@@ -17,16 +27,7 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-use crate::engine::{
-    ExecutionEventEnvelope, ExecutionEventPayload, InternalFailureKind, PublicEventEnvelope,
-    PublicEventKind, PublicEventPayload, PublicFailureKind, RunId, RunLifecycle,
-};
-
-use super::{
-    OrderedPublicEventRead, PostgresDurableRepository, PublicEventClaim,
-    PublicEventNotificationStream, PublicEventOutboxRepository, PublicEventPosition,
-    PublishedPublicEvent, RepositoryError, SqliteDurableRepository, PUBLIC_EVENT_NOTIFY_CHANNEL,
-};
+use super::{PostgresDurableRepository, SqliteDurableRepository};
 
 const MAX_CLAIM_SECONDS: u32 = 86_400;
 const MAX_CLAIM_BATCH: u32 = 1_000;
@@ -1577,18 +1578,10 @@ fn model_run_id(value: String) -> Result<RunId, RepositoryError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::engine::repository::{
-        PublicEventIntentAdapter as _, RunTransitionCommandAdapter as _,
-    };
     use chrono::{DateTime, Utc};
-    use serde_json::{json, Value};
-    use sqlx::{
-        postgres::PgPoolOptions,
-        sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-        AssertSqlSafe, Row,
-    };
-
-    use crate::engine::{
+    use insight_durable::model::adapter as model_adapter;
+    use insight_durable::{CreateRunCommand, DurableRepository, VersionedPlan};
+    use insight_engine::{
         ActivationId, AdmissionState, AttemptNo, ContentHash, DefinitionRevisionId,
         DeploymentRevisionId, ExecutionEventContext, ExecutionEventEnvelope, ExecutionEventPayload,
         ExecutionValueSummary, IntentHash, InternalFailureCode, InternalFailureKind,
@@ -1597,16 +1590,19 @@ mod tests {
         PublicFailureSummary, RunId, RunLifecycle, ScopeInstanceId, TransitionKey,
         TransitionOutcome, EXECUTION_EVENT_SCHEMA_VERSION,
     };
+    use serde_json::{json, Value};
+    use sqlx::{
+        postgres::PgPoolOptions,
+        sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+        AssertSqlSafe, Row,
+    };
 
     use super::{
         decode_safe_envelope, durable_public_event_envelope, event_id, public_event_id,
         public_outbox_contract_adapter, validate_claim_request, validate_prune_limit,
-        validate_retention_seconds, OrderedPublicEventRead, PublicEventOutboxRepository,
-        MAX_CLAIM_BATCH, MAX_CLAIM_SECONDS, MAX_NONTERMINAL_RETENTION_SECONDS, MAX_PRUNE_BATCH,
-    };
-    use crate::engine::repository::{
-        CreateRunCommand, DurableRepository, PostgresDurableRepository, PublicEventIntent,
-        RunTransitionCommand, SqliteDurableRepository, VersionedPlan,
+        validate_retention_seconds, OrderedPublicEventRead, PostgresDurableRepository,
+        PublicEventOutboxRepository, SqliteDurableRepository, MAX_CLAIM_BATCH, MAX_CLAIM_SECONDS,
+        MAX_NONTERMINAL_RETENTION_SECONDS, MAX_PRUNE_BATCH,
     };
 
     #[test]
@@ -1720,7 +1716,7 @@ mod tests {
         repository
             .commit_run_transition(
                 transition_key("delivery.upgrade.start"),
-                RunTransitionCommand::nonterminal(
+                model_adapter::run_transition_nonterminal(
                     run_id.clone(),
                     0,
                     RunLifecycle::Created,
@@ -2243,7 +2239,7 @@ mod tests {
         repository
             .commit_run_transition(
                 transition_key("bounded.start"),
-                RunTransitionCommand::nonterminal(
+                model_adapter::run_transition_nonterminal(
                     run_id.clone(),
                     0,
                     RunLifecycle::Created,
@@ -2251,7 +2247,9 @@ mod tests {
                     RunLifecycle::Active,
                     AdmissionState::Open,
                     event(&run_id, RunLifecycle::Active),
-                    Some(PublicEventIntent::new(PublicEventPayload::RunStarted)),
+                    Some(model_adapter::public_event_intent(
+                        PublicEventPayload::RunStarted,
+                    )),
                 )
                 .unwrap(),
             )
@@ -2333,7 +2331,7 @@ mod tests {
         repository
             .commit_run_transition(
                 transition_key("start"),
-                RunTransitionCommand::nonterminal(
+                model_adapter::run_transition_nonterminal(
                     run_id.clone(),
                     0,
                     RunLifecycle::Created,
@@ -2350,7 +2348,7 @@ mod tests {
         repository
             .commit_run_transition(
                 transition_key("completing"),
-                RunTransitionCommand::nonterminal(
+                model_adapter::run_transition_nonterminal(
                     run_id.clone(),
                     1,
                     RunLifecycle::Active,
@@ -2367,12 +2365,12 @@ mod tests {
         repository
             .commit_run_transition(
                 transition_key("terminal"),
-                RunTransitionCommand::terminal_success(
+                model_adapter::run_transition_terminal_success(
                     run_id.clone(),
                     2,
                     json!({"answer": 42}),
                     event(&run_id, RunLifecycle::Succeeded),
-                    PublicEventIntent::new(PublicEventPayload::RunCompleted),
+                    model_adapter::public_event_intent(PublicEventPayload::RunCompleted),
                 )
                 .unwrap(),
             )
@@ -2616,7 +2614,7 @@ mod tests {
         repository
             .commit_run_transition(
                 transition_key("retention.start"),
-                RunTransitionCommand::nonterminal(
+                model_adapter::run_transition_nonterminal(
                     run_id.clone(),
                     0,
                     RunLifecycle::Created,
@@ -2624,7 +2622,9 @@ mod tests {
                     RunLifecycle::Active,
                     AdmissionState::Open,
                     event(&run_id, RunLifecycle::Active),
-                    Some(PublicEventIntent::new(PublicEventPayload::RunStarted)),
+                    Some(model_adapter::public_event_intent(
+                        PublicEventPayload::RunStarted,
+                    )),
                 )
                 .unwrap(),
             )
@@ -2852,7 +2852,7 @@ mod tests {
         repository
             .commit_run_transition(
                 transition_key(&format!("{suffix}.migration.start")),
-                RunTransitionCommand::nonterminal(
+                model_adapter::run_transition_nonterminal(
                     run_id.clone(),
                     0,
                     RunLifecycle::Created,
@@ -2894,9 +2894,10 @@ mod tests {
         .execute(&repository.pool)
         .await
         .unwrap();
-        let migration = include_str!(
-            "../../../migrations/durable_v3/postgres/202607180016_public_event_delivery_heads.sql"
-        );
+        let migration = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/durable_v3/postgres/202607180016_public_event_delivery_heads.sql"
+        ));
         assert!(sqlx::raw_sql(migration)
             .execute(&repository.pool)
             .await
@@ -2966,7 +2967,7 @@ mod tests {
 
         let later_repository = repository.clone();
         let later_run_id = run_id.clone();
-        let later_transition = RunTransitionCommand::nonterminal(
+        let later_transition = model_adapter::run_transition_nonterminal(
             run_id.clone(),
             0,
             RunLifecycle::Created,
@@ -2974,7 +2975,9 @@ mod tests {
             RunLifecycle::Active,
             AdmissionState::Open,
             event(&run_id, RunLifecycle::Active),
-            Some(PublicEventIntent::new(PublicEventPayload::RunStarted)),
+            Some(model_adapter::public_event_intent(
+                PublicEventPayload::RunStarted,
+            )),
         )
         .unwrap();
         let later_key = transition_key(&format!("{suffix}.race.start"));
@@ -3088,7 +3091,7 @@ mod tests {
         repository
             .commit_run_transition(
                 transition_key(&format!("{suffix}.start")),
-                RunTransitionCommand::nonterminal(
+                model_adapter::run_transition_nonterminal(
                     run_id.clone(),
                     0,
                     RunLifecycle::Created,
@@ -3105,7 +3108,7 @@ mod tests {
         repository
             .commit_run_transition(
                 transition_key(&format!("{suffix}.completing")),
-                RunTransitionCommand::nonterminal(
+                model_adapter::run_transition_nonterminal(
                     run_id.clone(),
                     1,
                     RunLifecycle::Active,
@@ -3122,12 +3125,12 @@ mod tests {
         repository
             .commit_run_transition(
                 transition_key(&format!("{suffix}.terminal")),
-                RunTransitionCommand::terminal_success(
+                model_adapter::run_transition_terminal_success(
                     run_id.clone(),
                     2,
                     json!({"answer": 42}),
                     event(&run_id, RunLifecycle::Succeeded),
-                    PublicEventIntent::new(PublicEventPayload::RunCompleted),
+                    model_adapter::public_event_intent(PublicEventPayload::RunCompleted),
                 )
                 .unwrap(),
             )
@@ -3269,7 +3272,7 @@ mod tests {
         repository
             .commit_run_transition(
                 transition_key(&format!("{suffix}.retention.start")),
-                RunTransitionCommand::nonterminal(
+                model_adapter::run_transition_nonterminal(
                     retention_run_id.clone(),
                     0,
                     RunLifecycle::Created,
@@ -3277,7 +3280,9 @@ mod tests {
                     RunLifecycle::Active,
                     AdmissionState::Open,
                     event(&retention_run_id, RunLifecycle::Active),
-                    Some(PublicEventIntent::new(PublicEventPayload::RunStarted)),
+                    Some(model_adapter::public_event_intent(
+                        PublicEventPayload::RunStarted,
+                    )),
                 )
                 .unwrap(),
             )
@@ -3582,7 +3587,7 @@ mod tests {
         repository
             .commit_run_transition(
                 transition_key(&format!("{suffix}.bounded.start")),
-                RunTransitionCommand::nonterminal(
+                model_adapter::run_transition_nonterminal(
                     bounded_run_id.clone(),
                     0,
                     RunLifecycle::Created,
@@ -3590,7 +3595,9 @@ mod tests {
                     RunLifecycle::Active,
                     AdmissionState::Open,
                     event(&bounded_run_id, RunLifecycle::Active),
-                    Some(PublicEventIntent::new(PublicEventPayload::RunStarted)),
+                    Some(model_adapter::public_event_intent(
+                        PublicEventPayload::RunStarted,
+                    )),
                 )
                 .unwrap(),
             )

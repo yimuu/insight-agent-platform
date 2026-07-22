@@ -1,45 +1,25 @@
 mod activation;
 mod artifact;
-mod artifact_adapter;
 mod common;
 mod control_repository;
 mod error;
 mod human_task;
-mod human_task_adapter;
 mod ingress;
-mod ingress_adapter;
 #[doc(hidden)]
-pub mod migration_manifest;
+pub mod migration_manifest {
+    pub use insight_storage::repository::migration_manifest::*;
+}
 mod model;
 mod model_tool_parent_resume;
 mod model_tool_queue;
-mod postgres;
-mod postgres_activation;
-mod postgres_control;
-mod postgres_model_tool_queue;
-mod postgres_projection;
-mod postgres_recovery;
-mod postgres_retrieval_publication;
-mod postgres_scheduler;
 mod projection;
 mod public_outbox;
-mod public_outbox_adapter;
 mod recovery_repository;
 mod retrieval_publication;
-#[cfg(test)]
-mod retrieval_safety_tests;
 mod scheduler_repository;
 mod scheduler_runtime;
 #[cfg(test)]
 mod scheduler_safety_tests;
-mod sqlite;
-mod sqlite_activation;
-mod sqlite_control;
-mod sqlite_model_tool_queue;
-mod sqlite_projection;
-mod sqlite_recovery;
-mod sqlite_retrieval_publication;
-mod sqlite_scheduler;
 
 pub use activation::{
     ActivationAdmissionCommand, ActivationCasCommand, ActivationCommitReceipt,
@@ -69,16 +49,6 @@ pub use control_repository::{
     SettleScopeCommand, TokenConsumerKind,
 };
 pub(crate) use error::RepositoryErrorExt;
-#[allow(unused_imports)]
-pub use error::{
-    RepositoryError, StorageLocator, REPOSITORY_ACTIVATION_NOT_FOUND,
-    REPOSITORY_ARTIFACT_STORE_CONFLICT, REPOSITORY_CANONICALIZATION_FAILED,
-    REPOSITORY_CONFIGURATION_INVALID, REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_DATA_INVALID,
-    REPOSITORY_INTENT_CONFLICT, REPOSITORY_MIGRATION_FAILED, REPOSITORY_PLAN_CONFLICT,
-    REPOSITORY_REDRIVE_REQUIRES_FORK, REPOSITORY_RUN_MIGRATING, REPOSITORY_RUN_NOT_FOUND,
-    REPOSITORY_SCHEDULER_ACTION_UNSUPPORTED, REPOSITORY_SCHEDULER_CRASH_INJECTED,
-    REPOSITORY_STORAGE_FAILURE,
-};
 pub use human_task::{
     ClaimHumanWorkItemCommand, CompleteHumanWorkItemCommand, HumanTaskDurableRepository,
     HumanTaskPrincipal, HumanWorkItem, HumanWorkItemClaim, HumanWorkItemCompletionAuthority,
@@ -89,6 +59,18 @@ pub use ingress::{
     SignalInboxState, SignalWaitTarget,
 };
 pub use insight_durable::{ActivationDurableRepository, DurableRepository};
+#[allow(unused_imports)]
+pub use insight_engine::repository::{
+    RepositoryError, StorageLocator, REPOSITORY_ACTIVATION_NOT_FOUND,
+    REPOSITORY_ARTIFACT_STORE_CONFLICT, REPOSITORY_CANONICALIZATION_FAILED,
+    REPOSITORY_CONFIGURATION_INVALID, REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_DATA_INVALID,
+    REPOSITORY_INTENT_CONFLICT, REPOSITORY_MIGRATION_FAILED, REPOSITORY_PLAN_CONFLICT,
+    REPOSITORY_REDRIVE_REQUIRES_FORK, REPOSITORY_RUN_MIGRATING, REPOSITORY_RUN_NOT_FOUND,
+    REPOSITORY_SCHEDULER_ACTION_UNSUPPORTED, REPOSITORY_SCHEDULER_CRASH_INJECTED,
+    REPOSITORY_STORAGE_FAILURE,
+};
+pub use insight_storage::PostgresDurableRepository;
+pub use insight_storage::SqliteDurableRepository;
 pub use model::{
     CommitReceipt, CreateRunCommand, DurableResponseSnapshot, PlanInstallOutcome,
     PlanPublicationOutcome, PublicEventIntent, PublicRunAttachment, PublicationHead,
@@ -108,8 +90,6 @@ pub use model_tool_queue::{
     ModelToolTaskIdentity, ModelToolTaskOutcome, ModelToolTaskStatus,
     ModelToolTaskTransitionOutcome, FUNCTION_CALL_COMPLETE_SEAL_INDEX, MAX_MODEL_TOOL_RESULT_BYTES,
 };
-#[allow(unused_imports)]
-pub use postgres::PostgresDurableRepository;
 pub use projection::{
     ProjectionAudit, ProjectionDurableRepository, ProjectionRebuildSnapshot,
     ProjectionRepairReceipt, ProjectionSubject, ProjectionSubjectKind,
@@ -144,5 +124,3 @@ pub use scheduler_runtime::{
     SchedulerRetrievalLiveObserver, SchedulerWorkerFailurePolicy, SchedulerWorkerPumpOutcome,
     TerminalSchedulerWorkerFailurePolicy,
 };
-#[allow(unused_imports)]
-pub use sqlite::SqliteDurableRepository;

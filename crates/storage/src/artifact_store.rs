@@ -14,15 +14,16 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use crate::engine::repository::RepositoryErrorExt as _;
 use insight_engine::artifact_store::adapter as artifact_store_adapter;
-
 pub use insight_engine::artifact_store::{
     ArtifactStoreDeploymentCapability, ArtifactStoreDeploymentContract, WorkerArtifactStore,
 };
+use insight_engine::repository::{RepositoryError, StorageLocator, REPOSITORY_STORAGE_FAILURE};
+#[cfg(test)]
+use insight_engine::repository::{REPOSITORY_CONFIGURATION_INVALID, REPOSITORY_DATA_INVALID};
+use insight_engine::{ArtifactRef, ContentHash};
 
-use super::{ArtifactRef, ContentHash};
-use crate::engine::repository::{RepositoryError, StorageLocator, REPOSITORY_STORAGE_FAILURE};
+use crate::repository::RepositoryErrorExt as _;
 
 const STORAGE_LOCATOR_PREFIX: &str = "content-addressed:v1/sha256/";
 const SHARED_STORE_MARKER_FILE: &str = ".insight-agent-artifact-store-v1.json";
@@ -494,7 +495,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code(),
-            crate::engine::repository::REPOSITORY_CONFIGURATION_INVALID
+            REPOSITORY_CONFIGURATION_INVALID
         );
 
         let other = store.artifact_for_bytes(b"other", None).unwrap();
@@ -508,7 +509,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code(),
-            crate::engine::repository::REPOSITORY_DATA_INVALID
+            REPOSITORY_DATA_INVALID
         );
 
         tokio::fs::write(store.path_for(&artifact).unwrap(), b"tampered value!")
@@ -520,7 +521,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code(),
-            crate::engine::repository::REPOSITORY_DATA_INVALID
+            REPOSITORY_DATA_INVALID
         );
     }
 
@@ -543,7 +544,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code(),
-            crate::engine::repository::REPOSITORY_DATA_INVALID
+            REPOSITORY_DATA_INVALID
         );
     }
 
@@ -565,7 +566,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code(),
-            crate::engine::repository::REPOSITORY_DATA_INVALID
+            REPOSITORY_DATA_INVALID
         );
         assert!(first_path.exists());
 
@@ -575,7 +576,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             store.delete(&first, &malformed).await.unwrap_err().code(),
-            crate::engine::repository::REPOSITORY_DATA_INVALID
+            REPOSITORY_DATA_INVALID
         );
         assert!(first_path.exists());
 
@@ -665,14 +666,14 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code(),
-            crate::engine::repository::REPOSITORY_CONFIGURATION_INVALID
+            REPOSITORY_CONFIGURATION_INVALID
         );
         assert_eq!(
             LocalContentAddressedArtifactStore::open_shared(root.clone(), 8, "../invalid")
                 .await
                 .unwrap_err()
                 .code(),
-            crate::engine::repository::REPOSITORY_CONFIGURATION_INVALID
+            REPOSITORY_CONFIGURATION_INVALID
         );
 
         tokio::fs::write(
@@ -686,7 +687,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code(),
-            crate::engine::repository::REPOSITORY_DATA_INVALID
+            REPOSITORY_DATA_INVALID
         );
     }
 }

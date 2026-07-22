@@ -1,6 +1,10 @@
 pub mod control;
-pub mod postgres_response_broker;
+pub mod postgres_response_broker {
+    pub use insight_storage::postgres_response_broker::*;
+}
 pub mod response_stream;
+#[cfg(test)]
+mod retrieval_safety_tests;
 pub mod v3_service;
 
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
