@@ -899,6 +899,47 @@ async fn sqlite_shared_content_hash_is_deleted_only_after_every_run_releases_it(
     .await
     .unwrap();
     assert_eq!(states, vec!["deleted", "deleted"]);
+    let private_locator = fixture.locator.expose_to_storage_adapter();
+    let execution_payloads = sqlx::query_scalar::<_, String>(
+        "SELECT safe_payload FROM execution_events WHERE run_id IN (
+             SELECT run_id FROM artifacts WHERE content_hash=? AND storage_uri=?
+         )",
+    )
+    .bind(fixture.artifact.content_hash().as_str())
+    .bind(private_locator)
+    .fetch_all(&control)
+    .await
+    .unwrap();
+    assert!(
+        !execution_payloads.is_empty(),
+        "the Artifact runs must retain execution-event authority rows"
+    );
+    for payload in execution_payloads {
+        assert!(
+            !payload.contains(private_locator),
+            "execution event payload exposed an Artifact storage locator"
+        );
+    }
+    let public_envelopes = sqlx::query_scalar::<_, String>(
+        "SELECT safe_envelope FROM public_event_outbox WHERE run_id IN (
+             SELECT run_id FROM artifacts WHERE content_hash=? AND storage_uri=?
+         )",
+    )
+    .bind(fixture.artifact.content_hash().as_str())
+    .bind(private_locator)
+    .fetch_all(&control)
+    .await
+    .unwrap();
+    assert!(
+        !public_envelopes.is_empty(),
+        "the Artifact runs must retain public-event authority rows"
+    );
+    for envelope in public_envelopes {
+        assert!(
+            !envelope.contains(private_locator),
+            "public event envelope exposed an Artifact storage locator"
+        );
+    }
     assert!(tokio::fs::metadata(&fixture.object_path).await.is_err());
     let after_ack = repository
         .sweep_orphan_artifacts(
@@ -1168,6 +1209,47 @@ async fn postgres_shared_content_hash_is_deleted_once_after_global_release_when_
     .await
     .unwrap();
     assert_eq!(states, vec!["deleted", "deleted"]);
+    let private_locator = fixture.locator.expose_to_storage_adapter();
+    let execution_payloads = sqlx::query_scalar::<_, Value>(
+        "SELECT safe_payload FROM execution_events WHERE run_id IN (
+             SELECT run_id FROM artifacts WHERE content_hash=$1 AND storage_uri=$2
+         )",
+    )
+    .bind(fixture.artifact.content_hash().as_str())
+    .bind(private_locator)
+    .fetch_all(&control)
+    .await
+    .unwrap();
+    assert!(
+        !execution_payloads.is_empty(),
+        "the Artifact runs must retain execution-event authority rows"
+    );
+    for payload in execution_payloads {
+        assert!(
+            !payload.to_string().contains(private_locator),
+            "execution event payload exposed an Artifact storage locator"
+        );
+    }
+    let public_envelopes = sqlx::query_scalar::<_, Value>(
+        "SELECT safe_envelope FROM public_event_outbox WHERE run_id IN (
+             SELECT run_id FROM artifacts WHERE content_hash=$1 AND storage_uri=$2
+         )",
+    )
+    .bind(fixture.artifact.content_hash().as_str())
+    .bind(private_locator)
+    .fetch_all(&control)
+    .await
+    .unwrap();
+    assert!(
+        !public_envelopes.is_empty(),
+        "the Artifact runs must retain public-event authority rows"
+    );
+    for envelope in public_envelopes {
+        assert!(
+            !envelope.to_string().contains(private_locator),
+            "public event envelope exposed an Artifact storage locator"
+        );
+    }
     assert!(tokio::fs::metadata(&fixture.object_path).await.is_err());
     let after_ack = repository
         .sweep_orphan_artifacts(
@@ -1187,22 +1269,4 @@ async fn postgres_shared_content_hash_is_deleted_once_after_global_release_when_
         .await
         .unwrap();
     admin.close().await;
-}
-
-#[test]
-fn postgres_sweep_uses_global_object_locks_and_no_public_event_can_contain_a_locator() {
-    let source = include_str!("../src/engine/repository/artifact.rs")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    assert!(source.contains("pg_advisory_xact_lock"));
-    assert!(source.contains("for update of a"));
-    assert!(source.contains("where a.content_hash=$1 and a.storage_uri=$2"));
-    assert!(source.contains("artifact_state = 'deleted'"));
-    assert!(source.contains("deletion_fence"));
-    assert!(!source.contains("publiceventintent"));
-    assert!(!source.contains("publiceventpayload"));
-    assert!(!source
-        .contains("derive(debug, clone, partialeq, eq, serialize)] pub struct storagelocator"));
 }

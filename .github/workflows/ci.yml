@@ -34,6 +34,10 @@ jobs:
           cache-on-failure: "false"
       - name: Check DSL v3 cutover residuals
         run: bash scripts/check-v3-cutover-residuals.sh
+      - name: Check crate boundaries and dependency feature baseline
+        run: bash scripts/check-crate-boundaries.sh
+      - name: Check root public API baseline
+        run: CARGO_TARGET_DIR=target bash scripts/check-public-api-baseline.sh
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy

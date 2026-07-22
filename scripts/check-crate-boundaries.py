@@ -1,0 +1,390 @@
+import difflib
+import json
+import re
+import sys
+from collections import deque
+from pathlib import Path
+
+
+INTERNAL_ROLES = {
+    "insight-agent-platform": "root",
+    "insight-engine": "engine",
+    "insight-dsl": "dsl",
+    "insight-durable": "durable",
+    "insight-resources": "resources",
+    "insight-storage": "storage",
+    "insight-runtime": "runtime",
+    "insight-api": "api",
+}
+
+ALLOWED_INTERNAL = {
+    "root": {"engine", "dsl", "durable", "resources", "storage", "runtime", "api"},
+    "engine": set(),
+    "dsl": {"engine"},
+    "durable": {"engine", "dsl"},
+    "resources": {"engine"},
+    "storage": {"engine", "durable", "dsl"},
+    "runtime": {"engine", "durable", "dsl", "resources"},
+    "api": {"engine", "dsl", "runtime"},
+}
+
+FORBIDDEN_DIRECT = {
+    "engine": {
+        "axum",
+        "sqlx",
+        "reqwest",
+        "dotenvy",
+        "tracing-subscriber",
+        "yaml-rust2",
+        "yaml_serde",
+        "serde_yaml",
+    },
+    "dsl": {"axum", "sqlx", "reqwest"},
+    "durable": {"axum", "sqlx", "reqwest"},
+    "resources": {"axum", "sqlx"},
+    "storage": {"axum", "reqwest"},
+    "runtime": {"axum", "sqlx", "reqwest"},
+    "api": {"sqlx", "reqwest"},
+}
+
+TRANSITIVELY_FORBIDDEN = {"axum", "sqlx", "reqwest"}
+CRITICAL_FEATURE_PACKAGES = {"axum", "sqlx", "reqwest", "tokio"}
+
+IO_PATTERNS = (
+    (
+        "std filesystem/environment/network/process API",
+        re.compile(r"\bstd\s*::\s*(?:fs|env|net|process)\b"),
+    ),
+    (
+        "std grouped filesystem/environment/network/process import",
+        re.compile(
+            r"\bstd\s*::\s*\{[^;]{0,4000}\b(?:fs|env|net|process)\b[^;]{0,4000};",
+            re.DOTALL,
+        ),
+    ),
+    (
+        "Tokio filesystem/network/process API",
+        re.compile(r"\btokio\s*::\s*(?:fs|net|process)\b"),
+    ),
+    (
+        "Tokio grouped filesystem/network/process import",
+        re.compile(
+            r"\btokio\s*::\s*\{[^;]{0,4000}\b(?:fs|net|process)\b[^;]{0,4000};",
+            re.DOTALL,
+        ),
+    ),
+    (
+        "compile-time environment access",
+        re.compile(r"\b(?:env|option_env)!\s*\("),
+    ),
+)
+
+CLOCK_PATTERNS = (
+    (
+        "wall-clock import",
+        re.compile(
+            r"\buse\s+chrono\s*::[^;]{0,4000}\b(?:Utc|Local)\b[^;]{0,4000};",
+            re.DOTALL,
+        ),
+    ),
+    (
+        "aliased wall-clock crate import",
+        re.compile(r"\buse\s+(?:chrono|time)\s+as\s+[A-Za-z_][A-Za-z0-9_]*\s*;"),
+    ),
+    (
+        "instant/system/timer import",
+        re.compile(
+            r"\buse\s+(?:std|tokio)\s*::[^;]{0,4000}\b(?:time|thread)\b"
+            r"[^;]{0,4000}\b(?:Instant|SystemTime|UNIX_EPOCH|sleep|sleep_until|"
+            r"interval|interval_at|timeout|timeout_at)\b[^;]{0,4000};",
+            re.DOTALL,
+        ),
+    ),
+    (
+        "aliased time module import",
+        re.compile(
+            r"\buse\s+(?:std|tokio)\s*::[^;]{0,4000}\btime\b\s+as\s+"
+            r"[A-Za-z_][A-Za-z0-9_]*\s*;",
+            re.DOTALL,
+        ),
+    ),
+    (
+        "time crate wall-clock import",
+        re.compile(
+            r"\buse\s+time\s*::[^;]{0,4000}\bOffsetDateTime\b[^;]{0,4000};",
+            re.DOTALL,
+        ),
+    ),
+    (
+        "wall clock access",
+        re.compile(r"\b(?:chrono\s*::\s*)?(?:Utc|Local)\s*::\s*(?:now|today)\s*\("),
+    ),
+    (
+        "instant/system clock access",
+        re.compile(
+            r"\b(?:(?:std|tokio)\s*::\s*time\s*::\s*)?(?:Instant|SystemTime)\s*::\s*now\s*\("
+        ),
+    ),
+    (
+        "time crate wall clock access",
+        re.compile(r"\bOffsetDateTime\s*::\s*now_(?:utc|local)\s*\("),
+    ),
+    (
+        "implicit elapsed wall clock access",
+        re.compile(r"\bUNIX_EPOCH\s*\.\s*elapsed\s*\("),
+    ),
+    (
+        "scheduler timer access",
+        re.compile(
+            r"\b(?:tokio\s*::\s*time\s*::\s*(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)|std\s*::\s*thread\s*::\s*sleep)\s*\("
+        ),
+    ),
+)
+
+RUNTIME_STACK_PATTERN = re.compile(
+    r"\b(?:sqlx|axum|reqwest)\s*::|\bextern\s+crate\s+(?:sqlx|axum|reqwest)\b|\buse\s+(?:sqlx|axum|reqwest)\s*(?:;|as\b)"
+)
+
+
+def feature_snapshot(metadata):
+    workspace_ids = set(metadata["workspace_members"])
+    packages = {package["id"]: package for package in metadata["packages"]}
+    rows = []
+    for node in metadata["resolve"]["nodes"]:
+        if node["id"] in workspace_ids:
+            continue
+        package = packages[node["id"]]
+        rows.append(
+            (
+                package["name"],
+                package["version"],
+                ",".join(sorted(node.get("features", []))) or "-",
+            )
+        )
+    rows.sort()
+    body = "".join("\t".join(row) + "\n" for row in rows)
+    return "# crate-boundary-third-party-features-v1\n# name\tversion\tenabled-features\n" + body
+
+
+def dependency_kinds(dependency):
+    kinds = dependency.get("dep_kinds") or []
+    if not kinds:
+        return ["normal"]
+    return sorted({item.get("kind") or "normal" for item in kinds})
+
+
+def line_number(text, offset):
+    return text.count("\n", 0, offset) + 1
+
+
+def source_files(source_dir):
+    if not source_dir.is_dir():
+        return []
+    return sorted(source_dir.rglob("*.rs"))
+
+
+def scan_patterns(errors, role, source_dir, patterns, file_filter=lambda _path: True):
+    for path in source_files(source_dir):
+        if not file_filter(path):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            errors.append(f"{role}: Rust source is not UTF-8: {path}")
+            continue
+        for label, pattern in patterns:
+            for match in pattern.finditer(text):
+                errors.append(
+                    f"{role}: {label}: {path}:{line_number(text, match.start())}"
+                )
+
+
+def dependency_path(start_id, target_name, nodes, packages):
+    queue = deque([start_id])
+    parent = {start_id: None}
+    while queue:
+        current = queue.popleft()
+        for dependency in nodes[current].get("deps", []):
+            dependency_id = dependency["pkg"]
+            if dependency_id in parent:
+                continue
+            parent[dependency_id] = current
+            if packages[dependency_id]["name"] == target_name:
+                path = [dependency_id]
+                while parent[path[-1]] is not None:
+                    path.append(parent[path[-1]])
+                path.reverse()
+                return path
+            queue.append(dependency_id)
+    return None
+
+
+def format_package(package):
+    return f"{package['name']}@{package['version']}"
+
+
+def check(metadata, baseline_path, workspace_root):
+    errors = []
+    workspace_root = workspace_root.resolve()
+    packages = {package["id"]: package for package in metadata["packages"]}
+    nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
+    workspace_ids = set(metadata["workspace_members"])
+    role_by_id = {}
+    id_by_role = {}
+
+    for package_id in sorted(workspace_ids):
+        package = packages[package_id]
+        role = INTERNAL_ROLES.get(package["name"])
+        if role is None:
+            errors.append(f"unexpected workspace package: {package['name']}")
+            continue
+        if role in id_by_role:
+            errors.append(f"duplicate workspace package for internal role {role}")
+            continue
+        role_by_id[package_id] = role
+        id_by_role[role] = package_id
+
+    if "root" not in id_by_role:
+        errors.append("workspace does not contain the insight-agent-platform root package")
+
+    for package_id, package in sorted(packages.items()):
+        if package_id not in workspace_ids and package.get("source") is None:
+            errors.append(
+                "local path package is not a workspace member: "
+                f"{format_package(package)} ({package['manifest_path']}); "
+                f"expected it under {workspace_root} and in the explicit member list"
+            )
+
+    for package_id, role in sorted(role_by_id.items(), key=lambda item: item[1]):
+        node = nodes.get(package_id)
+        if node is None:
+            errors.append(f"{role}: package is absent from the Cargo resolve graph")
+            continue
+        for dependency in node.get("deps", []):
+            dependency_id = dependency["pkg"]
+            dependency_package = packages[dependency_id]
+            dependency_role = role_by_id.get(dependency_id)
+            kinds = "/".join(dependency_kinds(dependency))
+            if dependency_role is not None and dependency_role not in ALLOWED_INTERNAL[role]:
+                errors.append(
+                    f"{role}: forbidden {kinds} internal edge to {dependency_role} "
+                    f"({format_package(dependency_package)})"
+                )
+            if dependency_package["name"] in FORBIDDEN_DIRECT.get(role, set()):
+                errors.append(
+                    f"{role}: forbidden direct {kinds} dependency on "
+                    f"{format_package(dependency_package)}"
+                )
+
+    for role in ("engine", "dsl", "durable"):
+        package_id = id_by_role.get(role)
+        if package_id is None:
+            continue
+        for target_name in sorted(TRANSITIVELY_FORBIDDEN):
+            path = dependency_path(package_id, target_name, nodes, packages)
+            if path is not None:
+                rendered = " -> ".join(format_package(packages[item]) for item in path)
+                errors.append(f"{role}: forbidden transitive reachability: {rendered}")
+
+    for role in ("engine", "dsl", "durable", "runtime"):
+        package_id = id_by_role.get(role)
+        if package_id is None:
+            continue
+        package = packages[package_id]
+        manifest_dir = Path(package["manifest_path"]).parent
+        source_dir = manifest_dir / "src"
+        if not source_dir.is_dir():
+            errors.append(f"{role}: expected production source directory is absent: {source_dir}")
+            continue
+
+        if role in {"engine", "dsl", "durable"}:
+            custom_builds = [
+                target["src_path"]
+                for target in package.get("targets", [])
+                if "custom-build" in target.get("kind", [])
+            ]
+            if custom_builds or (manifest_dir / "build.rs").exists():
+                locations = custom_builds or [str(manifest_dir / "build.rs")]
+                errors.append(f"{role}: lower crate must not have build.rs: {', '.join(locations)}")
+            scan_patterns(errors, role, source_dir, IO_PATTERNS)
+
+        if role == "engine":
+            scan_patterns(
+                errors,
+                role,
+                source_dir,
+                CLOCK_PATTERNS,
+                lambda path: any("scheduler" in part.lower() for part in path.parts),
+            )
+        elif role == "runtime":
+            scan_patterns(
+                errors,
+                role,
+                source_dir,
+                (("direct SQLx/Axum/Reqwest source use", RUNTIME_STACK_PATTERN),),
+            )
+
+    actual_snapshot = feature_snapshot(metadata)
+    if not baseline_path.is_file():
+        errors.append(f"feature baseline is absent: {baseline_path}")
+    else:
+        expected_snapshot = baseline_path.read_text(encoding="utf-8")
+        if expected_snapshot != actual_snapshot:
+            diff = list(
+                difflib.unified_diff(
+                    expected_snapshot.splitlines(),
+                    actual_snapshot.splitlines(),
+                    fromfile=str(baseline_path),
+                    tofile="current cargo metadata",
+                    lineterm="",
+                )
+            )
+            errors.append("third-party version/feature snapshot changed:\n" + "\n".join(diff[:200]))
+
+        expected_critical = {
+            line.split("\t", 1)[0]
+            for line in expected_snapshot.splitlines()
+            if line and not line.startswith("#")
+        }
+        current_critical = {
+            line.split("\t", 1)[0]
+            for line in actual_snapshot.splitlines()
+            if line and not line.startswith("#")
+        }
+        for name in sorted(CRITICAL_FEATURE_PACKAGES):
+            if name not in expected_critical or name not in current_critical:
+                errors.append(f"critical feature baseline does not contain {name}")
+
+    if errors:
+        for error in errors:
+            print(f"crate boundary: {error}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Crate boundary scan passed ({len(workspace_ids)} workspace package(s), "
+        f"{len(nodes)} resolved package(s))."
+    )
+    return 0
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(
+            "usage: check-crate-boundaries.py snapshot METADATA | "
+            "check METADATA BASELINE WORKSPACE_ROOT",
+            file=sys.stderr,
+        )
+        return 2
+    mode = sys.argv[1]
+    metadata = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+    if mode == "snapshot" and len(sys.argv) == 3:
+        sys.stdout.write(feature_snapshot(metadata))
+        return 0
+    if mode == "check" and len(sys.argv) == 5:
+        return check(metadata, Path(sys.argv[3]), Path(sys.argv[4]))
+    print("invalid arguments", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

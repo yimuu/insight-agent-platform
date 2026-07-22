@@ -5,6 +5,21 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 failed=0
 
+# Keep scans aligned with both the Phase 0 single-package baseline and the
+# target workspace layout.  Do not derive these from the current workspace
+# members alone: a newly added crates/* source tree or manifest must be
+# scanned even before it is wired into Cargo's member list.
+production_source_roots=(src)
+member_manifests=(Cargo.toml)
+if [[ -d crates ]]; then
+  while IFS= read -r -d '' source_root; do
+    production_source_roots+=("$source_root")
+  done < <(find crates -type d -name src -print0)
+  while IFS= read -r -d '' manifest; do
+    member_manifests+=("$manifest")
+  done < <(find crates -type f -name Cargo.toml -print0)
+fi
+
 fail() {
   printf 'v3 cutover residual: %s\n' "$1" >&2
   failed=1
@@ -22,22 +37,36 @@ report_matches() {
 }
 
 # Deleted implementation boundaries must not be recreated under another CI
-# path. Historical specifications and explicitly negative fixtures are not in
-# this list: they are allowed to describe inputs that v3 rejects.
-for path in \
-  src/catalog.rs \
-  src/dsl/vnext \
-  src/runtime/coordinator.rs \
-  src/runtime/run_state.rs \
-  src/runtime/scope_scheduler.rs \
-  src/runtime/service.rs \
-  src/engine/repository/legacy_test \
-  migrations/formal_v2
-do
-  if [[ -e "$path" ]]; then
+# path. Match owner-independently: listing only today's expected owner would
+# let the same implementation return under (for example) crates/api/src.
+# Historical specifications and explicitly negative fixtures are outside the
+# production source roots and remain free to describe rejected v2 inputs.
+for source_root in "${production_source_roots[@]}"; do
+  while IFS= read -r -d '' path; do
     fail "deleted implementation path exists: $path"
-  fi
+  done < <(
+    find "$source_root" \
+      \( -type f \( \
+        -name catalog.rs -o \
+        -name coordinator.rs -o \
+        -name run_state.rs -o \
+        -name scope_scheduler.rs -o \
+        -name service.rs \
+      \) -o -type d \( -name vnext -o -name legacy_test \) \) \
+      -print0
+  )
 done
+
+migration_roots=()
+[[ -d migrations ]] && migration_roots+=(migrations)
+[[ -d crates ]] && migration_roots+=(crates)
+if ((${#migration_roots[@]} > 0)); then
+  while IFS= read -r -d '' path; do
+    fail "deleted implementation path exists: $path"
+  done < <(
+    find "${migration_roots[@]}" -type d -path '*/migrations/formal_v2' -print0
+  )
+fi
 
 # Production code may contain a small parser guard that rejects the literal
 # old control keyword. It must not contain an executable old node, scheduler,
@@ -46,12 +75,12 @@ report_matches \
   "production source contains a deleted execution symbol" \
   -RInE --include='*.rs' \
   '(scope_scheduler|mark_incomplete_interrupted|legacy_scheduler|LegacyScheduler|OldScheduler|runtime_local_(only_)?value_store|RegionYield|BranchPhi|ExecutableRegion|NodeKind::Switch|RawSwitch|SwitchDescriptor|SchedulerAction::Switch|core\.branch_end|USE_(OLD|V3)_SCHEDULER|ENABLE_(OLD|V3)_SCHEDULER)' \
-  src
+  "${production_source_roots[@]}"
 
 report_matches \
   "Cargo feature reintroduces an old/new scheduler split" \
   -nE '(old|legacy|v3)[_-]?scheduler|scheduler[_-]?(old|legacy|v3)' \
-  Cargo.toml
+  "${member_manifests[@]}"
 
 # The durable-v3 binary must not accept no-op safety settings retained from
 # the deleted in-process runtime. Negative parser tests may name these fields,
@@ -60,7 +89,7 @@ report_matches \
   "active configuration contains a deleted runtime setting" \
   -nEH \
   '(operation_cancel_grace_period|max_template_output_bytes|journal_capacity|journal_batch_size|journal_operation_timeout)' \
-  src config agents README.md docs/README.md docs/current/*.md
+  "${production_source_roots[@]}" config agents README.md docs/README.md docs/current/*.md
 
 # Author-controlled positive surfaces must be v3-only. Negative fixtures are
 # selected by name and intentionally excluded from this scan.

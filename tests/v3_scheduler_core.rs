@@ -1,16 +1,11 @@
 use std::collections::BTreeMap;
 
-use engine::{plan::*, DefinitionRevisionId, NodeId, RunId};
+use engine::{plan::*, scheduler::*, DefinitionRevisionId, NodeId, RunId};
 use insight_agent_platform::{
     dsl::v3::{compile_source, CompileOptions},
     engine,
 };
 use serde_json::json;
-
-#[path = "../src/engine/scheduler/mod.rs"]
-#[allow(dead_code)]
-mod scheduler;
-use scheduler::*;
 
 fn node_id(value: &str) -> NodeId {
     NodeId::new(value).unwrap()

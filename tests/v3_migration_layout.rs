@@ -40,7 +40,6 @@ const POSTGRES_ATOMIC_ARTIFACT_RETENTION: &str = DURABLE_V3_MIGRATIONS[21].postg
 const SQLITE_ATOMIC_ARTIFACT_RETENTION: &str = DURABLE_V3_MIGRATIONS[21].sqlite_sql;
 const POSTGRES_RETRIEVAL_PUBLICATIONS: &str = DURABLE_V3_MIGRATIONS[22].postgres_sql;
 const SQLITE_RETRIEVAL_PUBLICATIONS: &str = DURABLE_V3_MIGRATIONS[22].sqlite_sql;
-const PUBLIC_OUTBOX_SOURCE: &str = include_str!("../src/engine/repository/public_outbox.rs");
 
 const REQUIRED_TABLES: &[&str] = &[
     "workflow_definitions",
@@ -359,9 +358,13 @@ fn public_receipt_provenance_and_bounded_delivery_heads_run_on_both_backends() {
         assert!(sql.contains("public_event_receipt_insert_provenance"));
         assert!(sql.contains("public event receipt lacks committed provenance"));
         assert!(sql.contains("public_event_delivery_heads ("));
-        assert!(sql.contains("primary key"));
+        assert!(sql.contains("run_id text not null primary key"));
+        assert!(sql.contains("unique (public_event_id)"));
         assert!(sql.contains("head_state in ('ready', 'drained')"));
         assert!(sql.contains("idx_v3_public_delivery_heads_due"));
+        assert!(sql.contains(
+            "on public_event_delivery_heads( due_at,run_id,execution_seq,public_ordinal,public_event_id )"
+        ));
         assert!(sql.contains("public_event_outbox_authority_insert"));
         assert!(sql.contains("public_event_outbox_delivery_head_update"));
         assert!(sql.contains("public event delivery head cannot be deleted"));
@@ -373,9 +376,10 @@ fn public_receipt_provenance_and_bounded_delivery_heads_run_on_both_backends() {
                 || sql.contains("v3_public_016_validation")
         );
         assert!(sql.contains("next.execution_seq"));
+        assert!(sql.contains(
+            "order by next.execution_seq,next.public_ordinal,next.public_event_id limit 1"
+        ));
     }
-    assert!(PUBLIC_OUTBOX_SOURCE.contains("FROM public_event_delivery_heads candidate"));
-    assert!(!PUBLIC_OUTBOX_SOURCE.contains("ROW_NUMBER() OVER"));
 }
 
 #[test]
