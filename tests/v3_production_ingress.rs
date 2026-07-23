@@ -5,7 +5,6 @@ use axum::{
     http::{Request, StatusCode},
 };
 use insight_agent_platform::{
-    api::formal::{build_router, ApiAuth, BearerHumanPrincipalResolver, FormalApiState},
     catalog_v3::{
         compile_enabled_v3_agents, deploy_v3_agents, LeafDeploymentResolver, ResolvedLeafDeployment,
     },
@@ -25,6 +24,7 @@ use insight_agent_platform::{
         RunServiceConfig,
     },
 };
+use insight_api::v1::{build_router, ApiAuth, ApiState, BearerHumanPrincipalResolver};
 use serde_json::json;
 use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions, Row, SqlitePool};
 use tower::ServiceExt;
@@ -623,7 +623,7 @@ async fn human_principal_tokens_are_request_scoped_and_cannot_call_general_run_r
         ),
     ])
     .unwrap();
-    let app = build_router(FormalApiState {
+    let app = build_router(ApiState {
         service: service.clone(),
         auth: ApiAuth::bearer_token("platform-admin-token")
             .with_human_principal_resolver(Arc::new(resolver)),

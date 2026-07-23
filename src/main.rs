@@ -1,7 +1,6 @@
 use std::{error::Error, future::IntoFuture, io, sync::Arc};
 
 use insight_agent_platform::{
-    api::formal::{build_router, ApiAuth, BearerHumanPrincipalResolver, FormalApiState},
     catalog_v3::{
         compile_enabled_v3_agents, deploy_v3_agents, OwnedProductionLeafDeploymentResolver,
         ProductionLeafDeploymentResolver,
@@ -26,6 +25,7 @@ use insight_agent_platform::{
         ProductionRunRepository, RunService, RunServiceConfig,
     },
 };
+use insight_api::v1::{build_router, ApiAuth, ApiState, BearerHumanPrincipalResolver};
 
 type MainResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -158,7 +158,7 @@ async fn main() -> MainResult<()> {
     )
     .await?;
 
-    let app = build_router(FormalApiState {
+    let app = build_router(ApiState {
         service: service.clone(),
         auth: build_api_auth(&config)?,
         sse_keep_alive_interval: config.runtime.sse_keep_alive_interval,

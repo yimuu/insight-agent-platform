@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Check the normalized root API against narrowly audited compatibility bridges.
 
-The Phase 0 baseline remains immutable.  Each rule below describes one concrete
-parameter that moved behind a crate boundary and the exact generic view bound
-that replaced it.  The gate constructs the only accepted API inventory from
-the baseline, then compares the complete result byte-for-byte with the actual
-normalized inventory.
+The checked-in baseline is authoritative.  Each rule below describes one
+concrete parameter that moved behind a crate boundary and the exact generic
+view bound that replaced it.  The gate constructs the only accepted API
+inventory from the baseline, then compares the complete result byte-for-byte
+with the actual normalized inventory.
 """
 
 from __future__ import annotations
@@ -268,7 +268,7 @@ def check_inventory(baseline: str, actual: str, baseline_name: str, actual_name:
 
     if actual != expected:
         print(
-            "public API differs from the Phase 0 baseline plus the audited bridges:",
+            "public API differs from the recorded baseline plus the audited bridges:",
             file=sys.stderr,
         )
         print(

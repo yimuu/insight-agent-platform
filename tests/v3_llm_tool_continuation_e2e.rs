@@ -16,7 +16,6 @@ use axum::{
 };
 use futures::{stream, StreamExt};
 use insight_agent_platform::{
-    api::formal::{build_router, ApiAuth, FormalApiState},
     catalog_v3::{compile_v3_agent_dir, DeployedV3Agent, OwnedProductionLeafDeploymentResolver},
     dsl::CompileError,
     engine::{
@@ -40,6 +39,7 @@ use insight_agent_platform::{
         ProductionRunRepository, ResponseStreamEvent, RunError, RunService, RunServiceConfig,
     },
 };
+use insight_api::v1::{build_router, ApiAuth, ApiState};
 use serde_json::{json, Value};
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 use tower::ServiceExt;
@@ -446,7 +446,7 @@ workflow:
         )
         .await
         .unwrap();
-        let app = build_router(FormalApiState {
+        let app = build_router(ApiState {
             service: service.clone(),
             auth: ApiAuth::disabled(),
             sse_keep_alive_interval: Duration::from_secs(30),

@@ -1,3 +1,5 @@
+//! Authentication primitives for the v1 HTTP API.
+
 use std::{fmt, sync::Arc};
 
 use axum::http::{header::AUTHORIZATION, HeaderMap};

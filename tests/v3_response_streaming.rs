@@ -15,7 +15,6 @@ use axum::{
 };
 use futures::{stream, StreamExt};
 use insight_agent_platform::{
-    api::formal::{build_router, ApiAuth, FormalApiState},
     catalog_v3::{
         compile_v3_agent_dir, DeployedV3Agent, LeafDeploymentResolver,
         ProductionLeafDeploymentResolver, ResolvedLeafDeployment,
@@ -42,6 +41,7 @@ use insight_agent_platform::{
         RunServiceConfig,
     },
 };
+use insight_api::v1::{build_router, ApiAuth, ApiState};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Notify;
@@ -837,7 +837,7 @@ workflow:
         )
         .await
         .unwrap();
-        let app = build_router(FormalApiState {
+        let app = build_router(ApiState {
             service: service.clone(),
             auth: ApiAuth::disabled(),
             sse_keep_alive_interval: Duration::from_secs(30),
@@ -2184,7 +2184,7 @@ async fn public_sse_protocol_covers_all_stream_publish_combinations() {
 async fn artifact_read_route_requires_auth_and_hides_handle_and_run_misses() {
     let fixture = Fixture::start().await;
     let transcript = attached_transcript(&fixture.app, agent_id(false, false)).await;
-    let protected = build_router(FormalApiState {
+    let protected = build_router(ApiState {
         service: fixture.service.clone(),
         auth: ApiAuth::bearer_token("artifact-reader-token"),
         sse_keep_alive_interval: Duration::from_secs(30),

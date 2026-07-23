@@ -1,3 +1,5 @@
+//! Axum routes for the v1 HTTP API.
+
 use std::{sync::Arc, time::Duration};
 
 use axum::{
@@ -37,14 +39,14 @@ const X_CONTENT_TYPE_OPTIONS: HeaderName = HeaderName::from_static("x-content-ty
 const CONTENT_SECURITY_POLICY: HeaderName = HeaderName::from_static("content-security-policy");
 
 #[derive(Clone)]
-pub struct FormalApiState {
+pub struct ApiState {
     pub service: RunService,
     pub auth: ApiAuth,
     pub sse_keep_alive_interval: Duration,
     pub readiness_probe_timeout: Duration,
 }
 
-pub fn build_router(state: FormalApiState) -> Router {
+pub fn build_router(state: ApiState) -> Router {
     let state = Arc::new(state);
     let auth = state.auth.clone();
     let human_auth = state.auth.clone();
@@ -142,7 +144,7 @@ async fn live() -> Response {
     no_store(Json(ApiResponse::ok(json!({"status":"live"}))))
 }
 
-async fn health(State(state): State<Arc<FormalApiState>>) -> Response {
+async fn health(State(state): State<Arc<ApiState>>) -> Response {
     if state
         .service
         .check_readiness(state.readiness_probe_timeout)
@@ -201,7 +203,7 @@ impl From<&DeployedV3Agent> for AgentMetadata {
 }
 
 async fn list_agents(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
 ) -> Result<Json<ApiResponse<Vec<AgentMetadata>>>, ApiError> {
     let agents = state
         .service
@@ -217,7 +219,7 @@ async fn list_agents(
 }
 
 async fn get_agent(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<ApiResponse<AgentMetadata>>, ApiError> {
     let agent = state
@@ -229,7 +231,7 @@ async fn get_agent(
 }
 
 async fn publish_graph_revision(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(agent_id): Path<String>,
     body: Body,
 ) -> Result<Response, ApiError> {
@@ -249,7 +251,7 @@ async fn publish_graph_revision(
 }
 
 async fn get_graph_revision(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path((agent_id, definition_revision_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<GraphAuthorDocument>>, ApiError> {
     let graph = state
@@ -261,7 +263,7 @@ async fn get_graph_revision(
 }
 
 async fn apply_graph_semantic_edits(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path((agent_id, definition_revision_id)): Path<(String, String)>,
     body: Body,
 ) -> Result<Response, ApiError> {
@@ -287,7 +289,7 @@ struct GraphViewQuery {
 }
 
 async fn get_graph_view(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path((agent_id, definition_revision_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<StoredGraphView>>, ApiError> {
     let view = state
@@ -299,7 +301,7 @@ async fn get_graph_view(
 }
 
 async fn put_graph_view(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path((agent_id, definition_revision_id)): Path<(String, String)>,
     Query(query): Query<GraphViewQuery>,
     body: Body,
@@ -325,7 +327,7 @@ async fn put_graph_view(
 }
 
 async fn create_pinned_run(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path((agent_id, deployment_revision_id)): Path<(String, String)>,
     headers: HeaderMap,
     input: Result<Json<Value>, JsonRejection>,
@@ -352,7 +354,7 @@ async fn create_pinned_run(
 }
 
 async fn get_execution_graph(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(run_id): Path<String>,
 ) -> Result<Json<ApiResponse<GraphAuthorDocument>>, ApiError> {
     let graph = state
@@ -364,7 +366,7 @@ async fn get_execution_graph(
 }
 
 async fn get_trace_overlay(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(run_id): Path<String>,
 ) -> Result<Json<ApiResponse<TraceOverlay>>, ApiError> {
     let trace = state
@@ -385,7 +387,7 @@ async fn strict_document_body(
 }
 
 async fn create_attached_run(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(agent_id): Path<String>,
     headers: HeaderMap,
     input: Result<Json<Value>, JsonRejection>,
@@ -419,7 +421,7 @@ async fn create_attached_run(
 }
 
 async fn create_detached_run(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(agent_id): Path<String>,
     headers: HeaderMap,
     input: Result<Json<Value>, JsonRejection>,
@@ -445,7 +447,7 @@ async fn create_detached_run(
 }
 
 async fn get_run(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(run_id): Path<String>,
 ) -> Result<Json<ApiResponse<RunRecord>>, ApiError> {
     let run = state
@@ -457,7 +459,7 @@ async fn get_run(
 }
 
 async fn get_run_artifact(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path((run_id, artifact_id)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
     let artifact = state
@@ -491,7 +493,7 @@ async fn get_run_artifact(
 }
 
 async fn cancel_run(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(run_id): Path<String>,
 ) -> Result<Json<ApiResponse<RunRecord>>, ApiError> {
     let run = state
@@ -503,7 +505,7 @@ async fn cancel_run(
 }
 
 async fn pause_run(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(run_id): Path<String>,
 ) -> Result<Json<ApiResponse<RunRecord>>, ApiError> {
     let run = state.service.pause(&run_id).await.map_err(ApiError::from)?;
@@ -511,7 +513,7 @@ async fn pause_run(
 }
 
 async fn resume_run(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(run_id): Path<String>,
 ) -> Result<Json<ApiResponse<RunRecord>>, ApiError> {
     let run = state
@@ -559,7 +561,7 @@ struct MigrateRequest {
 }
 
 async fn redrive_run(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(run_id): Path<String>,
     headers: HeaderMap,
     input: Result<Json<RecoveryBaseRequest>, JsonRejection>,
@@ -581,7 +583,7 @@ async fn redrive_run(
 }
 
 async fn fork_run(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(run_id): Path<String>,
     headers: HeaderMap,
     input: Result<Json<ForkRequest>, JsonRejection>,
@@ -608,7 +610,7 @@ async fn fork_run(
 }
 
 async fn migrate_run(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(run_id): Path<String>,
     headers: HeaderMap,
     input: Result<Json<MigrateRequest>, JsonRejection>,
@@ -633,7 +635,7 @@ async fn migrate_run(
 }
 
 async fn continue_run_as_new(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(run_id): Path<String>,
     headers: HeaderMap,
     input: Result<Json<RecoveryInputRequest>, JsonRejection>,
@@ -663,7 +665,7 @@ struct SignalRequest {
 }
 
 async fn signal_run(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path((run_id, signal_name)): Path<(String, String)>,
     input: Result<Json<SignalRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<RunRecord>>, ApiError> {
@@ -683,7 +685,7 @@ struct HumanTaskListQuery {
 }
 
 async fn list_human_tasks(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Query(query): Query<HumanTaskListQuery>,
 ) -> Result<Json<ApiResponse<Vec<HumanWorkItem>>>, ApiError> {
@@ -701,7 +703,7 @@ async fn list_human_tasks(
 struct HumanTaskClaimRequest {}
 
 async fn claim_human_task(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(work_item_id): Path<String>,
     headers: HeaderMap,
     input: Result<Json<HumanTaskClaimRequest>, JsonRejection>,
@@ -730,7 +732,7 @@ struct HumanTaskCompleteRequest {
 }
 
 async fn complete_human_task(
-    State(state): State<Arc<FormalApiState>>,
+    State(state): State<Arc<ApiState>>,
     Path(work_item_id): Path<String>,
     headers: HeaderMap,
     input: Result<Json<HumanTaskCompleteRequest>, JsonRejection>,

@@ -43,7 +43,7 @@ cargo deny check
 | `crates/resources/src/` | Model/Action/Retrieval SPI、registry、builtin 与 OpenAI provider |
 | `crates/storage/src/` | SQLite/PostgreSQL、Graph SQL、Artifact store 与 PostgreSQL live broker adapter |
 | `crates/runtime/src/` | catalog/deployment、leaf adapter、scheduler/worker pump、RunService 与 live response |
-| `crates/api/src/formal/` | Axum HTTP、认证、错误映射与 SSE transport |
+| `crates/api/src/v1/` | `/v1` Axum HTTP、认证、错误映射与 SSE transport |
 | `src/` | 根兼容 facade、平台配置、严格 YAML 解码和 binary composition |
 | `migrations/durable_v3/` | SQLite/PostgreSQL 持久化 schema |
 | `agents/` | 随仓库交付的 Agent |

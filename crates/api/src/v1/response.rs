@@ -1,3 +1,5 @@
+//! Response envelopes and error mapping for the v1 HTTP API.
+
 use axum::{
     extract::rejection::JsonRejection,
     http::StatusCode,

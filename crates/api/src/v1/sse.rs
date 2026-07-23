@@ -1,3 +1,5 @@
+//! Server-sent event transport for the v1 HTTP API.
+
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     convert::Infallible,

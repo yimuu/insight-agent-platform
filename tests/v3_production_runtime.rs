@@ -13,7 +13,6 @@ use axum::{
     http::{header, Request, StatusCode},
 };
 use insight_agent_platform::{
-    api::formal::{build_router, ApiAuth, FormalApiState},
     catalog_v3::{
         compile_v3_agent_dir, DeployedV3Agent, LeafDeploymentResolver,
         ProductionLeafDeploymentResolver, ResolvedLeafDeployment,
@@ -52,6 +51,7 @@ use insight_agent_platform::{
         RunServiceConfig,
     },
 };
+use insight_api::v1::{build_router, ApiAuth, ApiState};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
@@ -673,7 +673,7 @@ async fn retrieval_only_public_streaming_needs_no_llm_worker_at_start_or_admissi
         .await
         .expect("Retrieval-only admission must not require a live LLM worker");
     wait_for_terminal(&service, &detached.run_id).await;
-    let app = build_router(FormalApiState {
+    let app = build_router(ApiState {
         service: service.clone(),
         auth: ApiAuth::disabled(),
         sse_keep_alive_interval: Duration::from_secs(30),

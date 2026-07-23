@@ -1,3 +1,3 @@
-//! HTTP API and streaming transport.
+//! Versioned HTTP API and streaming transport.
 
-pub mod formal;
+pub mod v1;

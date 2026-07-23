@@ -399,7 +399,7 @@ trait，会破坏下游实现和泛型调用，因此目标必须把**原始 tra
 
 #### G. API → 根配置
 
-`api/formal/auth.rs` 不得继续引用根 `config::AuthConfig`。API 只拥有 transport-facing `ApiAuth` 与
+`api/v1/auth.rs` 不得继续引用根 `config::AuthConfig`。API 只拥有 transport-facing `ApiAuth` 与
 principal resolver；root composition 根据 `PlatformConfig` 显式构造 `ApiAuth`。这样 API 不依赖根
 package，配置 schema 也不会成为 HTTP crate 的底层合同。
 
@@ -429,12 +429,13 @@ insight_agent_platform::engine::repository::SqliteDurableRepository
 insight_agent_platform::dsl::v3::compile_source
 insight_agent_platform::resources::models::ChatModel
 insight_agent_platform::runtime::RunService
-insight_agent_platform::api::formal::build_router
+insight_agent_platform::api::v1::build_router
 ```
 
 facade 只能重导出，不能包含状态机、SQL、adapter 或 wrapper。内部 member 必须使用直接 crate 路径，
-不得经 facade 形成隐藏反向依赖。本规范承诺保留 Phase 0 inventory 中的全部路径，而不只是上面的
-示例；删除其中任一路径属于未来独立 breaking design，本规范不授权删除。
+不得经 facade 形成隐藏反向依赖。除已明确采用的 API breaking rename
+`api::formal::FormalApiState` → `api::v1::ApiState` 外，本规范承诺保留 Phase 0 inventory 中的全部路径，
+而不只是上面的示例；删除其他路径属于未来独立 breaking design，本规范不授权删除。
 当前 `src/lib.rs` 暴露的 `api`、`catalog_v3`、`config`、`dsl`、`engine`、`events`、`history`、`outcome`、
 `resources`、`runtime`、`schema` 顶层路径都必须保留；其中跨 member 的旧嵌套路径可由 facade module
 shim 组合，但仍只能指向唯一原始类型。
@@ -672,8 +673,9 @@ skip。
 
 ### 11.2 行为与兼容
 
-- Phase 0 冻结的完整根 facade public API inventory 继续编译并指向同一类型；函数签名、trait
-  supertraits/关联项、公开 trait impl 与下游 impl fixture 等价；
+- 根 facade public API inventory 除明确采用的
+  `api::formal::FormalApiState` → `api::v1::ApiState` breaking rename 外，继续编译并指向同一类型；
+  函数签名、trait supertraits/关联项、公开 trait impl 与下游 impl fixture 等价；
 - binary 名、Quickstart、配置字段、环境变量和默认路径不变；
 - DSL positive/negative fixtures 的结果不变；
 - 相同作者输入生成逐字节相同的 Plan JSON 与 semantic hash；

@@ -12,7 +12,6 @@ use axum::{
     Router,
 };
 use insight_agent_platform::{
-    api::formal::{build_router, ApiAuth, FormalApiState},
     catalog_v3::{
         DeployedV3Agent, LeafDeploymentResolver, PublishedV3Agent, ResolvedLeafDeployment,
     },
@@ -39,6 +38,7 @@ use insight_agent_platform::{
         RunServiceConfig,
     },
 };
+use insight_api::v1::{build_router, ApiAuth, ApiState};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, AssertSqlSafe};
 use tokio_util::sync::CancellationToken;
@@ -768,7 +768,7 @@ async fn exercise_graph_product(
     )
     .await
     .unwrap();
-    let app = build_router(FormalApiState {
+    let app = build_router(ApiState {
         service: service.clone(),
         auth: ApiAuth::bearer_token(ADMIN_TOKEN),
         sse_keep_alive_interval: Duration::from_secs(1),
@@ -1281,7 +1281,7 @@ async fn sqlite_peer_discovery_reads_each_durable_graph_head_without_run_admissi
     )
     .await
     .unwrap();
-    let app_b = build_router(FormalApiState {
+    let app_b = build_router(ApiState {
         service: service_b.clone(),
         auth: ApiAuth::bearer_token(ADMIN_TOKEN),
         sse_keep_alive_interval: Duration::from_secs(1),
@@ -1459,7 +1459,7 @@ async fn postgres_live_runtimes_admit_new_runs_from_the_durable_graph_head() {
     )
     .await
     .unwrap();
-    let app_b = build_router(FormalApiState {
+    let app_b = build_router(ApiState {
         service: service_b.clone(),
         auth: ApiAuth::bearer_token(ADMIN_TOKEN),
         sse_keep_alive_interval: Duration::from_secs(1),

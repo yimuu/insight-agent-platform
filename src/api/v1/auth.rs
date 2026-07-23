@@ -1,6 +1,6 @@
-//! Compatibility facade for API-owned authentication primitives.
+//! Root configuration bridge for v1 API authentication.
 
-pub use insight_api::formal::{
+pub use insight_api::v1::{
     ApiAuth, BearerHumanPrincipalResolver, HumanPrincipalResolver, ResolvedHumanPrincipal,
 };
 

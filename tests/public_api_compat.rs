@@ -1,4 +1,4 @@
-//! Phase 0 downstream compile fixture for the root compatibility facade.
+//! Downstream compile fixture for the root public facade.
 //!
 //! `scripts/check-public-api-baseline.sh` freezes the complete normalized API
 //! inventory.  This independently compiled downstream fixture also proves
@@ -8,9 +8,7 @@ use std::{future::Future, sync::Arc};
 
 use axum::{http::HeaderMap, Router};
 use insight_agent_platform::{
-    api::formal::{
-        build_router, ApiAuth, FormalApiState, HumanPrincipalResolver, ResolvedHumanPrincipal,
-    },
+    api::v1::{build_router, ApiAuth, ApiState, HumanPrincipalResolver, ResolvedHumanPrincipal},
     config::AuthConfig,
     dsl::{
         v3::{compile_source, CompileOptions, GraphAuthorDocument, GraphSurfaceRepository},
@@ -109,7 +107,7 @@ impl HumanPrincipalResolver for DownstreamPrincipalResolver {
 #[test]
 fn root_facade_keeps_key_paths_signatures_and_type_identity() {
     let _: fn(&str, CompileOptions) -> Result<Plan, CompileError> = compile_source;
-    let _: fn(FormalApiState) -> Router = build_router;
+    let _: fn(ApiState) -> Router = build_router;
 
     fn root_plan_is_nested_plan(value: Plan) -> NestedPlan {
         value
@@ -155,7 +153,7 @@ fn production_repository_contract_and_public_impls_remain_available() {
 #[test]
 fn downstream_trait_impl_fixture_remains_usable() {
     let resolver: Arc<dyn HumanPrincipalResolver> = Arc::new(DownstreamPrincipalResolver);
-    let auth = insight_agent_platform::api::formal::ApiAuth::disabled()
+    let auth = insight_agent_platform::api::v1::ApiAuth::disabled()
         .with_human_principal_resolver(resolver);
     drop(auth);
 }

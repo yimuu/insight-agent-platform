@@ -14,7 +14,6 @@ use axum::{
     Router,
 };
 use insight_agent_platform::{
-    api::formal::{build_router, ApiAuth, FormalApiState},
     catalog_v3::{
         compile_enabled_v3_agents, deploy_v3_agents, LeafDeploymentResolver, ResolvedLeafDeployment,
     },
@@ -32,6 +31,7 @@ use insight_agent_platform::{
         RequestMetadata, RunService, RunServiceConfig,
     },
 };
+use insight_api::v1::{build_router, ApiAuth, ApiState};
 use serde_json::{json, Value};
 use sqlx::{
     postgres::PgPoolOptions, sqlite::SqliteConnectOptions, AssertSqlSafe, ConnectOptions,
@@ -980,7 +980,7 @@ async fn sqlite_service_and_api_map_unsafe_redrive_to_requires_fork_without_side
         .unwrap_err();
     assert_eq!(service_error.code(), "REDRIVE_REQUIRES_FORK");
 
-    let app = build_router(FormalApiState {
+    let app = build_router(ApiState {
         service: fixture.service.clone(),
         auth: ApiAuth::disabled(),
         sse_keep_alive_interval: Duration::from_secs(1),
@@ -1102,7 +1102,7 @@ fn mapped_wait_mapping() -> Value {
 async fn formal_recovery_routes_require_stable_identity_and_reject_low_level_proofs() {
     let (_temporary, service) = setup().await;
     let source = completed_source(&service, "router-source").await;
-    let app = build_router(FormalApiState {
+    let app = build_router(ApiState {
         service: service.clone(),
         auth: ApiAuth::disabled(),
         sse_keep_alive_interval: Duration::from_secs(1),
@@ -1352,7 +1352,7 @@ async fn sqlite_formal_migrate_derives_cross_revision_mapping_and_reuses_renamed
     )
     .await
     .unwrap();
-    let app = build_router(FormalApiState {
+    let app = build_router(ApiState {
         service: service.clone(),
         auth: ApiAuth::disabled(),
         sse_keep_alive_interval: Duration::from_secs(1),
@@ -1537,7 +1537,7 @@ async fn postgres_formal_migrate_derives_cross_revision_mapping_and_reuses_renam
     )
     .await
     .unwrap();
-    let app = build_router(FormalApiState {
+    let app = build_router(ApiState {
         service: service.clone(),
         auth: ApiAuth::disabled(),
         sse_keep_alive_interval: Duration::from_secs(1),
