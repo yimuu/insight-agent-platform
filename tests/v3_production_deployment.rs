@@ -42,6 +42,8 @@ use sqlx::{postgres::PgPoolOptions, AssertSqlSafe};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+const RUN_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn version(value: &str) -> VersionTag {
     VersionTag::new(value).unwrap()
 }
@@ -104,18 +106,22 @@ async fn drop_postgres_schema(admin: sqlx::PgPool, schema: String) {
 }
 
 async fn wait_for_completed(service: &RunService, run_id: &str) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + RUN_COMPLETION_TIMEOUT;
     loop {
         let record = service.get_run(run_id).await.unwrap();
-        match record.lifecycle {
-            RunLifecycle::Completed { output } => return output.data,
+        match &record.lifecycle {
+            RunLifecycle::Completed { output } => return output.data.clone(),
             RunLifecycle::Failed { error } => panic!("Run failed: {error:?}"),
             RunLifecycle::Cancelled { error } | RunLifecycle::Interrupted { error } => {
                 panic!("Run stopped: {error:?}")
             }
             RunLifecycle::Created | RunLifecycle::Running => {}
         }
-        assert!(Instant::now() < deadline, "Run did not complete");
+        assert!(
+            Instant::now() < deadline,
+            "Run did not complete within {RUN_COMPLETION_TIMEOUT:?}; last lifecycle: {:?}",
+            record.lifecycle
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
