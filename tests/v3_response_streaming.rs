@@ -1728,7 +1728,18 @@ async fn terminal_lifecycle_matrix_is_closed_redacted_unique_and_immediately_eof
 
 #[tokio::test]
 async fn checked_in_medical_agent_streams_three_initial_items_and_one_follow_up_item() {
-    let fixture = Fixture::start().await;
+    // This test asserts the complete publication lifecycle for every medical
+    // item. Give the finite workflow enough broker capacity that unrelated
+    // workflow observations cannot turn the assertion into a bounded-loss
+    // test under a contended CI scheduler; dedicated tests below cover gaps.
+    let broker: Arc<dyn LiveResponseBroker> =
+        Arc::new(InMemoryLiveResponseBroker::new(512, 64).unwrap());
+    let fixture = Fixture::start_with_broker_and_timeouts(
+        Duration::from_secs(10),
+        Duration::from_secs(2),
+        broker,
+    )
+    .await;
     let initial_response = start_attached_response(
         &fixture.app,
         "medical_report_interpreter",
