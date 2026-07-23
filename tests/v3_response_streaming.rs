@@ -507,6 +507,21 @@ impl Fixture {
         outbound_write_timeout: Duration,
         broker: Arc<dyn LiveResponseBroker>,
     ) -> Self {
+        Self::start_with_broker_and_response_timeouts(
+            run_timeout,
+            outbound_write_timeout,
+            Duration::from_millis(100),
+            broker,
+        )
+        .await
+    }
+
+    async fn start_with_broker_and_response_timeouts(
+        run_timeout: Duration,
+        outbound_write_timeout: Duration,
+        terminal_barrier_timeout: Duration,
+        broker: Arc<dyn LiveResponseBroker>,
+    ) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().to_path_buf();
         let counters = ModeCounters::default();
@@ -822,7 +837,7 @@ workflow:
         let mut config = RunServiceConfig::single_process_development(8, 4, 2, 32);
         config.pump_interval = Duration::from_millis(2);
         config.run_timeout = run_timeout;
-        config.terminal_barrier_timeout = Duration::from_millis(100);
+        config.terminal_barrier_timeout = terminal_barrier_timeout;
         config.outbound_write_timeout = outbound_write_timeout;
         config.artifact_gc_interval = Duration::from_secs(60);
         config.public_event_prune_interval = Duration::from_secs(60);
@@ -1332,8 +1347,15 @@ async fn closed_or_unread_http_clients_cancel_within_bounds_without_rewriting_te
     .await;
     assert_eq!(closed["data"]["status"], "cancelled");
 
+    // Keep the nonterminal cancellation checks fast, but give this branch a
+    // separate transport deadline so durable completion wins before the
+    // deliberately unread response becomes unwritable on a contended runner.
+    let completed_outbound_write_timeout = Duration::from_secs(5);
+    let completed_fixture =
+        Fixture::start_with_timeouts(Duration::from_secs(10), completed_outbound_write_timeout)
+            .await;
     let completed_response = start_attached_response(
-        &fixture.app,
+        &completed_fixture.app,
         "response_stream_backpressure_complete",
         "request-unread-client-terminal",
         json!({"question": BACKPRESSURE_QUESTION}),
@@ -1344,14 +1366,14 @@ async fn closed_or_unread_http_clients_cancel_within_bounds_without_rewriting_te
         .unwrap()
         .to_owned();
     let completed = wait_for_run_status(
-        &fixture.app,
+        &completed_fixture.app,
         &completed_run_id,
         "completed",
-        Duration::from_secs(4),
+        Duration::from_secs(8),
     )
     .await;
     assert_eq!(completed["data"]["output"]["data"], "x".repeat(40));
-    tokio::time::sleep(outbound_write_timeout.saturating_mul(4)).await;
+    tokio::time::sleep(completed_outbound_write_timeout + Duration::from_secs(1)).await;
     tokio::time::timeout(
         Duration::from_secs(1),
         to_bytes(completed_response.into_body(), 1 << 20),
@@ -1359,11 +1381,16 @@ async fn closed_or_unread_http_clients_cancel_within_bounds_without_rewriting_te
     .await
     .expect("the unread terminal HTTP response did not close after its write deadline")
     .unwrap();
-    let recovered = get_run(&fixture.app, &completed_run_id).await;
+    let recovered = get_run(&completed_fixture.app, &completed_run_id).await;
     assert_eq!(recovered["data"]["status"], "completed");
     assert_eq!(recovered["data"]["output"], completed["data"]["output"]);
 
     fixture
+        .service
+        .shutdown(Duration::from_secs(1))
+        .await
+        .unwrap();
+    completed_fixture
         .service
         .shutdown(Duration::from_secs(1))
         .await
@@ -1729,14 +1756,16 @@ async fn terminal_lifecycle_matrix_is_closed_redacted_unique_and_immediately_eof
 #[tokio::test]
 async fn checked_in_medical_agent_streams_three_initial_items_and_one_follow_up_item() {
     // This test asserts the complete publication lifecycle for every medical
-    // item. Give the finite workflow enough broker capacity that unrelated
-    // workflow observations cannot turn the assertion into a bounded-loss
-    // test under a contended CI scheduler; dedicated tests below cover gaps.
+    // item. Give the finite workflow enough broker capacity and terminal
+    // barrier time that unrelated workflow observations cannot turn the
+    // assertion into a bounded-loss test under a contended CI scheduler;
+    // dedicated tests below cover gaps.
     let broker: Arc<dyn LiveResponseBroker> =
         Arc::new(InMemoryLiveResponseBroker::new(512, 64).unwrap());
-    let fixture = Fixture::start_with_broker_and_timeouts(
+    let fixture = Fixture::start_with_broker_and_response_timeouts(
         Duration::from_secs(10),
         Duration::from_secs(2),
+        Duration::from_secs(5),
         broker,
     )
     .await;
