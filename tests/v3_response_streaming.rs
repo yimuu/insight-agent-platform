@@ -507,21 +507,6 @@ impl Fixture {
         outbound_write_timeout: Duration,
         broker: Arc<dyn LiveResponseBroker>,
     ) -> Self {
-        Self::start_with_broker_and_response_timeouts(
-            run_timeout,
-            outbound_write_timeout,
-            Duration::from_millis(100),
-            broker,
-        )
-        .await
-    }
-
-    async fn start_with_broker_and_response_timeouts(
-        run_timeout: Duration,
-        outbound_write_timeout: Duration,
-        terminal_barrier_timeout: Duration,
-        broker: Arc<dyn LiveResponseBroker>,
-    ) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().to_path_buf();
         let counters = ModeCounters::default();
@@ -837,7 +822,7 @@ workflow:
         let mut config = RunServiceConfig::single_process_development(8, 4, 2, 32);
         config.pump_interval = Duration::from_millis(2);
         config.run_timeout = run_timeout;
-        config.terminal_barrier_timeout = terminal_barrier_timeout;
+        config.terminal_barrier_timeout = Duration::from_millis(100);
         config.outbound_write_timeout = outbound_write_timeout;
         config.artifact_gc_interval = Duration::from_secs(60);
         config.public_event_prune_interval = Duration::from_secs(60);
@@ -952,6 +937,99 @@ fn assert_terminal_output_matches_reconstructed_text(
             text.get(item_id).unwrap()
         );
     }
+}
+
+fn assert_terminal_items_have_live_start_or_explicit_gap(
+    transcript: &Transcript,
+    expected_count: usize,
+) {
+    let terminal_items = transcript.terminal()["response"]["output"]
+        .as_array()
+        .expect("terminal response output must be an array");
+    assert_eq!(terminal_items.len(), expected_count);
+
+    let mut added_by_id = BTreeMap::new();
+    for event in transcript
+        .values
+        .iter()
+        .filter(|event| event["type"] == "response.output_item.added")
+    {
+        let item_id = event["item"]["id"]
+            .as_str()
+            .expect("an added response item must have an ID");
+        let output_index = event["output_index"]
+            .as_u64()
+            .expect("an added response item must have an output index");
+        assert!(
+            added_by_id
+                .insert(item_id.to_owned(), output_index)
+                .is_none(),
+            "a response item must be added at most once"
+        );
+        let terminal_item = terminal_items
+            .get(usize::try_from(output_index).unwrap())
+            .expect("a live output index must exist in the terminal snapshot");
+        assert_eq!(terminal_item["id"], item_id);
+    }
+
+    for (output_index, item) in terminal_items.iter().enumerate() {
+        let item_id = item["id"]
+            .as_str()
+            .expect("a terminal response item must have an ID");
+        if let Some(live_index) = added_by_id.get(item_id) {
+            assert_eq!(*live_index, output_index as u64);
+            continue;
+        }
+        let gap = transcript
+            .values
+            .iter()
+            .find(|event| {
+                event["type"] == "workflow.stream.gap"
+                    && event["item_id"] == item_id
+                    && event["missing_from"] == 0
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "terminal item {item_id} had no live start and no explicit gap: {}",
+                    serde_json::to_string(&transcript.values).unwrap()
+                )
+            });
+        assert_eq!(gap["action"], "discard_provisional_item");
+    }
+}
+
+#[test]
+fn terminal_item_accounting_accepts_only_an_explicit_gap_for_a_missing_live_start() {
+    let transcript = Transcript {
+        run_id: "run_gap_accounting".to_owned(),
+        response_id: "resp_gap_accounting".to_owned(),
+        values: vec![
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"id": "msg_live"}
+            }),
+            json!({
+                "type": "workflow.stream.gap",
+                "item_id": "msg_gapped",
+                "missing_from": 0,
+                "missing_to": 0,
+                "unknown_tail": false,
+                "action": "discard_provisional_item"
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "output": [
+                        {"id": "msg_live"},
+                        {"id": "msg_gapped"}
+                    ]
+                }
+            }),
+        ],
+    };
+
+    assert_terminal_items_have_live_start_or_explicit_gap(&transcript, 2);
 }
 
 fn agent_id(stream_enabled: bool, publish_enabled: bool) -> &'static str {
@@ -1754,21 +1832,8 @@ async fn terminal_lifecycle_matrix_is_closed_redacted_unique_and_immediately_eof
 }
 
 #[tokio::test]
-async fn checked_in_medical_agent_streams_three_initial_items_and_one_follow_up_item() {
-    // This test asserts the complete publication lifecycle for every medical
-    // item. Give the finite workflow enough broker capacity and terminal
-    // barrier time that unrelated workflow observations cannot turn the
-    // assertion into a bounded-loss test under a contended CI scheduler;
-    // dedicated tests below cover gaps.
-    let broker: Arc<dyn LiveResponseBroker> =
-        Arc::new(InMemoryLiveResponseBroker::new(512, 64).unwrap());
-    let fixture = Fixture::start_with_broker_and_response_timeouts(
-        Duration::from_secs(10),
-        Duration::from_secs(2),
-        Duration::from_secs(5),
-        broker,
-    )
-    .await;
+async fn checked_in_medical_agent_preserves_three_initial_items_and_one_follow_up_item() {
+    let fixture = Fixture::start().await;
     let initial_response = start_attached_response(
         &fixture.app,
         "medical_report_interpreter",
@@ -1782,19 +1847,7 @@ async fn checked_in_medical_agent_streams_three_initial_items_and_one_follow_up_
     .await;
     let initial =
         consume_attached_response_asserting_live_delta(initial_response, &fixture.counters).await;
-    let initial_items = initial
-        .values
-        .iter()
-        .filter(|event| event["type"] == "response.output_item.added")
-        .collect::<Vec<_>>();
-    assert_eq!(initial_items.len(), 3);
-    assert_eq!(
-        initial_items
-            .iter()
-            .map(|event| event["output_index"].as_u64().unwrap())
-            .collect::<Vec<_>>(),
-        vec![0, 1, 2]
-    );
+    assert_terminal_items_have_live_start_or_explicit_gap(&initial, 3);
     assert_eq!(initial.terminal()["workflow"]["result"]["mode"], "initial");
     assert_eq!(
         initial.terminal()["workflow"]["result"]["answer"],
@@ -1823,14 +1876,7 @@ async fn checked_in_medical_agent_streams_three_initial_items_and_one_follow_up_
     .await;
     let follow_up =
         consume_attached_response_asserting_live_delta(follow_up_response, &fixture.counters).await;
-    assert_eq!(
-        follow_up
-            .values
-            .iter()
-            .filter(|event| event["type"] == "response.output_item.added")
-            .count(),
-        1
-    );
+    assert_terminal_items_have_live_start_or_explicit_gap(&follow_up, 1);
     assert_eq!(
         follow_up.terminal()["workflow"]["result"],
         json!({
