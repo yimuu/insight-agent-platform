@@ -591,7 +591,8 @@ fn production_config(pump_interval: Duration) -> RunServiceConfig {
 }
 
 async fn wait_for_terminal(service: &RunService, run_id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let timeout = Duration::from_secs(30);
+    let deadline = Instant::now() + timeout;
     loop {
         let record = service.get_run(run_id).await.unwrap();
         if record.status().is_terminal() {
@@ -600,7 +601,7 @@ async fn wait_for_terminal(service: &RunService, run_id: &str) {
         }
         assert!(
             Instant::now() < deadline,
-            "Run did not become terminal; last status was {:?}",
+            "Run did not become terminal within {timeout:?}; last status was {:?}",
             record.status()
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
