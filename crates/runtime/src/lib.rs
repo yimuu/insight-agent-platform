@@ -2,13 +2,12 @@
 
 pub mod catalog_v3;
 pub mod control;
+#[doc(hidden)]
+pub mod internal;
 pub mod leaf_adapters;
 pub mod response_stream;
 pub mod retrieval_adapter;
 pub mod scheduler_runtime;
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-pub mod test_support;
 pub mod v3_service;
 
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};

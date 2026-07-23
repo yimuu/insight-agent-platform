@@ -1347,6 +1347,7 @@ dependencies = [
  "serde",
  "serde_jcs",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",

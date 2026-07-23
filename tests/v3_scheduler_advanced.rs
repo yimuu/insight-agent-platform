@@ -2120,18 +2120,6 @@ workflow:
 }
 
 #[test]
-fn scheduler_fact_wire_rejects_unknown_fields() {
-    let facts = SchedulerFacts::new(
-        RunId::new("run_wire_closed").unwrap(),
-        0,
-        RuntimeValue::new(json!({})).unwrap(),
-    );
-    let mut encoded = serde_json::to_value(facts).unwrap();
-    encoded["unknown_future_fact"] = json!(true);
-    assert!(serde_json::from_value::<SchedulerFacts>(encoded).is_err());
-}
-
-#[test]
 fn scheduler_action_wire_rederives_the_intent_hash_and_closes_its_schema() {
     let source = r#"api_version: insight.agent/v3
 kind: agent

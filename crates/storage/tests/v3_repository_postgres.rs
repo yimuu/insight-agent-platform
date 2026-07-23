@@ -1,30 +1,30 @@
 //! Public PostgreSQL repository conformance at the durable-v3 admission boundary.
 
-use insight_agent_platform::{
-    dsl::v3::{compile_source, CompileOptions},
-    engine::{
-        plan::{
-            AuthorFormat, DataBinding, DataBindingId, DataPort, DataPortId, Node, NodeKind,
-            PlanBuilder, PlanInputContract, PlanMetadata, PlanType, PortDirection, PortName,
-            ReturnDescriptor, ScopeId, ScopeMetadata, ValueSource, VersionTag,
-        },
-        repository::{
-            ActivationAdmissionCommand, ActivationDurableRepository, ContinueAsNewCommand,
-            CreateRunCommand, DurableRepository, PlanInstallOutcome, PostgresDurableRepository,
-            ProjectionAudit, ProjectionDurableRepository, ProjectionSubject, ReceiveSignalCommand,
-            RecoveryDurableRepository, VersionedPlan, REPOSITORY_DATA_INVALID,
-        },
-        ActivationId, ContentHash, DefinitionRevisionId, DeploymentRevisionId, ExecutionKind,
-        NodeId, RunId, RunLifecycle, ScopeInstanceId, SignalId, TransitionKey, TransitionOutcome,
-    },
+use insight_dsl::v3::{compile_source, CompileOptions};
+use insight_durable::{
+    ActivationAdmissionCommand, ActivationDurableRepository, ContinueAsNewCommand,
+    CreateRunCommand, DurableRepository, PlanInstallOutcome, ProjectionAudit,
+    ProjectionDurableRepository, ProjectionSubject, ReceiveSignalCommand,
+    RecoveryDurableRepository, VersionedPlan,
 };
+use insight_engine::{
+    plan::{
+        AuthorFormat, DataBinding, DataBindingId, DataPort, DataPortId, Node, NodeKind,
+        PlanBuilder, PlanInputContract, PlanMetadata, PlanType, PortDirection, PortName,
+        ReturnDescriptor, ScopeId, ScopeMetadata, ValueSource, VersionTag,
+    },
+    repository::REPOSITORY_DATA_INVALID,
+    ActivationId, ContentHash, DefinitionRevisionId, DeploymentRevisionId, ExecutionKind, NodeId,
+    RunId, RunLifecycle, ScopeInstanceId, SignalId, TransitionKey, TransitionOutcome,
+};
+use insight_storage::PostgresDurableRepository;
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, AssertSqlSafe, PgPool};
 use uuid::Uuid;
 
-fn verified_plan() -> insight_agent_platform::engine::Plan {
+fn verified_plan() -> insight_engine::Plan {
     let revision = DefinitionRevisionId::new("definition_revision_pg_v1").unwrap();
-    let return_id = insight_agent_platform::engine::NodeId::new("return_node").unwrap();
+    let return_id = insight_engine::NodeId::new("return_node").unwrap();
     let root_id = ScopeId::new("root_scope").unwrap();
     let value_input = DataPortId::new("return_value").unwrap();
     let safe_error = PlanType::safe_error().unwrap();
@@ -78,7 +78,7 @@ fn versioned_plan() -> VersionedPlan {
     .unwrap()
 }
 
-fn normalized_input_versioned_plan() -> (insight_agent_platform::engine::Plan, VersionedPlan) {
+fn normalized_input_versioned_plan() -> (insight_engine::Plan, VersionedPlan) {
     let source = r#"api_version: insight.agent/v3
 kind: agent
 inputs:

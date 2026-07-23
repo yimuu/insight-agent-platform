@@ -1,25 +1,26 @@
-use insight_agent_platform::{
-    dsl::v3::{
-        GraphAuthorDocument, GraphDocumentId, GraphSurfaceRepository, NodeView, ViewDocument,
-    },
-    engine::{
-        repository::{
-            CreateRunCommand, DurableRepository, PostgresDurableRepository,
-            SqliteDurableRepository, VersionedPlan,
-        },
-        DefinitionRevisionId, DeploymentRevisionId, RunId, TransitionKey, TransitionOutcome,
-    },
+#[macro_use]
+#[path = "../../../tests/support/workspace_assets.rs"]
+mod workspace_assets;
+
+use insight_dsl::v3::{
+    CompileOptions, GraphAuthorDocument, GraphDocumentId, GraphSurfaceRepository, NodeView,
+    ViewDocument,
 };
+use insight_durable::{CreateRunCommand, DurableRepository, VersionedPlan};
+use insight_engine::{
+    DefinitionRevisionId, DeploymentRevisionId, RunId, TransitionKey, TransitionOutcome,
+};
+use insight_storage::{PostgresDurableRepository, SqliteDurableRepository};
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, AssertSqlSafe};
 use uuid::Uuid;
 
 fn graph() -> GraphAuthorDocument {
-    let source = include_str!("fixtures/v3/linear.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/linear.yaml");
     GraphAuthorDocument::from_structured_source(
         GraphDocumentId::new("canvas_graph_repository").unwrap(),
         source,
-        insight_agent_platform::dsl::v3::CompileOptions::new(
+        CompileOptions::new(
             DefinitionRevisionId::new("canvas_definition_revision_1").unwrap(),
             "canvas/agent.yaml",
             source,

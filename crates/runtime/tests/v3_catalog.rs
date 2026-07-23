@@ -1,24 +1,24 @@
 use std::collections::BTreeSet;
 
-use insight_agent_platform::{
-    catalog_v3::{
-        compile_enabled_v3_agents, compile_v3_agent_dir, deploy_v3_agents, AgentStreamingContract,
-        DeployedV3Agent, DeploymentRiskCode, DeploymentRiskDiagnostic, DeploymentRiskSeverity,
-        LeafDeploymentResolver, PublishedV3Agent, ResolvedLeafDeployment,
+use insight_dsl::v3::{CompileOptions, GraphAuthorDocument, GraphDocumentId};
+use insight_engine::{
+    author::CompileError,
+    plan::{
+        DescriptorValue, LeafTaskDescriptor, LeafTaskKind, PlanIndex, SubflowContractRegistry,
+        ValueSource, VersionTag,
     },
-    dsl::{
-        v3::{CompileOptions, GraphAuthorDocument, GraphDocumentId},
-        CompileError,
-    },
-    engine::{
-        plan::{
-            DescriptorValue, LeafTaskDescriptor, LeafTaskKind, PlanIndex, SubflowContractRegistry,
-            ValueSource, VersionTag,
-        },
-        ContentHash, DefinitionRevisionId, NodeId,
-    },
+    ContentHash, DefinitionRevisionId, NodeId,
+};
+use insight_runtime::catalog_v3::{
+    compile_enabled_v3_agents, compile_v3_agent_dir, deploy_v3_agents, AgentStreamingContract,
+    DeployedV3Agent, DeploymentRiskCode, DeploymentRiskDiagnostic, DeploymentRiskSeverity,
+    LeafDeploymentResolver, PublishedV3Agent, ResolvedLeafDeployment,
 };
 use serde_json::json;
+
+#[allow(unused_macros)]
+#[path = "../../../tests/support/workspace_assets.rs"]
+mod workspace_assets;
 
 struct FixtureResolver;
 
@@ -42,7 +42,7 @@ impl LeafDeploymentResolver for FixtureResolver {
 
 #[test]
 fn all_checked_in_agents_compile_into_verified_immutable_v3_revisions() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agents");
+    let root = workspace_assets::workspace_path("agents");
     let enabled = BTreeSet::from([
         "action_demo".to_owned(),
         "medical_report_interpreter".to_owned(),
@@ -66,9 +66,7 @@ fn all_checked_in_agents_compile_into_verified_immutable_v3_revisions() {
 
 #[test]
 fn revision_pins_main_source_and_every_referenced_prompt() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("agents")
-        .join("researcher");
+    let root = workspace_assets::workspace_path("agents/researcher");
     let first = compile_v3_agent_dir(&root).unwrap();
     let second = compile_v3_agent_dir(&root).unwrap();
     assert_eq!(
@@ -234,9 +232,7 @@ workflow:
 
 #[test]
 fn markdown_prompt_template_slots_are_compiled_into_typed_runtime_bindings() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("agents")
-        .join("researcher");
+    let root = workspace_assets::workspace_path("agents/researcher");
     let agent = compile_v3_agent_dir(&root).unwrap();
     let index = PlanIndex::new(agent.plan()).unwrap();
 
@@ -252,7 +248,7 @@ fn markdown_prompt_template_slots_are_compiled_into_typed_runtime_bindings() {
     let DescriptorValue::String(question_port) = bindings.get("question").unwrap() else {
         panic!("planner.md question slot must compile into one data port")
     };
-    let question_port = insight_agent_platform::engine::DataPortId::new(question_port).unwrap();
+    let question_port = insight_engine::DataPortId::new(question_port).unwrap();
     assert!(matches!(
         index.source_for_input(&question_port),
         Some(ValueSource::RunInput { path }) if path == &["question".to_owned()]
@@ -275,9 +271,7 @@ fn markdown_prompt_template_slots_are_compiled_into_typed_runtime_bindings() {
 
 #[test]
 fn public_input_is_normalized_before_scheduler_admission() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("agents")
-        .join("medical_report_interpreter");
+    let root = workspace_assets::workspace_path("agents/medical_report_interpreter");
     let agent = compile_v3_agent_dir(&root).unwrap();
     let value = agent
         .normalize_input(json!({
@@ -319,9 +313,7 @@ fn public_input_is_normalized_before_scheduler_admission() {
 
 #[test]
 fn graph_publication_uses_the_same_frozen_input_normalization_contract() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("agents")
-        .join("medical_report_interpreter");
+    let root = workspace_assets::workspace_path("agents/medical_report_interpreter");
     let structured = compile_v3_agent_dir(&root).unwrap();
     let graph = GraphAuthorDocument::from_verified_plan(
         GraphDocumentId::new("medical_input_contract_graph").unwrap(),
@@ -358,9 +350,7 @@ fn graph_publication_uses_the_same_frozen_input_normalization_contract() {
 
 #[test]
 fn deployment_publication_contextually_links_every_leaf_and_freezes_binding_identity() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("agents")
-        .join("parallel_researcher");
+    let root = workspace_assets::workspace_path("agents/parallel_researcher");
     let published = std::sync::Arc::new(compile_v3_agent_dir(&root).unwrap());
     let deployment =
         DeployedV3Agent::publish(published, &FixtureResolver, SubflowContractRegistry::new())
@@ -524,12 +514,7 @@ workflow:
         .plan()
         .nodes()
         .iter()
-        .find(|node| {
-            matches!(
-                node.kind(),
-                insight_agent_platform::engine::plan::NodeKind::SubflowCall(_)
-            )
-        })
+        .find(|node| matches!(node.kind(), insight_engine::plan::NodeKind::SubflowCall(_)))
         .unwrap();
     let contract = linked.subflow(call.id()).unwrap();
     assert_eq!(

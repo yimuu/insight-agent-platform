@@ -1,20 +1,18 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use futures::StreamExt;
-use insight_agent_platform::{
-    resources::{
-        actions::{Action, ActionContext, ActionRegistry},
-        builtin_actions::{
-            builtin_action_registry, CurrentTimeAction, RestrictedHttpGetAction, TextMetricsAction,
-        },
-        models::{
-            ChatContent, ChatContentPart, ChatFinishReason, ChatMessage, ChatModel, ChatRequest,
-            ChatRequestMode, ChatResponseFormat, ChatRole, ChatStream, ChatToolCall,
-            ChatToolChoice, ChatToolDefinition, ModelCapability, ModelRequestCapability,
-        },
-        openai_chat::{OpenAiChatLimits, OpenAiChatModel, OpenAiTransportPolicy},
+use insight_engine::execution::{stop_pair, ExecutionControl, RunError};
+use insight_resources::{
+    actions::{Action, ActionContext, ActionRegistry},
+    builtin_actions::{
+        builtin_action_registry, CurrentTimeAction, RestrictedHttpGetAction, TextMetricsAction,
     },
-    runtime::{stop_pair, ExecutionControl, RunError},
+    models::{
+        ChatContent, ChatContentPart, ChatFinishReason, ChatMessage, ChatModel, ChatRequest,
+        ChatRequestMode, ChatResponseFormat, ChatRole, ChatStream, ChatToolCall, ChatToolChoice,
+        ChatToolDefinition, ModelCapability, ModelRequestCapability,
+    },
+    openai_chat::{OpenAiChatLimits, OpenAiChatModel, OpenAiTransportPolicy},
 };
 use serde_json::{json, Value};
 use tokio::{

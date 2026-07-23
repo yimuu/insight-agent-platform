@@ -1578,6 +1578,7 @@ fn model_run_id(value: String) -> Result<RunId, RepositoryError> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::migration_manifest::DURABLE_V3_MIGRATIONS;
     use chrono::{DateTime, Utc};
     use insight_durable::model::adapter as model_adapter;
     use insight_durable::{CreateRunCommand, DurableRepository, VersionedPlan};
@@ -2894,10 +2895,11 @@ mod tests {
         .execute(&repository.pool)
         .await
         .unwrap();
-        let migration = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../migrations/durable_v3/postgres/202607180016_public_event_delivery_heads.sql"
-        ));
+        let migration = DURABLE_V3_MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == 202607180016)
+            .expect("public event delivery-head migration must remain in the manifest")
+            .postgres_sql;
         assert!(sqlx::raw_sql(migration)
             .execute(&repository.pool)
             .await

@@ -145,6 +145,17 @@ RUNTIME_STACK_PATTERN = re.compile(
     r"\b(?:sqlx|axum|reqwest)\s*::|\bextern\s+crate\s+(?:sqlx|axum|reqwest)\b|\buse\s+(?:sqlx|axum|reqwest)\s*(?:;|as\b)"
 )
 
+ROOT_FACADE_PATTERN = re.compile(r"\binsight_agent_platform\b")
+DEEP_ASSET_INCLUDE_PATTERN = re.compile(
+    r"\binclude_(?:str|bytes)!\s*\([^)]{0,500}(?:\.\./){2}", re.DOTALL
+)
+MANIFEST_PARENT_PATH_PATTERN = re.compile(
+    r"CARGO_MANIFEST_DIR[^;]{0,500}(?:\.\./){2}", re.DOTALL
+)
+ALLOWED_FIXED_ASSET_LOCATORS = {
+    "crates/storage/src/repository/migration_manifest.rs",
+}
+
 
 def feature_snapshot(metadata):
     workspace_ids = set(metadata["workspace_members"])
@@ -271,6 +282,7 @@ def check(metadata, baseline_path, workspace_root):
             )
 
     for package_id, role in sorted(role_by_id.items(), key=lambda item: item[1]):
+        package = packages[package_id]
         node = nodes.get(package_id)
         if node is None:
             errors.append(f"{role}: package is absent from the Cargo resolve graph")
@@ -290,6 +302,12 @@ def check(metadata, baseline_path, workspace_root):
                     f"{role}: forbidden direct {kinds} dependency on "
                     f"{format_package(dependency_package)}"
                 )
+
+        if role != "root" and package.get("features"):
+            errors.append(
+                f"{role}: internal crate feature matrix is not allowed in the first cutover: "
+                f"{sorted(package['features'])}"
+            )
 
     for role in ("engine", "dsl", "durable"):
         package_id = id_by_role.get(role)
@@ -338,6 +356,34 @@ def check(metadata, baseline_path, workspace_root):
                 source_dir,
                 (("direct SQLx/Axum/Reqwest source use", RUNTIME_STACK_PATTERN),),
             )
+
+    shared_asset_helper = workspace_root / "tests/support/workspace_assets.rs"
+    if not shared_asset_helper.is_file():
+        errors.append(f"shared workspace asset helper is absent: {shared_asset_helper}")
+
+    for package_id, role in sorted(role_by_id.items(), key=lambda item: item[1]):
+        if role == "root":
+            continue
+        package = packages[package_id]
+        manifest_dir = Path(package["manifest_path"]).parent
+        for path in source_files(manifest_dir):
+            text = path.read_text(encoding="utf-8")
+            relative = path.resolve().relative_to(workspace_root).as_posix()
+            for match in ROOT_FACADE_PATTERN.finditer(text):
+                errors.append(
+                    f"{role}: member source/test must import its owner crates directly: "
+                    f"{path}:{line_number(text, match.start())}"
+                )
+            if relative in ALLOWED_FIXED_ASSET_LOCATORS:
+                continue
+            for label, pattern in (
+                ("deep relative include bypasses the shared asset locator", DEEP_ASSET_INCLUDE_PATTERN),
+                ("CARGO_MANIFEST_DIR parent traversal bypasses the shared asset locator", MANIFEST_PARENT_PATH_PATTERN),
+            ):
+                for match in pattern.finditer(text):
+                    errors.append(
+                        f"{role}: {label}: {path}:{line_number(text, match.start())}"
+                    )
 
     actual_snapshot = feature_snapshot(metadata)
     if not baseline_path.is_file():

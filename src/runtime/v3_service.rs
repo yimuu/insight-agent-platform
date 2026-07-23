@@ -29,7 +29,7 @@ mod public_event_multiruntime_tests {
         ExecutionEventContext, ExecutionEventPayload, PendingExecutionEvent, PublicEventPayload,
         RunId, RunLifecycle as EngineRunLifecycle, TransitionKey, TransitionOutcome,
     };
-    use insight_runtime::test_support;
+    use insight_runtime::internal as runtime_internal;
 
     fn plan(suffix: &str) -> VersionedPlan {
         insight_durable::model::adapter::versioned_plan_for_test(
@@ -183,7 +183,7 @@ mod public_event_multiruntime_tests {
             .unwrap()
             .unwrap();
 
-        let live = test_support::run_event(&service, &run_id, published.safe_envelope())
+        let live = runtime_internal::run_event(&service, &run_id, published.safe_envelope())
             .await
             .unwrap();
         assert_eq!(
@@ -291,26 +291,26 @@ mod public_event_multiruntime_tests {
             assert!(repository.publish_public_event(&claim, 60).await.unwrap());
         }
 
-        let mut subscription = test_support::subscription(&service, &run_id);
+        let mut subscription = runtime_internal::subscription(&service, &run_id);
 
         // Simulate the worst dispatcher race: the terminal hint wins and all
         // earlier hints are lost. The subscriber must still drain the durable
         // order, and the wake sender must remain open until that drain reaches
         // the terminal position.
-        test_support::deliver_published_public_event(&service, &terminal_id)
+        runtime_internal::deliver_published_public_event(&service, &terminal_id)
             .await
             .unwrap();
-        assert!(test_support::has_live_subscription(&service, &run_id));
+        assert!(runtime_internal::has_live_subscription(&service, &run_id));
         let created = subscription.recv().await.unwrap();
         let started = subscription.recv().await.unwrap();
-        assert!(test_support::has_live_subscription(&service, &run_id));
+        assert!(runtime_internal::has_live_subscription(&service, &run_id));
         let completed = subscription.recv().await.unwrap();
         assert_eq!(created.event_type, RunEventType::RunCreated);
         assert_eq!(started.event_type, RunEventType::RunStarted);
         assert_eq!(completed.event_type, RunEventType::RunCompleted);
         assert!(created.seq < started.seq && started.seq < completed.seq);
         assert_eq!(subscription.last_seq(), completed.seq);
-        assert!(!test_support::has_live_subscription(&service, &run_id));
+        assert!(!runtime_internal::has_live_subscription(&service, &run_id));
         assert_eq!(
             subscription.recv().await.unwrap_err().code(),
             "SUBSCRIPTION_TERMINAL"
@@ -403,7 +403,7 @@ mod public_event_multiruntime_tests {
             )
             .await
             .unwrap();
-        let mut subscription = test_support::subscription(&service_b, &run_id);
+        let mut subscription = runtime_internal::subscription(&service_b, &run_id);
 
         let start = repository_a
             .commit_run_transition(
@@ -433,8 +433,12 @@ mod public_event_multiruntime_tests {
                 panic!("start transition must commit")
             }
         };
-        test_support::flush_public_events(&service_a).await.unwrap();
-        test_support::flush_public_events(&service_a).await.unwrap();
+        runtime_internal::flush_public_events(&service_a)
+            .await
+            .unwrap();
+        runtime_internal::flush_public_events(&service_a)
+            .await
+            .unwrap();
 
         assert!(
             sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
@@ -485,13 +489,15 @@ mod public_event_multiruntime_tests {
                 panic!("terminal transition must commit")
             }
         };
-        test_support::flush_public_events(&service_a).await.unwrap();
+        runtime_internal::flush_public_events(&service_a)
+            .await
+            .unwrap();
 
         // Force the remote runtime's terminal handler to win locally, then
         // emit PostgreSQL hints in terminal-before-start order. Publication
         // notifications may also be duplicated or already buffered; none of
         // those process-local arrival orders may control subscriber order.
-        test_support::deliver_published_public_event(&service_b, &terminal_id)
+        runtime_internal::deliver_published_public_event(&service_b, &terminal_id)
             .await
             .unwrap();
         sqlx::query("SELECT pg_notify($1, $2)")

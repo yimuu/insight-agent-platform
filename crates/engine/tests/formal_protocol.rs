@@ -1,5 +1,5 @@
 use chrono::{TimeZone, Utc};
-use insight_agent_platform::{
+use insight_engine::{
     events::protocol::{RunEvent, RunEventScope, RunEventType},
     history::types::{
         NewRun, RunAttachment, RunLifecycle, RunRecord, RunStatus, RunSummary, RunTerminal,

@@ -1,23 +1,23 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
-use insight_agent_platform::{
-    catalog_v3::{DeployedV3Agent, ProductionLeafDeploymentResolver, PublishedV3Agent},
-    dsl::v3::{compile_source, CompileOptions, GraphAuthorDocument, GraphDocumentId},
-    engine::{
-        plan::{DescriptorValue, LeafTaskKind, NodeKind, PlanIndex, SubflowContractRegistry},
-        DefinitionRevisionId, RunId, RuntimeValue, SchedulerAction, SchedulerDecision,
-        SchedulerFacts, SchedulerPlanner, SchedulerTaskKind,
+use insight_dsl::v3::{CompileOptions, GraphAuthorDocument, GraphDocumentId};
+use insight_engine::{
+    execution::RunError,
+    plan::{LeafTaskKind, NodeKind, SubflowContractRegistry},
+    DefinitionRevisionId, RunId, RuntimeValue, SchedulerAction, SchedulerDecision, SchedulerFacts,
+    SchedulerPlanner, SchedulerTaskKind,
+};
+use insight_resources::{
+    actions::{ActionRegistry, CancellationClass, EffectClass, IdempotencyClass},
+    models::ModelRegistry,
+    retrievals::{
+        Retrieval, RetrievalCapability, RetrievalContext, RetrievalDescriptor,
+        RetrievalExecutionResult, RetrievalPublicPolicy, RetrievalRegistry,
     },
-    resources::{
-        actions::{ActionRegistry, CancellationClass, EffectClass, IdempotencyClass},
-        models::ModelRegistry,
-        retrievals::{
-            Retrieval, RetrievalCapability, RetrievalContext, RetrievalDescriptor,
-            RetrievalExecutionResult, RetrievalPublicPolicy, RetrievalRegistry,
-        },
-    },
-    runtime::RunError,
+};
+use insight_runtime::catalog_v3::{
+    DeployedV3Agent, ProductionLeafDeploymentResolver, PublishedV3Agent,
 };
 use serde_json::{json, Value};
 
@@ -126,62 +126,6 @@ fn retrieval_registry() -> RetrievalRegistry {
     let mut registry = RetrievalRegistry::default();
     registry.register(SearchRetrieval).unwrap();
     registry
-}
-
-#[test]
-fn retrieval_is_a_first_class_leaf_and_publish_defaults_private_across_roundtrip() {
-    let plan = compile_source(RETRIEVAL_SOURCE, compile_options(RETRIEVAL_SOURCE)).unwrap();
-    let retrieval = plan
-        .nodes()
-        .iter()
-        .find(|node| matches!(node.kind(), NodeKind::RetrievalTask(_)))
-        .expect("retrieval leaf is represented by its own Plan node kind");
-    let NodeKind::RetrievalTask(descriptor) = retrieval.kind() else {
-        unreachable!();
-    };
-    assert_eq!(descriptor.implementation, "medical.search");
-    assert_eq!(descriptor.descriptor_version.as_str(), "1");
-    assert_eq!(
-        descriptor.public_configuration.get("publish"),
-        Some(&DescriptorValue::Boolean(false))
-    );
-    assert_eq!(
-        PlanIndex::new(&plan)
-            .unwrap()
-            .leaf_descriptor(retrieval.id())
-            .unwrap()
-            .kind(),
-        LeafTaskKind::Retrieval
-    );
-
-    let native = GraphAuthorDocument::from_verified_plan(
-        GraphDocumentId::new("native_retrieval_roundtrip").unwrap(),
-        plan,
-    )
-    .unwrap();
-    let reduced = native.to_structured().unwrap();
-    let recompiled = compile_source(reduced.source(), compile_options(reduced.source())).unwrap();
-    assert_eq!(native.semantic_hash(), recompiled.semantic_hash());
-    assert!(reduced.source().contains("\"type\": \"retrieval\""));
-    assert!(reduced.source().contains("\"publish\": false"));
-}
-
-#[test]
-fn retrieval_author_surface_is_closed_and_requires_object_inputs() {
-    let missing_inputs = RETRIEVAL_SOURCE.replace("      inputs:\n        query: $question\n", "");
-    assert!(compile_source(&missing_inputs, compile_options(&missing_inputs)).is_err());
-
-    let invalid_publish = RETRIEVAL_SOURCE.replace(
-        "      response: SearchOutput",
-        "      publish: yes\n      response: SearchOutput",
-    );
-    assert!(compile_source(&invalid_publish, compile_options(&invalid_publish)).is_err());
-
-    let unknown = RETRIEVAL_SOURCE.replace(
-        "      response: SearchOutput",
-        "      arbitrary: true\n      response: SearchOutput",
-    );
-    assert!(compile_source(&unknown, compile_options(&unknown)).is_err());
 }
 
 #[test]

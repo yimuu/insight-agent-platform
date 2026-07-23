@@ -1,22 +1,25 @@
 use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
-use insight_agent_platform::engine::{
+use insight_durable::{
+    AcknowledgeArtifactDeletionCommand, ArtifactDurableRepository, ArtifactState,
+    BindArtifactStoreAuthorityCommand, CreateRunCommand, DurableRepository, OrphanSweepCommand,
+    PlanInstallOutcome, PutInlinePayloadCommand, StageArtifactCommand, VerifyArtifactCommand,
+    VersionedPlan,
+};
+use insight_engine::{
     plan::{
         AuthorFormat, DataBinding, DataBindingId, DataPort, DataPortId, Node, NodeKind,
         PlanBuilder, PlanInputContract, PlanMetadata, PlanType, PortDirection, PortName,
         ReturnDescriptor, ScopeId, ScopeMetadata, ValueSource, VersionTag,
     },
-    repository::{
-        AcknowledgeArtifactDeletionCommand, ArtifactDurableRepository, ArtifactState,
-        BindArtifactStoreAuthorityCommand, CreateRunCommand, DurableRepository, OrphanSweepCommand,
-        PlanInstallOutcome, PostgresDurableRepository, PutInlinePayloadCommand,
-        SqliteDurableRepository, StageArtifactCommand, StorageLocator, VerifyArtifactCommand,
-        VersionedPlan, REPOSITORY_ARTIFACT_STORE_CONFLICT, REPOSITORY_INTENT_CONFLICT,
-    },
-    ArtifactId, ArtifactRef, ContentHash, DefinitionRevisionId, DeploymentRevisionId,
-    LocalContentAddressedArtifactStore, NodeId, RunId, TransitionKey, TransitionOutcome,
-    WorkerArtifactStore,
+    repository::{StorageLocator, REPOSITORY_ARTIFACT_STORE_CONFLICT, REPOSITORY_INTENT_CONFLICT},
+    ArtifactId, ArtifactRef, ContentHash, DefinitionRevisionId, DeploymentRevisionId, NodeId,
+    RunId, TransitionKey, TransitionOutcome,
+};
+use insight_storage::{
+    artifact_store::{LocalContentAddressedArtifactStore, WorkerArtifactStore},
+    PostgresDurableRepository, SqliteDurableRepository,
 };
 use serde_json::{json, Value};
 use sqlx::{
@@ -29,7 +32,7 @@ fn key(label: &str) -> TransitionKey {
     TransitionKey::derive("artifact.repository.test", &[label]).unwrap()
 }
 
-fn verified_plan(label: &str) -> insight_agent_platform::engine::plan::Plan {
+fn verified_plan(label: &str) -> insight_engine::plan::Plan {
     let return_id = NodeId::new("return_node").unwrap();
     let root_id = ScopeId::new("root_scope").unwrap();
     let value_input = DataPortId::new("return_value").unwrap();

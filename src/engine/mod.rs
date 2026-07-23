@@ -1,9 +1,7 @@
-//! Durable graph execution kernel.
+//! Compatibility facade for the durable graph execution surface.
 //!
-//! This module is the implementation boundary for the DSL v3 execution model.
-//! Its model types are deliberately independent from the legacy Region runtime
-//! so the compiler, durable repository, scheduler, and workers share one set of
-//! identities and state-machine contracts during the clean cutover.
+//! Authoritative contracts and adapters are owned by the layered workspace
+//! crates; this module only rebuilds the frozen root paths from those types.
 
 pub mod artifact_store {
     pub use insight_storage::artifact_store::*;

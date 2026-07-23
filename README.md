@@ -74,15 +74,22 @@ workflow:
 - [开发指南](docs/current/development.md)：代码导航和验证命令。
 
 规范性合同见 [DSL v3 持久化图执行架构规范](docs/current/specifications/2026-07-18-dsl-v3-durable-graph-execution-design.md)。
+内部代码组织和依赖边界见
+[Rust Workspace 与 Crate 边界拆分规范](docs/current/specifications/2026-07-21-rust-workspace-crate-boundaries-design.md)。
 历史设计、实施计划和评审记录集中保存在 [`docs/archive/`](docs/archive/README.md)，不代表当前生产合同。
 
 ## 验证
 
 ```bash
+bash scripts/check-v3-cutover-residuals.sh
+bash scripts/check-crate-boundaries.sh
+bash scripts/check-public-api-baseline.sh
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
+cargo check --locked --workspace --all-targets --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-targets --all-features
+cargo test --locked --workspace --doc --all-features
 ```
 
-CI 还运行 v3 cutover residual scan、PostgreSQL 16 合同测试、real-process
-restart/shutdown 测试和依赖策略检查。具体环境要求见[开发指南](docs/current/development.md)。
+CI 使用同一组 workspace 门禁，并在 PostgreSQL 16 上运行数据库合同与 real-process
+restart/shutdown 测试，同时执行依赖策略检查。具体环境要求见[开发指南](docs/current/development.md)。

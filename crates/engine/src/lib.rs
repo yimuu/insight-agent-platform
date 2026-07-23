@@ -1,5 +1,10 @@
 //! I/O-free execution contracts and domain kernel.
 
+#[cfg(test)]
+#[macro_use]
+#[path = "../../../tests/support/workspace_assets.rs"]
+mod workspace_assets;
+
 pub mod aggregate;
 pub mod artifact_store;
 pub mod author;

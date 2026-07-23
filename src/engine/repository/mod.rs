@@ -1,26 +1,20 @@
-mod activation;
-mod artifact;
-mod common;
-mod control_repository;
-mod human_task;
-mod ingress;
 #[doc(hidden)]
 pub mod migration_manifest {
     pub use insight_storage::repository::migration_manifest::*;
 }
-mod model;
-mod model_tool_parent_resume;
-mod model_tool_queue;
-mod projection;
-mod public_outbox;
-mod recovery_repository;
-mod retrieval_publication;
-mod scheduler_repository;
-mod scheduler_runtime;
 #[cfg(test)]
 mod scheduler_safety_tests;
 
-pub use activation::{
+pub use insight_durable::ModelToolParentResume;
+pub use insight_durable::{
+    AcknowledgeArtifactDeletionCommand, ArtifactDeletionClaim, ArtifactDurableRepository,
+    ArtifactReceipt, ArtifactReferenceAuthority, ArtifactReferenceTarget, ArtifactRetentionRelease,
+    ArtifactState, ArtifactStoreAuthority, BindArtifactStoreAuthorityCommand, OrphanSweepBatch,
+    OrphanSweepCommand, PayloadId, PayloadReceipt, PutInlinePayloadCommand,
+    ReferenceArtifactCommand, ReleaseRunArtifactRetentionCommand, RetainedArtifact,
+    StageArtifactCommand, StoredInlinePayload, VerifyArtifactCommand,
+};
+pub use insight_durable::{
     ActivationAdmissionCommand, ActivationCasCommand, ActivationCommitReceipt,
     ActivationProjection, ActivationTimerKind, AttemptCompletion, AttemptCompletionAuthority,
     CommittedTerminalActivationAuthority, CommittedTerminalActivationProof,
@@ -30,15 +24,18 @@ pub use activation::{
     RetryScheduleAuthority, ScheduleActivationTimerCommand, SignalReceipt, TaskClaim,
     TaskDispatchSpec, TaskEnvelope, TimerFireAuthority, WaitResolutionAuthority,
 };
-pub use artifact::{
-    AcknowledgeArtifactDeletionCommand, ArtifactDeletionClaim, ArtifactDurableRepository,
-    ArtifactReceipt, ArtifactReferenceAuthority, ArtifactReferenceTarget, ArtifactRetentionRelease,
-    ArtifactState, ArtifactStoreAuthority, BindArtifactStoreAuthorityCommand, OrphanSweepBatch,
-    OrphanSweepCommand, PayloadId, PayloadReceipt, PutInlinePayloadCommand,
-    ReferenceArtifactCommand, ReleaseRunArtifactRetentionCommand, RetainedArtifact,
-    StageArtifactCommand, StoredInlinePayload, VerifyArtifactCommand,
+pub use insight_durable::{ActivationDurableRepository, DurableRepository};
+pub use insight_durable::{
+    BeginMigrationCommand, ContinueAsNewCommand, FinalizeMigrationCommand, ForkRunCommand,
+    MigrationIntentReceipt, MigrationMappingCompatibility, RecoveryDurableRepository,
+    RecoveryEventReceipt, RecoveryRevisionSpec, RecoveryRunReceipt, RedriveRunCommand,
 };
-pub use control_repository::{
+pub use insight_durable::{
+    ClaimHumanWorkItemCommand, CompleteHumanWorkItemCommand, HumanTaskDurableRepository,
+    HumanTaskPrincipal, HumanWorkItem, HumanWorkItemClaim, HumanWorkItemCompletionAuthority,
+    HumanWorkItemId, HumanWorkItemState,
+};
+pub use insight_durable::{
     ClaimSchedulerRunCommand, CloseScopeAdmissionCommand, ConsumeControlTokenCommand,
     ControlCommitReceipt, ControlDurableRepository, CreateChildScopeCommand, CreateForkCommand,
     CreateReuseCandidateCommand, EmitControlTokenCommand, FencedSchedulerRunCommand,
@@ -47,16 +44,41 @@ pub use control_repository::{
     ReuseCompatibility, RevokeControlTokenCommand, SchedulerLeaseRepository, SchedulerRunLease,
     SettleScopeCommand, TokenConsumerKind,
 };
-pub use human_task::{
-    ClaimHumanWorkItemCommand, CompleteHumanWorkItemCommand, HumanTaskDurableRepository,
-    HumanTaskPrincipal, HumanWorkItem, HumanWorkItemClaim, HumanWorkItemCompletionAuthority,
-    HumanWorkItemId, HumanWorkItemState,
+pub use insight_durable::{
+    CommitReceipt, CreateRunCommand, DurableResponseSnapshot, PlanInstallOutcome,
+    PlanPublicationOutcome, PublicEventIntent, PublicRunAttachment, PublicationHead,
+    PublicationOrigin, PublishVersionedPlanCommand, ResponseTerminalKind, ResponseUsageStatus,
+    RunProjection, RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
 };
-pub use ingress::{
+pub use insight_durable::{
     DueTimer, ExistingSignalSubmission, PendingSignalResolution, RuntimeIngressDurableRepository,
     SignalInboxState, SignalWaitTarget,
 };
-pub use insight_durable::{ActivationDurableRepository, DurableRepository};
+pub use insight_durable::{
+    DurableTaskExecutionRequest, FailOnceSchedulerCrash, ModelToolCallCheckpoint, NoSchedulerCrash,
+    SchedulerCommitReceipt, SchedulerCrashInjector, SchedulerCrashPoint,
+    SchedulerDurableRepository, SchedulerFailureDisposition, SchedulerStoredValue,
+    SchedulerTaskClaim, SchedulerTaskClaimMode, SchedulerTaskCommitOutcome,
+    SchedulerTaskCompletionReceipt, SchedulerTaskFailure, SchedulerTaskHeartbeatOutcome,
+    SchedulerTaskOutcome, SchedulerTaskSuccess, SCHEDULER_CHECKPOINT_SCHEMA_VERSION,
+    SCHEDULER_TASK_ENVELOPE_SCHEMA_VERSION,
+};
+pub use insight_durable::{
+    FrozenModelToolAction, ModelToolBatchActivation, ModelToolBatchActivationOutcome,
+    ModelToolContinuationStatus, ModelToolFailureClass, ModelToolTaskClaim,
+    ModelToolTaskCommitReceipt, ModelToolTaskDisposition, ModelToolTaskHeartbeatOutcome,
+    ModelToolTaskIdentity, ModelToolTaskOutcome, ModelToolTaskStatus,
+    ModelToolTaskTransitionOutcome, FUNCTION_CALL_COMPLETE_SEAL_INDEX, MAX_MODEL_TOOL_RESULT_BYTES,
+};
+pub use insight_durable::{
+    OrderedPublicEventRead, PublicEventClaim, PublicEventNotificationStream,
+    PublicEventOutboxRepository, PublicEventPosition, PublishedPublicEvent,
+    PUBLIC_EVENT_NOTIFY_CHANNEL,
+};
+pub use insight_durable::{
+    ProjectionAudit, ProjectionDurableRepository, ProjectionRebuildSnapshot,
+    ProjectionRepairReceipt, ProjectionSubject, ProjectionSubjectKind,
+};
 #[allow(unused_imports)]
 pub use insight_engine::repository::{
     RepositoryError, StorageLocator, REPOSITORY_ACTIVATION_NOT_FOUND,
@@ -67,46 +89,7 @@ pub use insight_engine::repository::{
     REPOSITORY_SCHEDULER_ACTION_UNSUPPORTED, REPOSITORY_SCHEDULER_CRASH_INJECTED,
     REPOSITORY_STORAGE_FAILURE,
 };
-pub use insight_storage::PostgresDurableRepository;
-pub use insight_storage::SqliteDurableRepository;
-pub use model::{
-    CommitReceipt, CreateRunCommand, DurableResponseSnapshot, PlanInstallOutcome,
-    PlanPublicationOutcome, PublicEventIntent, PublicRunAttachment, PublicationHead,
-    PublicationOrigin, PublishVersionedPlanCommand, ResponseTerminalKind, ResponseUsageStatus,
-    RunProjection, RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
-};
-pub use model_tool_parent_resume::ModelToolParentResume;
-pub use model_tool_queue::{
-    FrozenModelToolAction, ModelToolBatchActivation, ModelToolBatchActivationOutcome,
-    ModelToolContinuationStatus, ModelToolFailureClass, ModelToolTaskClaim,
-    ModelToolTaskCommitReceipt, ModelToolTaskDisposition, ModelToolTaskHeartbeatOutcome,
-    ModelToolTaskIdentity, ModelToolTaskOutcome, ModelToolTaskStatus,
-    ModelToolTaskTransitionOutcome, FUNCTION_CALL_COMPLETE_SEAL_INDEX, MAX_MODEL_TOOL_RESULT_BYTES,
-};
-pub use projection::{
-    ProjectionAudit, ProjectionDurableRepository, ProjectionRebuildSnapshot,
-    ProjectionRepairReceipt, ProjectionSubject, ProjectionSubjectKind,
-};
-pub use public_outbox::{
-    OrderedPublicEventRead, PublicEventClaim, PublicEventNotificationStream,
-    PublicEventOutboxRepository, PublicEventPosition, PublishedPublicEvent,
-    PUBLIC_EVENT_NOTIFY_CHANNEL,
-};
-pub use recovery_repository::{
-    BeginMigrationCommand, ContinueAsNewCommand, FinalizeMigrationCommand, ForkRunCommand,
-    MigrationIntentReceipt, MigrationMappingCompatibility, RecoveryDurableRepository,
-    RecoveryEventReceipt, RecoveryRevisionSpec, RecoveryRunReceipt, RedriveRunCommand,
-};
-pub use scheduler_repository::{
-    DurableTaskExecutionRequest, FailOnceSchedulerCrash, ModelToolCallCheckpoint, NoSchedulerCrash,
-    SchedulerCommitReceipt, SchedulerCrashInjector, SchedulerCrashPoint,
-    SchedulerDurableRepository, SchedulerFailureDisposition, SchedulerStoredValue,
-    SchedulerTaskClaim, SchedulerTaskClaimMode, SchedulerTaskCommitOutcome,
-    SchedulerTaskCompletionReceipt, SchedulerTaskFailure, SchedulerTaskHeartbeatOutcome,
-    SchedulerTaskOutcome, SchedulerTaskSuccess, SCHEDULER_CHECKPOINT_SCHEMA_VERSION,
-    SCHEDULER_TASK_ENVELOPE_SCHEMA_VERSION,
-};
-pub use scheduler_runtime::{
+pub use insight_runtime::scheduler_runtime::{
     consume_model_tool_task_once, consume_model_tool_task_once_with_observer,
     consume_scheduler_task_once, consume_scheduler_task_once_with_artifact_store,
     consume_scheduler_task_once_with_artifact_store_and_retrieval_observer,
@@ -117,3 +100,5 @@ pub use scheduler_runtime::{
     SchedulerRetrievalLiveObserver, SchedulerWorkerFailurePolicy, SchedulerWorkerPumpOutcome,
     TerminalSchedulerWorkerFailurePolicy,
 };
+pub use insight_storage::PostgresDurableRepository;
+pub use insight_storage::SqliteDurableRepository;

@@ -3292,8 +3292,8 @@ mod tests {
 
     #[test]
     fn vendored_openai_streaming_snapshot_is_pinned_to_the_v1_standard_event_contract() {
-        let snapshot: Value = serde_json::from_str(include_str!(
-            "../../../schemas/vendor/openai-responses-streaming-2026-07-19.snapshot.json"
+        let snapshot: Value = serde_json::from_str(workspace_asset_str!(
+            "schemas/vendor/openai-responses-streaming-2026-07-19.snapshot.json"
         ))
         .unwrap();
         assert_eq!(

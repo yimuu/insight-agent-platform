@@ -98,7 +98,6 @@ yaml-rust2.workspace = true
 yaml_serde.workspace = true
 
 [dev-dependencies]
-insight-runtime = { workspace = true, features = ["test-support"] }
 sqlx.workspace = true
 tempfile.workspace = true
 tower.workspace = true

@@ -2,16 +2,16 @@ use std::{collections::BTreeSet, time::Duration};
 
 use async_trait::async_trait;
 use futures::stream;
-use insight_agent_platform::{
-    dsl::CompileError,
-    resources::{
-        actions::{
-            Action, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass,
-            EffectClass, IdempotencyClass,
-        },
-        models::{ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability, ModelRegistry},
+use insight_engine::{
+    author::CompileError,
+    execution::{stop_pair, ExecutionControl, RunError, StopReason},
+};
+use insight_resources::{
+    actions::{
+        Action, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass, EffectClass,
+        IdempotencyClass,
     },
-    runtime::{stop_pair, ExecutionControl, RunError, StopReason},
+    models::{ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability, ModelRegistry},
 };
 use serde_json::{json, Value};
 

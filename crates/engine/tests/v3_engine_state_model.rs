@@ -1,4 +1,4 @@
-use insight_agent_platform::engine::{
+use insight_engine::{
     ActivationLifecycle, ActivationState, ActivationTerminationReason, AdmissionState,
     AttemptLifecycle, AttemptNo, AttemptState, CompletionDisposition, EffectEvidence,
     EffectIdempotency, LeaseEpoch, LeaseFence, RunState, TerminationClaim, TerminationIntent,
@@ -64,7 +64,7 @@ enum AppliedRunOperation {
 fn apply_run_operation(
     run: &mut RunState,
     operation: RunOperation,
-) -> Result<AppliedRunOperation, insight_agent_platform::engine::ModelError> {
+) -> Result<AppliedRunOperation, insight_engine::ModelError> {
     match operation {
         RunOperation::Start => run.start().map(|()| AppliedRunOperation::Ordinary),
         RunOperation::EnterWaiting => run.enter_waiting().map(|()| AppliedRunOperation::Ordinary),
@@ -244,7 +244,7 @@ fn apply_activation_operation(
     activation: &mut ActivationState,
     oracle: &mut ActivationOracle,
     operation: ActivationOperation,
-) -> Result<(), insight_agent_platform::engine::ModelError> {
+) -> Result<(), insight_engine::ModelError> {
     match operation {
         ActivationOperation::MakeReady => activation.make_ready(),
         ActivationOperation::ClaimEpoch1
@@ -431,7 +431,7 @@ const ATTEMPT_OPERATIONS: [AttemptOperation; 10] = [
 fn apply_attempt_operation(
     attempt: &mut AttemptState,
     operation: AttemptOperation,
-) -> Result<(), insight_agent_platform::engine::ModelError> {
+) -> Result<(), insight_engine::ModelError> {
     let fence = attempt.fence();
     match operation {
         AttemptOperation::Lease => attempt.lease(),

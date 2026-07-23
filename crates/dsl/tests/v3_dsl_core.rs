@@ -1,3 +1,7 @@
+#[macro_use]
+#[path = "../../../tests/support/workspace_assets.rs"]
+mod workspace_assets;
+
 use insight_dsl::v3::{compile_source, validate, CompileOptions, INVALID_STEP};
 use insight_engine::{
     plan::{
@@ -17,7 +21,7 @@ fn options(source: &str) -> CompileOptions {
 
 #[test]
 fn compiles_linear_leaf_and_return_to_verified_plan() {
-    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/linear.yaml");
     let plan = compile_source(source, options(source)).unwrap();
     let NodeKind::ActionTask(descriptor) = plan.nodes()[0].kind() else {
         panic!("expected action task");
@@ -39,7 +43,7 @@ fn compiles_linear_leaf_and_return_to_verified_plan() {
 
 #[test]
 fn lowers_ordered_if_elif_else_to_branch_merge_and_typed_phi() {
-    let source = include_str!("../../../tests/fixtures/v3/if.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/if.yaml");
     let plan = compile_source(source, options(source)).unwrap();
     let branch = plan
         .nodes()
@@ -66,7 +70,7 @@ fn lowers_ordered_if_elif_else_to_branch_merge_and_typed_phi() {
 
 #[test]
 fn lowers_parallel_to_flat_fork_join_collect() {
-    let source = include_str!("../../../tests/fixtures/v3/parallel.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/parallel.yaml");
     let plan = compile_source(source, options(source)).unwrap();
     assert_eq!(
         plan.nodes()
@@ -87,7 +91,7 @@ fn lowers_parallel_to_flat_fork_join_collect() {
 
 #[test]
 fn parallel_all_settled_freezes_typed_result_envelopes() {
-    let source = include_str!("../../../tests/fixtures/v3/parallel.yaml")
+    let source = workspace_asset_str!("tests/fixtures/v3/parallel.yaml")
         .replace("settle: all_success", "settle: all_settled");
     let plan = compile_source(&source, options(&source)).unwrap();
     let collect = plan
@@ -215,7 +219,7 @@ workflow:
 
 #[test]
 fn normalized_hash_matches_an_equivalent_programmatic_plan() {
-    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/linear.yaml");
     let compiled = compile_source(source, options(source)).unwrap();
     let metadata = PlanMetadata::new(
         DefinitionRevisionId::new("manual_equivalent").unwrap(),
@@ -615,9 +619,9 @@ workflow:
 #[test]
 fn legacy_control_and_child_result_are_not_in_the_positive_surface() {
     for source in [
-        include_str!("../../../tests/fixtures/v3/negative-switch.yaml"),
-        include_str!("../../../tests/fixtures/v3/negative-core.yaml"),
-        include_str!("../../../tests/fixtures/v3/negative-child-result.yaml"),
+        workspace_asset_str!("tests/fixtures/v3/negative-switch.yaml"),
+        workspace_asset_str!("tests/fixtures/v3/negative-core.yaml"),
+        workspace_asset_str!("tests/fixtures/v3/negative-child-result.yaml"),
     ] {
         let raw = insight_dsl::v3::parse(source).unwrap();
         assert_eq!(validate(raw).unwrap_err().code(), INVALID_STEP);
@@ -626,7 +630,7 @@ fn legacy_control_and_child_result_are_not_in_the_positive_surface() {
 
 #[test]
 fn checked_in_agents_and_markdown_prompts_compile_through_v3() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../agents");
+    let root = workspace_assets::workspace_path("agents");
     for agent in [
         "action_demo",
         "medical_report_interpreter",

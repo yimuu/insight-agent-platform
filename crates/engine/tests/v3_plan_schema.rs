@@ -1,9 +1,6 @@
 use std::collections::BTreeMap;
 
-use insight_agent_platform::{
-    engine::{plan::PlanProperty, PlanType, RuntimeValue},
-    schema::compile_schema_2020,
-};
+use insight_engine::{plan::PlanProperty, schema::compile_schema_2020, PlanType, RuntimeValue};
 use serde_json::{json, Value};
 
 fn assert_schema_equivalent(value_type: PlanType, samples: &[Value]) {

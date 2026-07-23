@@ -1,7 +1,6 @@
 mod auth;
-mod routes;
 
 pub use auth::{
     ApiAuth, BearerHumanPrincipalResolver, HumanPrincipalResolver, ResolvedHumanPrincipal,
 };
-pub use routes::{build_router, FormalApiState};
+pub use insight_api::formal::{build_router, FormalApiState};

@@ -4770,7 +4770,6 @@ fn spawn_artifact_gc_pump(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
     })
 }
 
-#[cfg(feature = "test-support")]
 pub(crate) async fn test_run_event(
     service: &RunService,
     run_id: &RunId,
@@ -4779,7 +4778,6 @@ pub(crate) async fn test_run_event(
     service.inner.run_event(run_id, envelope).await
 }
 
-#[cfg(feature = "test-support")]
 pub(crate) fn test_subscription(service: &RunService, run_id: &RunId) -> RunSubscription {
     RunSubscription {
         run_id: run_id.as_str().to_owned(),
@@ -4792,7 +4790,6 @@ pub(crate) fn test_subscription(service: &RunService, run_id: &RunId) -> RunSubs
     }
 }
 
-#[cfg(feature = "test-support")]
 pub(crate) async fn test_deliver_published_public_event(
     service: &RunService,
     public_event_id: &str,
@@ -4803,12 +4800,10 @@ pub(crate) async fn test_deliver_published_public_event(
         .await
 }
 
-#[cfg(feature = "test-support")]
 pub(crate) async fn test_flush_public_events(service: &RunService) -> Result<(), ServiceError> {
     service.inner.flush_public_events().await
 }
 
-#[cfg(feature = "test-support")]
 pub(crate) fn test_has_live_subscription(service: &RunService, run_id: &RunId) -> bool {
     service
         .inner

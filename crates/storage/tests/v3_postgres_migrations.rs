@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
-use insight_agent_platform::engine::repository::{
-    migration_manifest::DURABLE_V3_MIGRATIONS, PostgresDurableRepository,
-    REPOSITORY_MIGRATION_FAILED,
+use insight_engine::repository::REPOSITORY_MIGRATION_FAILED;
+use insight_storage::{
+    repository::migration_manifest::DURABLE_V3_MIGRATIONS, PostgresDurableRepository,
 };
 use sqlx::{postgres::PgPoolOptions, AssertSqlSafe, PgPool};
 use tokio::sync::Barrier;

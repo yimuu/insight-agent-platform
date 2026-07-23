@@ -2,24 +2,20 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use futures::stream;
-use insight_agent_platform::{
-    catalog_v3::{
-        compile_v3_agent_dir, DeployedV3Agent, ProductionLeafDeploymentResolver,
-        LLM_TOOL_CONTINUATION_CAPABILITY,
+use insight_engine::{author::CompileError, execution::RunError, NodeId, SubflowContractRegistry};
+use insight_resources::{
+    actions::{
+        Action, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass, EffectClass,
+        IdempotencyClass, ToolPublicArguments, ToolPublicPolicy,
     },
-    dsl::CompileError,
-    engine::{NodeId, SubflowContractRegistry},
-    resources::{
-        actions::{
-            Action, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass,
-            EffectClass, IdempotencyClass, ToolPublicArguments, ToolPublicPolicy,
-        },
-        models::{
-            ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability,
-            ModelDeploymentIdentity, ModelRegistry, ModelRequestCapability,
-        },
+    models::{
+        ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability, ModelDeploymentIdentity,
+        ModelRegistry, ModelRequestCapability,
     },
-    runtime::RunError,
+};
+use insight_runtime::catalog_v3::{
+    compile_v3_agent_dir, DeployedV3Agent, ProductionLeafDeploymentResolver,
+    LLM_TOOL_CONTINUATION_CAPABILITY,
 };
 use serde_json::{json, Value};
 
@@ -127,7 +123,7 @@ fn compile_agent(
     stream: bool,
     publish: bool,
     tools: &str,
-) -> Arc<insight_agent_platform::catalog_v3::PublishedV3Agent> {
+) -> Arc<insight_runtime::catalog_v3::PublishedV3Agent> {
     let directory = tempfile::tempdir().unwrap();
     let source = format!(
         r#"api_version: insight.agent/v3

@@ -1,6 +1,11 @@
 use std::{fs, path::Path};
 
-use insight_agent_platform::engine::repository::migration_manifest::DURABLE_V3_MIGRATIONS;
+#[allow(unused_macros)]
+#[path = "../../../tests/support/workspace_assets.rs"]
+mod workspace_assets;
+
+use insight_storage::repository::migration_manifest::DURABLE_V3_MIGRATIONS;
+use workspace_assets::workspace_path;
 
 const POSTGRES_V3: &str = DURABLE_V3_MIGRATIONS[0].postgres_sql;
 const SQLITE_V3: &str = DURABLE_V3_MIGRATIONS[0].sqlite_sql;
@@ -124,7 +129,7 @@ fn durable_v3_manifest_is_contiguous_and_exactly_matches_both_backend_directorie
         assert!(!migration.sqlite_sql.trim().is_empty());
     }
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations/durable_v3");
+    let root = workspace_path("migrations/durable_v3");
     let postgres_names = migration_file_names(&root.join("postgres"));
     let sqlite_names = migration_file_names(&root.join("sqlite"));
     let manifest_names = DURABLE_V3_MIGRATIONS
@@ -239,9 +244,9 @@ fn artifact_store_authority_is_singleton_closed_and_immutable_on_both_backends()
 
 #[test]
 fn durable_v3_has_isolated_forward_only_migrations_for_both_backends() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    assert!(root.join("migrations/durable_v3/postgres").is_dir());
-    assert!(root.join("migrations/durable_v3/sqlite").is_dir());
+    let root = workspace_path("migrations/durable_v3");
+    assert!(root.join("postgres").is_dir());
+    assert!(root.join("sqlite").is_dir());
 
     for migration in [POSTGRES_V3, SQLITE_V3] {
         let sql = normalize(migration);

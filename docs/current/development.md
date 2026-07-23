@@ -4,40 +4,52 @@
 
 ## 环境与验证
 
-仓库固定 Rust `1.94.1`，并要求 `rustfmt` 与 `clippy`：
+仓库固定 Rust `1.94.1`。完整 workspace 的最低验证命令为：
 
 ```bash
+bash scripts/check-v3-cutover-residuals.sh
+bash scripts/check-crate-boundaries.sh
+bash scripts/check-public-api-baseline.sh
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
+cargo metadata --locked --all-features --format-version 1
+cargo check --locked --workspace --all-targets --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-targets --all-features
+cargo test --locked --workspace --doc --all-features
+cargo audit
+cargo deny check
 ```
 
-CI 额外运行：
+其中：
 
 - `scripts/check-v3-cutover-residuals.sh`，阻止旧 parser、旧 runtime 和旧正向输入回流；
+- `scripts/check-crate-boundaries.sh`，校验 member 依赖 DAG、禁止的 I/O/clock 使用与第三方 feature 基线；
+- `scripts/check-public-api-baseline.sh`，验证根兼容 facade 的公开 Rust API；
 - 真实 PostgreSQL 16 repository、恢复与竞态合同测试；
 - real-process restart、SIGINT 和 shutdown 测试；
 - 依赖策略与 migration manifest 检查。
 
-PostgreSQL 测试使用 `V3_TEST_POSTGRES_URL`，Artifact repository 专项门禁使用
-`V3_ARTIFACT_TEST_POSTGRES_URL`。CI 中这些变量必须存在，相关门禁不能静默跳过。
+完整 PostgreSQL 门禁必须在 PostgreSQL 16 上以 `CI=1` 运行，并设置
+`RUN_HISTORY_POSTGRES_URL`、`V3_TEST_POSTGRES_URL`、`V3_ARTIFACT_TEST_POSTGRES_URL` 和
+`TEST_POSTGRES_URL`。CI 中这些变量必须存在，相关门禁不能静默跳过。
 
 ## 代码导航
 
 | 路径 | 职责 |
 |---|---|
-| `src/dsl/v3/` | 作者文档、表达式、类型检查与 lowering |
-| `src/engine/plan/` | Canonical Typed Plan、链接与 verifier |
-| `src/engine/scheduler/` | 纯计划决策、稳定身份与工作生成 |
-| `src/engine/repository/` | SQLite/PostgreSQL 状态机、lease、checkpoint、recovery |
-| `src/runtime/v3_service.rs` | Run 服务、Worker pump 与外部 ingress |
-| `src/runtime/response_stream*` | Attached response broker 与公开投影 |
-| `src/api/formal/` | HTTP、认证与 SSE 路由 |
-| `src/catalog_v3.rs` | Agent 编译、资源绑定和 revision 固定 |
+| `crates/engine/src/` | 无 I/O 的 Plan、scheduler、状态机和公开合同内核 |
+| `crates/dsl/src/v3/` | 作者文档、表达式、类型检查、lowering 与 Graph authoring |
+| `crates/durable/src/` | 后端中立的 repository ports、commands、claims、receipts 与 projection models |
+| `crates/resources/src/` | Model/Action/Retrieval SPI、registry、builtin 与 OpenAI provider |
+| `crates/storage/src/` | SQLite/PostgreSQL、Graph SQL、Artifact store 与 PostgreSQL live broker adapter |
+| `crates/runtime/src/` | catalog/deployment、leaf adapter、scheduler/worker pump、RunService 与 live response |
+| `crates/api/src/formal/` | Axum HTTP、认证、错误映射与 SSE transport |
+| `src/` | 根兼容 facade、平台配置、严格 YAML 解码和 binary composition |
 | `migrations/durable_v3/` | SQLite/PostgreSQL 持久化 schema |
 | `agents/` | 随仓库交付的 Agent |
 | `tests/fixtures/v3/` | v3 compiler 正向和负向 fixtures |
-| `tests/v3_*` | compiler、repository、scheduler、恢复与数据库门禁 |
+| `crates/*/{src,tests}` | owner crate 的单元与合同测试 |
+| `tests/` | 跨层 E2E、根 facade 兼容、real-process 与 binary smoke 门禁 |
 
 ## 修改合同时
 

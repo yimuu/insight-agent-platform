@@ -1,4 +1,9 @@
-//! Cross-layer test harness hooks for the root package.
+//! Workspace-internal hooks used by the root cross-layer conformance harness.
+//!
+//! This module is intentionally absent from the root compatibility facade. It
+//! exposes orchestration seams that cannot live in a lower crate without
+//! introducing a forbidden runtime/storage dependency, while keeping Cargo
+//! features reserved for actual build capabilities.
 
 use insight_engine::{events::protocol::RunEvent, PublicEventEnvelope, RunId};
 

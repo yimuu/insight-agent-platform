@@ -4,26 +4,26 @@
 //! transition commands. Scheduler/Activation tests own state-machine coverage;
 //! this file proves only the public plan, Run admission, and projection APIs.
 
-use insight_agent_platform::{
-    dsl::v3::{compile_source, CompileOptions},
-    engine::{
-        plan::{
-            AuthorFormat, DataBinding, DataBindingId, DataPort, DataPortId, Node, NodeKind,
-            PlanBuilder, PlanInputContract, PlanMetadata, PlanType, PortDirection, PortName,
-            ReturnDescriptor, ScopeId, ScopeMetadata, ValueSource, VersionTag,
-        },
-        repository::{
-            ContinueAsNewCommand, CreateRunCommand, DurableRepository, PlanInstallOutcome,
-            PlanPublicationOutcome, ProjectionAudit, ProjectionDurableRepository,
-            ProjectionSubject, PublishVersionedPlanCommand, RecoveryDurableRepository,
-            SqliteDurableRepository, VersionedPlan, REPOSITORY_CONFIGURATION_INVALID,
-            REPOSITORY_DATA_INVALID, REPOSITORY_INTENT_CONFLICT, REPOSITORY_PLAN_CONFLICT,
-            REPOSITORY_STORAGE_FAILURE,
-        },
-        AdmissionState, ContentHash, DefinitionRevisionId, DeploymentRevisionId, ExecutionEventId,
-        RunId, RunLifecycle, TransitionKey, TransitionOutcome,
-    },
+use insight_dsl::v3::{compile_source, CompileOptions};
+use insight_durable::{
+    ContinueAsNewCommand, CreateRunCommand, DurableRepository, PlanInstallOutcome,
+    PlanPublicationOutcome, ProjectionAudit, ProjectionDurableRepository, ProjectionSubject,
+    PublishVersionedPlanCommand, RecoveryDurableRepository, VersionedPlan,
 };
+use insight_engine::{
+    plan::{
+        AuthorFormat, DataBinding, DataBindingId, DataPort, DataPortId, Node, NodeKind,
+        PlanBuilder, PlanInputContract, PlanMetadata, PlanType, PortDirection, PortName,
+        ReturnDescriptor, ScopeId, ScopeMetadata, ValueSource, VersionTag,
+    },
+    repository::{
+        REPOSITORY_DATA_INVALID, REPOSITORY_INTENT_CONFLICT, REPOSITORY_PLAN_CONFLICT,
+        REPOSITORY_STORAGE_FAILURE,
+    },
+    AdmissionState, ContentHash, DefinitionRevisionId, DeploymentRevisionId, ExecutionEventId,
+    RunId, RunLifecycle, TransitionKey, TransitionOutcome,
+};
+use insight_storage::SqliteDurableRepository;
 use serde_json::{json, Value};
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 
@@ -31,9 +31,9 @@ fn key(label: &str) -> TransitionKey {
     TransitionKey::derive("repository.test", &[label]).unwrap()
 }
 
-fn verified_plan() -> insight_agent_platform::engine::Plan {
+fn verified_plan() -> insight_engine::Plan {
     let revision = DefinitionRevisionId::new("definition_revision_v1").unwrap();
-    let return_id = insight_agent_platform::engine::NodeId::new("return_node").unwrap();
+    let return_id = insight_engine::NodeId::new("return_node").unwrap();
     let root_id = ScopeId::new("root_scope").unwrap();
     let value_input = DataPortId::new("return_value").unwrap();
     let safe_error = PlanType::safe_error().unwrap();
@@ -157,7 +157,7 @@ async fn create_run(
     run_id
 }
 
-fn normalized_input_plan() -> (insight_agent_platform::engine::Plan, VersionedPlan) {
+fn normalized_input_plan() -> (insight_engine::Plan, VersionedPlan) {
     let source = r#"api_version: insight.agent/v3
 kind: agent
 inputs:
@@ -192,36 +192,6 @@ workflow:
     )
     .unwrap();
     (plan, versioned)
-}
-
-#[test]
-fn create_run_command_accepts_only_plan_normalized_input() {
-    let (plan, versioned) = normalized_input_plan();
-
-    let raw = json!({"question": "safe"});
-    let missing_default = CreateRunCommand::new(
-        RunId::new("run_missing_frozen_default").unwrap(),
-        &versioned,
-        raw.clone(),
-    )
-    .unwrap_err();
-    assert_eq!(missing_default.code(), REPOSITORY_CONFIGURATION_INVALID);
-
-    let normalized = plan.metadata().input_contract().normalize(raw).unwrap();
-    assert_eq!(normalized, json!({"messages": [], "question": "safe"}));
-    assert!(CreateRunCommand::new(
-        RunId::new("run_normalized_input").unwrap(),
-        &versioned,
-        normalized,
-    )
-    .is_ok());
-    let explicit_null = CreateRunCommand::new(
-        RunId::new("run_explicit_null_optional").unwrap(),
-        &versioned,
-        json!({"messages": [], "question": "safe", "image_url": null}),
-    )
-    .unwrap_err();
-    assert_eq!(explicit_null.code(), REPOSITORY_CONFIGURATION_INVALID);
 }
 
 #[tokio::test]

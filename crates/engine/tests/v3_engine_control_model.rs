@@ -1,10 +1,10 @@
-use insight_agent_platform::engine::control::{
+use insight_engine::control::{
     BranchDecision, ChildRequirement, ControlFrame, ControlLedger, ForkGroup, ForkLeg, MergeState,
     OwnedControlToken, PersistedControlTokenRow, ScopeTracker, CONTROL_HANDLE_FOREIGN,
     CONTROL_INTENT_CONFLICT, CONTROL_RUN_MISMATCH, FORK_ATOMIC_ADMISSION_CONFLICT,
     MERGE_CORRELATION_MISMATCH,
 };
-use insight_agent_platform::engine::{
+use insight_engine::{
     ActivationId, ForkGroupId, LegId, PortId, RunId, ScopeInstanceId, TransitionKey,
     TransitionOutcome,
 };

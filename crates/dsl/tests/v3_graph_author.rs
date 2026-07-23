@@ -1,3 +1,7 @@
+#[macro_use]
+#[path = "../../../tests/support/workspace_assets.rs"]
+mod workspace_assets;
+
 use std::collections::BTreeMap;
 
 use insight_dsl::v3::{
@@ -194,7 +198,7 @@ fn topology_edits(from: &GraphAuthorDocument, to: &GraphAuthorDocument) -> Vec<G
 
 #[test]
 fn layout_only_changes_cannot_change_graph_semantic_hash() {
-    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/linear.yaml");
     let graph = structured_graph(source);
     let before = graph.semantic_hash().clone();
     let node_id = graph.plan().nodes()[0].id().clone();
@@ -224,7 +228,7 @@ fn layout_only_changes_cannot_change_graph_semantic_hash() {
 
 #[test]
 fn graph_wire_contains_explicit_parts_and_never_serializes_plan_or_hash() {
-    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/linear.yaml");
     let graph = structured_graph(source);
     let encoded = graph.encode_json().unwrap();
     let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
@@ -254,7 +258,7 @@ fn graph_wire_contains_explicit_parts_and_never_serializes_plan_or_hash() {
 
 #[test]
 fn authoritative_graph_decode_rejects_unknown_duplicate_and_plan_shaped_fields() {
-    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/linear.yaml");
     let graph = structured_graph(source);
     let encoded = graph.encode_json().unwrap();
     let mut wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
@@ -305,7 +309,7 @@ fn authoritative_graph_decode_rejects_unknown_duplicate_and_plan_shaped_fields()
 
 #[test]
 fn graph_plan_diagnostics_target_exact_canvas_nodes_ports_and_edges() {
-    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/linear.yaml");
     let graph = structured_graph(source);
     let encoded = graph.encode_json().unwrap();
     let canonical: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
@@ -394,7 +398,7 @@ fn structured_graph_conversion_preserves_structured_parse_diagnostics() {
 
 #[test]
 fn authoritative_graph_decode_recompiles_and_rejects_invalid_tampering() {
-    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/linear.yaml");
     let graph = structured_graph(source);
     let expected = graph.semantic_hash().clone();
     let mut wire: serde_json::Value =
@@ -425,15 +429,12 @@ workflow:
     let sources = [
         (
             "linear.yaml",
-            include_str!("../../../tests/fixtures/v3/linear.yaml"),
+            workspace_asset_str!("tests/fixtures/v3/linear.yaml"),
         ),
-        (
-            "if.yaml",
-            include_str!("../../../tests/fixtures/v3/if.yaml"),
-        ),
+        ("if.yaml", workspace_asset_str!("tests/fixtures/v3/if.yaml")),
         (
             "parallel.yaml",
-            include_str!("../../../tests/fixtures/v3/parallel.yaml"),
+            workspace_asset_str!("tests/fixtures/v3/parallel.yaml"),
         ),
         ("wait.yaml", WAIT),
     ];
@@ -527,15 +528,15 @@ workflow:
     let sources = [
         (
             "native_linear",
-            include_str!("../../../tests/fixtures/v3/linear.yaml"),
+            workspace_asset_str!("tests/fixtures/v3/linear.yaml"),
         ),
         (
             "native_if",
-            include_str!("../../../tests/fixtures/v3/if.yaml"),
+            workspace_asset_str!("tests/fixtures/v3/if.yaml"),
         ),
         (
             "native_parallel",
-            include_str!("../../../tests/fixtures/v3/parallel.yaml"),
+            workspace_asset_str!("tests/fixtures/v3/parallel.yaml"),
         ),
         ("native_map", MAP),
         ("native_loop", LOOP),
@@ -691,7 +692,7 @@ workflow:
 
 #[test]
 fn native_nullable_required_input_is_not_inferred_to_be_optional() {
-    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/linear.yaml");
     let plan = compile_source(source, options("native_nullable_input.yaml", source)).unwrap();
     let PlanType::Object {
         mut properties,
@@ -764,7 +765,7 @@ fn native_nullable_required_input_is_not_inferred_to_be_optional() {
 
 #[test]
 fn native_linear_graph_with_policy_remains_graph_with_a_stable_diagnostic() {
-    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/linear.yaml");
     let plan = compile_source(source, options("native_policy.yaml", source)).unwrap();
     let task = plan
         .nodes()
@@ -815,7 +816,7 @@ fn native_linear_graph_with_policy_remains_graph_with_a_stable_diagnostic() {
 
 #[test]
 fn graph_policy_edits_reject_unexecutable_contracts_before_publication() {
-    let source = include_str!("../../../tests/fixtures/v3/linear.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/linear.yaml");
     let mut graph = structured_graph(source);
     let task = graph
         .nodes()
@@ -1245,7 +1246,7 @@ fn valid_graphs_without_a_lossless_structured_inverse_remain_graphs() {
 
 #[test]
 fn trace_overlay_links_stable_run_activation_and_node_ids_without_semantic_effect() {
-    let source = include_str!("../../../tests/fixtures/v3/parallel.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/parallel.yaml");
     let graph = structured_graph(source);
     let before = graph.semantic_hash().clone();
     let node_id = graph.plan().nodes()[0].id().clone();
@@ -1273,7 +1274,7 @@ fn trace_overlay_links_stable_run_activation_and_node_ids_without_semantic_effec
 
 #[test]
 fn branch_canvas_edits_are_atomic_verified_and_preserve_stable_node_identity() {
-    let source = include_str!("../../../tests/fixtures/v3/if.yaml");
+    let source = workspace_asset_str!("tests/fixtures/v3/if.yaml");
     let mut graph = structured_graph(source);
     let (branch_id, mut descriptor) = graph
         .plan()
@@ -1353,7 +1354,7 @@ workflow:
       response: string
     - return: $route
 "#;
-    const BRANCHED: &str = include_str!("../../../tests/fixtures/v3/if.yaml");
+    const BRANCHED: &str = workspace_asset_str!("tests/fixtures/v3/if.yaml");
 
     let mut graph = graph_for_revision(DIRECT, "semantic_edit_revision_1");
     let branched = graph_for_revision(BRANCHED, "semantic_edit_revision_2");
@@ -1434,7 +1435,7 @@ workflow:
 
 #[test]
 fn parallel_map_and_loop_canvas_edit_surfaces_reverify_the_complete_plan() {
-    let mut parallel = structured_graph(include_str!("../../../tests/fixtures/v3/parallel.yaml"));
+    let mut parallel = structured_graph(workspace_asset_str!("tests/fixtures/v3/parallel.yaml"));
     let (fork_node_id, mut fork) = parallel
         .plan()
         .nodes()

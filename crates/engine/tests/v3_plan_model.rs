@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use insight_agent_platform::engine::{
+use insight_engine::{
     plan::*, ContentHash, DefinitionRevisionId, DeploymentRevisionId, ExecutionRevisionPin, LegId,
     NodeId,
 };
