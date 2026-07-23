@@ -1687,10 +1687,13 @@ async fn postgres_subflow_publication_rejects_stale_snapshot_and_keeps_old_paren
 
     let stale_service = service_a.clone();
     let stale_graph = parent_graph.clone();
-    let stale_publication = tokio::spawn(async move {
-        stale_service
-            .publish_graph(PUBLICATION_PARENT_AGENT_ID, stale_graph)
-            .await
+    let runtime = tokio::runtime::Handle::current();
+    let stale_publication = tokio::task::spawn_blocking(move || {
+        runtime.block_on(async move {
+            stale_service
+                .publish_graph(PUBLICATION_PARENT_AGENT_ID, stale_graph)
+                .await
+        })
     });
     tokio::time::timeout(Duration::from_secs(10), gate.wait_until_reached())
         .await
@@ -1699,11 +1702,15 @@ async fn postgres_subflow_publication_rejects_stale_snapshot_and_keeps_old_paren
     // The gate is reached after Runtime A has selected child v1 from its
     // durable snapshot, but before the repository publication transaction.
     // Runtime B now advances the same child definition to a new deployment.
-    let child_v2_result = service_b
-        .publish_graph(PUBLICATION_CHILD_AGENT_ID, child_graph)
-        .await;
+    let child_v2_result = tokio::time::timeout(
+        Duration::from_secs(30),
+        service_b.publish_graph(PUBLICATION_CHILD_AGENT_ID, child_graph),
+    )
+    .await;
     gate.release();
-    let child_v2 = child_v2_result.unwrap();
+    let child_v2 = child_v2_result
+        .expect("new child publication did not finish")
+        .unwrap();
     assert_eq!(
         child_v2.definition_revision_id,
         child_v1.definition_revision_id
