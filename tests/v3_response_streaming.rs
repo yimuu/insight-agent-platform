@@ -998,6 +998,15 @@ fn assert_terminal_items_have_live_start_or_explicit_gap(
     }
 }
 
+fn assert_completed_terminal(transcript: &Transcript) {
+    assert_eq!(
+        transcript.terminal()["type"],
+        "response.completed",
+        "expected a completed response terminal: {}",
+        serde_json::to_string(&transcript.values).unwrap()
+    );
+}
+
 #[test]
 fn terminal_item_accounting_accepts_only_an_explicit_gap_for_a_missing_live_start() {
     let transcript = Transcript {
@@ -1149,10 +1158,10 @@ async fn consume_attached_response_asserting_live_delta(
     .await
     .expect("the first medical body delta was not delivered promptly");
 
-    // The fixture permits a Run to execute for up to 10 seconds. Under the
-    // full CI suite, concurrent streaming fixtures can delay terminal
-    // propagation beyond the shorter focused-test timing.
-    tokio::time::timeout(Duration::from_secs(15), async {
+    // The medical success fixture permits a Run to execute for up to 30
+    // seconds. Under the full CI suite, concurrent streaming fixtures can
+    // delay terminal propagation well beyond focused-test timing.
+    tokio::time::timeout(Duration::from_secs(35), async {
         while let Some(chunk) = body.next().await {
             bytes.extend_from_slice(&chunk.unwrap());
             assert!(
@@ -1833,7 +1842,7 @@ async fn terminal_lifecycle_matrix_is_closed_redacted_unique_and_immediately_eof
 
 #[tokio::test]
 async fn checked_in_medical_agent_preserves_three_initial_items_and_one_follow_up_item() {
-    let fixture = Fixture::start().await;
+    let fixture = Fixture::start_with_run_timeout(Duration::from_secs(30)).await;
     let initial_response = start_attached_response(
         &fixture.app,
         "medical_report_interpreter",
@@ -1847,6 +1856,7 @@ async fn checked_in_medical_agent_preserves_three_initial_items_and_one_follow_u
     .await;
     let initial =
         consume_attached_response_asserting_live_delta(initial_response, &fixture.counters).await;
+    assert_completed_terminal(&initial);
     assert_terminal_items_have_live_start_or_explicit_gap(&initial, 3);
     assert_eq!(initial.terminal()["workflow"]["result"]["mode"], "initial");
     assert_eq!(
@@ -1876,6 +1886,7 @@ async fn checked_in_medical_agent_preserves_three_initial_items_and_one_follow_u
     .await;
     let follow_up =
         consume_attached_response_asserting_live_delta(follow_up_response, &fixture.counters).await;
+    assert_completed_terminal(&follow_up);
     assert_terminal_items_have_live_start_or_explicit_gap(&follow_up, 1);
     assert_eq!(
         follow_up.terminal()["workflow"]["result"],
