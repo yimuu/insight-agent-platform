@@ -33,7 +33,7 @@ use super::sqlite_projection::{
     finalize_projection_checkpoints,
 };
 use super::{
-    ActivationAdmissionCommand, ActivationCasCommand, ActivationCommitReceipt,
+    database_time, ActivationAdmissionCommand, ActivationCasCommand, ActivationCommitReceipt,
     ActivationDurableRepository, ActivationProjection, ActivationTimerKind, AttemptCompletion,
     AttemptCompletionAuthority, CompleteAttemptCommand, FencedAttemptCommand, FireTimerCommand,
     GrantAttemptLeaseCommand, HeartbeatAttemptCommand, LeaseGrantAuthority, ReceiveSignalCommand,
@@ -985,7 +985,7 @@ async fn grant_attempt_lease(
     let token = fencing_token(&transition_key);
     let timer = model_data(TimerId::new(timer_id(&transition_key, "lease")))?;
     let task = task_id(&transition_key);
-    let now = Utc::now();
+    let now = database_time(Utc::now());
     let deadline = now
         .checked_add_signed(Duration::seconds(i64::from(command.lease_seconds())))
         .ok_or_else(RepositoryError::invalid_data)?;
