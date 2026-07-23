@@ -1159,8 +1159,7 @@ async fn postgres_human_claim_lease_reopens_for_authorized_peer_and_fences_stale
     let Some((repository, control, admin, schema)) = isolated_repository().await else {
         return;
     };
-    let source = HUMAN_TASK_AGENT.replace("claim_lease_ms: 60000", "claim_lease_ms: 50");
-    let plan = compile("human_task_short_lease_revision", &source);
+    let plan = compile("human_task_claim_lease_revision", HUMAN_TASK_AGENT);
     let linked = LinkedPlan::link(
         &plan,
         &DescriptorContractRegistry::new(),
@@ -1168,19 +1167,19 @@ async fn postgres_human_claim_lease_reopens_for_authorized_peer_and_fences_stale
     )
     .unwrap();
     let deployed = versioned(
-        "human_short_lease_definition",
-        "human_short_lease_agent",
-        "human_short_lease_deployment",
+        "human_claim_lease_definition",
+        "human_claim_lease_agent",
+        "human_claim_lease_deployment",
         &plan,
     );
     repository.install_versioned_plan(&deployed).await.unwrap();
-    let run_id = RunId::new("run_pg_human_short_claim_lease").unwrap();
+    let run_id = RunId::new("run_pg_human_claim_lease").unwrap();
     create_run(&repository, &deployed, &run_id, json!({})).await;
     let fence = lease_run(
         &control,
         &run_id,
-        "pg-human-short-lease-scheduler",
-        "pg-human-short-lease-fence",
+        "pg-human-claim-lease-scheduler",
+        "pg-human-claim-lease-fence",
     )
     .await;
     assert!(matches!(
@@ -1198,9 +1197,8 @@ async fn postgres_human_claim_lease_reopens_for_authorized_peer_and_fences_stale
         .work_item_id()
         .clone();
     let alice_command =
-        ClaimHumanWorkItemCommand::new(id.clone(), alice.clone(), "alice-short-claim").unwrap();
-    let bob_command =
-        ClaimHumanWorkItemCommand::new(id.clone(), bob.clone(), "bob-short-claim").unwrap();
+        ClaimHumanWorkItemCommand::new(id.clone(), alice.clone(), "alice-claim").unwrap();
+    let bob_command = ClaimHumanWorkItemCommand::new(id.clone(), bob.clone(), "bob-claim").unwrap();
     let (alice_result, bob_result) = tokio::join!(
         repository.claim_human_work_item(alice_command),
         repository.claim_human_work_item(bob_command),
@@ -1215,7 +1213,21 @@ async fn postgres_human_claim_lease_reopens_for_authorized_peer_and_fences_stale
             }
             other => panic!("concurrent claims must have exactly one winner: {other:?}"),
         };
-    tokio::time::sleep(Duration::from_millis(90)).await;
+    assert_eq!(
+        sqlx::query(
+            "UPDATE human_work_items
+             SET claim_expires_at=clock_timestamp() - INTERVAL '1 millisecond'
+             WHERE work_item_id=$1 AND work_state='claimed' AND claimed_by=$2",
+        )
+        .bind(id.as_str())
+        .bind(winner.identity())
+        .execute(&control)
+        .await
+        .unwrap()
+        .rows_affected(),
+        1,
+        "the winning claim must still be authoritative before expiry"
+    );
     let visible = repository.list_human_work_items(&loser, 10).await.unwrap();
     assert_eq!(
         visible.len(),
