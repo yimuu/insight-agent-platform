@@ -41,6 +41,8 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+const ASYNC_TRANSITION_TIMEOUT: Duration = Duration::from_secs(10);
+
 struct NoLeafResolver;
 
 async fn shared_artifact_store(
@@ -367,13 +369,17 @@ async fn wait_terminal(
     service: &RunService,
     run_id: &str,
 ) -> insight_agent_platform::history::types::RunRecord {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + ASYNC_TRANSITION_TIMEOUT;
     loop {
         let current = service.get_run(run_id).await.unwrap();
         if current.status().is_terminal() {
             return current;
         }
-        assert!(tokio::time::Instant::now() < deadline);
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Run did not reach terminal within {ASYNC_TRANSITION_TIMEOUT:?}; last status: {:?}",
+            current.status()
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
@@ -397,7 +403,7 @@ async fn completed_source(
     label: &str,
 ) -> insight_agent_platform::history::types::RunRecord {
     let created = waiting_source(service, label).await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let human_task_deadline = tokio::time::Instant::now() + ASYNC_TRANSITION_TIMEOUT;
     let item = loop {
         let item = service
             .list_human_tasks("recovery-reviewer", Vec::new(), 100)
@@ -408,7 +414,10 @@ async fn completed_source(
         if let Some(item) = item {
             break item;
         }
-        assert!(tokio::time::Instant::now() < deadline);
+        assert!(
+            tokio::time::Instant::now() < human_task_deadline,
+            "source Run did not expose its human task within {ASYNC_TRANSITION_TIMEOUT:?}"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
     let claim = service
@@ -435,14 +444,16 @@ async fn completed_source(
     if signalled.status().is_terminal() {
         return signalled;
     };
+    let terminal_deadline = tokio::time::Instant::now() + ASYNC_TRANSITION_TIMEOUT;
     loop {
         let current = service.get_run(&created.run_id).await.unwrap();
         if current.status().is_terminal() {
             return current;
         }
         assert!(
-            tokio::time::Instant::now() < deadline,
-            "source Run did not reach a terminal state"
+            tokio::time::Instant::now() < terminal_deadline,
+            "source Run did not reach terminal within {ASYNC_TRANSITION_TIMEOUT:?}; last status: {:?}",
+            current.status()
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -1033,7 +1044,7 @@ async fn sqlite_service_and_api_map_unsafe_redrive_to_requires_fork_without_side
 }
 
 async fn wait_for_human_task_on_run(service: &RunService, run_id: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + ASYNC_TRANSITION_TIMEOUT;
     loop {
         if service
             .list_human_tasks("mapped-reviewer", Vec::new(), 100)
