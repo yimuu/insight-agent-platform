@@ -1056,7 +1056,10 @@ async fn consume_attached_response_asserting_live_delta(
     .await
     .expect("the first medical body delta was not delivered promptly");
 
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // The fixture permits a Run to execute for up to 10 seconds. Under the
+    // full CI suite, concurrent streaming fixtures can delay terminal
+    // propagation beyond the shorter focused-test timing.
+    tokio::time::timeout(Duration::from_secs(15), async {
         while let Some(chunk) = body.next().await {
             bytes.extend_from_slice(&chunk.unwrap());
             assert!(
