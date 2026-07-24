@@ -1,0 +1,29 @@
+api_version: insight.agent/v1
+kind: agent
+
+inputs:
+  question: string
+
+# `any` is used only because this fixture focuses on Fork/Join/Collect shape.
+output: any
+
+workflow:
+  steps:
+    - id: analyses
+      settle: all_success
+      parallel:
+        technical:
+          - id: technical_analysis
+            type: action
+            call: fixture.technical
+            inputs: {question: $question}
+            response: string
+          - yield: $technical_analysis
+        risk:
+          - id: risk_analysis
+            type: action
+            call: fixture.risk
+            inputs: {question: $question}
+            response: string
+          - yield: $risk_analysis
+    - return: $analyses

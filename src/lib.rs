@@ -1,5 +1,5 @@
 pub mod api;
-pub mod catalog_v3;
+pub mod catalog;
 pub mod config;
 pub mod dsl;
 pub mod engine;

@@ -34,27 +34,27 @@ use crate::leaf_adapters::{
     production_worker_registry, production_worker_registry_with_live_response,
 };
 
-const V3_RETRIEVAL_DESCRIPTOR_VERSION: &str = "1";
-const RETRIEVAL_DESCRIPTOR_INVALID: &str = "V3_RETRIEVAL_DESCRIPTOR_INVALID";
-const RETRIEVAL_BINDING_INVALID: &str = "V3_RETRIEVAL_BINDING_INVALID";
-const RETRIEVAL_EXECUTION_FAILED: &str = "V3_RETRIEVAL_EXECUTION_FAILED";
-const RETRIEVAL_PUBLIC_RESULT_INVALID: &str = "V3_RETRIEVAL_PUBLIC_RESULT_INVALID";
+const RETRIEVAL_DESCRIPTOR_VERSION: &str = "1";
+const RETRIEVAL_DESCRIPTOR_INVALID: &str = "RETRIEVAL_DESCRIPTOR_INVALID";
+const RETRIEVAL_BINDING_INVALID: &str = "RETRIEVAL_BINDING_INVALID";
+const RETRIEVAL_EXECUTION_FAILED: &str = "RETRIEVAL_EXECUTION_FAILED";
+const RETRIEVAL_PUBLIC_RESULT_INVALID: &str = "RETRIEVAL_PUBLIC_RESULT_INVALID";
 const WORKER_CANCELLED: &str = "WORKER_CANCELLED";
 const WORKER_DEADLINE_EXCEEDED: &str = "WORKER_DEADLINE_EXCEEDED";
 
 #[derive(Clone)]
-pub struct V3RetrievalTaskExecutor {
+pub struct RetrievalTaskExecutor {
     retrievals: RetrievalRegistry,
 }
 
-impl V3RetrievalTaskExecutor {
+impl RetrievalTaskExecutor {
     pub fn new(retrievals: RetrievalRegistry) -> Self {
         Self { retrievals }
     }
 }
 
 #[async_trait]
-impl LeafTaskExecutor for V3RetrievalTaskExecutor {
+impl LeafTaskExecutor for RetrievalTaskExecutor {
     async fn execute(
         &self,
         context: &WorkerExecutionContext,
@@ -62,7 +62,7 @@ impl LeafTaskExecutor for V3RetrievalTaskExecutor {
         cancellation: CancellationToken,
     ) -> Result<TaskExecutionResult, WorkerFailure> {
         if request.task_kind() != SchedulerTaskKind::Retrieval
-            || request.descriptor_version().as_str() != V3_RETRIEVAL_DESCRIPTOR_VERSION
+            || request.descriptor_version().as_str() != RETRIEVAL_DESCRIPTOR_VERSION
         {
             return Err(invariant(RETRIEVAL_DESCRIPTOR_INVALID));
         }
@@ -181,7 +181,7 @@ pub fn install_retrieval_workers(
     registry: &mut WorkerExecutorRegistry,
     retrievals: &RetrievalRegistry,
 ) -> Result<(), CompileError> {
-    let descriptor_version = VersionTag::new(V3_RETRIEVAL_DESCRIPTOR_VERSION)
+    let descriptor_version = VersionTag::new(RETRIEVAL_DESCRIPTOR_VERSION)
         .map_err(|error| CompileError::new("WORKER_REGISTRY_INVALID", error.to_string()))?;
     for retrieval_id in retrievals.names() {
         let retrieval = retrievals.resolve(retrieval_id)?;
@@ -193,9 +193,9 @@ pub fn install_retrieval_workers(
                 VersionTag::new(retrieval.identity().version.to_string()).map_err(|error| {
                     CompileError::new("WORKER_REGISTRY_INVALID", error.to_string())
                 })?,
-                Arc::new(V3RetrievalTaskExecutor::new(retrievals.clone())),
+                Arc::new(RetrievalTaskExecutor::new(retrievals.clone())),
             )
-            .map_err(|code| CompileError::new(code, "failed to register v3 Retrieval worker"))?;
+            .map_err(|code| CompileError::new(code, "failed to register Retrieval worker"))?;
     }
     Ok(())
 }

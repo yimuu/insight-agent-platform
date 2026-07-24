@@ -14,13 +14,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use insight_dsl::v3::{
+use insight_dsl::{
     graph::TraceOverlay, GraphAuthorDocument, GraphSemanticEditBatch, StoredGraphView,
     ViewDocument, MAX_GRAPH_DOCUMENT_BYTES,
 };
 use insight_engine::{history::types::RunRecord, human::HumanWorkItem};
 use insight_runtime::{
-    catalog_v3::{AgentStreamingContract, DeployedV3Agent},
+    catalog::{AgentStreamingContract, DeployedAgent},
     ForkRecoveryOptions, MigrationNodeMappingRequest, RecoveryRequestMetadata, RecoveryReusePolicy,
     RecoveryRunResult, RequestMetadata, RunService, ServiceError,
 };
@@ -186,8 +186,8 @@ struct AgentMetadata {
     streaming: AgentStreamingContract,
 }
 
-impl From<&DeployedV3Agent> for AgentMetadata {
-    fn from(agent: &DeployedV3Agent) -> Self {
+impl From<&DeployedAgent> for AgentMetadata {
+    fn from(agent: &DeployedAgent) -> Self {
         let published = agent.published();
         let metadata = published.metadata();
         Self {

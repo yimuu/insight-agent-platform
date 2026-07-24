@@ -1578,7 +1578,7 @@ fn model_run_id(value: String) -> Result<RunId, RepositoryError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::migration_manifest::DURABLE_V3_MIGRATIONS;
+    use super::super::migration_manifest::DURABLE_MIGRATIONS;
     use chrono::{DateTime, Utc};
     use insight_durable::model::adapter as model_adapter;
     use insight_durable::{CreateRunCommand, DurableRepository, VersionedPlan};
@@ -1861,7 +1861,7 @@ mod tests {
         .unwrap();
         assert!(due_plan.iter().any(|row| {
             row.get::<String, _>("detail")
-                .contains("idx_v3_public_delivery_heads_due")
+                .contains("idx_public_delivery_heads_due")
         }));
         let successor_plan = sqlx::query(
             "EXPLAIN QUERY PLAN
@@ -1886,7 +1886,7 @@ mod tests {
         .unwrap();
         assert!(successor_plan.iter().any(|row| {
             row.get::<String, _>("detail")
-                .contains("idx_v3_public_projection_order")
+                .contains("idx_public_projection_order")
         }));
     }
 
@@ -2818,8 +2818,8 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_delivery_migration_rejects_orphan_receipt_when_available() {
-        let database_url = std::env::var("V3_PUBLIC_OUTBOX_TEST_POSTGRES_URL")
-            .or_else(|_| std::env::var("V3_TEST_POSTGRES_URL"));
+        let database_url = std::env::var("PUBLIC_OUTBOX_TEST_POSTGRES_URL")
+            .or_else(|_| std::env::var("TEST_POSTGRES_URL"));
         let Ok(database_url) = database_url else {
             return;
         };
@@ -2895,7 +2895,7 @@ mod tests {
         .execute(&repository.pool)
         .await
         .unwrap();
-        let migration = DURABLE_V3_MIGRATIONS
+        let migration = DURABLE_MIGRATIONS
             .iter()
             .find(|migration| migration.version == 202607180016)
             .expect("public event delivery-head migration must remain in the manifest")
@@ -2915,8 +2915,8 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_publish_and_concurrent_insert_preserve_next_head_when_available() {
-        let database_url = std::env::var("V3_PUBLIC_OUTBOX_TEST_POSTGRES_URL")
-            .or_else(|_| std::env::var("V3_TEST_POSTGRES_URL"));
+        let database_url = std::env::var("PUBLIC_OUTBOX_TEST_POSTGRES_URL")
+            .or_else(|_| std::env::var("TEST_POSTGRES_URL"));
         let Ok(database_url) = database_url else {
             return;
         };
@@ -3051,8 +3051,8 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_publish_commits_state_before_notifying_durable_id_when_available() {
-        let database_url = std::env::var("V3_PUBLIC_OUTBOX_TEST_POSTGRES_URL")
-            .or_else(|_| std::env::var("V3_TEST_POSTGRES_URL"));
+        let database_url = std::env::var("PUBLIC_OUTBOX_TEST_POSTGRES_URL")
+            .or_else(|_| std::env::var("TEST_POSTGRES_URL"));
         let Ok(database_url) = database_url else {
             return;
         };

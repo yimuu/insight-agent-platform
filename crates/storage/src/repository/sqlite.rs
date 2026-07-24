@@ -36,7 +36,7 @@ use insight_engine::{
     TransitionOutcome, EXECUTION_EVENT_SCHEMA_VERSION,
 };
 
-use super::migration_manifest::{DurableV3Migration, SqliteMigrationGuard, DURABLE_V3_MIGRATIONS};
+use super::migration_manifest::{DurableMigration, SqliteMigrationGuard, DURABLE_MIGRATIONS};
 use super::model::{
     CommitReceiptAdapter as _, CreateRunCommandAdapter as _, PublicEventIntentAdapter as _,
     PublicRunAttachment, PublicRunAttachmentAdapter as _, PublicationHeadAdapter as _,
@@ -83,7 +83,7 @@ struct CurrentRunRow {
 
 async fn sqlite_migration_is_required(
     pool: &SqlitePool,
-    migration: DurableV3Migration,
+    migration: DurableMigration,
 ) -> Result<bool, RepositoryError> {
     let presence_query = match migration.sqlite_guard {
         // All other SQLite migrations are idempotent and intentionally run on
@@ -132,7 +132,7 @@ impl SqliteDurableRepository {
             .connect_with(options)
             .await
             .map_err(RepositoryError::storage)?;
-        for migration in DURABLE_V3_MIGRATIONS {
+        for migration in DURABLE_MIGRATIONS {
             if sqlite_migration_is_required(&pool, migration).await? {
                 sqlx::raw_sql(migration.sqlite_sql)
                     .execute(&pool)

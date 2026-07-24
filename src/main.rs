@@ -1,8 +1,8 @@
 use std::{error::Error, future::IntoFuture, io, sync::Arc};
 
 use insight_agent_platform::{
-    catalog_v3::{
-        compile_enabled_v3_agents, deploy_v3_agents, OwnedProductionLeafDeploymentResolver,
+    catalog::{
+        compile_enabled_agents, deploy_agents, OwnedProductionLeafDeploymentResolver,
         ProductionLeafDeploymentResolver,
     },
     config::{
@@ -58,7 +58,7 @@ async fn main() -> MainResult<()> {
     )?;
     let retrievals = RetrievalRegistry::default();
 
-    let published = compile_enabled_v3_agents(&config.agents.directory, &config.agents.enabled)?;
+    let published = compile_enabled_agents(&config.agents.directory, &config.agents.enabled)?;
     let resolver = ProductionLeafDeploymentResolver::new(&models, &actions)
         .with_retrievals(&retrievals)
         .with_llm_tool_continuation_capability()
@@ -77,7 +77,7 @@ async fn main() -> MainResult<()> {
                 config.runtime.max_llm_tool_calls,
             )?,
     );
-    let deployed = deploy_v3_agents(&published, &resolver)?;
+    let deployed = deploy_agents(&published, &resolver)?;
     let agents = DeployedAgentCatalog::new(deployed)?;
     let (repository, live_response_broker) =
         initialize_repository_and_live_response(&config.history, config.runtime.response_stream)
@@ -168,7 +168,7 @@ async fn main() -> MainResult<()> {
     tracing::info!(
         bind_addr = %config.bind_addr,
         agents = service.agents().list().count(),
-        "v3 durable runtime listening"
+        "durable runtime listening"
     );
 
     let (http_shutdown, wait_http_shutdown) = tokio::sync::oneshot::channel::<()>();

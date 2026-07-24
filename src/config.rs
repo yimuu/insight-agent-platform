@@ -1,4 +1,4 @@
-//! Strict platform configuration for the durable v3 runtime.
+//! Strict platform configuration for the durable runtime.
 
 use std::{
     collections::BTreeSet,

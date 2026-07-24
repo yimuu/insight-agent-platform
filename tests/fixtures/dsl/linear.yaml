@@ -1,0 +1,18 @@
+api_version: insight.agent/v1
+kind: agent
+
+inputs:
+  question: string
+
+output: string
+
+workflow:
+  steps:
+    - id: answer
+      type: action
+      call: fixture.answer
+      inputs:
+        question: $question
+      response: string
+
+    - return: $answer

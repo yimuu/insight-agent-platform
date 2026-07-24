@@ -1771,7 +1771,7 @@ mod tests {
 
     #[tokio::test]
     async fn detached_unsealed_publication_is_reclaimed_when_postgres_is_available() {
-        let Ok(database_url) = std::env::var("V3_TEST_POSTGRES_URL") else {
+        let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
             return;
         };
         let pool = PgPoolOptions::new()
@@ -1808,7 +1808,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_broker_instances_exchange_body_then_seal_when_postgres_is_available() {
-        let Ok(database_url) = std::env::var("V3_TEST_POSTGRES_URL") else {
+        let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
             return;
         };
         let publisher_pool = PgPoolOptions::new()

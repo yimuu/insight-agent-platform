@@ -1,4 +1,4 @@
-//! Production adapters from immutable v3 leaf requests to model and Action
+//! Production adapters from immutable leaf requests to model and Action
 //! registries. They render compiler-owned programs but never read author files,
 //! resolve control flow, or commit durable state.
 
@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
-use insight_dsl::{v3::template::compile_template, CompileError};
+use insight_dsl::{template::compile_template, CompileError};
 use insight_engine::{
     execution::{stop_pair, ExecutionControl, RunError, RunErrorKind, StopReason},
     plan::{DescriptorValue, PlanType, VersionTag},
@@ -50,21 +50,21 @@ use insight_resources::{
     },
 };
 
-use crate::catalog_v3::VersionedLeafAdapterRegistry;
+use crate::catalog::VersionedLeafAdapterRegistry;
 
-const V3_LLM_DESCRIPTOR_VERSION: &str = "2";
-const V3_LEAF_DESCRIPTOR_VERSION: &str = "1";
+const LLM_DESCRIPTOR_VERSION: &str = "2";
+const LEAF_DESCRIPTOR_VERSION: &str = "1";
 const MAX_REQUEST_BYTES: usize = 1_048_576;
 const MAX_TEMPLATE_BYTES: usize = 1_048_576;
 const MAX_FUNCTION_ARGUMENT_FRAGMENTS_PER_CALL: usize = 16_384;
 const MAX_FUNCTION_ARGUMENT_FRAGMENTS_PER_MODEL_CALL: usize = 65_536;
 
-const LLM_DESCRIPTOR_INVALID: &str = "V3_LLM_DESCRIPTOR_INVALID";
-const LLM_BINDING_INVALID: &str = "V3_LLM_BINDING_INVALID";
-const LLM_MESSAGE_INVALID: &str = "V3_LLM_MESSAGE_INVALID";
-const LLM_REQUEST_TOO_LARGE: &str = "V3_LLM_REQUEST_TOO_LARGE";
-const LLM_RESPONSE_INVALID: &str = "V3_LLM_RESPONSE_INVALID";
-const LLM_PROVIDER_FAILED: &str = "V3_LLM_PROVIDER_FAILED";
+const LLM_DESCRIPTOR_INVALID: &str = "LLM_DESCRIPTOR_INVALID";
+const LLM_BINDING_INVALID: &str = "LLM_BINDING_INVALID";
+const LLM_MESSAGE_INVALID: &str = "LLM_MESSAGE_INVALID";
+const LLM_REQUEST_TOO_LARGE: &str = "LLM_REQUEST_TOO_LARGE";
+const LLM_RESPONSE_INVALID: &str = "LLM_RESPONSE_INVALID";
+const LLM_PROVIDER_FAILED: &str = "LLM_PROVIDER_FAILED";
 const MODEL_OUTPUT_TRUNCATED: &str = "MODEL_OUTPUT_TRUNCATED";
 const MODEL_OUTPUT_FILTERED: &str = "MODEL_OUTPUT_FILTERED";
 const MODEL_FINISH_REASON_INVALID: &str = "MODEL_FINISH_REASON_INVALID";
@@ -75,20 +75,20 @@ const LLM_TOOL_ROUND_LIMIT: &str = "LLM_TOOL_ROUND_LIMIT";
 const LLM_TOOL_CALL_LIMIT: &str = "LLM_TOOL_CALL_LIMIT";
 const LLM_PUBLICATION_AUTHORITY_LOST: &str = "LLM_PUBLICATION_AUTHORITY_LOST";
 const MAX_FROZEN_LLM_TOOL_CALLS: u32 = 1_024;
-const ACTION_DESCRIPTOR_INVALID: &str = "V3_ACTION_DESCRIPTOR_INVALID";
-const ACTION_BINDING_INVALID: &str = "V3_ACTION_BINDING_INVALID";
-const ACTION_EXECUTION_FAILED: &str = "V3_ACTION_EXECUTION_FAILED";
+const ACTION_DESCRIPTOR_INVALID: &str = "ACTION_DESCRIPTOR_INVALID";
+const ACTION_BINDING_INVALID: &str = "ACTION_BINDING_INVALID";
+const ACTION_EXECUTION_FAILED: &str = "ACTION_EXECUTION_FAILED";
 const WORKER_CANCELLED: &str = "WORKER_CANCELLED";
 const WORKER_DEADLINE_EXCEEDED: &str = "WORKER_DEADLINE_EXCEEDED";
 
 #[derive(Clone)]
-pub struct V3LlmTaskExecutor {
+pub struct LlmTaskExecutor {
     models: ModelRegistry,
     token_observer: Option<broadcast::Sender<LlmTokenObservation>>,
     live_response_broker: Option<Arc<dyn LiveResponseBroker>>,
 }
 
-impl V3LlmTaskExecutor {
+impl LlmTaskExecutor {
     pub fn new(models: ModelRegistry) -> Self {
         Self {
             models,
@@ -570,7 +570,7 @@ fn normalize_model_tool_calls(
 }
 
 #[async_trait]
-impl LeafTaskExecutor for V3LlmTaskExecutor {
+impl LeafTaskExecutor for LlmTaskExecutor {
     fn live_response_capable(&self) -> bool {
         self.live_response_broker.is_some()
     }
@@ -1639,18 +1639,18 @@ fn with_model_completion(
 }
 
 #[derive(Clone)]
-pub struct V3ActionTaskExecutor {
+pub struct ActionTaskExecutor {
     actions: ActionRegistry,
 }
 
-impl V3ActionTaskExecutor {
+impl ActionTaskExecutor {
     pub fn new(actions: ActionRegistry) -> Self {
         Self { actions }
     }
 }
 
 #[async_trait]
-impl LeafTaskExecutor for V3ActionTaskExecutor {
+impl LeafTaskExecutor for ActionTaskExecutor {
     async fn execute(
         &self,
         context: &WorkerExecutionContext,
@@ -1770,16 +1770,16 @@ fn production_worker_registry_inner(
     external_leaf_adapters: Option<&VersionedLeafAdapterRegistry>,
     live_response_broker: Option<Arc<dyn LiveResponseBroker>>,
 ) -> Result<WorkerExecutorRegistry, CompileError> {
-    let llm_descriptor_version = VersionTag::new(V3_LLM_DESCRIPTOR_VERSION)
+    let llm_descriptor_version = VersionTag::new(LLM_DESCRIPTOR_VERSION)
         .map_err(|error| CompileError::new("WORKER_REGISTRY_INVALID", error.to_string()))?;
-    let leaf_descriptor_version = VersionTag::new(V3_LEAF_DESCRIPTOR_VERSION)
+    let leaf_descriptor_version = VersionTag::new(LEAF_DESCRIPTOR_VERSION)
         .map_err(|error| CompileError::new("WORKER_REGISTRY_INVALID", error.to_string()))?;
     let mut registry = WorkerExecutorRegistry::new();
     let mut llm_versions = BTreeSet::new();
     for alias in models.names() {
         let identity = models.deployment_identity(alias)?;
         if llm_versions.insert(identity.worker_version().to_owned()) {
-            let executor = V3LlmTaskExecutor::new(models.clone());
+            let executor = LlmTaskExecutor::new(models.clone());
             let executor = match &live_response_broker {
                 Some(broker) => executor.with_live_response_broker(Arc::clone(broker)),
                 None => executor,
@@ -1794,7 +1794,7 @@ fn production_worker_registry_inner(
                     })?,
                     Arc::new(executor),
                 )
-                .map_err(|code| CompileError::new(code, "failed to register v3 LLM worker"))?;
+                .map_err(|code| CompileError::new(code, "failed to register LLM worker"))?;
         }
     }
     for action_id in actions.names() {
@@ -1807,9 +1807,9 @@ fn production_worker_registry_inner(
                 VersionTag::new(action.identity().version.to_string()).map_err(|error| {
                     CompileError::new("WORKER_REGISTRY_INVALID", error.to_string())
                 })?,
-                Arc::new(V3ActionTaskExecutor::new(actions.clone())),
+                Arc::new(ActionTaskExecutor::new(actions.clone())),
             )
-            .map_err(|code| CompileError::new(code, "failed to register v3 Action worker"))?;
+            .map_err(|code| CompileError::new(code, "failed to register Action worker"))?;
     }
     if let Some(external_leaf_adapters) = external_leaf_adapters {
         external_leaf_adapters.install_workers(&mut registry)?;
@@ -2314,7 +2314,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        catalog_v3::{LeafDeploymentResolver, ProductionLeafDeploymentResolver},
+        catalog::{LeafDeploymentResolver, ProductionLeafDeploymentResolver},
         response_stream::InMemoryLiveResponseBroker,
     };
 
@@ -3038,7 +3038,7 @@ mod tests {
                     "core.llm",
                     version("2"),
                     version("model-worker-1"),
-                    Arc::new(V3LlmTaskExecutor::new(models)),
+                    Arc::new(LlmTaskExecutor::new(models)),
                 )
                 .unwrap();
 
@@ -3133,7 +3133,7 @@ mod tests {
                 .with_model_continuation(vec![turn(1, &["call_1"]), turn(2, &["call_2", "call_3"])])
                 .unwrap();
 
-            let result = V3LlmTaskExecutor::new(models)
+            let result = LlmTaskExecutor::new(models)
                 .execute(&context, &request, CancellationToken::new())
                 .await
                 .unwrap();
@@ -3241,7 +3241,7 @@ mod tests {
             .with_model_call(ModelCallAuthority::new("response_catalog", 2, None).unwrap())
             .with_model_continuation(vec![turn])
             .unwrap();
-        V3LlmTaskExecutor::new(models.clone())
+        LlmTaskExecutor::new(models.clone())
             .execute(&context, &request, CancellationToken::new())
             .await
             .unwrap();
@@ -3260,7 +3260,7 @@ mod tests {
             Some(drifted_binding),
         );
         assert_eq!(
-            V3LlmTaskExecutor::new(models)
+            LlmTaskExecutor::new(models)
                 .execute(&context, &drifted_request, CancellationToken::new())
                 .await
                 .unwrap_err()
@@ -3340,7 +3340,7 @@ mod tests {
                 .unwrap();
 
             assert_eq!(
-                V3LlmTaskExecutor::new(models)
+                LlmTaskExecutor::new(models)
                     .execute(&context, &request, CancellationToken::new())
                     .await
                     .unwrap_err()
@@ -3724,7 +3724,7 @@ mod tests {
                     .subscribe(RunId::new("run_leaf").unwrap())
                     .await
                     .unwrap();
-                let executor = V3LlmTaskExecutor::new(models)
+                let executor = LlmTaskExecutor::new(models)
                     .with_live_response_broker(broker as Arc<dyn LiveResponseBroker>);
                 let request = dispatch_request(
                     SchedulerTaskKind::Llm,
@@ -3898,7 +3898,7 @@ mod tests {
             inputs,
             PlanType::String,
         );
-        let result = V3LlmTaskExecutor::new(models)
+        let result = LlmTaskExecutor::new(models)
             .execute(&worker_context(1), &request, CancellationToken::new())
             .await
             .unwrap();
@@ -3962,7 +3962,7 @@ mod tests {
                 ])]),
             ),
         ]);
-        let executor = V3LlmTaskExecutor::new(models);
+        let executor = LlmTaskExecutor::new(models);
 
         let missing = dispatch_request(
             SchedulerTaskKind::Llm,
@@ -4070,7 +4070,7 @@ mod tests {
         // Lag only describes best-effort observation loss; the worker result
         // must still contain the complete validated response.
         let (observer, mut receiver) = broadcast::channel(1);
-        let result = V3LlmTaskExecutor::new(models.clone())
+        let result = LlmTaskExecutor::new(models.clone())
             .with_token_observer(observer)
             .execute(&worker_context(1), &request, CancellationToken::new())
             .await
@@ -4088,7 +4088,7 @@ mod tests {
         // A completely detached observer is also non-authoritative.
         let (observer, receiver) = broadcast::channel(1);
         drop(receiver);
-        let result = V3LlmTaskExecutor::new(models)
+        let result = LlmTaskExecutor::new(models)
             .with_token_observer(observer)
             .execute(&worker_context(2), &request, CancellationToken::new())
             .await
@@ -4139,7 +4139,7 @@ mod tests {
             Vec::new(),
             Some(deployment_binding),
         );
-        let executor = V3ActionTaskExecutor::new(actions);
+        let executor = ActionTaskExecutor::new(actions);
         executor
             .execute(&worker_context(2), &request, CancellationToken::new())
             .await
@@ -4237,7 +4237,7 @@ mod tests {
             claim.claim_expires_at(),
         )
         .unwrap();
-        let executor = V3ActionTaskExecutor::new(actions);
+        let executor = ActionTaskExecutor::new(actions);
         executor
             .execute(&context, &request, CancellationToken::new())
             .await
@@ -4376,7 +4376,7 @@ mod tests {
                 claim.claim_expires_at(),
             )
             .unwrap();
-            let executor = V3ActionTaskExecutor::new(actions);
+            let executor = ActionTaskExecutor::new(actions);
 
             let mut identity_drift = serde_json::to_value(&request).unwrap();
             identity_drift["deployment_binding"]["descriptor_hash"] = json!("f".repeat(64));

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use insight_dsl::v3::GraphSurfaceRepository;
+use insight_dsl::GraphSurfaceRepository;
 use insight_engine::{NodeId, RunId, TransitionKey};
 
 use crate::{

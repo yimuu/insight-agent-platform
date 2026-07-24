@@ -1,9 +1,9 @@
 {
   "plan": {
-    "fixture": "tests/fixtures/v3/linear.yaml",
-    "json_length": 5854,
-    "json_sha256": "768915dc7088edbf1d74a8de49b83c4c30f69219ea0b0ae2f5a712b86ace0110",
-    "semantic_hash": "sha256:e163d45f5f081ddec0646ee992a442fe13e705bc07ba1711e8104ff9dcd81c73"
+    "fixture": "tests/fixtures/dsl/linear.yaml",
+    "json_length": 5848,
+    "json_sha256": "ecb9e010996acbdcd4faaf8c7d7f0eca8cbc2472b878b620e637c22f69b5d9ca",
+    "semantic_hash": "sha256:100a1ad74a35c8b29fb9d49a6b5540936c139d9ad4110d9ea7e2e87c491ac9c1"
   },
   "execution_event_kinds": [
     "run.created",

@@ -2580,8 +2580,8 @@ mod tests {
     }
 
     async fn isolated_repository() -> Option<PostgresDurableRepository> {
-        let database_url = std::env::var("V3_TEST_POSTGRES_URL").ok()?;
-        let schema = format!("recovery_v3_{}", Uuid::new_v4().simple());
+        let database_url = std::env::var("TEST_POSTGRES_URL").ok()?;
+        let schema = format!("recovery_{}", Uuid::new_v4().simple());
         let admin = PgPoolOptions::new()
             .max_connections(2)
             .connect(&database_url)

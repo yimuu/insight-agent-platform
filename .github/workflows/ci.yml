@@ -32,8 +32,8 @@ jobs:
           shared-key: "registry-only"
           cache-targets: "false"
           cache-on-failure: "false"
-      - name: Check DSL v3 cutover residuals
-        run: bash scripts/check-v3-cutover-residuals.sh
+      - name: Check DSL cutover residuals
+        run: bash scripts/check-cutover-residuals.sh
       - name: Check crate boundaries and dependency feature baseline
         run: bash scripts/check-crate-boundaries.sh
       - name: Check root public API baseline
@@ -50,11 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUN_HISTORY_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
-      # All durable-v3 PostgreSQL gates must exercise the same real PG16
-      # service in CI. Keep the explicit test variables so no gate can
-      # silently turn into a no-op because it looked for a different name.
-      V3_TEST_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
-      V3_ARTIFACT_TEST_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
+      # All durable PostgreSQL gates exercise the same real PG16 service in CI.
       TEST_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
     services:
       postgres:

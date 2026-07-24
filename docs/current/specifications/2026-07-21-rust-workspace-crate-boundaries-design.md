@@ -6,7 +6,7 @@
 | 变更类型 | Internal Architecture / Workspace Cutover |
 | 日期 | 2026-07-21 |
 | 验证日期 | 2026-07-23 |
-| 目标版本 | Repository Layout v1；不改变 `insight.agent/v3` |
+| 目标版本 | Repository Layout v1；不改变 `insight.agent/v1` |
 
 ## 1. 范围与规范效力
 
@@ -19,7 +19,7 @@
 1. 根兼容 facade、七个内部 member 及其单向依赖 DAG 是当前实现事实；
 2. 第 13 节记录 workspace 已完成的可复核证据；
 3. 本文不授权任何行为合同变更；与现行行为规范冲突时，
-   [DSL v3 持久化图执行架构规范](./2026-07-18-dsl-v3-durable-graph-execution-design.md)和
+   [DSL v1 持久化图执行架构规范](./2026-07-18-dsl-v1-durable-graph-execution-design.md)和
    [Response 实时流与 LLM 发布控制规范](./2026-07-19-response-streaming-and-llm-publication-design.md)
    优先；
 4. 若方案被放弃或替代，本文必须移入 `docs/archive/specs/`，在归档首页登记放弃/替代原因，并从
@@ -72,7 +72,7 @@ SQLx 的 SQLite/PostgreSQL 支持、DSL parser、运行时和配置实现都进�
 | DSL → SQL store | `src/dsl/v3/graph_repository.rs` 同时定义 Graph port、`VersionedPlan` 构造逻辑和 SQLite/PostgreSQL SQLx 实现 | DSL 无法独立编译，作者模型与基础设施混合 |
 | engine → repository | `src/engine/artifact_store.rs` 使用 `RepositoryError`/`StorageLocator`；`src/engine/worker.rs` 使用 `ModelToolTaskClaim` | engine 不是下层合同内核 |
 | repository → runtime | repository 的 terminal snapshot、tool/retrieval publication 和 `scheduler_runtime.rs` 使用 `runtime::Workflow*` 与 live broker 类型 | repository 与 runtime 形成反向依赖 |
-| runtime → repository/SQL | `src/runtime/v3_service.rs` 使用大量 repository trait，并直接使用 `sqlx::Row`；它还为两个具体 repository 实现应用层 trait | 服务编排、port 和 adapter 所有权倒置 |
+| runtime → repository/SQL | `src/runtime/run_service.rs` 使用大量 repository trait，并直接使用 `sqlx::Row`；它还为两个具体 repository 实现应用层 trait | 服务编排、port 和 adapter 所有权倒置 |
 | engine adapter → 上层 | `src/engine/leaf_adapters.rs` 同时依赖 catalog、DSL、resources、runtime | `engine` 同时承担合同和生产装配 |
 | resources → DSL/runtime | Action、Model、Retrieval 合同使用 `dsl::CompileError` 与 `runtime::{RunError, ExecutionControl}` | 资源 SPI 不能作为独立下层依赖 |
 | runtime → SQL live transport | `src/runtime/postgres_response_broker.rs` 直接使用 SQLx | runtime 无法只依赖抽象 port |
@@ -107,7 +107,7 @@ builder。
 
 ### 3.2 非目标
 
-- 不改变 `insight.agent/v3` 作者语法、Plan wire、语义哈希或 verifier 行为；
+- 不改变 `insight.agent/v1` 作者语法、Plan wire、语义哈希或 verifier 行为；
 - 不改变 HTTP 路由、请求/响应 JSON、SSE event、认证、错误 code 或 binary 名；
 - 不增加、删除或重写 durable migration，不改变 SQL bytes、顺序或 checksum；
 - 不改变 SQLite 单进程与 PostgreSQL 生产语义；
@@ -169,11 +169,11 @@ rust-version = "1.94.1"
 | Package / Rust crate | 所有权 | 迁移前主要来源 | 明确禁止 |
 |---|---|---|---|
 | `insight-engine` / `insight_engine` | 无 I/O 的执行合同内核：identity、value、Plan、纯 scheduler、状态机、aggregate、control、event、recovery、worker request/result、共享脱敏诊断类型、公开 response/history/outcome DTO、公开资源 policy、Schema 安全策略、Artifact/live-response ports 与共享有界队列原语 | `src/engine/` 中除 repository、具体 Artifact/leaf adapter 外的领域代码；`src/dsl/mod.rs` 的 path/span/`CompileError`；repository 的纯 `RepositoryError`；`src/runtime/control.rs`；`runtime/response_stream` 的 wire/port/queue 部分；`src/events`、`history`、`outcome`、`schema.rs` | SQLx、Axum、Reqwest、环境变量、文件系统、具体 broker/store/provider、catalog、DSL parser |
-| `insight-dsl` / `insight_dsl` | DSL v3 raw/AST/validate/compiler/template/Graph authoring、诊断与无 SQL 的 Graph store port | `src/dsl/`，但排除 `graph_repository.rs` 的 SQL 实现和外部类型 inherent impl | SQLx、Axum、Reqwest、runtime、storage、具体 repository |
+| `insight-dsl` / `insight_dsl` | DSL v1 raw/AST/validate/compiler/template/Graph authoring、诊断与无 SQL 的 Graph store port | `src/dsl/`，但排除 `graph_repository.rs` 的 SQL 实现和外部类型 inherent impl | SQLx、Axum、Reqwest、runtime、storage、具体 repository |
 | `insight-durable` / `insight_durable` | 后端中立的 durable ports、commands、claims、receipts、projection/publication models；保留既有 production repository 聚合合同；兼容重导出 engine-owned `RepositoryError` | `src/engine/repository/` 中的 trait/model/command 文件，以及 `runtime::ProductionRunRepository` 的原始合同定义 | SQLx、migration SQL、SQLite/PostgreSQL 类型、scheduler pump、live broker 实现、Axum、Reqwest |
 | `insight-resources` / `insight_resources` | Model/Action/Retrieval SPI、descriptor、registry、OpenAI 与 builtin provider 实现；使用 engine-owned `CompileError` 并保留现有签名；拥有 provider 私有观测辅助 | `src/resources/` 与 `src/observability.rs`；资源配置加载移至根 composition | durable/storage/runtime/API、SQLx、Axum |
 | `insight-storage` / `insight_storage` | SQLite/PostgreSQL durable adapter、共享 SQL codec、migration manifest、Graph SQL 实现、本地/共享文件系统 Artifact store、PostgreSQL live broker | `repository/{sqlite*,postgres*,common,migration_manifest}`、Graph SQL 代码、`engine/artifact_store.rs` 的文件系统实现、`runtime/postgres_response_broker.rs` | Axum、Reqwest、catalog、RunService、scheduler/worker pump、资源 registry |
-| `insight-runtime` / `insight_runtime` | catalog/deployment link、production leaf/retrieval adapter、scheduler/worker pump、RunService、进程内 live broker 和运行生命周期编排 | `src/catalog_v3.rs`、`engine/{leaf_adapters,retrieval_adapter}`、`repository/scheduler_runtime.rs`、`src/runtime/` 中非 PostgreSQL adapter 代码 | SQLx、Axum、具体 SQLite/PostgreSQL repository 构造、平台配置解析 |
+| `insight-runtime` / `insight_runtime` | catalog/deployment link、production leaf/retrieval adapter、scheduler/worker pump、RunService、进程内 live broker 和运行生命周期编排 | `src/catalog.rs`、`engine/{leaf_adapters,retrieval_adapter}`、`repository/scheduler_runtime.rs`、`src/runtime/` 中非 PostgreSQL adapter 代码 | SQLx、Axum、具体 SQLite/PostgreSQL repository 构造、平台配置解析 |
 | `insight-api` / `insight_api` | Axum router、认证、请求/错误映射和 SSE transport | `src/api/formal/` | SQLx、Reqwest、具体 storage/provider、进程启动、环境变量 |
 | `insight-agent-platform` / `insight_agent_platform` | 根兼容 facade、Platform/Resource 配置、严格 YAML 配置解码、进程级 tracing 初始化、binary composition | `src/{lib,main,config,yaml}.rs` 与 `resources/config.rs` | 新的领域状态机、SQL transaction、scheduler 决策、provider 业务实现 |
 
@@ -196,7 +196,7 @@ crates/
   api/
 agents/                       # 保持 workspace root 运行资产
 config/
-migrations/durable_v3/
+migrations/durable/
 schemas/vendor/
 tests/fixtures/
 ```
@@ -382,7 +382,7 @@ ports/models 不得引用 DSL 类型；仅允许 F 节为保留
 
 #### F. runtime service → 具体 SQL
 
-`v3_service.rs` 中的 `sqlx::Row`、直接 query、PostgreSQL listener 和为具体 backend 编写的 impl 必须移到
+`run_service.rs` 中的 `sqlx::Row`、直接 query、PostgreSQL listener 和为具体 backend 编写的 impl 必须移到
 `storage`。`ProductionRunRepository` 由 `durable` 所有，并在 `storage` 的具体类型一侧实现，避免
 orphan-rule 问题和 runtime 对 backend 类型的认知。
 
@@ -426,7 +426,7 @@ compile/API-snapshot gate 验证迁移前后等价。facade 可以用本地 modu
 insight_agent_platform::engine::Plan
 insight_agent_platform::engine::repository::DurableRepository
 insight_agent_platform::engine::repository::SqliteDurableRepository
-insight_agent_platform::dsl::v3::compile_source
+insight_agent_platform::dsl::compile_source
 insight_agent_platform::resources::models::ChatModel
 insight_agent_platform::runtime::RunService
 insight_agent_platform::api::v1::build_router
@@ -436,7 +436,7 @@ facade 只能重导出，不能包含状态机、SQL、adapter 或 wrapper。内
 不得经 facade 形成隐藏反向依赖。除已明确采用的 API breaking rename
 `api::formal::FormalApiState` → `api::v1::ApiState` 外，本规范承诺保留 Phase 0 inventory 中的全部路径，
 而不只是上面的示例；删除其他路径属于未来独立 breaking design，本规范不授权删除。
-当前 `src/lib.rs` 暴露的 `api`、`catalog_v3`、`config`、`dsl`、`engine`、`events`、`history`、`outcome`、
+当前 `src/lib.rs` 暴露的 `api`、`catalog`、`config`、`dsl`、`engine`、`events`、`history`、`outcome`、
 `resources`、`runtime`、`schema` 顶层路径都必须保留；其中跨 member 的旧嵌套路径可由 facade module
 shim 组合，但仍只能指向唯一原始类型。
 
@@ -451,7 +451,7 @@ shim 组合，但仍只能指向唯一原始类型。
 
 ### 7.3 Migration 与 vendor snapshot
 
-`migrations/durable_v3/{sqlite,postgres}` 的 23 对文件继续保留在 workspace root。storage 的 manifest
+`migrations/durable/{sqlite,postgres}` 的 23 对文件继续保留在 workspace root。storage 的 manifest
 必须通过以自身 `CARGO_MANIFEST_DIR` 为基准、可由编译器验证存在的固定路径嵌入这些 SQL。不得复制
 第二份 migration 目录。
 
@@ -471,7 +471,7 @@ shim 组合，但仍只能指向唯一原始类型。
 - 所有 member `publish = false`；
 - 第一轮不增加内部 crate feature matrix，当前 binary 继续同时构建 SQLite 与 PostgreSQL 能力；
 - 语义能力不得用 Cargo feature 表达；
-- 禁止 `old_layout`、`new_layout`、`legacy_*`、`v3_scheduler` 等切换 feature；
+- 禁止 `old_layout`、`new_layout`、`legacy_*`、`versioned_scheduler` 等切换 feature；
 - SQLx feature 清理、backend-only build 和 provider package 二次拆分必须另行评审。
 
 ## 8. 分阶段 Clean Cutover
@@ -481,7 +481,7 @@ shim 组合，但仍只能指向唯一原始类型。
 
 ### Phase 0：先修门禁，不移动生产代码
 
-1. 修改 `scripts/check-v3-cutover-residuals.sh`，让 production source scan 覆盖根 `src/` 与所有
+1. 修改 `scripts/check-cutover-residuals.sh`，让 production source scan 覆盖根 `src/` 与所有
    workspace member `src/`，Cargo feature scan 覆盖所有 member manifests；deleted implementation
    path 检查必须按新 owner 路径同步扩展，禁止历史实现换到 `crates/*` 后复活。
 2. 新增 `scripts/check-crate-boundaries.sh`：用
@@ -496,10 +496,10 @@ shim 组合，但仍只能指向唯一原始类型。
    inventory/compile snapshot。snapshot 必须覆盖路径、函数签名、trait supertraits/关联项、公开 trait impl
    与典型下游 impl compile fixture；所用工具与版本必须固定且能在 CI 重放。
 5. 识别并修复源码路径型测试：
-   - `tests/v3_scheduler_core.rs` 的 `#[path = "../src/engine/scheduler/mod.rs"]`；
-   - `tests/v3_repository_postgres_contract.rs` 的源码 `include_str!`；
-   - `tests/v3_artifact_repository.rs` 的源码 `include_str!`；
-   - `tests/v3_migration_layout.rs` 对 `public_outbox.rs` 的源码 `include_str!`。
+   - `tests/scheduler_core.rs` 的 `#[path = "../src/engine/scheduler/mod.rs"]`；
+   - `tests/repository_postgres_contract.rs` 的源码 `include_str!`；
+   - `tests/artifact_repository.rs` 的源码 `include_str!`；
+   - `tests/migration_layout.rs` 对 `public_outbox.rs` 的源码 `include_str!`。
 
 源码字符串断言应改为行为、数据库约束或独立 architecture gate；不得只更新相对路径继续把私有实现
 文本当作长期合同。
@@ -600,7 +600,7 @@ crate。根 E2E 可以继续通过 facade 验证兼容面。
 完成 workspace 化后，最低门禁为：
 
 ```bash
-bash scripts/check-v3-cutover-residuals.sh
+bash scripts/check-cutover-residuals.sh
 bash scripts/check-crate-boundaries.sh
 cargo fmt --all -- --check
 cargo metadata --locked --all-features --format-version 1
@@ -614,7 +614,7 @@ cargo deny check
 
 上面的 workspace `cargo test` 必须在现有 PostgreSQL 16 service job 中以 `CI=1` 运行；仅在无数据库
 环境中返回成功不能作为完成证据。现有 audit、dependency policy，以及 `RUN_HISTORY_POSTGRES_URL`、
-`V3_TEST_POSTGRES_URL`、`V3_ARTIFACT_TEST_POSTGRES_URL`、`TEST_POSTGRES_URL` 四个 URL 环境变量必须
+`TEST_POSTGRES_URL`、`TEST_POSTGRES_URL`、`TEST_POSTGRES_URL` 四个 URL 环境变量必须
 保留。CI 模式下任何必需的 PostgreSQL、Artifact 或 real-process gate 都不得因为 member 变化静默
 skip。
 
@@ -739,7 +739,7 @@ old/new scheduler split 的策略冲突。
   `--all-features` resolve graph 为 360 个 package。迁移前 feature/tree 证据冻结在
   `scripts/baselines/cargo-tree-workspace-all-features.txt` 和
   `scripts/baselines/crate-boundary-third-party-features.tsv`。
-- 结构门禁：`scripts/check-crate-boundaries.sh` 与 `scripts/check-v3-cutover-residuals.sh` 均通过。
+- 结构门禁：`scripts/check-crate-boundaries.sh` 与 `scripts/check-cutover-residuals.sh` 均通过。
   前者校验 normal/dev/build 内部边、禁止的传递 I/O 依赖、member 反向依赖根 facade、内部 feature
   matrix、下层 `build.rs`、member source/test 的越层导入，以及共享 workspace asset helper；migration
   manifest 的固定编译期路径是唯一登记的深层路径例外。

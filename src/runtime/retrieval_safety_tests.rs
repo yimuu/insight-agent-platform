@@ -6,8 +6,8 @@ use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    catalog_v3::{DeployedV3Agent, ProductionLeafDeploymentResolver, PublishedV3Agent},
-    dsl::v3::{CompileOptions, GraphAuthorDocument, GraphDocumentId},
+    catalog::{DeployedAgent, ProductionLeafDeploymentResolver, PublishedAgent},
+    dsl::{CompileOptions, GraphAuthorDocument, GraphDocumentId},
     engine::{
         production_worker_registry_with_retrievals, DefinitionRevisionId, RunId,
         SchedulerQuiescence, SubflowContractRegistry, TransitionKey, TransitionOutcome,
@@ -34,7 +34,7 @@ use crate::engine::repository::{
     SchedulerRecoveryOutcome, SchedulerWorkerPumpOutcome, SqliteDurableRepository,
 };
 
-const SOURCE: &str = r#"api_version: insight.agent/v3
+const SOURCE: &str = r#"api_version: insight.agent/v1
 kind: agent
 types:
   SearchOutput:
@@ -126,7 +126,7 @@ fn retrieval_registry() -> RetrievalRegistry {
     retrievals
 }
 
-fn deployed(suffix: &str) -> DeployedV3Agent {
+fn deployed(suffix: &str) -> DeployedAgent {
     let retrievals = retrieval_registry();
     let source_revision = format!("retrieval_runtime_{suffix}");
     let graph = GraphAuthorDocument::from_structured_source(
@@ -140,7 +140,7 @@ fn deployed(suffix: &str) -> DeployedV3Agent {
     )
     .unwrap();
     let published = Arc::new(
-        PublishedV3Agent::from_verified_graph(
+        PublishedAgent::from_verified_graph(
             format!("retrieval-runtime-{suffix}"),
             format!("retrieval-runtime-{suffix}"),
             "retrieval runtime observation fixture",
@@ -154,7 +154,7 @@ fn deployed(suffix: &str) -> DeployedV3Agent {
         .with_retrievals(&retrievals)
         .with_operation_timeout(Duration::from_secs(30))
         .unwrap();
-    DeployedV3Agent::publish(published, &resolver, SubflowContractRegistry::new()).unwrap()
+    DeployedAgent::publish(published, &resolver, SubflowContractRegistry::new()).unwrap()
 }
 
 fn transition(label: &str, run_id: &RunId) -> TransitionKey {
@@ -180,7 +180,7 @@ async fn sqlite_fixture(label: &str) -> (tempfile::TempDir, SqliteDurableReposit
 async fn prepare_sqlite_waiting(
     repository: &SqliteDurableRepository,
     control: &SqlitePool,
-    deployment: &DeployedV3Agent,
+    deployment: &DeployedAgent,
     run_id: &RunId,
 ) -> FencedSchedulerRunCommand {
     assert_eq!(

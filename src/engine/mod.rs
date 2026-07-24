@@ -60,8 +60,8 @@ pub use identity::{
 };
 pub use leaf_adapters::{
     production_worker_registry, production_worker_registry_with_leaf_adapters,
-    production_worker_registry_with_live_response, LlmTokenObservation, V3ActionTaskExecutor,
-    V3LlmTaskExecutor,
+    production_worker_registry_with_live_response, ActionTaskExecutor, LlmTaskExecutor,
+    LlmTokenObservation,
 };
 pub use plan::{
     BranchCaseId, ControlEdge, ControlEdgeId, ControlPort, ControlPortId, ControlRoute,
@@ -89,7 +89,7 @@ pub use retrieval::{
 };
 pub use retrieval_adapter::{
     install_retrieval_workers, production_worker_registry_with_live_response_and_retrievals,
-    production_worker_registry_with_retrievals, V3RetrievalTaskExecutor,
+    production_worker_registry_with_retrievals, RetrievalTaskExecutor,
 };
 pub use run::{
     RunExecutionAggregate, RunTerminationProgress, RunWorkProjection,

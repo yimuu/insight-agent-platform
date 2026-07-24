@@ -5,7 +5,7 @@
 | 状态 | Implemented / Verified |
 | 变更类型 | Breaking / Public SSE Protocol / LLM Runtime |
 | 日期 | 2026-07-19 |
-| 目标版本 | `insight.agent/v3` |
+| 目标版本 | `insight.agent/v1` |
 
 ## 1. 范围与规范效力
 
@@ -17,7 +17,7 @@
 - 工具调用、工具结果、RAG 检索结果、最终强类型结果和 token usage 的传输方式；
 - 实时增量与 durable workflow result 之间的顺序、重试、隐私和恢复边界。
 
-本文是 [DSL v3 持久化图执行架构规范](./2026-07-18-dsl-v3-durable-graph-execution-design.md)
+本文是 [DSL v1 持久化图执行架构规范](./2026-07-18-dsl-v1-durable-graph-execution-design.md)
 第 6.7 节的窄增量。它保留以下既有合同：
 
 - Attached SSE 仍然 live-only，不提供 replay、resume 或 `Last-Event-ID` 恢复；
@@ -45,10 +45,10 @@ provider，部署方必须注册实现后才能执行对应节点。
 
 ## 2. 立项时缺口（实现基线）
 
-本规范立项时，v3 有 Provider 流，但没有用户答案流：
+本规范立项时，运行时有 Provider 流，但没有用户答案流：
 
 1. `ChatModel` 只有 `stream_chat`，OpenAI adapter 固定发送流式请求；
-2. `V3LlmTaskExecutor` 会聚合 Provider chunk，并可选发送进程内 `LlmTokenObservation`；
+2. `LlmTaskExecutor` 会聚合 Provider chunk，并可选发送进程内 `LlmTokenObservation`；
 3. production worker registry 没有安装该 observer；
 4. observer 只有文本，没有工具调用、usage、节点实例内序号和类型化结果；
 5. `/v1/agents/{agent_id}/runs/stream` 只发送 `run.*` 与 `operation.*`；
@@ -168,7 +168,7 @@ async fn stream_chat(request: ChatRequest) -> ChatEventStream;
 具体 Rust 接口可以使用两个方法或一个带返回枚举的方法，但不能丢失这两个执行语义。
 
 `stream` 作用于由该 LLM 节点发起的每次模型调用，包括工具结果返回后的 continuation。工具执行本身
-不得成为 LLM executor 内不可恢复的内存循环；模型工具调用必须物化为受 v3 Activation、Attempt、
+不得成为 LLM executor 内不可恢复的内存循环；模型工具调用必须物化为受 durable Activation、Attempt、
 effect evidence、幂等键、retry 和恢复合同约束的 durable Tool/Action activation，再调度后续模型调用。
 
 一次模型调用以 `tool_calls` 结束时，scheduler 必须用不可歧义的 durable 状态机完成以下 handoff：
@@ -259,7 +259,7 @@ Attached API 可以继续在内部消费 durable RunSubscription，用它检测 
 
 ### 5.2 Live response plane
 
-文本 delta、函数参数 delta、工具执行进度等是临时响应事件。目标合同将 v3 第 6.7 节第 7 条拆成：
+文本 delta、函数参数 delta、工具执行进度等是临时响应事件。目标合同将主规范第 6.7 节第 7 条拆成：
 
 - durable lifecycle、terminal snapshot 与 terminal delivery 继续来自 projection/outbox；
 - transient response delta 来自独立 Live Response Broker，不写 projection/outbox。

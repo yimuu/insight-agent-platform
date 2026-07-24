@@ -1,8 +1,0 @@
-api_version: insight.agent/v3
-kind: agent
-inputs: {}
-output: string
-workflow:
-  steps:
-    - id: done
-      type: core.end

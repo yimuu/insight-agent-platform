@@ -35,7 +35,7 @@ use insight_engine::{
     TransitionOutcome, EXECUTION_EVENT_SCHEMA_VERSION,
 };
 
-use super::migration_manifest::DURABLE_V3_MIGRATIONS;
+use super::migration_manifest::DURABLE_MIGRATIONS;
 use super::model::{
     CommitReceiptAdapter as _, CreateRunCommandAdapter as _, PublicEventIntentAdapter as _,
     PublicRunAttachment, PublicRunAttachmentAdapter as _, PublicationHeadAdapter as _,
@@ -78,11 +78,11 @@ pub(crate) fn run_not_found() -> RepositoryError {
 fn validate_postgres_migration_prefix(
     rows: &[(i64, String, String)],
 ) -> Result<usize, RepositoryError> {
-    if rows.len() > DURABLE_V3_MIGRATIONS.len() {
+    if rows.len() > DURABLE_MIGRATIONS.len() {
         return Err(RepositoryError::migration_failed());
     }
     for (index, (version, name, checksum)) in rows.iter().enumerate() {
-        let expected = &DURABLE_V3_MIGRATIONS[index];
+        let expected = &DURABLE_MIGRATIONS[index];
         if u64::try_from(*version).ok() != Some(expected.version)
             || name != expected.name
             || checksum != &expected.postgres_checksum()
@@ -256,7 +256,7 @@ impl PostgresDurableRepository {
             return Err(RepositoryError::migration_failed());
         }
 
-        for migration in DURABLE_V3_MIGRATIONS.iter().skip(applied_count) {
+        for migration in DURABLE_MIGRATIONS.iter().skip(applied_count) {
             if let Err(error) = sqlx::raw_sql(migration.postgres_sql)
                 .execute(&mut *transaction)
                 .await
@@ -2364,14 +2364,14 @@ mod migration_tests {
 
     #[tokio::test]
     async fn postgres_migration_sql_and_ledger_insert_roll_back_together() {
-        let database_url = match std::env::var("V3_TEST_POSTGRES_URL") {
+        let database_url = match std::env::var("TEST_POSTGRES_URL") {
             Ok(value) => value,
             Err(error) if std::env::var_os("CI").is_some() => {
-                panic!("CI must set V3_TEST_POSTGRES_URL for migration rollback test: {error}")
+                panic!("CI must set TEST_POSTGRES_URL for migration rollback test: {error}")
             }
             Err(_) => return,
         };
-        let schema = format!("migration_v3_rollback_{}", Uuid::new_v4().simple());
+        let schema = format!("migration_rollback_{}", Uuid::new_v4().simple());
         let admin = PgPoolOptions::new()
             .max_connections(2)
             .connect(&database_url)
@@ -2387,7 +2387,7 @@ mod migration_tests {
             .await
             .unwrap();
 
-        let first_version = DURABLE_V3_MIGRATIONS[0].version;
+        let first_version = DURABLE_MIGRATIONS[0].version;
         let error = repository
             .migrate_schema_inner(Some(first_version))
             .await
@@ -2410,7 +2410,7 @@ mod migration_tests {
                 .fetch_one(&repository.pool)
                 .await
                 .unwrap(),
-            i64::try_from(DURABLE_V3_MIGRATIONS.len()).unwrap(),
+            i64::try_from(DURABLE_MIGRATIONS.len()).unwrap(),
         );
         sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
             .execute(&admin)

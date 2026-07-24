@@ -1,4 +1,4 @@
-use insight_dsl::v3::{compile_source, CompileOptions};
+use insight_dsl::{compile_source, CompileOptions};
 use insight_durable::{CreateRunCommand, VersionedPlan};
 use insight_engine::{
     repository::REPOSITORY_CONFIGURATION_INVALID, DefinitionRevisionId, DeploymentRevisionId, RunId,
@@ -6,7 +6,7 @@ use insight_engine::{
 use serde_json::json;
 
 fn normalized_input_plan() -> (insight_engine::Plan, VersionedPlan) {
-    let source = r#"api_version: insight.agent/v3
+    let source = r#"api_version: insight.agent/v1
 kind: agent
 inputs:
   question: string

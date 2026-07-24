@@ -14,7 +14,7 @@ use crate::engine::worker::{
     WorkerExecutionContext, WorkerExecutorRegistry, WorkerFailure, WorkerFailureClass,
 };
 use crate::{
-    dsl::v3::{compile_source, CompileOptions},
+    dsl::{compile_source, CompileOptions},
     engine::{
         plan::{
             DescriptorConfigurationContract, DescriptorContract, DescriptorContractRegistry,
@@ -51,7 +51,7 @@ use super::{
     SqliteDurableRepository, VersionedPlan,
 };
 
-const DEADLINE_AGENT: &str = r#"api_version: insight.agent/v3
+const DEADLINE_AGENT: &str = r#"api_version: insight.agent/v1
 kind: agent
 inputs: {}
 output: string
@@ -64,7 +64,7 @@ workflow:
     - return: $answer
 "#;
 
-const MODEL_CALL_AGENT: &str = r#"api_version: insight.agent/v3
+const MODEL_CALL_AGENT: &str = r#"api_version: insight.agent/v1
 kind: agent
 inputs: {}
 output: string
@@ -170,7 +170,7 @@ fn deadline_fixture() -> (Plan, DescriptorContractRegistry, VersionedPlan) {
         "Scheduler deadline authority fixture",
         DeploymentRevisionId::new("scheduler_deadline_authority_deployment_v1").unwrap(),
         "expression-3.0.0",
-        json!({"format": "structured-v3"}),
+        json!({"format": "structured"}),
         &plan,
         json!({"fixture": "descriptor-v1"}),
         json!({}),
@@ -290,7 +290,7 @@ fn model_call_fixture_from_source_with_effect_policy(
         "Scheduler model-call authority fixture",
         DeploymentRevisionId::new(deployment_revision_id).unwrap(),
         "expression-3.0.0",
-        json!({"format": "structured-v3"}),
+        json!({"format": "structured"}),
         &plan,
         json!({"fixture": "descriptor-v2"}),
         json!({}),
@@ -1903,10 +1903,10 @@ async fn sqlite_deadline_authority_rejects_premature_and_lost_leases_and_commits
 
 #[tokio::test]
 async fn postgres_deadline_authority_matches_sqlite_contract() {
-    let Ok(database_url) = std::env::var("V3_TEST_POSTGRES_URL") else {
+    let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
         return;
     };
-    let schema = format!("scheduler_deadline_v3_{}", Uuid::new_v4().simple());
+    let schema = format!("scheduler_deadline_{}", Uuid::new_v4().simple());
     let admin = PgPoolOptions::new()
         .max_connections(4)
         .connect(&database_url)
@@ -2617,10 +2617,10 @@ async fn sqlite_failed_and_cancelled_runs_retain_fenced_reported_usage() {
 
 #[tokio::test]
 async fn postgres_function_call_public_item_allocation_is_concurrent_fenced_and_deadline_bounded() {
-    let Ok(database_url) = std::env::var("V3_TEST_POSTGRES_URL") else {
+    let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
         return;
     };
-    let schema = format!("function_call_public_v3_{}", Uuid::new_v4().simple());
+    let schema = format!("function_call_public_{}", Uuid::new_v4().simple());
     let admin = PgPoolOptions::new()
         .max_connections(4)
         .connect(&database_url)
@@ -2769,10 +2769,10 @@ async fn postgres_function_call_public_item_allocation_is_concurrent_fenced_and_
 
 #[tokio::test]
 async fn postgres_failed_function_items_checkpoint_exactly_or_remain_unsealed_without_authority() {
-    let Ok(database_url) = std::env::var("V3_TEST_POSTGRES_URL") else {
+    let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
         return;
     };
-    let schema = format!("failed_function_checkpoint_v3_{}", Uuid::new_v4().simple());
+    let schema = format!("failed_function_checkpoint_{}", Uuid::new_v4().simple());
     let admin = PgPoolOptions::new()
         .max_connections(4)
         .connect(&database_url)
@@ -2912,10 +2912,10 @@ async fn postgres_failed_function_items_checkpoint_exactly_or_remain_unsealed_wi
 
 #[tokio::test]
 async fn postgres_public_retry_appends_identity_and_preserves_failed_incomplete_item() {
-    let Ok(database_url) = std::env::var("V3_TEST_POSTGRES_URL") else {
+    let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
         return;
     };
-    let schema = format!("public_retry_v3_{}", Uuid::new_v4().simple());
+    let schema = format!("public_retry_{}", Uuid::new_v4().simple());
     let admin = PgPoolOptions::new()
         .max_connections(4)
         .connect(&database_url)
@@ -3821,10 +3821,10 @@ async fn sqlite_model_tool_result_commit_crash_cuts_converge_with_stable_effect_
 
 #[tokio::test]
 async fn postgres_cancelled_run_closes_active_model_tool_work_and_fences_recovery() {
-    let Ok(database_url) = std::env::var("V3_TEST_POSTGRES_URL") else {
+    let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
         return;
     };
-    let schema = format!("terminal_model_tool_v3_{}", Uuid::new_v4().simple());
+    let schema = format!("terminal_model_tool_{}", Uuid::new_v4().simple());
     let admin = PgPoolOptions::new()
         .max_connections(4)
         .connect(&database_url)
@@ -4043,10 +4043,10 @@ async fn postgres_cancelled_run_closes_active_model_tool_work_and_fences_recover
 
 #[tokio::test]
 async fn postgres_terminal_run_preserves_checkpointed_model_tool_intent_and_fences_activation() {
-    let Ok(database_url) = std::env::var("V3_TEST_POSTGRES_URL") else {
+    let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
         return;
     };
-    let schema = format!("checkpoint_terminal_tool_v3_{}", Uuid::new_v4().simple());
+    let schema = format!("checkpoint_terminal_tool_{}", Uuid::new_v4().simple());
     let admin = PgPoolOptions::new()
         .max_connections(4)
         .connect(&database_url)
@@ -5518,10 +5518,10 @@ async fn sqlite_model_tool_deadline_preserves_success_and_fences_late_commit() {
 
 #[tokio::test]
 async fn postgres_model_call_authority_matches_sqlite_contract() {
-    let Ok(database_url) = std::env::var("V3_TEST_POSTGRES_URL") else {
+    let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
         return;
     };
-    let schema = format!("scheduler_model_call_v3_{}", Uuid::new_v4().simple());
+    let schema = format!("scheduler_model_call_{}", Uuid::new_v4().simple());
     let admin = PgPoolOptions::new()
         .max_connections(4)
         .connect(&database_url)

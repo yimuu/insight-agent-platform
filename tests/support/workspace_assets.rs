@@ -23,7 +23,7 @@ pub(crate) fn workspace_root() -> PathBuf {
         .find(|candidate| {
             candidate.join("Cargo.toml").is_file()
                 && candidate.join("crates/engine/Cargo.toml").is_file()
-                && candidate.join("tests/fixtures/v3").is_dir()
+                && candidate.join("tests/fixtures/dsl").is_dir()
         })
         .map(Path::to_path_buf)
         .unwrap_or_else(|| {

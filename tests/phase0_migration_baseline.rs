@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fmt::Write as _, fs, path::Path};
 
 use insight_agent_platform::engine::repository::migration_manifest::{
-    SqliteMigrationGuard, DURABLE_V3_MIGRATIONS,
+    SqliteMigrationGuard, DURABLE_MIGRATIONS,
 };
 use sha2::{Digest, Sha256};
 
@@ -25,7 +25,7 @@ fn sha256(bytes: &[u8]) -> String {
 }
 
 fn baselines() -> Vec<Baseline<'static>> {
-    include_str!("baselines/durable-v3-migrations.tsv")
+    include_str!("baselines/durable-migrations.tsv")
         .lines()
         .filter(|line| !line.starts_with('#') && !line.is_empty())
         .map(|line| {
@@ -61,15 +61,15 @@ fn directory_files(path: &Path) -> BTreeMap<String, Vec<u8>> {
 fn phase0_freezes_all_migration_bytes_checksums_guards_and_execution_manifest() {
     let baseline = baselines();
     assert_eq!(baseline.len(), 23);
-    assert_eq!(DURABLE_V3_MIGRATIONS.len(), baseline.len());
+    assert_eq!(DURABLE_MIGRATIONS.len(), baseline.len());
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations/durable_v3");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations/durable");
     let postgres_files = directory_files(&root.join("postgres"));
     let sqlite_files = directory_files(&root.join("sqlite"));
     assert_eq!(postgres_files.len(), baseline.len());
     assert_eq!(sqlite_files.len(), baseline.len());
 
-    for (migration, expected) in DURABLE_V3_MIGRATIONS.iter().zip(&baseline) {
+    for (migration, expected) in DURABLE_MIGRATIONS.iter().zip(&baseline) {
         assert_eq!(migration.version, expected.version);
         assert_eq!(migration.name, expected.name);
 

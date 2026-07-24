@@ -2,7 +2,7 @@
 
 状态：Current
 
-适用版本：`insight.agent/v3`
+适用版本：`insight.agent/v1`
 
 Insight Agent Platform 将作者编写的结构化 YAML 或画布 Graph 编译为同一个不可变、类型化的
 Canonical Plan。调度器只根据 Plan、持久化事实和数据库时间作出决定，Worker 通过带 fence 的
@@ -48,13 +48,13 @@ Run 始终固定到不可变 revision。ViewDocument 和 trace overlay 用于布
 | Package | 所有权边界 |
 |---|---|
 | `insight-engine` | 无 I/O 的执行合同内核：Plan、纯 scheduler、状态机和公开 DTO |
-| `insight-dsl` | DSL v3 与 Graph authoring 的解析、校验、类型检查和 lowering |
+| `insight-dsl` | DSL v1 与 Graph authoring 的解析、校验、类型检查和 lowering |
 | `insight-durable` | 后端中立的持久化 ports、commands、claims、receipts 和 projection models |
 | `insight-resources` | Model/Action/Retrieval SPI、registry 与具体 provider |
 | `insight-storage` | SQLite/PostgreSQL、Graph SQL、Artifact store 和 PostgreSQL live broker adapter |
 | `insight-runtime` | catalog/deployment、leaf adapter、scheduler/worker pump、RunService 和 live response |
 | `insight-api` | Axum HTTP、认证、请求/错误映射和 SSE transport |
-| `insight-agent-platform` | 根兼容 facade、平台配置、进程 bootstrap 和 binary composition |
+| `insight-agent-platform` | 根 facade、平台配置、进程 bootstrap 和 binary composition |
 
 依赖只从高层 consumer 指向低层 owner。`storage` 与 `runtime` 不直接依赖彼此，而是通过
 `engine`/`durable` 所有的 ports 在根 composition 中组合；workspace member 直接导入 owner crate，
@@ -77,7 +77,7 @@ Detached Run 通过查询接口读取 durable projection。Attached Run 使用 l
 
 ## 规范入口
 
-- [DSL v3 持久化图执行架构规范](specifications/2026-07-18-dsl-v3-durable-graph-execution-design.md)
+- [DSL v1 持久化图执行架构规范](specifications/2026-07-18-dsl-v1-durable-graph-execution-design.md)
 - [Response 实时流与 LLM 发布控制规范](specifications/2026-07-19-response-streaming-and-llm-publication-design.md)
 - [Rust Workspace 与 Crate 边界拆分规范](specifications/2026-07-21-rust-workspace-crate-boundaries-design.md)
 - [文档权威关系](../README.md#权威关系)

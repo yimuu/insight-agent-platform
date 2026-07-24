@@ -1441,7 +1441,7 @@ impl TaskExecutionRequest {
     }
 
     /// Projects one independently leased durable model-tool claim into the
-    /// existing v3 Action worker boundary. Every identity and policy field is
+    /// existing Action worker boundary. Every identity and policy field is
     /// copied from frozen claim authority; this path never consults a mutable
     /// Action catalog or reconstructs model-side state.
     pub fn from_model_tool_claim<C: ModelToolTaskClaimView + ?Sized>(

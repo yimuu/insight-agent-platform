@@ -4,7 +4,7 @@
 
 基础路径：`/v1`
 
-HTTP `/v1` 是服务 API 版本，与 Agent DSL 的 `insight.agent/v3` 是两个独立版本空间。除健康检查外，
+HTTP `/v1` 是服务 API 版本，与 Agent DSL 的 `insight.agent/v1` 是两个独立版本空间。除健康检查外，
 路由按平台认证配置执行授权。
 
 ## 健康与发现

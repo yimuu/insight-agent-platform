@@ -10,7 +10,7 @@ use super::{common::canonical_value, DurableRepository, RepositoryError};
 
 pub(crate) const PROJECTION_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 
-/// Closed set understood by the v3 checkpoint envelope and repair registry.
+/// Closed set understood by the checkpoint envelope and repair registry.
 /// Delivery/inbox/idempotency authorities such as `task_outbox`,
 /// `signals_inbox`, `human_work_items`, and `public_event_outbox` are
 /// intentionally excluded: rebuilding one could duplicate an external

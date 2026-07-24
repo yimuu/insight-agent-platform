@@ -26,7 +26,7 @@ fencing 或生产恢复。
 ## PostgreSQL 迁移
 
 进程连接 PostgreSQL 后会在创建 RunService 或读取运行表之前自动执行
-[`migrations/durable_v3/postgres/`](../../migrations/durable_v3/postgres) 中的前向 migration manifest。
+[`migrations/durable/postgres/`](../../migrations/durable/postgres) 中的前向 migration manifest。
 并发实例通过固定的事务级 advisory lock 串行化。
 
 `schema_migrations` 记录 version、文件名、SQL SHA-256 和应用时间。已应用记录必须是当前
@@ -69,4 +69,4 @@ token 不应进入配置明文、Debug、错误或日志。
 - terminal Public Event 和 durable response snapshot 不受该策略影响；
 - `shutdown_grace_period` 与 `shutdown_hard_deadline` 控制停止 admission、drain 与最终退出边界。
 
-生产语义与故障边界的规范性说明见 [DSL v3 架构规范](specifications/2026-07-18-dsl-v3-durable-graph-execution-design.md)。
+生产语义与故障边界的规范性说明见 [DSL v1 架构规范](specifications/2026-07-18-dsl-v1-durable-graph-execution-design.md)。

@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-/// Stable, body-free error returned by the v3 execution model.
+/// Stable, body-free error returned by the execution model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelError {
     code: &'static str,

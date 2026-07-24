@@ -121,7 +121,7 @@ impl ActionContext {
         }
     }
 
-    /// Durable-v3 constructor. The repository-owned `effect_id`, rather than
+    /// Durable constructor. The repository-owned `effect_id`, rather than
     /// an Attempt identity, is the provider idempotency key and therefore
     /// remains stable across retries and worker re-leases.
     pub fn for_durable_effect(

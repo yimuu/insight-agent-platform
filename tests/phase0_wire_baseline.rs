@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, Utc};
 use insight_agent_platform::{
-    dsl::v3::{compile_source, CompileOptions},
+    dsl::{compile_source, CompileOptions},
     engine::{
         ActivationId, AttemptNo, DefinitionRevisionId, ExecutionEventContext,
         ExecutionEventEnvelope, ExecutionEventKind, ExecutionEventPayload, NodeId,
@@ -739,11 +739,11 @@ fn outcome_baseline() -> Value {
 }
 
 fn actual_baseline() -> Value {
-    let source = include_str!("fixtures/v3/linear.yaml");
+    let source = include_str!("fixtures/dsl/linear.yaml");
     let plan = compile_source(
         source,
         CompileOptions::new(
-            DefinitionRevisionId::new("dsl_v3_fixture_revision").unwrap(),
+            DefinitionRevisionId::new("dsl_fixture_revision").unwrap(),
             "fixture.yaml",
             source,
         ),
@@ -842,7 +842,7 @@ fn actual_baseline() -> Value {
 
     json!({
         "plan": {
-            "fixture": "tests/fixtures/v3/linear.yaml",
+            "fixture": "tests/fixtures/dsl/linear.yaml",
             "json_length": plan_json.len(),
             "json_sha256": sha256(&plan_json),
             "semantic_hash": plan.semantic_hash().as_str(),

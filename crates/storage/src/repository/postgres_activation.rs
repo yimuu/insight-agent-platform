@@ -5143,10 +5143,10 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_signal_replay_and_resolution_recompute_persisted_payload_authority() {
-        let Ok(database_url) = std::env::var("V3_TEST_POSTGRES_URL") else {
+        let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
             return;
         };
-        let schema = format!("activation_payload_v3_{}", Uuid::new_v4().simple());
+        let schema = format!("activation_payload_{}", Uuid::new_v4().simple());
         let admin = PgPoolOptions::new()
             .max_connections(2)
             .connect(&database_url)
@@ -5258,10 +5258,10 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_activation_contract_when_pg16_is_available() {
-        let Ok(database_url) = std::env::var("V3_TEST_POSTGRES_URL") else {
+        let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
             return;
         };
-        let schema = format!("activation_v3_{}", Uuid::new_v4().simple());
+        let schema = format!("activation_{}", Uuid::new_v4().simple());
         let admin = PgPoolOptions::new()
             .max_connections(2)
             .connect(&database_url)

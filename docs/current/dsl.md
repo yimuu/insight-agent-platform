@@ -1,16 +1,16 @@
-# DSL v3 指南
+# DSL v1 指南
 
 状态：Current
 
-适用版本：`insight.agent/v3`
+适用版本：`insight.agent/v1`
 
-DSL v3 使用自然 YAML 表达类型、数据依赖和结构化控制流。平台在启动或发布 revision 时完成解析、
+DSL v1 使用自然 YAML 表达类型、数据依赖和结构化控制流。平台在启动或发布 revision 时完成解析、
 类型检查、链接与 lowering；编译失败的 Agent 不会进入运行时。
 
 ## 最小结构
 
 ```yaml
-api_version: insight.agent/v3
+api_version: insight.agent/v1
 kind: agent
 
 metadata:
@@ -137,5 +137,5 @@ JSON Schema；compiler 会生成并执行输入、节点响应和最终输出校
 ## 示例与规范
 
 - [`agents/`](../../agents)：随仓库运行的完整 Agent；
-- [`tests/fixtures/v3/`](../../tests/fixtures/v3)：正向和负向 compiler fixtures；
-- [DSL v3 规范](specifications/2026-07-18-dsl-v3-durable-graph-execution-design.md)：完整作者语义与 lowering 合同。
+- [`tests/fixtures/dsl/`](../../tests/fixtures/dsl)：正向和负向 compiler fixtures；
+- [DSL v1 规范](specifications/2026-07-18-dsl-v1-durable-graph-execution-design.md)：完整作者语义与 lowering 合同。

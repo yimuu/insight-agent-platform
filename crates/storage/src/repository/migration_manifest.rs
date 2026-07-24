@@ -1,4 +1,4 @@
-//! Ordered durable-v3 migration manifest shared by both repository backends.
+//! Ordered durable migration manifest shared by both repository backends.
 //!
 //! Repository initialization iterates this exact manifest. The integration
 //! layout gate also compares it with both on-disk migration directories, so a
@@ -10,7 +10,7 @@ use std::fmt::Write;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DurableV3Migration {
+pub struct DurableMigration {
     pub version: u64,
     pub name: &'static str,
     pub postgres_sql: &'static str,
@@ -18,7 +18,7 @@ pub struct DurableV3Migration {
     pub sqlite_guard: SqliteMigrationGuard,
 }
 
-impl DurableV3Migration {
+impl DurableMigration {
     /// The immutable PostgreSQL migration identity recorded by the production
     /// coordinator. The filename and SQL bytes are both bound by the ledger.
     pub fn postgres_checksum(&self) -> String {
@@ -40,12 +40,12 @@ pub enum SqliteMigrationGuard {
 
 macro_rules! migration {
     ($version:literal, $name:literal, $sqlite_guard:expr) => {
-        DurableV3Migration {
+        DurableMigration {
             version: $version,
             name: concat!(stringify!($version), "_", $name, ".sql"),
             postgres_sql: include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../migrations/durable_v3/postgres/",
+                "/../../migrations/durable/postgres/",
                 stringify!($version),
                 "_",
                 $name,
@@ -53,7 +53,7 @@ macro_rules! migration {
             )),
             sqlite_sql: include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../migrations/durable_v3/sqlite/",
+                "/../../migrations/durable/sqlite/",
                 stringify!($version),
                 "_",
                 $name,
@@ -64,10 +64,10 @@ macro_rules! migration {
     };
 }
 
-pub const DURABLE_V3_MIGRATIONS: [DurableV3Migration; 23] = [
+pub const DURABLE_MIGRATIONS: [DurableMigration; 23] = [
     migration!(
         202607180001,
-        "durable_v3",
+        "initial_schema",
         SqliteMigrationGuard::WhenQueryMissing(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_runs'"
         )

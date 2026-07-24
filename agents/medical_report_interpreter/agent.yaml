@@ -1,4 +1,4 @@
-api_version: insight.agent/v3
+api_version: insight.agent/v1
 kind: agent
 
 metadata:

@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, AssertSqlSafe, PgPool, Row, SqlitePool};
 use uuid::Uuid;
 
-use insight_dsl::v3::{compile_source, CompileOptions};
+use insight_dsl::{compile_source, CompileOptions};
 use insight_durable::scheduler_repository::adapter::SchedulerTaskFailureAdapter as _;
 use insight_engine::plan::PortDirection;
 use insight_engine::resource_policy::RetrievalPublicPolicy;
@@ -32,7 +32,7 @@ use super::{
     VersionedPlan, REPOSITORY_DATA_INVALID,
 };
 
-const SOURCE: &str = r#"api_version: insight.agent/v3
+const SOURCE: &str = r#"api_version: insight.agent/v1
 kind: agent
 types:
   SearchOutput:
@@ -53,7 +53,7 @@ workflow:
     - return: $search
 "#;
 
-const FAIL_AFTER_RETRIEVAL_SOURCE: &str = r#"api_version: insight.agent/v3
+const FAIL_AFTER_RETRIEVAL_SOURCE: &str = r#"api_version: insight.agent/v1
 kind: agent
 types:
   SearchOutput:
@@ -286,7 +286,7 @@ fn deployed_from_source(
         "retrieval durable fixture",
         DeploymentRevisionId::new(format!("retrieval_deployment_{suffix}")).unwrap(),
         "expression-3.0.0",
-        json!({"format": "structured-v3", "source": source}),
+        json!({"format": "structured", "source": source}),
         &plan,
         json!({"fixture": "descriptor-v1"}),
         json!({"fixture": "retrieval-binding-v1"}),
@@ -1076,7 +1076,7 @@ async fn sqlite_retrieval_artifact_is_exact_run_scoped_and_retained_atomically_a
 
 #[tokio::test]
 async fn postgres_retrieval_success_race_replay_and_deadline_match_sqlite() {
-    let Ok(database_url) = std::env::var("V3_TEST_POSTGRES_URL") else {
+    let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
         return;
     };
     let schema = format!("retrieval_publication_{}", Uuid::new_v4().simple());

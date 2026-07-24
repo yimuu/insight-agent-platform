@@ -70,7 +70,7 @@ BRIDGE_RULES = (
             "insight_agent_platform::engine::repository::VersionedPlan::from_verified_graph",
         ),
         generic_name="G",
-        concrete_path="insight_agent_platform::dsl::v3::GraphAuthorDocument",
+        concrete_path="insight_agent_platform::dsl::GraphAuthorDocument",
         view_path="insight_engine::internal::VerifiedAuthorPlanView",
         input_index=5,
         existing_impl_into_string_generics=4,

@@ -1,6 +1,6 @@
 # DSL v2 直接切换说明
 
-> **归档状态：已被 DSL v3 替代。** 本文只描述当时的 `insight.agent/v2` 切换，不是当前迁移或作者指南。当前入口见 [DSL v3 指南](../../current/dsl.md)；v2 作者语法保留在 [DSL 作者语法精简规范](../specs/2026-07-17-dsl-authoring-syntax-simplification.md) 中供追溯。
+> **归档状态：已被 DSL v1 替代。** 本文只描述当时的 `insight.agent/v2` 切换，不是当前迁移或作者指南。当前入口见 [DSL v1 指南](../../current/dsl.md)；v2 作者语法保留在 [DSL 作者语法精简规范](../specs/2026-07-17-dsl-authoring-syntax-simplification.md) 中供追溯。
 
 仓库中的旧 Agent YAML 和图执行器属于未发布原型，不是兼容目标。迁移时必须原子部署新 binary 与全部 Agent YAML；旧文档明确编译失败，不提供 alias、双 parser 或双 scheduler。
 

@@ -12,7 +12,7 @@ use super::RepositoryError;
 
 /// PostgreSQL notification channel used only as a wake-up hint. Consumers
 /// must always load the durable, already-redacted envelope by ID.
-pub const PUBLIC_EVENT_NOTIFY_CHANNEL: &str = "insight_agent_public_events_v3";
+pub const PUBLIC_EVENT_NOTIFY_CHANNEL: &str = "insight_agent_public_events";
 
 /// Database-authoritative total-order cursor for one Run's public stream.
 #[derive(Debug, Clone, PartialEq, Eq)]

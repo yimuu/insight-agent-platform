@@ -1,6 +1,6 @@
 #[cfg(test)]
 pub(crate) mod dynamic_scope_test_contract {
-    use insight_dsl::v3::{compile_source, CompileOptions};
+    use insight_dsl::{compile_source, CompileOptions};
     use insight_engine::internal::{
         scope_instance_for_occurrence, scope_instance_for_runtime_scope,
     };
@@ -39,7 +39,7 @@ pub(crate) mod dynamic_scope_test_contract {
     }
 
     pub(crate) fn assert_map_item_scope_rederivation() {
-        let source = r#"api_version: insight.agent/v3
+        let source = r#"api_version: insight.agent/v1
 kind: agent
 inputs:
   items: string[]
@@ -97,7 +97,7 @@ workflow:
     }
 
     pub(crate) fn assert_loop_iteration_scope_rederivation() {
-        let source = r#"api_version: insight.agent/v3
+        let source = r#"api_version: insight.agent/v1
 kind: agent
 inputs: {seed: string}
 output: string
@@ -139,7 +139,7 @@ workflow:
     }
 
     pub(crate) fn assert_subflow_invocation_scope_rederivation() {
-        let source = r#"api_version: insight.agent/v3
+        let source = r#"api_version: insight.agent/v1
 kind: agent
 inputs: {question: string}
 output: string

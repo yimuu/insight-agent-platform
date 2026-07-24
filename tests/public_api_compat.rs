@@ -11,8 +11,7 @@ use insight_agent_platform::{
     api::v1::{build_router, ApiAuth, ApiState, HumanPrincipalResolver, ResolvedHumanPrincipal},
     config::AuthConfig,
     dsl::{
-        v3::{compile_source, CompileOptions, GraphAuthorDocument, GraphSurfaceRepository},
-        CompileError,
+        compile_source, CompileError, CompileOptions, GraphAuthorDocument, GraphSurfaceRepository,
     },
     engine::{
         plan::Plan as NestedPlan,
@@ -27,7 +26,7 @@ use insight_agent_platform::{
     },
     resources::retrievals::RegisteredRetrieval,
     runtime::{
-        v3_service::PendingMigrationWait, ProductionRunRepository, RunRepositoryCapability,
+        run_service::PendingMigrationWait, ProductionRunRepository, RunRepositoryCapability,
         RunService,
     },
 };

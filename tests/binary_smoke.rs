@@ -1,4 +1,4 @@
-//! Real binary smoke test for the durable v3 workflow runtime.
+//! Real binary smoke test for the durable workflow runtime.
 
 use std::{
     fs,
@@ -12,7 +12,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use futures::FutureExt;
-use insight_agent_platform::engine::repository::migration_manifest::DURABLE_V3_MIGRATIONS;
+use insight_agent_platform::engine::repository::migration_manifest::DURABLE_MIGRATIONS;
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, AssertSqlSafe, PgPool};
@@ -296,7 +296,7 @@ async fn stock_production_binary_recovers_postgres_run_across_restart() {
         .max_connections(2)
         .connect(&database_url)
         .await
-        .unwrap_or_else(|_| panic!("V3_TEST_POSTGRES_URL must be reachable"));
+        .unwrap_or_else(|_| panic!("TEST_POSTGRES_URL must be reachable"));
     sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
         .execute(&admin)
         .await
@@ -412,10 +412,10 @@ async fn stock_production_binary_recovers_postgres_run_across_restart() {
 }
 
 fn postgres_binary_test_url() -> Option<String> {
-    match std::env::var("V3_TEST_POSTGRES_URL") {
+    match std::env::var("TEST_POSTGRES_URL") {
         Ok(value) => Some(value),
         Err(error) if std::env::var_os("CI").is_some() => {
-            panic!("CI must set V3_TEST_POSTGRES_URL for the stock production binary gate: {error}")
+            panic!("CI must set TEST_POSTGRES_URL for the stock production binary gate: {error}")
         }
         Err(_) => None,
     }
@@ -429,8 +429,8 @@ async fn postgres_startup_authority(pool: &PgPool) -> PostgresStartupAuthoritySn
     .fetch_all(pool)
     .await
     .expect("stock binary must expose its migration ledger");
-    assert_eq!(migrations.len(), DURABLE_V3_MIGRATIONS.len());
-    for (actual, expected) in migrations.iter().zip(DURABLE_V3_MIGRATIONS.iter()) {
+    assert_eq!(migrations.len(), DURABLE_MIGRATIONS.len());
+    for (actual, expected) in migrations.iter().zip(DURABLE_MIGRATIONS.iter()) {
         assert_eq!(u64::try_from(actual.0).unwrap(), expected.version);
         assert_eq!(actual.1, expected.name);
         assert_eq!(actual.2, expected.postgres_checksum());
@@ -548,7 +548,7 @@ fn write_restart_configs(root: &Path, bind_addr: SocketAddr) -> PathBuf {
     fs::create_dir_all(&agent_dir).unwrap();
     fs::write(
         agent_dir.join("agent.yaml"),
-        r#"api_version: insight.agent/v3
+        r#"api_version: insight.agent/v1
 kind: agent
 
 metadata:

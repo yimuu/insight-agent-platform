@@ -181,7 +181,7 @@ impl<'de> Deserialize<'de> for WorkerExecutionPolicy {
 }
 
 /// Preferred public name. The old name remains the concrete type while the
-/// aggregate model is being cut over in the same v3 branch.
+/// aggregate model is being cut over in the same implementation.
 pub type WorkerEffectPolicy = WorkerExecutionPolicy;
 
 /// An Activation has exactly one execution capability for its entire life.

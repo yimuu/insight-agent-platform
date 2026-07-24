@@ -5,7 +5,7 @@ pub mod postgres_response_broker {
 pub mod response_stream;
 #[cfg(test)]
 mod retrieval_safety_tests;
-pub mod v3_service;
+pub mod run_service;
 
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
 pub use insight_engine::execution::{RunError, RunErrorKind};
@@ -30,7 +30,7 @@ pub use response_stream::{
     WorkflowToolResult, WorkflowUsageStatus, MAX_FUNCTION_CALL_ARGUMENT_BYTES,
     RESPONSE_STREAM_PROTOCOL_VERSION,
 };
-pub use v3_service::{
+pub use run_service::{
     AttachedRun, DeployedAgentCatalog, ForkRecoveryOptions, GraphPublication,
     MigrationNodeMappingRequest, ProductionRunRepository, PublicArtifact, RecoveryOperation,
     RecoveryRequestMetadata, RecoveryReusePolicy, RecoveryRunResult, RequestMetadata,

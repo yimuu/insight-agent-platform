@@ -13,7 +13,7 @@ use sqlx::Row;
 use insight_engine::repository::RepositoryError;
 use insight_engine::{ActivationId, DefinitionRevisionId, NodeId, Plan, RunId, TransitionOutcome};
 
-use insight_dsl::v3::{
+use insight_dsl::{
     graph_repository::adapter as graph_repository_adapter, ActivationTrace, GraphAuthorDocument,
     GraphDocumentId, GraphSurfaceRepository, StoredGraphView, TraceActivationState, TraceOverlay,
     ViewDocument,
