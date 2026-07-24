@@ -1533,7 +1533,7 @@ async fn heartbeat_attempt(
 ) -> Result<TransitionOutcome<()>, RepositoryError> {
     let authority = command.authority();
     let _writer = repository.writer.lock().await;
-    let now = Utc::now();
+    let now = database_time(Utc::now());
     let now_encoded = now_text(now);
     let mut transaction = repository
         .pool

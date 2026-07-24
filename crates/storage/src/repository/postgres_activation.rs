@@ -1587,7 +1587,7 @@ async fn heartbeat_attempt(
     let authority = command.authority();
     let transition_key = activation_adapter::heartbeat_transition_key(&command)?;
     let intent_hash = canonical_intent_hash(&command)?;
-    let now = Utc::now();
+    let now = database_time(Utc::now());
     let mut transaction = repository
         .pool
         .begin()
