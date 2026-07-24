@@ -82,7 +82,8 @@ python3 "$repo_root/scripts/normalize-public-api-rustdoc.py" \
   --workspace-root "$repo_root" >"$actual"
 
 if [[ "${UPDATE_PUBLIC_API_BASELINE:-0}" == "1" ]]; then
-  cp "$actual" "$baseline"
+  python3 "$repo_root/scripts/check-public-api-compat-bridges.py" \
+    --freeze-bridges "$actual" "$baseline"
   echo "updated $baseline"
   exit 0
 fi

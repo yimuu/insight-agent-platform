@@ -80,4 +80,4 @@ best-effort；发生丢失时客户端通过 `workflow.stream.gap` 和最终快�
 人工任务使用独立的 request-scoped principal。claim 返回单调递增的 `claim_fence`，complete 必须回传
 该 fence；租约过期后的旧处理人不能提交。
 
-完整协议合同见 [Response 实时流与 LLM 发布控制规范](specifications/2026-07-19-response-streaming-and-llm-publication-design.md)。
+SSE 事件类型、终态快照和错误映射由公开 DTO 与 API 合同测试共同约束。

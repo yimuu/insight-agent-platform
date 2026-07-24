@@ -134,8 +134,8 @@ JSON Schema；compiler 会生成并执行输入、节点响应和最终输出校
 `human_task` 是独立的持久化工作项，不是 signal 的别名。候选人、候选组、响应类型和 claim lease
 都必须显式声明。
 
-## 示例与规范
+## 示例与相关文档
 
 - [`agents/`](../../agents)：随仓库运行的完整 Agent；
 - [`tests/fixtures/dsl/`](../../tests/fixtures/dsl)：正向和负向 compiler fixtures；
-- [DSL v1 规范](specifications/2026-07-18-dsl-v1-durable-graph-execution-design.md)：完整作者语义与 lowering 合同。
+- [架构概览](architecture.md)：Canonical Plan、持久化执行与恢复边界。

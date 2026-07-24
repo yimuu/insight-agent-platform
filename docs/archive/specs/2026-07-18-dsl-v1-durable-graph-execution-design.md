@@ -20,28 +20,28 @@
 - 从 Region/SSA 内存运行时到当前持久化内核的九阶段 clean-break 切换结果。
 
 本文是当前 parser、compiler、Plan、durable runtime 与 Graph API 的规范性合同。
-[DSL 作者语法精简规范](../../archive/specs/2026-07-17-dsl-authoring-syntax-simplification.md)及更早文档只作为
+[DSL 作者语法精简规范](./2026-07-17-dsl-authoring-syntax-simplification.md)及更早文档只作为
 历史决策记录；本文没有明确保留的旧语法或旧运行时行为均不属于当前生产合同。
 
 ### 1.1 与现有规范的关系
 
 | 现有规范 | 当前决策 |
 |---|---|
-| [DSL 作者语法精简规范](../../archive/specs/2026-07-17-dsl-authoring-syntax-simplification.md) | 保留类型、`$`、`{{ }}`、Message、自然 YAML 和 LLM response 合同 |
-| [DSL 作者层重设计规范](../../archive/specs/2026-07-17-dsl-authoring-surface-redesign.md) | 保留 LLM、Action、Prompt、安全和错误合同；替代 structured `switch` 与 Region lowering |
-| [DSL vNext Region/SSA Design](../../archive/specs/2026-07-16-dsl-vnext-region-ssa-design.md) | 保留词法作用域、类型验证、取消/drain 和唯一终态；替代 executable Region、递归 scope runtime、路径派生 ID 与进程内中间值 |
-| [PostgreSQL Exclusive Store Ownership](../../archive/specs/2026-07-15-postgresql-exclusive-store-ownership-design.md) | 保留 fencing 原则；以多 runtime 的 lease、epoch 与 CAS 替代 singleton store owner |
-| [Durable Recovery Finalization](../../archive/specs/2026-07-11-durable-recovery-finalization-design.md) | 保留权威终态收敛；以 Activation checkpoint resume 替代启动时统一标记 interrupted |
-| [Live-only SSE](../../archive/specs/2026-07-11-live-only-sse-design.md) | 保留 Attached live-only、terminal 后 EOF 与无 replay；内部 execution ledger 不成为公共 replay API |
+| [DSL 作者语法精简规范](./2026-07-17-dsl-authoring-syntax-simplification.md) | 保留类型、`$`、`{{ }}`、Message、自然 YAML 和 LLM response 合同 |
+| [DSL 作者层重设计规范](./2026-07-17-dsl-authoring-surface-redesign.md) | 保留 LLM、Action、Prompt、安全和错误合同；替代 structured `switch` 与 Region lowering |
+| [DSL vNext Region/SSA Design](./2026-07-16-dsl-vnext-region-ssa-design.md) | 保留词法作用域、类型验证、取消/drain 和唯一终态；替代 executable Region、递归 scope runtime、路径派生 ID 与进程内中间值 |
+| [PostgreSQL Exclusive Store Ownership](./2026-07-15-postgresql-exclusive-store-ownership-design.md) | 保留 fencing 原则；以多 runtime 的 lease、epoch 与 CAS 替代 singleton store owner |
+| [Durable Recovery Finalization](./2026-07-11-durable-recovery-finalization-design.md) | 保留权威终态收敛；以 Activation checkpoint resume 替代启动时统一标记 interrupted |
+| [Live-only SSE](./2026-07-11-live-only-sse-design.md) | 保留 Attached live-only、terminal 后 EOF 与无 replay；内部 execution ledger 不成为公共 replay API |
 | [Response 实时流与 LLM 发布控制规范](./2026-07-19-response-streaming-and-llm-publication-design.md) | Implemented / Verified 窄增量：增加 OpenAI-aligned 实时回答、LLM `stream`/`publish`、工具/RAG 安全投影与 durable final snapshot |
-| [Production Lifecycle V1](../../archive/specs/2026-07-15-production-lifecycle-v1-design.md) | 保留健康检查、admission 和 drain；替代 singleton ownership readiness |
-| [Authoritative Stop Semantics](../../archive/specs/2026-07-11-authoritative-stop-semantics-design.md) | 保留 runtime first-winner stop authority；改由 durable termination intent 承载 |
-| [Terminal CAS](../../archive/specs/2026-07-15-independent-connection-terminal-cas-race-design.md) 与 [Public Agent Contract](../../archive/specs/2026-07-15-public-agent-contract-design.md) | 保留唯一终态 CAS 和公共输入 Schema；内部状态通过明确映射投影到现有公共状态/事件 |
+| [Production Lifecycle V1](./2026-07-15-production-lifecycle-v1-design.md) | 保留健康检查、admission 和 drain；替代 singleton ownership readiness |
+| [Authoritative Stop Semantics](./2026-07-11-authoritative-stop-semantics-design.md) | 保留 runtime first-winner stop authority；改由 durable termination intent 承载 |
+| [Terminal CAS](./2026-07-15-independent-connection-terminal-cas-race-design.md) 与 [Public Agent Contract](./2026-07-15-public-agent-contract-design.md) | 保留唯一终态 CAS 和公共输入 Schema；内部状态通过明确映射投影到现有公共状态/事件 |
 | 历史 `core.*` 控制流规范 | 继续为历史文档；Fork/Join 是私有 Plan 原语，不重新开放 public `core.*` 节点 |
 
 当前实现仅保留 clean-break 路径；发布级完成以本文状态与证据节所列门禁通过为准。
 冲突规范按历史记录保留，当前权威关系由
-[设计文档权威关系](../README.md)定义；旧 parser、Region/SSA scheduler 与 singleton store
+[设计文档权威关系](../../README.md)定义；旧 parser、Region/SSA scheduler 与 singleton store
 ownership 不得重新进入生产入口或 checked-in positive surface。
 
 ### 1.2 规范性术语

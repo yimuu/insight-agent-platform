@@ -16,5 +16,10 @@ API change:
 UPDATE_PUBLIC_API_BASELINE=1 bash scripts/check-public-api-baseline.sh
 ```
 
+The update path records the complete current inventory but rewrites the
+narrowly audited generic crate-boundary bridges back to their concrete facade
+signatures. This keeps subsequent checks able to prove that those generic
+implementations remain source-compatible with the facade API.
+
 Protocol and migration byte baselines in this directory are verified by the
 Phase 0 compatibility integration tests.

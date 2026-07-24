@@ -69,4 +69,4 @@ token 不应进入配置明文、Debug、错误或日志。
 - terminal Public Event 和 durable response snapshot 不受该策略影响；
 - `shutdown_grace_period` 与 `shutdown_hard_deadline` 控制停止 admission、drain 与最终退出边界。
 
-生产语义与故障边界的规范性说明见 [DSL v1 架构规范](specifications/2026-07-18-dsl-v1-durable-graph-execution-design.md)。
+生产语义与故障边界见[架构概览](architecture.md)，具体配置以严格配置 schema 和启动校验为准。

@@ -52,11 +52,10 @@ cargo deny check
 
 ## 修改合同时
 
-1. 先确认变更属于使用者文档、规范、实现还是三者共同变更；
-2. Breaking 语义先更新 `docs/current/specifications/` 中的主规范或新增窄增量；
-3. 同步 compiler/schema、runtime、正向示例和负向 fixtures；
-4. 为 durable 行为补充 SQLite 与真实 PostgreSQL 证据；
-5. 更新对应 `docs/current/` 使用者文档；
-6. 已被替代的设计移入 `docs/archive/`，不要让历史示例重新成为正向输入。
+1. 先确认受影响的公开合同、实现、测试和当前文档；
+2. Breaking 语义同步更新 compiler/schema、runtime、正向示例和负向 fixtures；
+3. 为 durable 行为补充 SQLite 与真实 PostgreSQL 证据；
+4. 更新对应 `docs/current/` 文档；
+5. 设计和迁移记录写入 `docs/archive/`，不要让历史示例重新成为正向输入。
 
 文档分类与权威顺序见[文档首页](../README.md)。

@@ -246,6 +246,75 @@ def audited_expected_inventory(baseline: str) -> tuple[str, int]:
     return "".join(transformed), len(seen)
 
 
+def frozen_baseline_inventory(actual: str) -> tuple[str, int]:
+    """Reverse audited bridges before recording a new frozen baseline."""
+    rules_by_path = {path: rule for rule in BRIDGE_RULES for path in rule.paths}
+    if len(rules_by_path) != sum(len(rule.paths) for rule in BRIDGE_RULES):
+        raise BridgeConfigurationError("bridge rules contain a duplicate public path")
+
+    transformed: list[str] = []
+    seen: set[str] = set()
+    for raw_line in actual.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        ending = raw_line[len(line) :]
+        path, separator, remainder = line.partition("\t")
+        rule = rules_by_path.get(path)
+        if rule is None:
+            transformed.append(raw_line)
+            continue
+        if path in seen:
+            raise BridgeConfigurationError(f"duplicate actual declaration: {path}")
+        seen.add(path)
+
+        kind, second_separator, declaration_json = remainder.partition("\t")
+        if separator != "\t" or second_separator != "\t":
+            raise BridgeConfigurationError(f"malformed actual declaration: {path}")
+        if kind != "inherent_function":
+            raise BridgeConfigurationError(
+                f"expected inherent_function for {path}; found {kind!r}"
+            )
+        try:
+            declaration = json.loads(declaration_json)
+        except json.JSONDecodeError as error:
+            raise BridgeConfigurationError(
+                f"invalid declaration JSON for {path}: {error}"
+            ) from error
+
+        expected_generics = bridged_generics(rule)
+        if declaration.get("generics") != expected_generics:
+            raise BridgeConfigurationError(
+                f"actual generics changed for audited bridge {path}"
+            )
+        signature = declaration.get("sig")
+        if not isinstance(signature, dict):
+            raise BridgeConfigurationError(f"actual signature is missing for {path}")
+        inputs = signature.get("inputs")
+        if not isinstance(inputs, list) or rule.input_index >= len(inputs):
+            raise BridgeConfigurationError(
+                f"actual input {rule.input_index} is missing for {path}"
+            )
+        expected_input = borrowed({"generic": rule.generic_name})
+        if inputs[rule.input_index] != expected_input:
+            raise BridgeConfigurationError(
+                f"actual input {rule.input_index} changed for audited bridge {path}"
+            )
+
+        declaration["generics"] = baseline_generics(rule)
+        inputs[rule.input_index] = borrowed(
+            {"resolved_path": {"args": None, "path": rule.concrete_path}}
+        )
+        canonical = json.dumps(declaration, ensure_ascii=False, separators=(",", ":"))
+        transformed.append(f"{path}\t{kind}\t{canonical}{ending}")
+
+    missing = sorted(set(rules_by_path) - seen)
+    if missing:
+        raise BridgeConfigurationError(
+            "actual inventory is missing audited bridge declaration(s): "
+            + ", ".join(missing)
+        )
+    return "".join(transformed), len(seen)
+
+
 def unified_inventory_diff(
     expected: str, actual: str, baseline_name: str, actual_name: str
 ) -> str:
@@ -321,6 +390,9 @@ def self_test() -> None:
     baseline = "".join(lines)
     expected, count = audited_expected_inventory(baseline)
     assert count == sum(len(rule.paths) for rule in BRIDGE_RULES)
+    frozen, frozen_count = frozen_baseline_inventory(expected)
+    assert frozen_count == count
+    assert frozen == baseline
     graph_path = BRIDGE_RULES[-1].paths[0]
     graph_line = next(
         line for line in expected.splitlines() if line.startswith(f"{graph_path}\t")
@@ -375,9 +447,26 @@ def main() -> int:
     parser.add_argument("baseline", nargs="?", type=Path)
     parser.add_argument("actual", nargs="?", type=Path)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument(
+        "--freeze-bridges",
+        nargs=2,
+        metavar=("ACTUAL", "BASELINE"),
+        type=Path,
+        help="record ACTUAL while restoring audited concrete signatures in BASELINE",
+    )
     args = parser.parse_args()
     if args.self_test:
         self_test()
+        return 0
+    if args.freeze_bridges is not None:
+        actual_path, baseline_path = args.freeze_bridges
+        try:
+            baseline, frozen_count = frozen_baseline_inventory(actual_path.read_text())
+        except BridgeConfigurationError as error:
+            print(f"public API bridge gate configuration error: {error}", file=sys.stderr)
+            return 2
+        baseline_path.write_text(baseline)
+        print(f"froze {frozen_count} audited bridge declarations in {baseline_path}")
         return 0
     if args.baseline is None or args.actual is None:
         parser.error("baseline and actual are required unless --self-test is used")

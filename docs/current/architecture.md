@@ -75,9 +75,10 @@ Detached Run 通过查询接口读取 durable projection。Attached Run 使用 l
 不提供 `Last-Event-ID` replay；临时 delta 是有界、best-effort 数据，最终 durable terminal snapshot
 才是交付权威。内部 execution ledger 不直接暴露为公共事件历史。
 
-## 规范入口
+## 相关文档
 
-- [DSL v1 持久化图执行架构规范](specifications/2026-07-18-dsl-v1-durable-graph-execution-design.md)
-- [Response 实时流与 LLM 发布控制规范](specifications/2026-07-19-response-streaming-and-llm-publication-design.md)
-- [Rust Workspace 与 Crate 边界拆分规范](specifications/2026-07-21-rust-workspace-crate-boundaries-design.md)
+- [DSL v1 指南](dsl.md)
+- [HTTP 与 SSE API](api.md)
+- [部署与运维](operations.md)
+- [开发指南](development.md)
 - [文档权威关系](../README.md#权威关系)

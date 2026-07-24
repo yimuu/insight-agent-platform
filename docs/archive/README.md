@@ -5,7 +5,7 @@
 
 | 目录 | 内容 |
 |---|---|
-| [`specs/`](specs/) | 已被 DSL v1 主规范吸收、替代或废弃的设计 |
+| [`specs/`](specs/) | 已完成、被吸收、被替代或废弃的设计 |
 | [`plans/`](plans/) | 已完成或失效的实施步骤与任务清单 |
 | [`reviews/`](reviews/) | 特定时间点的代码、依赖和整改快照 |
 | [`migrations/`](migrations/) | 旧 DSL 或运行时切换说明 |
@@ -16,7 +16,8 @@
 当前入口：
 
 - [文档首页](../README.md)
-- [当前文档与规范](../current/README.md)
-- [DSL v1 持久化图执行架构规范](../current/specifications/2026-07-18-dsl-v1-durable-graph-execution-design.md)
+- [当前文档](../current/README.md)
+- [架构概览](../current/architecture.md)
+- [DSL v1 指南](../current/dsl.md)
 
 如果归档记录与当前文档、实现或测试冲突，以[文档权威关系](../README.md#权威关系)为准。

@@ -26,7 +26,7 @@
 - 最终验证后的 workflow result 才是 durable authority；
 - durable terminal snapshot 发送后立即 EOF；
 - Provider 入站流的完成证据继续由
-  [OpenAI Stream Completion Evidence](../../archive/specs/2026-07-15-openai-stream-completion-evidence-design.md)
+  [OpenAI Stream Completion Evidence](./2026-07-15-openai-stream-completion-evidence-design.md)
   负责。
 
 本规范已经实现、验证并完成切换，替代了“LLM 只在内部聚合，公共 SSE 不提供内容”的旧结论。

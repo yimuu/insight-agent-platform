@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    io::{self, Read},
     net::{SocketAddr, TcpListener},
     panic::{resume_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
@@ -705,17 +706,92 @@ trait RecoverableChild {
     fn wait_for_drop(&mut self);
 }
 
-impl RecoverableChild for Child {
+struct CapturedChild {
+    child: Child,
+    stdout: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+    stderr: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+}
+
+impl CapturedChild {
+    fn new(mut child: Child) -> Self {
+        let stdout = child.stdout.take().expect("child stdout must be piped");
+        let stderr = child.stderr.take().expect("child stderr must be piped");
+        Self {
+            child,
+            stdout: Some(spawn_output_reader(stdout)),
+            stderr: Some(spawn_output_reader(stderr)),
+        }
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        self.child.kill()
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.child.wait()
+    }
+
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn collect(mut self) -> io::Result<Output> {
+        let status = self.child.wait()?;
+        let stdout = join_output_reader(self.stdout.take(), "stdout")?;
+        let stderr = join_output_reader(self.stderr.take(), "stderr")?;
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
+    }
+
+    fn join_output_readers(&mut self) {
+        for reader in [&mut self.stdout, &mut self.stderr] {
+            if let Some(reader) = reader.take() {
+                let _ = reader.join();
+            }
+        }
+    }
+}
+
+fn spawn_output_reader<R>(mut reader: R) -> thread::JoinHandle<io::Result<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output)?;
+        Ok(output)
+    })
+}
+
+fn join_output_reader(
+    reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+    stream: &str,
+) -> io::Result<Vec<u8>> {
+    reader
+        .expect("output reader already collected")
+        .join()
+        .map_err(|_| io::Error::other(format!("child {stream} reader panicked")))?
+}
+
+impl RecoverableChild for CapturedChild {
     fn kill_for_drop(&mut self) {
         let _ = self.kill();
     }
 
     fn wait_for_drop(&mut self) {
         let _ = self.wait();
+        self.join_output_readers();
     }
 }
 
-struct ChildGuard<C: RecoverableChild = Child> {
+struct ChildGuard<C: RecoverableChild = CapturedChild> {
     child: Option<C>,
 }
 
@@ -729,7 +805,7 @@ impl<C: RecoverableChild> ChildGuard<C> {
     }
 }
 
-impl ChildGuard<Child> {
+impl ChildGuard<CapturedChild> {
     fn spawn(platform_config: &Path) -> Self {
         Self::spawn_with_env(platform_config, &[])
     }
@@ -746,7 +822,7 @@ impl ChildGuard<Child> {
         let child = command
             .spawn()
             .expect("failed to spawn insight-agent-platform binary");
-        Self::new(child)
+        Self::new(CapturedChild::new(child))
     }
 
     fn try_wait(&mut self) -> Option<ExitStatus> {
@@ -812,7 +888,7 @@ impl ChildGuard<Child> {
         }
 
         let child = self.child.take().expect("child already collected");
-        Some(child.wait_with_output().expect(collect_context))
+        Some(child.collect().expect(collect_context))
     }
 }
 
@@ -826,7 +902,7 @@ impl<C: RecoverableChild> Drop for ChildGuard<C> {
 }
 
 #[cfg(unix)]
-fn request_graceful_shutdown(child: &mut Child) {
+fn request_graceful_shutdown(child: &mut CapturedChild) {
     let status = Command::new("kill")
         .arg("-TERM")
         .arg(child.id().to_string())
@@ -836,7 +912,7 @@ fn request_graceful_shutdown(child: &mut Child) {
 }
 
 #[cfg(not(unix))]
-fn request_graceful_shutdown(child: &mut Child) {
+fn request_graceful_shutdown(child: &mut CapturedChild) {
     let _ = child.kill();
 }
 

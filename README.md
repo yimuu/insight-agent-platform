@@ -71,12 +71,11 @@ workflow:
 - [DSL v1 指南](docs/current/dsl.md)：Agent 结构、类型、表达式和控制流；
 - [HTTP 与 SSE API](docs/current/api.md)：路由、幂等要求和响应流；
 - [部署与运维](docs/current/operations.md)：配置、存储、迁移、认证和生命周期；
-- [开发指南](docs/current/development.md)：代码导航和验证命令。
+- [开发指南](docs/current/development.md)：代码导航和验证命令；
+- [变更记录](CHANGELOG.md)：发布版本的重要变化与兼容性说明。
 
-规范性合同见 [DSL v1 持久化图执行架构规范](docs/current/specifications/2026-07-18-dsl-v1-durable-graph-execution-design.md)。
-内部代码组织和依赖边界见
-[Rust Workspace 与 Crate 边界拆分规范](docs/current/specifications/2026-07-21-rust-workspace-crate-boundaries-design.md)。
-历史设计、实施计划和评审记录集中保存在 [`docs/archive/`](docs/archive/README.md)，不代表当前生产合同。
+当前行为由上述文档、公开 schema、编译器与 verifier、数据库约束及测试共同定义。历史设计、
+实施计划和评审记录集中保存在 [`docs/archive/`](docs/archive/README.md)，不代表当前生产合同。
 
 ## 验证
 
@@ -93,3 +92,7 @@ cargo test --locked --workspace --doc --all-features
 
 CI 使用同一组 workspace 门禁，并在 PostgreSQL 16 上运行数据库合同与 real-process
 restart/shutdown 测试，同时执行依赖策略检查。具体环境要求见[开发指南](docs/current/development.md)。
+
+## License
+
+本项目采用 [Apache License 2.0](LICENSE)。
