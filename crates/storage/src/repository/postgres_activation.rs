@@ -2020,7 +2020,7 @@ async fn complete_attempt(
         &transition_key,
         "attempt_terminal",
     )?);
-    let now = Utc::now();
+    let now = database_time(Utc::now());
     let (
         attempt_next,
         activation_next,
@@ -2045,7 +2045,8 @@ async fn complete_attempt(
             let evidence = parse_effect_evidence(&evidence)?;
             let retry_safe = idempotency == "idempotent" || evidence == EffectEvidence::NotStarted;
             let retry = if let Some(retry_at) = retry_at {
-                if !retry_safe || remaining <= 0 || retry_at <= &now {
+                let retry_at = database_time(*retry_at);
+                if !retry_safe || remaining <= 0 || retry_at <= now {
                     return Ok(TransitionOutcome::StateConflict);
                 }
                 let retry_timer = model_data(TimerId::new(timer_id(&transition_key, "retry")))?;
@@ -2059,7 +2060,7 @@ async fn complete_attempt(
                 .bind(command.run_id().as_str())
                 .bind(retry_timer.as_str())
                 .bind(command.activation_id().as_str())
-                .bind(*retry_at)
+                .bind(retry_at)
                 .bind(attempt_i32(authority.fence().attempt_no())?)
                 .bind(i64_from_u64(authority.fence().lease_epoch().get())?)
                 .bind(authority.fencing_token())
@@ -2074,7 +2075,7 @@ async fn complete_attempt(
                     command.activation_id().clone(),
                     authority.fence(),
                     retry_timer,
-                    *retry_at,
+                    retry_at,
                     u32::try_from(remaining).map_err(|_| RepositoryError::invalid_data())?,
                 ))
             } else {
@@ -2351,7 +2352,7 @@ async fn register_wait(
     .execute(&mut *transaction)
     .await
     .map_err(RepositoryError::storage)?;
-    if let Some(deadline) = command.wait_deadline() {
+    if let Some(deadline) = command.wait_deadline().copied().map(database_time) {
         sqlx::query(
             "INSERT INTO timers (
                 run_id,timer_id,activation_id,timer_kind,timer_state,deadline_at,
@@ -2361,7 +2362,7 @@ async fn register_wait(
         .bind(command.run_id().as_str())
         .bind(timer_id(&transition_key, "wait"))
         .bind(command.activation_id().as_str())
-        .bind(*deadline)
+        .bind(deadline)
         .bind(transition_key.as_str())
         .execute(&mut *transaction)
         .await
@@ -2387,7 +2388,7 @@ async fn register_wait(
         event,
     )
     .await?;
-    if let Some(deadline) = command.wait_deadline() {
+    if let Some(deadline) = command.wait_deadline().copied().map(database_time) {
         let scope = model_data(insight_engine::ScopeInstanceId::new(
             row.try_get::<String, _>("scope_instance_id")
                 .map_err(|_| RepositoryError::invalid_data())?,
@@ -2404,7 +2405,7 @@ async fn register_wait(
                 ))?),
             ExecutionEventPayload::TimerScheduled {
                 timer_id: model_data(TimerId::new(timer_id(&transition_key, "wait")))?,
-                fire_at: *deadline,
+                fire_at: deadline,
             },
         ))?;
         insert_companion_event(
@@ -2459,7 +2460,7 @@ async fn replay_wait_receipt(
     if stored != ExecutionEventPayload::ActivationWaiting {
         return Err(RepositoryError::invalid_data());
     }
-    if let Some(deadline) = command.wait_deadline() {
+    if let Some(deadline) = command.wait_deadline().copied().map(database_time) {
         let timer = sqlx::query(
             "SELECT timer_id,deadline_at FROM timers
              WHERE run_id=$1 AND created_by_transition_key=$2 AND timer_kind='wait'",
@@ -2477,7 +2478,7 @@ async fn replay_wait_receipt(
         if timer
             .try_get::<DateTime<Utc>, _>("deadline_at")
             .map_err(|_| RepositoryError::invalid_data())?
-            != *deadline
+            != deadline
         {
             return Err(RepositoryError::invalid_data());
         }
@@ -2499,7 +2500,7 @@ async fn replay_wait_receipt(
                 ))?),
             ExecutionEventPayload::TimerScheduled {
                 timer_id: id,
-                fire_at: *deadline,
+                fire_at: deadline,
             },
         ))?;
         verify_companion_event(
@@ -2608,6 +2609,7 @@ async fn schedule_activation_timer(
         &transition_key,
         activation_adapter::activation_timer_kind_str(command.kind()),
     )))?;
+    let deadline = database_time(*command.deadline());
     sqlx::query(
         "INSERT INTO timers (
             run_id,timer_id,activation_id,timer_kind,timer_state,deadline_at,
@@ -2620,7 +2622,7 @@ async fn schedule_activation_timer(
     .bind(activation_adapter::activation_timer_kind_str(
         command.kind(),
     ))
-    .bind(*command.deadline())
+    .bind(deadline)
     .bind(transition_key.as_str())
     .execute(&mut *transaction)
     .await
@@ -2636,7 +2638,7 @@ async fn schedule_activation_timer(
         )?,
         ExecutionEventPayload::TimerScheduled {
             timer_id: id.clone(),
-            fire_at: *command.deadline(),
+            fire_at: deadline,
         },
     ))?;
     let receipt = insert_closed_event(
@@ -4050,7 +4052,7 @@ async fn fire_timer(
     let deadline = row
         .try_get::<DateTime<Utc>, _>("deadline_at")
         .map_err(|_| RepositoryError::invalid_data())?;
-    let observed = Utc::now();
+    let observed = database_time(Utc::now());
     if row
         .try_get::<String, _>("timer_state")
         .map_err(|_| RepositoryError::invalid_data())?
@@ -4274,7 +4276,8 @@ async fn fire_timer(
                 let retry_at = command
                     .retry_at()
                     .ok_or_else(RepositoryError::invalid_data)?;
-                if retry_at <= &observed {
+                let retry_at = database_time(*retry_at);
+                if retry_at <= observed {
                     return Ok(TransitionOutcome::StateConflict);
                 }
                 let id = model_data(TimerId::new(timer_id(&transition_key, "retry")))?;
@@ -4288,7 +4291,7 @@ async fn fire_timer(
                 .bind(command.run_id().as_str())
                 .bind(id.as_str())
                 .bind(activation_id.as_str())
-                .bind(*retry_at)
+                .bind(retry_at)
                 .bind(attempt_i32(fence.attempt_no())?)
                 .bind(i64_from_u64(fence.lease_epoch().get())?)
                 .bind(row.try_get::<String, _>("expected_fencing_token").map_err(|_| RepositoryError::invalid_data())?)
@@ -4303,7 +4306,7 @@ async fn fire_timer(
                     activation_id.clone(),
                     fence,
                     id,
-                    *retry_at,
+                    retry_at,
                     u32::try_from(remaining).map_err(|_| RepositoryError::invalid_data())?,
                 ))
             } else {
@@ -5495,11 +5498,14 @@ mod tests {
         )
         .await;
         let registration_key = key("pg_wait.register");
+        let registration_deadline = DateTime::parse_from_rfc3339("2020-01-02T03:04:05.123456789Z")
+            .unwrap()
+            .with_timezone(&Utc);
         let registration_command = RegisterWaitCommand::new(
             wait_run.clone(),
             wait_activation.clone(),
             1,
-            Some(Utc::now() - Duration::seconds(1)),
+            Some(registration_deadline),
         );
         assert!(matches!(
             repository
