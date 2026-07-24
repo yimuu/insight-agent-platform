@@ -24,9 +24,11 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const BINARY_POSTGRES_URL_ENV: &str = "BINARY_SMOKE_POSTGRES_URL";
 const BINARY_POSTGRES_ARTIFACT_NAMESPACE: &str = "binary-pg-restart";
+static BINARY_STARTUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
 async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
+    let startup_guard = BINARY_STARTUP_LOCK.lock().await;
     let temp = TempDir::new().unwrap();
     let bind_addr = reserve_loopback_addr();
     let platform_config = write_temp_configs(temp.path(), bind_addr);
@@ -38,6 +40,7 @@ async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
 
     let mut child = ChildGuard::spawn(&platform_config);
     wait_for_health(&client, &base_url, &mut child).await;
+    drop(startup_guard);
 
     let ready_url = format!("{base_url}/health/ready");
     let ready = expect_json(
@@ -148,6 +151,7 @@ async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
 
 #[tokio::test]
 async fn stock_binary_wires_two_environment_backed_human_principals() {
+    let startup_guard = BINARY_STARTUP_LOCK.lock().await;
     let temp = TempDir::new().unwrap();
     let bind_addr = reserve_loopback_addr();
     let platform_config = write_human_auth_configs(temp.path(), bind_addr);
@@ -169,6 +173,7 @@ async fn stock_binary_wires_two_environment_backed_human_principals() {
         ],
     );
     wait_for_health(&client, &base_url, &mut child).await;
+    drop(startup_guard);
 
     let human_tasks_url = format!("{base_url}/v1/human-tasks");
     for token in [alice_token, bob_token] {
@@ -216,6 +221,7 @@ async fn stock_binary_wires_two_environment_backed_human_principals() {
 
 #[tokio::test]
 async fn ordinary_process_restart_keeps_a_nonterminal_run_recoverable() {
+    let first_startup_guard = BINARY_STARTUP_LOCK.lock().await;
     let temp = TempDir::new().unwrap();
     let first_addr = reserve_loopback_addr();
     let platform_config = write_restart_configs(temp.path(), first_addr);
@@ -227,6 +233,7 @@ async fn ordinary_process_restart_keeps_a_nonterminal_run_recoverable() {
 
     let mut first = ChildGuard::spawn(&platform_config);
     wait_for_health(&client, &first_base, &mut first).await;
+    drop(first_startup_guard);
     let created = expect_json(
         format!("POST {first_base}/v1/agents/restart_waiter/runs"),
         client
@@ -245,11 +252,13 @@ async fn ordinary_process_restart_keeps_a_nonterminal_run_recoverable() {
         format_output(&first_output)
     );
 
+    let second_startup_guard = BINARY_STARTUP_LOCK.lock().await;
     let second_addr = reserve_loopback_addr();
     rewrite_bind_addr(&platform_config, first_addr, second_addr);
     let second_base = format!("http://{second_addr}");
     let mut second = ChildGuard::spawn(&platform_config);
     wait_for_health(&client, &second_base, &mut second).await;
+    drop(second_startup_guard);
     let recovered = expect_json(
         format!("GET {second_base}/v1/runs/{run_id}"),
         client.get(format!("{second_base}/v1/runs/{run_id}")),
@@ -311,6 +320,7 @@ async fn stock_production_binary_recovers_postgres_run_across_restart() {
     };
 
     let outcome = AssertUnwindSafe(async {
+        let first_startup_guard = BINARY_STARTUP_LOCK.lock().await;
         let temp = TempDir::new().unwrap();
         let first_addr = reserve_loopback_addr();
         let platform_config = write_postgres_restart_configs(temp.path(), first_addr);
@@ -323,6 +333,7 @@ async fn stock_production_binary_recovers_postgres_run_across_restart() {
 
         let mut first = ChildGuard::spawn_with_env(&platform_config, &process_environment);
         wait_for_health(&client, &first_base, &mut first).await;
+        drop(first_startup_guard);
         let created = expect_json(
             format!("POST {first_base}/v1/agents/restart_waiter/runs"),
             client
@@ -346,11 +357,13 @@ async fn stock_production_binary_recovers_postgres_run_across_restart() {
             format_output(&first_output)
         );
 
+        let second_startup_guard = BINARY_STARTUP_LOCK.lock().await;
         let second_addr = reserve_loopback_addr();
         rewrite_bind_addr(&platform_config, first_addr, second_addr);
         let second_base = format!("http://{second_addr}");
         let mut second = ChildGuard::spawn_with_env(&platform_config, &process_environment);
         wait_for_health(&client, &second_base, &mut second).await;
+        drop(second_startup_guard);
         let recovered = expect_json(
             format!("GET {second_base}/v1/runs/{run_id}"),
             client.get(format!("{second_base}/v1/runs/{run_id}")),
