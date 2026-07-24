@@ -29,8 +29,8 @@ fencing 或生产恢复。
 [`migrations/durable_v3/postgres/`](../../migrations/durable_v3/postgres) 中的前向 migration manifest。
 并发实例通过固定的事务级 advisory lock 串行化。
 
-`durable_v3_schema_migrations` 记录 version、文件名、SQL SHA-256 和应用时间。已应用记录必须是当前
-manifest 的精确前缀；版本空洞、未知或更高版本、文件名/checksum 漂移，以及已有 v3 表但没有
+`schema_migrations` 记录 version、文件名、SQL SHA-256 和应用时间。已应用记录必须是当前
+manifest 的精确前缀；版本空洞、未知或更高版本、文件名/checksum 漂移，以及已有受管表但没有
 ledger，都会使进程 fail-closed。每个 migration SQL 与 ledger 写入处于同一事务。
 
 数据库角色需要目标 database/schema 的连接和使用权限、创建对象权限、后续 migration 对既有对象的

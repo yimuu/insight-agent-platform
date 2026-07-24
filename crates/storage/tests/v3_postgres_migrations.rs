@@ -101,7 +101,7 @@ async fn postgres_migration_coordinator_is_concurrent_idempotent_and_exactly_onc
 
     let rows = sqlx::query_as::<_, (i64, String, String, DateTime<Utc>)>(
         "SELECT version,name,checksum,applied_at
-         FROM durable_v3_schema_migrations ORDER BY version",
+         FROM schema_migrations ORDER BY version",
     )
     .fetch_all(&schema.control)
     .await
@@ -116,7 +116,7 @@ async fn postgres_migration_coordinator_is_concurrent_idempotent_and_exactly_onc
     schema.repository.migrate_schema().await.unwrap();
     let after = sqlx::query_as::<_, (i64, DateTime<Utc>)>(
         "SELECT version,applied_at
-         FROM durable_v3_schema_migrations ORDER BY version",
+         FROM schema_migrations ORDER BY version",
     )
     .fetch_all(&schema.control)
     .await
@@ -141,7 +141,7 @@ async fn postgres_migration_coordinator_rejects_checksum_name_hole_and_unknown_r
     };
     checksum.repository.migrate_schema().await.unwrap();
     sqlx::query(
-        "UPDATE durable_v3_schema_migrations
+        "UPDATE schema_migrations
          SET checksum=$1 WHERE version=$2",
     )
     .bind(format!("sha256:{}", "0".repeat(64)))
@@ -157,7 +157,7 @@ async fn postgres_migration_coordinator_rejects_checksum_name_hole_and_unknown_r
     };
     name.repository.migrate_schema().await.unwrap();
     sqlx::query(
-        "UPDATE durable_v3_schema_migrations
+        "UPDATE schema_migrations
          SET name='drifted_migration.sql' WHERE version=$1",
     )
     .bind(i64::try_from(DURABLE_V3_MIGRATIONS[0].version).unwrap())
@@ -172,20 +172,18 @@ async fn postgres_migration_coordinator_rejects_checksum_name_hole_and_unknown_r
     };
     hole.repository.migrate_schema().await.unwrap();
     let missing_version = DURABLE_V3_MIGRATIONS[5].version;
-    sqlx::query("DELETE FROM durable_v3_schema_migrations WHERE version=$1")
+    sqlx::query("DELETE FROM schema_migrations WHERE version=$1")
         .bind(i64::try_from(missing_version).unwrap())
         .execute(&hole.control)
         .await
         .unwrap();
     assert_migration_failure(&hole.repository).await;
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM durable_v3_schema_migrations WHERE version=$1",
-        )
-        .bind(i64::try_from(missing_version).unwrap())
-        .fetch_one(&hole.control)
-        .await
-        .unwrap(),
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM schema_migrations WHERE version=$1",)
+            .bind(i64::try_from(missing_version).unwrap())
+            .fetch_one(&hole.control)
+            .await
+            .unwrap(),
         0,
         "a hole must not be silently replayed over later authority",
     );
@@ -197,7 +195,7 @@ async fn postgres_migration_coordinator_rejects_checksum_name_hole_and_unknown_r
     unknown.repository.migrate_schema().await.unwrap();
     let unknown_version = DURABLE_V3_MIGRATIONS.last().unwrap().version + 1;
     sqlx::query(
-        "INSERT INTO durable_v3_schema_migrations(version,name,checksum)
+        "INSERT INTO schema_migrations(version,name,checksum)
          VALUES ($1,'unknown_newer.sql',$2)",
     )
     .bind(i64::try_from(unknown_version).unwrap())
@@ -210,7 +208,7 @@ async fn postgres_migration_coordinator_rejects_checksum_name_hole_and_unknown_r
 }
 
 #[tokio::test]
-async fn postgres_migration_coordinator_rejects_unledgered_v3_schema_without_adoption() {
+async fn postgres_migration_coordinator_rejects_unledgered_schema_without_adoption() {
     let Some(schema) = isolated_schema("unledgered").await else {
         return;
     };
@@ -219,11 +217,11 @@ async fn postgres_migration_coordinator_rejects_unledgered_v3_schema_without_ado
         .await
         .unwrap();
     assert_migration_failure(&schema.repository).await;
-    assert!(!sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('durable_v3_schema_migrations') IS NOT NULL",
-    )
-    .fetch_one(&schema.control)
-    .await
-    .unwrap());
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT to_regclass('schema_migrations') IS NOT NULL",)
+            .fetch_one(&schema.control)
+            .await
+            .unwrap()
+    );
     cleanup(schema).await;
 }

@@ -53,8 +53,8 @@ use super::{
 };
 
 const POSTGRES_MIGRATION_ADVISORY_LOCK: i64 = 0x4941_505f_4456_3301;
-const POSTGRES_MIGRATION_LEDGER: &str = "durable_v3_schema_migrations";
-const CREATE_POSTGRES_MIGRATION_LEDGER: &str = "CREATE TABLE durable_v3_schema_migrations (
+const MIGRATION_LEDGER: &str = "schema_migrations";
+const CREATE_MIGRATION_LEDGER: &str = "CREATE TABLE schema_migrations (
         version BIGINT PRIMARY KEY CHECK (version > 0),
         name TEXT NOT NULL UNIQUE,
         checksum TEXT NOT NULL CHECK (checksum ~ '^sha256:[0-9a-f]{64}$'),
@@ -198,7 +198,7 @@ impl PostgresDurableRepository {
             .await
             .map_err(RepositoryError::storage)?;
 
-        let (ledger_exists, v3_schema_exists) = sqlx::query_as::<_, (bool, bool)>(
+        let (ledger_exists, managed_schema_exists) = sqlx::query_as::<_, (bool, bool)>(
             "SELECT
                 to_regclass($1) IS NOT NULL,
                 to_regclass('workflow_definitions') IS NOT NULL
@@ -211,11 +211,11 @@ impl PostgresDurableRepository {
                   OR to_regclass('public_event_projection_decisions') IS NOT NULL
                   OR to_regclass('public_event_delivery_heads') IS NOT NULL",
         )
-        .bind(POSTGRES_MIGRATION_LEDGER)
+        .bind(MIGRATION_LEDGER)
         .fetch_one(&mut *transaction)
         .await
         .map_err(RepositoryError::storage)?;
-        if !ledger_exists && v3_schema_exists {
+        if !ledger_exists && managed_schema_exists {
             transaction
                 .rollback()
                 .await
@@ -223,7 +223,7 @@ impl PostgresDurableRepository {
             return Err(RepositoryError::migration_failed());
         }
         if !ledger_exists {
-            sqlx::raw_sql(CREATE_POSTGRES_MIGRATION_LEDGER)
+            sqlx::raw_sql(CREATE_MIGRATION_LEDGER)
                 .execute(&mut *transaction)
                 .await
                 .map_err(RepositoryError::storage)?;
@@ -231,7 +231,7 @@ impl PostgresDurableRepository {
 
         let applied = sqlx::query_as::<_, (i64, String, String)>(
             "SELECT version,name,checksum
-             FROM durable_v3_schema_migrations ORDER BY version",
+             FROM schema_migrations ORDER BY version",
         )
         .fetch_all(&mut *transaction)
         .await
@@ -246,7 +246,9 @@ impl PostgresDurableRepository {
                 return Err(error);
             }
         };
-        if (applied_count == 0 && v3_schema_exists) || (applied_count > 0 && !v3_schema_exists) {
+        if (applied_count == 0 && managed_schema_exists)
+            || (applied_count > 0 && !managed_schema_exists)
+        {
             transaction
                 .rollback()
                 .await
@@ -273,7 +275,7 @@ impl PostgresDurableRepository {
                 return Err(RepositoryError::migration_failed());
             }
             if let Err(error) = sqlx::query(
-                "INSERT INTO durable_v3_schema_migrations
+                "INSERT INTO schema_migrations
                     (version,name,checksum,applied_at)
                  VALUES ($1,$2,$3,clock_timestamp())",
             )
@@ -2393,7 +2395,7 @@ mod migration_tests {
         assert_eq!(error.code(), super::super::REPOSITORY_MIGRATION_FAILED);
         let (ledger_exists, schema_exists) = sqlx::query_as::<_, (bool, bool)>(
             "SELECT
-                to_regclass('durable_v3_schema_migrations') IS NOT NULL,
+                to_regclass('schema_migrations') IS NOT NULL,
                 to_regclass('workflow_runs') IS NOT NULL",
         )
         .fetch_one(&repository.pool)
@@ -2404,7 +2406,7 @@ mod migration_tests {
 
         repository.migrate_schema().await.unwrap();
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM durable_v3_schema_migrations",)
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM schema_migrations",)
                 .fetch_one(&repository.pool)
                 .await
                 .unwrap(),

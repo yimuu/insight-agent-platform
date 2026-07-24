@@ -424,7 +424,7 @@ fn postgres_binary_test_url() -> Option<String> {
 async fn postgres_startup_authority(pool: &PgPool) -> PostgresStartupAuthoritySnapshot {
     let migrations = sqlx::query_as::<_, (i64, String, String, DateTime<Utc>)>(
         "SELECT version,name,checksum,applied_at
-         FROM durable_v3_schema_migrations ORDER BY version",
+         FROM schema_migrations ORDER BY version",
     )
     .fetch_all(pool)
     .await
