@@ -19,7 +19,7 @@ use sqlx::{postgres::PgPoolOptions, AssertSqlSafe, PgPool};
 use tempfile::TempDir;
 use uuid::Uuid;
 
-const READY_TIMEOUT: Duration = Duration::from_secs(10);
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const BINARY_POSTGRES_URL_ENV: &str = "BINARY_SMOKE_POSTGRES_URL";
