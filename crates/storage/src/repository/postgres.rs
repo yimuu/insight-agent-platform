@@ -78,6 +78,17 @@ fn postgres_schema_contract_read_error(error: sqlx::Error) -> RepositoryError {
     }
 }
 
+/// Start a durable PostgreSQL transaction with the isolation level required by
+/// the event/head synchronization protocol. `begin_with` emits one BEGIN
+/// command, so making the contract explicit does not add a setup round trip.
+pub(crate) async fn begin_write_transaction(
+    pool: &PgPool,
+) -> Result<Transaction<'static, Postgres>, RepositoryError> {
+    pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+        .await
+        .map_err(RepositoryError::storage)
+}
+
 /// Acquire the per-Run event-writer authority before any mutable projection
 /// row is locked. Every PostgreSQL transaction that can allocate an execution
 /// event sequence must use this order, otherwise two paths can form a cycle by
@@ -314,7 +325,7 @@ impl DurableRepository for PostgresDurableRepository {
         &self,
         plan: &VersionedPlan,
     ) -> Result<PlanInstallOutcome, RepositoryError> {
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         let installed = install_plan(&mut transaction, plan).await?;
         transaction
             .commit()
@@ -331,7 +342,7 @@ impl DurableRepository for PostgresDurableRepository {
         &self,
         command: PublishVersionedPlanCommand,
     ) -> Result<PlanPublicationOutcome, RepositoryError> {
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         if !lock_and_match_publication_heads(&mut transaction, &command).await? {
             transaction
                 .rollback()
@@ -356,7 +367,7 @@ impl DurableRepository for PostgresDurableRepository {
         &self,
         plan: &VersionedPlan,
     ) -> Result<PublicationHead, RepositoryError> {
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         install_plan(&mut transaction, plan).await?;
         sqlx::query(
             "INSERT INTO agent_publication_heads (
@@ -405,7 +416,7 @@ impl DurableRepository for PostgresDurableRepository {
         command: CreateRunCommand,
     ) -> Result<TransitionOutcome<CommitReceipt>, RepositoryError> {
         let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         match load_replay(
             &mut transaction,
             command.run_id(),
@@ -617,7 +628,7 @@ impl DurableRepository for PostgresDurableRepository {
         command: RunTransitionCommand,
     ) -> Result<TransitionOutcome<CommitReceipt>, RepositoryError> {
         let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
 
         match load_replay(
             &mut transaction,

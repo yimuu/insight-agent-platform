@@ -36,9 +36,9 @@ use super::control_repository::{
     RevokeControlTokenCommand, SchedulerLeaseRepository, SchedulerRunLease, SettleScopeCommand,
 };
 use super::postgres::{
-    allocate_event_seq, decode_execution_event_row, insert_event, insert_or_get_payload,
-    load_replay, lock_run_for_event_write, lock_runs_for_event_write, PostgresDurableRepository,
-    Replay,
+    allocate_event_seq, begin_write_transaction, decode_execution_event_row, insert_event,
+    insert_or_get_payload, load_replay, lock_run_for_event_write, lock_runs_for_event_write,
+    PostgresDurableRepository, Replay,
 };
 use super::postgres_projection::finalize_projection_checkpoints;
 use super::RepositoryError;
@@ -336,7 +336,7 @@ impl ControlDurableRepository for PostgresDurableRepository {
         command: CreateChildScopeCommand,
     ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
         let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         lock_transition(&mut transaction, command.run_id(), &transition_key).await?;
         if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
             &mut transaction,
@@ -488,7 +488,7 @@ impl ControlDurableRepository for PostgresDurableRepository {
         command: CloseScopeAdmissionCommand,
     ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
         let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         lock_transition(&mut transaction, command.run_id(), &transition_key).await?;
         if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
             &mut transaction,
@@ -631,7 +631,7 @@ impl ControlDurableRepository for PostgresDurableRepository {
         command: SettleScopeCommand,
     ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
         let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         lock_transition(&mut transaction, command.run_id(), &transition_key).await?;
         if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
             &mut transaction,
@@ -788,7 +788,7 @@ impl ControlDurableRepository for PostgresDurableRepository {
         command: EmitControlTokenCommand,
     ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
         let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         lock_transition(&mut transaction, command.run_id(), &transition_key).await?;
         if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
             &mut transaction,
@@ -979,11 +979,7 @@ async fn mutate_token_terminal<T: Serialize>(
     command: &T,
 ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(command)?;
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     lock_transition(&mut transaction, run_id, &transition_key).await?;
     if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
         &mut transaction,
@@ -1117,11 +1113,7 @@ async fn create_fork(
     command: CreateForkCommand,
 ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     lock_transition(&mut tx, command.run_id(), &transition_key).await?;
     if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
         &mut tx,
@@ -1492,11 +1484,7 @@ async fn record_join_arrival(
     command: RecordJoinArrivalCommand,
 ) -> Result<TransitionOutcome<JoinArrivalReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     lock_transition(&mut tx, command.run_id(), &transition_key).await?;
     if let Some(authoritative) = replay_result::<JoinArrivalReceipt>(
         &mut tx,
@@ -2194,11 +2182,7 @@ async fn create_reuse_candidate(
     command: CreateReuseCandidateCommand,
 ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     lock_transition(&mut tx, command.run_id(), &transition_key).await?;
     if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
         &mut tx,
@@ -2387,11 +2371,7 @@ async fn reject_reuse_candidate(
     command: RejectReuseCandidateCommand,
 ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     lock_transition(&mut tx, command.run_id(), &transition_key).await?;
     if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
         &mut tx,
@@ -2461,11 +2441,7 @@ async fn materialize_reuse_candidate(
     command: MaterializeReuseCandidateCommand,
 ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     lock_transition(&mut tx, command.run_id(), &transition_key).await?;
     if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
         &mut tx,
@@ -3023,7 +2999,7 @@ impl SchedulerLeaseRepository for PostgresDurableRepository {
         command: ClaimSchedulerRunCommand,
     ) -> Result<TransitionOutcome<SchedulerRunLease>, RepositoryError> {
         let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         lock_transition(&mut transaction, command.run_id(), &transition_key).await?;
         if let Some(authoritative) = replay_result::<SchedulerRunLease>(
             &mut transaction,
@@ -3126,7 +3102,7 @@ impl SchedulerLeaseRepository for PostgresDurableRepository {
     ) -> Result<TransitionOutcome<SchedulerRunLease>, RepositoryError> {
         let intent_hash = canonical_intent_hash(&command)?;
         let run_id = command.fence().run_id();
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         lock_transition(&mut transaction, run_id, &transition_key).await?;
         if let Some(authoritative) = replay_result::<SchedulerRunLease>(
             &mut transaction,
@@ -3220,7 +3196,7 @@ impl SchedulerLeaseRepository for PostgresDurableRepository {
         command: FencedSchedulerRunCommand,
     ) -> Result<TransitionOutcome<ControlCommitReceipt>, RepositoryError> {
         let intent_hash = canonical_intent_hash(&command)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         lock_transition(&mut transaction, command.run_id(), &transition_key).await?;
         if let Some(authoritative) = replay_result::<ControlCommitReceipt>(
             &mut transaction,

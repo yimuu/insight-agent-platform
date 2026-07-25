@@ -2602,7 +2602,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-7f3c2a8e-6d54-4b91-9ac0-2e75f186bd43',
+    'durable-schema-312c2675-57b7-4a9b-bfe8-3803b3157481',
     'sqlite'
 );
 

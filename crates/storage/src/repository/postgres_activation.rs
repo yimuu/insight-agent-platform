@@ -26,9 +26,10 @@ use insight_engine::{
 };
 
 use super::postgres::{
-    allocate_event_seq, decode_execution_event_row as decode_closed_execution_event_row,
-    insert_event, insert_or_get_payload, load_replay, lock_run_for_event_write,
-    lock_runs_for_event_write, Replay,
+    allocate_event_seq, begin_write_transaction,
+    decode_execution_event_row as decode_closed_execution_event_row, insert_event,
+    insert_or_get_payload, load_replay, lock_run_for_event_write, lock_runs_for_event_write,
+    Replay,
 };
 use super::postgres_projection::{
     append_projection_mutation_event, finalize_empty_projection_checkpoints,
@@ -456,7 +457,7 @@ impl ActivationDurableRepository for PostgresDurableRepository {
         run_id: &RunId,
         timer_id: &TimerId,
     ) -> Result<bool, RepositoryError> {
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         lock_run_for_event_write(&mut transaction, run_id).await?;
         let version = sqlx::query_scalar::<_, i64>(
             "UPDATE timers SET timer_state = 'cancelled', fired_at = CURRENT_TIMESTAMP,
@@ -575,11 +576,7 @@ async fn admit_activation(
     command: ActivationAdmissionCommand,
 ) -> Result<TransitionOutcome<ActivationCommitReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     if let Replay::Exact(replay) = load_replay(
         &mut transaction,
         command.run_id(),
@@ -741,11 +738,7 @@ async fn make_activation_ready(
     command: ActivationCasCommand,
 ) -> Result<TransitionOutcome<ActivationCommitReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     if let Some(outcome) = replay_activation_receipt(
         &mut transaction,
         command.run_id(),
@@ -966,11 +959,7 @@ async fn grant_attempt_lease(
     command: GrantAttemptLeaseCommand,
 ) -> Result<TransitionOutcome<LeaseGrantAuthority>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     match load_replay(
         &mut transaction,
         command.run_id(),
@@ -1268,11 +1257,7 @@ async fn fenced_state_change(
         command: &command,
         evidence,
     })?;
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     if let Some(outcome) = replay_fenced_receipt(
         &mut transaction,
         &transition_key,
@@ -1588,11 +1573,7 @@ async fn heartbeat_attempt(
     let transition_key = activation_adapter::heartbeat_transition_key(&command)?;
     let intent_hash = canonical_intent_hash(&command)?;
     let now = database_time(Utc::now());
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     match load_replay(
         &mut transaction,
         authority.run_id(),
@@ -1921,11 +1902,7 @@ async fn complete_attempt(
 ) -> Result<TransitionOutcome<AttemptCompletionAuthority>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
     let authority = command.authority();
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     match load_replay(
         &mut transaction,
         command.run_id(),
@@ -2286,11 +2263,7 @@ async fn register_wait(
     command: RegisterWaitCommand,
 ) -> Result<TransitionOutcome<ActivationCommitReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     if let Some(outcome) = replay_wait_receipt(
         &mut transaction,
         &transition_key,
@@ -2547,11 +2520,7 @@ async fn schedule_activation_timer(
     command: ScheduleActivationTimerCommand,
 ) -> Result<TransitionOutcome<TimerId>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     match load_replay(
         &mut transaction,
         command.run_id(),
@@ -2666,11 +2635,7 @@ async fn receive_signal(
     command: ReceiveSignalCommand,
 ) -> Result<TransitionOutcome<SignalReceipt>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     let advisory = format!("{}:{}", command.run_id().as_str(), command.message_id());
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
         .bind(advisory)
@@ -3252,11 +3217,7 @@ pub(super) async fn reconcile_wait_late_audits(
             row.try_get::<i64, _>("projection_version")
                 .map_err(|_| RepositoryError::invalid_data())?,
         )?;
-        let mut transaction = repository
-            .pool
-            .begin()
-            .await
-            .map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&repository.pool).await?;
         let outcome = match loser_kind.as_str() {
             "timer" => {
                 let timer_id = model_data(TimerId::new(loser_id))?;
@@ -3305,11 +3266,7 @@ async fn resolve_wait_signal(
     command: ResolveSignalCommand,
 ) -> Result<TransitionOutcome<WaitResolutionAuthority>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     sqlx::query("SELECT 1 FROM workflow_runs WHERE run_id=$1 FOR UPDATE")
         .bind(command.run_id().as_str())
         .fetch_one(&mut *transaction)
@@ -3943,11 +3900,7 @@ async fn fire_timer(
     command: FireTimerCommand,
 ) -> Result<TransitionOutcome<TimerFireAuthority>, RepositoryError> {
     let intent_hash = canonical_intent_hash(&command)?;
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     sqlx::query("SELECT 1 FROM workflow_runs WHERE run_id=$1 FOR UPDATE")
         .bind(command.run_id().as_str())
         .fetch_one(&mut *transaction)
@@ -4737,11 +4690,7 @@ async fn claim_task_outbox(
     {
         return Err(RepositoryError::invalid_configuration());
     }
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     let now = Utc::now();
     let expires = now
         .checked_add_signed(Duration::seconds(i64::from(claim_seconds)))
@@ -4874,11 +4823,7 @@ async fn mutate_task_claim(
     publish: bool,
 ) -> Result<bool, RepositoryError> {
     let now = Utc::now();
-    let mut transaction = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut transaction = begin_write_transaction(&repository.pool).await?;
     lock_run_for_event_write(&mut transaction, claim.run_id()).await?;
     let version = if publish {
         sqlx::query_scalar::<_, i64>(

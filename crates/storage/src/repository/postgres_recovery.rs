@@ -38,7 +38,9 @@ use insight_engine::{
     SchedulerCheckpointId, ScopeInstanceId, TransitionKey, TransitionOutcome,
 };
 
-use super::postgres::{allocate_event_seq, insert_event, insert_or_get_payload};
+use super::postgres::{
+    allocate_event_seq, begin_write_transaction, insert_event, insert_or_get_payload,
+};
 use super::postgres_projection::{
     finalize_projection_checkpoints, verify_projection_checkpoint_batch,
 };
@@ -635,7 +637,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
         source_run_id: &RunId,
         expected_source_projection_version: u64,
     ) -> Result<Option<ContentHash>, RepositoryError> {
-        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut tx = begin_write_transaction(&self.pool).await?;
         // Keep the source identity present while selecting immutable checkpoint
         // rows. Selection itself is historical (as of the requested version)
         // so exact retries still work after the live source advances.
@@ -688,7 +690,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
         expected_source_projection_version: u64,
         checkpoint_id: &SchedulerCheckpointId,
     ) -> Result<Option<ContentHash>, RepositoryError> {
-        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut tx = begin_write_transaction(&self.pool).await?;
         let Some(mut source) = load_source(&mut tx, source_run_id).await? else {
             tx.commit().await.map_err(RepositoryError::storage)?;
             return Ok(None);
@@ -724,7 +726,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
         target_revision: &RecoveryRevisionSpec,
         source_checkpoint_hash: Option<&ContentHash>,
     ) -> Result<Option<Vec<CreateReuseCandidateCommand>>, RepositoryError> {
-        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut tx = begin_write_transaction(&self.pool).await?;
         let Some(source) = load_source(&mut tx, source_run_id).await? else {
             tx.commit().await.map_err(RepositoryError::storage)?;
             return Ok(None);
@@ -754,7 +756,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
         target_revision: &RecoveryRevisionSpec,
         mappings: &[MigrationMappingCompatibility],
     ) -> Result<Option<Vec<CreateReuseCandidateCommand>>, RepositoryError> {
-        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut tx = begin_write_transaction(&self.pool).await?;
         let Some(source) = load_source(&mut tx, source_run_id).await? else {
             tx.commit().await.map_err(RepositoryError::storage)?;
             return Ok(None);
@@ -783,7 +785,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
     ) -> Result<TransitionOutcome<RecoveryRunReceipt>, RepositoryError> {
         recovery_adapter::validate_redrive(&command)?;
         let intent_hash = canonical_intent_hash(&command)?;
-        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut tx = begin_write_transaction(&self.pool).await?;
         lock_transition(&mut tx, command.source_run_id(), &transition_key).await?;
         if let Some(authoritative) = replay_result::<RecoveryRunReceipt>(
             &mut tx,
@@ -855,7 +857,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
     ) -> Result<TransitionOutcome<RecoveryRunReceipt>, RepositoryError> {
         recovery_adapter::validate_fork(&command)?;
         let intent_hash = canonical_intent_hash(&command)?;
-        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut tx = begin_write_transaction(&self.pool).await?;
         lock_transition(&mut tx, command.source_run_id(), &transition_key).await?;
         if let Some(authoritative) = replay_result::<RecoveryRunReceipt>(
             &mut tx,
@@ -1012,7 +1014,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
     ) -> Result<TransitionOutcome<MigrationIntentReceipt>, RepositoryError> {
         recovery_adapter::validate_begin_migration(&command)?;
         let intent_hash = canonical_intent_hash(&command)?;
-        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut tx = begin_write_transaction(&self.pool).await?;
         lock_transition(&mut tx, command.source_run_id(), &transition_key).await?;
         if let Some(authoritative) = replay_result::<MigrationIntentReceipt>(
             &mut tx,
@@ -1178,7 +1180,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
     ) -> Result<TransitionOutcome<RecoveryRunReceipt>, RepositoryError> {
         recovery_adapter::validate_finalize_migration(&command)?;
         let intent_hash = canonical_intent_hash(&command)?;
-        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut tx = begin_write_transaction(&self.pool).await?;
         lock_transition(&mut tx, command.source_run_id(), &transition_key).await?;
         if let Some(authoritative) = replay_result::<RecoveryRunReceipt>(
             &mut tx,
@@ -1306,7 +1308,7 @@ impl RecoveryDurableRepository for PostgresDurableRepository {
     ) -> Result<TransitionOutcome<RecoveryRunReceipt>, RepositoryError> {
         recovery_adapter::validate_continue_as_new(&command)?;
         let intent_hash = canonical_intent_hash(&command)?;
-        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut tx = begin_write_transaction(&self.pool).await?;
         lock_transition(&mut tx, command.source_run_id(), &transition_key).await?;
         if let Some(authoritative) = replay_result::<RecoveryRunReceipt>(
             &mut tx,

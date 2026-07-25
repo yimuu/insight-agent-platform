@@ -52,9 +52,9 @@ use super::model_tool_parent_resume::{
     LatestParentModelCallView,
 };
 use super::postgres::{
-    allocate_event_seq, decode_execution_event_row, insert_event, insert_or_get_payload,
-    load_replay, lock_run_for_event_write, lock_runs_for_event_write, PostgresDurableRepository,
-    Replay,
+    allocate_event_seq, begin_write_transaction, decode_execution_event_row, insert_event,
+    insert_or_get_payload, load_replay, lock_run_for_event_write, lock_runs_for_event_write,
+    PostgresDurableRepository, Replay,
 };
 use super::postgres_model_tool_queue::{
     activate_model_tool_call_batch_postgres, claim_model_tool_calls_postgres,
@@ -6102,11 +6102,7 @@ async fn commit_action(
     {
         return Err(RepositoryError::invalid_data());
     }
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     match load_replay(
         &mut tx,
         action.intent().run_id(),
@@ -6288,11 +6284,7 @@ async fn claim_tasks(
     if max_claimed_per_run == 0 || max_claimed_per_run > MAX_CLAIM_LIMIT {
         return Err(RepositoryError::invalid_configuration());
     }
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     // Candidate discovery must not lock task/attempt projections before the
     // per-Run event writer rows. Recheck every candidate after acquiring all
     // affected Run locks in deterministic order.
@@ -7263,11 +7255,7 @@ async fn start_task(
         "admission_class": claim.envelope().request().admission_class(),
         "task_envelope": claim.envelope(),
     }))?;
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     match load_replay(&mut tx, claim.run_id(), &transition, intent.as_str()).await? {
         Replay::Exact(replay) => {
             validate_task_transition_event_postgres(
@@ -7480,11 +7468,7 @@ async fn heartbeat_task(
     {
         return Err(RepositoryError::invalid_configuration());
     }
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     let Some(authority) =
         load_authoritative_task_claim_postgres(&mut tx, claim, TaskClaimComparison::Exact).await?
     else {
@@ -9630,11 +9614,7 @@ async fn commit_task_outcome(
         "admission_class": claim.envelope().request().admission_class(),
         "outcome": outcome,
     }))?;
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     match load_replay(&mut tx, claim.run_id(), &transition, intent.as_str()).await? {
         Replay::Exact(replay) => {
             let receipt = exact_task_outcome_receipt(
@@ -9918,11 +9898,7 @@ async fn acknowledge_task(
         "fencing_token": claim.envelope().fencing_token(),
         "admission_class": claim.envelope().request().admission_class(),
     }))?;
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     lock_run_for_event_write(&mut tx, claim.run_id()).await?;
     let Some(authority) = load_authoritative_task_claim_postgres(
         &mut tx,
@@ -10269,11 +10245,7 @@ async fn load_model_tool_parent_resume_postgres(
     {
         return Err(RepositoryError::invalid_configuration());
     }
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     let Some(authority) =
         load_authoritative_task_claim_postgres(&mut tx, claim, TaskClaimComparison::Exact).await?
     else {
@@ -10384,11 +10356,7 @@ async fn reserve_model_call_postgres(
     {
         return Err(RepositoryError::invalid_configuration());
     }
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     let Some(authority) =
         load_authoritative_task_claim_postgres(&mut tx, claim, TaskClaimComparison::Exact).await?
     else {
@@ -10638,11 +10606,7 @@ async fn reserve_model_call_public_item_postgres(
     {
         return Err(RepositoryError::invalid_configuration());
     }
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     // This is the append-only output-index authority for the whole Run. It
     // must be acquired before any model-call/item row to share one lock order
     // with every other PostgreSQL response item allocator.
@@ -10860,11 +10824,7 @@ async fn reserve_model_call_public_function_item_postgres(
         return Err(RepositoryError::invalid_configuration());
     }
 
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     // All response item allocators acquire the Run row before model-call or
     // item rows, preventing output-index races and lock-order inversions.
     lock_run_for_event_write(&mut tx, claim.run_id()).await?;
@@ -11114,11 +11074,7 @@ async fn checkpoint_model_call_completion_with_batch_postgres(
     {
         return Err(RepositoryError::invalid_configuration());
     }
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     let Some(authority) =
         load_authoritative_task_claim_postgres(&mut tx, claim, TaskClaimComparison::Exact).await?
     else {
@@ -11843,7 +11799,7 @@ impl SchedulerDurableRepository for PostgresDurableRepository {
         run_id: &RunId,
         port_id: &DataPortId,
     ) -> Result<Option<SchedulerStoredValue>, RepositoryError> {
-        let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut tx = begin_write_transaction(&self.pool).await?;
         let row = sqlx::query(
             "SELECT port_id,owner_activation_id,runtime_value,value_ref,declared_type,storage_kind,
                     payload_id,artifact_id,content_hash,projection_version

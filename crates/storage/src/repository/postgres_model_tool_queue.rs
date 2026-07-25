@@ -32,7 +32,7 @@ use super::{
         ModelToolTaskIdentity, ModelToolTaskOutcome, ModelToolTaskStatus,
         ModelToolTaskTransitionOutcome,
     },
-    postgres::{lock_run_for_event_write, PostgresDurableRepository},
+    postgres::{begin_write_transaction, lock_run_for_event_write, PostgresDurableRepository},
     scheduler_repository::{
         DurableTaskExecutionRequest, SchedulerTaskClaim, SchedulerTaskClaimMode,
     },
@@ -408,11 +408,7 @@ pub(crate) async fn activate_model_tool_call_batch_postgres(
     if model_call_no == 0 {
         return Err(RepositoryError::invalid_configuration());
     }
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     lock_run_for_event_write(&mut tx, claim.run_id()).await?;
     let parent_attempt = i32::try_from(claim.envelope().attempt_no().get())
         .map_err(|_| RepositoryError::invalid_data())?;
@@ -1518,11 +1514,7 @@ pub(crate) async fn claim_model_tool_calls_postgres(
     if !valid_claim_parameters(claimed_by, claim_seconds, limit, max_claimed_per_run) {
         return Err(RepositoryError::invalid_configuration());
     }
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     recover_expired_model_tool_calls_postgres(&mut tx).await?;
     expire_parent_operation_deadlines_postgres(&mut tx).await?;
     let candidates = sqlx::query(
@@ -1734,11 +1726,7 @@ pub(crate) async fn mark_model_tool_call_started_postgres(
     repository: &PostgresDurableRepository,
     claim: &ModelToolTaskClaim,
 ) -> Result<ModelToolTaskTransitionOutcome<()>, RepositoryError> {
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     if lock_claim_batch(&mut tx, claim).await?.is_none() {
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(ModelToolTaskTransitionOutcome::StaleLease);
@@ -1853,11 +1841,7 @@ pub(crate) async fn heartbeat_model_tool_call_postgres(
     if !(3..=MAX_CLAIM_SECONDS).contains(&claim_seconds) {
         return Err(RepositoryError::invalid_configuration());
     }
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     if lock_claim_batch(&mut tx, claim).await?.is_none() {
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(ModelToolTaskHeartbeatOutcome::StaleLease);
@@ -2040,11 +2024,7 @@ pub(crate) async fn commit_model_tool_call_outcome_postgres(
     outcome: &ModelToolTaskOutcome,
 ) -> Result<ModelToolTaskTransitionOutcome<ModelToolTaskCommitReceipt>, RepositoryError> {
     let outcome_hash = model_tool_task_outcome_canonical_hash(outcome)?;
-    let mut tx = repository
-        .pool
-        .begin()
-        .await
-        .map_err(RepositoryError::storage)?;
+    let mut tx = begin_write_transaction(&repository.pool).await?;
     if lock_claim_batch(&mut tx, claim).await?.is_none() {
         tx.rollback().await.map_err(RepositoryError::storage)?;
         return Ok(ModelToolTaskTransitionOutcome::StaleLease);

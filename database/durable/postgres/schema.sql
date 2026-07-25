@@ -227,7 +227,20 @@ CREATE FUNCTION establish_public_event_authority() RETURNS trigger
     AS $$
 DECLARE
     affected_rows INTEGER;
+    authority_execution_seq BIGINT;
+    current_head_state TEXT;
+    current_public_event_id TEXT;
+    current_execution_seq BIGINT;
+    current_public_ordinal INTEGER;
 BEGIN
+    -- The non-locking ready-head fast path below relies on statement-fresh
+    -- snapshots. Fail closed for direct callers and future repository paths
+    -- that bypass the explicit READ COMMITTED transaction entry point.
+    IF current_setting('transaction_isolation')<>'read committed' THEN
+        RAISE EXCEPTION 'public outbox writes require READ COMMITTED'
+            USING ERRCODE='check_violation';
+    END IF;
+
     IF NEW.publish_state<>'pending' THEN
         RAISE EXCEPTION 'public outbox must enter pending'
             USING ERRCODE='check_violation';
@@ -258,30 +271,67 @@ BEGIN
         NEW.public_schema_version,NEW.event_kind,NEW.is_terminal,NEW.created_at
     );
 
-    INSERT INTO public_event_delivery_heads (
-        run_id,head_state,public_event_id,execution_event_id,
-        execution_seq,public_ordinal,delivery_state,due_at
-    )
-    SELECT NEW.run_id,'ready',NEW.public_event_id,NEW.causation_event_id,
-           decision.execution_seq,NEW.public_ordinal,'pending',NEW.available_at
+    SELECT decision.execution_seq
+    INTO authority_execution_seq
     FROM public_event_projection_decisions decision
     WHERE decision.run_id=NEW.run_id
       AND decision.execution_event_id=NEW.causation_event_id
-      AND decision.decision='public'
-    ON CONFLICT(run_id) DO UPDATE SET
-        head_state=EXCLUDED.head_state,
-        public_event_id=EXCLUDED.public_event_id,
-        execution_event_id=EXCLUDED.execution_event_id,
-        execution_seq=EXCLUDED.execution_seq,
-        public_ordinal=EXCLUDED.public_ordinal,
-        delivery_state=EXCLUDED.delivery_state,
-        due_at=EXCLUDED.due_at
-    WHERE public_event_delivery_heads.head_state='drained'
-       OR (EXCLUDED.execution_seq,EXCLUDED.public_ordinal,EXCLUDED.public_event_id)
-          < (public_event_delivery_heads.execution_seq,
-             public_event_delivery_heads.public_ordinal,
-             public_event_delivery_heads.public_event_id);
-    RETURN NEW;
+      AND decision.decision='public';
+    IF authority_execution_seq IS NULL THEN
+        RAISE EXCEPTION 'public projection decision authority is missing'
+            USING ERRCODE='check_violation';
+    END IF;
+
+    LOOP
+        -- Do not lock or update a ready head for the normal monotonic case.
+        -- Event sequence allocation is serialized by workflow_runs, so a
+        -- smaller key indicates a broken repository/backfill invariant.
+        SELECT head_state,public_event_id,execution_seq,public_ordinal
+        INTO current_head_state,current_public_event_id,
+             current_execution_seq,current_public_ordinal
+        FROM public_event_delivery_heads
+        WHERE run_id=NEW.run_id;
+
+        IF NOT FOUND THEN
+            INSERT INTO public_event_delivery_heads (
+                run_id,head_state,public_event_id,execution_event_id,
+                execution_seq,public_ordinal,delivery_state,due_at
+            ) VALUES (
+                NEW.run_id,'ready',NEW.public_event_id,NEW.causation_event_id,
+                authority_execution_seq,NEW.public_ordinal,'pending',NEW.available_at
+            )
+            ON CONFLICT(run_id) DO NOTHING;
+            GET DIAGNOSTICS affected_rows=ROW_COUNT;
+            IF affected_rows=1 THEN
+                RETURN NEW;
+            END IF;
+            CONTINUE;
+        END IF;
+
+        IF current_head_state='ready' THEN
+            IF (authority_execution_seq,NEW.public_ordinal,NEW.public_event_id)
+               < (current_execution_seq,current_public_ordinal,current_public_event_id) THEN
+                RAISE EXCEPTION 'public event key regressed for run %',NEW.run_id
+                    USING ERRCODE='check_violation';
+            END IF;
+            RETURN NEW;
+        END IF;
+
+        UPDATE public_event_delivery_heads
+        SET head_state='ready',
+            public_event_id=NEW.public_event_id,
+            execution_event_id=NEW.causation_event_id,
+            execution_seq=authority_execution_seq,
+            public_ordinal=NEW.public_ordinal,
+            delivery_state='pending',
+            due_at=NEW.available_at
+        WHERE run_id=NEW.run_id
+          AND head_state='drained';
+        GET DIAGNOSTICS affected_rows=ROW_COUNT;
+        IF affected_rows=1 THEN
+            RETURN NEW;
+        END IF;
+    END LOOP;
 END;
 $$;
 
@@ -357,15 +407,6 @@ BEGIN
        AND NEW.public_ordinal=OLD.public_ordinal
        AND ((OLD.delivery_state='pending' AND NEW.delivery_state='claimed')
             OR (OLD.delivery_state='claimed' AND NEW.delivery_state='claimed')) THEN
-        RETURN NEW;
-    END IF;
-
-    -- A concurrently inserted smaller key may replace the current key. Normal
-    -- repository transitions are monotonic, but accepting only a smaller key
-    -- remains order-safe and keeps the local upsert race-proof.
-    IF OLD.head_state='ready' AND NEW.head_state='ready'
-       AND (NEW.execution_seq,NEW.public_ordinal,NEW.public_event_id)
-           < (OLD.execution_seq,OLD.public_ordinal,OLD.public_event_id) THEN
         RETURN NEW;
     END IF;
 
@@ -618,7 +659,19 @@ CREATE FUNCTION synchronize_public_event_delivery_head() RETURNS trigger
     AS $$
 DECLARE
     affected_rows INTEGER;
+    boundary_locked BOOLEAN := FALSE;
+    next_public_event_id TEXT;
+    next_execution_event_id TEXT;
+    next_execution_seq BIGINT;
+    next_public_ordinal INTEGER;
+    next_delivery_state TEXT;
+    next_due_at TIMESTAMPTZ;
 BEGIN
+    IF current_setting('transaction_isolation')<>'read committed' THEN
+        RAISE EXCEPTION 'public outbox delivery updates require READ COMMITTED'
+            USING ERRCODE='check_violation';
+    END IF;
+
     IF NEW.publish_state<>'published' THEN
         UPDATE public_event_delivery_heads
         SET delivery_state=NEW.publish_state,
@@ -636,41 +689,73 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    -- Seek strictly after the published key. The projection-order index starts
-    -- at OLD rather than scanning from the beginning of Run history.
-    INSERT INTO public_event_delivery_heads (
-        run_id,head_state,public_event_id,execution_event_id,
-        execution_seq,public_ordinal,delivery_state,due_at
-    )
-    SELECT next.run_id,'ready',next.public_event_id,next.execution_event_id,
-           next.execution_seq,next.public_ordinal,next_outbox.publish_state,
-           CASE next_outbox.publish_state
-               WHEN 'pending' THEN next_outbox.available_at
-               ELSE next_outbox.claim_expires_at
-           END
-    FROM public_event_projection_decisions current
-    JOIN public_event_projection_decisions next ON next.run_id=current.run_id
-    JOIN public_event_outbox next_outbox
-      ON next_outbox.run_id=next.run_id
-     AND next_outbox.causation_event_id=next.execution_event_id
-     AND next_outbox.public_event_id=next.public_event_id
-    WHERE current.run_id=NEW.run_id
-      AND current.execution_event_id=NEW.causation_event_id
-      AND current.decision='public'
-      AND next.decision='public'
-      AND next_outbox.publish_state<>'published'
-      AND (next.execution_seq,next.public_ordinal,next.public_event_id)
-          > (current.execution_seq,current.public_ordinal,current.public_event_id)
-    ORDER BY next.execution_seq,next.public_ordinal,next.public_event_id
-    LIMIT 1
-    ON CONFLICT(run_id) DO UPDATE SET
-        head_state=EXCLUDED.head_state,
-        public_event_id=EXCLUDED.public_event_id,
-        execution_event_id=EXCLUDED.execution_event_id,
-        execution_seq=EXCLUDED.execution_seq,
-        public_ordinal=EXCLUDED.public_ordinal,
-        delivery_state=EXCLUDED.delivery_state,
-        due_at=EXCLUDED.due_at;
+    LOOP
+        -- Seek strictly after the published key. The projection-order index
+        -- starts at the current event rather than scanning Run history.
+        SELECT next.public_event_id,next.execution_event_id,next.execution_seq,
+               next.public_ordinal,next_outbox.publish_state,
+               CASE next_outbox.publish_state
+                   WHEN 'pending' THEN next_outbox.available_at
+                   ELSE next_outbox.claim_expires_at
+               END
+        INTO next_public_event_id,next_execution_event_id,next_execution_seq,
+             next_public_ordinal,next_delivery_state,next_due_at
+        FROM public_event_projection_decisions current
+        JOIN public_event_projection_decisions next ON next.run_id=current.run_id
+        JOIN public_event_outbox next_outbox
+          ON next_outbox.run_id=next.run_id
+         AND next_outbox.causation_event_id=next.execution_event_id
+         AND next_outbox.public_event_id=next.public_event_id
+        WHERE current.run_id=NEW.run_id
+          AND current.execution_event_id=NEW.causation_event_id
+          AND current.decision='public'
+          AND next.decision='public'
+          AND next_outbox.publish_state<>'published'
+          AND (next.execution_seq,next.public_ordinal,next.public_event_id)
+              > (current.execution_seq,current.public_ordinal,current.public_event_id)
+        ORDER BY next.execution_seq,next.public_ordinal,next.public_event_id
+        LIMIT 1;
+
+        IF FOUND THEN
+            UPDATE public_event_delivery_heads
+            SET head_state='ready',
+                public_event_id=next_public_event_id,
+                execution_event_id=next_execution_event_id,
+                execution_seq=next_execution_seq,
+                public_ordinal=next_public_ordinal,
+                delivery_state=next_delivery_state,
+                due_at=next_due_at
+            WHERE run_id=NEW.run_id
+              AND head_state='ready'
+              AND public_event_id=NEW.public_event_id;
+            GET DIAGNOSTICS affected_rows=ROW_COUNT;
+            IF affected_rows<>1 THEN
+                RAISE EXCEPTION 'published public event does not own delivery head'
+                    USING ERRCODE='check_violation';
+            END IF;
+            RETURN NEW;
+        END IF;
+
+        IF boundary_locked THEN
+            EXIT;
+        END IF;
+
+        -- Close the empty-successor race with an event writer. Writers already
+        -- serialize on workflow_runs and do not touch a ready head for
+        -- monotonic inserts, so this adds no hot-path head contention or writer
+        -- wait edge back to the head.
+        PERFORM 1
+        FROM workflow_runs
+        WHERE run_id=NEW.run_id
+        FOR UPDATE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'public event Run authority is missing'
+                USING ERRCODE='foreign_key_violation';
+        END IF;
+        boundary_locked := TRUE;
+        -- Under READ COMMITTED the next loop iteration gets a snapshot after
+        -- the event writer that held workflow_runs has committed.
+    END LOOP;
 
     UPDATE public_event_delivery_heads
     SET head_state='drained',public_event_id=NULL,execution_event_id=NULL,
@@ -2787,7 +2872,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-7f3c2a8e-6d54-4b91-9ac0-2e75f186bd43',
+    'durable-schema-312c2675-57b7-4a9b-bfe8-3803b3157481',
     'postgres'
 );
 

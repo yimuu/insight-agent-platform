@@ -27,6 +27,7 @@ use sqlx::{
 };
 use uuid::Uuid;
 
+use super::postgres::begin_write_transaction;
 use super::{PostgresDurableRepository, SqliteDurableRepository};
 
 const MAX_CLAIM_SECONDS: u32 = 86_400;
@@ -98,7 +99,7 @@ impl PublicEventOutboxRepository for PostgresDurableRepository {
         limit: u32,
     ) -> Result<Vec<PublicEventClaim>, RepositoryError> {
         validate_claim_request(claimant, claim_seconds, limit)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         let rows = complete_public_query!(
             "FROM (
                  SELECT candidate.run_id,candidate.public_event_id,candidate.due_at,
@@ -201,12 +202,11 @@ impl PublicEventOutboxRepository for PostgresDurableRepository {
         nonterminal_retention_seconds: u32,
     ) -> Result<bool, RepositoryError> {
         validate_retention_seconds(nonterminal_retention_seconds)?;
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        let mut transaction = begin_write_transaction(&self.pool).await?;
         // Public claim/reclaim takes the durable head before the outbox row.
-        // Publishing must use the same lock order. Besides avoiding a
-        // head<->outbox deadlock at lease expiry, this makes the following
-        // outbox UPDATE a fresh READ COMMITTED statement after every
-        // concurrent outbox INSERT/upsert that previously owned the head.
+        // Publishing must use the same lock order to avoid a head<->outbox
+        // deadlock at lease expiry. The explicit READ COMMITTED transaction
+        // also makes the trigger's drain-boundary recheck statement-fresh.
         let locked_head = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
             "SELECT head_state,public_event_id,delivery_state
              FROM public_event_delivery_heads
@@ -1594,15 +1594,16 @@ mod tests {
     use sqlx::{
         postgres::PgPoolOptions,
         sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-        AssertSqlSafe, Row,
+        AssertSqlSafe, Postgres, Row, Transaction,
     };
 
+    use super::super::postgres::{allocate_event_seq, begin_write_transaction, insert_event};
     use super::{
         decode_safe_envelope, durable_public_event_envelope, event_id, public_event_id,
-        public_outbox_contract_adapter, validate_claim_request, validate_prune_limit,
-        validate_retention_seconds, OrderedPublicEventRead, PostgresDurableRepository,
-        PublicEventOutboxRepository, SqliteDurableRepository, MAX_CLAIM_BATCH, MAX_CLAIM_SECONDS,
-        MAX_NONTERMINAL_RETENTION_SECONDS, MAX_PRUNE_BATCH,
+        public_event_ordinal, public_outbox_contract_adapter, validate_claim_request,
+        validate_prune_limit, validate_retention_seconds, OrderedPublicEventRead,
+        PostgresDurableRepository, PublicEventOutboxRepository, SqliteDurableRepository,
+        MAX_CLAIM_BATCH, MAX_CLAIM_SECONDS, MAX_NONTERMINAL_RETENTION_SECONDS, MAX_PRUNE_BATCH,
     };
 
     #[test]
@@ -1836,6 +1837,97 @@ mod tests {
             ExecutionEventPayload::RunLifecycleChanged { lifecycle },
         )
         .unwrap()
+    }
+
+    async fn insert_synthetic_run_started(
+        transaction: &mut Transaction<'_, Postgres>,
+        run_id: &RunId,
+        label: &str,
+    ) -> String {
+        let transition = transition_key(label);
+        let execution_event_id = event_id(&transition);
+        let intent_hash = IntentHash::from_serializable(&label).unwrap();
+        let event_seq = allocate_event_seq(transaction, run_id).await.unwrap();
+        let occurred_at = insert_event(
+            transaction,
+            run_id,
+            event_seq,
+            &execution_event_id,
+            &transition,
+            intent_hash.as_str(),
+            0,
+            &event(run_id, RunLifecycle::Active),
+        )
+        .await
+        .unwrap();
+        let payload = PublicEventPayload::RunStarted;
+        let kind = payload.kind();
+        let public_id = public_event_id(run_id, &transition, kind);
+        let envelope = serde_json::to_value(
+            durable_public_event_envelope(
+                run_id,
+                &public_id,
+                &execution_event_id,
+                event_seq,
+                occurred_at,
+                payload,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO public_event_outbox (
+                run_id,public_event_id,causation_event_id,public_ordinal,
+                public_schema_version,event_kind,is_terminal,publish_state,
+                safe_envelope,available_at,claimed_by,claim_token,claim_expires_at,
+                publish_attempts,published_at,published_by,published_claim_token,
+                notified_at,retain_until,created_at
+             ) VALUES (
+                $1,$2,$3,$4,1,$5,FALSE,'pending',$6,CURRENT_TIMESTAMP,
+                NULL,NULL,NULL,0,NULL,NULL,NULL,NULL,NULL,CURRENT_TIMESTAMP
+             )",
+        )
+        .bind(run_id.as_str())
+        .bind(&public_id)
+        .bind(&execution_event_id)
+        .bind(i32::from(public_event_ordinal(kind)))
+        .bind(kind.as_str())
+        .bind(envelope)
+        .execute(&mut **transaction)
+        .await
+        .unwrap();
+        public_id
+    }
+
+    async fn insert_test_public_outbox(
+        transaction: &mut Transaction<'_, Postgres>,
+        run_id: &RunId,
+        public_id: &str,
+        execution_event_id: &str,
+        kind: PublicEventKind,
+        envelope: &Value,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO public_event_outbox (
+                run_id,public_event_id,causation_event_id,public_ordinal,
+                public_schema_version,event_kind,is_terminal,publish_state,
+                safe_envelope,available_at,claimed_by,claim_token,claim_expires_at,
+                publish_attempts,published_at,published_by,published_claim_token,
+                notified_at,retain_until,created_at
+             ) VALUES (
+                $1,$2,$3,$4,1,$5,FALSE,'pending',$6,CURRENT_TIMESTAMP,
+                NULL,NULL,NULL,0,NULL,NULL,NULL,NULL,NULL,CURRENT_TIMESTAMP
+             )",
+        )
+        .bind(run_id.as_str())
+        .bind(public_id)
+        .bind(execution_event_id)
+        .bind(i32::from(public_event_ordinal(kind)))
+        .bind(kind.as_str())
+        .bind(envelope)
+        .execute(&mut **transaction)
+        .await?;
+        Ok(())
     }
 
     fn plan() -> VersionedPlan {
@@ -2792,8 +2884,8 @@ mod tests {
             .pop()
             .unwrap();
 
-        // This is publish_public_event's first lock. The later transition can
-        // commit through its outbox INSERT and then waits at the head upsert.
+        // This is publish_public_event's first lock. A later monotonic outbox
+        // insert must not touch this ready head.
         let mut publishing = repository.pool.begin().await.unwrap();
         let locked_id = sqlx::query_scalar::<_, Option<String>>(
             "SELECT public_event_id FROM public_event_delivery_heads
@@ -2826,8 +2918,16 @@ mod tests {
                 .commit_run_transition(later_key, later_transition)
                 .await
         });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(!later.is_finished());
+        let later_outcome = tokio::time::timeout(std::time::Duration::from_secs(10), later)
+            .await
+            .expect("a monotonic outbox insert must not wait for the ready head")
+            .unwrap()
+            .unwrap();
+        let later_public_id = later_outcome
+            .committed_result()
+            .and_then(|receipt| receipt.public_event_id())
+            .unwrap()
+            .to_owned();
 
         let published = sqlx::query_scalar::<_, String>(
             "UPDATE public_event_outbox
@@ -2850,15 +2950,6 @@ mod tests {
         assert_eq!(published, first_claim.public_event_id());
         publishing.commit().await.unwrap();
 
-        let later_outcome = tokio::time::timeout(std::time::Duration::from_secs(10), later)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let later_public_id = later_outcome
-            .committed_result()
-            .and_then(|receipt| receipt.public_event_id())
-            .unwrap();
         assert_eq!(
             sqlx::query_scalar::<_, Option<String>>(
                 "SELECT public_event_id FROM public_event_delivery_heads
@@ -2869,7 +2960,7 @@ mod tests {
             .await
             .unwrap()
             .as_deref(),
-            Some(later_public_id)
+            Some(later_public_id.as_str())
         );
         let second_claim = repository
             .claim_public_events(&format!("race_next_dispatcher_{suffix}"), 30, 1)
@@ -2878,6 +2969,333 @@ mod tests {
             .pop()
             .unwrap();
         assert_eq!(second_claim.public_event_id(), later_public_id);
+
+        repository.pool.close().await;
+        sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_public_head_drain_boundary_and_monotonicity_fail_closed_when_available() {
+        let database_url = std::env::var("PUBLIC_OUTBOX_TEST_POSTGRES_URL")
+            .or_else(|_| std::env::var("TEST_POSTGRES_URL"));
+        let Ok(database_url) = database_url else {
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let schema = format!("public_head_boundary_{}", &suffix[..16]);
+        let admin = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let separator = if database_url.contains('?') { '&' } else { '?' };
+        let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+        let repository = PostgresDurableRepository::connect_provisioned_for_test(&scoped_url)
+            .await
+            .unwrap();
+        let plan = plan();
+        repository.install_versioned_plan(&plan).await.unwrap();
+
+        let mut isolation_tx = begin_write_transaction(&repository.pool).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SHOW transaction_isolation")
+                .fetch_one(&mut *isolation_tx)
+                .await
+                .unwrap(),
+            "read committed"
+        );
+        isolation_tx.rollback().await.unwrap();
+
+        // Hold the event-writer authority while a publisher reaches the empty
+        // successor boundary. The writer must be able to insert without
+        // waiting for the ready head, and the publisher must re-read after the
+        // writer commits instead of draining the Run.
+        let boundary_run = RunId::new(format!("run_public_head_boundary_{suffix}")).unwrap();
+        repository
+            .create_run(
+                transition_key(&format!("{suffix}.boundary.create")),
+                CreateRunCommand::new(boundary_run.clone(), &plan, json!({"input": 1})).unwrap(),
+            )
+            .await
+            .unwrap();
+        let first_claim = repository
+            .claim_public_events(&format!("boundary_dispatcher_{suffix}"), 30, 1)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut writer = begin_write_transaction(&repository.pool).await.unwrap();
+        sqlx::query("SELECT 1 FROM workflow_runs WHERE run_id=$1 FOR UPDATE")
+            .bind(boundary_run.as_str())
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap();
+
+        let publishing_pool = repository.pool.clone();
+        let publishing_run = boundary_run.clone();
+        let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
+        let publishing = tokio::spawn(async move {
+            let mut transaction = begin_write_transaction(&publishing_pool).await.unwrap();
+            let backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+                .fetch_one(&mut *transaction)
+                .await
+                .unwrap();
+            sqlx::query(
+                "SELECT public_event_id FROM public_event_delivery_heads
+                 WHERE run_id=$1 FOR UPDATE",
+            )
+            .bind(publishing_run.as_str())
+            .fetch_one(&mut *transaction)
+            .await
+            .unwrap();
+            pid_sender.send(backend_pid).unwrap();
+            sqlx::query(
+                "UPDATE public_event_outbox
+                 SET publish_state='published',published_at=clock_timestamp(),
+                     published_by=$3,published_claim_token=$4,
+                     notified_at=clock_timestamp(),claimed_by=NULL,
+                     claim_token=NULL,claim_expires_at=NULL,
+                     retain_until=clock_timestamp()+INTERVAL '60 seconds'
+                 WHERE run_id=$1 AND public_event_id=$2 AND publish_state='claimed'
+                   AND claimed_by=$3 AND claim_token=$4",
+            )
+            .bind(publishing_run.as_str())
+            .bind(first_claim.public_event_id())
+            .bind(first_claim.claimant())
+            .bind(first_claim.claim_token())
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+            transaction.commit().await.unwrap();
+        });
+        let publishing_pid = pid_receiver.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting = sqlx::query_scalar::<_, bool>(
+                    "SELECT COALESCE(wait_event_type='Lock',FALSE)
+                     FROM pg_stat_activity WHERE pid=$1",
+                )
+                .bind(publishing_pid)
+                .fetch_optional(&repository.pool)
+                .await
+                .unwrap()
+                .unwrap_or(false);
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("publisher must wait for the workflow_runs boundary lock");
+
+        let successor_id = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            insert_synthetic_run_started(
+                &mut writer,
+                &boundary_run,
+                &format!("{suffix}.boundary.successor"),
+            ),
+        )
+        .await
+        .expect("monotonic insertion must not wait for the publisher's ready-head lock");
+        writer.commit().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), publishing)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT public_event_id FROM public_event_delivery_heads
+                 WHERE run_id=$1 AND head_state='ready'",
+            )
+            .bind(boundary_run.as_str())
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap()
+            .as_deref(),
+            Some(successor_id.as_str())
+        );
+
+        // Build seq=2 as a deliberately private event, then install a public
+        // seq=3 head. A late attempt to bind seq=2 must roll back loudly.
+        let regression_run = RunId::new(format!("run_public_head_regression_{suffix}")).unwrap();
+        repository
+            .create_run(
+                transition_key(&format!("{suffix}.regression.create")),
+                CreateRunCommand::new(regression_run.clone(), &plan, json!({"input": 1})).unwrap(),
+            )
+            .await
+            .unwrap();
+        let private_key = transition_key(&format!("{suffix}.regression.private"));
+        repository
+            .commit_run_transition(
+                private_key.clone(),
+                model_adapter::run_transition_nonterminal(
+                    regression_run.clone(),
+                    0,
+                    RunLifecycle::Created,
+                    AdmissionState::Open,
+                    RunLifecycle::Active,
+                    AdmissionState::Open,
+                    event(&regression_run, RunLifecycle::Active),
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut later_writer = begin_write_transaction(&repository.pool).await.unwrap();
+        let later_id = insert_synthetic_run_started(
+            &mut later_writer,
+            &regression_run,
+            &format!("{suffix}.regression.later"),
+        )
+        .await;
+        later_writer.commit().await.unwrap();
+        let regression_created_id = sqlx::query_scalar::<_, String>(
+            "SELECT public_event_id FROM public_event_delivery_heads
+             WHERE run_id=$1 AND head_state='ready'",
+        )
+        .bind(regression_run.as_str())
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        let regression_claimant = format!("regression_dispatcher_{suffix}");
+        let regression_token = format!("regression_token_{suffix}");
+        sqlx::query(
+            "UPDATE public_event_outbox
+             SET publish_state='claimed',claimed_by=$3,claim_token=$4,
+                 claim_expires_at=clock_timestamp()+INTERVAL '30 seconds',
+                 publish_attempts=publish_attempts+1
+             WHERE run_id=$1 AND public_event_id=$2 AND publish_state='pending'",
+        )
+        .bind(regression_run.as_str())
+        .bind(&regression_created_id)
+        .bind(&regression_claimant)
+        .bind(&regression_token)
+        .execute(&repository.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE public_event_outbox
+             SET publish_state='published',published_at=clock_timestamp(),
+                 published_by=$3,published_claim_token=$4,
+                 notified_at=clock_timestamp(),claimed_by=NULL,
+                 claim_token=NULL,claim_expires_at=NULL,
+                 retain_until=clock_timestamp()+INTERVAL '60 seconds'
+             WHERE run_id=$1 AND public_event_id=$2 AND publish_state='claimed'
+               AND claimed_by=$3 AND claim_token=$4",
+        )
+        .bind(regression_run.as_str())
+        .bind(&regression_created_id)
+        .bind(&regression_claimant)
+        .bind(&regression_token)
+        .execute(&repository.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT public_event_id FROM public_event_delivery_heads
+                 WHERE run_id=$1 AND head_state='ready'",
+            )
+            .bind(regression_run.as_str())
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap()
+            .as_deref(),
+            Some(later_id.as_str())
+        );
+
+        let private_event_id = event_id(&private_key);
+        let (private_seq, private_occurred_at) = sqlx::query_as::<_, (i64, DateTime<Utc>)>(
+            "SELECT seq,occurred_at FROM execution_events
+                 WHERE run_id=$1 AND event_id=$2",
+        )
+        .bind(regression_run.as_str())
+        .bind(&private_event_id)
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        let regressed_payload = PublicEventPayload::RunStarted;
+        let regressed_kind = regressed_payload.kind();
+        let regressed_public_id = public_event_id(&regression_run, &private_key, regressed_kind);
+        let regressed_envelope = serde_json::to_value(
+            durable_public_event_envelope(
+                &regression_run,
+                &regressed_public_id,
+                &private_event_id,
+                u64::try_from(private_seq).unwrap(),
+                private_occurred_at,
+                regressed_payload,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut regression_tx = begin_write_transaction(&repository.pool).await.unwrap();
+        let regression_error = insert_test_public_outbox(
+            &mut regression_tx,
+            &regression_run,
+            &regressed_public_id,
+            &private_event_id,
+            regressed_kind,
+            &regressed_envelope,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            regression_error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref(),
+            Some("23514")
+        );
+        assert!(regression_error
+            .to_string()
+            .contains("public event key regressed"));
+        regression_tx.rollback().await.unwrap();
+
+        let mut repeatable_read = repository.pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *repeatable_read)
+            .await
+            .unwrap();
+        let isolation_error = insert_test_public_outbox(
+            &mut repeatable_read,
+            &regression_run,
+            &regressed_public_id,
+            &private_event_id,
+            regressed_kind,
+            &regressed_envelope,
+        )
+        .await
+        .unwrap_err();
+        assert!(isolation_error
+            .to_string()
+            .contains("public outbox writes require READ COMMITTED"));
+        repeatable_read.rollback().await.unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT public_event_id FROM public_event_delivery_heads
+                 WHERE run_id=$1 AND head_state='ready'",
+            )
+            .bind(regression_run.as_str())
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap()
+            .as_deref(),
+            Some(later_id.as_str())
+        );
 
         repository.pool.close().await;
         sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
