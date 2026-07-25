@@ -1,0 +1,10 @@
+.git
+.github
+.codex
+.agents
+target
+data
+bench/results
+docs/archive
+**/*.log
+**/.DS_Store

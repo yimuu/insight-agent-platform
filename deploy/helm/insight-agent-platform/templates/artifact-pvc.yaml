@@ -1,0 +1,17 @@
+{{- if .Values.artifacts.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "insight-agent-platform.artifactClaimName" . }}
+  labels:
+    {{- include "insight-agent-platform.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.artifacts.persistence.accessModes | nindent 4 }}
+  {{- if .Values.artifacts.persistence.storageClass }}
+  storageClassName: {{ .Values.artifacts.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+      requests:
+        storage: {{ .Values.artifacts.persistence.size }}
+{{- end }}

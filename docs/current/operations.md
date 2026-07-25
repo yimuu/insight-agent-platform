@@ -16,6 +16,22 @@ Quickstart 使用 [`config/platform.quickstart.yaml`](../../config/platform.quic
 `action_demo`。生产样例位于 [`config/platform.yaml`](../../config/platform.yaml)。对外暴露服务前，
 必须按部署要求配置认证、数据库凭据、模型凭据和共享 Artifact 挂载。
 
+## Helm 与 Kubernetes
+
+仓库提供 [`deploy/helm/insight-agent-platform`](../../deploy/helm/insight-agent-platform) chart。
+默认部署一个 runtime、一个供评估使用的 PostgreSQL 16、ClusterIP Service、持久 Artifact PVC，
+并为内置 PostgreSQL 生成内部 CA 和服务证书。runtime 使用 `sslmode=verify-full` 校验数据库 Service
+DNS，不会绕过远程 PostgreSQL TLS 合同。
+
+默认 Artifact PVC 是 runtime 重启安全性的必要条件：共享文件系统首次生成的 store marker 会绑定到
+PostgreSQL authority；不能用随 Pod 删除的 `emptyDir` 替代。默认 Deployment 使用 `Recreate`，适合
+单副本和 `ReadWriteOnce` Artifact PVC。需要多 runtime 时，应改用支持 `ReadWriteMany` 的真实共享
+存储、外部 PostgreSQL，并单独验证发布策略和容量。
+
+内置 PostgreSQL 默认面向本地评估，不替代生产数据库的持久化、备份、HA、证书和最小权限设计。
+有限资源部署和 k6 生命周期压测见
+[`bench/k8s/README.md`](../../bench/k8s/README.md)。
+
 ## 启动前 Schema provisioning
 
 Durable Schema 的唯一权威资产是：

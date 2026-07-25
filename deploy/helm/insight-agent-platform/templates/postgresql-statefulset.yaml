@@ -1,0 +1,166 @@
+{{- if .Values.postgresql.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "insight-agent-platform.postgresqlName" . }}
+  labels:
+    {{- include "insight-agent-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  serviceName: {{ include "insight-agent-platform.postgresqlName" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "insight-agent-platform.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: postgresql
+  template:
+    metadata:
+      annotations:
+        {{- if .Values.postgresql.tls.enabled }}
+        checksum/postgresql-tls: {{ include (print $.Template.BasePath "/postgresql-tls-secret.yaml") . | sha256sum }}
+        {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ include "insight-agent-platform.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: postgresql
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: copy-durable-schema
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["cp"]
+          args:
+            - /app/database/durable/postgres/schema.sql
+            - /schema/10-durable-schema.sql
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: init-schema
+              mountPath: /schema
+      containers:
+        - name: postgresql
+          image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+          args:
+            - -c
+            - shared_preload_libraries=pg_stat_statements
+            - -c
+            - track_io_timing=on
+            - -c
+            - max_connections={{ .Values.postgresql.maxConnections }}
+            - -c
+            - shared_buffers={{ .Values.postgresql.sharedBuffers }}
+            {{- if .Values.postgresql.tls.enabled }}
+            - -c
+            - ssl=on
+            - -c
+            - ssl_cert_file=/etc/postgresql/tls/tls.crt
+            - -c
+            - ssl_key_file=/etc/postgresql/tls/tls.key
+            {{- end }}
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "insight-agent-platform.databaseSecretName" . }}
+                  key: postgres-password
+            # The volume root is owned by kubelet. A postgres-owned child
+            # directory lets initdb tighten permissions without root/FOWNER.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgresql
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -ec
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 2
+            periodSeconds: 3
+            timeoutSeconds: 2
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -ec
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init-schema
+              mountPath: /docker-entrypoint-initdb.d/10-durable-schema.sql
+              subPath: 10-durable-schema.sql
+              readOnly: true
+            - name: observability
+              mountPath: /docker-entrypoint-initdb.d/20-observability.sql
+              subPath: 20-observability.sql
+              readOnly: true
+            {{- if .Values.postgresql.tls.enabled }}
+            - name: postgresql-tls
+              mountPath: /etc/postgresql/tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: init-schema
+          emptyDir:
+            sizeLimit: 1Mi
+        - name: observability
+          configMap:
+            name: {{ include "insight-agent-platform.postgresqlName" . }}-observability
+        {{- if .Values.postgresql.tls.enabled }}
+        - name: postgresql-tls
+          secret:
+            secretName: {{ include "insight-agent-platform.postgresqlName" . }}-tls
+            defaultMode: 0440
+        {{- end }}
+        {{- if not .Values.postgresql.persistence.enabled }}
+        - name: data
+          emptyDir:
+            sizeLimit: {{ .Values.postgresql.persistence.size }}
+        {{- end }}
+  {{- if .Values.postgresql.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          {{- toYaml .Values.postgresql.persistence.accessModes | nindent 10 }}
+        {{- if .Values.postgresql.persistence.storageClass }}
+        storageClassName: {{ .Values.postgresql.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgresql.persistence.size }}
+  {{- end }}
+{{- end }}

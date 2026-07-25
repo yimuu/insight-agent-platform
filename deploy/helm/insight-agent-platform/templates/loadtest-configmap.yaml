@@ -1,0 +1,12 @@
+{{- if .Values.loadTest.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "insight-agent-platform.fullname" . }}-k6
+  labels:
+    {{- include "insight-agent-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: load-test
+data:
+  run-lifecycle.js: |
+{{ .Files.Get "files/run-lifecycle.js" | indent 4 }}
+{{- end }}

@@ -1,0 +1,125 @@
+replicaCount: 1
+
+image:
+  repository: insight-agent-platform
+  tag: dev
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 3000
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+runtime:
+  rustLog: warn
+  maxConcurrentRuns: 16
+  maxConcurrentOperations: 16
+  maxConcurrentOperationsPerRun: 4
+  operationTimeout: 30s
+  runTimeout: 2m
+  subscriberCapacity: 64
+  publicEventRetention: 1h
+  publicEventPruneInterval: 1m
+  readinessProbeTimeout: 2s
+  shutdownGracePeriod: 20s
+  shutdownHardDeadline: 25s
+
+artifacts:
+  namespace: benchmark
+  mountPath: /data/artifacts
+  persistence:
+    # Shared artifact authority must survive runtime Pod replacement.
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+    accessModes: ["ReadWriteOnce"]
+
+externalDatabase:
+  existingSecret: ""
+  databaseUrlKey: database-url
+  databaseUrl: ""
+
+postgresql:
+  enabled: true
+  image:
+    repository: postgres
+    tag: 16-alpine
+    pullPolicy: IfNotPresent
+  auth:
+    username: insight
+    password: insight-benchmark
+    database: insight_agent_platform
+  maxConnections: 100
+  sharedBuffers: 64MB
+  tls:
+    enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  persistence:
+    enabled: false
+    size: 2Gi
+    storageClass: ""
+    accessModes: ["ReadWriteOnce"]
+
+probes:
+  startup:
+    failureThreshold: 30
+    periodSeconds: 2
+  readiness:
+    periodSeconds: 5
+    timeoutSeconds: 2
+  liveness:
+    periodSeconds: 10
+    timeoutSeconds: 2
+
+loadTest:
+  enabled: false
+  runId: manual
+  image:
+    repository: grafana/k6
+    tag: 1.7.1
+    pullPolicy: IfNotPresent
+  virtualUsers: 8
+  duration: 30s
+  pollIntervalSeconds: "0.02"
+  runTimeoutSeconds: "15"
+  startDelaySeconds: "8"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi

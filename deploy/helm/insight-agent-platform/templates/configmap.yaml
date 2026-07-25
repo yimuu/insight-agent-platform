@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "insight-agent-platform.fullname" . }}-config
+  labels:
+    {{- include "insight-agent-platform.labels" . | nindent 4 }}
+data:
+  platform.yaml: |
+    version: 1
+    deployment_mode: production
+    bind_addr: 0.0.0.0:3000
+
+    auth:
+      mode: disabled
+
+    agents:
+      directory: /app/agents
+      enabled:
+        - action_demo
+
+    models:
+      config: /app/config-runtime/models.yaml
+
+    actions:
+      enabled:
+        - example.text_metrics
+
+    history:
+      provider: postgres
+      database_url_env: RUN_HISTORY_POSTGRES_URL
+
+    artifacts:
+      provider: shared_filesystem
+      namespace: {{ .Values.artifacts.namespace | quote }}
+      directory: {{ .Values.artifacts.mountPath | quote }}
+      inline_threshold_bytes: 65536
+      max_read_bytes: 67108864
+      orphan_retention: 1h
+      reference_retention: 1d
+      gc_interval: 1m
+      deletion_claim_seconds: 60
+
+    runtime:
+      max_concurrent_runs: {{ .Values.runtime.maxConcurrentRuns }}
+      max_concurrent_operations: {{ .Values.runtime.maxConcurrentOperations }}
+      max_concurrent_operations_per_run: {{ .Values.runtime.maxConcurrentOperationsPerRun }}
+      operation_timeout: {{ .Values.runtime.operationTimeout }}
+      run_timeout: {{ .Values.runtime.runTimeout }}
+      sse_keep_alive_interval: 5s
+      subscriber_capacity: {{ .Values.runtime.subscriberCapacity }}
+      max_llm_tool_rounds: 16
+      max_llm_tool_calls: 64
+      response_stream:
+        broker: postgres_notify
+        body_queue_capacity: 128
+        control_queue_capacity: 32
+        max_frame_bytes: 4096
+        max_item_bytes: 4194304
+        max_run_bytes: 16777216
+        terminal_barrier_timeout: 2s
+        outbound_write_timeout: 10s
+      public_event_retention: {{ .Values.runtime.publicEventRetention }}
+      public_event_prune_interval: {{ .Values.runtime.publicEventPruneInterval }}
+      readiness_probe_timeout: {{ .Values.runtime.readinessProbeTimeout }}
+      shutdown_grace_period: {{ .Values.runtime.shutdownGracePeriod }}
+      shutdown_hard_deadline: {{ .Values.runtime.shutdownHardDeadline }}
+
+  models.yaml: |
+    version: 1
+    models:
+      unused_benchmark_model:
+        type: open_ai_chat
+        base_url: https://models.example.invalid/v1
+        model: unused-benchmark-model
+        capabilities: []
+        connect_timeout: 1s
+        request_timeout: 5s

@@ -1,0 +1,13 @@
+Insight Agent Platform is installed as release {{ .Release.Name }}.
+
+Check readiness:
+  kubectl -n {{ .Release.Namespace }} get pods
+  kubectl -n {{ .Release.Namespace }} port-forward service/{{ include "insight-agent-platform.fullname" . }} 3000:{{ .Values.service.port }}
+  curl http://127.0.0.1:3000/health/ready
+
+{{- if .Values.postgresql.enabled }}
+The embedded PostgreSQL instance is intended for local evaluation and benchmarks.
+Use postgresql.enabled=false with an external managed PostgreSQL service for production.
+{{- end }}
+The Artifact store is backed by PVC {{ include "insight-agent-platform.artifactClaimName" . }};
+do not replace it with emptyDir while retaining the durable PostgreSQL database.

@@ -1,0 +1,49 @@
+image:
+  repository: insight-agent-platform
+  tag: benchmark
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+runtime:
+  rustLog: warn
+  # Match scheduler fan-out to the deliberately small 500m PostgreSQL limit.
+  # Each operation worker polls durable queues, so production-sized worker
+  # counts create avoidable database pressure in this constrained profile.
+  maxConcurrentRuns: 8
+  maxConcurrentOperations: 2
+  maxConcurrentOperationsPerRun: 2
+
+artifacts:
+  namespace: limited-resource-benchmark
+  persistence:
+    enabled: true
+
+postgresql:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  persistence:
+    enabled: false
+
+loadTest:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi
