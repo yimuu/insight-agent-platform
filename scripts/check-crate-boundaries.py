@@ -49,6 +49,8 @@ FORBIDDEN_DIRECT = {
 
 TRANSITIVELY_FORBIDDEN = {"axum", "sqlx", "reqwest"}
 CRITICAL_FEATURE_PACKAGES = {"axum", "sqlx", "reqwest", "tokio"}
+REQUIRED_RUSTLS_PROVIDER_FEATURE = "aws_lc_rs"
+FORBIDDEN_RUSTLS_PROVIDER_FEATURE = "ring"
 
 IO_PATTERNS = (
     (
@@ -279,6 +281,26 @@ def check(metadata, baseline_path, workspace_root):
                 "local path package is not a workspace member: "
                 f"{format_package(package)} ({package['manifest_path']}); "
                 f"expected it under {workspace_root} and in the explicit member list"
+            )
+
+    rustls_nodes = [
+        (package_id, package)
+        for package_id, package in packages.items()
+        if package["name"] == "rustls" and package_id in nodes
+    ]
+    if not rustls_nodes:
+        errors.append("workspace TLS provider policy requires a resolved rustls package")
+    for package_id, package in rustls_nodes:
+        features = set(nodes[package_id].get("features", []))
+        if REQUIRED_RUSTLS_PROVIDER_FEATURE not in features:
+            errors.append(
+                "workspace rustls provider must be AWS-LC; required feature is absent: "
+                f"{format_package(package)}"
+            )
+        if FORBIDDEN_RUSTLS_PROVIDER_FEATURE in features:
+            errors.append(
+                "workspace rustls provider must be AWS-LC-only; Ring feature is enabled: "
+                f"{format_package(package)}"
             )
 
     for package_id, role in sorted(role_by_id.items(), key=lambda item: item[1]):
