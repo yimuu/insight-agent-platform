@@ -67,6 +67,22 @@ if ((${#migration_roots[@]} > 0)); then
   )
 fi
 
+if [[ -d migrations/durable ]]; then
+  fail "pre-1.0 durable migration history still exists: migrations/durable"
+fi
+
+report_matches \
+  "production source contains deleted runtime Schema migration authority" \
+  -RInE --include='*.rs' \
+  '(DURABLE_MIGRATIONS|DurableMigration|SqliteMigrationGuard|schema_migrations|migrate_schema|initialize_schema|migration_manifest)' \
+  "${production_source_roots[@]}"
+
+report_matches \
+  "production source embeds the provisioning-only durable Schema" \
+  -RInE --include='*.rs' \
+  '(include_(str|bytes)!\([^)]*database/durable|database/durable/(postgres|sqlite)/schema\.sql)' \
+  "${production_source_roots[@]}"
+
 # Production code may contain a small parser guard that rejects the literal
 # old control keyword. It must not contain an executable old node, scheduler,
 # local value store, compatibility flag, or old internal control instruction.
@@ -113,11 +129,11 @@ fi
 report_matches \
   "active documentation describes a deleted production contract" \
   -nEH \
-  '(Region/SSA|RegionYield|Branch/Phi|runtime-local-only|scope_scheduler|mark_incomplete_interrupted|api_version:[[:space:]]*insight\.agent/v2|type:[[:space:]]*switch([[:space:]]|$)|core\.branch_end|formal_v2|legacy scheduler)' \
+  '(Region/SSA|RegionYield|Branch/Phi|runtime-local-only|scope_scheduler|mark_incomplete_interrupted|api_version:[[:space:]]*insight\.agent/v2|type:[[:space:]]*switch([[:space:]]|$)|core\.branch_end|formal_v2|legacy scheduler|migrations/durable|schema_migrations|migration manifest|自动(执行|运行).*(migration|迁移))' \
   README.md docs/README.md docs/current/*.md
 
 if ((failed != 0)); then
   exit 1
 fi
 
-printf 'DSL cutover residual scan passed.\n'
+printf 'Cutover residual scan passed.\n'

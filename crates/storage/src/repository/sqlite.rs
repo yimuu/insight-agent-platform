@@ -36,13 +36,13 @@ use insight_engine::{
     TransitionOutcome, EXECUTION_EVENT_SCHEMA_VERSION,
 };
 
-use super::migration_manifest::{DurableMigration, SqliteMigrationGuard, DURABLE_MIGRATIONS};
 use super::model::{
     CommitReceiptAdapter as _, CreateRunCommandAdapter as _, PublicEventIntentAdapter as _,
     PublicRunAttachment, PublicRunAttachmentAdapter as _, PublicationHeadAdapter as _,
     PublicationOriginAdapter as _, RunProjectionAdapter as _, RunTransitionCommandAdapter as _,
     VersionedPlanAdapter as _, VersionedPlanCatalogAdapter as _,
 };
+use super::schema_contract::{validate_contract_row, SQLITE_SCHEMA_BACKEND};
 use super::sqlite_projection::{
     finalize_projection_checkpoints, verify_projection_checkpoint_batch,
 };
@@ -81,25 +81,19 @@ struct CurrentRunRow {
     termination_intent_reason: Option<String>,
 }
 
-async fn sqlite_migration_is_required(
-    pool: &SqlitePool,
-    migration: DurableMigration,
-) -> Result<bool, RepositoryError> {
-    let presence_query = match migration.sqlite_guard {
-        // All other SQLite migrations are idempotent and intentionally run on
-        // every open. This restores trigger-based authority after interrupted
-        // development and test runs.
-        SqliteMigrationGuard::Always => return Ok(true),
-        SqliteMigrationGuard::WhenQueryMissing(query) => query,
-    };
-    Ok(sqlx::query_scalar::<_, i64>(presence_query)
-        .fetch_optional(pool)
-        .await
-        .map_err(RepositoryError::storage)?
-        .is_none())
+fn sqlite_schema_contract_read_error(error: sqlx::Error) -> RepositoryError {
+    let missing_contract_object = error.as_database_error().is_some_and(|database_error| {
+        let message = database_error.message();
+        message.starts_with("no such table:") || message.starts_with("no such column:")
+    });
+    if missing_contract_object {
+        RepositoryError::schema_not_initialized()
+    } else {
+        RepositoryError::storage(error)
+    }
 }
 
-/// SQLite test-double repository.
+/// SQLite single-process durable repository.
 ///
 /// A single connection and shared writer mutex deliberately serialize all
 /// mutations. This backend is not a multi-runtime lease authority.
@@ -110,19 +104,45 @@ pub struct SqliteDurableRepository {
 }
 
 impl SqliteDurableRepository {
+    /// Explicitly provisions an isolated in-memory database for unit tests.
+    #[cfg(test)]
     pub async fn in_memory() -> Result<Self, RepositoryError> {
         let options = SqliteConnectOptions::new()
             .filename(":memory:")
             .foreign_keys(true);
-        Self::connect_options(options).await
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .min_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(RepositoryError::storage)?;
+        super::schema_contract::provision_sqlite_for_test(&pool).await;
+        Self::from_pool(pool).await
     }
 
     pub async fn connect_path(path: &Path) -> Result<Self, RepositoryError> {
+        match tokio::fs::try_exists(path).await {
+            Ok(true) => {}
+            Ok(false) => return Err(RepositoryError::schema_not_initialized()),
+            Err(_) => return Err(RepositoryError::storage_unavailable()),
+        }
         let options = SqliteConnectOptions::new()
             .filename(path)
-            .create_if_missing(true)
+            .create_if_missing(false)
             .foreign_keys(true);
         Self::connect_options(options).await
+    }
+
+    /// Wraps an already configured runtime pool after validating its
+    /// pre-provisioned durable Schema. Callers remain responsible for using a
+    /// single-connection pool with foreign-key enforcement enabled.
+    pub async fn from_pool(pool: SqlitePool) -> Result<Self, RepositoryError> {
+        let repository = Self {
+            pool,
+            writer: Arc::new(Mutex::new(())),
+        };
+        repository.validate_schema_contract().await?;
+        Ok(repository)
     }
 
     async fn connect_options(options: SqliteConnectOptions) -> Result<Self, RepositoryError> {
@@ -132,18 +152,21 @@ impl SqliteDurableRepository {
             .connect_with(options)
             .await
             .map_err(RepositoryError::storage)?;
-        for migration in DURABLE_MIGRATIONS {
-            if sqlite_migration_is_required(&pool, migration).await? {
-                sqlx::raw_sql(migration.sqlite_sql)
-                    .execute(&pool)
-                    .await
-                    .map_err(RepositoryError::storage)?;
-            }
-        }
-        Ok(Self {
-            pool,
-            writer: Arc::new(Mutex::new(())),
-        })
+        Self::from_pool(pool).await
+    }
+
+    /// Performs the bounded, read-only startup gate for the durable Schema.
+    pub async fn validate_schema_contract(&self) -> Result<(), RepositoryError> {
+        let row = sqlx::query_as::<_, (String, String)>(
+            "SELECT contract_id,backend
+             FROM durable_schema_contract
+             WHERE singleton=?",
+        )
+        .bind(1_i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlite_schema_contract_read_error)?;
+        validate_contract_row(row, SQLITE_SCHEMA_BACKEND)
     }
 
     pub async fn check_health(&self) -> Result<(), RepositoryError> {

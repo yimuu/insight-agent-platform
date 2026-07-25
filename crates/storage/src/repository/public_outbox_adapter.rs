@@ -1578,7 +1578,6 @@ fn model_run_id(value: String) -> Result<RunId, RepositoryError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::migration_manifest::DURABLE_MIGRATIONS;
     use chrono::{DateTime, Utc};
     use insight_durable::model::adapter as model_adapter;
     use insight_durable::{CreateRunCommand, DurableRepository, VersionedPlan};
@@ -1622,13 +1621,30 @@ mod tests {
         assert!(validate_prune_limit(MAX_PRUNE_BATCH + 1).is_err());
     }
 
-    #[tokio::test]
-    async fn sqlite_delivery_head_migration_reopens_pending_and_rolls_back_with_outbox() {
-        let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("public-delivery-head-reopen.sqlite");
-        let repository = SqliteDurableRepository::connect_path(&database)
+    async fn provisioned_sqlite_file(database: &std::path::Path) -> SqliteDurableRepository {
+        std::fs::File::create(database).unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(database)
+                    .create_if_missing(false)
+                    .foreign_keys(true),
+            )
             .await
             .unwrap();
+        super::super::schema_contract::provision_sqlite_for_test(&pool).await;
+        pool.close().await;
+        SqliteDurableRepository::connect_path(database)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sqlite_delivery_head_reopen_preserves_pending_and_rolls_back_with_outbox() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("public-delivery-head-reopen.sqlite");
+        let repository = provisioned_sqlite_file(&database).await;
         let plan = plan();
         repository.install_versioned_plan(&plan).await.unwrap();
         let run_id = RunId::new("run_public_delivery_reopen").unwrap();
@@ -1698,90 +1714,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_delivery_head_migration_rejects_orphan_receipt() {
-        let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("public-delivery-head-upgrade.sqlite");
-        let repository = SqliteDurableRepository::connect_path(&database)
-            .await
-            .unwrap();
-        let plan = plan();
-        repository.install_versioned_plan(&plan).await.unwrap();
-        let run_id = RunId::new("run_public_delivery_upgrade").unwrap();
-        repository
-            .create_run(
-                transition_key("delivery.upgrade.create"),
-                CreateRunCommand::new(run_id.clone(), &plan, json!({"input": 1})).unwrap(),
-            )
-            .await
-            .unwrap();
-        repository
-            .commit_run_transition(
-                transition_key("delivery.upgrade.start"),
-                model_adapter::run_transition_nonterminal(
-                    run_id.clone(),
-                    0,
-                    RunLifecycle::Created,
-                    AdmissionState::Open,
-                    RunLifecycle::Active,
-                    AdmissionState::Open,
-                    event(&run_id, RunLifecycle::Active),
-                    None,
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        let (event_id, occurred_at) = sqlx::query_as::<_, (String, String)>(
-            "SELECT event_id,occurred_at FROM execution_events
-             WHERE run_id=? AND seq=2",
-        )
-        .bind(run_id.as_str())
-        .fetch_one(&repository.pool)
-        .await
-        .unwrap();
-        repository.pool.close().await;
-
-        let inspection = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(
-                SqliteConnectOptions::new()
-                    .filename(&database)
-                    .foreign_keys(true),
-            )
-            .await
-            .unwrap();
-        sqlx::query("DROP TRIGGER public_event_receipt_insert_provenance")
-            .execute(&inspection)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO public_event_receipts (
-                 run_id,public_event_id,causation_event_id,public_ordinal,
-                 public_schema_version,event_kind,is_terminal,created_at
-             ) VALUES (?,?,?,?,1,'run.started',0,?)",
-        )
-        .bind(run_id.as_str())
-        .bind("public_event_orphan_upgrade")
-        .bind(event_id)
-        .bind(20_i64)
-        .bind(occurred_at)
-        .execute(&inspection)
-        .await
-        .unwrap();
-        inspection.close().await;
-
-        assert!(SqliteDurableRepository::connect_path(&database)
-            .await
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn sqlite_delivery_head_migration_accepts_exact_receipt_after_body_prune() {
+    async fn sqlite_delivery_head_reopen_accepts_exact_receipt_after_body_prune() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("public-delivery-head-pruned.sqlite");
-        let repository = SqliteDurableRepository::connect_path(&database)
-            .await
-            .unwrap();
+        let repository = provisioned_sqlite_file(&database).await;
         let plan = plan();
         repository.install_versioned_plan(&plan).await.unwrap();
         let run_id = RunId::new("run_public_delivery_pruned").unwrap();
@@ -2817,103 +2753,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postgres_delivery_migration_rejects_orphan_receipt_when_available() {
-        let database_url = std::env::var("PUBLIC_OUTBOX_TEST_POSTGRES_URL")
-            .or_else(|_| std::env::var("TEST_POSTGRES_URL"));
-        let Ok(database_url) = database_url else {
-            return;
-        };
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let schema = format!("public_migration_{}", &suffix[..16]);
-        let admin = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&database_url)
-            .await
-            .unwrap();
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let separator = if database_url.contains('?') { '&' } else { '?' };
-        let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
-        let repository = PostgresDurableRepository::connect(&scoped_url)
-            .await
-            .unwrap();
-        repository.initialize_schema().await.unwrap();
-        let plan = plan();
-        repository.install_versioned_plan(&plan).await.unwrap();
-        let run_id = RunId::new(format!("run_public_migration_{suffix}")).unwrap();
-        repository
-            .create_run(
-                transition_key(&format!("{suffix}.migration.create")),
-                CreateRunCommand::new(run_id.clone(), &plan, json!({"input": 1})).unwrap(),
-            )
-            .await
-            .unwrap();
-        repository
-            .commit_run_transition(
-                transition_key(&format!("{suffix}.migration.start")),
-                model_adapter::run_transition_nonterminal(
-                    run_id.clone(),
-                    0,
-                    RunLifecycle::Created,
-                    AdmissionState::Open,
-                    RunLifecycle::Active,
-                    AdmissionState::Open,
-                    event(&run_id, RunLifecycle::Active),
-                    None,
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        let (event_id, occurred_at) = sqlx::query_as::<_, (String, DateTime<Utc>)>(
-            "SELECT event_id,occurred_at FROM execution_events
-             WHERE run_id=$1 AND seq=2",
-        )
-        .bind(run_id.as_str())
-        .fetch_one(&repository.pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "DROP TRIGGER public_event_receipt_insert_provenance
-             ON public_event_receipts",
-        )
-        .execute(&repository.pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO public_event_receipts (
-                 run_id,public_event_id,causation_event_id,public_ordinal,
-                 public_schema_version,event_kind,is_terminal,created_at
-             ) VALUES ($1,$2,$3,20,1,'run.started',FALSE,$4)",
-        )
-        .bind(run_id.as_str())
-        .bind(format!("public_event_orphan_{suffix}"))
-        .bind(event_id)
-        .bind(occurred_at)
-        .execute(&repository.pool)
-        .await
-        .unwrap();
-        let migration = DURABLE_MIGRATIONS
-            .iter()
-            .find(|migration| migration.version == 202607180016)
-            .expect("public event delivery-head migration must remain in the manifest")
-            .postgres_sql;
-        assert!(sqlx::raw_sql(migration)
-            .execute(&repository.pool)
-            .await
-            .is_err());
-
-        repository.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
-            .execute(&admin)
-            .await
-            .unwrap();
-        admin.close().await;
-    }
-
-    #[tokio::test]
     async fn postgres_publish_and_concurrent_insert_preserve_next_head_when_available() {
         let database_url = std::env::var("PUBLIC_OUTBOX_TEST_POSTGRES_URL")
             .or_else(|_| std::env::var("TEST_POSTGRES_URL"));
@@ -2933,10 +2772,9 @@ mod tests {
             .unwrap();
         let separator = if database_url.contains('?') { '&' } else { '?' };
         let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
-        let repository = PostgresDurableRepository::connect(&scoped_url)
+        let repository = PostgresDurableRepository::connect_provisioned_for_test(&scoped_url)
             .await
             .unwrap();
-        repository.initialize_schema().await.unwrap();
         let plan = plan();
         repository.install_versioned_plan(&plan).await.unwrap();
         let run_id = RunId::new(format!("run_public_head_race_{suffix}")).unwrap();
@@ -3069,10 +2907,9 @@ mod tests {
             .unwrap();
         let separator = if database_url.contains('?') { '&' } else { '?' };
         let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
-        let repository = PostgresDurableRepository::connect(&scoped_url)
+        let repository = PostgresDurableRepository::connect_provisioned_for_test(&scoped_url)
             .await
             .unwrap();
-        repository.initialize_schema().await.unwrap();
 
         let mut listener = repository
             .open_public_event_notification_stream()

@@ -1,3 +1,6 @@
+#[path = "support/database.rs"]
+mod database;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use insight_agent_platform::{
@@ -387,6 +390,7 @@ async fn sqlite_agent_loop_turns_are_distinct_durable_scopes() {
     let deployed = deployed(&plan);
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("agent-loop.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -447,6 +451,7 @@ async fn sqlite_workflow_loop_retains_loop_iteration_scope_kind() {
     let deployed = deployed(&plan);
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("workflow-loop.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -525,6 +530,7 @@ async fn sqlite_agent_loop_completion_and_cancellation_drain_turn_scopes() {
     let deployed = deployed(&plan);
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("agent-loop-terminal.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -747,6 +753,7 @@ async fn sqlite_ordinal_map_preserves_order_accepts_duplicate_values_and_replays
     let workers = workers(&plan);
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("ordinal-map.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -861,10 +868,10 @@ async fn isolated_postgres() -> Option<(PostgresDurableRepository, PgPool, PgPoo
         .connect(&scoped_url)
         .await
         .unwrap();
+    database::provision_postgres_schema(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     Some((repository, control, admin, schema))
 }
 
@@ -1264,7 +1271,9 @@ async fn postgres16_ordinal_map_preserves_order_accepts_duplicate_values_and_rep
     assert_ne!(durable_scopes[0].0, durable_scopes[1].0);
 
     drop(repository);
-    let restarted = PostgresDurableRepository::from_pool(control.clone());
+    let restarted = PostgresDurableRepository::from_pool(control.clone())
+        .await
+        .unwrap();
     assert_eq!(
         drive(&restarted, &linked, &ordered_fence, &workers).await,
         SchedulerQuiescence::RunSucceeded,

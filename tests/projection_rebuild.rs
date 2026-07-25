@@ -3,6 +3,9 @@
 //! The immutable checkpoint ledger is the value authority. SQL identity and
 //! writable columns remain repository-owned through a closed registry.
 
+#[path = "support/database.rs"]
+mod database;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
@@ -251,6 +254,7 @@ async fn drive_to_success<R>(
 async fn sqlite_repository() -> (tempfile::TempDir, SqliteDurableRepository, SqlitePool) {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("projection-rebuild.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -574,10 +578,10 @@ async fn postgres_repository() -> Option<(PostgresDurableRepository, PgPool, PgP
         .connect(&scoped_url)
         .await
         .unwrap();
+    database::provision_postgres_schema(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     Some((repository, control, admin, schema))
 }
 

@@ -1,5 +1,7 @@
 //! Public PostgreSQL repository conformance at the durable admission boundary.
 
+mod support;
+
 use insight_dsl::{compile_source, CompileOptions};
 use insight_durable::{
     ActivationAdmissionCommand, ActivationDurableRepository, ContinueAsNewCommand,
@@ -137,10 +139,10 @@ async fn isolated_repository() -> Option<(PostgresDurableRepository, PgPool, PgP
         .connect(&scoped_url)
         .await
         .unwrap();
+    support::provision_postgres_schema(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     Some((repository, control, admin, schema))
 }
 

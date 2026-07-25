@@ -173,6 +173,7 @@ workflow:
     }
 
     let database = directory.path().join("secret-ledger.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = Arc::new(
         SqliteDurableRepository::connect_path(&database)
             .await
@@ -316,6 +317,7 @@ workflow:
     let workers = production_worker_registry(&models, &actions).unwrap();
 
     let database = directory.path().join("rendered-request.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = Arc::new(
         SqliteDurableRepository::connect_path(&database)
             .await
@@ -414,3 +416,5 @@ workflow:
         "the fully materialized Provider message must not become a durable Run fact"
     );
 }
+#[path = "support/database.rs"]
+mod database;

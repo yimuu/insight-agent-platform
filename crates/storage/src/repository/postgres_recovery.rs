@@ -1821,7 +1821,7 @@ async fn insert_target_run(
             created_at,started_at,updated_at,terminal_at,deadline_at
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,'detached','created','open',NULL,NULL,NULL,$8,NULL,NULL,NULL,NULL,NULL,NULL,
                    $9,$10,$11,NULL,1,0,0,NULL,NULL,NULL,NULL,CURRENT_TIMESTAMP,NULL,CURRENT_TIMESTAMP,NULL,$12)
-         ON CONFLICT (run_id) DO NOTHING",
+         ON CONFLICT DO NOTHING",
     )
     .bind(target_run_id.as_str())
     .bind(target_revision.definition_id())
@@ -2593,10 +2593,9 @@ mod tests {
             .unwrap();
         let separator = if database_url.contains('?') { '&' } else { '?' };
         let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
-        let repository = PostgresDurableRepository::connect(&scoped_url)
+        let repository = PostgresDurableRepository::connect_provisioned_for_test(&scoped_url)
             .await
             .unwrap();
-        repository.initialize_schema().await.unwrap();
         Some(repository)
     }
 

@@ -182,6 +182,7 @@ workflow:
         .unwrap(),
     );
     let database = temporary.path().join("durable.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = Arc::new(
         SqliteDurableRepository::connect_path(&database)
             .await
@@ -234,3 +235,5 @@ workflow:
     );
     restarted.shutdown(Duration::from_secs(1)).await.unwrap();
 }
+#[path = "support/database.rs"]
+mod database;

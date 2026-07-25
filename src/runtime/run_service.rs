@@ -17,7 +17,7 @@ mod public_event_multiruntime_tests {
     use crate::engine::{
         repository::{
             DurableRepository, PostgresDurableRepository, PublicEventOutboxRepository,
-            SqliteDurableRepository, VersionedPlan,
+            VersionedPlan,
         },
         ContentHash, DefinitionRevisionId, DeploymentRevisionId,
         LocalContentAddressedArtifactStore,
@@ -107,7 +107,7 @@ mod public_event_multiruntime_tests {
 
     #[tokio::test]
     async fn sqlite_live_event_uses_canonical_envelope_occurred_at() {
-        let repository = Arc::new(SqliteDurableRepository::in_memory().await.unwrap());
+        let repository = Arc::new(crate::test_database::sqlite_in_memory_repository().await);
         let service = RunService::start(
             DeployedAgentCatalog::new(Vec::new()).unwrap(),
             repository.clone() as Arc<dyn ProductionRunRepository>,
@@ -195,7 +195,7 @@ mod public_event_multiruntime_tests {
 
     #[tokio::test]
     async fn sqlite_subscription_uses_durable_order_when_terminal_hint_arrives_first() {
-        let repository = Arc::new(SqliteDurableRepository::in_memory().await.unwrap());
+        let repository = Arc::new(crate::test_database::sqlite_in_memory_repository().await);
         let service = RunService::start(
             DeployedAgentCatalog::new(Vec::new()).unwrap(),
             repository.clone() as Arc<dyn ProductionRunRepository>,
@@ -348,12 +348,12 @@ mod public_event_multiruntime_tests {
             .unwrap();
         let separator = if database_url.contains('?') { '&' } else { '?' };
         let scoped = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+        crate::test_database::provision_postgres_url(&scoped).await;
         let repository_a = Arc::new(
             PostgresDurableRepository::connect(&format!("{scoped}&application_name={app_a}"))
                 .await
                 .unwrap(),
         );
-        repository_a.initialize_schema().await.unwrap();
         let repository_b = Arc::new(
             PostgresDurableRepository::connect(&format!("{scoped}&application_name={app_b}"))
                 .await

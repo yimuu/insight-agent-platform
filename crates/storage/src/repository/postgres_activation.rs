@@ -5158,10 +5158,9 @@ mod tests {
             .unwrap();
         let separator = if database_url.contains('?') { '&' } else { '?' };
         let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
-        let repository = PostgresDurableRepository::connect(&scoped_url)
+        let repository = PostgresDurableRepository::connect_provisioned_for_test(&scoped_url)
             .await
             .unwrap();
-        repository.initialize_schema().await.unwrap();
         let plan = plan("signal_payload_authority");
         repository.install_versioned_plan(&plan).await.unwrap();
         let run_id = create_run(&repository, &plan, "signal_payload_authority").await;
@@ -5273,10 +5272,9 @@ mod tests {
             .unwrap();
         let separator = if database_url.contains('?') { '&' } else { '?' };
         let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
-        let repository = PostgresDurableRepository::connect(&scoped_url)
+        let repository = PostgresDurableRepository::connect_provisioned_for_test(&scoped_url)
             .await
             .unwrap();
-        repository.initialize_schema().await.unwrap();
         let plan = plan("activation_contract");
         assert_eq!(
             repository.install_versioned_plan(&plan).await.unwrap(),

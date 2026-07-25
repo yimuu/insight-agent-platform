@@ -1,6 +1,5 @@
 #[macro_use]
-#[path = "../../../tests/support/workspace_assets.rs"]
-mod workspace_assets;
+mod support;
 
 use insight_dsl::{
     CompileOptions, GraphAuthorDocument, GraphDocumentId, GraphSurfaceRepository, NodeView,
@@ -10,7 +9,7 @@ use insight_durable::{CreateRunCommand, DurableRepository, VersionedPlan};
 use insight_engine::{
     DefinitionRevisionId, DeploymentRevisionId, RunId, TransitionKey, TransitionOutcome,
 };
-use insight_storage::{PostgresDurableRepository, SqliteDurableRepository};
+use insight_storage::PostgresDurableRepository;
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, AssertSqlSafe};
 use uuid::Uuid;
@@ -46,7 +45,7 @@ fn versioned(graph: &GraphAuthorDocument) -> VersionedPlan {
 
 #[tokio::test]
 async fn graph_author_view_and_trace_have_one_durable_authority_each() {
-    let repository = SqliteDurableRepository::in_memory().await.unwrap();
+    let (_database, repository) = support::temporary_sqlite_repository().await;
     let graph = graph();
     let versioned = versioned(&graph);
     repository.install_versioned_plan(&versioned).await.unwrap();
@@ -153,10 +152,16 @@ async fn postgres_graph_author_view_and_trace_contract_matches_sqlite() {
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    let provisioner = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&scoped_url)
+        .await
+        .unwrap();
+    support::provision_postgres_schema(&provisioner).await;
+    provisioner.close().await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
 
     let graph = graph();
     let versioned = versioned(&graph);

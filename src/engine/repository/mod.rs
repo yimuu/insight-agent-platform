@@ -1,7 +1,3 @@
-#[doc(hidden)]
-pub mod migration_manifest {
-    pub use insight_storage::repository::migration_manifest::*;
-}
 #[cfg(test)]
 mod scheduler_safety_tests;
 
@@ -84,10 +80,9 @@ pub use insight_engine::repository::{
     RepositoryError, StorageLocator, REPOSITORY_ACTIVATION_NOT_FOUND,
     REPOSITORY_ARTIFACT_STORE_CONFLICT, REPOSITORY_CANONICALIZATION_FAILED,
     REPOSITORY_CONFIGURATION_INVALID, REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_DATA_INVALID,
-    REPOSITORY_INTENT_CONFLICT, REPOSITORY_MIGRATION_FAILED, REPOSITORY_PLAN_CONFLICT,
-    REPOSITORY_REDRIVE_REQUIRES_FORK, REPOSITORY_RUN_MIGRATING, REPOSITORY_RUN_NOT_FOUND,
-    REPOSITORY_SCHEDULER_ACTION_UNSUPPORTED, REPOSITORY_SCHEDULER_CRASH_INJECTED,
-    REPOSITORY_STORAGE_FAILURE,
+    REPOSITORY_INTENT_CONFLICT, REPOSITORY_PLAN_CONFLICT, REPOSITORY_REDRIVE_REQUIRES_FORK,
+    REPOSITORY_RUN_MIGRATING, REPOSITORY_RUN_NOT_FOUND, REPOSITORY_SCHEDULER_ACTION_UNSUPPORTED,
+    REPOSITORY_SCHEDULER_CRASH_INJECTED, REPOSITORY_STORAGE_FAILURE,
 };
 pub use insight_runtime::scheduler_runtime::{
     consume_model_tool_task_once, consume_model_tool_task_once_with_observer,
@@ -100,5 +95,8 @@ pub use insight_runtime::scheduler_runtime::{
     SchedulerRetrievalLiveObserver, SchedulerWorkerFailurePolicy, SchedulerWorkerPumpOutcome,
     TerminalSchedulerWorkerFailurePolicy,
 };
-pub use insight_storage::PostgresDurableRepository;
-pub use insight_storage::SqliteDurableRepository;
+pub use insight_storage::{
+    PostgresDurableRepository, SqliteDurableRepository, DATABASE_SCHEMA_BACKEND_MISMATCH,
+    DATABASE_SCHEMA_CONTRACT_MISMATCH, DATABASE_SCHEMA_NOT_INITIALIZED, DURABLE_SCHEMA_CONTRACT_ID,
+    POSTGRES_SCHEMA_BACKEND, SQLITE_SCHEMA_BACKEND,
+};

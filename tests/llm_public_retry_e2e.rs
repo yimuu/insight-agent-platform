@@ -317,6 +317,7 @@ workflow:
         )
         .unwrap();
         let database = root.join("durable.sqlite");
+        database::provision_sqlite_database(&database).await;
         let repository = Arc::new(
             insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
                 &database,
@@ -609,3 +610,5 @@ async fn attached_public_llm_retry_closes_old_items_and_appends_a_new_terminal_i
         .await
         .unwrap();
 }
+#[path = "support/database.rs"]
+mod database;

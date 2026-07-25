@@ -245,9 +245,6 @@ async fn initialize_repository_and_live_response(
                 )
                 .into());
             }
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
             let repository = Arc::new(SqliteDurableRepository::connect_path(path).await?)
                 as Arc<dyn ProductionRunRepository>;
             let broker = Arc::new(InMemoryLiveResponseBroker::new_with_limits(
@@ -263,9 +260,6 @@ async fn initialize_repository_and_live_response(
         }
         HistoryConfig::Postgres { database_url } => {
             let repository = PostgresDurableRepository::connect(database_url.expose()).await?;
-            // Migration is part of PostgreSQL startup authority and must finish
-            // before RunService performs any catalog or runtime table reads.
-            repository.migrate_schema().await?;
             let broker: Arc<dyn LiveResponseBroker> = match response_stream.broker {
                 LiveResponseBrokerProvider::InProcess => {
                     Arc::new(InMemoryLiveResponseBroker::new_with_limits(

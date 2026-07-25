@@ -433,6 +433,7 @@ async fn repository_and_control(
 ) -> (tempfile::TempDir, SqliteDurableRepository, SqlitePool) {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join(format!("{name}.sqlite"));
+    database::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -2399,3 +2400,5 @@ async fn sqlite_subflow_failure_requires_explicit_invocation_settlement() {
     );
     assert_subflow_parent_drained(&control, &parent_run, "settled", "settled").await;
 }
+#[path = "support/database.rs"]
+mod database;

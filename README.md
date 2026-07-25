@@ -11,9 +11,18 @@ YAML，平台在启动时将其编译为不可变、类型化的 Canonical Plan�
 
 仓库要求 Rust `1.94.1`。Quickstart 只启用本地 `action_demo`，不需要模型密钥：
 
+首次启动或明确重建数据库时：
+
 ```bash
+bash scripts/provision-sqlite-schema.sh
 PLATFORM_CONFIG=config/platform.quickstart.yaml cargo run
 ```
+
+第一条命令在服务启动前从
+[`database/durable/sqlite/schema.sql`](database/durable/sqlite/schema.sql) 创建
+`data/quickstart.sqlite3`。服务本身不会创建数据库文件或表；如果目标文件已经存在，provisioner
+会拒绝覆盖。已按当前 contract provision 的数据库在普通服务重启时直接运行第二条命令；只有明确
+重建或 Schema contract 变化时，才先移动/删除 pre-1.0 开发数据库并重新执行 provisioner。
 
 服务默认监听 `127.0.0.1:3000`：
 
@@ -70,7 +79,7 @@ workflow:
 - [架构概览](docs/current/architecture.md)：执行模型、核心不变量与权威边界；
 - [DSL v1 指南](docs/current/dsl.md)：Agent 结构、类型、表达式和控制流；
 - [HTTP 与 SSE API](docs/current/api.md)：路由、幂等要求和响应流；
-- [部署与运维](docs/current/operations.md)：配置、存储、迁移、认证和生命周期；
+- [部署与运维](docs/current/operations.md)：Schema 预置、配置、存储、认证和生命周期；
 - [开发指南](docs/current/development.md)：代码导航和验证命令；
 - [变更记录](CHANGELOG.md)：发布版本的重要变化与兼容性说明。
 

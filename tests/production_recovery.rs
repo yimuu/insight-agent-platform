@@ -1,3 +1,6 @@
+#[path = "support/database.rs"]
+mod database;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -234,6 +237,7 @@ async fn setup_reuse_sqlite() -> ReuseFixture {
         .to_owned();
     let agents = DeployedAgentCatalog::new(deployed).unwrap();
     let database = temporary.path().join("reuse.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
             &database,
@@ -315,9 +319,11 @@ async fn setup() -> (tempfile::TempDir, RunService) {
     write_agent(&agents_root, "recovery_v1", "approve_v1");
     write_agent(&agents_root, "recovery_v2", "approve_v2");
     let agents = recovery_catalog(&agents_root);
+    let database_path = temporary.path().join("recovery.sqlite");
+    database::provision_sqlite_database(&database_path).await;
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
-            &temporary.path().join("recovery.sqlite"),
+            &database_path,
         )
         .await
         .unwrap(),
@@ -510,6 +516,7 @@ async fn sqlite_waiting_recovery_target_reaches_durable_deadline_after_service_r
     write_agent(&agents_root, "recovery_v2", "approve_v2");
     let database = temporary.path().join("recovery-deadline.sqlite");
     let timeout = Duration::from_millis(750);
+    database::provision_sqlite_database(&database).await;
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
             &database,
@@ -801,6 +808,7 @@ async fn sqlite_service_migrate_replays_frozen_pending_intent_after_alias_advanc
         .as_str()
         .to_owned();
     let database = temporary.path().join("migration-crash-replay.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
             &database,
@@ -1339,6 +1347,7 @@ async fn sqlite_formal_migrate_derives_cross_revision_mapping_and_reuses_renamed
         "approve_v2",
     );
     let database = temporary.path().join("mapped-migrate.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
             &database,
@@ -1522,12 +1531,12 @@ async fn postgres_formal_migrate_derives_cross_revision_mapping_and_reuses_renam
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    database::provision_postgres_url(&scoped_url).await;
     let repository = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    repository.initialize_schema().await.unwrap();
     let control = PgPoolOptions::new()
         .max_connections(4)
         .connect(&scoped_url)
@@ -1699,12 +1708,12 @@ async fn postgres_service_redrive_migrate_and_continue_preserve_durable_lineage(
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    database::provision_postgres_url(&scoped_url).await;
     let repository = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    repository.initialize_schema().await.unwrap();
     let artifact_store = shared_artifact_store(
         temporary.path().join("artifacts"),
         "lineage-production-recovery",
@@ -1808,12 +1817,12 @@ async fn postgres_stale_runtime_migrate_uses_the_durable_target_head() {
         .connect(&scoped_url)
         .await
         .unwrap();
+    database::provision_postgres_schema(&control).await;
     let stale_repository = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    stale_repository.initialize_schema().await.unwrap();
     let artifact_store = shared_artifact_store(
         temporary.path().join("artifacts"),
         "durable-head-migration-recovery",
@@ -1936,12 +1945,12 @@ async fn postgres_service_migrate_replays_frozen_pending_intent_after_alias_adva
         .connect(&scoped_url)
         .await
         .unwrap();
+    database::provision_postgres_schema(&control).await;
     let repository = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    repository.initialize_schema().await.unwrap();
     let artifact_store = shared_artifact_store(
         temporary.path().join("artifacts"),
         "frozen-intent-migration-recovery",
@@ -2095,12 +2104,12 @@ async fn postgres_public_redrive_and_selected_fork_reuse_override_and_cas_are_du
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    database::provision_postgres_url(&scoped_url).await;
     let repository = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    repository.initialize_schema().await.unwrap();
     let control = PgPoolOptions::new()
         .max_connections(4)
         .connect(&scoped_url)

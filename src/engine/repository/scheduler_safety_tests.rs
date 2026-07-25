@@ -1471,9 +1471,7 @@ async fn prepare_sqlite_model_tool_batch(
     let linked = LinkedPlan::link(&plan, &descriptors, &subflows).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join(format!("{run_name}.sqlite"));
-    let repository = SqliteDurableRepository::connect_path(&database)
-        .await
-        .unwrap();
+    let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
     assert_eq!(
         repository.install_versioned_plan(&versioned).await.unwrap(),
         PlanInstallOutcome::Installed
@@ -1543,9 +1541,7 @@ async fn prepare_sqlite_single_weather_batch(
     let linked = LinkedPlan::link(&plan, &descriptors, &SubflowContractRegistry::new()).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join(format!("{run_name}.sqlite"));
-    let repository = SqliteDurableRepository::connect_path(&database)
-        .await
-        .unwrap();
+    let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
     assert_eq!(
         repository.install_versioned_plan(&versioned).await.unwrap(),
         PlanInstallOutcome::Installed
@@ -1780,9 +1776,7 @@ async fn sqlite_deadline_authority_rejects_premature_and_lost_leases_and_commits
     let linked = LinkedPlan::link(&plan, &descriptors, &subflows).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("scheduler-deadline-authority.sqlite");
-    let repository = SqliteDurableRepository::connect_path(&database)
-        .await
-        .unwrap();
+    let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
     assert_eq!(
         repository.install_versioned_plan(&versioned).await.unwrap(),
         PlanInstallOutcome::Installed
@@ -1923,10 +1917,10 @@ async fn postgres_deadline_authority_matches_sqlite_contract() {
         .connect(&scoped_url)
         .await
         .unwrap();
+    crate::test_database::provision_postgres_pool(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     let (plan, descriptors, versioned) = deadline_fixture();
     let subflows = SubflowContractRegistry::new();
     let linked = LinkedPlan::link(&plan, &descriptors, &subflows).unwrap();
@@ -2069,9 +2063,7 @@ async fn sqlite_model_call_reservation_and_checkpoint_are_fenced_append_only_and
     let database = directory
         .path()
         .join("scheduler-model-call-authority.sqlite");
-    let repository = SqliteDurableRepository::connect_path(&database)
-        .await
-        .unwrap();
+    let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
     assert_eq!(
         repository.install_versioned_plan(&versioned).await.unwrap(),
         PlanInstallOutcome::Installed
@@ -2218,9 +2210,7 @@ async fn sqlite_function_call_public_item_allocation_is_concurrent_fenced_and_de
     let database = directory
         .path()
         .join("function-call-public-authority.sqlite");
-    let repository = SqliteDurableRepository::connect_path(&database)
-        .await
-        .unwrap();
+    let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
     assert_eq!(
         repository.install_versioned_plan(&versioned).await.unwrap(),
         PlanInstallOutcome::Installed,
@@ -2337,9 +2327,7 @@ async fn sqlite_failed_function_items_checkpoint_exactly_or_remain_unsealed_with
     let linked = LinkedPlan::link(&plan, &descriptors, &SubflowContractRegistry::new()).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("failed-function-checkpoint.sqlite");
-    let repository = SqliteDurableRepository::connect_path(&database)
-        .await
-        .unwrap();
+    let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
     repository.install_versioned_plan(&versioned).await.unwrap();
     let control = SqlitePool::connect_with(
         SqliteConnectOptions::new()
@@ -2442,9 +2430,7 @@ async fn sqlite_public_retry_appends_identity_and_preserves_failed_incomplete_it
     let linked = LinkedPlan::link(&plan, &descriptors, &SubflowContractRegistry::new()).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("public-retry.sqlite");
-    let repository = SqliteDurableRepository::connect_path(&database)
-        .await
-        .unwrap();
+    let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
     repository.install_versioned_plan(&versioned).await.unwrap();
     let control = SqlitePool::connect_with(
         SqliteConnectOptions::new()
@@ -2520,9 +2506,7 @@ async fn sqlite_failed_and_cancelled_runs_retain_fenced_reported_usage() {
     let linked = LinkedPlan::link(&plan, &descriptors, &SubflowContractRegistry::new()).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("terminal-reported-usage.sqlite");
-    let repository = SqliteDurableRepository::connect_path(&database)
-        .await
-        .unwrap();
+    let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
     repository.install_versioned_plan(&versioned).await.unwrap();
     let control = SqlitePool::connect_with(
         SqliteConnectOptions::new()
@@ -2637,10 +2621,10 @@ async fn postgres_function_call_public_item_allocation_is_concurrent_fenced_and_
         .connect(&scoped_url)
         .await
         .unwrap();
+    crate::test_database::provision_postgres_pool(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     let (plan, descriptors, versioned) =
         model_call_fixture_with_binding(all_public_model_tool_queue_binding());
     let linked = LinkedPlan::link(&plan, &descriptors, &SubflowContractRegistry::new()).unwrap();
@@ -2789,10 +2773,10 @@ async fn postgres_failed_function_items_checkpoint_exactly_or_remain_unsealed_wi
         .connect(&scoped_url)
         .await
         .unwrap();
+    crate::test_database::provision_postgres_pool(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     let (plan, descriptors, versioned) =
         model_call_fixture_with_binding(all_public_model_tool_queue_binding());
     let linked = LinkedPlan::link(&plan, &descriptors, &SubflowContractRegistry::new()).unwrap();
@@ -2932,10 +2916,10 @@ async fn postgres_public_retry_appends_identity_and_preserves_failed_incomplete_
         .connect(&scoped_url)
         .await
         .unwrap();
+    crate::test_database::provision_postgres_pool(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     let (plan, descriptors, versioned) = retryable_public_model_call_fixture();
     let linked = LinkedPlan::link(&plan, &descriptors, &SubflowContractRegistry::new()).unwrap();
     repository.install_versioned_plan(&versioned).await.unwrap();
@@ -3010,9 +2994,7 @@ async fn sqlite_private_model_call_never_allocates_a_public_item() {
     let linked = LinkedPlan::link(&plan, &descriptors, &SubflowContractRegistry::new()).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("scheduler-private-model-call.sqlite");
-    let repository = SqliteDurableRepository::connect_path(&database)
-        .await
-        .unwrap();
+    let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
     let control = SqlitePool::connect_with(
         SqliteConnectOptions::new()
             .filename(&database)
@@ -3279,9 +3261,7 @@ async fn sqlite_terminal_run_preserves_checkpointed_model_tool_intent_and_fences
         let database = directory
             .path()
             .join(format!("checkpoint-before-{suffix}.sqlite"));
-        let repository = SqliteDurableRepository::connect_path(&database)
-            .await
-            .unwrap();
+        let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
         assert_eq!(
             repository.install_versioned_plan(&versioned).await.unwrap(),
             PlanInstallOutcome::Installed
@@ -3433,9 +3413,7 @@ async fn sqlite_model_tool_checkpoint_transaction_failure_leaves_no_partial_batc
     let database = directory
         .path()
         .join("checkpoint-transaction-failure.sqlite");
-    let repository = SqliteDurableRepository::connect_path(&database)
-        .await
-        .unwrap();
+    let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
     assert_eq!(
         repository.install_versioned_plan(&versioned).await.unwrap(),
         PlanInstallOutcome::Installed
@@ -3841,10 +3819,10 @@ async fn postgres_cancelled_run_closes_active_model_tool_work_and_fences_recover
         .connect(&scoped_url)
         .await
         .unwrap();
+    crate::test_database::provision_postgres_pool(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     let (plan, descriptors, versioned) = model_call_fixture();
     let subflows = SubflowContractRegistry::new();
     let linked = LinkedPlan::link(&plan, &descriptors, &subflows).unwrap();
@@ -4063,10 +4041,10 @@ async fn postgres_terminal_run_preserves_checkpointed_model_tool_intent_and_fenc
         .connect(&scoped_url)
         .await
         .unwrap();
+    crate::test_database::provision_postgres_pool(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     let (plan, descriptors, versioned) = model_call_fixture();
     let linked = LinkedPlan::link(&plan, &descriptors, &SubflowContractRegistry::new()).unwrap();
     assert_eq!(
@@ -4239,9 +4217,7 @@ async fn sqlite_model_tool_queue_activates_claims_parallel_calls_and_opens_barri
     let linked = LinkedPlan::link(&plan, &descriptors, &subflows).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("scheduler-model-tool-queue.sqlite");
-    let repository = SqliteDurableRepository::connect_path(&database)
-        .await
-        .unwrap();
+    let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
     assert_eq!(
         repository.install_versioned_plan(&versioned).await.unwrap(),
         PlanInstallOutcome::Installed
@@ -4449,9 +4425,7 @@ async fn sqlite_checkpointed_parent_reclaim_renews_running_attempt_without_reset
     let linked = LinkedPlan::link(&plan, &descriptors, &SubflowContractRegistry::new()).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("checkpointed-parent-reclaim.sqlite");
-    let repository = SqliteDurableRepository::connect_path(&database)
-        .await
-        .unwrap();
+    let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
     assert_eq!(
         repository.install_versioned_plan(&versioned).await.unwrap(),
         PlanInstallOutcome::Installed
@@ -5538,10 +5512,10 @@ async fn postgres_model_call_authority_matches_sqlite_contract() {
         .connect(&scoped_url)
         .await
         .unwrap();
+    crate::test_database::provision_postgres_pool(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     let (plan, descriptors, versioned) = model_call_fixture();
     let subflows = SubflowContractRegistry::new();
     let linked = LinkedPlan::link(&plan, &descriptors, &subflows).unwrap();

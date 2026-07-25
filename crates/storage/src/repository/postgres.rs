@@ -35,7 +35,6 @@ use insight_engine::{
     TransitionOutcome, EXECUTION_EVENT_SCHEMA_VERSION,
 };
 
-use super::migration_manifest::DURABLE_MIGRATIONS;
 use super::model::{
     CommitReceiptAdapter as _, CreateRunCommandAdapter as _, PublicEventIntentAdapter as _,
     PublicRunAttachment, PublicRunAttachmentAdapter as _, PublicationHeadAdapter as _,
@@ -45,21 +44,13 @@ use super::model::{
 use super::postgres_projection::{
     finalize_projection_checkpoints, verify_projection_checkpoint_batch,
 };
+use super::schema_contract::{validate_contract_row, POSTGRES_SCHEMA_BACKEND};
 use super::{
     CommitReceipt, CreateRunCommand, DurableRepository, DurableResponseSnapshot,
     PlanInstallOutcome, PlanPublicationOutcome, PublicationHead, PublicationOrigin,
     PublishVersionedPlanCommand, RepositoryError, RunProjection, RunTransitionCommand,
     VersionedPlan, VersionedPlanCatalog, REPOSITORY_PLAN_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
 };
-
-const POSTGRES_MIGRATION_ADVISORY_LOCK: i64 = 0x4941_505f_4456_3301;
-const MIGRATION_LEDGER: &str = "schema_migrations";
-const CREATE_MIGRATION_LEDGER: &str = "CREATE TABLE schema_migrations (
-        version BIGINT PRIMARY KEY CHECK (version > 0),
-        name TEXT NOT NULL UNIQUE,
-        checksum TEXT NOT NULL CHECK (checksum ~ '^sha256:[0-9a-f]{64}$'),
-        applied_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
-     )";
 
 fn plan_conflict() -> RepositoryError {
     RepositoryError::new(
@@ -75,22 +66,16 @@ pub(crate) fn run_not_found() -> RepositoryError {
     )
 }
 
-fn validate_postgres_migration_prefix(
-    rows: &[(i64, String, String)],
-) -> Result<usize, RepositoryError> {
-    if rows.len() > DURABLE_MIGRATIONS.len() {
-        return Err(RepositoryError::migration_failed());
+fn postgres_schema_contract_read_error(error: sqlx::Error) -> RepositoryError {
+    let missing_contract_object = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .is_some_and(|code| matches!(code.as_ref(), "42P01" | "42703"));
+    if missing_contract_object {
+        RepositoryError::schema_not_initialized()
+    } else {
+        RepositoryError::storage(error)
     }
-    for (index, (version, name, checksum)) in rows.iter().enumerate() {
-        let expected = &DURABLE_MIGRATIONS[index];
-        if u64::try_from(*version).ok() != Some(expected.version)
-            || name != expected.name
-            || checksum != &expected.postgres_checksum()
-        {
-            return Err(RepositoryError::migration_failed());
-        }
-    }
-    Ok(rows.len())
 }
 
 /// Acquire the per-Run event-writer authority before any mutable projection
@@ -146,15 +131,34 @@ struct CurrentRunRow {
 /// PostgreSQL production repository.
 ///
 /// Every Run transition is serialized by a row lock; correctness additionally
-/// relies on the migration's composite foreign keys and transition uniqueness.
+/// relies on the Schema's composite foreign keys and transition uniqueness.
 #[derive(Clone)]
 pub struct PostgresDurableRepository {
     pub(crate) pool: PgPool,
 }
 
 impl PostgresDurableRepository {
-    pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+    /// Explicitly provisions an empty, isolated PostgreSQL target for unit
+    /// tests before applying the normal read-only constructor gate.
+    #[cfg(test)]
+    pub(crate) async fn connect_provisioned_for_test(
+        database_url: &str,
+    ) -> Result<Self, RepositoryError> {
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .connect(database_url)
+            .await
+            .map_err(RepositoryError::storage)?;
+        super::schema_contract::provision_postgres_for_test(&pool).await;
+        Self::from_pool(pool).await
+    }
+
+    /// Wraps an existing runtime pool after validating its pre-provisioned
+    /// durable Schema. The pool is never used to install or repair objects.
+    pub async fn from_pool(pool: PgPool) -> Result<Self, RepositoryError> {
+        let repository = Self { pool };
+        repository.validate_schema_contract().await?;
+        Ok(repository)
     }
 
     pub async fn connect(database_url: &str) -> Result<Self, RepositoryError> {
@@ -163,7 +167,7 @@ impl PostgresDurableRepository {
             .connect(database_url)
             .await
             .map_err(RepositoryError::storage)?;
-        Ok(Self { pool })
+        Self::from_pool(pool).await
     }
 
     /// Shares the configured PostgreSQL endpoint with infrastructure that is
@@ -174,129 +178,18 @@ impl PostgresDurableRepository {
         self.pool.clone()
     }
 
-    /// Runs the production forward-only coordinator. A fixed transaction-level
-    /// advisory lock serializes all callers in this database, while the
-    /// dedicated ledger must remain an exact prefix of the embedded manifest.
-    pub async fn migrate_schema(&self) -> Result<(), RepositoryError> {
-        self.migrate_schema_inner(None).await
-    }
-
-    /// Backward-compatible repository initialization entry point. Tests and
-    /// production now share the exact same migration authority and ledger.
-    pub async fn initialize_schema(&self) -> Result<(), RepositoryError> {
-        self.migrate_schema().await
-    }
-
-    async fn migrate_schema_inner(
-        &self,
-        fail_after_sql_version: Option<u64>,
-    ) -> Result<(), RepositoryError> {
-        let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(POSTGRES_MIGRATION_ADVISORY_LOCK)
-            .execute(&mut *transaction)
-            .await
-            .map_err(RepositoryError::storage)?;
-
-        let (ledger_exists, managed_schema_exists) = sqlx::query_as::<_, (bool, bool)>(
-            "SELECT
-                to_regclass($1) IS NOT NULL,
-                to_regclass('workflow_definitions') IS NOT NULL
-                  OR to_regclass('workflow_runs') IS NOT NULL
-                  OR to_regclass('execution_events') IS NOT NULL
-                  OR to_regclass('graph_view_documents') IS NOT NULL
-                  OR to_regclass('human_work_items') IS NOT NULL
-                  OR to_regclass('agent_publication_heads') IS NOT NULL
-                  OR to_regclass('public_event_receipts') IS NOT NULL
-                  OR to_regclass('public_event_projection_decisions') IS NOT NULL
-                  OR to_regclass('public_event_delivery_heads') IS NOT NULL",
+    /// Performs the bounded, read-only startup gate for the durable Schema.
+    pub async fn validate_schema_contract(&self) -> Result<(), RepositoryError> {
+        let row = sqlx::query_as::<_, (String, String)>(
+            "SELECT contract_id,backend
+             FROM durable_schema_contract
+             WHERE singleton=$1",
         )
-        .bind(MIGRATION_LEDGER)
-        .fetch_one(&mut *transaction)
+        .bind(1_i32)
+        .fetch_optional(&self.pool)
         .await
-        .map_err(RepositoryError::storage)?;
-        if !ledger_exists && managed_schema_exists {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Err(RepositoryError::migration_failed());
-        }
-        if !ledger_exists {
-            sqlx::raw_sql(CREATE_MIGRATION_LEDGER)
-                .execute(&mut *transaction)
-                .await
-                .map_err(RepositoryError::storage)?;
-        }
-
-        let applied = sqlx::query_as::<_, (i64, String, String)>(
-            "SELECT version,name,checksum
-             FROM schema_migrations ORDER BY version",
-        )
-        .fetch_all(&mut *transaction)
-        .await
-        .map_err(RepositoryError::storage)?;
-        let applied_count = match validate_postgres_migration_prefix(&applied) {
-            Ok(count) => count,
-            Err(error) => {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(RepositoryError::storage)?;
-                return Err(error);
-            }
-        };
-        if (applied_count == 0 && managed_schema_exists)
-            || (applied_count > 0 && !managed_schema_exists)
-        {
-            transaction
-                .rollback()
-                .await
-                .map_err(RepositoryError::storage)?;
-            return Err(RepositoryError::migration_failed());
-        }
-
-        for migration in DURABLE_MIGRATIONS.iter().skip(applied_count) {
-            if let Err(error) = sqlx::raw_sql(migration.postgres_sql)
-                .execute(&mut *transaction)
-                .await
-            {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(RepositoryError::storage)?;
-                return Err(RepositoryError::storage(error));
-            }
-            if fail_after_sql_version == Some(migration.version) {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(RepositoryError::storage)?;
-                return Err(RepositoryError::migration_failed());
-            }
-            if let Err(error) = sqlx::query(
-                "INSERT INTO schema_migrations
-                    (version,name,checksum,applied_at)
-                 VALUES ($1,$2,$3,clock_timestamp())",
-            )
-            .bind(i64::try_from(migration.version).map_err(|_| RepositoryError::invalid_data())?)
-            .bind(migration.name)
-            .bind(migration.postgres_checksum())
-            .execute(&mut *transaction)
-            .await
-            {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(RepositoryError::storage)?;
-                return Err(RepositoryError::storage(error));
-            }
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(RepositoryError::storage)?;
-        Ok(())
+        .map_err(postgres_schema_contract_read_error)?;
+        validate_contract_row(row, POSTGRES_SCHEMA_BACKEND)
     }
 
     pub async fn check_health(&self) -> Result<(), RepositoryError> {
@@ -590,7 +483,7 @@ impl DurableRepository for PostgresDurableRepository {
                 NULL, NULL, NULL, $9, NULL, NULL, NULL, NULL, NULL, NULL,
                 NULL, NULL, 1, NULL, 1, 0, 0, NULL, NULL, NULL,
                 CURRENT_TIMESTAMP, NULL, CURRENT_TIMESTAMP, NULL, $10, $11
-             ) ON CONFLICT (run_id) DO NOTHING",
+             ) ON CONFLICT DO NOTHING",
         )
         .bind(command.run_id().as_str())
         .bind(command.definition_id())
@@ -2354,68 +2247,4 @@ fn projection_from_row(run_id: &RunId, row: &PgRow) -> Result<RunProjection, Rep
         row.try_get("deadline_at")
             .map_err(|_| RepositoryError::invalid_data())?,
     ))
-}
-
-#[cfg(test)]
-mod migration_tests {
-    use super::*;
-    use sqlx::AssertSqlSafe;
-    use uuid::Uuid;
-
-    #[tokio::test]
-    async fn postgres_migration_sql_and_ledger_insert_roll_back_together() {
-        let database_url = match std::env::var("TEST_POSTGRES_URL") {
-            Ok(value) => value,
-            Err(error) if std::env::var_os("CI").is_some() => {
-                panic!("CI must set TEST_POSTGRES_URL for migration rollback test: {error}")
-            }
-            Err(_) => return,
-        };
-        let schema = format!("migration_rollback_{}", Uuid::new_v4().simple());
-        let admin = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&database_url)
-            .await
-            .unwrap();
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let separator = if database_url.contains('?') { '&' } else { '?' };
-        let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
-        let repository = PostgresDurableRepository::connect(&scoped_url)
-            .await
-            .unwrap();
-
-        let first_version = DURABLE_MIGRATIONS[0].version;
-        let error = repository
-            .migrate_schema_inner(Some(first_version))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), super::super::REPOSITORY_MIGRATION_FAILED);
-        let (ledger_exists, schema_exists) = sqlx::query_as::<_, (bool, bool)>(
-            "SELECT
-                to_regclass('schema_migrations') IS NOT NULL,
-                to_regclass('workflow_runs') IS NOT NULL",
-        )
-        .fetch_one(&repository.pool)
-        .await
-        .unwrap();
-        assert!(!ledger_exists);
-        assert!(!schema_exists);
-
-        repository.migrate_schema().await.unwrap();
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM schema_migrations",)
-                .fetch_one(&repository.pool)
-                .await
-                .unwrap(),
-            i64::try_from(DURABLE_MIGRATIONS.len()).unwrap(),
-        );
-        sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
-            .execute(&admin)
-            .await
-            .unwrap();
-        admin.close().await;
-    }
 }

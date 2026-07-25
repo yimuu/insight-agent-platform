@@ -21,7 +21,7 @@
 | [架构概览](current/architecture.md) | 架构师、开发者 | 运行模型、持久化边界与核心不变量 |
 | [DSL v1 指南](current/dsl.md) | Agent 作者 | 作者语法、类型、表达式、控制流 |
 | [HTTP 与 SSE API](current/api.md) | API 使用者 | 路由、幂等、响应流和人工任务 |
-| [部署与运维](current/operations.md) | 运维、平台开发者 | 配置、数据库、Artifact、认证、迁移 |
+| [部署与运维](current/operations.md) | 运维、平台开发者 | Schema 预置、数据库、Artifact、认证 |
 | [开发指南](current/development.md) | 贡献者 | 代码导航、测试和 CI 门禁 |
 
 ## 权威关系

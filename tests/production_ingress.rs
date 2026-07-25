@@ -126,6 +126,7 @@ async fn setup() -> (tempfile::TempDir, RunService, SqlitePool) {
     let deployed = deploy_agents(&published, &NoLeafResolver).unwrap();
     let agents = DeployedAgentCatalog::new(deployed).unwrap();
     let database = temporary.path().join("runtime-ingress.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
             &database,
@@ -750,6 +751,7 @@ async fn reserved_human_completion_is_replayed_after_runtime_restart_without_cli
     let deployed = deploy_agents(&published, &NoLeafResolver).unwrap();
     let agents = DeployedAgentCatalog::new(deployed).unwrap();
     let database = temporary.path().join("human-completion-restart.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
             &database,
@@ -954,6 +956,7 @@ async fn root_deadline_is_database_clocked_persists_restart_and_ignores_pause() 
     let deployed = deploy_agents(&published, &NoLeafResolver).unwrap();
     let agents = DeployedAgentCatalog::new(deployed).unwrap();
     let database = temporary.path().join("root-deadline.sqlite");
+    database::provision_sqlite_database(&database).await;
 
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
@@ -1107,3 +1110,5 @@ async fn root_deadline_is_database_clocked_persists_restart_and_ignores_pause() 
     second.shutdown(Duration::from_secs(1)).await.unwrap();
     control.close().await;
 }
+#[path = "support/database.rs"]
+mod database;

@@ -10,7 +10,6 @@ pub const REPOSITORY_CONSTRAINT_CONFLICT: &str = "ENGINE_REPOSITORY_CONSTRAINT_C
 pub const REPOSITORY_INTENT_CONFLICT: &str = "ENGINE_REPOSITORY_INTENT_CONFLICT";
 pub const REPOSITORY_DATA_INVALID: &str = "ENGINE_REPOSITORY_DATA_INVALID";
 pub const REPOSITORY_STORAGE_FAILURE: &str = "ENGINE_REPOSITORY_STORAGE_FAILURE";
-pub const REPOSITORY_MIGRATION_FAILED: &str = "ENGINE_REPOSITORY_MIGRATION_FAILED";
 pub const REPOSITORY_ARTIFACT_STORE_CONFLICT: &str = "ENGINE_REPOSITORY_ARTIFACT_STORE_CONFLICT";
 pub const REPOSITORY_SCHEDULER_ACTION_UNSUPPORTED: &str =
     "ENGINE_REPOSITORY_SCHEDULER_ACTION_UNSUPPORTED";
@@ -119,8 +118,8 @@ impl fmt::Debug for StorageLocator {
 pub mod adapter {
     use super::{
         RepositoryError, StorageLocator, REPOSITORY_ACTIVATION_NOT_FOUND,
-        REPOSITORY_INTENT_CONFLICT, REPOSITORY_MIGRATION_FAILED, REPOSITORY_REDRIVE_REQUIRES_FORK,
-        REPOSITORY_RUN_MIGRATING, REPOSITORY_SCHEDULER_CRASH_INJECTED,
+        REPOSITORY_INTENT_CONFLICT, REPOSITORY_REDRIVE_REQUIRES_FORK, REPOSITORY_RUN_MIGRATING,
+        REPOSITORY_SCHEDULER_CRASH_INJECTED,
     };
 
     pub const fn repository_error(code: &'static str, message: &'static str) -> RepositoryError {
@@ -164,13 +163,6 @@ pub mod adapter {
         RepositoryError::new(
             REPOSITORY_RUN_MIGRATING,
             "workflow run is migrating and no longer accepts signals",
-        )
-    }
-
-    pub const fn migration_failed() -> RepositoryError {
-        RepositoryError::new(
-            REPOSITORY_MIGRATION_FAILED,
-            "durable PostgreSQL migration authority is invalid",
         )
     }
 

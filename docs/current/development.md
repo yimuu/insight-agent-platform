@@ -27,7 +27,7 @@ cargo deny check
 - `scripts/check-public-api-baseline.sh`，验证根 facade 的公开 Rust API；
 - 真实 PostgreSQL 16 repository、恢复与竞态合同测试；
 - real-process restart、SIGINT 和 shutdown 测试；
-- 依赖策略与 migration manifest 检查。
+- 空数据库 Schema 安装、contract 校验、运行时零 DDL 和依赖策略检查。
 
 完整 PostgreSQL 门禁必须在 PostgreSQL 16 上以 `CI=1` 运行，并设置
 `RUN_HISTORY_POSTGRES_URL` 和 `TEST_POSTGRES_URL`。CI 中这些变量必须存在，相关门禁不能静默跳过。
@@ -44,7 +44,7 @@ cargo deny check
 | `crates/runtime/src/` | catalog/deployment、leaf adapter、scheduler/worker pump、RunService 与 live response |
 | `crates/api/src/v1/` | `/v1` Axum HTTP、认证、错误映射与 SSE transport |
 | `src/` | 根兼容 facade、平台配置、严格 YAML 解码和 binary composition |
-| `migrations/durable/` | SQLite/PostgreSQL 持久化 schema |
+| `database/durable/` | SQLite/PostgreSQL 完整 Schema、安装与权限合同 |
 | `agents/` | 随仓库交付的 Agent |
 | `tests/fixtures/dsl/` | DSL compiler 正向和负向 fixtures |
 | `crates/*/{src,tests}` | owner crate 的单元与合同测试 |
@@ -57,5 +57,10 @@ cargo deny check
 3. 为 durable 行为补充 SQLite 与真实 PostgreSQL 证据；
 4. 更新对应 `docs/current/` 文档；
 5. 设计和迁移记录写入 `docs/archive/`，不要让历史示例重新成为正向输入。
+
+Repository 测试必须显式区分数据库安装和连接：先在新的空目标执行
+`database/durable/{postgres,sqlite}/schema.sql`，再创建 repository。生产构造函数没有隐式建表
+捷径。修改 1.0 前 Schema 时应同时修改两个后端和 contract ID，然后重建所有开发/CI 数据库；
+不得为尚未发布的数据库保留伪 migration 历史。
 
 文档分类与权威顺序见[文档首页](../README.md)。

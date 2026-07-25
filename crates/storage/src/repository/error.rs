@@ -7,13 +7,16 @@ use insight_engine::repository::adapter as repository_adapter;
 pub(crate) trait RepositoryErrorExt {
     fn new(code: &'static str, message: &'static str) -> Self;
     fn storage(error: sqlx::Error) -> Self;
+    fn storage_unavailable() -> Self;
     fn canonicalization() -> Self;
     fn invalid_configuration() -> Self;
     fn invalid_data() -> Self;
     fn intent_conflict() -> Self;
     fn activation_not_found() -> Self;
     fn run_migrating() -> Self;
-    fn migration_failed() -> Self;
+    fn schema_not_initialized() -> Self;
+    fn schema_contract_mismatch() -> Self;
+    fn schema_backend_mismatch() -> Self;
     fn redrive_requires_fork() -> Self;
 }
 
@@ -32,6 +35,13 @@ impl RepositoryErrorExt for RepositoryError {
                 "durable repository constraint conflict",
             );
         }
+        repository_adapter::repository_error(
+            REPOSITORY_STORAGE_FAILURE,
+            "durable repository operation failed",
+        )
+    }
+
+    fn storage_unavailable() -> Self {
         repository_adapter::repository_error(
             REPOSITORY_STORAGE_FAILURE,
             "durable repository operation failed",
@@ -62,8 +72,25 @@ impl RepositoryErrorExt for RepositoryError {
         repository_adapter::run_migrating()
     }
 
-    fn migration_failed() -> Self {
-        repository_adapter::migration_failed()
+    fn schema_not_initialized() -> Self {
+        repository_adapter::repository_error(
+            super::schema_contract::DATABASE_SCHEMA_NOT_INITIALIZED,
+            "durable database Schema is not initialized",
+        )
+    }
+
+    fn schema_contract_mismatch() -> Self {
+        repository_adapter::repository_error(
+            super::schema_contract::DATABASE_SCHEMA_CONTRACT_MISMATCH,
+            "durable database Schema contract does not match this service",
+        )
+    }
+
+    fn schema_backend_mismatch() -> Self {
+        repository_adapter::repository_error(
+            super::schema_contract::DATABASE_SCHEMA_BACKEND_MISMATCH,
+            "durable database Schema backend does not match this repository",
+        )
     }
 
     fn redrive_requires_fork() -> Self {

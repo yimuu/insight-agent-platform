@@ -22,6 +22,8 @@
   和公开结果投影。
 - `/v1` HTTP API、Attached live-only SSE、durable terminal snapshot、人工任务和 Artifact 读取。
 - 内容寻址 Artifact store、保留策略、GC、公开事件投影和响应流边界。
+- PostgreSQL/SQLite 权威完整 Schema、启动前显式 provisioning、只读 contract gate，以及业务
+  服务运行时零 DDL 权限边界。
 - 分层 Rust workspace、依赖策略检查、真实 PostgreSQL 合同测试、binary smoke 和恢复门禁。
 
 ### Security

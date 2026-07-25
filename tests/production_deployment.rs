@@ -1,3 +1,6 @@
+#[path = "support/database.rs"]
+mod database;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -88,12 +91,12 @@ async fn postgres_repository(
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    database::provision_postgres_url(&scoped_url).await;
     let repository = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    repository.initialize_schema().await.unwrap();
     (admin, schema, repository)
 }
 

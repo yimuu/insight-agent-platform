@@ -1,3 +1,6 @@
+#[path = "support/database.rs"]
+mod database;
+
 use std::collections::BTreeMap;
 
 use insight_agent_platform::{
@@ -536,6 +539,7 @@ async fn sqlite_planner_failures_commit_one_closed_terminal_and_exact_replay() {
     ] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(format!("{}.sqlite", case.label()));
+        database::provision_sqlite_database(&path).await;
         let repository = SqliteDurableRepository::connect_path(&path).await.unwrap();
         let control = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
@@ -605,8 +609,8 @@ async fn isolated_postgres() -> Option<(PostgresDurableRepository, PgPool, PgPoo
         .connect(&scoped)
         .await
         .unwrap();
+    database::provision_postgres_schema(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped).await.unwrap();
-    repository.initialize_schema().await.unwrap();
     Some((repository, control, admin, schema))
 }
 

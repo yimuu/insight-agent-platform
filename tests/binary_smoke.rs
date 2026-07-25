@@ -1,9 +1,12 @@
 //! Real binary smoke test for the durable workflow runtime.
 
+#[path = "support/database.rs"]
+mod database;
+
 use std::{
     fs,
     io::{self, Read},
-    net::{SocketAddr, TcpListener},
+    net::{SocketAddr, TcpListener, TcpStream},
     panic::{resume_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
@@ -13,8 +16,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use futures::FutureExt;
-use insight_agent_platform::engine::repository::migration_manifest::DURABLE_MIGRATIONS;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, Url};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, AssertSqlSafe, PgPool};
 use tempfile::TempDir;
@@ -28,11 +30,47 @@ const BINARY_POSTGRES_ARTIFACT_NAMESPACE: &str = "binary-pg-restart";
 static BINARY_STARTUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
+async fn binary_rejects_missing_sqlite_before_bind_without_creating_the_file() {
+    let startup_guard = BINARY_STARTUP_LOCK.lock().await;
+    let temp = TempDir::new().unwrap();
+    let bind_addr = reserve_loopback_addr();
+    let platform_config = write_temp_configs(temp.path(), bind_addr);
+    let database_path = temp.path().join("history.sqlite3");
+    assert!(!database_path.exists());
+
+    let mut child = ChildGuard::spawn(&platform_config);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "binary did not fail after the required SQLite file was absent"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    let output = child.terminate_and_collect();
+    drop(startup_guard);
+
+    assert!(
+        !output.status.success(),
+        "binary must fail when Schema provisioning was skipped"
+    );
+    assert!(
+        !database_path.exists(),
+        "binary startup must not create the configured SQLite file"
+    );
+    assert!(
+        TcpStream::connect_timeout(&bind_addr, Duration::from_millis(100)).is_err(),
+        "business HTTP must not bind before the Schema contract gate"
+    );
+}
+
+#[tokio::test]
 async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
     let startup_guard = BINARY_STARTUP_LOCK.lock().await;
     let temp = TempDir::new().unwrap();
     let bind_addr = reserve_loopback_addr();
     let platform_config = write_temp_configs(temp.path(), bind_addr);
+    database::provision_sqlite_database(&temp.path().join("history.sqlite3")).await;
     let base_url = format!("http://{bind_addr}");
     let client = Client::builder()
         .timeout(Duration::from_secs(2))
@@ -156,6 +194,7 @@ async fn stock_binary_wires_two_environment_backed_human_principals() {
     let temp = TempDir::new().unwrap();
     let bind_addr = reserve_loopback_addr();
     let platform_config = write_human_auth_configs(temp.path(), bind_addr);
+    database::provision_sqlite_database(&temp.path().join("history.sqlite3")).await;
     let base_url = format!("http://{bind_addr}");
     let client = Client::builder()
         .timeout(Duration::from_secs(2))
@@ -226,6 +265,7 @@ async fn ordinary_process_restart_keeps_a_nonterminal_run_recoverable() {
     let temp = TempDir::new().unwrap();
     let first_addr = reserve_loopback_addr();
     let platform_config = write_restart_configs(temp.path(), first_addr);
+    database::provision_sqlite_database(&temp.path().join("restart.sqlite3")).await;
     let first_base = format!("http://{first_addr}");
     let client = Client::builder()
         .timeout(Duration::from_secs(2))
@@ -283,73 +323,80 @@ async fn ordinary_process_restart_keeps_a_nonterminal_run_recoverable() {
 
 #[derive(Debug, PartialEq, Eq)]
 struct PostgresStartupAuthoritySnapshot {
-    migrations: Vec<(i64, String, String, DateTime<Utc>)>,
-    artifact_store: (String, String, String, DateTime<Utc>),
+    schema_contract: (String, String, DateTime<Utc>),
+    tables: Vec<String>,
+    indexes: Vec<(String, String)>,
+    triggers: Vec<(String, String)>,
 }
 
 #[tokio::test]
-async fn stock_production_binary_recovers_postgres_run_across_restart() {
+async fn stock_production_binary_runs_and_restarts_with_a_no_ddl_postgres_role() {
     let Some(database_url) = postgres_binary_test_url() else {
         return;
     };
     let schema = format!("binary_restart_{}", Uuid::new_v4().simple());
+    let runtime_role = format!("binary_runtime_{}", Uuid::new_v4().simple());
+    let runtime_password = format!("binary_password_{}", Uuid::new_v4().simple());
     let admin = PgPoolOptions::new()
         .max_connections(2)
         .connect(&database_url)
         .await
         .unwrap_or_else(|_| panic!("TEST_POSTGRES_URL must be reachable"));
-    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-        .execute(&admin)
-        .await
-        .expect("binary PostgreSQL gate must create its isolated schema");
-    let separator = if database_url.contains('?') { '&' } else { '?' };
-    let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
-    let control = match PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&scoped_url)
-        .await
-    {
-        Ok(control) => control,
-        Err(_) => {
-            sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
-                .execute(&admin)
-                .await
-                .expect("failed to clean isolated schema after control connection failure");
-            admin.close().await;
-            panic!("isolated binary PostgreSQL schema must be reachable");
-        }
-    };
 
     let outcome = AssertUnwindSafe(async {
+        let server_version =
+            sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::INT")
+                .fetch_one(&admin)
+                .await
+                .expect("binary PostgreSQL gate must read the server version");
+        assert_eq!(
+            server_version / 10_000,
+            16,
+            "the no-DDL production binary gate must run against PostgreSQL 16"
+        );
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .expect("binary PostgreSQL gate must create its isolated schema");
+        let scoped_admin_url = postgres_scoped_url(&database_url, &schema);
+        let control = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&scoped_admin_url)
+            .await
+            .expect("isolated binary PostgreSQL schema must be reachable");
+        database::provision_postgres_schema(&control).await;
+        install_postgres_runtime_role(&admin, &schema, &runtime_role, &runtime_password).await;
+        let runtime_url = postgres_role_url(&scoped_admin_url, &runtime_role, &runtime_password);
+        verify_postgres_runtime_role(&admin, &runtime_url, &runtime_role).await;
+        let provisioned_schema = postgres_startup_authority(&control).await;
+
         let first_startup_guard = BINARY_STARTUP_LOCK.lock().await;
         let temp = TempDir::new().unwrap();
         let first_addr = reserve_loopback_addr();
-        let platform_config = write_postgres_restart_configs(temp.path(), first_addr);
+        let platform_config = write_postgres_action_configs(temp.path(), first_addr);
         let first_base = format!("http://{first_addr}");
-        let client = Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .unwrap();
-        let process_environment = [(BINARY_POSTGRES_URL_ENV, scoped_url.as_str())];
+        let client = Client::builder().timeout(RUN_TIMEOUT).build().unwrap();
+        let process_environment = [(BINARY_POSTGRES_URL_ENV, runtime_url.as_str())];
 
         let mut first = ChildGuard::spawn_with_env(&platform_config, &process_environment);
         wait_for_health(&client, &first_base, &mut first).await;
         drop(first_startup_guard);
-        let created = expect_json(
-            format!("POST {first_base}/v1/agents/restart_waiter/runs"),
-            client
-                .post(format!("{first_base}/v1/agents/restart_waiter/runs"))
-                .header("x-request-id", "postgres-restart-request-1")
-                .json(&json!({})),
-            StatusCode::ACCEPTED,
+        let attached = create_attached_action_and_read_response(&client, &first_base).await;
+        let run_id = attached.run_id;
+        let response_id = attached.response_id;
+        let completed = expect_json(
+            format!("GET {first_base}/v1/runs/{run_id}"),
+            client.get(format!("{first_base}/v1/runs/{run_id}")),
+            StatusCode::OK,
         )
         .await;
-        assert_eq!(created["data"]["status"], "running");
-        let run_id = created["data"]["run_id"]
-            .as_str()
-            .expect("create response must contain run_id")
-            .to_owned();
-        let first_authority = postgres_startup_authority(&control).await;
+        assert_eq!(completed["data"]["status"], "completed");
+        assert_eq!(completed["data"]["response_id"], response_id);
+        assert_eq!(
+            completed["data"]["output"],
+            json!({"data":{"characters":16,"words":3,"lines":1}})
+        );
+        assert_completed_action_trace(&client, &first_base, &run_id).await;
 
         let first_output = first.shutdown();
         assert!(
@@ -357,6 +404,12 @@ async fn stock_production_binary_recovers_postgres_run_across_restart() {
             "first production PostgreSQL process should stop cleanly\n{}",
             format_output(&first_output)
         );
+        let after_first_start = postgres_startup_authority(&control).await;
+        assert_eq!(
+            after_first_start, provisioned_schema,
+            "first startup must not rewrite the contract or table/index/trigger inventory"
+        );
+        let first_artifact_authority = postgres_artifact_store_authority(&control).await;
 
         let second_startup_guard = BINARY_STARTUP_LOCK.lock().await;
         let second_addr = reserve_loopback_addr();
@@ -371,41 +424,55 @@ async fn stock_production_binary_recovers_postgres_run_across_restart() {
             StatusCode::OK,
         )
         .await;
-        assert_eq!(recovered["data"]["status"], "running");
+        assert_eq!(recovered["data"]["status"], "completed");
+        assert_eq!(recovered["data"]["response_id"], response_id);
+        assert_eq!(recovered["data"]["attachment"], "attached");
         assert_eq!(
-            recovered["data"]["request_id"],
-            "postgres-restart-request-1"
+            recovered["data"]["output"],
+            json!({"data":{"characters":16,"words":3,"lines":1}})
         );
-        assert_eq!(recovered["data"]["attachment"], "detached");
-        assert!(recovered["data"]["agent_version"]
-            .as_str()
-            .is_some_and(|value| value.starts_with("deployrev_")));
-
-        let second_authority = postgres_startup_authority(&control).await;
-        assert_eq!(
-            second_authority, first_authority,
-            "restart must not rewrite migration or Artifact-store authority"
-        );
+        assert_completed_action_trace(&client, &second_base, &run_id).await;
         let second_output = second.shutdown();
         assert!(
             shutdown_was_graceful(&second_output),
             "second production PostgreSQL process should stop cleanly\n{}",
             format_output(&second_output)
         );
+        let after_restart = postgres_startup_authority(&control).await;
+        assert_eq!(
+            after_restart, provisioned_schema,
+            "restart must not rewrite the contract or table/index/trigger inventory"
+        );
+        let second_artifact_authority = postgres_artifact_store_authority(&control).await;
+        assert_eq!(
+            second_artifact_authority, first_artifact_authority,
+            "restart must preserve the durable Artifact-store authority row"
+        );
+        control.close().await;
     })
     .catch_unwind()
     .await;
 
-    control.close().await;
-    let cleanup = sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+    let schema_cleanup = sqlx::query(AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE"
+    )))
+    .execute(&admin)
+    .await;
+    let role_cleanup = sqlx::query(AssertSqlSafe(format!("DROP ROLE IF EXISTS {runtime_role}")))
         .execute(&admin)
         .await;
     admin.close().await;
     match outcome {
-        Ok(()) => cleanup.expect("binary PostgreSQL gate must clean its isolated schema"),
+        Ok(()) => {
+            schema_cleanup.expect("binary PostgreSQL gate must clean its isolated schema");
+            role_cleanup.expect("binary PostgreSQL gate must clean its runtime role");
+        }
         Err(payload) => {
-            if let Err(error) = cleanup {
+            if let Err(error) = schema_cleanup {
                 eprintln!("failed to clean binary PostgreSQL schema after panic: {error}");
+            }
+            if let Err(error) = role_cleanup {
+                eprintln!("failed to clean binary PostgreSQL role after panic: {error}");
             }
             resume_unwind(payload);
         }
@@ -422,20 +489,394 @@ fn postgres_binary_test_url() -> Option<String> {
     }
 }
 
+#[derive(Debug)]
+struct AttachedActionEvidence {
+    run_id: String,
+    response_id: String,
+}
+
+async fn create_attached_action_and_read_response(
+    client: &Client,
+    base_url: &str,
+) -> AttachedActionEvidence {
+    let stream_url = format!("{base_url}/v1/agents/action_demo/runs/stream");
+    let response = client
+        .post(&stream_url)
+        .header("x-request-id", "postgres-no-ddl-action-1")
+        .json(&json!({"text":"hello rust world"}))
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("POST {stream_url}: {error}"));
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "attached action run must open its response stream"
+    );
+    assert!(
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream")),
+        "attached action run must return an SSE response"
+    );
+    let run_id = response
+        .headers()
+        .get("x-run-id")
+        .and_then(|value| value.to_str().ok())
+        .expect("attached action response must expose x-run-id")
+        .to_owned();
+    let response_id = response
+        .headers()
+        .get("x-response-id")
+        .and_then(|value| value.to_str().ok())
+        .expect("attached action response must expose x-response-id")
+        .to_owned();
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| panic!("failed to read {stream_url} to terminal EOF: {error}"));
+    let events = decode_sse_json_events(&body);
+    assert!(
+        events.len() >= 3,
+        "attached action response must expose created, in-progress, and terminal events: {body}"
+    );
+    assert_eq!(events[0]["type"], "response.created");
+    assert_eq!(events[1]["type"], "response.in_progress");
+    let terminal = events.last().unwrap();
+    assert_eq!(terminal["type"], "response.completed");
+    assert_eq!(terminal["response"]["id"], response_id);
+    assert_eq!(terminal["response"]["status"], "completed");
+    assert_eq!(terminal["workflow"]["run_id"], run_id);
+    assert_eq!(
+        terminal["workflow"]["result"],
+        json!({"characters":16,"words":3,"lines":1})
+    );
+    let mut previous_sequence = None;
+    for event in &events {
+        let sequence = event["sequence_number"]
+            .as_u64()
+            .expect("every public response event must carry a sequence number");
+        if let Some(previous) = previous_sequence {
+            assert!(
+                sequence > previous,
+                "public response event sequence must be strictly increasing"
+            );
+        }
+        previous_sequence = Some(sequence);
+    }
+
+    AttachedActionEvidence {
+        run_id,
+        response_id,
+    }
+}
+
+fn decode_sse_json_events(body: &str) -> Vec<Value> {
+    let normalized = body.replace("\r\n", "\n");
+    normalized
+        .split("\n\n")
+        .filter_map(|frame| {
+            let mut event_name = None;
+            let mut data = Vec::new();
+            for line in frame.lines() {
+                if let Some(value) = line.strip_prefix("event:") {
+                    event_name = Some(value.trim());
+                } else if let Some(value) = line.strip_prefix("data:") {
+                    data.push(value.trim_start());
+                }
+            }
+            let event_name = event_name?;
+            assert!(
+                !data.is_empty(),
+                "SSE event {event_name} must carry JSON data"
+            );
+            let encoded = data.join("\n");
+            let event: Value = serde_json::from_str(&encoded)
+                .unwrap_or_else(|error| panic!("SSE event {event_name} is not JSON: {error}"));
+            assert_eq!(
+                event["type"], event_name,
+                "SSE event name and closed JSON event type must agree"
+            );
+            Some(event)
+        })
+        .collect()
+}
+
+async fn assert_completed_action_trace(client: &Client, base_url: &str, run_id: &str) {
+    let graph_url = format!("{base_url}/v1/runs/{run_id}/execution-graph");
+    let graph = expect_json(
+        format!("GET {graph_url}"),
+        client.get(graph_url),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(
+        graph["data"]["nodes"]
+            .as_array()
+            .is_some_and(|nodes| !nodes.is_empty()),
+        "completed action must expose its scheduled execution graph"
+    );
+
+    let trace_url = format!("{base_url}/v1/runs/{run_id}/trace");
+    let trace = expect_json(
+        format!("GET {trace_url}"),
+        client.get(trace_url),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(trace["data"]["run_id"], run_id);
+    let activations = trace["data"]["activations"]
+        .as_array()
+        .expect("completed action trace must expose activation events");
+    assert!(
+        !activations.is_empty(),
+        "completed action trace must prove scheduler activity"
+    );
+    assert!(
+        activations
+            .iter()
+            .all(|activation| activation["state"] == "succeeded"),
+        "every terminal action activation must be succeeded: {activations:?}"
+    );
+}
+
+fn postgres_scoped_url(database_url: &str, schema: &str) -> String {
+    assert_postgres_identifier(schema);
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    format!("{database_url}{separator}options=-csearch_path%3D{schema}")
+}
+
+fn postgres_role_url(scoped_url: &str, role: &str, password: &str) -> String {
+    assert_postgres_identifier(role);
+    let mut url = Url::parse(scoped_url).expect("TEST_POSTGRES_URL must be a PostgreSQL URL");
+    url.set_username(role)
+        .expect("generated PostgreSQL role must be URL-safe");
+    url.set_password(Some(password))
+        .expect("generated PostgreSQL password must be URL-safe");
+    url.to_string()
+}
+
+fn assert_postgres_identifier(identifier: &str) {
+    assert!(
+        identifier
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| byte.is_ascii_lowercase()
+                || byte == b'_'
+                || (index > 0 && byte.is_ascii_digit())),
+        "generated PostgreSQL identifier is not safely formattable: {identifier}"
+    );
+}
+
+async fn install_postgres_runtime_role(admin: &PgPool, schema: &str, role: &str, password: &str) {
+    assert_postgres_identifier(schema);
+    assert_postgres_identifier(role);
+    assert!(
+        password
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_' || byte.is_ascii_digit()),
+        "generated PostgreSQL password is not safely formattable"
+    );
+    let statements = [
+        format!(
+            "CREATE ROLE {role} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB \
+             NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '{password}'"
+        ),
+        format!("REVOKE ALL PRIVILEGES ON SCHEMA {schema} FROM {role}"),
+        format!("GRANT USAGE ON SCHEMA {schema} TO {role}"),
+        format!("GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA {schema} TO {role}"),
+        format!("GRANT USAGE,SELECT,UPDATE ON ALL SEQUENCES IN SCHEMA {schema} TO {role}"),
+        format!("REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA {schema} FROM PUBLIC"),
+        format!("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA {schema} TO {role}"),
+        format!(
+            "REVOKE ALL PRIVILEGES ON TABLE \
+             {schema}.durable_schema_contract FROM {role}"
+        ),
+        format!("GRANT SELECT ON TABLE {schema}.durable_schema_contract TO {role}"),
+    ];
+    for statement in statements {
+        sqlx::query(AssertSqlSafe(statement))
+            .execute(admin)
+            .await
+            .expect("provisioner must install the restricted runtime role");
+    }
+}
+
+async fn verify_postgres_runtime_role(admin: &PgPool, runtime_url: &str, role: &str) {
+    let role_attributes = sqlx::query_as::<_, (bool, bool, bool, bool, bool, bool, bool)>(
+        "SELECT rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,
+                rolreplication,rolbypassrls
+         FROM pg_roles WHERE rolname=$1",
+    )
+    .bind(role)
+    .fetch_one(admin)
+    .await
+    .expect("provisioner must expose the generated runtime role");
+    assert_eq!(
+        role_attributes,
+        (false, false, false, false, true, false, false),
+        "runtime role must be LOGIN-only and inherit no owner/DDL authority"
+    );
+
+    let runtime = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(runtime_url)
+        .await
+        .expect("restricted runtime LOGIN role must connect");
+    let contract = sqlx::query_as::<_, (String, String)>(
+        "SELECT contract_id,backend FROM durable_schema_contract WHERE singleton=1",
+    )
+    .fetch_one(&runtime)
+    .await
+    .expect("runtime role must read the Schema contract");
+    assert_eq!(contract.0, database::DURABLE_SCHEMA_CONTRACT_ID);
+    assert_eq!(contract.1, "postgres");
+
+    let privileges = sqlx::query_as::<_, (bool, bool, bool, bool, bool, bool, bool, bool)>(
+        "SELECT
+           has_schema_privilege(current_user,current_schema(),'USAGE'),
+           has_schema_privilege(current_user,current_schema(),'CREATE'),
+           has_table_privilege(current_user,'workflow_runs','SELECT,INSERT,UPDATE,DELETE'),
+           has_table_privilege(current_user,'durable_schema_contract','SELECT'),
+           has_table_privilege(current_user,'durable_schema_contract','INSERT'),
+           has_table_privilege(current_user,'durable_schema_contract','UPDATE'),
+           has_table_privilege(current_user,'durable_schema_contract','DELETE'),
+           has_table_privilege(current_user,'durable_schema_contract','TRUNCATE')",
+    )
+    .fetch_one(&runtime)
+    .await
+    .expect("runtime role privileges must be inspectable");
+    assert_eq!(
+        privileges,
+        (true, false, true, true, false, false, false, false),
+        "runtime role needs DML while the contract remains read-only and schema CREATE is denied"
+    );
+    let owned_objects = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM pg_class class
+         JOIN pg_namespace namespace ON namespace.oid=class.relnamespace
+         WHERE namespace.nspname=current_schema()
+           AND class.relowner=(SELECT oid FROM pg_roles WHERE rolname=current_user)",
+    )
+    .fetch_one(&runtime)
+    .await
+    .expect("runtime role object ownership must be inspectable");
+    assert_eq!(
+        owned_objects, 0,
+        "runtime role must own no relation, so ALTER and DROP remain unavailable"
+    );
+    let all_functions_executable = sqlx::query_scalar::<_, Option<bool>>(
+        "SELECT bool_and(has_function_privilege(current_user,procedure.oid,'EXECUTE'))
+         FROM pg_proc procedure
+         JOIN pg_namespace namespace ON namespace.oid=procedure.pronamespace
+         WHERE namespace.nspname=current_schema()",
+    )
+    .fetch_one(&runtime)
+    .await
+    .expect("runtime function privileges must be inspectable");
+    assert_eq!(
+        all_functions_executable,
+        Some(true),
+        "runtime role must execute the pre-provisioned trigger functions"
+    );
+
+    for (statement, authority) in [
+        (
+            "CREATE TABLE runtime_must_not_create(singleton INTEGER)",
+            "CREATE",
+        ),
+        (
+            "ALTER TABLE workflow_runs \
+             ADD COLUMN runtime_must_not_alter INTEGER",
+            "ALTER",
+        ),
+        ("DROP TABLE workflow_runs", "DROP"),
+        (
+            "UPDATE durable_schema_contract SET contract_id=contract_id WHERE singleton=1",
+            "contract UPDATE",
+        ),
+    ] {
+        assert_postgres_statement_denied(&runtime, statement, authority).await;
+    }
+    runtime.close().await;
+}
+
+async fn assert_postgres_statement_denied(pool: &PgPool, statement: &str, authority: &str) {
+    let mut transaction = pool
+        .begin()
+        .await
+        .expect("runtime permission probe must begin a transaction");
+    let result = sqlx::query(AssertSqlSafe(statement.to_owned()))
+        .execute(&mut *transaction)
+        .await;
+    transaction
+        .rollback()
+        .await
+        .expect("runtime permission probe must roll back");
+    assert!(
+        result.is_err(),
+        "runtime role unexpectedly acquired {authority} authority"
+    );
+}
+
 async fn postgres_startup_authority(pool: &PgPool) -> PostgresStartupAuthoritySnapshot {
-    let migrations = sqlx::query_as::<_, (i64, String, String, DateTime<Utc>)>(
-        "SELECT version,name,checksum,applied_at
-         FROM schema_migrations ORDER BY version",
+    let schema_contract = sqlx::query_as::<_, (String, String, DateTime<Utc>)>(
+        "SELECT contract_id,backend,installed_at
+         FROM durable_schema_contract WHERE singleton=1",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("stock binary must preserve the pre-provisioned Schema contract");
+    assert_eq!(schema_contract.0, database::DURABLE_SCHEMA_CONTRACT_ID);
+    assert_eq!(schema_contract.1, "postgres");
+    let tables = sqlx::query_scalar::<_, String>(
+        "SELECT class.relname
+         FROM pg_class class
+         JOIN pg_namespace namespace ON namespace.oid=class.relnamespace
+         WHERE namespace.nspname=current_schema()
+           AND class.relkind IN ('r','p')
+         ORDER BY class.relname",
     )
     .fetch_all(pool)
     .await
-    .expect("stock binary must expose its migration ledger");
-    assert_eq!(migrations.len(), DURABLE_MIGRATIONS.len());
-    for (actual, expected) in migrations.iter().zip(DURABLE_MIGRATIONS.iter()) {
-        assert_eq!(u64::try_from(actual.0).unwrap(), expected.version);
-        assert_eq!(actual.1, expected.name);
-        assert_eq!(actual.2, expected.postgres_checksum());
+    .expect("stock binary Schema table inventory must be readable");
+    let indexes = sqlx::query_as::<_, (String, String)>(
+        "SELECT table_class.relname,index_class.relname
+         FROM pg_index index_metadata
+         JOIN pg_class table_class ON table_class.oid=index_metadata.indrelid
+         JOIN pg_class index_class ON index_class.oid=index_metadata.indexrelid
+         JOIN pg_namespace namespace ON namespace.oid=table_class.relnamespace
+         WHERE namespace.nspname=current_schema()
+         ORDER BY table_class.relname,index_class.relname",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("stock binary Schema index inventory must be readable");
+    let triggers = sqlx::query_as::<_, (String, String)>(
+        "SELECT class.relname,trigger.tgname
+         FROM pg_trigger trigger
+         JOIN pg_class class ON class.oid=trigger.tgrelid
+         JOIN pg_namespace namespace ON namespace.oid=class.relnamespace
+         WHERE namespace.nspname=current_schema()
+           AND NOT trigger.tgisinternal
+         ORDER BY class.relname,trigger.tgname",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("stock binary Schema trigger inventory must be readable");
+
+    PostgresStartupAuthoritySnapshot {
+        schema_contract,
+        tables,
+        indexes,
+        triggers,
     }
+}
+
+async fn postgres_artifact_store_authority(
+    pool: &PgPool,
+) -> (String, String, String, DateTime<Utc>) {
     let artifact_store = sqlx::query_as::<_, (String, String, String, DateTime<Utc>)>(
         "SELECT backend,namespace,store_id,bound_at
          FROM artifact_store_authority WHERE singleton=TRUE",
@@ -446,11 +887,7 @@ async fn postgres_startup_authority(pool: &PgPool) -> PostgresStartupAuthoritySn
     assert_eq!(artifact_store.0, "shared_filesystem");
     assert_eq!(artifact_store.1, BINARY_POSTGRES_ARTIFACT_NAMESPACE);
     assert!(artifact_store.2.starts_with("artifact_store_"));
-
-    PostgresStartupAuthoritySnapshot {
-        migrations,
-        artifact_store,
-    }
+    artifact_store
 }
 
 fn reserve_loopback_addr() -> SocketAddr {
@@ -628,10 +1065,26 @@ runtime:
     platform_config
 }
 
-fn write_postgres_restart_configs(root: &Path, bind_addr: SocketAddr) -> PathBuf {
-    let platform_config = write_restart_configs(root, bind_addr);
-    let agents_dir = root.join("agents");
+fn write_postgres_action_configs(root: &Path, bind_addr: SocketAddr) -> PathBuf {
+    let platform_config = root.join("postgres-platform.yaml");
+    let models_config = root.join("models.yaml");
+    let agents_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("agents");
     let artifact_root = root.join("shared-artifacts");
+    fs::write(
+        &models_config,
+        r#"version: 1
+
+models:
+  unused_postgres_smoke_model:
+    type: open_ai_chat
+    base_url: https://models.example.invalid/v1
+    model: unused-postgres-smoke-model
+    capabilities: []
+    connect_timeout: 1s
+    request_timeout: 5s
+"#,
+    )
+    .unwrap();
     fs::write(
         &platform_config,
         format!(
@@ -644,13 +1097,13 @@ auth:
 
 agents:
   directory: {}
-  enabled: [restart_waiter]
+  enabled: [action_demo]
 
 models:
-  config: restart-models.yaml
+  config: models.yaml
 
 actions:
-  enabled: []
+  enabled: [example.text_metrics]
 
 history:
   provider: postgres

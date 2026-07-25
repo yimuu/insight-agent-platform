@@ -1,3 +1,6 @@
+#[path = "support/database.rs"]
+mod database;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -606,11 +609,8 @@ async fn wait_for_terminal(service: &RunService, run_id: &str) {
 #[tokio::test]
 async fn production_sqlite_is_rejected_at_the_library_boundary_before_catalog_writes() {
     let (agents, _) = deployed_catalog();
-    let repository = Arc::new(
-        insight_agent_platform::engine::repository::SqliteDurableRepository::in_memory()
-            .await
-            .unwrap(),
-    );
+    let (_database, repository) = database::temporary_sqlite_repository().await;
+    let repository = Arc::new(repository);
 
     let error = RunService::start(
         agents.clone(),
@@ -646,11 +646,8 @@ async fn retrieval_only_public_streaming_needs_no_llm_worker_at_start_or_admissi
         !retrieval_workers.supports_public_llm_response(),
         "an empty ModelRegistry must not manufacture a live LLM worker"
     );
-    let repository = Arc::new(
-        insight_agent_platform::engine::repository::SqliteDurableRepository::in_memory()
-            .await
-            .unwrap(),
-    );
+    let (_database, repository) = database::temporary_sqlite_repository().await;
+    let repository = Arc::new(repository);
     let service = RunService::start(
         agents,
         repository as Arc<dyn ProductionRunRepository>,
@@ -761,13 +758,12 @@ async fn production_artifact_store_gate_precedes_publication_and_binds_shared_id
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    database::provision_postgres_url(&scoped_url).await;
     let repository = Arc::new(
         insight_agent_platform::engine::repository::PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    repository.initialize_schema().await.unwrap();
-
     let missing = RunService::start(
         deployed_catalog().0,
         repository.clone() as Arc<dyn ProductionRunRepository>,
@@ -969,6 +965,7 @@ async fn executor_panic_is_durable_and_does_not_kill_the_only_worker_pump() {
     let database = directory
         .path()
         .join("runtime-terminal-task-failure.sqlite");
+    database::provision_sqlite_database(&database).await;
     let (agents, _) = deployed_catalog();
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
@@ -1132,6 +1129,7 @@ async fn executor_panic_is_durable_and_does_not_kill_the_only_worker_pump() {
 async fn sqlite_restart_resumes_nonterminal_run_and_preserves_public_identity() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("runtime.sqlite");
+    database::provision_sqlite_database(&database).await;
     let (agents, revision) = deployed_catalog();
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
@@ -1200,6 +1198,8 @@ async fn sqlite_restart_rejects_llm_descriptor_v1_without_applying_v2_defaults_a
     let directory = tempfile::tempdir().unwrap();
     let legacy_database = directory.path().join("llm-descriptor-v1.sqlite");
     let current_database = directory.path().join("llm-descriptor-v2.sqlite");
+    database::provision_sqlite_database(&legacy_database).await;
+    database::provision_sqlite_database(&current_database).await;
     let provider_calls = Arc::new(AtomicUsize::new(0));
     let (deployment, models) = clean_cutover_fixture(Arc::clone(&provider_calls));
     let legacy_plan = legacy_llm_descriptor_v1(&deployment);
@@ -1370,11 +1370,8 @@ async fn sqlite_restart_rejects_llm_descriptor_v1_without_applying_v2_defaults_a
 #[tokio::test]
 async fn attached_subscription_delivers_one_terminal_event_then_reaches_eof() {
     let (agents, revision) = deployed_catalog();
-    let repository = Arc::new(
-        insight_agent_platform::engine::repository::SqliteDurableRepository::in_memory()
-            .await
-            .unwrap(),
-    );
+    let (_database, repository) = database::temporary_sqlite_repository().await;
+    let repository = Arc::new(repository);
     let service = RunService::start(
         agents,
         repository as Arc<dyn ProductionRunRepository>,
@@ -1461,12 +1458,12 @@ async fn postgres_attached_public_lifecycle_is_ordered_private_and_replay_idempo
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    database::provision_postgres_url(&scoped_url).await;
     let repository = Arc::new(
         insight_agent_platform::engine::repository::PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    repository.initialize_schema().await.unwrap();
     let control = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect(&scoped_url)
@@ -1737,6 +1734,7 @@ async fn postgres_attached_public_lifecycle_is_ordered_private_and_replay_idempo
 async fn cancel_is_durable_and_idempotently_visible_through_get() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("runtime-cancel-retention.sqlite");
+    database::provision_sqlite_database(&database).await;
     let (agents, revision) = deployed_catalog();
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
@@ -1811,6 +1809,7 @@ async fn terminal_artifact_retention_abort_rolls_back_and_replays_the_whole_term
     let database = directory
         .path()
         .join("runtime-terminal-retention-abort.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
             &database,
@@ -1923,11 +1922,8 @@ async fn terminal_artifact_retention_abort_rolls_back_and_replays_the_whole_term
 #[tokio::test]
 async fn max_concurrent_runs_bounds_nonterminal_runs_and_reopens_after_drain() {
     let (agents, _) = deployed_catalog();
-    let repository = Arc::new(
-        insight_agent_platform::engine::repository::SqliteDurableRepository::in_memory()
-            .await
-            .unwrap(),
-    );
+    let (_database, repository) = database::temporary_sqlite_repository().await;
+    let repository = Arc::new(repository);
     let mut service_config = config(Duration::from_secs(3_600));
     service_config.max_concurrent_runs = 1;
     let service = RunService::start(
@@ -1980,6 +1976,7 @@ async fn max_concurrent_runs_bounds_nonterminal_runs_and_reopens_after_drain() {
 async fn production_public_event_pruner_keeps_terminal_and_expires_nonterminal_rows() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("runtime-public-retention.sqlite");
+    database::provision_sqlite_database(&database).await;
     let (agents, _) = deployed_catalog();
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
@@ -2085,6 +2082,7 @@ async fn production_worker_externalizes_large_output_and_commits_reference() {
 
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("runtime-artifact.sqlite");
+    database::provision_sqlite_database(&database).await;
     let (agents, _) = deployed_catalog();
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
@@ -2328,6 +2326,7 @@ async fn production_artifact_gc_deletes_verified_unreferenced_object() {
 
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("runtime-artifact-gc.sqlite");
+    database::provision_sqlite_database(&database).await;
     let (agents, _) = deployed_catalog();
     let repository = Arc::new(
         insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
@@ -2449,12 +2448,12 @@ async fn postgres_background_pumps_externalize_prune_and_gc_across_shared_store_
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    database::provision_postgres_url(&scoped_url).await;
     let repository = Arc::new(
         insight_agent_platform::engine::repository::PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    repository.initialize_schema().await.unwrap();
     let control = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
         .connect(&scoped_url)

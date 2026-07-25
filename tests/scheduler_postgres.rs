@@ -1,3 +1,6 @@
+#[path = "support/database.rs"]
+mod database;
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -378,10 +381,10 @@ async fn isolated_repository() -> Option<(PostgresDurableRepository, PgPool, PgP
         .connect(&scoped_url)
         .await
         .unwrap();
+    database::provision_postgres_schema(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     Some((repository, control, admin, schema))
 }
 
@@ -2635,7 +2638,9 @@ async fn postgres_nested_parallel_completes_after_repository_and_worker_runtime_
 
     drop(before_registry);
     drop(repository);
-    let repository = PostgresDurableRepository::from_pool(control.clone());
+    let repository = PostgresDurableRepository::from_pool(control.clone())
+        .await
+        .unwrap();
     let after_registry = behavior_registry(&[
         (
             "fixture.left",
@@ -2775,7 +2780,9 @@ async fn postgres_join_before_and_after_commit_crashes_replay_idempotently() {
         }
         assert!(crashed && crash.fired());
 
-        let recovered = PostgresDurableRepository::from_pool(control.clone());
+        let recovered = PostgresDurableRepository::from_pool(control.clone())
+            .await
+            .unwrap();
         assert_eq!(
             drive_parallel_with_workers(
                 &recovered,

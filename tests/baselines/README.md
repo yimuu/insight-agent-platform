@@ -21,5 +21,7 @@ narrowly audited generic crate-boundary bridges back to their concrete facade
 signatures. This keeps subsequent checks able to prove that those generic
 implementations remain source-compatible with the facade API.
 
-Protocol and migration byte baselines in this directory are verified by the
-Phase 0 compatibility integration tests.
+Protocol byte baselines in this directory are verified by the Phase 0
+compatibility integration tests. Durable database structure is instead
+verified from the two authoritative `database/durable/*/schema.sql` files;
+pre-1.0 migration byte histories are intentionally not retained.

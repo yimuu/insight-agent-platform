@@ -1,3 +1,5 @@
+mod support;
+
 use std::sync::Arc;
 
 use insight_dsl::{compile_source, CompileOptions};
@@ -10,7 +12,7 @@ use insight_engine::{
     DeploymentRevisionId, ExecutionKind, NodeId, PublicEventPayload, RunId, ScopeInstanceId,
     SignalId, TransitionKey, TransitionOutcome,
 };
-use insight_storage::{PostgresDurableRepository, SqliteDurableRepository};
+use insight_storage::PostgresDurableRepository;
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, AssertSqlSafe, PgPool};
 use uuid::Uuid;
@@ -77,10 +79,10 @@ async fn isolated_postgres_repository(
         .connect(&scoped_url)
         .await
         .unwrap();
+    support::provision_postgres_schema(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     Some((repository, control, admin, schema))
 }
 
@@ -278,7 +280,7 @@ async fn postgres_concurrent_writers_commit_once_replay_exactly_and_keep_one_eve
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sqlite_repository_clones_serialize_one_transition_and_preserve_typed_public_output() {
-    let repository = SqliteDurableRepository::in_memory().await.unwrap();
+    let (_database, repository) = support::temporary_sqlite_repository().await;
     let plan = versioned_plan(
         "sqlite_serialized_authority",
         json!({"model": "fixed"}),

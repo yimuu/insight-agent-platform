@@ -2,7 +2,6 @@ mod artifact_adapter;
 mod error;
 mod human_task_adapter;
 mod ingress_adapter;
-pub mod migration_manifest;
 mod model;
 mod model_tool_parent_resume;
 mod postgres;
@@ -18,6 +17,7 @@ mod public_outbox_adapter;
 mod recovery_repository;
 #[cfg(test)]
 mod retrieval_safety_tests;
+pub mod schema_contract;
 mod sqlite;
 mod sqlite_activation;
 mod sqlite_control;

@@ -109,6 +109,7 @@ async fn production_catalog_discovers_pins_and_recovers_parent_child_subflow() {
     let agents = DeployedAgentCatalog::new(deployed).unwrap();
 
     let database = temporary.path().join("subflow.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = Arc::new(
         SqliteDurableRepository::connect_path(&database)
             .await
@@ -169,3 +170,5 @@ async fn production_catalog_discovers_pins_and_recovers_parent_child_subflow() {
 
     service.shutdown(Duration::from_secs(1)).await.unwrap();
 }
+#[path = "support/database.rs"]
+mod database;

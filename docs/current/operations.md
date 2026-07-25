@@ -16,6 +16,56 @@ Quickstart 使用 [`config/platform.quickstart.yaml`](../../config/platform.quic
 `action_demo`。生产样例位于 [`config/platform.yaml`](../../config/platform.yaml)。对外暴露服务前，
 必须按部署要求配置认证、数据库凭据、模型凭据和共享 Artifact 挂载。
 
+## 启动前 Schema provisioning
+
+Durable Schema 的唯一权威资产是：
+
+- [`database/durable/postgres/schema.sql`](../../database/durable/postgres/schema.sql)；
+- [`database/durable/sqlite/schema.sql`](../../database/durable/sqlite/schema.sql)。
+
+两份文件都只面向新的空目标，并在一个显式事务中创建完整结构；contract metadata 是最后一个安装
+步骤。业务服务不会创建数据库文件、表、索引、函数或触发器，也不会升级或修复部分 Schema。
+
+SQLite Quickstart 的新目标必须先执行：
+
+```bash
+bash scripts/provision-sqlite-schema.sh
+PLATFORM_CONFIG=config/platform.quickstart.yaml cargo run
+```
+
+指定其他文件时，把路径作为第一个参数。脚本拒绝覆盖已存在的目标：
+
+```bash
+bash scripts/provision-sqlite-schema.sh /absolute/path/runtime.sqlite3
+```
+
+Provisioning 对每个新目标只执行一次；普通进程重启直接使用已通过当前 contract 校验的数据库，
+不得重复执行 Schema 文件。
+
+PostgreSQL 必须由 DDL-capable provisioner 角色在服务启动前执行：
+
+```bash
+SCHEMA_PROVISIONER_POSTGRES_URL='postgres://schema_owner:...@host/database' \
+  bash scripts/provision-postgres-schema.sh
+
+RUN_HISTORY_POSTGRES_URL='postgres://runtime:...@host/database' \
+  PLATFORM_CONFIG=config/platform.yaml cargo run
+```
+
+URL 可以通过 PostgreSQL `options` 指定一个新的空 `search_path`。本仓库的
+`docker-compose.postgres.yml` 将 Schema 挂载到官方镜像的初始化目录，因此新 volume 会在
+PostgreSQL healthcheck 通过前完成 provisioning；它只是本地开发样例，不替代生产权限设计。
+镜像初始化目录只对新 volume 生效；本次 pre-1.0 clean cutover 不接纳旧 volume，已有开发 volume
+必须先明确丢弃并重新创建，不能直接交给新服务启动。
+
+服务启动会在 HTTP bind、scheduler 和 worker 启动前只读校验
+`durable_schema_contract` 的 contract ID 与 backend。metadata 缺失、contract 不匹配或 backend
+错误都会使启动 fail-closed；服务不会扫描全部数据库对象，也不会自动修复。
+
+启动错误码分别为 `DATABASE_SCHEMA_NOT_INITIALIZED`、
+`DATABASE_SCHEMA_CONTRACT_MISMATCH` 和 `DATABASE_SCHEMA_BACKEND_MISMATCH`。它们只表达部署合同
+不成立，不包含连接凭据或数据库路径。
+
 生产模式强制使用 PostgreSQL 和显式的 `artifacts.provider: shared_filesystem`。共享存储必须声明
 `namespace`，连接同一数据库的所有 runtime 必须挂载同一个物理目录。首次启动生成的 store marker
 会与数据库中的 Artifact-store authority 绑定；identity 不一致时 runtime fail-closed。
@@ -23,18 +73,14 @@ Quickstart 使用 [`config/platform.quickstart.yaml`](../../config/platform.quic
 `local_filesystem` 不接受 namespace，只允许单进程开发。SQLite 不承诺多进程所有权、HA、lease
 fencing 或生产恢复。
 
-## PostgreSQL 迁移
+## PostgreSQL 权限边界
 
-进程连接 PostgreSQL 后会在创建 RunService 或读取运行表之前自动执行
-[`migrations/durable/postgres/`](../../migrations/durable/postgres) 中的前向 migration manifest。
-并发实例通过固定的事务级 advisory lock 串行化。
+Schema provisioner 角色需要在目标 database/schema 中创建和拥有表、索引、函数、触发器与约束。
+业务服务使用独立 runtime 角色，只授予 durable repository 所需的 `SELECT`、`INSERT`、`UPDATE`、
+受控 `DELETE` 和必要函数执行权限；不得授予创建、修改、删除或替换受管数据库对象的权限。
 
-`schema_migrations` 记录 version、文件名、SQL SHA-256 和应用时间。已应用记录必须是当前
-manifest 的精确前缀；版本空洞、未知或更高版本、文件名/checksum 漂移，以及已有受管表但没有
-ledger，都会使进程 fail-closed。每个 migration SQL 与 ledger 写入处于同一事务。
-
-数据库角色需要目标 database/schema 的连接和使用权限、创建对象权限、后续 migration 对既有对象的
-owner/ALTER 权限，以及 migration ledger 的读写权限。
+部署顺序必须是“创建空目标 → provisioner 成功 → 授予/确认 runtime 最小权限 → 启动服务 → 只读
+contract 校验 → Ready”。不得先启动服务再等待它补齐 Schema。
 
 ## Artifact 生命周期
 

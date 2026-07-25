@@ -3305,7 +3305,9 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use serde_json::json;
-    use tokio::sync::{Barrier, OnceCell};
+    use sqlx::{postgres::PgPoolOptions, AssertSqlSafe, PgPool};
+    use tokio::sync::Barrier;
+    use uuid::Uuid;
 
     use super::*;
     use insight_durable::{
@@ -3319,8 +3321,6 @@ mod tests {
         ForkGroupId, ForkLeg, InternalFailureCode, InternalFailureSummary, JoinMode, LegId, NodeId,
         PortId, RunLifecycle, ScopeInstance,
     };
-
-    static SCHEMA: OnceCell<()> = OnceCell::const_new();
 
     fn key(label: &str) -> TransitionKey {
         TransitionKey::derive("repository.scheduler-lease.test", &[label]).unwrap()
@@ -3336,12 +3336,45 @@ mod tests {
         }
     }
 
-    async fn initialize_once(repository: &PostgresDurableRepository) {
-        SCHEMA
-            .get_or_init(|| async {
-                repository.initialize_schema().await.unwrap();
-            })
-            .await;
+    async fn repository_for_test(
+        database_url: &str,
+    ) -> (PostgresDurableRepository, PgPool, String) {
+        let schema = format!("postgres_control_{}", Uuid::new_v4().simple());
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(database_url)
+            .await
+            .unwrap();
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let separator = if database_url.contains('?') { '&' } else { '?' };
+        let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .connect(&scoped_url)
+            .await
+            .unwrap();
+        super::super::schema_contract::provision_postgres_for_test(&pool).await;
+        (
+            PostgresDurableRepository::from_pool(pool).await.unwrap(),
+            admin,
+            schema,
+        )
+    }
+
+    async fn cleanup_test_repository(
+        repository: PostgresDurableRepository,
+        admin: PgPool,
+        schema: String,
+    ) {
+        repository.pool.close().await;
+        sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
     }
 
     fn test_plan(label: &str) -> VersionedPlan {
@@ -3540,10 +3573,7 @@ mod tests {
         let Some(database_url) = postgres_test_url() else {
             return;
         };
-        let repository = PostgresDurableRepository::connect(&database_url)
-            .await
-            .unwrap();
-        initialize_once(&repository).await;
+        let (repository, admin, schema) = repository_for_test(&database_url).await;
         let plan = insight_durable::model::adapter::versioned_plan_for_test(
             "definition_scheduler_lease",
             "agent_scheduler_lease",
@@ -3666,6 +3696,7 @@ mod tests {
             .unwrap();
         let reclaimed = reclaimed.committed_result().unwrap();
         assert!(reclaimed.lease_epoch() > winner.lease_epoch());
+        cleanup_test_repository(repository, admin, schema).await;
     }
 
     #[tokio::test]
@@ -3673,10 +3704,7 @@ mod tests {
         let Some(database_url) = postgres_test_url() else {
             return;
         };
-        let repository = PostgresDurableRepository::connect(&database_url)
-            .await
-            .unwrap();
-        initialize_once(&repository).await;
+        let (repository, admin, schema) = repository_for_test(&database_url).await;
         let plan = test_plan("pg_control");
         let run_id = install_run(&repository, &plan, "pg_control").await;
 
@@ -4315,5 +4343,6 @@ mod tests {
             .unwrap(),
             0
         );
+        cleanup_test_repository(repository, admin, schema).await;
     }
 }

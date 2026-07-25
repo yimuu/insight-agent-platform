@@ -1821,6 +1821,7 @@ workflow:
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("advanced.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -2163,3 +2164,5 @@ workflow:
     open_wire["unknown_future_field"] = json!(true);
     assert!(serde_json::from_value::<PlannedSchedulerAction>(open_wire).is_err());
 }
+#[path = "support/database.rs"]
+mod database;

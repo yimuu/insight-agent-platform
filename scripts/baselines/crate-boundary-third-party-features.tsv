@@ -239,10 +239,10 @@ slab	0.4.12	default,std
 smallvec	1.15.2	const_generics,const_new,serde
 socket2	0.6.4	all
 spin	0.9.9	barrier,default,lazy,lock_api,lock_api_crate,mutex,once,rwlock,spin_mutex
-sqlx	0.9.0	_rt-tokio,_sqlite,chrono,derive,json,macros,migrate,postgres,runtime-tokio,sqlite,sqlite-bundled,sqlite-deserialize,sqlite-load-extension,sqlite-unlock-notify,sqlx-macros,sqlx-postgres,sqlx-sqlite,tls-rustls-aws-lc-rs
+sqlx	0.9.0	_rt-tokio,_sqlite,chrono,derive,json,macros,postgres,runtime-tokio,sqlite,sqlite-bundled,sqlite-deserialize,sqlite-load-extension,sqlite-unlock-notify,sqlx-macros,sqlx-postgres,sqlx-sqlite,tls-rustls-aws-lc-rs
 sqlx-core	0.9.0	_rt-tokio,_tls-rustls,_tls-rustls-aws-lc-rs,any,chrono,crc,default,json,migrate,offline,rustls,serde,serde_json,sha2,tokio,tokio-stream,webpki-roots
-sqlx-macros	0.9.0	_rt-tokio,_tls-rustls-aws-lc-rs,chrono,default,derive,json,macros,migrate,postgres,sqlite,sqlite-load-extension
-sqlx-macros-core	0.9.0	_rt-tokio,_sqlite,_tls-rustls-aws-lc-rs,chrono,default,derive,json,macros,migrate,postgres,sqlite,sqlite-load-extension,sqlx-postgres,sqlx-sqlite,thiserror,tokio
+sqlx-macros	0.9.0	_rt-tokio,_tls-rustls-aws-lc-rs,chrono,default,derive,json,macros,postgres,sqlite,sqlite-load-extension
+sqlx-macros-core	0.9.0	_rt-tokio,_sqlite,_tls-rustls-aws-lc-rs,chrono,default,derive,json,macros,postgres,sqlite,sqlite-load-extension,sqlx-postgres,sqlx-sqlite,thiserror,tokio
 sqlx-mysql	0.9.0	chrono,json,migrate,offline,serde
 sqlx-postgres	0.9.0	chrono,json,migrate,offline
 sqlx-sqlite	0.9.0	bundled,chrono,deserialize,json,load-extension,migrate,offline,serde,unlock-notify

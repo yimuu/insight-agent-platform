@@ -1096,10 +1096,10 @@ async fn postgres_retrieval_success_race_replay_and_deadline_match_sqlite() {
         .connect(&scoped_url)
         .await
         .unwrap();
+    super::schema_contract::provision_postgres_for_test(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
 
     let deployment = deployed(PublicMode::Both, Duration::from_secs(30), "pg_race");
     let run_id = RunId::new("run_retrieval_pg_race").unwrap();

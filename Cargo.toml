@@ -36,7 +36,7 @@ serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.2"
 serde_json = "1"
 sha2 = "0.11"
-sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "postgres", "chrono", "json", "migrate", "macros", "tls-rustls-aws-lc-rs"], default-features = false }
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "postgres", "chrono", "json", "macros", "tls-rustls-aws-lc-rs"], default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
 tokio-stream = "0.1"

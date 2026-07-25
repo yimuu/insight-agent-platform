@@ -1,3 +1,6 @@
+#[path = "support/database.rs"]
+mod database;
+
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -19,9 +22,7 @@ use insight_agent_platform::{
     },
     engine::{
         plan::{LeafTaskDescriptor, SubflowContractRegistry},
-        repository::{
-            CreateRunCommand, DurableRepository, PostgresDurableRepository, SqliteDurableRepository,
-        },
+        repository::{CreateRunCommand, DurableRepository, PostgresDurableRepository},
         DefinitionRevisionId, EffectEvidence, LeafTaskExecutor, LeafTaskKind,
         LocalContentAddressedArtifactStore, RunId, RuntimeValue, SchedulerTaskKind,
         TaskExecutionRequest, TaskExecutionResult, TransitionKey, TransitionOutcome, VersionTag,
@@ -1247,7 +1248,8 @@ async fn put_view(
 
 #[tokio::test]
 async fn sqlite_graph_author_publish_run_trace_and_view_is_a_product_flow() {
-    let repository = Arc::new(SqliteDurableRepository::in_memory().await.unwrap());
+    let (_database, repository) = database::temporary_sqlite_repository().await;
+    let repository = Arc::new(repository);
     exercise_graph_product(
         repository as Arc<dyn ProductionRunRepository>,
         single_process_development_config(),
@@ -1257,7 +1259,8 @@ async fn sqlite_graph_author_publish_run_trace_and_view_is_a_product_flow() {
 
 #[tokio::test]
 async fn sqlite_peer_discovery_reads_each_durable_graph_head_without_run_admission() {
-    let repository = Arc::new(SqliteDurableRepository::in_memory().await.unwrap());
+    let (_database, repository) = database::temporary_sqlite_repository().await;
+    let repository = Arc::new(repository);
     let service_a = RunService::start_with_graph_publication(
         DeployedAgentCatalog::default(),
         repository.clone() as Arc<dyn ProductionRunRepository>,
@@ -1322,13 +1325,12 @@ async fn postgres_graph_author_product_contract_matches_sqlite() {
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    database::provision_postgres_url(&scoped_url).await;
     let repository = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    repository.initialize_schema().await.unwrap();
-
     exercise_graph_product(repository as Arc<dyn ProductionRunRepository>, config()).await;
 
     sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
@@ -1354,12 +1356,12 @@ async fn postgres_production_graph_publication_rejects_public_streaming_without_
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    database::provision_postgres_url(&scoped_url).await;
     let repository = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    repository.initialize_schema().await.unwrap();
     let artifact_directory = tempfile::tempdir().unwrap();
     let artifact_store = shared_artifact_store(
         artifact_directory.path().join("shared"),
@@ -1417,12 +1419,12 @@ async fn postgres_live_runtimes_admit_new_runs_from_the_durable_graph_head() {
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    database::provision_postgres_url(&scoped_url).await;
     let repository_a = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    repository_a.initialize_schema().await.unwrap();
     let repository_b = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await
@@ -1613,12 +1615,12 @@ async fn postgres_subflow_publication_rejects_stale_snapshot_and_keeps_old_paren
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    database::provision_postgres_url(&scoped_url).await;
     let repository_a = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    repository_a.initialize_schema().await.unwrap();
     let repository_b = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await
@@ -1795,12 +1797,12 @@ async fn postgres_stale_runtime_restores_exact_subflow_closure_and_takes_over_ru
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    database::provision_postgres_url(&scoped_url).await;
     let repository_a = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await
             .unwrap(),
     );
-    repository_a.initialize_schema().await.unwrap();
     let repository_b = Arc::new(
         PostgresDurableRepository::connect(&scoped_url)
             .await

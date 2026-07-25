@@ -4,6 +4,8 @@
 //! transition commands. Scheduler/Activation tests own state-machine coverage;
 //! this file proves only the public plan, Run admission, and projection APIs.
 
+mod support;
+
 use insight_dsl::{compile_source, CompileOptions};
 use insight_durable::{
     ContinueAsNewCommand, CreateRunCommand, DurableRepository, PlanInstallOutcome,
@@ -127,6 +129,7 @@ fn graph_plan(
 async fn file_repository() -> (tempfile::TempDir, SqliteDurableRepository, SqlitePool) {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("durable.sqlite");
+    support::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -883,7 +886,7 @@ async fn exact_admission_replay_uses_embedded_ledger_when_materialization_is_mis
 
 #[tokio::test]
 async fn public_repository_errors_are_stable_and_body_free() {
-    let repository = SqliteDurableRepository::in_memory().await.unwrap();
+    let (_database, repository) = support::temporary_sqlite_repository().await;
     let plan = plan_with_binding(json!({"model": "model-fixed"}));
     repository.install_versioned_plan(&plan).await.unwrap();
 

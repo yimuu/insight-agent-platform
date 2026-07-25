@@ -164,9 +164,7 @@ fn transition(label: &str, run_id: &RunId) -> TransitionKey {
 async fn sqlite_fixture(label: &str) -> (tempfile::TempDir, SqliteDurableRepository, SqlitePool) {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join(format!("{label}.sqlite"));
-    let repository = SqliteDurableRepository::connect_path(&database)
-        .await
-        .unwrap();
+    let repository = crate::test_database::provisioned_sqlite_repository(&database).await;
     let control = SqlitePool::connect_with(
         SqliteConnectOptions::new()
             .filename(database)

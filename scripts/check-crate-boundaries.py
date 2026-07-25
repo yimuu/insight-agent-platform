@@ -155,7 +155,9 @@ MANIFEST_PARENT_PATH_PATTERN = re.compile(
     r"CARGO_MANIFEST_DIR[^;]{0,500}(?:\.\./){2}", re.DOTALL
 )
 ALLOWED_FIXED_ASSET_LOCATORS = {
-    "crates/storage/src/repository/migration_manifest.rs",
+    # Test-only Schema provisioning reads the workspace-owned baseline at
+    # runtime; production storage builds contain no embedded DDL.
+    "crates/storage/src/repository/schema_contract.rs",
 }
 
 

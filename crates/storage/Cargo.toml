@@ -18,7 +18,6 @@ insight-engine.workspace = true
 serde.workspace = true
 serde_jcs.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 sqlx.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-util.workspace = true

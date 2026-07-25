@@ -693,6 +693,7 @@ async fn sqlite_durable_scheduler_recovers_after_result_commit_without_reexecuti
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("durable-scheduler.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -928,6 +929,7 @@ async fn sqlite_duplicate_large_worker_values_share_one_verified_artifact_and_su
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("durable-artifact.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -1110,6 +1112,7 @@ async fn sqlite_worker_heartbeat_retry_timeout_and_zombie_fences_use_frozen_poli
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("durable-worker-gate.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -1432,6 +1435,7 @@ async fn sqlite_retry_backoff_uses_database_time_and_rejects_corrupted_lineage()
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("durable-retry-backoff-gate.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -1641,3 +1645,5 @@ async fn sqlite_retry_backoff_uses_database_time_and_rejects_corrupted_lineage()
         initial_claim.envelope().fencing_token()
     );
 }
+#[path = "support/database.rs"]
+mod database;

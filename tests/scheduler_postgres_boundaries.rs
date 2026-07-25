@@ -1,3 +1,6 @@
+#[path = "support/database.rs"]
+mod database;
+
 use std::{collections::BTreeMap, time::Duration};
 
 use insight_agent_platform::{
@@ -425,10 +428,10 @@ async fn isolated_repository() -> Option<(PostgresDurableRepository, PgPool, PgP
         .connect(&scoped_url)
         .await
         .unwrap();
+    database::provision_postgres_schema(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     Some((repository, control, admin, schema))
 }
 
@@ -1768,8 +1771,12 @@ async fn postgres_late_audit_reconciles_atomically_after_fault_and_restart() {
         .await
         .unwrap();
     drop(repository);
-    let reconciler_a = PostgresDurableRepository::from_pool(control.clone());
-    let reconciler_b = PostgresDurableRepository::from_pool(control.clone());
+    let reconciler_a = PostgresDurableRepository::from_pool(control.clone())
+        .await
+        .unwrap();
+    let reconciler_b = PostgresDurableRepository::from_pool(control.clone())
+        .await
+        .unwrap();
     let (appended_a, appended_b) = tokio::join!(
         reconciler_a.reconcile_wait_late_audits(128),
         reconciler_b.reconcile_wait_late_audits(128),
@@ -1790,7 +1797,9 @@ async fn postgres_late_audit_reconciles_atomically_after_fault_and_restart() {
     );
     // Crash point 3: reconstruct immediately after the successful commit.
     // The stable internal transition identity makes the next pump a no-op.
-    let repository = PostgresDurableRepository::from_pool(control.clone());
+    let repository = PostgresDurableRepository::from_pool(control.clone())
+        .await
+        .unwrap();
     assert_eq!(repository.reconcile_wait_late_audits(128).await.unwrap(), 0);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -1924,7 +1933,9 @@ async fn postgres_late_audit_reconciles_atomically_after_fault_and_restart() {
         .await
         .unwrap();
     drop(repository);
-    let repository = PostgresDurableRepository::from_pool(control.clone());
+    let repository = PostgresDurableRepository::from_pool(control.clone())
+        .await
+        .unwrap();
     assert_eq!(repository.reconcile_wait_late_audits(128).await.unwrap(), 1);
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -1938,7 +1949,9 @@ async fn postgres_late_audit_reconciles_atomically_after_fault_and_restart() {
         timer_winner_event
     );
     drop(repository);
-    let repository = PostgresDurableRepository::from_pool(control.clone());
+    let repository = PostgresDurableRepository::from_pool(control.clone())
+        .await
+        .unwrap();
     assert_eq!(repository.reconcile_wait_late_audits(128).await.unwrap(), 0);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -2382,7 +2395,9 @@ async fn postgres_subflow_deadline_uses_child_policy_parent_cap_and_survives_res
     .await
     .unwrap();
 
-    let restarted = PostgresDurableRepository::from_pool(control.clone());
+    let restarted = PostgresDurableRepository::from_pool(control.clone())
+        .await
+        .unwrap();
     assert!(restarted.load_run(&capped_child).await.unwrap().is_some());
     assert_eq!(
         sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(

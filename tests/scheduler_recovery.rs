@@ -1,3 +1,6 @@
+#[path = "support/database.rs"]
+mod database;
+
 use std::{
     collections::BTreeMap,
     sync::{
@@ -632,6 +635,7 @@ async fn repository_and_control(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join(format!("{name}.sqlite"));
+    database::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -1983,10 +1987,10 @@ async fn isolated_postgres() -> Option<(PostgresDurableRepository, PgPool, PgPoo
         .connect(&scoped_url)
         .await
         .unwrap();
+    database::provision_postgres_schema(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     Some((repository, control, admin, schema, scoped_url))
 }
 

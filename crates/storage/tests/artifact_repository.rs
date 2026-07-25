@@ -1,3 +1,5 @@
+mod support;
+
 use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
@@ -594,7 +596,7 @@ where
 
 #[tokio::test]
 async fn sqlite_payload_and_artifact_repository_is_run_scoped_and_fail_closed() {
-    let repository = SqliteDurableRepository::in_memory().await.unwrap();
+    let (_database, repository) = support::temporary_sqlite_repository().await;
     assert_repository_contract(&repository, "sqlite").await;
 }
 
@@ -602,6 +604,7 @@ async fn sqlite_payload_and_artifact_repository_is_run_scoped_and_fail_closed() 
 async fn sqlite_retained_artifact_read_metadata_is_run_scoped_and_expires() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("read-authority.sqlite");
+    support::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -711,6 +714,7 @@ async fn sqlite_retained_artifact_read_metadata_is_run_scoped_and_expires() {
 async fn sqlite_artifact_store_authority_is_atomic_immutable_and_fail_closed() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("authority.sqlite");
+    support::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -794,6 +798,7 @@ async fn sqlite_artifact_store_authority_is_atomic_immutable_and_fail_closed() {
 async fn sqlite_shared_content_hash_is_deleted_only_after_every_run_releases_it() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("repository.sqlite");
+    support::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -975,10 +980,16 @@ async fn postgres_payload_and_artifact_repository_contract_when_available() {
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    let provisioner = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&scoped_url)
+        .await
+        .unwrap();
+    support::provision_postgres_schema(&provisioner).await;
+    provisioner.close().await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     assert_repository_contract(&repository, "postgres").await;
     drop(repository);
     sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
@@ -1007,10 +1018,16 @@ async fn postgres_artifact_store_authority_is_atomic_immutable_and_fail_closed_w
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    let provisioner = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&scoped_url)
+        .await
+        .unwrap();
+    support::provision_postgres_schema(&provisioner).await;
+    provisioner.close().await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     let command = BindArtifactStoreAuthorityCommand::shared_filesystem(
         "production",
         "artifact_store_cccccccccccccccccccccccccccccccc",
@@ -1098,10 +1115,16 @@ async fn postgres_shared_content_hash_is_deleted_once_after_global_release_when_
         .unwrap();
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    let provisioner = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&scoped_url)
+        .await
+        .unwrap();
+    support::provision_postgres_schema(&provisioner).await;
+    provisioner.close().await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     let control = PgPoolOptions::new()
         .max_connections(4)
         .connect(&scoped_url)

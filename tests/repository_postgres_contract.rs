@@ -76,6 +76,7 @@ workflow:
     );
 
     let database = temporary.path().join("typed-intent.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = Arc::new(
         SqliteDurableRepository::connect_path(&database)
             .await
@@ -195,3 +196,5 @@ workflow:
         "a String event kind fallback must not reproduce the committed intent"
     );
 }
+#[path = "support/database.rs"]
+mod database;

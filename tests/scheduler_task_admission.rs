@@ -1,3 +1,6 @@
+#[path = "support/database.rs"]
+mod database;
+
 use std::collections::BTreeMap;
 
 use insight_agent_platform::{
@@ -200,6 +203,7 @@ async fn sqlite_termination_closes_normal_tasks_but_executes_structural_finalize
     let deployed = versioned(&plan, "task_admission_sqlite_v1");
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("task-admission.sqlite");
+    database::provision_sqlite_database(&database).await;
     let repository = SqliteDurableRepository::connect_path(&database)
         .await
         .unwrap();
@@ -463,10 +467,10 @@ async fn isolated_postgres() -> Option<(PostgresDurableRepository, PgPool, PgPoo
         .connect(&scoped_url)
         .await
         .unwrap();
+    database::provision_postgres_schema(&control).await;
     let repository = PostgresDurableRepository::connect(&scoped_url)
         .await
         .unwrap();
-    repository.initialize_schema().await.unwrap();
     Some((repository, control, admin, schema))
 }
 

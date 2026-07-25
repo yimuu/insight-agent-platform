@@ -1791,7 +1791,6 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       ├── insight-dsl feature "default" (command-line) (*)
 │       ├── insight-engine feature "default" (command-line) (*)
 │       ├── serde_jcs feature "default" (*)
-│       ├── sha2 feature "default" (*)
 │       ├── tokio-util feature "default" (*)
 │       ├── tokio-util feature "rt" (*)
 │       ├── insight-durable feature "default" (command-line) (*)
@@ -2316,7 +2315,42 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │                   ├── sqlx-core feature "offline" (*)
 │       │   │   │                   └── sqlx-sqlite feature "serde"
 │       │   │   │                       └── sqlx-sqlite v0.9.0 (*)
-│       │   │   ├── sqlx-postgres feature "default" (*)
+│       │   │   ├── sqlx-postgres feature "default"
+│       │   │   │   └── sqlx-postgres v0.9.0
+│       │   │   │       ├── bitflags v2.13.0
+│       │   │   │       ├── dotenvy v0.15.7
+│       │   │   │       ├── futures-core v0.3.32
+│       │   │   │       ├── hmac v0.13.0 (*)
+│       │   │   │       ├── md-5 v0.11.0 (*)
+│       │   │   │       ├── memchr v2.8.2
+│       │   │   │       ├── sha2 v0.11.0 (*)
+│       │   │   │       ├── whoami v2.1.2
+│       │   │   │       ├── itoa feature "default" (*)
+│       │   │   │       ├── tracing feature "default" (*)
+│       │   │   │       ├── tracing feature "log" (*)
+│       │   │   │       ├── log feature "default" (*)
+│       │   │   │       ├── futures-util feature "alloc" (*)
+│       │   │   │       ├── futures-util feature "io" (*)
+│       │   │   │       ├── futures-util feature "sink" (*)
+│       │   │   │       ├── futures-channel feature "alloc" (*)
+│       │   │   │       ├── futures-channel feature "sink" (*)
+│       │   │   │       ├── futures-channel feature "std" (*)
+│       │   │   │       ├── smallvec feature "default" (*)
+│       │   │   │       ├── serde feature "default" (*)
+│       │   │   │       ├── serde feature "derive" (*)
+│       │   │   │       ├── base64 feature "alloc" (*)
+│       │   │   │       ├── serde_json feature "default" (*)
+│       │   │   │       ├── serde_json feature "raw_value" (*)
+│       │   │   │       ├── byteorder feature "std" (*)
+│       │   │   │       ├── chrono feature "clock" (*)
+│       │   │   │       ├── chrono feature "std" (*)
+│       │   │   │       ├── thiserror feature "std" (*)
+│       │   │   │       ├── sqlx-core feature "default" (*)
+│       │   │   │       ├── hex feature "default" (*)
+│       │   │   │       ├── atoi feature "default" (*)
+│       │   │   │       ├── hkdf feature "default" (*)
+│       │   │   │       ├── rand feature "thread_rng" (*)
+│       │   │   │       └── stringprep feature "default" (*)
 │       │   │   └── sqlx-sqlite feature "default"
 │       │   │       └── sqlx-sqlite v0.9.0
 │       │   │           ├── futures-core v0.3.32
@@ -2363,7 +2397,9 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │       └── sqlx-sqlite feature "chrono"
 │       │   │           ├── sqlx-sqlite v0.9.0 (*)
 │       │   │           └── sqlx-core feature "chrono" (*)
-│       │   ├── sqlx-postgres feature "chrono" (*)
+│       │   ├── sqlx-postgres feature "chrono"
+│       │   │   ├── sqlx-postgres v0.9.0 (*)
+│       │   │   └── sqlx-core feature "chrono" (*)
 │       │   └── sqlx-sqlite feature "chrono"
 │       │       ├── sqlx-sqlite v0.9.0 (*)
 │       │       └── sqlx-core feature "chrono" (*)
@@ -2385,7 +2421,9 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │           ├── sqlx-sqlite v0.9.0 (*)
 │       │   │           ├── sqlx-core feature "json" (*)
 │       │   │           └── sqlx-sqlite feature "serde" (*)
-│       │   ├── sqlx-postgres feature "json" (*)
+│       │   ├── sqlx-postgres feature "json"
+│       │   │   ├── sqlx-postgres v0.9.0 (*)
+│       │   │   └── sqlx-core feature "json" (*)
 │       │   └── sqlx-sqlite feature "json"
 │       │       ├── sqlx-sqlite v0.9.0 (*)
 │       │       ├── sqlx-core feature "json" (*)
@@ -2412,23 +2450,16 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │       ├── sqlx-macros-core v0.9.0 (*)
 │       │   │       └── sqlx-macros-core feature "thiserror"
 │       │   │           └── sqlx-macros-core v0.9.0 (*)
-│       │   ├── sqlx-postgres feature "offline" (*)
+│       │   ├── sqlx-postgres feature "offline"
+│       │   │   ├── sqlx-postgres v0.9.0 (*)
+│       │   │   ├── smallvec feature "serde"
+│       │   │   │   └── smallvec v1.15.2 (*)
+│       │   │   ├── sqlx-core feature "offline" (*)
+│       │   │   └── sqlx-postgres feature "json" (*)
 │       │   └── sqlx-sqlite feature "offline"
 │       │       ├── sqlx-sqlite v0.9.0 (*)
 │       │       ├── sqlx-core feature "offline" (*)
 │       │       └── sqlx-sqlite feature "serde" (*)
-│       ├── sqlx feature "migrate"
-│       │   ├── sqlx v0.9.0 (*)
-│       │   ├── sqlx-core feature "migrate" (*)
-│       │   ├── sqlx-macros feature "migrate"
-│       │   │   ├── sqlx-macros v0.9.0 (proc-macro) (*)
-│       │   │   └── sqlx-macros-core feature "migrate"
-│       │   │       ├── sqlx-macros-core v0.9.0 (*)
-│       │   │       └── sqlx-core feature "migrate" (*)
-│       │   ├── sqlx-postgres feature "migrate" (*)
-│       │   └── sqlx-sqlite feature "migrate"
-│       │       ├── sqlx-sqlite v0.9.0 (*)
-│       │       └── sqlx-core feature "migrate" (*)
 │       ├── sqlx feature "postgres"
 │       │   ├── sqlx v0.9.0 (*)
 │       │   ├── sqlx feature "sqlx-postgres"
@@ -2618,7 +2649,6 @@ insight-agent-platform v0.1.0 (<workspace>)
 ├── sqlx feature "chrono" (*)
 ├── sqlx feature "json" (*)
 ├── sqlx feature "macros" (*)
-├── sqlx feature "migrate" (*)
 ├── sqlx feature "postgres" (*)
 ├── sqlx feature "runtime-tokio" (*)
 ├── sqlx feature "sqlite" (*)

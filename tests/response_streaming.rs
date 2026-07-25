@@ -807,6 +807,7 @@ workflow:
         let workers =
             production_worker_registry_with_live_response(&models, &actions, Arc::clone(&broker))
                 .unwrap();
+        database::provision_sqlite_database(&root.join("response-stream.sqlite")).await;
         let repository: Arc<dyn ProductionRunRepository> = Arc::new(
             insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
                 &root.join("response-stream.sqlite"),
@@ -2345,3 +2346,5 @@ async fn artifact_read_route_requires_auth_and_hides_handle_and_run_misses() {
         .await
         .unwrap();
 }
+#[path = "support/database.rs"]
+mod database;

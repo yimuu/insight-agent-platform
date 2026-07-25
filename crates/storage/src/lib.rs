@@ -6,4 +6,11 @@ pub mod postgres_config;
 pub mod postgres_response_broker;
 pub mod repository;
 
-pub use repository::{PostgresDurableRepository, SqliteDurableRepository};
+pub use repository::{
+    schema_contract::{
+        DATABASE_SCHEMA_BACKEND_MISMATCH, DATABASE_SCHEMA_CONTRACT_MISMATCH,
+        DATABASE_SCHEMA_NOT_INITIALIZED, DURABLE_SCHEMA_CONTRACT_ID, POSTGRES_SCHEMA_BACKEND,
+        SQLITE_SCHEMA_BACKEND,
+    },
+    PostgresDurableRepository, SqliteDurableRepository,
+};
