@@ -135,6 +135,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/health/live", get(live))
         .route("/health/ready", get(health))
+        .route("/metrics", get(metrics))
         .merge(v1)
         .merge(human_tasks)
         .with_state(state)
@@ -142,6 +143,15 @@ pub fn build_router(state: ApiState) -> Router {
 
 async fn live() -> Response {
     no_store(Json(ApiResponse::ok(json!({"status":"live"}))))
+}
+
+async fn metrics(State(state): State<Arc<ApiState>>) -> Response {
+    let mut response = state.service.prometheus_metrics().into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+    );
+    no_store(response)
 }
 
 async fn health(State(state): State<Arc<ApiState>>) -> Response {

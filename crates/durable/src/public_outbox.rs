@@ -205,8 +205,10 @@ impl PublicEventClaim {
     }
 }
 
-/// Durable dispatcher contract. Claim and publication are separately fenced;
-/// PostgreSQL publication atomically marks the row and emits `pg_notify`.
+/// Durable dispatcher contract. Claim and publication are separately fenced.
+/// PostgreSQL non-runtime writers may emit a commit-scoped `pg_notify`;
+/// runtime writers deliver locally after commit and subscribers retain a
+/// bounded durable-order poll, so notification loss never changes authority.
 #[async_trait]
 pub trait PublicEventOutboxRepository: Send + Sync {
     async fn claim_public_events(

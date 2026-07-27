@@ -24,6 +24,7 @@ actions:
 history:
   provider: postgres
   database_url_env: RUN_HISTORY_POSTGRES_URL
+  max_connections: 10
 
 artifacts:
   provider: shared_filesystem
@@ -44,6 +45,13 @@ runtime:
   run_timeout: 5m
   sse_keep_alive_interval: 5s
   subscriber_capacity: 128
+  scheduler:
+    active_poll_interval: 25ms
+    idle_poll_min_interval: 100ms
+    idle_poll_max_interval: 2s
+    safety_poll_interval: 5s
+    claim_batch_size: 8
+    notification_reconnect_interval: 250ms
   max_llm_tool_rounds: 16
   max_llm_tool_calls: 64
   response_stream:

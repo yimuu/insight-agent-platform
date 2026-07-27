@@ -1269,8 +1269,10 @@ async fn expire_parent_operation_deadlines_postgres(
            AND (b.parent_operation_deadline IS NULL
                 OR b.parent_operation_deadline<=clock_timestamp())
          ORDER BY b.run_id,b.activation_id,b.attempt_no,b.model_call_no
-         FOR UPDATE OF b",
+         LIMIT $1
+         FOR UPDATE OF b SKIP LOCKED",
     )
+    .bind(i64::from(MAX_CLAIM_LIMIT))
     .fetch_all(&mut **tx)
     .await
     .map_err(RepositoryError::storage)?;
@@ -1309,9 +1311,12 @@ async fn recover_expired_model_tool_calls_postgres(
          WHERE b.execution_status='active' AND b.continuation_status='waiting_tools'
            AND r.lifecycle NOT IN ('succeeded','failed','cancelled','interrupted','timed_out')
            AND c.call_status IN ('claimed','running')
-           AND c.claim_expires_at<=clock_timestamp()
-         ORDER BY c.run_id,c.activation_id,c.attempt_no,c.model_call_no,c.call_index",
+           AND c.claim_expires_at<=statement_timestamp()
+         ORDER BY c.claim_expires_at,c.run_id,c.activation_id,c.attempt_no,
+                  c.model_call_no,c.call_index
+         LIMIT $1",
     )
+    .bind(i64::from(MAX_CLAIM_LIMIT))
     .fetch_all(&mut **tx)
     .await
     .map_err(RepositoryError::storage)?;
@@ -1524,7 +1529,7 @@ pub(crate) async fn claim_model_tool_calls_postgres(
            AND b.activation_id=c.activation_id AND b.attempt_no=c.attempt_no
            AND b.model_call_no=c.model_call_no
          JOIN workflow_runs r ON r.run_id=c.run_id
-         WHERE c.call_status='pending' AND c.available_at<=clock_timestamp()
+         WHERE c.call_status='pending' AND c.available_at<=statement_timestamp()
            AND b.execution_status='active' AND b.continuation_status='waiting_tools'
            AND r.lifecycle IN ('created','active','waiting')
          ORDER BY c.available_at,c.run_id,c.activation_id,c.attempt_no,

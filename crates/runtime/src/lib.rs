@@ -34,5 +34,5 @@ pub use run_service::{
     MigrationNodeMappingRequest, ProductionRunRepository, PublicArtifact, RecoveryOperation,
     RecoveryRequestMetadata, RecoveryReusePolicy, RecoveryRunResult, RequestMetadata,
     RunRepositoryCapability, RunService, RunServiceConfig, RunSubscription, ServiceError,
-    SubscriptionError,
+    SubscriptionError, WorkCoordinatorConfig,
 };

@@ -92,8 +92,13 @@ pub struct ActionsConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HistoryConfig {
-    Sqlite { path: PathBuf },
-    Postgres { database_url: SecretString },
+    Sqlite {
+        path: PathBuf,
+    },
+    Postgres {
+        database_url: SecretString,
+        max_connections: u32,
+    },
 }
 
 /// Declares the durability and ownership contract expected by this process.
@@ -156,9 +161,19 @@ impl HistoryConfig {
     pub fn database_url(&self) -> Option<&str> {
         match self {
             Self::Sqlite { .. } => None,
-            Self::Postgres { database_url } => Some(database_url.expose()),
+            Self::Postgres { database_url, .. } => Some(database_url.expose()),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedulerConfig {
+    pub active_poll_interval: Duration,
+    pub idle_poll_min_interval: Duration,
+    pub idle_poll_max_interval: Duration,
+    pub safety_poll_interval: Duration,
+    pub claim_batch_size: u32,
+    pub notification_reconnect_interval: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +185,7 @@ pub struct RuntimeConfig {
     pub run_timeout: Duration,
     pub sse_keep_alive_interval: Duration,
     pub subscriber_capacity: usize,
+    pub scheduler: SchedulerConfig,
     pub response_stream: ResponseStreamConfig,
     /// Platform hard bounds. Author-level LLM tool budgets must not exceed
     /// these values when a Deployment Revision is linked.
@@ -404,8 +420,18 @@ struct HttpGetYaml {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
 enum HistoryYaml {
-    Sqlite { path: PathBuf },
-    Postgres { database_url_env: String },
+    Sqlite {
+        path: PathBuf,
+    },
+    Postgres {
+        database_url_env: String,
+        #[serde(default = "default_postgres_pool_connections")]
+        max_connections: u32,
+    },
+}
+
+const fn default_postgres_pool_connections() -> u32 {
+    10
 }
 
 #[derive(Debug, Deserialize)]
@@ -436,6 +462,8 @@ struct RuntimeYaml {
     sse_keep_alive_interval: String,
     subscriber_capacity: usize,
     #[serde(default)]
+    scheduler: Option<SchedulerYaml>,
+    #[serde(default)]
     response_stream: Option<ResponseStreamYaml>,
     #[serde(default)]
     max_llm_tool_rounds: Option<u32>,
@@ -448,6 +476,17 @@ struct RuntimeYaml {
     readiness_probe_timeout: Option<String>,
     shutdown_grace_period: Option<String>,
     shutdown_hard_deadline: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SchedulerYaml {
+    active_poll_interval: String,
+    idle_poll_min_interval: String,
+    idle_poll_max_interval: String,
+    safety_poll_interval: String,
+    claim_batch_size: u32,
+    notification_reconnect_interval: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -588,10 +627,22 @@ fn resolve_history(
         HistoryYaml::Sqlite { path } => Ok(HistoryConfig::Sqlite {
             path: resolve_path(parent, &path),
         }),
-        HistoryYaml::Postgres { database_url_env } => {
+        HistoryYaml::Postgres {
+            database_url_env,
+            max_connections,
+        } => {
+            if !(4..=256).contains(&max_connections) {
+                return Err(PlatformConfigError::new(
+                    "PLATFORM_CONFIG_INVALID",
+                    "history.max_connections must be between 4 and 256",
+                ));
+            }
             let database_url = required_secret(&database_url_env, get_env)?;
             validate_postgres_history_url(database_url.expose())?;
-            Ok(HistoryConfig::Postgres { database_url })
+            Ok(HistoryConfig::Postgres {
+                database_url,
+                max_connections,
+            })
         }
     }
 }
@@ -758,6 +809,7 @@ fn resolve_runtime(
         ));
     }
     let response_stream = resolve_response_stream(raw.response_stream, deployment_mode)?;
+    let scheduler = resolve_scheduler(raw.scheduler)?;
     let max_llm_tool_rounds = raw.max_llm_tool_rounds.unwrap_or(16);
     let max_llm_tool_calls = raw.max_llm_tool_calls.unwrap_or(64);
     if max_llm_tool_rounds == 0
@@ -779,6 +831,7 @@ fn resolve_runtime(
             "runtime.sse_keep_alive_interval",
         )?,
         subscriber_capacity: raw.subscriber_capacity,
+        scheduler,
         response_stream,
         max_llm_tool_rounds,
         max_llm_tool_calls,
@@ -788,6 +841,52 @@ fn resolve_runtime(
         shutdown_grace_period,
         shutdown_hard_deadline,
     })
+}
+
+fn resolve_scheduler(raw: Option<SchedulerYaml>) -> Result<SchedulerConfig, PlatformConfigError> {
+    let Some(raw) = raw else {
+        return Ok(SchedulerConfig {
+            active_poll_interval: Duration::from_millis(25),
+            idle_poll_min_interval: Duration::from_millis(100),
+            idle_poll_max_interval: Duration::from_secs(2),
+            safety_poll_interval: Duration::from_secs(5),
+            claim_batch_size: 8,
+            notification_reconnect_interval: Duration::from_millis(250),
+        });
+    };
+    let scheduler = SchedulerConfig {
+        active_poll_interval: positive_duration(
+            &raw.active_poll_interval,
+            "runtime.scheduler.active_poll_interval",
+        )?,
+        idle_poll_min_interval: positive_duration(
+            &raw.idle_poll_min_interval,
+            "runtime.scheduler.idle_poll_min_interval",
+        )?,
+        idle_poll_max_interval: positive_duration(
+            &raw.idle_poll_max_interval,
+            "runtime.scheduler.idle_poll_max_interval",
+        )?,
+        safety_poll_interval: positive_duration(
+            &raw.safety_poll_interval,
+            "runtime.scheduler.safety_poll_interval",
+        )?,
+        claim_batch_size: raw.claim_batch_size,
+        notification_reconnect_interval: positive_duration(
+            &raw.notification_reconnect_interval,
+            "runtime.scheduler.notification_reconnect_interval",
+        )?,
+    };
+    if scheduler.active_poll_interval > scheduler.idle_poll_min_interval
+        || scheduler.idle_poll_min_interval > scheduler.idle_poll_max_interval
+        || scheduler.idle_poll_max_interval > scheduler.safety_poll_interval
+        || !(1..=256).contains(&scheduler.claim_batch_size)
+    {
+        return Err(runtime_error(
+            "runtime.scheduler intervals or claim_batch_size are invalid",
+        ));
+    }
+    Ok(scheduler)
 }
 
 fn resolve_response_stream(

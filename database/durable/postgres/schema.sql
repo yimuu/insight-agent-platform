@@ -70,6 +70,116 @@ $durable_schema_target_must_be_empty$;
 -- remains deterministic without a separate post-processing dependency pass.
 SET LOCAL check_function_bodies = false;
 
+CREATE FUNCTION notify_durable_work() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    target_namespace OID;
+    old_row JSONB;
+    new_row JSONB := to_jsonb(NEW);
+    should_notify BOOLEAN := FALSE;
+BEGIN
+    old_row := CASE WHEN TG_OP = 'UPDATE' THEN to_jsonb(OLD) ELSE '{}'::jsonb END;
+
+    -- The runtime marks its SQL connections with this fixed application name.
+    -- Those commits already wake their process-local WorkCoordinator, while a
+    -- bounded publisher sends at most one cross-process hint per debounce
+    -- window after commit. Skipping row-triggered NOTIFY here removes the
+    -- notification-ordering lock from every authoritative write transaction.
+    -- Other repository writers retain commit-scoped trigger hints.
+    IF current_setting('application_name', TRUE) =
+       'insight-agent-platform-runtime' THEN
+        RETURN NEW;
+    END IF;
+
+    -- Only transitions that make work immediately claimable need a low-latency
+    -- hint. Claimed/running rows are not eligible until a database deadline;
+    -- the coordinator's bounded deadline/safety scan owns that later wakeup.
+    should_notify := CASE TG_TABLE_NAME
+        WHEN 'task_outbox' THEN
+            new_row->>'task_state' IN ('pending', 'published')
+            AND (
+                TG_OP = 'INSERT'
+                OR old_row->>'task_state' IS DISTINCT FROM new_row->>'task_state'
+                OR old_row->>'available_at' IS DISTINCT FROM new_row->>'available_at'
+            )
+        WHEN 'model_tool_calls' THEN
+            new_row->>'call_status' = 'pending'
+            AND (
+                TG_OP = 'INSERT'
+                OR old_row->>'call_status' IS DISTINCT FROM new_row->>'call_status'
+                OR old_row->>'available_at' IS DISTINCT FROM new_row->>'available_at'
+            )
+        WHEN 'timers' THEN
+            new_row->>'timer_state' = 'scheduled'
+            AND (
+                TG_OP = 'INSERT'
+                OR old_row->>'timer_state' IS DISTINCT FROM new_row->>'timer_state'
+                OR old_row->>'deadline_at' IS DISTINCT FROM new_row->>'deadline_at'
+            )
+        WHEN 'signals_inbox' THEN
+            new_row->>'signal_state' = 'pending'
+            AND (
+                TG_OP = 'INSERT'
+                OR old_row->>'signal_state' IS DISTINCT FROM new_row->>'signal_state'
+            )
+        WHEN 'wait_late_audit_outbox' THEN
+            new_row->>'audit_state' = 'pending'
+            AND (
+                TG_OP = 'INSERT'
+                OR old_row->>'audit_state' IS DISTINCT FROM new_row->>'audit_state'
+                OR old_row->>'due_at' IS DISTINCT FROM new_row->>'due_at'
+            )
+        WHEN 'public_event_delivery_heads' THEN
+            new_row->>'head_state' = 'ready'
+            AND (
+                TG_OP = 'INSERT'
+                OR old_row->>'head_state' IS DISTINCT FROM new_row->>'head_state'
+                OR old_row->>'due_at' IS DISTINCT FROM new_row->>'due_at'
+                OR old_row->>'public_event_id' IS DISTINCT FROM new_row->>'public_event_id'
+            )
+        WHEN 'workflow_runs' THEN
+            (
+                new_row->>'lifecycle' = 'terminating'
+                OR (
+                    new_row->>'lifecycle' IN ('created', 'active', 'waiting')
+                    AND new_row->>'admission_state' = 'open'
+                )
+            )
+            AND (
+                TG_OP = 'INSERT'
+                OR old_row->>'lifecycle' IS DISTINCT FROM new_row->>'lifecycle'
+                OR old_row->>'admission_state' IS DISTINCT FROM new_row->>'admission_state'
+                OR old_row->>'projection_version' IS DISTINCT FROM new_row->>'projection_version'
+            )
+        ELSE FALSE
+    END;
+    IF NOT should_notify THEN
+        RETURN NEW;
+    END IF;
+
+    -- One transaction can make several work classes eligible. A single
+    -- payload-free all-class hint is enough: PostgreSQL state remains the
+    -- authority and the coordinator coalesces before running bounded queries.
+    -- The transaction-local flag also avoids repeated pg_notify() calls from
+    -- multiple row triggers in the same commit.
+    IF current_setting('iap.work_notify_emitted', TRUE) = '1' THEN
+        RETURN NEW;
+    END IF;
+    PERFORM set_config('iap.work_notify_emitted', '1', TRUE);
+
+    SELECT oid INTO target_namespace
+    FROM pg_catalog.pg_namespace
+    WHERE nspname=current_schema();
+    IF target_namespace IS NULL THEN
+        RAISE EXCEPTION 'durable Schema target does not exist'
+            USING ERRCODE = '3F000';
+    END IF;
+    PERFORM pg_notify('iap_work_' || target_namespace::text, 'maintenance');
+    RETURN NEW;
+END;
+$$;
+
 CREATE FUNCTION bind_public_projection_decision() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -1805,6 +1915,28 @@ CREATE TABLE signals_inbox (
     CONSTRAINT signals_inbox_signal_state_check CHECK ((signal_state = ANY (ARRAY['pending'::text, 'consumed'::text, 'rejected'::text, 'expired'::text])))
 );
 
+CREATE TABLE wait_late_audit_outbox (
+    run_id text NOT NULL,
+    activation_id text NOT NULL,
+    loser_kind text NOT NULL,
+    loser_id text NOT NULL,
+    due_at timestamp with time zone NOT NULL,
+    audit_state text NOT NULL,
+    claimed_by text,
+    claim_token text,
+    claim_expires_at timestamp with time zone,
+    created_at timestamp with time zone NOT NULL,
+    completed_event_id text,
+    CONSTRAINT wait_late_audit_outbox_pkey PRIMARY KEY (run_id, loser_kind, loser_id),
+    CONSTRAINT wait_late_audit_outbox_kind_check CHECK (loser_kind = ANY (ARRAY['timer'::text, 'signal'::text])),
+    CONSTRAINT wait_late_audit_outbox_state_check CHECK (audit_state = ANY (ARRAY['pending'::text, 'claimed'::text, 'completed'::text])),
+    CONSTRAINT wait_late_audit_outbox_lifecycle_check CHECK (
+        ((audit_state = 'pending'::text) AND (claimed_by IS NULL) AND (claim_token IS NULL) AND (claim_expires_at IS NULL) AND (completed_event_id IS NULL))
+        OR ((audit_state = 'claimed'::text) AND (claimed_by IS NOT NULL) AND (claim_token IS NOT NULL) AND (claim_expires_at IS NOT NULL) AND (completed_event_id IS NULL))
+        OR ((audit_state = 'completed'::text) AND (claimed_by IS NULL) AND (claim_token IS NULL) AND (claim_expires_at IS NULL) AND (completed_event_id IS NOT NULL))
+    )
+);
+
 CREATE TABLE task_outbox (
     run_id text NOT NULL,
     task_id text NOT NULL,
@@ -2380,7 +2512,9 @@ CREATE INDEX idx_model_tool_batches_parent_deadline ON model_tool_call_batches U
 
 CREATE INDEX idx_model_tool_calls_batch_status ON model_tool_calls USING btree (run_id, activation_id, attempt_no, model_call_no, call_status);
 
-CREATE INDEX idx_model_tool_calls_claim ON model_tool_calls USING btree (call_status, available_at, run_id, tool_task_id);
+CREATE INDEX idx_model_tool_calls_claim ON model_tool_calls USING btree (available_at, run_id, tool_task_id) WHERE (call_status = 'pending'::text);
+
+CREATE INDEX idx_model_tool_calls_reclaim ON model_tool_calls USING btree (claim_expires_at, run_id, activation_id, attempt_no, model_call_no, call_index) WHERE (call_status = ANY (ARRAY['claimed'::text, 'running'::text]));
 
 CREATE INDEX idx_occurrence_values_owner ON scheduler_occurrence_values USING btree (run_id, owner_activation_id, occurrence_key, port_id);
 
@@ -2392,6 +2526,8 @@ CREATE INDEX idx_public_outbox_dispatch ON public_event_outbox USING btree (avai
 
 CREATE INDEX idx_public_outbox_reclaim ON public_event_outbox USING btree (claim_expires_at, run_id, public_ordinal, public_event_id) WHERE (publish_state = 'claimed'::text);
 
+CREATE INDEX idx_public_outbox_retention ON public_event_outbox USING btree (retain_until, run_id, public_event_id) WHERE ((publish_state = 'published'::text) AND (NOT is_terminal) AND (retain_until IS NOT NULL));
+
 CREATE INDEX idx_public_projection_order ON public_event_projection_decisions USING btree (run_id, execution_seq, public_ordinal, public_event_id) WHERE (decision = 'public'::text);
 
 CREATE INDEX idx_reuse_candidates_pending ON run_reuse_candidates USING btree (run_id, target_scope_instance_id, target_node_id, candidate_id) WHERE (candidate_state = 'candidate'::text);
@@ -2399,6 +2535,8 @@ CREATE INDEX idx_reuse_candidates_pending ON run_reuse_candidates USING btree (r
 CREATE INDEX idx_run_deadline_due ON workflow_runs USING btree (deadline_at, run_id) WHERE ((deadline_at IS NOT NULL) AND (lifecycle = ANY (ARRAY['created'::text, 'active'::text, 'waiting'::text, 'completing'::text])));
 
 CREATE INDEX idx_runs_dispatch ON workflow_runs USING btree (lifecycle, admission_state, updated_at, run_id) WHERE (lifecycle = ANY (ARRAY['active'::text, 'waiting'::text]));
+
+CREATE INDEX idx_runs_recovery ON workflow_runs USING btree (updated_at, run_id) WHERE ((lifecycle = 'terminating'::text) OR ((lifecycle = ANY (ARRAY['created'::text, 'active'::text, 'waiting'::text])) AND (admission_state = 'open'::text)));
 
 CREATE INDEX idx_runs_scheduler_lease ON workflow_runs USING btree (scheduler_lease_expires_at, run_id) WHERE (scheduler_lease_owner IS NOT NULL);
 
@@ -2412,11 +2550,17 @@ CREATE INDEX idx_signals_pending ON signals_inbox USING btree (run_id, target_ac
 
 CREATE INDEX idx_task_outbox_dispatch ON task_outbox USING btree (available_at, run_id, task_id) WHERE (task_state = 'pending'::text);
 
+CREATE INDEX idx_task_outbox_acknowledge ON task_outbox USING btree (available_at, run_id, task_id) WHERE (task_state = 'published'::text);
+
 CREATE INDEX idx_task_outbox_reclaim ON task_outbox USING btree (claim_expires_at, run_id, task_id) WHERE (task_state = 'claimed'::text);
 
 CREATE INDEX idx_timers_due ON timers USING btree (deadline_at, run_id, timer_id) WHERE (timer_state = 'scheduled'::text);
 
 CREATE INDEX idx_workflow_retrieval_publications_terminal ON workflow_retrieval_publications USING btree (run_id, activation_id, attempt_no, retrieval_id);
+
+CREATE INDEX idx_wait_late_audit_pending ON wait_late_audit_outbox USING btree (due_at, run_id, loser_kind, loser_id) WHERE (audit_state = 'pending'::text);
+
+CREATE INDEX idx_wait_late_audit_reclaim ON wait_late_audit_outbox USING btree (claim_expires_at, run_id, loser_kind, loser_id) WHERE (audit_state = 'claimed'::text);
 
 CREATE UNIQUE INDEX uq_attempt_lease_timer ON timers USING btree (run_id, activation_id, expected_attempt_no, expected_lease_epoch) WHERE (timer_kind = 'lease'::text);
 
@@ -2432,6 +2576,8 @@ CREATE UNIQUE INDEX uq_root_scope_per_run ON scope_instances USING btree (run_id
 
 CREATE UNIQUE INDEX uq_workflow_runs_response_id ON workflow_runs USING btree (response_id);
 
+CREATE UNIQUE INDEX uq_wait_late_audit_claim_token ON wait_late_audit_outbox USING btree (claim_token) WHERE (claim_token IS NOT NULL);
+
 CREATE TRIGGER artifact_retention_release_delete_forbidden BEFORE DELETE ON artifact_retention_releases FOR EACH ROW EXECUTE FUNCTION reject_durable_authority_delete();
 
 CREATE TRIGGER artifact_store_authority_immutable BEFORE DELETE OR UPDATE ON artifact_store_authority FOR EACH ROW EXECUTE FUNCTION reject_artifact_store_authority_mutation();
@@ -2445,6 +2591,10 @@ CREATE TRIGGER control_transition_result_rewrite_forbidden BEFORE UPDATE ON cont
 CREATE TRIGGER execution_event_projection_ledger_immutable BEFORE INSERT OR DELETE OR UPDATE ON execution_events FOR EACH ROW EXECUTE FUNCTION reject_execution_event_projection_ledger_rewrite();
 
 CREATE TRIGGER execution_event_public_projection_decision_insert AFTER INSERT ON execution_events FOR EACH ROW EXECUTE FUNCTION insert_public_projection_decision();
+
+CREATE TRIGGER model_tool_call_work_wakeup AFTER INSERT OR UPDATE OF call_status, available_at, claim_expires_at ON model_tool_calls FOR EACH ROW WHEN ((NEW.call_status = ANY (ARRAY['pending'::text, 'claimed'::text, 'running'::text]))) EXECUTE FUNCTION notify_durable_work();
+
+CREATE TRIGGER public_event_delivery_work_wakeup AFTER INSERT OR UPDATE OF head_state, due_at ON public_event_delivery_heads FOR EACH ROW WHEN (NEW.head_state = 'ready'::text) EXECUTE FUNCTION notify_durable_work();
 
 CREATE TRIGGER public_event_delivery_head_mutation_guard BEFORE INSERT OR DELETE OR UPDATE ON public_event_delivery_heads FOR EACH ROW EXECUTE FUNCTION guard_public_event_delivery_head();
 
@@ -2467,6 +2617,16 @@ CREATE TRIGGER public_event_receipt_update_forbidden BEFORE UPDATE ON public_eve
 CREATE TRIGGER recovery_transition_result_delete_forbidden BEFORE DELETE ON recovery_transition_results FOR EACH ROW EXECUTE FUNCTION reject_durable_authority_delete();
 
 CREATE TRIGGER recovery_transition_result_rewrite_forbidden BEFORE UPDATE ON recovery_transition_results FOR EACH ROW EXECUTE FUNCTION reject_transition_receipt_rewrite();
+
+CREATE TRIGGER run_recovery_work_wakeup AFTER INSERT OR UPDATE OF lifecycle, admission_state, projection_version ON workflow_runs FOR EACH ROW WHEN ((NEW.lifecycle = 'terminating'::text) OR ((NEW.lifecycle = ANY (ARRAY['created'::text, 'active'::text, 'waiting'::text])) AND (NEW.admission_state = 'open'::text))) EXECUTE FUNCTION notify_durable_work();
+
+CREATE TRIGGER signal_ingress_work_wakeup AFTER INSERT OR UPDATE OF signal_state ON signals_inbox FOR EACH ROW WHEN (NEW.signal_state = 'pending'::text) EXECUTE FUNCTION notify_durable_work();
+
+CREATE TRIGGER task_outbox_work_wakeup AFTER INSERT OR UPDATE OF task_state, available_at, claim_expires_at ON task_outbox FOR EACH ROW WHEN ((NEW.task_state = ANY (ARRAY['pending'::text, 'claimed'::text, 'published'::text]))) EXECUTE FUNCTION notify_durable_work();
+
+CREATE TRIGGER timer_ingress_work_wakeup AFTER INSERT OR UPDATE OF timer_state, deadline_at ON timers FOR EACH ROW WHEN (NEW.timer_state = 'scheduled'::text) EXECUTE FUNCTION notify_durable_work();
+
+CREATE TRIGGER wait_late_audit_work_wakeup AFTER INSERT OR UPDATE OF audit_state, due_at, claim_expires_at ON wait_late_audit_outbox FOR EACH ROW WHEN ((NEW.audit_state = ANY (ARRAY['pending'::text, 'claimed'::text]))) EXECUTE FUNCTION notify_durable_work();
 
 CREATE TRIGGER trg_definition_public_metadata_immutable BEFORE DELETE OR UPDATE ON workflow_definition_public_metadata FOR EACH ROW EXECUTE FUNCTION durable_reject_definition_public_metadata_mutation();
 
@@ -2862,6 +3022,12 @@ ALTER TABLE ONLY workflow_runs
 ALTER TABLE ONLY workflow_runs
     ADD CONSTRAINT workflow_runs_replacement_run_id_fkey FOREIGN KEY (replacement_run_id) REFERENCES workflow_runs(run_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
 
+ALTER TABLE ONLY wait_late_audit_outbox
+    ADD CONSTRAINT wait_late_audit_outbox_activation_fkey FOREIGN KEY (run_id, activation_id) REFERENCES node_activations(run_id, activation_id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY wait_late_audit_outbox
+    ADD CONSTRAINT wait_late_audit_outbox_event_fkey FOREIGN KEY (run_id, completed_event_id) REFERENCES execution_events(run_id, event_id) ON DELETE RESTRICT;
+
 CREATE TABLE durable_schema_contract (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     contract_id TEXT NOT NULL,
@@ -2872,7 +3038,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-312c2675-57b7-4a9b-bfe8-3803b3157481',
+    'durable-schema-cd9a5c3f-5f12-46d2-ab96-78820a13186f',
     'postgres'
 );
 

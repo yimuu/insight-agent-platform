@@ -15,5 +15,5 @@ spec:
   ports:
     - name: postgresql
       port: 5432
-    targetPort: postgresql
+      targetPort: postgresql
 {{- end }}

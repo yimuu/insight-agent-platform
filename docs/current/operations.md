@@ -32,6 +32,21 @@ PostgreSQL authority；不能用随 Pod 删除的 `emptyDir` 替代。默认 Dep
 有限资源部署和 k6 生命周期压测见
 [`bench/k8s/README.md`](../../bench/k8s/README.md)。
 
+容量资格使用三个显式 overlay，均应叠加在 `values-benchmark.yaml` 之后：
+
+- `values-benchmark-limited.yaml`：runtime/PostgreSQL 各 `500m / 256Mi`，50 active Run、4 permits；
+- `values-benchmark-c1.yaml`：runtime `2 CPU / 1Gi`，PostgreSQL `4 CPU / 8Gi`，12 permits；
+- `values-benchmark-c2.yaml`：runtime `4 CPU / 2Gi`，PostgreSQL `8 CPU / 16Gi`，16 permits。
+
+C1/C2 是短 Run burst 的资格档位，不是所有 LLM、retrieval 或第三方 API workload 的资源保证。
+默认值只有在容量矩阵通过后才能据此调整，不能用 values 中的数字替代压测结论。
+
+`history.max_connections` 是单个 runtime 进程共享的 PostgreSQL pool 上限；durable transition、
+readiness 和 LISTEN consumer 都从该有界 pool 获取连接。它必须至少为 4，且应高于 operation
+permit 数并为监听与控制查询留出余量。Helm 用
+`runtime.databasePoolMaxConnections` 生成该配置：limited/C1/C2 分别使用 6/24/32。盲目增大
+pool 会增加 PostgreSQL backend 私有内存和瞬时竞争，不等价于提高吞吐。
+
 ## 启动前 Schema provisioning
 
 Durable Schema 的唯一权威资产是：
@@ -127,6 +142,14 @@ token 不应进入配置明文、Debug、错误或日志。
 
 - `/health/live` 只表示进程存活；
 - `/health/ready` 检查 repository 与 runtime admission readiness；
+- `/metrics` 以 Prometheus text format 暴露 bounded-label 的 active、executing、admission、
+  coordinator wakeup/poll、claim latency、notification listener，以及跨进程 hint
+  `requested/published/error` 指标；`published/requested` 的差值体现进程级合并效果；
+- work notification listener 断开不会单独使 readiness 失败，安全轮询继续保证最终发现；listener
+  状态会在 metrics 中降级；
+- Kubernetes 资格脚本另外保存 PostgreSQL queue oldest age、进程 RSS/PSS、cgroup memory、
+  lock waiter、top SQL 的 temp/WAL blocks 和一致性抽样；cgroup page cache 上升不能单独等价为
+  进程 RSS 泄漏；
 - `runtime.public_event_retention` 只清理已发布的非终态 Public Event；
 - terminal Public Event 和 durable response snapshot 不受该策略影响；
 - `shutdown_grace_period` 与 `shutdown_hard_deadline` 控制停止 admission、drain 与最终退出边界。

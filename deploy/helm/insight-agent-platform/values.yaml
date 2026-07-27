@@ -39,12 +39,20 @@ resources:
 
 runtime:
   rustLog: warn
+  databasePoolMaxConnections: 10
   maxConcurrentRuns: 16
   maxConcurrentOperations: 16
   maxConcurrentOperationsPerRun: 4
   operationTimeout: 30s
   runTimeout: 2m
   subscriberCapacity: 64
+  scheduler:
+    activePollInterval: 25ms
+    idlePollMinInterval: 100ms
+    idlePollMaxInterval: 2s
+    safetyPollInterval: 5s
+    claimBatchSize: 8
+    notificationReconnectInterval: 250ms
   publicEventRetention: 1h
   publicEventPruneInterval: 1m
   readinessProbeTimeout: 2s
@@ -78,6 +86,8 @@ postgresql:
     database: insight_agent_platform
   maxConnections: 100
   sharedBuffers: 64MB
+  logLockWaits: false
+  deadlockTimeout: 1s
   tls:
     enabled: true
   resources:
@@ -107,15 +117,22 @@ probes:
 loadTest:
   enabled: false
   runId: manual
+  script: run-lifecycle.js
   image:
     repository: grafana/k6
     tag: 1.7.1
     pullPolicy: IfNotPresent
   virtualUsers: 8
   duration: 30s
+  executor: constant-vus
+  iterations: "50"
+  arrivalRate: "10"
+  maxVirtualUsers: "50"
   pollIntervalSeconds: "0.02"
   runTimeoutSeconds: "15"
   startDelaySeconds: "8"
+  holdDurationSeconds: "1800"
+  roundIntervalSeconds: "0"
   resources:
     requests:
       cpu: 100m

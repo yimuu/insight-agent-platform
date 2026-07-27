@@ -26,6 +26,7 @@ use insight_agent_platform::{
         production_worker_registry, production_worker_registry_with_retrievals,
         repository::{
             CreateRunCommand, DurableRepository, SchedulerDurableRepository, VersionedPlan,
+            PUBLIC_EVENT_NOTIFY_CHANNEL,
         },
         scheduler::TaskOutcomeFact,
         ContentHash, DeploymentRevisionId, EffectEvidence, LeafTaskExecutor, LeafTaskKind,
@@ -759,10 +760,13 @@ async fn production_artifact_store_gate_precedes_publication_and_binds_shared_id
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
     database::provision_postgres_url(&scoped_url).await;
+    let runtime_url = format!("{scoped_url}&application_name=insight-agent-platform-runtime");
     let repository = Arc::new(
-        insight_agent_platform::engine::repository::PostgresDurableRepository::connect(&scoped_url)
-            .await
-            .unwrap(),
+        insight_agent_platform::engine::repository::PostgresDurableRepository::connect(
+            &runtime_url,
+        )
+        .await
+        .unwrap(),
     );
     let missing = RunService::start(
         deployed_catalog().0,
@@ -1459,14 +1463,24 @@ async fn postgres_attached_public_lifecycle_is_ordered_private_and_replay_idempo
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
     database::provision_postgres_url(&scoped_url).await;
+    let runtime_url = format!("{scoped_url}&application_name=insight-agent-platform-runtime");
     let repository = Arc::new(
-        insight_agent_platform::engine::repository::PostgresDurableRepository::connect(&scoped_url)
-            .await
-            .unwrap(),
+        insight_agent_platform::engine::repository::PostgresDurableRepository::connect(
+            &runtime_url,
+        )
+        .await
+        .unwrap(),
     );
     let control = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
+        .max_connections(2)
         .connect(&scoped_url)
+        .await
+        .unwrap();
+    let mut public_listener = sqlx::postgres::PgListener::connect_with(&control)
+        .await
+        .unwrap();
+    public_listener
+        .listen(PUBLIC_EVENT_NOTIFY_CHANNEL)
         .await
         .unwrap();
 
@@ -1530,6 +1544,12 @@ async fn postgres_attached_public_lifecycle_is_ordered_private_and_replay_idempo
     assert_eq!(
         attached.subscription.recv().await.unwrap_err().code(),
         "SUBSCRIPTION_TERMINAL"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), public_listener.recv())
+            .await
+            .is_err(),
+        "runtime publication must use local delivery without a per-event transactional NOTIFY"
     );
 
     let rows = sqlx::query_as::<_, (String, String, String, i64, i32)>(
@@ -1612,6 +1632,28 @@ async fn postgres_attached_public_lifecycle_is_ordered_private_and_replay_idempo
         ),
         (1, 1, 1)
     );
+
+    let publisher_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let published = service
+            .prometheus_metrics()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix(
+                    "insight_runtime_notification_publisher_total{backend=\"postgres\",outcome=\"published\"} ",
+                )
+            })
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        if published > 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < publisher_deadline,
+            "process-coalesced PostgreSQL work hint was not published"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     service.shutdown(Duration::from_secs(2)).await.unwrap();
     drop(service);
@@ -1722,6 +1764,7 @@ async fn postgres_attached_public_lifecycle_is_ordered_private_and_replay_idempo
     );
 
     drop(repository);
+    drop(public_listener);
     control.close().await;
     sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&admin)
@@ -1954,6 +1997,10 @@ async fn max_concurrent_runs_bounds_nonterminal_runs_and_reopens_after_drain() {
         .await
         .unwrap_err();
     assert_eq!(capacity.code(), "RUN_CAPACITY_EXCEEDED");
+    let metrics = service.prometheus_metrics();
+    assert!(metrics.contains("insight_runtime_admission_total{outcome=\"accepted\"} 1"));
+    assert!(metrics.contains("insight_runtime_admission_total{outcome=\"capacity_rejected\"} 1"));
+    assert!(metrics.contains("insight_runtime_active_runs{lifecycle_class=\"nonterminal\"} 1"));
 
     assert_eq!(
         service.cancel(&first.run_id).await.unwrap().status(),

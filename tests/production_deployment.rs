@@ -45,6 +45,14 @@ use sqlx::{postgres::PgPoolOptions, AssertSqlSafe};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+#[test]
+fn bundled_benchmark_wait_agent_compiles_as_a_durable_signal_wait() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("agents")
+        .join("benchmark_wait");
+    compile_agent_dir(&directory).unwrap();
+}
+
 const RUN_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn version(value: &str) -> VersionTag {

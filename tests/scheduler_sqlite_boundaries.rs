@@ -1281,6 +1281,20 @@ async fn sqlite_wait_signal_and_timeout_share_one_durable_first_winner() {
         .unwrap(),
         1
     );
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64)>(
+            "SELECT loser_kind, CASE WHEN completed_event_id IS NULL THEN 0 ELSE 1 END
+             FROM wait_late_audit_outbox
+             WHERE run_id IN (?,?)
+             ORDER BY loser_kind",
+        )
+        .bind(timer_run.as_str())
+        .bind(signal_run.as_str())
+        .fetch_all(&control)
+        .await
+        .unwrap(),
+        vec![("signal".to_owned(), 1), ("timer".to_owned(), 1)]
+    );
 }
 
 #[tokio::test]

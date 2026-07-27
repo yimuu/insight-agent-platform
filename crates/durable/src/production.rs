@@ -7,7 +7,7 @@ use insight_engine::{NodeId, RunId, TransitionKey};
 use crate::{
     ClaimSchedulerRunCommand, FencedSchedulerRunCommand, HumanTaskDurableRepository,
     PublicEventOutboxRepository, RecoveryDurableRepository, RepositoryError,
-    RuntimeIngressDurableRepository, SchedulerDurableRepository,
+    RuntimeIngressDurableRepository, SchedulerDurableRepository, WorkWakeupRepository,
 };
 
 /// Declares whether a Run repository can uphold the ownership and fencing
@@ -29,6 +29,7 @@ pub trait ProductionRunRepository:
     + RecoveryDurableRepository
     + HumanTaskDurableRepository
     + GraphSurfaceRepository
+    + WorkWakeupRepository
 {
     fn run_repository_capability(&self) -> RunRepositoryCapability {
         RunRepositoryCapability::SingleProcessOnly

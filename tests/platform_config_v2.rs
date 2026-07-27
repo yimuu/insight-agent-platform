@@ -120,6 +120,15 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
         Duration::from_secs(5)
     );
     assert_eq!(
+        config.runtime.scheduler.active_poll_interval,
+        Duration::from_millis(25)
+    );
+    assert_eq!(
+        config.runtime.scheduler.idle_poll_min_interval,
+        Duration::from_millis(100)
+    );
+    assert_eq!(config.runtime.scheduler.claim_batch_size, 8);
+    assert_eq!(
         config.runtime.readiness_probe_timeout,
         Duration::from_secs(2)
     );
@@ -701,7 +710,57 @@ fn postgres_history_secret_is_resolved_and_redacted() {
     .unwrap();
 
     assert_eq!(config.history.database_url(), Some(secret));
+    assert!(matches!(
+        config.history,
+        insight_agent_platform::config::HistoryConfig::Postgres {
+            max_connections: 10,
+            ..
+        }
+    ));
     assert!(!format!("{config:?}").contains(secret));
+}
+
+#[test]
+fn postgres_history_pool_bound_is_strict_and_bounded() {
+    for max_connections in [0, 3, 257] {
+        let yaml = base_yaml("  mode: disabled").replace(
+            "history:\n  provider: sqlite\n  path: ../data/history.sqlite3",
+            &format!(
+                "history:\n  provider: postgres\n  database_url_env: HISTORY_URL\n  max_connections: {max_connections}"
+            ),
+        );
+        let (_directory, path) = write_config(&yaml);
+        let error = load(
+            &path,
+            BTreeMap::from([(
+                "HISTORY_URL".to_owned(),
+                "postgres://localhost/platform".to_owned(),
+            )]),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "PLATFORM_CONFIG_INVALID");
+    }
+
+    let yaml = base_yaml("  mode: disabled").replace(
+        "history:\n  provider: sqlite\n  path: ../data/history.sqlite3",
+        "history:\n  provider: postgres\n  database_url_env: HISTORY_URL\n  max_connections: 8",
+    );
+    let (_directory, path) = write_config(&yaml);
+    let config = load(
+        &path,
+        BTreeMap::from([(
+            "HISTORY_URL".to_owned(),
+            "postgres://localhost/platform".to_owned(),
+        )]),
+    )
+    .unwrap();
+    assert!(matches!(
+        config.history,
+        insight_agent_platform::config::HistoryConfig::Postgres {
+            max_connections: 8,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -948,6 +1007,45 @@ fn removed_sse_recovery_settings_are_unknown() {
             "PLATFORM_CONFIG_INVALID"
         );
     }
+}
+
+#[test]
+fn scheduler_polling_contract_is_strict_ordered_and_bounded() {
+    let explicit = base_yaml("  mode: disabled").replace(
+        "  subscriber_capacity: 64",
+        "  subscriber_capacity: 64\n  scheduler:\n    active_poll_interval: 10ms\n    idle_poll_min_interval: 20ms\n    idle_poll_max_interval: 1s\n    safety_poll_interval: 3s\n    claim_batch_size: 12\n    notification_reconnect_interval: 50ms",
+    );
+    let (_directory, path) = write_config(&explicit);
+    let config = load(&path, BTreeMap::new()).unwrap();
+    assert_eq!(
+        config.runtime.scheduler.active_poll_interval,
+        Duration::from_millis(10)
+    );
+    assert_eq!(config.runtime.scheduler.claim_batch_size, 12);
+
+    for invalid in [
+        explicit.replace("active_poll_interval: 10ms", "active_poll_interval: 30ms"),
+        explicit.replace("claim_batch_size: 12", "claim_batch_size: 0"),
+        explicit.replace(
+            "notification_reconnect_interval: 50ms",
+            "notification_reconnect_interval: 0ms",
+        ),
+    ] {
+        let (_directory, path) = write_config(&invalid);
+        assert_eq!(
+            load(&path, BTreeMap::new()).unwrap_err().code(),
+            "PLATFORM_RUNTIME_INVALID"
+        );
+    }
+    let unknown = explicit.replace(
+        "notification_reconnect_interval: 50ms",
+        "notification_reconnect_interval: 50ms\n    unknown_scheduler_key: true",
+    );
+    let (_directory, path) = write_config(&unknown);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_CONFIG_INVALID"
+    );
 }
 
 #[test]

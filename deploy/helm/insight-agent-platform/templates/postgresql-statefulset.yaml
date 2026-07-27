@@ -63,6 +63,10 @@ spec:
             - max_connections={{ .Values.postgresql.maxConnections }}
             - -c
             - shared_buffers={{ .Values.postgresql.sharedBuffers }}
+            - -c
+            - log_lock_waits={{ .Values.postgresql.logLockWaits }}
+            - -c
+            - deadlock_timeout={{ .Values.postgresql.deadlockTimeout }}
             {{- if .Values.postgresql.tls.enabled }}
             - -c
             - ssl=on

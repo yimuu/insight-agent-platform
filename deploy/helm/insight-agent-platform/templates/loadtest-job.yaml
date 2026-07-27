@@ -31,7 +31,7 @@ spec:
           args:
             - run
             - --summary-export=/results/summary.json
-            - /scripts/run-lifecycle.js
+            - {{ printf "/scripts/%s" .Values.loadTest.script | quote }}
           env:
             - name: BASE_URL
               value: {{ printf "http://%s:%v" (include "insight-agent-platform.fullname" .) .Values.service.port | quote }}
@@ -41,12 +41,24 @@ spec:
               value: {{ .Values.loadTest.virtualUsers | quote }}
             - name: DURATION
               value: {{ .Values.loadTest.duration | quote }}
+            - name: EXECUTOR
+              value: {{ .Values.loadTest.executor | quote }}
+            - name: ITERATIONS
+              value: {{ .Values.loadTest.iterations | quote }}
+            - name: ARRIVAL_RATE
+              value: {{ .Values.loadTest.arrivalRate | quote }}
+            - name: MAX_VUS
+              value: {{ .Values.loadTest.maxVirtualUsers | quote }}
             - name: POLL_INTERVAL_SECONDS
               value: {{ .Values.loadTest.pollIntervalSeconds | quote }}
             - name: RUN_TIMEOUT_SECONDS
               value: {{ .Values.loadTest.runTimeoutSeconds | quote }}
             - name: START_DELAY_SECONDS
               value: {{ .Values.loadTest.startDelaySeconds | quote }}
+            - name: HOLD_DURATION_SECONDS
+              value: {{ .Values.loadTest.holdDurationSeconds | quote }}
+            - name: ROUND_INTERVAL_SECONDS
+              value: {{ .Values.loadTest.roundIntervalSeconds | quote }}
           resources:
             {{- toYaml .Values.loadTest.resources | nindent 12 }}
           securityContext:

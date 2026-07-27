@@ -24,10 +24,7 @@ use insight_engine::{
     RunId, SignalId, TimerId, TransitionKey, TransitionOutcome, ValueRef,
 };
 
-use super::sqlite::{
-    allocate_event_seq, decode_execution_event_row as decode_closed_execution_event_row,
-    insert_event, insert_or_get_payload, load_replay, Replay,
-};
+use super::sqlite::{allocate_event_seq, insert_event, insert_or_get_payload, load_replay, Replay};
 use super::sqlite_projection::{
     append_projection_mutation_event, finalize_empty_projection_checkpoints,
     finalize_projection_checkpoints,
@@ -2928,9 +2925,44 @@ async fn is_timer_late_replay(
     Ok(true)
 }
 
+async fn complete_wait_late_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &RunId,
+    loser_kind: &str,
+    loser_id: &str,
+    event_id: &str,
+    expected_claim_token: Option<&str>,
+) -> Result<(), RepositoryError> {
+    let updated = sqlx::query(
+        "UPDATE wait_late_audit_outbox
+         SET audit_state='completed',claimed_by=NULL,claim_token=NULL,
+             claim_expires_at=NULL,completed_event_id=?
+         WHERE run_id=? AND loser_kind=? AND loser_id=?
+           AND (? IS NULL OR (audit_state='claimed' AND claim_token=?))
+           AND (audit_state IN ('pending','claimed')
+             OR (audit_state='completed' AND completed_event_id=?))",
+    )
+    .bind(event_id)
+    .bind(run_id.as_str())
+    .bind(loser_kind)
+    .bind(loser_id)
+    .bind(expected_claim_token)
+    .bind(expected_claim_token)
+    .bind(event_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .rows_affected();
+    if updated != 1 {
+        return Err(RepositoryError::invalid_data());
+    }
+    Ok(())
+}
+
 async fn append_timer_late_if_wait_loser(
     transaction: &mut Transaction<'_, Sqlite>,
     command: &FireTimerCommand,
+    expected_claim_token: Option<&str>,
 ) -> Result<Option<bool>, RepositoryError> {
     let row = sqlx::query(
         "SELECT a.activation_id,a.scope_instance_id,a.node_id,a.projection_version,
@@ -2967,6 +2999,15 @@ async fn append_timer_late_if_wait_loser(
             if !is_timer_late_replay(transaction, command, replay.event_id()).await? {
                 return Err(RepositoryError::invalid_data());
             }
+            complete_wait_late_audit(
+                transaction,
+                command.run_id(),
+                "timer",
+                command.timer_id().as_str(),
+                replay.event_id(),
+                expected_claim_token,
+            )
+            .await?;
             return Ok(Some(false));
         }
         Replay::Vacant => {}
@@ -3011,6 +3052,15 @@ async fn append_timer_late_if_wait_loser(
     .await?;
     finalize_empty_projection_checkpoints(transaction, command.run_id(), receipt.event_id())
         .await?;
+    complete_wait_late_audit(
+        transaction,
+        command.run_id(),
+        "timer",
+        command.timer_id().as_str(),
+        receipt.event_id(),
+        expected_claim_token,
+    )
+    .await?;
     Ok(Some(true))
 }
 
@@ -3061,6 +3111,7 @@ async fn is_signal_late_replay(
 async fn append_signal_late_if_wait_loser(
     transaction: &mut Transaction<'_, Sqlite>,
     command: &ResolveSignalCommand,
+    expected_claim_token: Option<&str>,
 ) -> Result<Option<bool>, RepositoryError> {
     let row = sqlx::query(
         "SELECT a.scope_instance_id,a.node_id,a.projection_version,s.payload_id,
@@ -3097,6 +3148,15 @@ async fn append_signal_late_if_wait_loser(
             if !is_signal_late_replay(transaction, command, replay.event_id()).await? {
                 return Err(RepositoryError::invalid_data());
             }
+            complete_wait_late_audit(
+                transaction,
+                command.run_id(),
+                "signal",
+                command.signal_id().as_str(),
+                replay.event_id(),
+                expected_claim_token,
+            )
+            .await?;
             return Ok(Some(false));
         }
         Replay::Vacant => {}
@@ -3149,6 +3209,15 @@ async fn append_signal_late_if_wait_loser(
     .await?;
     finalize_empty_projection_checkpoints(transaction, command.run_id(), receipt.event_id())
         .await?;
+    complete_wait_late_audit(
+        transaction,
+        command.run_id(),
+        "signal",
+        command.signal_id().as_str(),
+        receipt.event_id(),
+        expected_claim_token,
+    )
+    .await?;
     Ok(Some(true))
 }
 
@@ -3157,60 +3226,90 @@ pub(super) async fn reconcile_wait_late_audits(
     limit: i64,
 ) -> Result<u64, RepositoryError> {
     let _writer = repository.writer.lock().await;
-    let late_events = sqlx::query(
-        "SELECT schema_version,event_id,run_id,transition_key,intent_hash,seq,
-                occurred_at,kind,node_id,scope_instance_id,activation_id,attempt_no,
-                causation_event_id,safe_payload
-         FROM execution_events WHERE kind IN ('timer.late','signal.late')",
-    )
-    .fetch_all(&repository.pool)
-    .await
-    .map_err(RepositoryError::storage)?;
-    for event in late_events {
-        decode_closed_execution_event_row(&event)?;
-    }
-    let rows = sqlx::query(
-        "SELECT loser_kind,run_id,activation_id,loser_id,projection_version
-         FROM (
-           SELECT 'timer' AS loser_kind,m.run_id,a.activation_id,m.timer_id AS loser_id,
-                  a.projection_version,m.deadline_at AS ordered_at
-           FROM timers m
-           JOIN node_activations a ON a.run_id=m.run_id AND a.activation_id=m.activation_id
-           JOIN scheduler_wait_registrations w ON w.run_id=m.run_id
-              AND w.activation_id=m.activation_id AND w.timer_id=m.timer_id
-           JOIN signals_inbox s ON s.run_id=w.run_id AND s.signal_id=w.winner_signal_id
-           WHERE m.timer_kind='wait' AND m.timer_state='cancelled'
-             AND w.winner_kind='signal' AND s.signal_state='consumed'
-             AND julianday(m.deadline_at) <= julianday('now')
-             AND NOT EXISTS (
-               SELECT 1 FROM execution_events e
-               WHERE e.run_id=m.run_id AND e.kind='timer.late'
-                 AND json_extract(e.safe_payload,'$.timer_id')=m.timer_id
-             )
-           UNION ALL
-           SELECT 'signal' AS loser_kind,s.run_id,a.activation_id,s.signal_id AS loser_id,
-                  a.projection_version,COALESCE(s.terminal_at,s.received_at) AS ordered_at
-           FROM signals_inbox s
-           JOIN node_activations a ON a.run_id=s.run_id
-              AND a.activation_id=s.target_activation_id
-           JOIN scheduler_wait_registrations w ON w.run_id=s.run_id
-              AND w.activation_id=s.target_activation_id AND w.signal_id=s.signal_id
-           JOIN timers t ON t.run_id=w.run_id AND t.timer_id=w.winner_timer_id
-           WHERE s.signal_state='rejected' AND w.winner_kind='timer'
-             AND t.timer_state='fired'
-             AND NOT EXISTS (
-               SELECT 1 FROM execution_events e
-               WHERE e.run_id=s.run_id AND e.kind='signal.late'
-                 AND json_extract(e.safe_payload,'$.signal_id')=s.signal_id
-             )
-         ) candidates
-         ORDER BY ordered_at,run_id,loser_kind,loser_id
+    let claimant = format!("late_audit_{}", Uuid::new_v4().simple());
+    let database_now =
+        sqlx::query_scalar::<_, String>("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+            .fetch_one(&repository.pool)
+            .await
+            .map_err(RepositoryError::storage)?;
+    let mut claim_transaction = repository
+        .pool
+        .begin()
+        .await
+        .map_err(RepositoryError::storage)?;
+    let mut candidates = sqlx::query(
+        "SELECT run_id,loser_kind,loser_id
+         FROM wait_late_audit_outbox
+         WHERE audit_state='pending' AND due_at<=?
+         ORDER BY due_at,run_id,loser_kind,loser_id
          LIMIT ?",
     )
+    .bind(&database_now)
     .bind(limit)
-    .fetch_all(&repository.pool)
+    .fetch_all(&mut *claim_transaction)
     .await
     .map_err(RepositoryError::storage)?;
+    let remaining = limit.saturating_sub(candidates.len() as i64);
+    if remaining > 0 {
+        candidates.extend(
+            sqlx::query(
+                "SELECT run_id,loser_kind,loser_id
+                 FROM wait_late_audit_outbox
+                 WHERE audit_state='claimed' AND claim_expires_at<=?
+                 ORDER BY claim_expires_at,run_id,loser_kind,loser_id
+                 LIMIT ?",
+            )
+            .bind(&database_now)
+            .bind(remaining)
+            .fetch_all(&mut *claim_transaction)
+            .await
+            .map_err(RepositoryError::storage)?,
+        );
+    }
+    let claim_expires_at = sqlx::query_scalar::<_, String>(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now','+60 seconds')",
+    )
+    .fetch_one(&mut *claim_transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let mut rows = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let run_id = candidate
+            .try_get::<String, _>("run_id")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let loser_kind = candidate
+            .try_get::<String, _>("loser_kind")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let loser_id = candidate
+            .try_get::<String, _>("loser_id")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let claim_token = format!("late_claim_{}", Uuid::new_v4().simple());
+        rows.push(
+            sqlx::query(
+                "UPDATE wait_late_audit_outbox
+                 SET audit_state='claimed',claimed_by=?,claim_token=?,claim_expires_at=?
+                 WHERE run_id=? AND loser_kind=? AND loser_id=?
+                 RETURNING loser_kind,run_id,activation_id,loser_id,claim_token,
+                     (SELECT projection_version FROM node_activations a
+                      WHERE a.run_id=wait_late_audit_outbox.run_id
+                        AND a.activation_id=wait_late_audit_outbox.activation_id)
+                         AS projection_version",
+            )
+            .bind(&claimant)
+            .bind(&claim_token)
+            .bind(&claim_expires_at)
+            .bind(&run_id)
+            .bind(&loser_kind)
+            .bind(&loser_id)
+            .fetch_one(&mut *claim_transaction)
+            .await
+            .map_err(RepositoryError::storage)?,
+        );
+    }
+    claim_transaction
+        .commit()
+        .await
+        .map_err(RepositoryError::storage)?;
     let mut appended = 0_u64;
     for row in rows {
         let loser_kind = row
@@ -3231,6 +3330,9 @@ pub(super) async fn reconcile_wait_late_audits(
             row.try_get::<i64, _>("projection_version")
                 .map_err(|_| RepositoryError::invalid_data())?,
         )?;
+        let claim_token = row
+            .try_get::<String, _>("claim_token")
+            .map_err(|_| RepositoryError::invalid_data())?;
         let mut transaction = repository
             .pool
             .begin()
@@ -3238,39 +3340,80 @@ pub(super) async fn reconcile_wait_late_audits(
             .map_err(RepositoryError::storage)?;
         let outcome = match loser_kind.as_str() {
             "timer" => {
-                let timer_id = model_data(TimerId::new(loser_id))?;
+                let timer_id = model_data(TimerId::new(loser_id.clone()))?;
                 append_timer_late_if_wait_loser(
                     &mut transaction,
-                    &FireTimerCommand::new(run_id, timer_id, None),
+                    &FireTimerCommand::new(run_id.clone(), timer_id, None),
+                    Some(&claim_token),
                 )
-                .await?
+                .await
             }
             "signal" => {
-                let signal_id = model_data(SignalId::new(loser_id))?;
+                let signal_id = model_data(SignalId::new(loser_id.clone()))?;
                 append_signal_late_if_wait_loser(
                     &mut transaction,
                     &ResolveSignalCommand::new(
-                        run_id,
-                        activation_id,
+                        run_id.clone(),
+                        activation_id.clone(),
                         signal_id,
                         projection_version,
                     ),
+                    Some(&claim_token),
                 )
-                .await?
+                .await
             }
             _ => return Err(RepositoryError::invalid_data()),
         };
-        if outcome == Some(true) {
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(RepositoryError::storage)?;
+                sqlx::query(
+                    "UPDATE wait_late_audit_outbox
+                     SET audit_state='pending',claimed_by=NULL,claim_token=NULL,
+                         claim_expires_at=NULL
+                     WHERE run_id=? AND loser_kind=? AND loser_id=?
+                       AND audit_state='claimed' AND claim_token=?",
+                )
+                .bind(run_id.as_str())
+                .bind(&loser_kind)
+                .bind(&loser_id)
+                .bind(&claim_token)
+                .execute(&repository.pool)
+                .await
+                .map_err(RepositoryError::storage)?;
+                return Err(error);
+            }
+        };
+        if let Some(was_appended) = outcome {
             transaction
                 .commit()
                 .await
                 .map_err(RepositoryError::storage)?;
-            appended = appended
-                .checked_add(1)
-                .ok_or_else(RepositoryError::invalid_data)?;
+            if was_appended {
+                appended = appended
+                    .checked_add(1)
+                    .ok_or_else(RepositoryError::invalid_data)?;
+            }
         } else {
+            sqlx::query(
+                "UPDATE wait_late_audit_outbox
+                 SET audit_state='pending',claimed_by=NULL,claim_token=NULL,claim_expires_at=NULL
+                 WHERE run_id=? AND loser_kind=? AND loser_id=?
+                   AND audit_state='claimed' AND claim_token=?",
+            )
+            .bind(run_id.as_str())
+            .bind(&loser_kind)
+            .bind(&loser_id)
+            .bind(&claim_token)
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::storage)?;
             transaction
-                .rollback()
+                .commit()
                 .await
                 .map_err(RepositoryError::storage)?;
         }
@@ -3664,7 +3807,7 @@ async fn fire_timer(
         != "scheduled"
         || observed < deadline
     {
-        let late = append_timer_late_if_wait_loser(&mut transaction, &command).await?;
+        let late = append_timer_late_if_wait_loser(&mut transaction, &command, None).await?;
         if late.is_some() {
             transaction
                 .commit()
@@ -4310,6 +4453,25 @@ async fn fire_timer(
         .execute(&mut *transaction)
         .await
         .map_err(RepositoryError::storage)?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO wait_late_audit_outbox (
+                 run_id,activation_id,loser_kind,loser_id,due_at,audit_state,
+                 claimed_by,claim_token,claim_expires_at,created_at,completed_event_id
+             )
+             SELECT s.run_id,s.target_activation_id,'signal',s.signal_id,
+                    COALESCE(s.terminal_at,?), 'pending',
+                    NULL,NULL,NULL,?,NULL
+             FROM signals_inbox s
+             WHERE s.run_id=? AND s.target_activation_id=?
+               AND s.signal_state='rejected'",
+        )
+        .bind(&observed_text)
+        .bind(&observed_text)
+        .bind(command.run_id().as_str())
+        .bind(activation_id.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
     }
     let checkpoint_event_id = receipt.event_id().to_owned();
     let result = match authority_seed {
@@ -4627,7 +4789,7 @@ async fn resolve_wait_signal(
             != "pending"
         || registration_text.is_none()
     {
-        let late = append_signal_late_if_wait_loser(&mut transaction, &command).await?;
+        let late = append_signal_late_if_wait_loser(&mut transaction, &command, None).await?;
         if late.is_some() {
             transaction
                 .commit()
@@ -4777,6 +4939,23 @@ async fn resolve_wait_signal(
                 projection_version = projection_version + 1
          WHERE run_id = ? AND activation_id = ? AND timer_kind = 'wait'
            AND timer_state = 'scheduled'",
+    )
+    .bind(&now)
+    .bind(command.run_id().as_str())
+    .bind(command.activation_id().as_str())
+    .execute(&mut *transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO wait_late_audit_outbox (
+             run_id,activation_id,loser_kind,loser_id,due_at,audit_state,
+             claimed_by,claim_token,claim_expires_at,created_at,completed_event_id
+         )
+         SELECT m.run_id,m.activation_id,'timer',m.timer_id,m.deadline_at,'pending',
+                NULL,NULL,NULL,?,NULL
+         FROM timers m
+         WHERE m.run_id=? AND m.activation_id=?
+           AND m.timer_kind='wait' AND m.timer_state='cancelled'",
     )
     .bind(&now)
     .bind(command.run_id().as_str())

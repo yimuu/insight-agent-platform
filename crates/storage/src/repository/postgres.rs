@@ -1,12 +1,13 @@
 use super::RepositoryErrorExt as _;
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use log::LevelFilter;
 use serde_json::Value;
 use sqlx::{
-    postgres::{PgPoolOptions, PgRow},
+    postgres::{PgListener, PgPoolOptions, PgRow},
     PgPool, Postgres, Row, Transaction,
 };
 
@@ -23,7 +24,8 @@ use insight_durable::model::adapter as model_adapter;
 use insight_durable::production::adapter as production_contract_adapter;
 use insight_durable::{
     ClaimSchedulerRunCommand, FencedSchedulerRunCommand, PendingMigrationWait,
-    ProductionRunRepository, RunRepositoryCapability, SchedulerLeaseRepository,
+    ProductionRunRepository, RunRepositoryCapability, SchedulerLeaseRepository, WorkClass,
+    WorkNotificationStream, WorkWakeupRepository, WORK_NOTIFY_CHANNEL_PREFIX,
 };
 use insight_engine::response::adapter::{
     durable_response_snapshot_new, response_terminal_kind_parse, response_usage_status_parse,
@@ -64,6 +66,23 @@ pub(crate) fn run_not_found() -> RepositoryError {
         REPOSITORY_RUN_NOT_FOUND,
         "durable workflow run was not found",
     )
+}
+
+struct PostgresWorkNotificationStream {
+    listener: PgListener,
+}
+
+#[async_trait]
+impl WorkNotificationStream for PostgresWorkNotificationStream {
+    async fn recv(&mut self) -> Result<WorkClass, RepositoryError> {
+        let notification = self
+            .listener
+            .try_recv()
+            .await
+            .map_err(RepositoryError::storage)?
+            .ok_or_else(RepositoryError::storage_unavailable)?;
+        WorkClass::parse(notification.payload())
+    }
 }
 
 fn postgres_schema_contract_read_error(error: sqlx::Error) -> RepositoryError {
@@ -146,6 +165,7 @@ struct CurrentRunRow {
 #[derive(Clone)]
 pub struct PostgresDurableRepository {
     pub(crate) pool: PgPool,
+    pub(crate) defer_transactional_notifications: bool,
 }
 
 impl PostgresDurableRepository {
@@ -167,14 +187,39 @@ impl PostgresDurableRepository {
     /// Wraps an existing runtime pool after validating its pre-provisioned
     /// durable Schema. The pool is never used to install or repair objects.
     pub async fn from_pool(pool: PgPool) -> Result<Self, RepositoryError> {
-        let repository = Self { pool };
+        let defer_transactional_notifications = sqlx::query_scalar::<_, bool>(
+            "SELECT current_setting('application_name', TRUE) =
+                    'insight-agent-platform-runtime'",
+        )
+        .fetch_one(&pool)
+        .await
+        .map_err(RepositoryError::storage)?;
+        let repository = Self {
+            pool,
+            defer_transactional_notifications,
+        };
         repository.validate_schema_contract().await?;
         Ok(repository)
     }
 
     pub async fn connect(database_url: &str) -> Result<Self, RepositoryError> {
+        Self::connect_with_max_connections(database_url, 10).await
+    }
+
+    /// Connects to a pre-provisioned durable Schema with an explicit process
+    /// pool bound. LISTEN connections and authoritative transitions share this
+    /// pool, so deployments should leave headroom above execution permits.
+    pub async fn connect_with_max_connections(
+        database_url: &str,
+        max_connections: u32,
+    ) -> Result<Self, RepositoryError> {
+        if max_connections == 0 {
+            return Err(RepositoryError::invalid_configuration());
+        }
         let pool = PgPoolOptions::new()
-            .max_connections(10)
+            .max_connections(max_connections)
+            .acquire_slow_threshold(Duration::from_millis(100))
+            .acquire_slow_level(LevelFilter::Warn)
             .connect(database_url)
             .await
             .map_err(RepositoryError::storage)?;
@@ -316,6 +361,55 @@ impl ProductionRunRepository for PostgresDurableRepository {
                 )
             })
             .collect()
+    }
+}
+
+#[async_trait]
+impl WorkWakeupRepository for PostgresDurableRepository {
+    async fn open_work_notification_stream(
+        &self,
+    ) -> Result<Option<Box<dyn WorkNotificationStream>>, RepositoryError> {
+        let schema_oid = sqlx::query_scalar::<_, i64>(
+            "SELECT oid::bigint
+             FROM pg_catalog.pg_namespace
+             WHERE nspname=current_schema()",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::storage)?
+        .ok_or_else(RepositoryError::schema_not_initialized)?;
+        let channel = format!("{WORK_NOTIFY_CHANNEL_PREFIX}{schema_oid}");
+        let mut listener = PgListener::connect_with(&self.pool)
+            .await
+            .map_err(RepositoryError::storage)?;
+        // Surface connection loss to the WorkCoordinator instead of letting
+        // sqlx reconnect invisibly. The coordinator then records degraded
+        // state, performs an all-class safety scan, and re-opens LISTEN.
+        listener.eager_reconnect(false);
+        listener
+            .listen(&channel)
+            .await
+            .map_err(RepositoryError::storage)?;
+        Ok(Some(Box::new(PostgresWorkNotificationStream { listener })))
+    }
+
+    async fn publish_work_notification(&self, work: WorkClass) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "SELECT pg_notify(
+               $1 || (
+                 SELECT oid::text
+                 FROM pg_catalog.pg_namespace
+                 WHERE nspname=current_schema()
+               ),
+               $2
+             )",
+        )
+        .bind(WORK_NOTIFY_CHANNEL_PREFIX)
+        .bind(work.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(RepositoryError::storage)?;
+        Ok(())
     }
 }
 

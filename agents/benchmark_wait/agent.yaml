@@ -1,0 +1,18 @@
+api_version: insight.agent/v1
+kind: agent
+
+metadata:
+  id: benchmark_wait
+  name: Benchmark Durable Wait
+  description: Holds one durable signal wait for active-Run capacity qualification.
+
+inputs: {}
+output: string
+
+workflow:
+  steps:
+    - id: gate
+      wait:
+        signal: continue
+        response: string
+    - return: $gate

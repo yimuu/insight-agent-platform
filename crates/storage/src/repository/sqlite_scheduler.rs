@@ -79,6 +79,80 @@ use insight_engine::response::WorkflowToolPublicProjection;
 
 const MAX_CLAIM_SECONDS: u32 = 3_600;
 const MAX_CLAIM_LIMIT: u32 = 1_000;
+const SCHEDULER_TASK_DISCOVERY_SQL: &str = r#"
+WITH candidate_tasks AS (
+    SELECT run_id,task_id,0 AS priority,available_at AS due_at
+    FROM task_outbox
+    WHERE task_state='published'
+    UNION ALL
+    SELECT run_id,task_id,1 AS priority,available_at AS due_at
+    FROM task_outbox
+    WHERE task_state='pending' AND available_at<=?
+    UNION ALL
+    SELECT run_id,task_id,1 AS priority,claim_expires_at AS due_at
+    FROM task_outbox
+    WHERE task_state='claimed' AND claim_expires_at<=?
+), eligible_tasks AS (
+    SELECT candidate.run_id,candidate.task_id,candidate.priority,candidate.due_at,
+           ROW_NUMBER() OVER (
+               PARTITION BY candidate.run_id
+               ORDER BY candidate.priority,candidate.due_at,candidate.task_id
+           ) AS run_rank
+    FROM candidate_tasks candidate
+    JOIN task_outbox o
+      ON o.run_id=candidate.run_id AND o.task_id=candidate.task_id
+    JOIN workflow_runs r ON r.run_id=o.run_id
+    JOIN node_attempts a ON a.run_id=o.run_id AND a.activation_id=o.activation_id
+      AND a.attempt_no=o.attempt_no AND a.lease_epoch=o.lease_epoch
+      AND a.fencing_token=o.fencing_token
+    WHERE (o.task_state='published'
+           OR r.lifecycle IN ('created','active','waiting')
+           OR (r.lifecycle='terminating'
+               AND json_extract(o.task_envelope,'$.request.admission_class')='termination_finalizer'))
+      AND NOT EXISTS (
+          SELECT 1 FROM model_tool_call_batches latest_waiting
+          WHERE latest_waiting.run_id=o.run_id
+            AND latest_waiting.activation_id=o.activation_id
+            AND latest_waiting.attempt_no=o.attempt_no
+            AND latest_waiting.model_call_no=(
+                SELECT MAX(latest_usage.model_call_no) FROM model_call_usage latest_usage
+                WHERE latest_usage.run_id=o.run_id
+                  AND latest_usage.activation_id=o.activation_id
+                  AND latest_usage.attempt_no=o.attempt_no
+            )
+            AND latest_waiting.execution_status='active'
+            AND latest_waiting.continuation_status='waiting_tools'
+      )
+      AND (o.task_state='published' OR (
+          SELECT COUNT(*) FROM task_outbox active
+          WHERE active.run_id=o.run_id AND active.task_state='claimed'
+            AND active.claim_expires_at>?
+            AND NOT EXISTS (
+                SELECT 1 FROM model_tool_call_batches waiting_parent
+                WHERE waiting_parent.run_id=active.run_id
+                  AND waiting_parent.parent_task_id=active.task_id
+                  AND waiting_parent.execution_status='active'
+                  AND waiting_parent.continuation_status='waiting_tools'
+            )
+      ) + (
+          SELECT COUNT(*) FROM model_tool_calls active_tool
+          JOIN model_tool_call_batches active_batch
+            ON active_batch.run_id=active_tool.run_id
+           AND active_batch.activation_id=active_tool.activation_id
+           AND active_batch.attempt_no=active_tool.attempt_no
+           AND active_batch.model_call_no=active_tool.model_call_no
+          WHERE active_tool.run_id=o.run_id
+            AND active_batch.execution_status='active'
+            AND active_batch.continuation_status='waiting_tools'
+            AND active_tool.call_status IN ('claimed','running')
+            AND active_tool.claim_expires_at>?
+      ) < ?)
+)
+SELECT run_id,task_id
+FROM eligible_tasks
+ORDER BY priority,run_rank,due_at,run_id,task_id
+LIMIT ?
+"#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -736,6 +810,23 @@ async fn cancel_and_drain_scope(
             SELECT activation_id FROM node_activations
              WHERE run_id=? AND scope_instance_id=?
          ) AND timer_state='scheduled'",
+    )
+    .bind(&now)
+    .bind(run_id.as_str())
+    .bind(run_id.as_str())
+    .bind(scope_instance_id.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+
+    sqlx::query(
+        "UPDATE scheduler_wait_registrations
+         SET winner_kind='cancelled',winner_signal_id=NULL,winner_timer_id=NULL,
+             resolved_at=?,projection_version=projection_version+1
+         WHERE run_id=? AND activation_id IN (
+            SELECT activation_id FROM node_activations
+             WHERE run_id=? AND scope_instance_id=?
+         ) AND winner_kind IS NULL",
     )
     .bind(&now)
     .bind(run_id.as_str())
@@ -7648,65 +7739,47 @@ async fn claim_tasks_sqlite(
         .begin()
         .await
         .map_err(RepositoryError::storage)?;
-    let candidates = sqlx::query(
-        "SELECT o.run_id,o.task_id,o.task_state,o.task_envelope,o.projection_version,
-                a.lifecycle AS attempt_lifecycle,a.effect_evidence AS attempt_effect_evidence
-         FROM task_outbox o JOIN workflow_runs r ON r.run_id=o.run_id
-         JOIN node_attempts a ON a.run_id=o.run_id AND a.activation_id=o.activation_id
-           AND a.attempt_no=o.attempt_no AND a.lease_epoch=o.lease_epoch
-           AND a.fencing_token=o.fencing_token
-         WHERE ((((o.task_state='pending' AND julianday(o.available_at) <= julianday('now'))
-              OR (o.task_state='claimed' AND julianday(o.claim_expires_at) <= julianday('now')))
-                AND (r.lifecycle IN ('created','active','waiting')
-                  OR (r.lifecycle='terminating'
-                    AND json_extract(o.task_envelope,'$.request.admission_class')='termination_finalizer')))
-            OR o.task_state='published')
-           AND NOT EXISTS (
-               SELECT 1 FROM model_tool_call_batches latest_waiting
-               WHERE latest_waiting.run_id=o.run_id
-                 AND latest_waiting.activation_id=o.activation_id
-                 AND latest_waiting.attempt_no=o.attempt_no
-                 AND latest_waiting.model_call_no=(
-                     SELECT MAX(latest_usage.model_call_no) FROM model_call_usage latest_usage
-                     WHERE latest_usage.run_id=o.run_id
-                       AND latest_usage.activation_id=o.activation_id
-                       AND latest_usage.attempt_no=o.attempt_no
-                 )
-                 AND latest_waiting.execution_status='active'
-                 AND latest_waiting.continuation_status='waiting_tools'
-           )
-           AND (o.task_state='published' OR (
-               SELECT COUNT(*) FROM task_outbox active
-               WHERE active.run_id=o.run_id AND active.task_state='claimed'
-                 AND julianday(active.claim_expires_at)>julianday('now')
-                 AND NOT EXISTS (
-                     SELECT 1 FROM model_tool_call_batches waiting_parent
-                     WHERE waiting_parent.run_id=active.run_id
-                       AND waiting_parent.parent_task_id=active.task_id
-                       AND waiting_parent.execution_status='active'
-                       AND waiting_parent.continuation_status='waiting_tools'
-                 )
-           ) + (
-               SELECT COUNT(*) FROM model_tool_calls active_tool
-               JOIN model_tool_call_batches active_batch
-                 ON active_batch.run_id=active_tool.run_id
-                AND active_batch.activation_id=active_tool.activation_id
-                AND active_batch.attempt_no=active_tool.attempt_no
-                AND active_batch.model_call_no=active_tool.model_call_no
-               WHERE active_tool.run_id=o.run_id
-                 AND active_batch.execution_status='active'
-                 AND active_batch.continuation_status='waiting_tools'
-                 AND active_tool.call_status IN ('claimed','running')
-                 AND julianday(active_tool.claim_expires_at)>julianday('now')
-           ) < ?)
-         ORDER BY CASE o.task_state WHEN 'published' THEN 0 ELSE 1 END,
-                  o.available_at,o.run_id,o.task_id LIMIT ?",
-    )
-    .bind(i64::from(max_claimed_per_run))
-    .bind(i64::from(limit))
-    .fetch_all(&mut *transaction)
-    .await
-    .map_err(RepositoryError::storage)?;
+    let database_now =
+        sqlx::query_scalar::<_, String>("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(RepositoryError::storage)?;
+    let discovered = sqlx::query(SCHEDULER_TASK_DISCOVERY_SQL)
+        .bind(&database_now)
+        .bind(&database_now)
+        .bind(&database_now)
+        .bind(&database_now)
+        .bind(i64::from(max_claimed_per_run))
+        .bind(i64::from(limit))
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
+    let mut candidates = Vec::with_capacity(discovered.len());
+    for row in discovered {
+        let run_id = row
+            .try_get::<String, _>("run_id")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let task_id = row
+            .try_get::<String, _>("task_id")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let candidate = sqlx::query(
+            "SELECT o.run_id,o.task_id,o.task_state,o.task_envelope,o.projection_version,
+                    a.lifecycle AS attempt_lifecycle,a.effect_evidence AS attempt_effect_evidence
+             FROM task_outbox o
+             JOIN node_attempts a ON a.run_id=o.run_id AND a.activation_id=o.activation_id
+               AND a.attempt_no=o.attempt_no AND a.lease_epoch=o.lease_epoch
+               AND a.fencing_token=o.fencing_token
+             WHERE o.run_id=? AND o.task_id=?",
+        )
+        .bind(&run_id)
+        .bind(&task_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
+        if let Some(candidate) = candidate {
+            candidates.push(candidate);
+        }
+    }
     let mut claims = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let run_id = model_data(RunId::new(
@@ -12109,10 +12182,42 @@ impl SchedulerDurableRepository for SqliteDurableRepository {
             return Err(RepositoryError::invalid_configuration());
         }
         sqlx::query_scalar::<_, String>(
-            "SELECT run_id FROM workflow_runs
-             WHERE lifecycle='terminating'
-                OR (lifecycle IN ('created','active','waiting') AND admission_state='open')
-             ORDER BY updated_at,run_id LIMIT ?",
+            "SELECT r.run_id FROM workflow_runs r
+             WHERE r.lifecycle='terminating'
+                OR (
+                    r.lifecycle IN ('created','active','waiting')
+                    AND r.admission_state='open'
+                    AND (
+                        NOT EXISTS (
+                            SELECT 1
+                            FROM scheduler_checkpoints checkpoint
+                            WHERE checkpoint.run_id=r.run_id
+                              AND checkpoint.scheduler_projection_version
+                                  >= r.projection_version
+                        )
+                        OR (
+                            SELECT checkpoint.checkpoint_kind
+                            FROM scheduler_checkpoints checkpoint
+                            WHERE checkpoint.run_id=r.run_id
+                            ORDER BY checkpoint.scheduler_projection_version DESC,
+                                     checkpoint.created_at DESC,
+                                     checkpoint.checkpoint_id DESC
+                            LIMIT 1
+                        )='task_completed'
+                        OR EXISTS (
+                            SELECT 1
+                            FROM scheduler_subflow_invocations invocation
+                            JOIN workflow_runs child
+                              ON child.run_id=invocation.child_run_id
+                            WHERE invocation.run_id=r.run_id
+                              AND invocation.invocation_state
+                                  IN ('started','cancellation_requested')
+                              AND child.lifecycle
+                                  IN ('succeeded','failed','cancelled','timed_out','interrupted')
+                        )
+                    )
+                )
+             ORDER BY r.updated_at,r.run_id LIMIT ?",
         )
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
@@ -12332,5 +12437,21 @@ mod integrity_tests {
             &mismatched_finalize
         )
         .is_err());
+    }
+
+    #[test]
+    fn sqlite_scheduler_discovery_partitions_hot_states_before_joining_projections() {
+        let normalized = SCHEDULER_TASK_DISCOVERY_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        assert_eq!(normalized.matches("union all").count(), 2);
+        assert!(normalized.contains("where task_state='published'"));
+        assert!(normalized.contains("where task_state='pending' and available_at<=?"));
+        assert!(normalized.contains("where task_state='claimed' and claim_expires_at<=?"));
+        assert!(!normalized.contains("julianday"));
+        assert!(normalized.contains("row_number() over"));
+        assert!(normalized.contains("partition by candidate.run_id"));
     }
 }

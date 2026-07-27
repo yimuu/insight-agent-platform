@@ -189,6 +189,59 @@ async fn wait_for_human_item(
 }
 
 #[tokio::test]
+async fn quiescent_wait_is_not_recovered_after_scheduler_checkpoint_catches_up() {
+    let (_temporary, service, control) = setup().await;
+    let created = service
+        .create_detached(
+            "human_gate",
+            json!({}),
+            RequestMetadata {
+                request_id: Some("quiescent-recovery-filter-1".to_owned()),
+            },
+        )
+        .await
+        .unwrap();
+    wait_for_human_item(
+        &service,
+        &created.run_id,
+        "reviewer",
+        vec!["medical-reviewers".to_owned()],
+    )
+    .await;
+
+    let before = sqlx::query(
+        "SELECT r.next_event_seq,r.projection_version,
+                MAX(c.scheduler_projection_version) AS checkpoint_version
+         FROM workflow_runs r
+         JOIN scheduler_checkpoints c ON c.run_id=r.run_id
+         WHERE r.run_id=?
+         GROUP BY r.next_event_seq,r.projection_version",
+    )
+    .bind(&created.run_id)
+    .fetch_one(&control)
+    .await
+    .unwrap();
+    assert_eq!(
+        before.get::<i64, _>("projection_version"),
+        before.get::<i64, _>("checkpoint_version")
+    );
+
+    for _ in 0..5 {
+        assert_eq!(service.reconcile_startup().await.unwrap(), 0);
+    }
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT next_event_seq FROM workflow_runs WHERE run_id=?")
+            .bind(&created.run_id)
+            .fetch_one(&control)
+            .await
+            .unwrap(),
+        before.get::<i64, _>("next_event_seq")
+    );
+    service.shutdown(Duration::from_secs(1)).await.unwrap();
+}
+
+#[tokio::test]
 async fn human_work_item_is_assigned_fenced_typed_and_idempotent_while_paused() {
     let (temporary, service, control) = setup().await;
     let created = service
@@ -1106,6 +1159,16 @@ async fn root_deadline_is_database_clocked_persists_restart_and_ignores_pause() 
             .await
             .unwrap(),
         "expired"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT winner_kind FROM scheduler_wait_registrations WHERE run_id=?",
+        )
+        .bind(&created.run_id)
+        .fetch_one(&control)
+        .await
+        .unwrap(),
+        "cancelled"
     );
     second.shutdown(Duration::from_secs(1)).await.unwrap();
     control.close().await;

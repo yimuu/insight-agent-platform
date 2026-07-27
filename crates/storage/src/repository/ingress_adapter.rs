@@ -201,16 +201,22 @@ impl RuntimeIngressDurableRepository for SqliteDurableRepository {
     }
 
     async fn list_due_runtime_timers(&self, limit: u32) -> Result<Vec<DueTimer>, RepositoryError> {
+        let database_now =
+            sqlx::query_scalar::<_, String>("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(RepositoryError::storage)?;
         let rows = sqlx::query(
             "SELECT t.run_id,t.timer_id
              FROM timers t JOIN workflow_runs r ON r.run_id=t.run_id
              WHERE t.timer_state='scheduled'
                AND t.timer_kind IN ('wait','retry','activation_timeout')
-               AND julianday(t.deadline_at) <= julianday('now')
+               AND t.deadline_at <= ?
                AND r.lifecycle IN ('active','waiting','terminating')
              ORDER BY t.deadline_at,t.run_id,t.timer_id
              LIMIT ?",
         )
+        .bind(&database_now)
         .bind(validate_limit(limit)?)
         .fetch_all(&self.pool)
         .await
@@ -235,15 +241,21 @@ impl RuntimeIngressDurableRepository for SqliteDurableRepository {
     }
 
     async fn list_due_run_deadlines(&self, limit: u32) -> Result<Vec<RunId>, RepositoryError> {
+        let database_now =
+            sqlx::query_scalar::<_, String>("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(RepositoryError::storage)?;
         let rows = sqlx::query(
             "SELECT run_id FROM workflow_runs
              WHERE deadline_at IS NOT NULL
-               AND julianday(deadline_at) <= julianday('now')
+               AND deadline_at <= ?
                AND lifecycle IN ('created','active','waiting','completing')
                AND termination_intent_reason IS NULL
              ORDER BY deadline_at,run_id
              LIMIT ?",
         )
+        .bind(&database_now)
         .bind(validate_limit(limit)?)
         .fetch_all(&self.pool)
         .await
@@ -257,6 +269,57 @@ impl RuntimeIngressDurableRepository for SqliteDurableRepository {
                 .map_err(|_| RepositoryError::invalid_data())
             })
             .collect()
+    }
+
+    async fn next_runtime_ingress_delay(
+        &self,
+    ) -> Result<Option<std::time::Duration>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') AS database_now,
+                    MIN(due_at) AS due_at
+             FROM (
+                 SELECT MIN(deadline_at) AS due_at
+                 FROM timers
+                 WHERE timer_state='scheduled'
+                   AND timer_kind IN ('wait','retry','activation_timeout')
+                 UNION ALL
+                 SELECT MIN(deadline_at) AS due_at
+                 FROM workflow_runs
+                 WHERE deadline_at IS NOT NULL
+                   AND lifecycle IN ('created','active','waiting','completing')
+                   AND termination_intent_reason IS NULL
+                 UNION ALL
+                 SELECT MIN(due_at) AS due_at
+                 FROM wait_late_audit_outbox
+                 WHERE audit_state='pending'
+                 UNION ALL
+                 SELECT MIN(claim_expires_at) AS due_at
+                 FROM wait_late_audit_outbox
+                 WHERE audit_state='claimed'
+             )",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(RepositoryError::storage)?;
+        let database_now = row
+            .try_get::<String, _>("database_now")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let Some(due_at) = row
+            .try_get::<Option<String>, _>("due_at")
+            .map_err(|_| RepositoryError::invalid_data())?
+        else {
+            return Ok(None);
+        };
+        let database_now = chrono::DateTime::parse_from_rfc3339(&database_now)
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let due_at = chrono::DateTime::parse_from_rfc3339(&due_at)
+            .map_err(|_| RepositoryError::invalid_data())?;
+        Ok(Some(
+            due_at
+                .signed_duration_since(database_now)
+                .to_std()
+                .unwrap_or(std::time::Duration::ZERO),
+        ))
     }
 }
 
@@ -407,7 +470,7 @@ impl RuntimeIngressDurableRepository for PostgresDurableRepository {
              FROM timers t JOIN workflow_runs r ON r.run_id=t.run_id
              WHERE t.timer_state='scheduled'
                AND t.timer_kind IN ('wait','retry','activation_timeout')
-               AND t.deadline_at <= clock_timestamp()
+               AND t.deadline_at <= statement_timestamp()
                AND r.lifecycle IN ('active','waiting','terminating')
              ORDER BY t.deadline_at,t.run_id,t.timer_id
              LIMIT $1",
@@ -439,7 +502,7 @@ impl RuntimeIngressDurableRepository for PostgresDurableRepository {
         let rows = sqlx::query(
             "SELECT run_id FROM workflow_runs
              WHERE deadline_at IS NOT NULL
-               AND deadline_at <= clock_timestamp()
+               AND deadline_at <= statement_timestamp()
                AND lifecycle IN ('created','active','waiting','completing')
                AND termination_intent_reason IS NULL
              ORDER BY deadline_at,run_id
@@ -458,5 +521,51 @@ impl RuntimeIngressDurableRepository for PostgresDurableRepository {
                 .map_err(|_| RepositoryError::invalid_data())
             })
             .collect()
+    }
+
+    async fn next_runtime_ingress_delay(
+        &self,
+    ) -> Result<Option<std::time::Duration>, RepositoryError> {
+        let delay_ms = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT CASE
+                        WHEN MIN(due_at) IS NULL THEN NULL
+                        ELSE GREATEST(
+                            0,
+                            FLOOR(
+                                EXTRACT(EPOCH FROM (MIN(due_at)-statement_timestamp())) * 1000
+                            )
+                        )::bigint
+                    END
+             FROM (
+                 SELECT MIN(deadline_at) AS due_at
+                 FROM timers
+                 WHERE timer_state='scheduled'
+                   AND timer_kind IN ('wait','retry','activation_timeout')
+                 UNION ALL
+                 SELECT MIN(deadline_at) AS due_at
+                 FROM workflow_runs
+                 WHERE deadline_at IS NOT NULL
+                   AND lifecycle IN ('created','active','waiting','completing')
+                   AND termination_intent_reason IS NULL
+                 UNION ALL
+                 SELECT MIN(due_at) AS due_at
+                 FROM wait_late_audit_outbox
+                 WHERE audit_state='pending'
+                 UNION ALL
+                 SELECT MIN(claim_expires_at) AS due_at
+                 FROM wait_late_audit_outbox
+                 WHERE audit_state='claimed'
+             ) due",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(RepositoryError::storage)?;
+        delay_ms
+            .map(|delay_ms| {
+                u64::try_from(delay_ms)
+                    .map(std::time::Duration::from_millis)
+                    .map_err(|_| RepositoryError::invalid_data())
+            })
+            .transpose()
     }
 }

@@ -1615,6 +1615,20 @@ async fn postgres_wait_signal_and_timeout_share_one_durable_first_winner() {
         .unwrap(),
         1
     );
+    assert_eq!(
+        sqlx::query_as::<_, (String, bool)>(
+            "SELECT loser_kind, completed_event_id IS NOT NULL
+             FROM wait_late_audit_outbox
+             WHERE run_id IN ($1,$2)
+             ORDER BY loser_kind",
+        )
+        .bind(timer_run.as_str())
+        .bind(signal_run.as_str())
+        .fetch_all(&control)
+        .await
+        .unwrap(),
+        vec![("signal".to_owned(), true), ("timer".to_owned(), true)]
+    );
 
     cleanup(repository, control, admin, schema).await;
 }

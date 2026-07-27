@@ -211,6 +211,13 @@ ON workflow_runs(
   run_id
 )
 WHERE lifecycle IN('active', 'waiting');
+CREATE INDEX idx_runs_recovery
+ON workflow_runs(
+  updated_at,
+  run_id
+)
+WHERE lifecycle = 'terminating'
+OR(lifecycle IN('created', 'active', 'waiting') AND admission_state = 'open');
 CREATE TABLE payloads(
   run_id TEXT NOT NULL,
   payload_id TEXT NOT NULL,
@@ -769,6 +776,12 @@ ON task_outbox(
   run_id,
   task_id
 ) WHERE task_state = 'pending';
+CREATE INDEX idx_task_outbox_acknowledge
+ON task_outbox(
+  available_at,
+  run_id,
+  task_id
+) WHERE task_state = 'published';
 CREATE INDEX idx_task_outbox_reclaim
 ON task_outbox(
   claim_expires_at,
@@ -849,6 +862,15 @@ ON public_event_outbox(
   public_event_id
 )
 WHERE publish_state = 'claimed';
+CREATE INDEX idx_public_outbox_retention
+ON public_event_outbox(
+  retain_until,
+  run_id,
+  public_event_id
+)
+WHERE publish_state = 'published'
+  AND is_terminal = 0
+  AND retain_until IS NOT NULL;
 CREATE UNIQUE INDEX uq_public_outbox_claim_token
 ON public_event_outbox(
   claim_token
@@ -899,6 +921,41 @@ ON signals_inbox(
   signal_id
 )
 WHERE signal_state = 'pending';
+CREATE TABLE wait_late_audit_outbox(
+  run_id TEXT NOT NULL,
+  activation_id TEXT NOT NULL,
+  loser_kind TEXT NOT NULL CHECK(loser_kind IN('timer', 'signal')),
+  loser_id TEXT NOT NULL,
+  due_at TEXT NOT NULL,
+  audit_state TEXT NOT NULL CHECK(audit_state IN('pending', 'claimed', 'completed')),
+  claimed_by TEXT,
+  claim_token TEXT,
+  claim_expires_at TEXT,
+  created_at TEXT NOT NULL,
+  completed_event_id TEXT,
+  PRIMARY KEY(run_id, loser_kind, loser_id),
+  FOREIGN KEY(run_id, activation_id)
+  REFERENCES node_activations(run_id, activation_id) ON DELETE RESTRICT,
+  FOREIGN KEY(run_id, completed_event_id)
+  REFERENCES execution_events(run_id, event_id) ON DELETE RESTRICT,
+  CHECK(
+    (audit_state='pending' AND claimed_by IS NULL AND claim_token IS NULL
+      AND claim_expires_at IS NULL AND completed_event_id IS NULL)
+    OR(audit_state='claimed' AND claimed_by IS NOT NULL AND claim_token IS NOT NULL
+      AND claim_expires_at IS NOT NULL AND completed_event_id IS NULL)
+    OR(audit_state='completed' AND claimed_by IS NULL AND claim_token IS NULL
+      AND claim_expires_at IS NULL AND completed_event_id IS NOT NULL)
+  )
+);
+CREATE INDEX idx_wait_late_audit_pending
+ON wait_late_audit_outbox(due_at, run_id, loser_kind, loser_id)
+WHERE audit_state='pending';
+CREATE INDEX idx_wait_late_audit_reclaim
+ON wait_late_audit_outbox(claim_expires_at, run_id, loser_kind, loser_id)
+WHERE audit_state='claimed';
+CREATE UNIQUE INDEX uq_wait_late_audit_claim_token
+ON wait_late_audit_outbox(claim_token)
+WHERE claim_token IS NOT NULL;
 CREATE TABLE timers(
   run_id TEXT NOT NULL,
   timer_id TEXT NOT NULL,
@@ -2511,11 +2568,19 @@ AND available_at IS NULL AND completed_at IS NOT NULL))
 );
 CREATE INDEX idx_model_tool_calls_claim
 ON model_tool_calls(
-  call_status,
   available_at,
   run_id,
   tool_task_id
-);
+) WHERE call_status = 'pending';
+CREATE INDEX idx_model_tool_calls_reclaim
+ON model_tool_calls(
+  claim_expires_at,
+  run_id,
+  activation_id,
+  attempt_no,
+  model_call_no,
+  call_index
+) WHERE call_status IN('claimed', 'running');
 CREATE INDEX idx_model_tool_calls_batch_status
 ON model_tool_calls(
   run_id,
@@ -2602,7 +2667,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-312c2675-57b7-4a9b-bfe8-3803b3157481',
+    'durable-schema-cd9a5c3f-5f12-46d2-ab96-78820a13186f',
     'sqlite'
 );
 

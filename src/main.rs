@@ -22,7 +22,7 @@ use insight_agent_platform::{
     runtime::{
         DeployedAgentCatalog, InMemoryLiveResponseBroker, LiveResponseBroker,
         LiveResponseByteLimits, PostgresLiveResponseBroker, PostgresLiveResponseBrokerOptions,
-        ProductionRunRepository, RunService, RunServiceConfig,
+        ProductionRunRepository, RunService, RunServiceConfig, WorkCoordinatorConfig,
     },
 };
 use insight_api::v1::{build_router, ApiAuth, ApiState, BearerHumanPrincipalResolver};
@@ -31,6 +31,7 @@ type MainResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 const PROCESS_PANICKED_CODE: &str = "PROCESS_PANICKED";
 const PROCESS_PANICKED_MESSAGE: &str = "process panic captured";
+const RUNTIME_POSTGRES_APPLICATION_NAME: &str = "insight-agent-platform-runtime";
 
 #[tokio::main]
 async fn main() -> MainResult<()> {
@@ -124,6 +125,14 @@ async fn main() -> MainResult<()> {
             config.runtime.subscriber_capacity,
         ),
     }
+    .with_work_coordinator(WorkCoordinatorConfig {
+        active_poll_interval: config.runtime.scheduler.active_poll_interval,
+        idle_poll_min_interval: config.runtime.scheduler.idle_poll_min_interval,
+        idle_poll_max_interval: config.runtime.scheduler.idle_poll_max_interval,
+        safety_poll_interval: config.runtime.scheduler.safety_poll_interval,
+        claim_batch_size: config.runtime.scheduler.claim_batch_size,
+        notification_reconnect_interval: config.runtime.scheduler.notification_reconnect_interval,
+    })
     .with_run_timeout(config.runtime.run_timeout)
     .with_public_event_retention(
         config.runtime.public_event_retention,
@@ -258,8 +267,16 @@ async fn initialize_repository_and_live_response(
             )?) as Arc<dyn LiveResponseBroker>;
             Ok((repository, broker))
         }
-        HistoryConfig::Postgres { database_url } => {
-            let repository = PostgresDurableRepository::connect(database_url.expose()).await?;
+        HistoryConfig::Postgres {
+            database_url,
+            max_connections,
+        } => {
+            let database_url = runtime_postgres_url(database_url.expose());
+            let repository = PostgresDurableRepository::connect_with_max_connections(
+                &database_url,
+                *max_connections,
+            )
+            .await?;
             let broker: Arc<dyn LiveResponseBroker> = match response_stream.broker {
                 LiveResponseBrokerProvider::InProcess => {
                     Arc::new(InMemoryLiveResponseBroker::new_with_limits(
@@ -291,6 +308,11 @@ async fn initialize_repository_and_live_response(
             Ok((Arc::new(repository), broker))
         }
     }
+}
+
+fn runtime_postgres_url(database_url: &str) -> String {
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    format!("{database_url}{separator}application_name={RUNTIME_POSTGRES_APPLICATION_NAME}")
 }
 
 fn init_tracing() {

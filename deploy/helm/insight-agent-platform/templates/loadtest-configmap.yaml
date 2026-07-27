@@ -9,4 +9,6 @@ metadata:
 data:
   run-lifecycle.js: |
 {{ .Files.Get "files/run-lifecycle.js" | indent 4 }}
+  wait-capacity.js: |
+{{ .Files.Get "files/wait-capacity.js" | indent 4 }}
 {{- end }}

@@ -39,6 +39,13 @@ runtime:
   run_timeout: 1m
   sse_keep_alive_interval: 5s
   subscriber_capacity: 32
+  scheduler:
+    active_poll_interval: 25ms
+    idle_poll_min_interval: 100ms
+    idle_poll_max_interval: 2s
+    safety_poll_interval: 5s
+    claim_batch_size: 4
+    notification_reconnect_interval: 250ms
   max_llm_tool_rounds: 16
   max_llm_tool_calls: 64
   response_stream:

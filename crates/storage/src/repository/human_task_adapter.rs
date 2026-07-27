@@ -663,7 +663,7 @@ async fn reopen_expired_postgres_claims(
     let ids = sqlx::query_scalar::<_, String>(
         "SELECT work_item_id FROM human_work_items
          WHERE work_state='claimed' AND completion_request_id IS NULL
-           AND claim_expires_at<=clock_timestamp()
+           AND claim_expires_at<=statement_timestamp()
          ORDER BY claim_expires_at,work_item_id LIMIT 1024",
     )
     .fetch_all(&repository.pool)

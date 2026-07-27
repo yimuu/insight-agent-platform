@@ -53,6 +53,16 @@ GraphAuthorDocument 在发布时重新验证并编译为 Canonical Plan。ViewDo
 `expected_projection_version`；checkpoint hash、effect proof 和 revision/schema 兼容证据由服务端
 从 durable authority 推导，客户端不能注入。
 
+Run admission 容量与业务状态冲突是两个不同合同：
+
+| 条件 | HTTP | code | Header |
+|---|---:|---|---|
+| active Run slot 已满 | `429` | `RUN_CAPACITY_EXCEEDED` | `Retry-After: 1` |
+| 请求或当前 Run 状态冲突 | `409` | `RUN_CONFLICT` | 无 |
+
+客户端收到 429 后应使用 exponential backoff 与 jitter；不能无间隔重试。容量拒绝没有创建 Run，
+也不应被统计为成功 create latency。
+
 ## Attached SSE
 
 `/runs/stream` 使用 `response-stream/v1` 用户响应协议：

@@ -1,0 +1,28 @@
+# Gate B/C/D capacity profile C1. Apply after values-benchmark.yaml.
+resources:
+  requests:
+    cpu: "1"
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+
+runtime:
+  databasePoolMaxConnections: 24
+  maxConcurrentRuns: 50
+  maxConcurrentOperations: 12
+  maxConcurrentOperationsPerRun: 2
+  scheduler:
+    claimBatchSize: 12
+
+postgresql:
+  sharedBuffers: 2GB
+  resources:
+    requests:
+      cpu: "2"
+      memory: 4Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+  persistence:
+    enabled: true

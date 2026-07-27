@@ -30,6 +30,8 @@ pub mod recovery_repository;
 pub mod retrieval_publication;
 #[doc(hidden)]
 pub mod scheduler_repository;
+#[doc(hidden)]
+pub mod work_wakeup;
 
 use async_trait::async_trait;
 
@@ -148,6 +150,9 @@ pub use scheduler_repository::{
     SchedulerTaskCompletionReceipt, SchedulerTaskFailure, SchedulerTaskHeartbeatOutcome,
     SchedulerTaskOutcome, SchedulerTaskSuccess, SCHEDULER_CHECKPOINT_SCHEMA_VERSION,
     SCHEDULER_TASK_ENVELOPE_SCHEMA_VERSION,
+};
+pub use work_wakeup::{
+    WorkClass, WorkNotificationStream, WorkWakeupRepository, WORK_NOTIFY_CHANNEL_PREFIX,
 };
 
 #[async_trait]

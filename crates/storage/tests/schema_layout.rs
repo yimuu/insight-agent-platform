@@ -55,6 +55,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "signals_inbox",
     "task_outbox",
     "timers",
+    "wait_late_audit_outbox",
     "workflow_definition_public_metadata",
     "workflow_definition_revisions",
     "workflow_definitions",
@@ -278,23 +279,112 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(indexes.len(), 36, "all explicit indexes must be installed");
+    assert_eq!(indexes.len(), 43, "all explicit indexes must be installed");
     for (index, table) in [
         ("idx_runs_dispatch", "workflow_runs"),
+        ("idx_runs_recovery", "workflow_runs"),
         ("idx_execution_events_rebuild", "execution_events"),
         ("idx_task_outbox_dispatch", "task_outbox"),
+        ("idx_task_outbox_acknowledge", "task_outbox"),
         ("idx_public_outbox_dispatch", "public_event_outbox"),
+        ("idx_public_outbox_retention", "public_event_outbox"),
         (
             "idx_public_projection_order",
             "public_event_projection_decisions",
         ),
         ("idx_model_tool_calls_claim", "model_tool_calls"),
+        ("idx_model_tool_calls_reclaim", "model_tool_calls"),
         ("uq_public_terminal_per_run", "public_event_outbox"),
         ("uq_workflow_runs_response_id", "workflow_runs"),
+        ("idx_wait_late_audit_pending", "wait_late_audit_outbox"),
+        ("idx_wait_late_audit_reclaim", "wait_late_audit_outbox"),
+        ("uq_wait_late_audit_claim_token", "wait_late_audit_outbox"),
     ] {
         assert!(
             indexes.contains(&(index.to_owned(), table.to_owned())),
             "SQLite catalog is missing index {index} on {table}"
+        );
+    }
+    for (query, expected_index) in [
+        (
+            "EXPLAIN QUERY PLAN
+             SELECT run_id,task_id FROM task_outbox
+             WHERE task_state='pending' AND available_at<='9999-12-31T23:59:59.999Z'
+             ORDER BY available_at,run_id,task_id LIMIT 8",
+            "idx_task_outbox_dispatch",
+        ),
+        (
+            "EXPLAIN QUERY PLAN
+             SELECT run_id,task_id FROM task_outbox
+             WHERE task_state='claimed' AND claim_expires_at<='9999-12-31T23:59:59.999Z'
+             ORDER BY claim_expires_at,run_id,task_id LIMIT 8",
+            "idx_task_outbox_reclaim",
+        ),
+        (
+            "EXPLAIN QUERY PLAN
+             SELECT run_id,task_id FROM task_outbox
+             WHERE task_state='published'
+             ORDER BY available_at,run_id,task_id LIMIT 8",
+            "idx_task_outbox_acknowledge",
+        ),
+        (
+            "EXPLAIN QUERY PLAN
+             SELECT run_id,tool_task_id FROM model_tool_calls
+             WHERE call_status='pending' AND available_at<='9999-12-31T23:59:59.999Z'
+             ORDER BY available_at,run_id,tool_task_id LIMIT 8",
+            "idx_model_tool_calls_claim",
+        ),
+        (
+            "EXPLAIN QUERY PLAN
+             SELECT run_id,activation_id,attempt_no,model_call_no,call_index
+             FROM model_tool_calls
+             WHERE call_status IN ('claimed','running')
+               AND claim_expires_at<='9999-12-31T23:59:59.999Z'
+             ORDER BY claim_expires_at,run_id,activation_id,attempt_no,model_call_no,call_index
+             LIMIT 8",
+            "idx_model_tool_calls_reclaim",
+        ),
+        (
+            "EXPLAIN QUERY PLAN
+             SELECT run_id,loser_kind,loser_id FROM wait_late_audit_outbox
+             WHERE audit_state='pending' AND due_at<='9999-12-31T23:59:59.999Z'
+             ORDER BY due_at,run_id,loser_kind,loser_id LIMIT 8",
+            "idx_wait_late_audit_pending",
+        ),
+        (
+            "EXPLAIN QUERY PLAN
+             SELECT run_id,loser_kind,loser_id FROM wait_late_audit_outbox
+             WHERE audit_state='claimed'
+               AND claim_expires_at<='9999-12-31T23:59:59.999Z'
+             ORDER BY claim_expires_at,run_id,loser_kind,loser_id LIMIT 8",
+            "idx_wait_late_audit_reclaim",
+        ),
+        (
+            "EXPLAIN QUERY PLAN
+             SELECT run_id FROM workflow_runs
+             WHERE lifecycle='terminating'
+                OR (lifecycle IN ('created','active','waiting') AND admission_state='open')
+             ORDER BY updated_at,run_id LIMIT 8",
+            "idx_runs_recovery",
+        ),
+        (
+            "EXPLAIN QUERY PLAN
+             SELECT run_id,public_event_id FROM public_event_outbox
+             WHERE publish_state='published' AND is_terminal=0
+               AND retain_until IS NOT NULL
+               AND retain_until<='9999-12-31T23:59:59.999Z'
+             ORDER BY retain_until,run_id,public_event_id LIMIT 8",
+            "idx_public_outbox_retention",
+        ),
+    ] {
+        let plan = sqlx::query_as::<_, (i64, i64, i64, String)>(query)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|(_, _, _, detail)| detail.to_ascii_lowercase().contains(expected_index)),
+            "SQLite discovery branch must use {expected_index}: {plan:?}"
         );
     }
 

@@ -16,7 +16,7 @@ use sqlx::{
 use tempfile::TempDir;
 
 pub(crate) const DURABLE_SCHEMA_CONTRACT_ID: &str =
-    "durable-schema-7f3c2a8e-6d54-4b91-9ac0-2e75f186bd43";
+    "durable-schema-cd9a5c3f-5f12-46d2-ab96-78820a13186f";
 pub(crate) const POSTGRES_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/database/durable/postgres/schema.sql"

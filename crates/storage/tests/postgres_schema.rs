@@ -2,7 +2,10 @@ mod support;
 
 use chrono::{DateTime, Utc};
 use insight_dsl::{compile_source, CompileOptions};
-use insight_durable::{CreateRunCommand, DurableRepository, VersionedPlan};
+use insight_durable::{
+    CreateRunCommand, DurableRepository, RuntimeIngressDurableRepository, VersionedPlan, WorkClass,
+    WorkWakeupRepository,
+};
 use insight_engine::{
     DefinitionRevisionId, DeploymentRevisionId, RunId, TransitionKey, TransitionOutcome,
 };
@@ -71,6 +74,27 @@ async fn cleanup(schema: IsolatedPostgresSchema) {
     schema.admin.close().await;
 }
 
+#[tokio::test]
+async fn postgres_runtime_ingress_delay_is_none_without_due_work() {
+    let Some(schema) = isolated_schema("no_ingress_deadline").await else {
+        return;
+    };
+
+    support::provision_postgres_schema(&schema.control).await;
+    let repository = PostgresDurableRepository::connect(&schema.scoped_url)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repository.next_runtime_ingress_delay().await.unwrap(),
+        None,
+        "an empty ingress set must not become an immediate deadline"
+    );
+
+    drop(repository);
+    cleanup(schema).await;
+}
+
 fn versioned_plan(label: &str) -> VersionedPlan {
     let source = r#"api_version: insight.agent/v1
 kind: agent
@@ -122,7 +146,7 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(tables.len(), 51, "the complete table contract must install");
+    assert_eq!(tables.len(), 52, "the complete table contract must install");
     for table in [
         "durable_schema_contract",
         "workflow_runs",
@@ -133,6 +157,7 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
         "public_event_delivery_heads",
         "model_tool_call_batches",
         "model_tool_calls",
+        "wait_late_audit_outbox",
         "workflow_retrieval_publications",
     ] {
         assert!(
@@ -153,27 +178,129 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .collect::<BTreeSet<_>>();
     assert_eq!(
         indexes.len(),
-        159,
+        167,
         "all explicit and constraint-backed indexes must be installed"
     );
     for (index, table) in [
         ("idx_runs_dispatch", "workflow_runs"),
+        ("idx_runs_recovery", "workflow_runs"),
         ("idx_runs_scheduler_lease", "workflow_runs"),
         ("idx_execution_events_rebuild", "execution_events"),
         ("idx_task_outbox_dispatch", "task_outbox"),
+        ("idx_task_outbox_acknowledge", "task_outbox"),
         ("idx_public_outbox_dispatch", "public_event_outbox"),
+        ("idx_public_outbox_retention", "public_event_outbox"),
         (
             "idx_public_projection_order",
             "public_event_projection_decisions",
         ),
         ("idx_model_tool_calls_claim", "model_tool_calls"),
+        ("idx_model_tool_calls_reclaim", "model_tool_calls"),
         ("uq_public_terminal_per_run", "public_event_outbox"),
+        ("idx_wait_late_audit_pending", "wait_late_audit_outbox"),
+        ("idx_wait_late_audit_reclaim", "wait_late_audit_outbox"),
+        ("uq_wait_late_audit_claim_token", "wait_late_audit_outbox"),
     ] {
         assert!(
             indexes.contains(&(index.to_owned(), table.to_owned())),
             "PostgreSQL catalog is missing index {index} on {table}"
         );
     }
+    let mut plan_transaction = schema.control.begin().await.unwrap();
+    sqlx::query("SET LOCAL enable_seqscan=off")
+        .execute(&mut *plan_transaction)
+        .await
+        .unwrap();
+    for (query, expected_index) in [
+        (
+            "EXPLAIN
+             SELECT run_id,task_id FROM task_outbox
+             WHERE task_state='pending' AND available_at<=statement_timestamp()
+             ORDER BY available_at,run_id,task_id LIMIT 8",
+            "idx_task_outbox_dispatch",
+        ),
+        (
+            "EXPLAIN
+             SELECT run_id,task_id FROM task_outbox
+             WHERE task_state='claimed' AND claim_expires_at<=statement_timestamp()
+             ORDER BY claim_expires_at,run_id,task_id LIMIT 8",
+            "idx_task_outbox_reclaim",
+        ),
+        (
+            "EXPLAIN
+             SELECT run_id,task_id FROM task_outbox
+             WHERE task_state='published'
+             ORDER BY available_at,run_id,task_id LIMIT 8",
+            "idx_task_outbox_acknowledge",
+        ),
+        (
+            "EXPLAIN
+             SELECT run_id,tool_task_id FROM model_tool_calls
+             WHERE call_status='pending' AND available_at<=statement_timestamp()
+             ORDER BY available_at,run_id,tool_task_id LIMIT 8",
+            "idx_model_tool_calls_claim",
+        ),
+        (
+            "EXPLAIN
+             SELECT run_id,activation_id,attempt_no,model_call_no,call_index
+             FROM model_tool_calls
+             WHERE call_status IN ('claimed','running')
+               AND claim_expires_at<=statement_timestamp()
+             ORDER BY claim_expires_at,run_id,activation_id,attempt_no,model_call_no,call_index
+             LIMIT 8",
+            "idx_model_tool_calls_reclaim",
+        ),
+        (
+            "EXPLAIN
+             SELECT run_id FROM workflow_runs
+             WHERE lifecycle='terminating'
+                OR (lifecycle IN ('created','active','waiting') AND admission_state='open')
+             ORDER BY updated_at,run_id LIMIT 8",
+            "idx_runs_recovery",
+        ),
+        (
+            "EXPLAIN
+             SELECT run_id,loser_kind,loser_id FROM wait_late_audit_outbox
+             WHERE audit_state='pending' AND due_at<=statement_timestamp()
+             ORDER BY due_at,run_id,loser_kind,loser_id LIMIT 8",
+            "idx_wait_late_audit_pending",
+        ),
+        (
+            "EXPLAIN
+             SELECT run_id,loser_kind,loser_id FROM wait_late_audit_outbox
+             WHERE audit_state='claimed' AND claim_expires_at<=statement_timestamp()
+             ORDER BY claim_expires_at,run_id,loser_kind,loser_id LIMIT 8",
+            "idx_wait_late_audit_reclaim",
+        ),
+        (
+            "EXPLAIN
+             SELECT run_id,public_event_id FROM public_event_outbox
+             WHERE publish_state='published' AND NOT is_terminal
+               AND retain_until IS NOT NULL
+               AND retain_until<=statement_timestamp()
+             ORDER BY retain_until,run_id,public_event_id LIMIT 8",
+            "idx_public_outbox_retention",
+        ),
+    ] {
+        let plan = sqlx::query_scalar::<_, String>(query)
+            .fetch_all(&mut *plan_transaction)
+            .await
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|line| line.to_ascii_lowercase().contains(expected_index)),
+            "PostgreSQL discovery branch must use {expected_index}: {plan:?}"
+        );
+        if expected_index == "idx_public_outbox_retention" {
+            let normalized = plan.join(" ").to_ascii_lowercase();
+            assert!(
+                normalized.contains("index cond:")
+                    && normalized.contains("retain_until <= statement_timestamp()"),
+                "retention deadline must be an index range condition, not a post-index filter: {plan:?}"
+            );
+        }
+    }
+    plan_transaction.rollback().await.unwrap();
 
     let triggers = sqlx::query_as::<_, (String, String)>(
         "SELECT trigger_row.tgname::text, table_row.relname::text
@@ -190,7 +317,7 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(triggers.len(), 23, "all user triggers must be installed");
+    assert_eq!(triggers.len(), 30, "all user triggers must be installed");
     for (trigger, table) in [
         (
             "execution_event_projection_ledger_immutable",
@@ -216,12 +343,37 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
             "workflow_retrieval_publication_immutable",
             "workflow_retrieval_publications",
         ),
+        ("task_outbox_work_wakeup", "task_outbox"),
+        ("model_tool_call_work_wakeup", "model_tool_calls"),
+        ("timer_ingress_work_wakeup", "timers"),
+        ("signal_ingress_work_wakeup", "signals_inbox"),
+        ("run_recovery_work_wakeup", "workflow_runs"),
+        (
+            "public_event_delivery_work_wakeup",
+            "public_event_delivery_heads",
+        ),
+        ("wait_late_audit_work_wakeup", "wait_late_audit_outbox"),
     ] {
         assert!(
             triggers.contains(&(trigger.to_owned(), table.to_owned())),
             "PostgreSQL catalog is missing trigger {trigger} on {table}"
         );
     }
+    let recovery_trigger = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_triggerdef(trigger_row.oid)
+         FROM pg_catalog.pg_trigger AS trigger_row
+         WHERE trigger_row.tgname='run_recovery_work_wakeup'
+           AND NOT trigger_row.tgisinternal",
+    )
+    .fetch_one(&schema.control)
+    .await
+    .unwrap()
+    .to_ascii_lowercase();
+    assert!(recovery_trigger.contains("projection_version"));
+    assert!(
+        !recovery_trigger.contains("updated_at"),
+        "lease/control timestamp updates must not self-wake recovery: {recovery_trigger}"
+    );
 
     let functions = sqlx::query_scalar::<_, String>(
         "SELECT procedure_row.proname::text
@@ -238,13 +390,14 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .collect::<BTreeSet<_>>();
     assert_eq!(
         functions.len(),
-        21,
+        22,
         "all schema functions must be installed"
     );
     for function in [
         "bind_public_projection_decision",
         "establish_public_event_authority",
         "guard_public_event_receipt_provenance",
+        "notify_durable_work",
         "reject_execution_event_projection_ledger_rewrite",
         "synchronize_public_event_delivery_head",
     ] {
@@ -494,6 +647,179 @@ async fn postgres_repository_rejects_missing_wrong_contract_and_wrong_backend() 
         .expect("a wrong backend must be rejected");
     assert_eq!(error.code(), DATABASE_SCHEMA_BACKEND_MISMATCH);
 
+    cleanup(schema).await;
+}
+
+#[tokio::test]
+async fn postgres_work_notifications_are_commit_scoped_and_payload_free() {
+    let Some(schema) = isolated_schema("work_notify").await else {
+        return;
+    };
+    support::provision_postgres_schema(&schema.control).await;
+    let repository = PostgresDurableRepository::connect(&schema.scoped_url)
+        .await
+        .unwrap();
+    let mut stream = repository
+        .open_work_notification_stream()
+        .await
+        .unwrap()
+        .expect("PostgreSQL must expose durable work notifications");
+
+    let plan = versioned_plan("work_notify");
+    repository.install_versioned_plan(&plan).await.unwrap();
+    let run_id = RunId::new("run_postgres_work_notify").unwrap();
+    repository
+        .create_run(
+            TransitionKey::derive("postgres.schema.work-notify", &["create"]).unwrap(),
+            CreateRunCommand::new(run_id.clone(), &plan, json!({"question": "safe"})).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), stream.recv())
+            .await
+            .expect("a committed eligible Run must wake the listener")
+            .unwrap(),
+        WorkClass::Maintenance
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), stream.recv())
+            .await
+            .is_err(),
+        "one transaction must emit at most one all-class work hint"
+    );
+
+    sqlx::query("UPDATE workflow_runs SET updated_at=clock_timestamp() WHERE run_id=$1")
+        .bind(run_id.as_str())
+        .execute(&schema.control)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), stream.recv())
+            .await
+            .is_err(),
+        "lease/control timestamp updates must not wake scheduler recovery"
+    );
+
+    let mut transaction = schema.control.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE workflow_runs
+         SET projection_version=projection_version+1
+         WHERE run_id=$1",
+    )
+    .bind(run_id.as_str())
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), stream.recv())
+            .await
+            .is_err(),
+        "a rolled-back transition must not emit a work notification"
+    );
+
+    let listener_pid = sqlx::query_scalar::<_, i32>(
+        "SELECT pid
+         FROM pg_stat_activity
+         WHERE datname=current_database()
+           AND query LIKE 'LISTEN \"iap_work_%'
+         ORDER BY backend_start DESC
+         LIMIT 1",
+    )
+    .fetch_one(&schema.control)
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+            .bind(listener_pid)
+            .fetch_one(&schema.control)
+            .await
+            .unwrap()
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), stream.recv())
+            .await
+            .expect("connection loss must be surfaced promptly")
+            .is_err(),
+        "the adapter must not hide a LISTEN reconnect from the coordinator"
+    );
+
+    let mut stream = repository
+        .open_work_notification_stream()
+        .await
+        .unwrap()
+        .expect("the coordinator must be able to reopen LISTEN");
+    sqlx::query(
+        "UPDATE workflow_runs
+         SET projection_version=projection_version+1
+         WHERE run_id=$1",
+    )
+    .bind(run_id.as_str())
+    .execute(&schema.control)
+    .await
+    .unwrap();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), stream.recv())
+            .await
+            .expect("a committed projection change must wake recovery")
+            .unwrap(),
+        WorkClass::Maintenance
+    );
+
+    drop(repository);
+    cleanup(schema).await;
+}
+
+#[tokio::test]
+async fn runtime_marked_writes_defer_to_explicit_coalesced_notification() {
+    let Some(schema) = isolated_schema("runtime_work_notify").await else {
+        return;
+    };
+    support::provision_postgres_schema(&schema.control).await;
+    let runtime_url = format!(
+        "{}&application_name=insight-agent-platform-runtime",
+        schema.scoped_url
+    );
+    let repository = PostgresDurableRepository::connect(&runtime_url)
+        .await
+        .unwrap();
+    let mut stream = repository
+        .open_work_notification_stream()
+        .await
+        .unwrap()
+        .expect("PostgreSQL must expose durable work notifications");
+
+    let plan = versioned_plan("runtime_work_notify");
+    repository.install_versioned_plan(&plan).await.unwrap();
+    let run_id = RunId::new("run_runtime_work_notify").unwrap();
+    repository
+        .create_run(
+            TransitionKey::derive("postgres.schema.runtime-work-notify", &["create"]).unwrap(),
+            CreateRunCommand::new(run_id, &plan, json!({"question": "safe"})).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), stream.recv())
+            .await
+            .is_err(),
+        "runtime-marked authoritative commits must not take the NOTIFY ordering lock"
+    );
+
+    repository
+        .publish_work_notification(WorkClass::Maintenance)
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), stream.recv())
+            .await
+            .expect("the process-coalesced hint must reach listeners")
+            .unwrap(),
+        WorkClass::Maintenance
+    );
+
+    drop(repository);
     cleanup(schema).await;
 }
 

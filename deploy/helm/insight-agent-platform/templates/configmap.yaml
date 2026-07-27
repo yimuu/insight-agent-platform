@@ -17,6 +17,7 @@ data:
       directory: /app/agents
       enabled:
         - action_demo
+        - benchmark_wait
 
     models:
       config: /app/config-runtime/models.yaml
@@ -28,6 +29,7 @@ data:
     history:
       provider: postgres
       database_url_env: RUN_HISTORY_POSTGRES_URL
+      max_connections: {{ .Values.runtime.databasePoolMaxConnections }}
 
     artifacts:
       provider: shared_filesystem
@@ -48,6 +50,13 @@ data:
       run_timeout: {{ .Values.runtime.runTimeout }}
       sse_keep_alive_interval: 5s
       subscriber_capacity: {{ .Values.runtime.subscriberCapacity }}
+      scheduler:
+        active_poll_interval: {{ .Values.runtime.scheduler.activePollInterval }}
+        idle_poll_min_interval: {{ .Values.runtime.scheduler.idlePollMinInterval }}
+        idle_poll_max_interval: {{ .Values.runtime.scheduler.idlePollMaxInterval }}
+        safety_poll_interval: {{ .Values.runtime.scheduler.safetyPollInterval }}
+        claim_batch_size: {{ .Values.runtime.scheduler.claimBatchSize }}
+        notification_reconnect_interval: {{ .Values.runtime.scheduler.notificationReconnectInterval }}
       max_llm_tool_rounds: 16
       max_llm_tool_calls: 64
       response_stream:

@@ -2,7 +2,7 @@
 
 use axum::{
     extract::rejection::JsonRejection,
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -123,7 +123,12 @@ impl From<ServiceError> for ApiError {
                 "ARTIFACT_TOO_LARGE",
                 "artifact exceeds the authorized read size",
             ),
-            "RUN_CONFLICT" | "RUN_CAPACITY_EXCEEDED" => Self::new(
+            "RUN_CAPACITY_EXCEEDED" => Self::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "RUN_CAPACITY_EXCEEDED",
+                "active Run capacity is exhausted",
+            ),
+            "RUN_CONFLICT" => Self::new(
                 StatusCode::CONFLICT,
                 "RUN_CONFLICT",
                 "run request conflicts with current runtime state",
@@ -239,7 +244,8 @@ impl From<ServiceError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
+        let retry_after = self.code == "RUN_CAPACITY_EXCEEDED";
+        let mut response = (
             self.status,
             Json(ApiResponse {
                 code: self.code,
@@ -247,6 +253,43 @@ impl IntoResponse for ApiError {
                 data: serde_json::json!({}),
             }),
         )
-            .into_response()
+            .into_response();
+        if retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        }
+        response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{body::to_bytes, http::StatusCode, response::IntoResponse};
+    use insight_runtime::ServiceError;
+
+    use super::ApiError;
+
+    #[tokio::test]
+    async fn capacity_exhaustion_is_retryable_429_without_collapsing_conflicts() {
+        let capacity =
+            ApiError::from(ServiceError::new("RUN_CAPACITY_EXCEEDED", "capacity")).into_response();
+        assert_eq!(capacity.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(capacity.headers()["retry-after"], "1");
+        let capacity_body = to_bytes(capacity.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&capacity_body).unwrap()["code"],
+            "RUN_CAPACITY_EXCEEDED"
+        );
+
+        let conflict =
+            ApiError::from(ServiceError::new("RUN_CONFLICT", "conflict")).into_response();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert!(!conflict.headers().contains_key("retry-after"));
+        let conflict_body = to_bytes(conflict.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&conflict_body).unwrap()["code"],
+            "RUN_CONFLICT"
+        );
     }
 }

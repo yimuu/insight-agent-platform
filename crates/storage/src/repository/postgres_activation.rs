@@ -26,10 +26,8 @@ use insight_engine::{
 };
 
 use super::postgres::{
-    allocate_event_seq, begin_write_transaction,
-    decode_execution_event_row as decode_closed_execution_event_row, insert_event,
-    insert_or_get_payload, load_replay, lock_run_for_event_write, lock_runs_for_event_write,
-    Replay,
+    allocate_event_seq, begin_write_transaction, insert_event, insert_or_get_payload, load_replay,
+    lock_run_for_event_write, lock_runs_for_event_write, Replay,
 };
 use super::postgres_projection::{
     append_projection_mutation_event, finalize_empty_projection_checkpoints,
@@ -2903,9 +2901,42 @@ async fn is_timer_late_replay(
     Ok(true)
 }
 
+async fn complete_wait_late_audit(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    loser_kind: &str,
+    loser_id: &str,
+    event_id: &str,
+    expected_claim_token: Option<&str>,
+) -> Result<(), RepositoryError> {
+    let updated = sqlx::query(
+        "UPDATE wait_late_audit_outbox
+         SET audit_state='completed',claimed_by=NULL,claim_token=NULL,
+             claim_expires_at=NULL,completed_event_id=$1
+         WHERE run_id=$2 AND loser_kind=$3 AND loser_id=$4
+           AND ($5::text IS NULL OR (audit_state='claimed' AND claim_token=$5))
+           AND (audit_state IN ('pending','claimed')
+             OR (audit_state='completed' AND completed_event_id=$1))",
+    )
+    .bind(event_id)
+    .bind(run_id.as_str())
+    .bind(loser_kind)
+    .bind(loser_id)
+    .bind(expected_claim_token)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .rows_affected();
+    if updated != 1 {
+        return Err(RepositoryError::invalid_data());
+    }
+    Ok(())
+}
+
 async fn append_timer_late_if_wait_loser(
     transaction: &mut Transaction<'_, Postgres>,
     command: &FireTimerCommand,
+    expected_claim_token: Option<&str>,
 ) -> Result<Option<bool>, RepositoryError> {
     let (transition_key, intent_hash) =
         wait_late_audit_identity("timer", command.run_id(), command.timer_id().as_str())?;
@@ -2952,6 +2983,15 @@ async fn append_timer_late_if_wait_loser(
             if !is_timer_late_replay(transaction, command, replay.event_id()).await? {
                 return Err(RepositoryError::invalid_data());
             }
+            complete_wait_late_audit(
+                transaction,
+                command.run_id(),
+                "timer",
+                command.timer_id().as_str(),
+                replay.event_id(),
+                expected_claim_token,
+            )
+            .await?;
             return Ok(Some(false));
         }
         Replay::Vacant => {}
@@ -2995,6 +3035,15 @@ async fn append_timer_late_if_wait_loser(
     .await?;
     finalize_empty_projection_checkpoints(transaction, command.run_id(), receipt.event_id())
         .await?;
+    complete_wait_late_audit(
+        transaction,
+        command.run_id(),
+        "timer",
+        command.timer_id().as_str(),
+        receipt.event_id(),
+        expected_claim_token,
+    )
+    .await?;
     Ok(Some(true))
 }
 
@@ -3045,6 +3094,7 @@ async fn is_signal_late_replay(
 async fn append_signal_late_if_wait_loser(
     transaction: &mut Transaction<'_, Postgres>,
     command: &ResolveSignalCommand,
+    expected_claim_token: Option<&str>,
 ) -> Result<Option<bool>, RepositoryError> {
     let (transition_key, intent_hash) =
         wait_late_audit_identity("signal", command.run_id(), command.signal_id().as_str())?;
@@ -3091,6 +3141,15 @@ async fn append_signal_late_if_wait_loser(
             if !is_signal_late_replay(transaction, command, replay.event_id()).await? {
                 return Err(RepositoryError::invalid_data());
             }
+            complete_wait_late_audit(
+                transaction,
+                command.run_id(),
+                "signal",
+                command.signal_id().as_str(),
+                replay.event_id(),
+                expected_claim_token,
+            )
+            .await?;
             return Ok(Some(false));
         }
         Replay::Vacant => {}
@@ -3136,6 +3195,15 @@ async fn append_signal_late_if_wait_loser(
     .await?;
     finalize_empty_projection_checkpoints(transaction, command.run_id(), receipt.event_id())
         .await?;
+    complete_wait_late_audit(
+        transaction,
+        command.run_id(),
+        "signal",
+        command.signal_id().as_str(),
+        receipt.event_id(),
+        expected_claim_token,
+    )
+    .await?;
     Ok(Some(true))
 }
 
@@ -3143,60 +3211,74 @@ pub(super) async fn reconcile_wait_late_audits(
     repository: &PostgresDurableRepository,
     limit: i64,
 ) -> Result<u64, RepositoryError> {
-    let late_events = sqlx::query(
-        "SELECT schema_version,event_id,run_id,transition_key,intent_hash,seq,
-                occurred_at,kind,node_id,scope_instance_id,activation_id,attempt_no,
-                causation_event_id,safe_payload
-         FROM execution_events WHERE kind IN ('timer.late','signal.late')",
-    )
-    .fetch_all(&repository.pool)
-    .await
-    .map_err(RepositoryError::storage)?;
-    for event in late_events {
-        decode_closed_execution_event_row(&event)?;
-    }
-    let rows = sqlx::query(
-        "SELECT loser_kind,run_id,activation_id,loser_id,projection_version
-         FROM (
-           SELECT 'timer' AS loser_kind,m.run_id,a.activation_id,m.timer_id AS loser_id,
-                  a.projection_version,m.deadline_at AS ordered_at
-           FROM timers m
-           JOIN node_activations a ON a.run_id=m.run_id AND a.activation_id=m.activation_id
-           JOIN scheduler_wait_registrations w ON w.run_id=m.run_id
-              AND w.activation_id=m.activation_id AND w.timer_id=m.timer_id
-           JOIN signals_inbox s ON s.run_id=w.run_id AND s.signal_id=w.winner_signal_id
-           WHERE m.timer_kind='wait' AND m.timer_state='cancelled'
-             AND w.winner_kind='signal' AND s.signal_state='consumed'
-             AND m.deadline_at <= clock_timestamp()
-             AND NOT EXISTS (
-               SELECT 1 FROM execution_events e
-               WHERE e.run_id=m.run_id AND e.kind='timer.late'
-                 AND e.safe_payload->>'timer_id'=m.timer_id
-             )
-           UNION ALL
-           SELECT 'signal' AS loser_kind,s.run_id,a.activation_id,s.signal_id AS loser_id,
-                  a.projection_version,COALESCE(s.terminal_at,s.received_at) AS ordered_at
-           FROM signals_inbox s
-           JOIN node_activations a ON a.run_id=s.run_id
-              AND a.activation_id=s.target_activation_id
-           JOIN scheduler_wait_registrations w ON w.run_id=s.run_id
-              AND w.activation_id=s.target_activation_id AND w.signal_id=s.signal_id
-           JOIN timers t ON t.run_id=w.run_id AND t.timer_id=w.winner_timer_id
-           WHERE s.signal_state='rejected' AND w.winner_kind='timer'
-             AND t.timer_state='fired'
-             AND NOT EXISTS (
-               SELECT 1 FROM execution_events e
-               WHERE e.run_id=s.run_id AND e.kind='signal.late'
-                 AND e.safe_payload->>'signal_id'=s.signal_id
-             )
-         ) candidates
-         ORDER BY ordered_at,run_id,loser_kind,loser_id
-         LIMIT $1",
+    let claimant = format!("late_audit_{}", Uuid::new_v4().simple());
+    let mut claim_transaction = begin_write_transaction(&repository.pool).await?;
+    let mut candidates = sqlx::query(
+        "SELECT run_id,loser_kind,loser_id
+         FROM wait_late_audit_outbox
+         WHERE audit_state='pending' AND due_at<=statement_timestamp()
+         ORDER BY due_at,run_id,loser_kind,loser_id
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED",
     )
     .bind(limit)
-    .fetch_all(&repository.pool)
+    .fetch_all(&mut *claim_transaction)
     .await
     .map_err(RepositoryError::storage)?;
+    let remaining = limit.saturating_sub(candidates.len() as i64);
+    if remaining > 0 {
+        candidates.extend(
+            sqlx::query(
+                "SELECT run_id,loser_kind,loser_id
+                 FROM wait_late_audit_outbox
+                 WHERE audit_state='claimed' AND claim_expires_at<=statement_timestamp()
+                 ORDER BY claim_expires_at,run_id,loser_kind,loser_id
+                 LIMIT $1
+                 FOR UPDATE SKIP LOCKED",
+            )
+            .bind(remaining)
+            .fetch_all(&mut *claim_transaction)
+            .await
+            .map_err(RepositoryError::storage)?,
+        );
+    }
+    let mut rows = Vec::<PgRow>::with_capacity(candidates.len());
+    for candidate in candidates {
+        let run_id = candidate
+            .try_get::<String, _>("run_id")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let loser_kind = candidate
+            .try_get::<String, _>("loser_kind")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let loser_id = candidate
+            .try_get::<String, _>("loser_id")
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let claim_token = format!("late_claim_{}", Uuid::new_v4().simple());
+        rows.push(
+            sqlx::query(
+                "UPDATE wait_late_audit_outbox o
+                 SET audit_state='claimed',claimed_by=$1,claim_token=$2,
+                     claim_expires_at=clock_timestamp()+INTERVAL '60 seconds'
+                 WHERE o.run_id=$3 AND o.loser_kind=$4 AND o.loser_id=$5
+                 RETURNING o.loser_kind,o.run_id,o.activation_id,o.loser_id,o.claim_token,
+                     (SELECT a.projection_version FROM node_activations a
+                      WHERE a.run_id=o.run_id AND a.activation_id=o.activation_id)
+                         AS projection_version",
+            )
+            .bind(&claimant)
+            .bind(&claim_token)
+            .bind(&run_id)
+            .bind(&loser_kind)
+            .bind(&loser_id)
+            .fetch_one(&mut *claim_transaction)
+            .await
+            .map_err(RepositoryError::storage)?,
+        );
+    }
+    claim_transaction
+        .commit()
+        .await
+        .map_err(RepositoryError::storage)?;
     let mut appended = 0_u64;
     for row in rows {
         let loser_kind = row
@@ -3217,42 +3299,86 @@ pub(super) async fn reconcile_wait_late_audits(
             row.try_get::<i64, _>("projection_version")
                 .map_err(|_| RepositoryError::invalid_data())?,
         )?;
+        let claim_token = row
+            .try_get::<String, _>("claim_token")
+            .map_err(|_| RepositoryError::invalid_data())?;
         let mut transaction = begin_write_transaction(&repository.pool).await?;
         let outcome = match loser_kind.as_str() {
             "timer" => {
-                let timer_id = model_data(TimerId::new(loser_id))?;
+                let timer_id = model_data(TimerId::new(loser_id.clone()))?;
                 append_timer_late_if_wait_loser(
                     &mut transaction,
-                    &FireTimerCommand::new(run_id, timer_id, None),
+                    &FireTimerCommand::new(run_id.clone(), timer_id, None),
+                    Some(&claim_token),
                 )
-                .await?
+                .await
             }
             "signal" => {
-                let signal_id = model_data(SignalId::new(loser_id))?;
+                let signal_id = model_data(SignalId::new(loser_id.clone()))?;
                 append_signal_late_if_wait_loser(
                     &mut transaction,
                     &ResolveSignalCommand::new(
-                        run_id,
-                        activation_id,
+                        run_id.clone(),
+                        activation_id.clone(),
                         signal_id,
                         projection_version,
                     ),
+                    Some(&claim_token),
                 )
-                .await?
+                .await
             }
             _ => return Err(RepositoryError::invalid_data()),
         };
-        if outcome == Some(true) {
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(RepositoryError::storage)?;
+                sqlx::query(
+                    "UPDATE wait_late_audit_outbox
+                     SET audit_state='pending',claimed_by=NULL,claim_token=NULL,
+                         claim_expires_at=NULL
+                     WHERE run_id=$1 AND loser_kind=$2 AND loser_id=$3
+                       AND audit_state='claimed' AND claim_token=$4",
+                )
+                .bind(run_id.as_str())
+                .bind(&loser_kind)
+                .bind(&loser_id)
+                .bind(&claim_token)
+                .execute(&repository.pool)
+                .await
+                .map_err(RepositoryError::storage)?;
+                return Err(error);
+            }
+        };
+        if let Some(was_appended) = outcome {
             transaction
                 .commit()
                 .await
                 .map_err(RepositoryError::storage)?;
-            appended = appended
-                .checked_add(1)
-                .ok_or_else(RepositoryError::invalid_data)?;
+            if was_appended {
+                appended = appended
+                    .checked_add(1)
+                    .ok_or_else(RepositoryError::invalid_data)?;
+            }
         } else {
+            sqlx::query(
+                "UPDATE wait_late_audit_outbox
+                 SET audit_state='pending',claimed_by=NULL,claim_token=NULL,claim_expires_at=NULL
+                 WHERE run_id=$1 AND loser_kind=$2 AND loser_id=$3
+                   AND audit_state='claimed' AND claim_token=$4",
+            )
+            .bind(run_id.as_str())
+            .bind(&loser_kind)
+            .bind(&loser_id)
+            .bind(&claim_token)
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::storage)?;
             transaction
-                .rollback()
+                .commit()
                 .await
                 .map_err(RepositoryError::storage)?;
         }
@@ -3369,7 +3495,7 @@ async fn resolve_wait_signal(
             != "pending"
         || registration_text.is_none()
     {
-        let late = append_signal_late_if_wait_loser(&mut transaction, &command).await?;
+        let late = append_signal_late_if_wait_loser(&mut transaction, &command, None).await?;
         if late.is_some() {
             transaction
                 .commit()
@@ -3520,6 +3646,23 @@ async fn resolve_wait_signal(
          WHERE run_id=$2 AND activation_id=$3 AND timer_kind='wait' AND timer_state='scheduled'",
     )
     .bind(now)
+    .bind(command.run_id().as_str())
+    .bind(command.activation_id().as_str())
+    .execute(&mut *transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    sqlx::query(
+        "INSERT INTO wait_late_audit_outbox (
+             run_id,activation_id,loser_kind,loser_id,due_at,audit_state,
+             claimed_by,claim_token,claim_expires_at,created_at,completed_event_id
+         )
+         SELECT m.run_id,m.activation_id,'timer',m.timer_id,m.deadline_at,'pending',
+                NULL,NULL,NULL,clock_timestamp(),NULL
+         FROM timers m
+         WHERE m.run_id=$1 AND m.activation_id=$2
+           AND m.timer_kind='wait' AND m.timer_state='cancelled'
+         ON CONFLICT (run_id,loser_kind,loser_id) DO NOTHING",
+    )
     .bind(command.run_id().as_str())
     .bind(command.activation_id().as_str())
     .execute(&mut *transaction)
@@ -4012,7 +4155,7 @@ async fn fire_timer(
         != "scheduled"
         || observed < deadline
     {
-        let late = append_timer_late_if_wait_loser(&mut transaction, &command).await?;
+        let late = append_timer_late_if_wait_loser(&mut transaction, &command, None).await?;
         if late.is_some() {
             transaction
                 .commit()
@@ -4594,6 +4737,24 @@ async fn fire_timer(
         .bind(transition_key.as_str())
         .bind(timer_receipt.event_id())
         .bind(observed)
+        .bind(command.run_id().as_str())
+        .bind(activation_id.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
+        sqlx::query(
+            "INSERT INTO wait_late_audit_outbox (
+                 run_id,activation_id,loser_kind,loser_id,due_at,audit_state,
+                 claimed_by,claim_token,claim_expires_at,created_at,completed_event_id
+             )
+             SELECT s.run_id,s.target_activation_id,'signal',s.signal_id,
+                    COALESCE(s.terminal_at,clock_timestamp()),'pending',
+                    NULL,NULL,NULL,clock_timestamp(),NULL
+             FROM signals_inbox s
+             WHERE s.run_id=$1 AND s.target_activation_id=$2
+               AND s.signal_state='rejected'
+             ON CONFLICT (run_id,loser_kind,loser_id) DO NOTHING",
+        )
         .bind(command.run_id().as_str())
         .bind(activation_id.as_str())
         .execute(&mut *transaction)

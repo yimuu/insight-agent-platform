@@ -1,0 +1,33 @@
+# Gate A: 50 durable active/waiting Runs on deliberately limited resources.
+# Apply after values-benchmark.yaml.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+runtime:
+  databasePoolMaxConnections: 6
+  maxConcurrentRuns: 50
+  maxConcurrentOperations: 4
+  maxConcurrentOperationsPerRun: 2
+  # Gate A holds durable signal waits for 30 minutes; the platform root
+  # deadline must remain a safety boundary, not terminate the qualification.
+  runTimeout: 1h
+  scheduler:
+    claimBatchSize: 4
+
+postgresql:
+  # Keep fixed shared memory and backend slots proportionate to the deliberate
+  # 256Mi Gate A limit. The runtime uses a much smaller SQLx pool.
+  maxConnections: 40
+  sharedBuffers: 32MB
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi

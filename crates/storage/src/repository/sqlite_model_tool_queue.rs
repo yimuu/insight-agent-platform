@@ -1299,8 +1299,10 @@ async fn expire_parent_operation_deadlines_sqlite(
            AND r.lifecycle NOT IN ('succeeded','failed','cancelled','interrupted','timed_out')
            AND (b.parent_operation_deadline IS NULL
                 OR julianday(b.parent_operation_deadline)<=julianday('now'))
-         ORDER BY b.run_id,b.activation_id,b.attempt_no,b.model_call_no",
+         ORDER BY b.run_id,b.activation_id,b.attempt_no,b.model_call_no
+         LIMIT ?",
     )
+    .bind(i64::from(MAX_CLAIM_LIMIT))
     .fetch_all(&mut **tx)
     .await
     .map_err(RepositoryError::storage)?;
@@ -1329,6 +1331,11 @@ async fn recover_expired_model_tool_calls_sqlite(
     tx: &mut Transaction<'_, Sqlite>,
 ) -> Result<(), RepositoryError> {
     expire_parent_operation_deadlines_sqlite(tx).await?;
+    let database_now =
+        sqlx::query_scalar::<_, String>("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(RepositoryError::storage)?;
     let expired = sqlx::query(
         "SELECT c.run_id,c.activation_id,c.attempt_no,c.model_call_no,c.call_index,
                 c.tool_task_id,c.call_status,c.tool_attempt_no,c.lease_epoch,
@@ -1341,9 +1348,13 @@ async fn recover_expired_model_tool_calls_sqlite(
          WHERE b.execution_status='active' AND b.continuation_status='waiting_tools'
            AND r.lifecycle NOT IN ('succeeded','failed','cancelled','interrupted','timed_out')
            AND c.call_status IN ('claimed','running')
-           AND julianday(c.claim_expires_at)<=julianday('now')
-         ORDER BY c.run_id,c.tool_task_id",
+           AND c.claim_expires_at<=?
+         ORDER BY c.claim_expires_at,c.run_id,c.activation_id,c.attempt_no,
+                  c.model_call_no,c.call_index
+         LIMIT ?",
     )
+    .bind(&database_now)
+    .bind(i64::from(MAX_CLAIM_LIMIT))
     .fetch_all(&mut **tx)
     .await
     .map_err(RepositoryError::storage)?;

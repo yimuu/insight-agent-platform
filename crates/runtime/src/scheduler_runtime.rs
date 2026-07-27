@@ -764,9 +764,47 @@ where
     let mut claims = repository
         .claim_scheduler_tasks_with_run_limit(claimant, claim_seconds, 1, max_claimed_per_run)
         .await?;
-    let Some(mut claim) = claims.pop() else {
+    let Some(claim) = claims.pop() else {
         return Ok(SchedulerWorkerPumpOutcome::NoTask);
     };
+    consume_claimed_scheduler_task_with_artifact_store_and_retrieval_observer(
+        repository,
+        registry,
+        failure_policy,
+        claim_seconds,
+        cancellation,
+        artifact_store,
+        retrieval_observer,
+        crash,
+        claim,
+    )
+    .await
+}
+
+/// Executes one scheduler task whose durable lease was acquired by a caller.
+///
+/// Separating discovery from execution lets the host coordinate one bounded
+/// worker pool without making every idle execution slot poll the database.
+/// The lease remains the sole execution authority, so the execution path is
+/// otherwise identical to the compatibility pump APIs above.
+#[allow(clippy::too_many_arguments)]
+pub async fn consume_claimed_scheduler_task_with_artifact_store_and_retrieval_observer<R, I, P, O>(
+    repository: &R,
+    registry: &WorkerExecutorRegistry,
+    failure_policy: &P,
+    claim_seconds: u32,
+    cancellation: CancellationToken,
+    artifact_store: Option<&dyn WorkerArtifactStore>,
+    retrieval_observer: &O,
+    crash: &I,
+    mut claim: SchedulerTaskClaim,
+) -> Result<SchedulerWorkerPumpOutcome, RepositoryError>
+where
+    R: SchedulerDurableRepository + ?Sized,
+    I: SchedulerCrashInjector,
+    P: SchedulerWorkerFailurePolicy,
+    O: SchedulerRetrievalLiveObserver + ?Sized,
+{
     if claim.mode() == SchedulerTaskClaimMode::Acknowledge {
         return if repository.acknowledge_scheduler_task(&claim).await? {
             Ok(SchedulerWorkerPumpOutcome::AcknowledgedRecoveredResult)
@@ -1441,10 +1479,40 @@ where
     let mut claims = repository
         .claim_model_tool_tasks(claimant, claim_seconds, 1, max_claimed_per_run)
         .await?;
-    let Some(mut claim) = claims.pop() else {
+    let Some(claim) = claims.pop() else {
         return Ok(ModelToolWorkerPumpOutcome::NoTask);
     };
+    consume_claimed_model_tool_task_with_observer(
+        repository,
+        registry,
+        claim_seconds,
+        cancellation,
+        observer,
+        crash,
+        claim,
+    )
+    .await
+}
 
+/// Executes one model-tool task whose durable lease was acquired by a caller.
+///
+/// Hosts may use this entry point to share one coordinated concurrency budget
+/// between ordinary scheduler work and model-tool work.
+#[allow(clippy::too_many_arguments)]
+pub async fn consume_claimed_model_tool_task_with_observer<R, I, O>(
+    repository: &R,
+    registry: &WorkerExecutorRegistry,
+    claim_seconds: u32,
+    cancellation: CancellationToken,
+    observer: &O,
+    crash: &I,
+    mut claim: ModelToolTaskClaim,
+) -> Result<ModelToolWorkerPumpOutcome, RepositoryError>
+where
+    R: ModelToolWorkerRepository + ?Sized,
+    I: SchedulerCrashInjector,
+    O: ModelToolLiveObserver + ?Sized,
+{
     // Freeze the complete timeout budget before mark-start. Repository and
     // heartbeat latency cannot buy extra time in which the Action may run.
     let timeout_ms = claim.identity().action().effect_policy().timeout_ms();

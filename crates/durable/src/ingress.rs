@@ -182,6 +182,13 @@ pub trait RuntimeIngressDurableRepository: ActivationDurableRepository {
     /// Lease expiry additionally needs the frozen retry policy and is owned by
     /// the worker lease-reaper, so it is intentionally excluded here.
     async fn list_due_runtime_timers(&self, limit: u32) -> Result<Vec<DueTimer>, RepositoryError>;
+
+    /// Returns the database-clock delay until the next timer or root deadline.
+    /// `None` means no ingress deadline exists. This is a scheduling hint only;
+    /// due queries remain the authoritative eligibility check.
+    async fn next_runtime_ingress_delay(
+        &self,
+    ) -> Result<Option<std::time::Duration>, RepositoryError>;
 }
 
 /// Workspace-internal construction surface for storage adapters.

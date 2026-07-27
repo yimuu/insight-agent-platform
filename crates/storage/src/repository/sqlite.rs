@@ -24,7 +24,7 @@ use insight_durable::model::adapter as model_adapter;
 use insight_durable::production::adapter as production_contract_adapter;
 use insight_durable::{
     ClaimSchedulerRunCommand, FencedSchedulerRunCommand, PendingMigrationWait,
-    ProductionRunRepository, RunRepositoryCapability,
+    ProductionRunRepository, RunRepositoryCapability, WorkNotificationStream, WorkWakeupRepository,
 };
 use insight_engine::response::adapter::{
     durable_response_snapshot_new, response_terminal_kind_parse, response_usage_status_parse,
@@ -2291,6 +2291,15 @@ impl ProductionRunRepository for SqliteDurableRepository {
                 )
             })
             .collect()
+    }
+}
+
+#[async_trait]
+impl WorkWakeupRepository for SqliteDurableRepository {
+    async fn open_work_notification_stream(
+        &self,
+    ) -> Result<Option<Box<dyn WorkNotificationStream>>, RepositoryError> {
+        Ok(None)
     }
 }
 

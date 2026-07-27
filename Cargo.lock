@@ -1363,6 +1363,7 @@ dependencies = [
  "insight-dsl",
  "insight-durable",
  "insight-engine",
+ "log",
  "serde",
  "serde_jcs",
  "serde_json",

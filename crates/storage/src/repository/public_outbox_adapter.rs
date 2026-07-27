@@ -34,6 +34,22 @@ const MAX_CLAIM_SECONDS: u32 = 86_400;
 const MAX_CLAIM_BATCH: u32 = 1_000;
 pub(crate) const MAX_NONTERMINAL_RETENTION_SECONDS: u32 = 10 * 365 * 24 * 60 * 60;
 const MAX_PRUNE_BATCH: u32 = 1_000;
+const POSTGRES_PUBLIC_EVENT_RETENTION_PRUNE_SQL: &str = r#"
+WITH due AS (
+    SELECT run_id, public_event_id
+    FROM public_event_outbox
+    WHERE publish_state = 'published' AND NOT is_terminal
+      AND retain_until IS NOT NULL
+      AND retain_until <= statement_timestamp()
+    ORDER BY retain_until, run_id, public_event_id
+    FOR UPDATE SKIP LOCKED
+    LIMIT $1
+)
+DELETE FROM public_event_outbox AS outbox
+USING due
+WHERE outbox.run_id = due.run_id
+  AND outbox.public_event_id = due.public_event_id
+"#;
 
 macro_rules! complete_public_query {
     ($tail:literal) => {
@@ -83,10 +99,14 @@ struct PostgresPublicEventNotificationStream {
 impl PublicEventNotificationStream for PostgresPublicEventNotificationStream {
     async fn recv(&mut self) -> Result<String, RepositoryError> {
         self.listener
-            .recv()
+            .try_recv()
             .await
-            .map(|notification| notification.payload().to_owned())
             .map_err(RepositoryError::storage)
+            .and_then(|notification| {
+                notification
+                    .map(|notification| notification.payload().to_owned())
+                    .ok_or_else(RepositoryError::storage_unavailable)
+            })
     }
 }
 
@@ -203,6 +223,20 @@ impl PublicEventOutboxRepository for PostgresDurableRepository {
     ) -> Result<bool, RepositoryError> {
         validate_retention_seconds(nonterminal_retention_seconds)?;
         let mut transaction = begin_write_transaction(&self.pool).await?;
+        if claim.is_terminal() {
+            // A terminal transition owns workflow_runs until commit, where its
+            // deferred terminal-public-event FK takes KEY SHARE on this outbox
+            // row. The publish trigger also reaches workflow_runs when it
+            // drains the last delivery head. Take the Run lock first so these
+            // two paths share workflow_runs -> head -> outbox lock ordering
+            // instead of deadlocking at the terminal transition's COMMIT.
+            sqlx::query("SELECT 1 FROM workflow_runs WHERE run_id=$1 FOR UPDATE")
+                .bind(claim.run_id().as_str())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(RepositoryError::storage)?
+                .ok_or_else(RepositoryError::invalid_data)?;
+        }
         // Public claim/reclaim takes the durable head before the outbox row.
         // Publishing must use the same lock order to avoid a head<->outbox
         // deadlock at lease expiry. The explicit READ COMMITTED transaction
@@ -276,14 +310,19 @@ impl PublicEventOutboxRepository for PostgresDurableRepository {
         .map_err(RepositoryError::storage)?;
 
         if let Some(public_event_id) = published {
-            // PostgreSQL delivers NOTIFY only after this transaction commits.
-            // The payload is an opaque durable ID, never the event body.
-            sqlx::query("SELECT pg_notify($1, $2)")
-                .bind(PUBLIC_EVENT_NOTIFY_CHANNEL)
-                .bind(public_event_id)
-                .execute(&mut *transaction)
-                .await
-                .map_err(RepositoryError::storage)?;
+            if !self.defer_transactional_notifications {
+                // Non-runtime repository writers keep the commit-scoped
+                // cross-process hint. The runtime delivers locally after this
+                // commit and its subscribers independently poll durable order,
+                // so putting five NOTIFY calls per short Run in authoritative
+                // transactions only adds notification-ordering lock pressure.
+                sqlx::query("SELECT pg_notify($1, $2)")
+                    .bind(PUBLIC_EVENT_NOTIFY_CHANNEL)
+                    .bind(public_event_id)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(RepositoryError::storage)?;
+            }
             transaction
                 .commit()
                 .await
@@ -314,27 +353,12 @@ impl PublicEventOutboxRepository for PostgresDurableRepository {
 
     async fn prune_expired_public_events(&self, limit: u32) -> Result<u64, RepositoryError> {
         validate_prune_limit(limit)?;
-        sqlx::query(
-            "WITH due AS (
-                 SELECT run_id, public_event_id
-                 FROM public_event_outbox
-                 WHERE publish_state = 'published' AND NOT is_terminal
-                   AND retain_until IS NOT NULL
-                   AND retain_until <= clock_timestamp()
-                 ORDER BY retain_until, run_id, public_event_id
-                 FOR UPDATE SKIP LOCKED
-                 LIMIT $1
-             )
-             DELETE FROM public_event_outbox AS outbox
-             USING due
-             WHERE outbox.run_id = due.run_id
-               AND outbox.public_event_id = due.public_event_id",
-        )
-        .bind(i64::from(limit))
-        .execute(&self.pool)
-        .await
-        .map(|result| result.rows_affected())
-        .map_err(RepositoryError::storage)
+        sqlx::query(POSTGRES_PUBLIC_EVENT_RETENTION_PRUNE_SQL)
+            .bind(i64::from(limit))
+            .execute(&self.pool)
+            .await
+            .map(|result| result.rows_affected())
+            .map_err(RepositoryError::storage)
     }
 
     async fn load_terminal_public_event(
@@ -512,6 +536,7 @@ impl PublicEventOutboxRepository for PostgresDurableRepository {
         let mut listener = PgListener::connect_with(&self.pool)
             .await
             .map_err(RepositoryError::storage)?;
+        listener.eager_reconnect(false);
         listener
             .listen(PUBLIC_EVENT_NOTIFY_CHANNEL)
             .await
@@ -1604,6 +1629,7 @@ mod tests {
         validate_prune_limit, validate_retention_seconds, OrderedPublicEventRead,
         PostgresDurableRepository, PublicEventOutboxRepository, SqliteDurableRepository,
         MAX_CLAIM_BATCH, MAX_CLAIM_SECONDS, MAX_NONTERMINAL_RETENTION_SECONDS, MAX_PRUNE_BATCH,
+        POSTGRES_PUBLIC_EVENT_RETENTION_PRUNE_SQL,
     };
 
     #[test]
@@ -1620,6 +1646,17 @@ mod tests {
         assert!(validate_prune_limit(1).is_ok());
         assert!(validate_prune_limit(0).is_err());
         assert!(validate_prune_limit(MAX_PRUNE_BATCH + 1).is_err());
+    }
+
+    #[test]
+    fn postgres_retention_prune_uses_an_indexable_statement_clock() {
+        let normalized = POSTGRES_PUBLIC_EVENT_RETENTION_PRUNE_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        assert!(normalized.contains("retain_until <= statement_timestamp()"));
+        assert!(!normalized.contains("clock_timestamp()"));
     }
 
     async fn provisioned_sqlite_file(database: &std::path::Path) -> SqliteDurableRepository {
@@ -3295,6 +3332,179 @@ mod tests {
             .unwrap()
             .as_deref(),
             Some(later_id.as_str())
+        );
+
+        repository.pool.close().await;
+        sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_terminal_publish_locks_run_before_delivery_head_when_available() {
+        let database_url = std::env::var("PUBLIC_OUTBOX_TEST_POSTGRES_URL")
+            .or_else(|_| std::env::var("TEST_POSTGRES_URL"));
+        let Ok(database_url) = database_url else {
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let schema = format!("public_terminal_order_{}", &suffix[..12]);
+        let admin = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let separator = if database_url.contains('?') { '&' } else { '?' };
+        let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+        let repository = PostgresDurableRepository::connect_provisioned_for_test(&scoped_url)
+            .await
+            .unwrap();
+        let plan = plan();
+        repository.install_versioned_plan(&plan).await.unwrap();
+        let run_id = RunId::new(format!("run_terminal_publish_order_{suffix}")).unwrap();
+        repository
+            .create_run(
+                transition_key(&format!("{suffix}.create")),
+                CreateRunCommand::new(run_id.clone(), &plan, json!({"input": 1})).unwrap(),
+            )
+            .await
+            .unwrap();
+        repository
+            .commit_run_transition(
+                transition_key(&format!("{suffix}.start")),
+                model_adapter::run_transition_nonterminal(
+                    run_id.clone(),
+                    0,
+                    RunLifecycle::Created,
+                    AdmissionState::Open,
+                    RunLifecycle::Active,
+                    AdmissionState::Open,
+                    event(&run_id, RunLifecycle::Active),
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        repository
+            .commit_run_transition(
+                transition_key(&format!("{suffix}.completing")),
+                model_adapter::run_transition_nonterminal(
+                    run_id.clone(),
+                    1,
+                    RunLifecycle::Active,
+                    AdmissionState::Open,
+                    RunLifecycle::Completing,
+                    AdmissionState::Draining,
+                    event(&run_id, RunLifecycle::Completing),
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        repository
+            .commit_run_transition(
+                transition_key(&format!("{suffix}.terminal")),
+                model_adapter::run_transition_terminal_success(
+                    run_id.clone(),
+                    2,
+                    json!({"answer": 42}),
+                    event(&run_id, RunLifecycle::Succeeded),
+                    model_adapter::public_event_intent(PublicEventPayload::RunCompleted),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let created = repository
+            .claim_public_events(&format!("terminal_order_dispatcher_{suffix}"), 30, 1)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(!created.is_terminal());
+        assert!(repository.publish_public_event(&created, 60).await.unwrap());
+        let terminal = repository
+            .claim_public_events(&format!("terminal_order_dispatcher_{suffix}"), 30, 1)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(terminal.is_terminal());
+
+        let mut transition = begin_write_transaction(&repository.pool).await.unwrap();
+        sqlx::query("SELECT 1 FROM workflow_runs WHERE run_id=$1 FOR UPDATE")
+            .bind(run_id.as_str())
+            .fetch_one(&mut *transition)
+            .await
+            .unwrap();
+        let publishing_repository = repository.clone();
+        let publishing = tokio::spawn(async move {
+            publishing_repository
+                .publish_public_event(&terminal, 60)
+                .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waits_before_head = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                       SELECT 1
+                       FROM pg_stat_activity
+                       WHERE datname=current_database()
+                         AND state='active'
+                         AND wait_event_type='Lock'
+                         AND query LIKE 'SELECT 1 FROM workflow_runs WHERE run_id=$1 FOR UPDATE%'
+                     )",
+                )
+                .fetch_one(&repository.pool)
+                .await
+                .unwrap();
+                if waits_before_head {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal publisher must wait on workflow_runs before the delivery head");
+
+        let mut head_probe = begin_write_transaction(&repository.pool).await.unwrap();
+        sqlx::query(
+            "SELECT 1 FROM public_event_delivery_heads
+             WHERE run_id=$1 FOR UPDATE NOWAIT",
+        )
+        .bind(run_id.as_str())
+        .fetch_one(&mut *head_probe)
+        .await
+        .expect("blocked terminal publisher must not own the delivery head");
+        head_probe.rollback().await.unwrap();
+
+        transition.commit().await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), publishing)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT head_state FROM public_event_delivery_heads WHERE run_id=$1",
+            )
+            .bind(run_id.as_str())
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap(),
+            "drained"
         );
 
         repository.pool.close().await;

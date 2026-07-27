@@ -8,8 +8,9 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
+    fmt::Write as _,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
     time::Duration,
@@ -28,12 +29,13 @@ use insight_durable::{
     ClaimHumanWorkItemCommand, ClaimSchedulerRunCommand, CompleteHumanWorkItemCommand,
     ContinueAsNewCommand, CreateRunCommand, DurableResponseSnapshot, FencedSchedulerRunCommand,
     FinalizeMigrationCommand, FireTimerCommand, ForkRunCommand, HumanTaskPrincipal, HumanWorkItem,
-    HumanWorkItemId, MigrationMappingCompatibility, ModelToolBatchActivation, NoSchedulerCrash,
-    OrderedPublicEventRead, OrphanSweepCommand, PlanPublicationOutcome, PublicEventPosition,
-    PublicRunAttachment, PublicationHead, PublicationOrigin, PublishVersionedPlanCommand,
-    ReceiveSignalCommand, RecoveryRevisionSpec, RecoveryRunReceipt, RedriveRunCommand,
-    ReleaseRunArtifactRetentionCommand, RepositoryError, ResolveSignalCommand, RunProjection,
-    SignalInboxState, VersionedPlan, VersionedPlanCatalog, REPOSITORY_ARTIFACT_STORE_CONFLICT,
+    HumanWorkItemId, MigrationMappingCompatibility, ModelToolBatchActivation, ModelToolTaskClaim,
+    NoSchedulerCrash, OrderedPublicEventRead, OrphanSweepCommand, PlanPublicationOutcome,
+    PublicEventPosition, PublicRunAttachment, PublicationHead, PublicationOrigin,
+    PublishVersionedPlanCommand, ReceiveSignalCommand, RecoveryRevisionSpec, RecoveryRunReceipt,
+    RedriveRunCommand, RepositoryError, ResolveSignalCommand, RunProjection,
+    SchedulerDurableRepository, SchedulerTaskClaim, SignalInboxState, VersionedPlan,
+    VersionedPlanCatalog, WorkClass, REPOSITORY_ARTIFACT_STORE_CONFLICT,
     REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_INTENT_CONFLICT, REPOSITORY_REDRIVE_REQUIRES_FORK,
 };
 use insight_engine::{
@@ -52,8 +54,8 @@ use insight_engine::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{
-    sync::{broadcast, Mutex as AsyncMutex},
-    task::JoinHandle,
+    sync::{broadcast, Mutex as AsyncMutex, Notify},
+    task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -66,11 +68,10 @@ use crate::{
         DeployedAgent, DeploymentRiskDiagnostic, LeafDeploymentResolver, PublishedAgent,
     },
     scheduler_runtime::{
-        consume_model_tool_task_once_with_observer,
-        consume_scheduler_task_once_with_artifact_store_and_retrieval_observer,
-        consume_scheduler_task_once_with_retrieval_observer, drive_scheduler_until_quiescent,
-        FrozenSchedulerWorkerFailurePolicy, ModelToolWorkerPumpOutcome, SchedulerRecoveryOutcome,
-        SchedulerWorkerPumpOutcome,
+        consume_claimed_model_tool_task_with_observer,
+        consume_claimed_scheduler_task_with_artifact_store_and_retrieval_observer,
+        drive_scheduler_until_quiescent, FrozenSchedulerWorkerFailurePolicy,
+        SchedulerRecoveryOutcome, SchedulerWorkerPumpOutcome,
     },
 };
 
@@ -82,6 +83,11 @@ use super::{
 
 const PRODUCTION_TRANSITION_DOMAIN: &str = "production.run-service";
 const DEFAULT_PUMP_INTERVAL: Duration = Duration::from_millis(25);
+const DEFAULT_IDLE_POLL_MIN_INTERVAL: Duration = Duration::from_millis(100);
+const DEFAULT_IDLE_POLL_MAX_INTERVAL: Duration = Duration::from_secs(2);
+const DEFAULT_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_NOTIFICATION_RECONNECT_INTERVAL: Duration = Duration::from_millis(250);
+const DEFAULT_CLAIM_BATCH_SIZE: u32 = 8;
 const MAX_RECOVERY_BATCH: u32 = 256;
 const MAX_PUBLIC_EVENT_BATCH: u32 = 256;
 const MAX_PUBLIC_EVENT_PRUNE_BATCH: u32 = 256;
@@ -103,6 +109,92 @@ const PLATFORM_ARTIFACT_STORE_AUTHORITY_CONFLICT: &str =
     "PLATFORM_ARTIFACT_STORE_AUTHORITY_CONFLICT";
 const PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER: &str =
     "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER";
+const WORK_SCHEDULER_TASK: u8 = 1 << 0;
+const WORK_MODEL_TOOL_TASK: u8 = 1 << 1;
+const WORK_RUNTIME_INGRESS: u8 = 1 << 2;
+const WORK_PUBLIC_EVENT: u8 = 1 << 3;
+const WORK_RECOVERY: u8 = 1 << 4;
+const WORK_ALL: u8 = WORK_SCHEDULER_TASK
+    | WORK_MODEL_TOOL_TASK
+    | WORK_RUNTIME_INGRESS
+    | WORK_PUBLIC_EVENT
+    | WORK_RECOVERY;
+
+#[derive(Default)]
+struct RunServiceMetrics {
+    admission_accepted: AtomicU64,
+    admission_capacity_rejected: AtomicU64,
+    wakeup_notify: AtomicU64,
+    wakeup_deadline: AtomicU64,
+    wakeup_safety: AtomicU64,
+    wakeup_completion: AtomicU64,
+    scheduler_poll_claimed: AtomicU64,
+    scheduler_poll_empty: AtomicU64,
+    scheduler_claimed_nanos: AtomicU64,
+    scheduler_empty_nanos: AtomicU64,
+    model_tool_poll_claimed: AtomicU64,
+    model_tool_poll_empty: AtomicU64,
+    model_tool_claimed_nanos: AtomicU64,
+    model_tool_empty_nanos: AtomicU64,
+    executing_scheduler: AtomicUsize,
+    executing_model_tool: AtomicUsize,
+    executing_recovery: AtomicUsize,
+    notification_listener_connected: AtomicBool,
+    notification_listener_reconnects: AtomicU64,
+    notification_publish_requests: AtomicU64,
+    notification_published: AtomicU64,
+    notification_publish_errors: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoordinatorWakeupSource {
+    Notify,
+    Deadline,
+    Safety,
+    Completion,
+}
+
+impl RunServiceMetrics {
+    fn record_wakeup(&self, source: CoordinatorWakeupSource) {
+        let counter = match source {
+            CoordinatorWakeupSource::Notify => &self.wakeup_notify,
+            CoordinatorWakeupSource::Deadline => &self.wakeup_deadline,
+            CoordinatorWakeupSource::Safety => &self.wakeup_safety,
+            CoordinatorWakeupSource::Completion => &self.wakeup_completion,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_claim(&self, class: WorkClass, claimed: bool, elapsed: Duration) {
+        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        let (count, total) = match (class, claimed) {
+            (WorkClass::SchedulerTask, true) => {
+                (&self.scheduler_poll_claimed, &self.scheduler_claimed_nanos)
+            }
+            (WorkClass::SchedulerTask, false) => {
+                (&self.scheduler_poll_empty, &self.scheduler_empty_nanos)
+            }
+            (WorkClass::ModelToolTask, true) => (
+                &self.model_tool_poll_claimed,
+                &self.model_tool_claimed_nanos,
+            ),
+            (WorkClass::ModelToolTask, false) => {
+                (&self.model_tool_poll_empty, &self.model_tool_empty_nanos)
+            }
+            _ => return,
+        };
+        count.fetch_add(1, Ordering::Relaxed);
+        total.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    fn executing_counter(&self, class: WorkClass) -> &AtomicUsize {
+        match class {
+            WorkClass::ModelToolTask => &self.executing_model_tool,
+            WorkClass::Recovery => &self.executing_recovery,
+            _ => &self.executing_scheduler,
+        }
+    }
+}
 
 fn has_public_streaming_source(agent: &PublishedAgent) -> bool {
     !agent.public_streaming_contract().sources().is_empty()
@@ -511,6 +603,29 @@ enum RunServiceDeploymentMode {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct WorkCoordinatorConfig {
+    pub active_poll_interval: Duration,
+    pub idle_poll_min_interval: Duration,
+    pub idle_poll_max_interval: Duration,
+    pub safety_poll_interval: Duration,
+    pub claim_batch_size: u32,
+    pub notification_reconnect_interval: Duration,
+}
+
+impl Default for WorkCoordinatorConfig {
+    fn default() -> Self {
+        Self {
+            active_poll_interval: DEFAULT_PUMP_INTERVAL,
+            idle_poll_min_interval: DEFAULT_IDLE_POLL_MIN_INTERVAL,
+            idle_poll_max_interval: DEFAULT_IDLE_POLL_MAX_INTERVAL,
+            safety_poll_interval: DEFAULT_SAFETY_POLL_INTERVAL,
+            claim_batch_size: DEFAULT_CLAIM_BATCH_SIZE,
+            notification_reconnect_interval: DEFAULT_NOTIFICATION_RECONNECT_INTERVAL,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct RunServiceConfig {
     deployment_mode: RunServiceDeploymentMode,
     pub max_concurrent_runs: usize,
@@ -520,6 +635,9 @@ pub struct RunServiceConfig {
     pub scheduler_lease_seconds: u32,
     pub task_claim_seconds: u32,
     pub scheduler_action_budget: u32,
+    pub work_coordinator: WorkCoordinatorConfig,
+    /// Legacy cadence retained for non-production tests and maintenance
+    /// pumps. Production scheduler discovery uses `work_coordinator`.
     pub pump_interval: Duration,
     pub run_timeout: Duration,
     pub artifact_orphan_retention: Duration,
@@ -554,6 +672,7 @@ impl RunServiceConfig {
             scheduler_lease_seconds: 30,
             task_claim_seconds: 60,
             scheduler_action_budget: 512,
+            work_coordinator: WorkCoordinatorConfig::default(),
             pump_interval: DEFAULT_PUMP_INTERVAL,
             run_timeout: Duration::from_secs(5 * 60),
             artifact_orphan_retention: Duration::from_secs(24 * 60 * 60),
@@ -616,6 +735,34 @@ impl RunServiceConfig {
         self
     }
 
+    pub fn with_work_coordinator(mut self, config: WorkCoordinatorConfig) -> Self {
+        self.work_coordinator = config;
+        self
+    }
+
+    fn effective_work_coordinator(&self) -> WorkCoordinatorConfig {
+        if self.pump_interval == DEFAULT_PUMP_INTERVAL {
+            return self.work_coordinator;
+        }
+        // Existing integration tests use a non-default pump interval as an
+        // injected clock. Preserve that behavior until those tests move to a
+        // dedicated coordinator clock; production configuration never enters
+        // this compatibility branch.
+        let idle_poll_max_interval = if self.pump_interval > DEFAULT_IDLE_POLL_MAX_INTERVAL {
+            self.pump_interval
+        } else {
+            DEFAULT_IDLE_POLL_MAX_INTERVAL
+        };
+        WorkCoordinatorConfig {
+            active_poll_interval: self.pump_interval,
+            idle_poll_min_interval: self.pump_interval,
+            idle_poll_max_interval,
+            safety_poll_interval: idle_poll_max_interval.max(DEFAULT_SAFETY_POLL_INTERVAL),
+            claim_batch_size: self.work_coordinator.claim_batch_size,
+            notification_reconnect_interval: self.work_coordinator.notification_reconnect_interval,
+        }
+    }
+
     pub fn with_public_event_retention(
         mut self,
         nonterminal_retention: Duration,
@@ -661,6 +808,21 @@ impl RunServiceConfig {
             || self.scheduler_lease_seconds == 0
             || self.task_claim_seconds == 0
             || self.scheduler_action_budget == 0
+            || self.work_coordinator.active_poll_interval.is_zero()
+            || self.work_coordinator.idle_poll_min_interval.is_zero()
+            || self.work_coordinator.idle_poll_max_interval.is_zero()
+            || self.work_coordinator.safety_poll_interval.is_zero()
+            || self
+                .work_coordinator
+                .notification_reconnect_interval
+                .is_zero()
+            || self.work_coordinator.active_poll_interval
+                > self.work_coordinator.idle_poll_min_interval
+            || self.work_coordinator.idle_poll_min_interval
+                > self.work_coordinator.idle_poll_max_interval
+            || self.work_coordinator.idle_poll_max_interval
+                > self.work_coordinator.safety_poll_interval
+            || !(1..=256).contains(&self.work_coordinator.claim_batch_size)
             || self.pump_interval.is_zero()
             || self.run_timeout.is_zero()
             || self.artifact_orphan_retention.is_zero()
@@ -1097,6 +1259,11 @@ struct RunServiceInner {
     /// Both queues therefore share the same process-global worker pool without
     /// allowing either continuously-ready queue to starve the other.
     model_tool_turn: AtomicBool,
+    pending_work: AtomicU8,
+    work_wakeup: Notify,
+    work_notification_publish_pending: AtomicBool,
+    work_notification_publish_wakeup: Notify,
+    metrics: RunServiceMetrics,
     shutdown: CancellationToken,
     background: AsyncMutex<Vec<JoinHandle<()>>>,
     live: Mutex<BTreeMap<String, broadcast::Sender<()>>>,
@@ -1344,6 +1511,11 @@ impl RunService {
                 owner: format!("runtime_{}", Uuid::new_v4().simple()),
                 accepting: AtomicBool::new(true),
                 model_tool_turn: AtomicBool::new(true),
+                pending_work: AtomicU8::new(0),
+                work_wakeup: Notify::new(),
+                work_notification_publish_pending: AtomicBool::new(false),
+                work_notification_publish_wakeup: Notify::new(),
+                metrics: RunServiceMetrics::default(),
                 shutdown: CancellationToken::new(),
                 background: AsyncMutex::new(Vec::new()),
                 live: Mutex::new(BTreeMap::new()),
@@ -1352,11 +1524,210 @@ impl RunService {
         };
         service.reconcile_startup().await?;
         service.spawn_background().await;
+        service
+            .inner
+            .wake_work(WORK_ALL, CoordinatorWakeupSource::Safety);
         Ok(service)
     }
 
     pub fn agents(&self) -> &DeployedAgentCatalog {
         &self.inner.agents
+    }
+
+    /// Renders bounded-cardinality runtime metrics in the Prometheus text
+    /// exposition format. Durable queue depth and PostgreSQL lock/pool
+    /// telemetry remain database-exporter concerns; this surface deliberately
+    /// contains no Run, task, request or tenant identifiers.
+    pub fn prometheus_metrics(&self) -> String {
+        let metrics = &self.inner.metrics;
+        let active_runs = self
+            .inner
+            .active_runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+        let pending = self.inner.pending_work.load(Ordering::Acquire);
+        let backend = match self.inner.repository.run_repository_capability() {
+            RunRepositoryCapability::Production => "postgres",
+            RunRepositoryCapability::SingleProcessOnly => "sqlite",
+        };
+        let mut output = String::with_capacity(4096);
+        output.push_str(
+            "# HELP insight_runtime_active_runs Process-local admitted nonterminal Runs.\n\
+             # TYPE insight_runtime_active_runs gauge\n",
+        );
+        let _ = writeln!(
+            output,
+            "insight_runtime_active_runs{{lifecycle_class=\"nonterminal\"}} {active_runs}"
+        );
+        output.push_str(
+            "# HELP insight_runtime_runnable_operations Coalesced runnable work-class hints; durable queue rows remain authoritative.\n\
+             # TYPE insight_runtime_runnable_operations gauge\n",
+        );
+        for (class, bit) in [
+            ("scheduler_task", WORK_SCHEDULER_TASK),
+            ("model_tool_task", WORK_MODEL_TOOL_TASK),
+            ("runtime_ingress", WORK_RUNTIME_INGRESS),
+            ("public_event", WORK_PUBLIC_EVENT),
+            ("recovery", WORK_RECOVERY),
+        ] {
+            let _ = writeln!(
+                output,
+                "insight_runtime_runnable_operations{{work_class=\"{class}\"}} {}",
+                u8::from(pending & bit != 0)
+            );
+        }
+        output.push_str(
+            "# HELP insight_runtime_executing_operations Operations currently holding a process-global execution permit.\n\
+             # TYPE insight_runtime_executing_operations gauge\n",
+        );
+        let _ = writeln!(
+            output,
+            "insight_runtime_executing_operations{{work_class=\"scheduler_task\"}} {}",
+            metrics.executing_scheduler.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "insight_runtime_executing_operations{{work_class=\"model_tool_task\"}} {}",
+            metrics.executing_model_tool.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "insight_runtime_executing_operations{{work_class=\"recovery\"}} {}",
+            metrics.executing_recovery.load(Ordering::Relaxed)
+        );
+        output.push_str(
+            "# HELP insight_runtime_admission_total Run admission outcomes.\n\
+             # TYPE insight_runtime_admission_total counter\n",
+        );
+        let _ = writeln!(
+            output,
+            "insight_runtime_admission_total{{outcome=\"accepted\"}} {}",
+            metrics.admission_accepted.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "insight_runtime_admission_total{{outcome=\"capacity_rejected\"}} {}",
+            metrics.admission_capacity_rejected.load(Ordering::Relaxed)
+        );
+        output.push_str(
+            "# HELP insight_runtime_coordinator_wakeups_total WorkCoordinator wakeups by bounded source.\n\
+             # TYPE insight_runtime_coordinator_wakeups_total counter\n",
+        );
+        for (source, counter) in [
+            ("notify", &metrics.wakeup_notify),
+            ("deadline", &metrics.wakeup_deadline),
+            ("safety", &metrics.wakeup_safety),
+            ("completion", &metrics.wakeup_completion),
+        ] {
+            let _ = writeln!(
+                output,
+                "insight_runtime_coordinator_wakeups_total{{source=\"{source}\"}} {}",
+                counter.load(Ordering::Relaxed)
+            );
+        }
+        output.push_str(
+            "# HELP insight_runtime_coordinator_poll_cycles_total Durable queue poll outcomes.\n\
+             # TYPE insight_runtime_coordinator_poll_cycles_total counter\n",
+        );
+        for (class, outcome, counter) in [
+            ("scheduler_task", "claimed", &metrics.scheduler_poll_claimed),
+            ("scheduler_task", "empty", &metrics.scheduler_poll_empty),
+            (
+                "model_tool_task",
+                "claimed",
+                &metrics.model_tool_poll_claimed,
+            ),
+            ("model_tool_task", "empty", &metrics.model_tool_poll_empty),
+        ] {
+            let _ = writeln!(
+                output,
+                "insight_runtime_coordinator_poll_cycles_total{{work_class=\"{class}\",outcome=\"{outcome}\"}} {}",
+                counter.load(Ordering::Relaxed)
+            );
+        }
+        output.push_str(
+            "# HELP insight_runtime_claim_latency_seconds Durable claim latency summary.\n\
+             # TYPE insight_runtime_claim_latency_seconds summary\n",
+        );
+        for (class, outcome, count, nanos) in [
+            (
+                "scheduler_task",
+                "claimed",
+                &metrics.scheduler_poll_claimed,
+                &metrics.scheduler_claimed_nanos,
+            ),
+            (
+                "scheduler_task",
+                "empty",
+                &metrics.scheduler_poll_empty,
+                &metrics.scheduler_empty_nanos,
+            ),
+            (
+                "model_tool_task",
+                "claimed",
+                &metrics.model_tool_poll_claimed,
+                &metrics.model_tool_claimed_nanos,
+            ),
+            (
+                "model_tool_task",
+                "empty",
+                &metrics.model_tool_poll_empty,
+                &metrics.model_tool_empty_nanos,
+            ),
+        ] {
+            let _ = writeln!(
+                output,
+                "insight_runtime_claim_latency_seconds_count{{work_class=\"{class}\",outcome=\"{outcome}\"}} {}",
+                count.load(Ordering::Relaxed)
+            );
+            let _ = writeln!(
+                output,
+                "insight_runtime_claim_latency_seconds_sum{{work_class=\"{class}\",outcome=\"{outcome}\"}} {:.9}",
+                nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000_f64
+            );
+        }
+        output.push_str(
+            "# HELP insight_runtime_notification_listener_state Durable work listener connection state.\n\
+             # TYPE insight_runtime_notification_listener_state gauge\n",
+        );
+        let _ = writeln!(
+            output,
+            "insight_runtime_notification_listener_state{{backend=\"{backend}\"}} {}",
+            u8::from(
+                backend == "sqlite"
+                    || metrics
+                        .notification_listener_connected
+                        .load(Ordering::Relaxed)
+            )
+        );
+        output.push_str(
+            "# HELP insight_runtime_notification_listener_reconnects_total Durable work listener reconnect attempts.\n\
+             # TYPE insight_runtime_notification_listener_reconnects_total counter\n",
+        );
+        let _ = writeln!(
+            output,
+            "insight_runtime_notification_listener_reconnects_total{{backend=\"{backend}\"}} {}",
+            metrics
+                .notification_listener_reconnects
+                .load(Ordering::Relaxed)
+        );
+        output.push_str(
+            "# HELP insight_runtime_notification_publisher_total Process-coalesced cross-process work hints.\n\
+             # TYPE insight_runtime_notification_publisher_total counter\n",
+        );
+        for (outcome, counter) in [
+            ("requested", &metrics.notification_publish_requests),
+            ("published", &metrics.notification_published),
+            ("error", &metrics.notification_publish_errors),
+        ] {
+            let _ = writeln!(
+                output,
+                "insight_runtime_notification_publisher_total{{backend=\"{backend}\",outcome=\"{outcome}\"}} {}",
+                counter.load(Ordering::Relaxed)
+            );
+        }
+        output
     }
 
     /// Lists the effective public Agent routes from one durable publication
@@ -2005,6 +2376,10 @@ impl RunService {
                 ));
             }
             ActiveRunReservation::CapacityFull => {
+                self.inner
+                    .metrics
+                    .admission_capacity_rejected
+                    .fetch_add(1, Ordering::Relaxed);
                 return Err(ServiceError::new(
                     "RUN_CAPACITY_EXCEEDED",
                     "Run capacity is exhausted",
@@ -2069,6 +2444,10 @@ impl RunService {
                 });
             }
         }
+        self.inner
+            .metrics
+            .admission_accepted
+            .fetch_add(1, Ordering::Relaxed);
         // Attached SSE is live-only: publish the durable admission event while
         // its receiver is already open, before Run start can produce a later
         // sequence. This makes `run.created` the observable first event
@@ -3277,16 +3656,13 @@ impl RunService {
 
     async fn spawn_background(&self) {
         let mut tasks = self.inner.background.lock().await;
-        tasks.push(spawn_recovery_pump(Arc::clone(&self.inner)));
-        for worker_index in 0..self.inner.config.max_concurrent_operations {
-            tasks.push(spawn_worker_pump(Arc::clone(&self.inner), worker_index));
-        }
-        tasks.push(spawn_runtime_ingress_pump(Arc::clone(&self.inner)));
-        tasks.push(spawn_public_event_pump(Arc::clone(&self.inner)));
+        tasks.push(spawn_worker_coordinator(Arc::clone(&self.inner)));
         tasks.push(spawn_public_event_prune_pump(Arc::clone(&self.inner)));
         tasks.push(spawn_public_event_notification_pump(Arc::clone(
             &self.inner,
         )));
+        tasks.push(spawn_work_notification_pump(Arc::clone(&self.inner)));
+        tasks.push(spawn_work_notification_publisher(Arc::clone(&self.inner)));
         if self.inner.artifact_store.is_some() {
             tasks.push(spawn_artifact_gc_pump(Arc::clone(&self.inner)));
         }
@@ -3304,6 +3680,26 @@ enum ActiveRunReservation {
     Existing,
     NewlyReserved,
     CapacityFull,
+}
+
+enum CoordinatedWorkClaim {
+    Scheduler(Box<SchedulerTaskClaim>),
+    ModelTool(Box<ModelToolTaskClaim>),
+    Recovery(RunId),
+}
+
+type WorkerExecutionResult = Result<Result<(), ServiceError>, Box<dyn std::any::Any + Send>>;
+type WorkerCompletion =
+    Result<(usize, Option<RunId>, WorkerExecutionResult), tokio::task::JoinError>;
+
+impl CoordinatedWorkClaim {
+    const fn work_class(&self) -> WorkClass {
+        match self {
+            Self::Scheduler(_) => WorkClass::SchedulerTask,
+            Self::ModelTool(_) => WorkClass::ModelToolTask,
+            Self::Recovery(_) => WorkClass::Recovery,
+        }
+    }
 }
 
 impl<'a> ActiveRunGuard<'a> {
@@ -3357,6 +3753,32 @@ impl Drop for LiveRunGuard<'_> {
 }
 
 impl RunServiceInner {
+    fn wake_work(&self, work: u8, source: CoordinatorWakeupSource) {
+        if source == CoordinatorWakeupSource::Completion {
+            self.request_cross_process_work_hint();
+        }
+        if self.config.pump_interval != DEFAULT_PUMP_INTERVAL {
+            return;
+        }
+        self.metrics.record_wakeup(source);
+        self.pending_work.fetch_or(work, Ordering::Release);
+        self.work_wakeup.notify_one();
+    }
+
+    fn request_cross_process_work_hint(&self) {
+        if self.repository.run_repository_capability() != RunRepositoryCapability::Production
+            || self.shutdown.is_cancelled()
+        {
+            return;
+        }
+        self.metrics
+            .notification_publish_requests
+            .fetch_add(1, Ordering::Relaxed);
+        self.work_notification_publish_pending
+            .store(true, Ordering::Release);
+        self.work_notification_publish_wakeup.notify_one();
+    }
+
     /// Publishes the completed function-call item only after its durable
     /// checkpoint and tool-batch activation have committed. Exact activation
     /// replay carries the same frozen identity and canonical arguments, so
@@ -3518,6 +3940,9 @@ impl RunServiceInner {
             return Ok(false);
         }
         if active.len() >= self.config.max_concurrent_runs {
+            self.metrics
+                .admission_capacity_rejected
+                .fetch_add(1, Ordering::Relaxed);
             return Err(ServiceError::new(
                 "RUN_CAPACITY_EXCEEDED",
                 "Run capacity is exhausted",
@@ -3643,6 +4068,7 @@ impl RunServiceInner {
         let linked = agent
             .linked_plan()
             .map_err(|_| ServiceError::new("RUN_DEPLOYMENT_UNAVAILABLE", "Plan link failed"))?;
+        let projection_version_before_drive = projection.projection_version();
         let drive = drive_scheduler_until_quiescent(
             self.repository.as_ref(),
             &linked,
@@ -3663,6 +4089,20 @@ impl RunServiceInner {
                 } else if let Some(reservation) = &mut reservation {
                     reservation.retain();
                 }
+                let mut wake = WORK_SCHEDULER_TASK
+                    | WORK_MODEL_TOOL_TASK
+                    | WORK_RUNTIME_INGRESS
+                    | WORK_PUBLIC_EVENT;
+                // PostgreSQL gets this hint from the workflow_runs trigger.
+                // SQLite has no cross-process listener; one progress-driven
+                // recovery hint closes local subflow/child continuation
+                // without turning every quiescent wait into a poll loop.
+                if self.config.deployment_mode == RunServiceDeploymentMode::SingleProcessDevelopment
+                    && projection.projection_version() > projection_version_before_drive
+                {
+                    wake |= WORK_RECOVERY;
+                }
+                self.wake_work(wake, CoordinatorWakeupSource::Completion);
                 Ok(())
             }
             SchedulerRecoveryOutcome::Fenced => {
@@ -3680,17 +4120,6 @@ impl RunServiceInner {
         self.repository
             .release_production_scheduler_run(key, fence)
             .await?;
-        Ok(())
-    }
-
-    async fn recovery_cycle(&self) -> Result<(), ServiceError> {
-        let runs = self
-            .repository
-            .list_recoverable_scheduler_runs(MAX_RECOVERY_BATCH)
-            .await?;
-        for run_id in runs {
-            self.resume_run(&run_id, false).await?;
-        }
         Ok(())
     }
 
@@ -3802,7 +4231,11 @@ impl RunServiceInner {
         Ok(())
     }
 
-    async fn worker_cycle(&self, worker_index: usize) -> Result<(), ServiceError> {
+    async fn claim_worker_task(
+        &self,
+        worker_index: usize,
+        requested_work: u8,
+    ) -> Result<Option<CoordinatedWorkClaim>, ServiceError> {
         let claimant = format!("{}_worker_{worker_index}", self.owner);
         // A per-Run limit larger than the process-global pool is valid and
         // naturally collapses to the global limit. This keeps independently
@@ -3818,75 +4251,100 @@ impl RunServiceInner {
             )
         })?;
         let model_tool_first = self.model_tool_turn.fetch_xor(true, Ordering::AcqRel);
-        if model_tool_first {
-            let outcome = consume_model_tool_task_once_with_observer(
+        if model_tool_first && requested_work & WORK_MODEL_TOOL_TASK != 0 {
+            let started = std::time::Instant::now();
+            let mut claims = SchedulerDurableRepository::claim_model_tool_calls(
                 self.repository.as_ref(),
-                self.workers.as_ref(),
                 &claimant,
                 self.config.task_claim_seconds,
+                1,
                 per_run,
-                self.shutdown.child_token(),
-                self.live_response_broker.as_ref(),
-                &NoSchedulerCrash,
             )
             .await?;
-            if !matches!(outcome, ModelToolWorkerPumpOutcome::NoTask) {
-                self.recovery_cycle().await?;
-                return Ok(());
+            self.metrics.record_claim(
+                WorkClass::ModelToolTask,
+                !claims.is_empty(),
+                started.elapsed(),
+            );
+            if let Some(claim) = claims.pop() {
+                return Ok(Some(CoordinatedWorkClaim::ModelTool(Box::new(claim))));
             }
         }
-        let outcome = match self.artifact_store.as_deref() {
-            Some(store) => {
-                consume_scheduler_task_once_with_artifact_store_and_retrieval_observer(
-                    self.repository.as_ref(),
-                    self.workers.as_ref(),
-                    &FrozenSchedulerWorkerFailurePolicy,
-                    &claimant,
-                    self.config.task_claim_seconds,
-                    per_run,
-                    self.shutdown.child_token(),
-                    store,
-                    self.live_response_broker.as_ref(),
-                    &NoSchedulerCrash,
-                )
-                .await?
-            }
-            None => {
-                consume_scheduler_task_once_with_retrieval_observer(
-                    self.repository.as_ref(),
-                    self.workers.as_ref(),
-                    &FrozenSchedulerWorkerFailurePolicy,
-                    &claimant,
-                    self.config.task_claim_seconds,
-                    per_run,
-                    self.shutdown.child_token(),
-                    self.live_response_broker.as_ref(),
-                    &NoSchedulerCrash,
-                )
-                .await?
-            }
-        };
-        if let SchedulerWorkerPumpOutcome::SuspendedForTools { activation, .. } = &outcome {
-            self.publish_completed_function_calls(activation);
-        }
-        if !matches!(outcome, SchedulerWorkerPumpOutcome::NoTask) {
-            self.recovery_cycle().await?;
-            return Ok(());
-        }
-        if !model_tool_first {
-            let outcome = consume_model_tool_task_once_with_observer(
+        if requested_work & WORK_SCHEDULER_TASK != 0 {
+            let started = std::time::Instant::now();
+            let mut claims = SchedulerDurableRepository::claim_scheduler_tasks_with_run_limit(
                 self.repository.as_ref(),
-                self.workers.as_ref(),
                 &claimant,
                 self.config.task_claim_seconds,
+                1,
                 per_run,
-                self.shutdown.child_token(),
-                self.live_response_broker.as_ref(),
-                &NoSchedulerCrash,
             )
             .await?;
-            if !matches!(outcome, ModelToolWorkerPumpOutcome::NoTask) {
-                self.recovery_cycle().await?;
+            self.metrics.record_claim(
+                WorkClass::SchedulerTask,
+                !claims.is_empty(),
+                started.elapsed(),
+            );
+            if let Some(claim) = claims.pop() {
+                return Ok(Some(CoordinatedWorkClaim::Scheduler(Box::new(claim))));
+            }
+        }
+        if !model_tool_first && requested_work & WORK_MODEL_TOOL_TASK != 0 {
+            let started = std::time::Instant::now();
+            let mut claims = SchedulerDurableRepository::claim_model_tool_calls(
+                self.repository.as_ref(),
+                &claimant,
+                self.config.task_claim_seconds,
+                1,
+                per_run,
+            )
+            .await?;
+            self.metrics.record_claim(
+                WorkClass::ModelToolTask,
+                !claims.is_empty(),
+                started.elapsed(),
+            );
+            if let Some(claim) = claims.pop() {
+                return Ok(Some(CoordinatedWorkClaim::ModelTool(Box::new(claim))));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn execute_worker_claim(&self, claim: CoordinatedWorkClaim) -> Result<(), ServiceError> {
+        match claim {
+            CoordinatedWorkClaim::Scheduler(claim) => {
+                let outcome =
+                    consume_claimed_scheduler_task_with_artifact_store_and_retrieval_observer(
+                        self.repository.as_ref(),
+                        self.workers.as_ref(),
+                        &FrozenSchedulerWorkerFailurePolicy,
+                        self.config.task_claim_seconds,
+                        self.shutdown.child_token(),
+                        self.artifact_store.as_deref(),
+                        self.live_response_broker.as_ref(),
+                        &NoSchedulerCrash,
+                        *claim,
+                    )
+                    .await?;
+                if let SchedulerWorkerPumpOutcome::SuspendedForTools { activation, .. } = &outcome {
+                    self.publish_completed_function_calls(activation);
+                }
+            }
+            CoordinatedWorkClaim::ModelTool(claim) => {
+                consume_claimed_model_tool_task_with_observer(
+                    self.repository.as_ref(),
+                    self.workers.as_ref(),
+                    self.config.task_claim_seconds,
+                    self.shutdown.child_token(),
+                    self.live_response_broker.as_ref(),
+                    &NoSchedulerCrash,
+                    *claim,
+                )
+                .await?;
+            }
+            CoordinatedWorkClaim::Recovery(run_id) => {
+                self.resume_run(&run_id, false).await?;
             }
         }
         Ok(())
@@ -3896,31 +4354,12 @@ impl RunServiceInner {
         let Some(store) = self.artifact_store.as_deref() else {
             return Ok(());
         };
-        let retention_seconds = u32::try_from(self.config.artifact_reference_retention.as_secs())
-            .map_err(|_| {
-            ServiceError::new(
-                "RUN_SERVICE_CONFIG_INVALID",
-                "artifact reference retention is invalid",
-            )
-        })?;
-        for run_id in self
-            .repository
-            .list_unreleased_terminal_artifact_runs(MAX_RUNTIME_INGRESS_BATCH)
-            .await?
-        {
-            let key = transition_key("artifact.retention.release", &[run_id.as_str()])?;
-            let command = ReleaseRunArtifactRetentionCommand::new(run_id, retention_seconds)?;
-            match self
-                .repository
-                .release_run_artifact_retention(key, command)
-                .await?
-            {
-                TransitionOutcome::Committed { .. }
-                | TransitionOutcome::ExactReplay { .. }
-                | TransitionOutcome::StaleLease
-                | TransitionOutcome::StateConflict => {}
-            }
-        }
+        // Every Run admitted by this schema registers Artifact retention in
+        // the same transaction as terminal state. Looking for the absence of
+        // that receipt is an unbounded anti-join over all closed Runs, so it
+        // must not run as periodic online maintenance. The repository scanner
+        // and legacy command remain available to an explicit pre-cutover
+        // verifier/repair tool, where a historical full scan is intentional.
         let orphan_retention_seconds =
             u32::try_from(self.config.artifact_orphan_retention.as_secs()).map_err(|_| {
                 ServiceError::new(
@@ -4604,73 +5043,261 @@ fn transition_key(operation: &str, parts: &[&str]) -> Result<TransitionKey, Serv
         .map_err(|_| ServiceError::new("RUN_CONFLICT", "transition identity is invalid"))
 }
 
-fn spawn_recovery_pump(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
+fn spawn_worker_coordinator(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let coordinator = inner.config.effective_work_coordinator();
+        let mut workers = JoinSet::new();
+        let mut in_flight_recovery = BTreeSet::new();
+        let mut worker_index = 0_usize;
+        let mut idle_interval = coordinator.idle_poll_min_interval;
+        let mut jitter_sequence = 0_u64;
+        let mut ready_work = if inner.config.pump_interval == DEFAULT_PUMP_INTERVAL {
+            WORK_ALL
+        } else {
+            0
+        };
+        let mut next_ingress_deadline = None;
+        let mut next_safety_deadline =
+            tokio::time::Instant::now() + coordinator.safety_poll_interval;
         loop {
-            tokio::select! {
-                _ = inner.shutdown.cancelled() => return,
-                _ = tokio::time::sleep(inner.config.pump_interval) => {}
+            ready_work |= inner.pending_work.swap(0, Ordering::AcqRel);
+            let now = tokio::time::Instant::now();
+            if now >= next_safety_deadline {
+                inner.metrics.record_wakeup(CoordinatorWakeupSource::Safety);
+                ready_work |= WORK_ALL;
+                next_safety_deadline = now + coordinator.safety_poll_interval;
             }
-            if let Err(error) = inner.recovery_cycle().await {
-                tracing::warn!(code = error.code(), "scheduler recovery cycle failed");
+            if next_ingress_deadline.is_some_and(|deadline| now >= deadline) {
+                inner
+                    .metrics
+                    .record_wakeup(CoordinatorWakeupSource::Deadline);
+                ready_work |= WORK_RUNTIME_INGRESS;
+                next_ingress_deadline = None;
             }
-        }
-    })
-}
 
-fn spawn_worker_pump(inner: Arc<RunServiceInner>, worker_index: usize) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = inner.shutdown.cancelled() => return,
-                _ = tokio::time::sleep(inner.config.pump_interval) => {}
+            if ready_work & WORK_RUNTIME_INGRESS != 0 {
+                if let Err(error) = inner.runtime_ingress_cycle().await {
+                    tracing::warn!(code = error.code(), "timer/signal ingress cycle failed");
+                }
+                next_ingress_deadline = match inner.repository.next_runtime_ingress_delay().await {
+                    Ok(Some(delay)) => tokio::time::Instant::now().checked_add(delay),
+                    Ok(None) => None,
+                    Err(error) => {
+                        tracing::warn!(code = error.code(), "next timer/deadline discovery failed");
+                        tokio::time::Instant::now().checked_add(coordinator.safety_poll_interval)
+                    }
+                };
             }
-            // Keep the long-lived pump supervised even if repository or host
-            // adapter code panics outside the executor boundary. A claimed
-            // task remains protected by its durable lease and is reclaimed by
-            // a later cycle; the runtime must not silently lose capacity.
-            match std::panic::AssertUnwindSafe(inner.worker_cycle(worker_index))
-                .catch_unwind()
-                .await
+            if ready_work & WORK_PUBLIC_EVENT != 0 {
+                if let Err(error) = inner.flush_public_events().await {
+                    tracing::warn!(code = error.code(), "public event cycle failed");
+                }
+            }
+
+            let mut claimed_any = false;
+            if ready_work & WORK_RECOVERY != 0 {
+                let available_permits = inner
+                    .config
+                    .max_concurrent_operations
+                    .saturating_sub(workers.len());
+                let recovery_budget = available_permits
+                    .min(coordinator.claim_batch_size as usize)
+                    .min(MAX_RECOVERY_BATCH as usize);
+                if recovery_budget > 0 {
+                    let discovery_limit = recovery_budget
+                        .saturating_add(in_flight_recovery.len())
+                        .min(MAX_RECOVERY_BATCH as usize);
+                    match inner
+                        .repository
+                        .list_recoverable_scheduler_runs(discovery_limit as u32)
+                        .await
+                    {
+                        Ok(runs) => {
+                            for run_id in runs
+                                .into_iter()
+                                .filter(|run_id| in_flight_recovery.insert(run_id.clone()))
+                                .take(recovery_budget)
+                            {
+                                claimed_any = true;
+                                let claim = CoordinatedWorkClaim::Recovery(run_id.clone());
+                                let work_class = claim.work_class();
+                                let task_inner = Arc::clone(&inner);
+                                let task_worker_index = worker_index;
+                                workers.spawn(async move {
+                                    let executing =
+                                        task_inner.metrics.executing_counter(work_class);
+                                    executing.fetch_add(1, Ordering::Relaxed);
+                                    let result = std::panic::AssertUnwindSafe(
+                                        task_inner.execute_worker_claim(claim),
+                                    )
+                                    .catch_unwind()
+                                    .await;
+                                    executing.fetch_sub(1, Ordering::Relaxed);
+                                    (task_worker_index, Some(run_id), result)
+                                });
+                                worker_index = worker_index.wrapping_add(1);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                code = error.code(),
+                                "scheduler recovery discovery failed"
+                            );
+                        }
+                    }
+                }
+            }
+
+            let requested_worker_work = ready_work & (WORK_SCHEDULER_TASK | WORK_MODEL_TOOL_TASK);
+            if requested_worker_work != 0 {
+                let available_permits = inner
+                    .config
+                    .max_concurrent_operations
+                    .saturating_sub(workers.len());
+                let claim_budget = available_permits.min(coordinator.claim_batch_size as usize);
+                for _ in 0..claim_budget {
+                    let claim = match std::panic::AssertUnwindSafe(
+                        inner.claim_worker_task(worker_index, requested_worker_work),
+                    )
+                    .catch_unwind()
+                    .await
+                    {
+                        Ok(Ok(claim)) => claim,
+                        Ok(Err(error)) => {
+                            tracing::warn!(code = error.code(), "scheduler work discovery failed");
+                            break;
+                        }
+                        Err(_) => {
+                            tracing::error!("scheduler work discovery panicked");
+                            break;
+                        }
+                    };
+                    let Some(claim) = claim else {
+                        break;
+                    };
+                    claimed_any = true;
+                    let work_class = claim.work_class();
+                    let task_inner = Arc::clone(&inner);
+                    let task_worker_index = worker_index;
+                    workers.spawn(async move {
+                        let executing = task_inner.metrics.executing_counter(work_class);
+                        executing.fetch_add(1, Ordering::Relaxed);
+                        let result =
+                            std::panic::AssertUnwindSafe(task_inner.execute_worker_claim(claim))
+                                .catch_unwind()
+                                .await;
+                        executing.fetch_sub(1, Ordering::Relaxed);
+                        (task_worker_index, None, result)
+                    });
+                    worker_index = worker_index.wrapping_add(1);
+                }
+                if claimed_any {
+                    idle_interval = coordinator.idle_poll_min_interval;
+                } else {
+                    idle_interval = idle_interval
+                        .checked_mul(2)
+                        .unwrap_or(coordinator.idle_poll_max_interval)
+                        .min(coordinator.idle_poll_max_interval);
+                }
+            }
+            ready_work = 0;
+
+            let poll_interval = if workers.is_empty() {
+                jitter_sequence = jitter_sequence.wrapping_add(1);
+                jittered_poll_interval(idle_interval, jitter_sequence)
+            } else {
+                coordinator.active_poll_interval
+            };
+            let queue_poll_deadline = (workers.len() < inner.config.max_concurrent_operations)
+                .then(|| tokio::time::Instant::now() + poll_interval);
+            let mut wake_deadline = next_safety_deadline;
+            if let Some(deadline) = queue_poll_deadline {
+                wake_deadline = wake_deadline.min(deadline);
+            }
+            if let Some(deadline) = next_ingress_deadline {
+                wake_deadline = wake_deadline.min(deadline);
+            }
+
+            let completed = if workers.is_empty() {
+                tokio::select! {
+                    _ = inner.shutdown.cancelled() => None,
+                    _ = inner.work_wakeup.notified() => Some(None),
+                    _ = tokio::time::sleep_until(wake_deadline) => Some(None),
+                }
+            } else {
+                tokio::select! {
+                    _ = inner.shutdown.cancelled() => None,
+                    _ = inner.work_wakeup.notified() => Some(None),
+                    completed = workers.join_next() => Some(completed),
+                    _ = tokio::time::sleep_until(wake_deadline) => Some(None),
+                }
+            };
+            let Some(completed) = completed else {
+                while let Some(completed) = workers.join_next().await {
+                    remove_completed_recovery(&completed, &mut in_flight_recovery);
+                    supervise_worker_completion(completed);
+                }
+                return;
+            };
+            if let Some(completed) = completed {
+                remove_completed_recovery(&completed, &mut in_flight_recovery);
+                inner
+                    .metrics
+                    .record_wakeup(CoordinatorWakeupSource::Completion);
+                inner.request_cross_process_work_hint();
+                ready_work |= supervise_worker_completion(completed);
+            } else if queue_poll_deadline
+                .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
             {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(code = error.code(), "scheduler worker cycle failed");
-                }
-                Err(_) => {
-                    tracing::error!(worker_index, "scheduler worker cycle panicked");
-                }
+                ready_work |= if inner.config.pump_interval == DEFAULT_PUMP_INTERVAL {
+                    WORK_SCHEDULER_TASK | WORK_MODEL_TOOL_TASK
+                } else {
+                    WORK_ALL
+                };
             }
         }
     })
 }
 
-fn spawn_runtime_ingress_pump(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = inner.shutdown.cancelled() => return,
-                _ = tokio::time::sleep(inner.config.pump_interval) => {}
-            }
-            if let Err(error) = inner.runtime_ingress_cycle().await {
-                tracing::warn!(code = error.code(), "timer/signal ingress cycle failed");
-            }
-        }
-    })
+fn jittered_poll_interval(base: Duration, sequence: u64) -> Duration {
+    // A deterministic process-local sequence avoids pulling payload-bearing
+    // randomness into scheduler logs while still de-synchronizing repeated
+    // safety polls. The multiplier spans the required inclusive ±20% range.
+    let percent = 80 + sequence.wrapping_mul(17) % 41;
+    base.mul_f64(percent as f64 / 100.0)
 }
 
-fn spawn_public_event_pump(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = inner.shutdown.cancelled() => return,
-                _ = tokio::time::sleep(inner.config.pump_interval) => {}
-            }
-            if let Err(error) = inner.flush_public_events().await {
-                tracing::warn!(code = error.code(), "public event cycle failed");
-            }
+fn remove_completed_recovery(
+    completed: &WorkerCompletion,
+    in_flight_recovery: &mut BTreeSet<RunId>,
+) {
+    if let Ok((_, Some(run_id), _)) = completed {
+        in_flight_recovery.remove(run_id);
+    }
+}
+
+fn supervise_worker_completion(completed: WorkerCompletion) -> u8 {
+    match completed {
+        Ok((_, _, Ok(Ok(())))) => {
+            WORK_SCHEDULER_TASK | WORK_MODEL_TOOL_TASK | WORK_PUBLIC_EVENT | WORK_RECOVERY
         }
-    })
+        Ok((_, _, Ok(Err(error)))) => {
+            tracing::warn!(code = error.code(), "scheduler worker execution failed");
+            0
+        }
+        Ok((worker_index, _, Err(_))) => {
+            tracing::error!(worker_index, "scheduler worker execution panicked");
+            0
+        }
+        Err(error) => {
+            if error.is_cancelled() {
+                tracing::warn!("scheduler worker execution was cancelled");
+            } else {
+                tracing::error!("scheduler worker task failed");
+            }
+            0
+        }
+    }
 }
 
 fn spawn_public_event_prune_pump(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
@@ -4744,6 +5371,146 @@ fn spawn_public_event_notification_pump(inner: Arc<RunServiceInner>) -> JoinHand
             }
         }
     })
+}
+
+fn spawn_work_notification_pump(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if inner.shutdown.is_cancelled() {
+                return;
+            }
+            let mut stream = match inner.repository.open_work_notification_stream().await {
+                Ok(Some(stream)) => {
+                    inner
+                        .metrics
+                        .notification_listener_connected
+                        .store(true, Ordering::Release);
+                    stream
+                }
+                Ok(None) => return,
+                Err(error) => {
+                    inner
+                        .metrics
+                        .notification_listener_connected
+                        .store(false, Ordering::Release);
+                    inner
+                        .metrics
+                        .notification_listener_reconnects
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        code = error.code(),
+                        "durable work notification listener failed to connect"
+                    );
+                    tokio::select! {
+                        _ = inner.shutdown.cancelled() => return,
+                        _ = tokio::time::sleep(
+                            inner.config.work_coordinator.notification_reconnect_interval
+                        ) => continue,
+                    }
+                }
+            };
+            // Anything committed while the listener was disconnected is
+            // recovered by an immediate all-class safety scan.
+            inner.wake_work(WORK_ALL, CoordinatorWakeupSource::Safety);
+            loop {
+                let received = tokio::select! {
+                    _ = inner.shutdown.cancelled() => return,
+                    received = stream.recv() => received,
+                };
+                match received {
+                    Ok(work) => {
+                        inner.wake_work(work_class_bit(work), CoordinatorWakeupSource::Notify)
+                    }
+                    Err(error) => {
+                        inner
+                            .metrics
+                            .notification_listener_connected
+                            .store(false, Ordering::Release);
+                        inner
+                            .metrics
+                            .notification_listener_reconnects
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            code = error.code(),
+                            "durable work notification listener disconnected"
+                        );
+                        break;
+                    }
+                }
+            }
+            tokio::select! {
+                _ = inner.shutdown.cancelled() => return,
+                _ = tokio::time::sleep(
+                    inner.config.work_coordinator.notification_reconnect_interval
+                ) => {}
+            }
+        }
+    })
+}
+
+fn spawn_work_notification_publisher(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        if inner.repository.run_repository_capability() != RunRepositoryCapability::Production {
+            return;
+        }
+        let debounce = inner
+            .config
+            .work_coordinator
+            .notification_reconnect_interval;
+        loop {
+            tokio::select! {
+                _ = inner.shutdown.cancelled() => return,
+                _ = inner.work_notification_publish_wakeup.notified() => {}
+            }
+            tokio::select! {
+                _ = inner.shutdown.cancelled() => return,
+                _ = tokio::time::sleep(debounce) => {}
+            }
+            if !inner
+                .work_notification_publish_pending
+                .swap(false, Ordering::AcqRel)
+            {
+                continue;
+            }
+            match inner
+                .repository
+                .publish_work_notification(WorkClass::Maintenance)
+                .await
+            {
+                Ok(()) => {
+                    inner
+                        .metrics
+                        .notification_published
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    inner
+                        .metrics
+                        .notification_publish_errors
+                        .fetch_add(1, Ordering::Relaxed);
+                    inner
+                        .work_notification_publish_pending
+                        .store(true, Ordering::Release);
+                    inner.work_notification_publish_wakeup.notify_one();
+                    tracing::warn!(
+                        code = error.code(),
+                        "cross-process durable work notification publish failed"
+                    );
+                }
+            }
+        }
+    })
+}
+
+const fn work_class_bit(work: WorkClass) -> u8 {
+    match work {
+        WorkClass::SchedulerTask => WORK_SCHEDULER_TASK,
+        WorkClass::ModelToolTask => WORK_MODEL_TOOL_TASK,
+        WorkClass::RuntimeIngress => WORK_RUNTIME_INGRESS,
+        WorkClass::PublicEvent => WORK_PUBLIC_EVENT,
+        WorkClass::Recovery => WORK_RECOVERY,
+        WorkClass::Maintenance => WORK_ALL,
+    }
 }
 
 fn spawn_artifact_gc_pump(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
