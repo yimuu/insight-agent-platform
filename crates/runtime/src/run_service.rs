@@ -3315,6 +3315,34 @@ impl RunService {
             .metrics
             .admission_accepted
             .fetch_add(1, Ordering::Relaxed);
+        if attachment == PublicRunAttachment::Detached {
+            // A detached request acknowledges the durable admission boundary.
+            // Execution belongs to the supervised WorkCoordinator after that
+            // commit: its recovery worker contains failures, observes
+            // shutdown, and is backed by durable safety discovery. Keeping
+            // resume out of this request future also prevents a fast terminal
+            // failure from racing the HTTP 202 response.
+            active_run.retain();
+            self.inner.wake_work(
+                WORK_RECOVERY | WORK_PUBLIC_EVENT,
+                CoordinatorWakeupSource::Completion,
+            );
+            let projection = self
+                .inner
+                .repository
+                .load_run(&run_id)
+                .await?
+                .ok_or_else(|| {
+                    ServiceError::new("RUN_NOT_FOUND", "Run disappeared after creation")
+                })?;
+            if projection.lifecycle().is_terminal() {
+                self.inner.release_active_run(&run_id);
+            }
+            if let Some(live_run) = &mut live_run {
+                live_run.retain();
+            }
+            return Ok((projection, receiver, live_response));
+        }
         // Attached SSE is live-only: publish the durable admission event while
         // its receiver is already open, before Run start can produce a later
         // sequence. This makes `run.created` the observable first event

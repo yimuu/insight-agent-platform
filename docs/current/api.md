@@ -53,6 +53,14 @@ GraphAuthorDocument 在发布时重新验证并编译为 Canonical Plan。ViewDo
 `expected_projection_version`；checkpoint hash、effect proof 和 revision/schema 兼容证据由服务端
 从 durable authority 推导，客户端不能注入。
 
+Detached 创建接口以 durable admission commit 为成功边界，成功响应统一为 `202 Accepted`。
+响应中的 Run 可以仍是 `created`，也可以已经被后台 coordinator 推进为 `running` 或终态。
+admission 后的调度、worker 或 terminal commit 故障不会反向改写本次 HTTP 响应；客户端必须使用
+`GET /v1/runs/{run_id}` 查询最终结果。对于具备 admission 幂等契约的 Terminal-only 和
+Conversation 写接口，客户端遇到传输失败或 5xx 时必须使用相同 `X-Request-ID` 重试，因为响应
+生成失败前 admission 可能已经提交；服务端 replay 不得重复创建 Run 或 Conversation user
+message。
+
 `GET/DELETE /v1/runs/{run_id}` 以及 pause、resume、signal 和 recovery capability 检查对普通
 Run 接受可选 `X-Tenant-ID`，未提供时使用兼容默认值 `default`。Conversation turn 创建的 Run
 绑定完整 Conversation principal；客户端断线后必须继续携带同一组可信 `X-Tenant-ID` 与

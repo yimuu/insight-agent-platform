@@ -3046,9 +3046,13 @@ impl SchedulerLeaseRepository for PostgresDurableRepository {
                  scheduler_lease_owner = $2, scheduler_fencing_token = $3,
                  scheduler_lease_expires_at = CURRENT_TIMESTAMP + make_interval(secs => $4),
                  scheduler_heartbeat_at = CURRENT_TIMESTAMP
-             WHERE run_id = $1 AND lifecycle IN ('active', 'waiting', 'terminating')
+             WHERE run_id = $1
+               AND lifecycle IN ('active', 'waiting', 'completing', 'terminating')
                AND termination_intent_reason IS DISTINCT FROM 'migrated'
-               AND (admission_state = 'open' OR lifecycle = 'terminating')
+               AND (
+                   admission_state = 'open'
+                   OR lifecycle IN ('completing', 'terminating')
+               )
                AND (scheduler_lease_owner IS NULL OR scheduler_lease_expires_at <= CURRENT_TIMESTAMP)
              RETURNING scheduler_lease_epoch, scheduler_lease_expires_at",
         )

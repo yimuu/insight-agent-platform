@@ -298,7 +298,7 @@ workflow:
         )
         .await
         .unwrap();
-    assert_eq!(old_run.status(), RunStatus::Running);
+    assert_eq!(old_run.status(), RunStatus::Created);
     assert_eq!(old_run.agent_version, old.deployment_revision_id().as_str());
     first.shutdown(Duration::from_secs(2)).await.unwrap();
     drop(first);

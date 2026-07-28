@@ -2437,8 +2437,12 @@ impl ProductionRunRepository for SqliteDurableRepository {
                  scheduler_lease_owner = ?, scheduler_fencing_token = ?,
                  scheduler_lease_expires_at = datetime('now', '+' || ? || ' seconds'),
                  scheduler_heartbeat_at = CURRENT_TIMESTAMP
-             WHERE run_id = ? AND lifecycle IN ('active','waiting','terminating')
-               AND (admission_state = 'open' OR lifecycle = 'terminating')
+             WHERE run_id = ?
+               AND lifecycle IN ('active','waiting','completing','terminating')
+               AND (
+                   admission_state = 'open'
+                   OR lifecycle IN ('completing','terminating')
+               )
              RETURNING scheduler_lease_epoch",
         )
         .bind(command.owner())

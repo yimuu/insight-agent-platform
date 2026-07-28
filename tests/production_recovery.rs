@@ -394,14 +394,45 @@ async fn waiting_source(
     service: &RunService,
     label: &str,
 ) -> insight_agent_platform::history::types::RunRecord {
-    service
+    let created = service
         .create_detached(
             "recovery_v1",
             json!({"label": label}),
             RequestMetadata::default(),
         )
         .await
-        .unwrap()
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + ASYNC_TRANSITION_TIMEOUT;
+    loop {
+        let waiting = service
+            .list_human_tasks("recovery-reviewer", Vec::new(), 100)
+            .await
+            .unwrap()
+            .iter()
+            .any(|item| item.run_id().as_str() == created.run_id);
+        if waiting {
+            let current = service.get_run(&created.run_id).await.unwrap();
+            assert_eq!(
+                current.status(),
+                RunStatus::Running,
+                "source Run exposed a human task outside its active/waiting lifecycle"
+            );
+            return current;
+        }
+        let current = service.get_run(&created.run_id).await.unwrap();
+        assert!(
+            !current.status().is_terminal(),
+            "source Run reached {:?} before exposing its human task",
+            current.status()
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "source Run did not reach its durable human wait within \
+             {ASYNC_TRANSITION_TIMEOUT:?}; last status: {:?}",
+            current.status()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn completed_source(

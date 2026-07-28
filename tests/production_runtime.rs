@@ -1160,7 +1160,7 @@ async fn sqlite_restart_resumes_nonterminal_run_and_preserves_public_identity() 
         )
         .await
         .unwrap();
-    assert_eq!(created.status(), RunStatus::Running);
+    assert_eq!(created.status(), RunStatus::Created);
     assert_eq!(created.request_id, "request-restart-1");
     assert_eq!(created.attachment, RunAttachment::Detached);
     assert_eq!(created.agent_version, revision);
@@ -1322,7 +1322,7 @@ async fn sqlite_restart_rejects_llm_descriptor_v1_without_applying_v2_defaults_a
         )
         .await
         .unwrap();
-    assert_eq!(current.status(), RunStatus::Running);
+    assert_eq!(current.status(), RunStatus::Created);
     let current_run_id = current.run_id.clone();
     first.shutdown(Duration::from_secs(1)).await.unwrap();
     drop(first);
@@ -1810,7 +1810,7 @@ async fn cancel_is_durable_and_idempotently_visible_through_get() {
         )
         .await
         .unwrap();
-    assert_eq!(created.status(), RunStatus::Running);
+    assert_eq!(created.status(), RunStatus::Created);
     let cancelled = service.cancel(&created.run_id).await.unwrap();
     assert_eq!(cancelled.status(), RunStatus::Cancelled);
     assert_eq!(cancelled.request_id, "request-cancel-1");
@@ -1992,7 +1992,7 @@ async fn max_concurrent_runs_bounds_nonterminal_runs_and_reopens_after_drain() {
         )
         .await
         .unwrap();
-    assert_eq!(first.status(), RunStatus::Running);
+    assert_eq!(first.status(), RunStatus::Created);
 
     let capacity = service
         .create_detached(
@@ -2020,7 +2020,7 @@ async fn max_concurrent_runs_bounds_nonterminal_runs_and_reopens_after_drain() {
         )
         .await
         .unwrap();
-    assert_eq!(admitted.status(), RunStatus::Running);
+    assert_eq!(admitted.status(), RunStatus::Created);
 
     service.shutdown(Duration::from_secs(1)).await.unwrap();
 }

@@ -3258,13 +3258,46 @@ async fn full_conversation_large_assistant_stage_and_terminal_result_commit_atom
             TENANT_ID,
             USER_ID,
             "full-atomic-stage-turn",
+            json!({"content": large_content.clone()}),
+        ),
+    )
+    .await;
+    assert_eq!(turn.status(), StatusCode::ACCEPTED);
+    let accepted_run_id = turn.headers()["x-run-id"].to_str().unwrap().to_owned();
+    let accepted_message_id = turn.headers()["x-message-id"].to_str().unwrap().to_owned();
+    let turn_body = json_body(turn).await;
+    assert_eq!(turn_body["data"]["replayed"], false);
+    assert_eq!(turn_body["data"]["run"]["run_id"], accepted_run_id);
+    assert_eq!(
+        turn_body["data"]["user_message"]["message_id"],
+        accepted_message_id
+    );
+
+    let replay = send(
+        &fixture.app,
+        conversation_write(
+            Method::POST,
+            format!("/v1/conversations/{conversation_id}/messages"),
+            TENANT_ID,
+            USER_ID,
+            "full-atomic-stage-turn",
             json!({"content": large_content}),
         ),
     )
     .await;
-    assert_eq!(turn.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let run_id = sqlx::query_scalar::<_, String>(
-        "SELECT run_id FROM full_conversation_turns
+    assert_eq!(replay.status(), StatusCode::ACCEPTED);
+    assert_eq!(replay.headers()["x-run-id"], accepted_run_id);
+    assert_eq!(replay.headers()["x-message-id"], accepted_message_id);
+    let replay_body = json_body(replay).await;
+    assert_eq!(replay_body["data"]["replayed"], true);
+    assert_eq!(replay_body["data"]["run"]["run_id"], accepted_run_id);
+    assert_eq!(
+        replay_body["data"]["user_message"]["message_id"],
+        accepted_message_id
+    );
+
+    let (run_id, message_id) = sqlx::query_as::<_, (String, String)>(
+        "SELECT run_id,user_message_id FROM full_conversation_turns
          WHERE tenant_id=? AND request_id=? AND conversation_id=?",
     )
     .bind(TENANT_ID)
@@ -3273,6 +3306,8 @@ async fn full_conversation_large_assistant_stage_and_terminal_result_commit_atom
     .fetch_one(&fixture.inspection)
     .await
     .unwrap();
+    assert_eq!(run_id, accepted_run_id);
+    assert_eq!(message_id, accepted_message_id);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let staged = sqlx::query_scalar::<_, i64>(
@@ -3292,9 +3327,9 @@ async fn full_conversation_large_assistant_stage_and_terminal_result_commit_atom
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let (lifecycle, terminal_event_id, output_payload_id) =
-        sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
-            "SELECT lifecycle,terminal_event_id,output_payload_id
+    let (lifecycle, terminal_event_id, output_payload_id, output_artifact_id) =
+        sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+            "SELECT lifecycle,terminal_event_id,output_payload_id,output_artifact_id
              FROM workflow_runs WHERE run_id=?",
         )
         .bind(&run_id)
@@ -3304,6 +3339,7 @@ async fn full_conversation_large_assistant_stage_and_terminal_result_commit_atom
     assert_ne!(lifecycle, "succeeded");
     assert!(terminal_event_id.is_none());
     assert!(output_payload_id.is_none());
+    assert!(output_artifact_id.is_none());
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM conversation_messages
@@ -3321,6 +3357,59 @@ async fn full_conversation_large_assistant_stage_and_terminal_result_commit_atom
         .execute(&fixture.inspection)
         .await
         .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        fixture.service.reconcile_startup().await.unwrap();
+        let lifecycle =
+            sqlx::query_scalar::<_, String>("SELECT lifecycle FROM workflow_runs WHERE run_id=?")
+                .bind(&run_id)
+                .fetch_one(&fixture.inspection)
+                .await
+                .unwrap();
+        if lifecycle == "succeeded" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Run did not recover its rolled-back terminal commit; last lifecycle: {lifecycle}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (terminal_event_id, output_payload_id, output_artifact_id) =
+        sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
+            "SELECT terminal_event_id,output_payload_id,output_artifact_id
+             FROM workflow_runs WHERE run_id=?",
+        )
+        .bind(&run_id)
+        .fetch_one(&fixture.inspection)
+        .await
+        .unwrap();
+    assert!(terminal_event_id.is_some());
+    assert_ne!(output_payload_id.is_some(), output_artifact_id.is_some());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM conversation_messages
+             WHERE conversation_id=? AND run_id=? AND role='assistant'",
+        )
+        .bind(&conversation_id)
+        .bind(&run_id)
+        .fetch_one(&fixture.inspection)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM terminal_artifact_staging
+             WHERE source_kind='assistant_message' AND source_id=?",
+        )
+        .bind(&run_id)
+        .fetch_one(&fixture.inspection)
+        .await
+        .unwrap(),
+        0
+    );
     fixture.shutdown().await;
 }
 

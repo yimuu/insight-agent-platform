@@ -254,7 +254,10 @@ async fn human_work_item_is_assigned_fenced_typed_and_idempotent_while_paused() 
         )
         .await
         .unwrap();
-    assert_eq!(created.status(), RunStatus::Running);
+    assert!(matches!(
+        created.status(),
+        RunStatus::Created | RunStatus::Running
+    ));
     let item = wait_for_human_item(
         &service,
         &created.run_id,

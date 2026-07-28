@@ -284,7 +284,10 @@ async fn ordinary_process_restart_keeps_a_nonterminal_run_recoverable() {
         StatusCode::ACCEPTED,
     )
     .await;
-    assert_eq!(created["data"]["status"], "running");
+    assert!(matches!(
+        created["data"]["status"].as_str(),
+        Some("created" | "running")
+    ));
     let run_id = created["data"]["run_id"].as_str().unwrap().to_owned();
     let first_output = first.shutdown();
     assert!(

@@ -11867,7 +11867,7 @@ impl SchedulerDurableRepository for PostgresDurableRepository {
         }
         sqlx::query_scalar::<_, String>(
             "SELECT r.run_id FROM workflow_runs r
-             WHERE r.lifecycle='terminating'
+             WHERE r.lifecycle IN ('completing','terminating')
                 OR (
                     r.lifecycle IN ('created','active','waiting')
                     AND r.admission_state='open'
@@ -11888,6 +11888,15 @@ impl SchedulerDurableRepository for PostgresDurableRepository {
                                      checkpoint.checkpoint_id DESC
                             LIMIT 1
                         )='task_completed'
+                        OR (
+                            SELECT checkpoint.fact_payload->'action'->>'kind'
+                            FROM scheduler_checkpoints checkpoint
+                            WHERE checkpoint.run_id=r.run_id
+                            ORDER BY checkpoint.scheduler_projection_version DESC,
+                                     checkpoint.created_at DESC,
+                                     checkpoint.checkpoint_id DESC
+                            LIMIT 1
+                        )='commit_native_output'
                         OR EXISTS (
                             SELECT 1
                             FROM scheduler_subflow_invocations invocation
