@@ -5,12 +5,20 @@
 //! claims external exactly-once I/O.
 
 use std::{
+    collections::BTreeMap,
+    fmt,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use async_trait::async_trait;
+use ring::{
+    aead::{self, Aad, LessSafeKey, Nonce, UnboundKey},
+    digest, hkdf,
+    rand::{SecureRandom as _, SystemRandom},
+};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
@@ -30,6 +38,158 @@ const SHARED_STORE_MARKER_FILE: &str = ".insight-agent-artifact-store-v1.json";
 const SHARED_STORE_MARKER_SCHEMA_VERSION: u32 = 1;
 const MAX_SHARED_STORE_MARKER_BYTES: usize = 4 * 1024;
 const MAX_SHARED_STORE_NAMESPACE_BYTES: usize = 128;
+const TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE: &str = "application/vnd.insight.terminal-object.v1+json";
+const TERMINAL_SCOPED_ARTIFACT_KIND: &str = "insight_terminal_object";
+const TENANT_ENCRYPTION_MAGIC: &[u8; 8] = b"IAPTEA01";
+const TENANT_ENCRYPTION_NONCE_BYTES: usize = 12;
+const TENANT_ENCRYPTION_DIGEST_BYTES: usize = 32;
+const TENANT_ENCRYPTION_TAG_BYTES: usize = 16;
+const TENANT_ENCRYPTION_MAX_KEY_VERSION_BYTES: usize = 64;
+const TENANT_ENCRYPTION_MAX_OVERHEAD: usize = TENANT_ENCRYPTION_MAGIC.len()
+    + 1
+    + TENANT_ENCRYPTION_MAX_KEY_VERSION_BYTES
+    + TENANT_ENCRYPTION_DIGEST_BYTES
+    + TENANT_ENCRYPTION_NONCE_BYTES
+    + TENANT_ENCRYPTION_TAG_BYTES;
+const TENANT_ENCRYPTION_HKDF_SALT: &[u8] = b"insight-agent-platform/tenant-artifact-encryption/v1";
+
+/// Versioned keyring for tenant-scoped Conversation and terminal objects.
+///
+/// The active key encrypts new objects. Older versions remain readable while
+/// present in the keyring, which permits a rolling key rotation without ever
+/// writing a key or plaintext tenant identifier into an object header.
+#[derive(Clone)]
+pub struct TenantArtifactEncryptionKeyring {
+    inner: Arc<TenantArtifactEncryptionKeyringInner>,
+}
+
+struct TenantArtifactEncryptionKeyringInner {
+    active_key_version: String,
+    keys: BTreeMap<String, [u8; 32]>,
+}
+
+impl Drop for TenantArtifactEncryptionKeyringInner {
+    fn drop(&mut self) {
+        for key in self.keys.values_mut() {
+            key.fill(0);
+        }
+    }
+}
+
+impl fmt::Debug for TenantArtifactEncryptionKeyring {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TenantArtifactEncryptionKeyring")
+            .field("active_key_version", &self.inner.active_key_version)
+            .field("key_versions", &self.inner.keys.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
+}
+
+impl TenantArtifactEncryptionKeyring {
+    /// Parses a Secret value shaped as `{"version":"64 lowercase hex chars"}`.
+    ///
+    /// The JSON belongs in a Secret-backed environment variable. It must not
+    /// be embedded in platform YAML or Helm values.
+    pub fn from_secret_json(
+        active_key_version: impl Into<String>,
+        secret_json: &str,
+    ) -> Result<Self, RepositoryError> {
+        let active_key_version = active_key_version.into();
+        if !valid_key_version(&active_key_version) {
+            return Err(RepositoryError::invalid_configuration());
+        }
+        let encoded = serde_json::from_str::<BTreeMap<String, String>>(secret_json)
+            .map_err(|_| RepositoryError::invalid_configuration())?;
+        if encoded.is_empty() || encoded.len() > 32 {
+            return Err(RepositoryError::invalid_configuration());
+        }
+        let mut keys = BTreeMap::new();
+        for (version, value) in encoded {
+            if !valid_key_version(&version) || keys.insert(version, decode_key(&value)?).is_some() {
+                return Err(RepositoryError::invalid_configuration());
+            }
+        }
+        if !keys.contains_key(&active_key_version) {
+            return Err(RepositoryError::invalid_configuration());
+        }
+        Ok(Self {
+            inner: Arc::new(TenantArtifactEncryptionKeyringInner {
+                active_key_version,
+                keys,
+            }),
+        })
+    }
+
+    pub fn active_key_version(&self) -> &str {
+        &self.inner.active_key_version
+    }
+
+    fn encryption_key(
+        &self,
+        key_version: &str,
+        tenant_digest: &[u8; TENANT_ENCRYPTION_DIGEST_BYTES],
+    ) -> Result<LessSafeKey, RepositoryError> {
+        let master = self
+            .inner
+            .keys
+            .get(key_version)
+            .ok_or_else(RepositoryError::invalid_configuration)?;
+        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, TENANT_ENCRYPTION_HKDF_SALT);
+        let pseudo_random_key = salt.extract(master);
+        let prefix = b"tenant-aead:";
+        let separator = b":";
+        let info = [
+            prefix.as_slice(),
+            key_version.as_bytes(),
+            separator.as_slice(),
+            tenant_digest.as_slice(),
+        ];
+        let output = pseudo_random_key
+            .expand(&info, hkdf::HKDF_SHA256)
+            .map_err(|_| RepositoryError::invalid_configuration())?;
+        let mut derived = [0_u8; 32];
+        output
+            .fill(&mut derived)
+            .map_err(|_| RepositoryError::invalid_configuration())?;
+        let key = UnboundKey::new(&aead::AES_256_GCM, &derived)
+            .map(LessSafeKey::new)
+            .map_err(|_| RepositoryError::invalid_configuration());
+        derived.fill(0);
+        key
+    }
+}
+
+fn valid_key_version(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= TENANT_ENCRYPTION_MAX_KEY_VERSION_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn decode_key(value: &str) -> Result<[u8; 32], RepositoryError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(RepositoryError::invalid_configuration());
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        decoded[index] = (decode_hex_digit(chunk[0])? << 4) | decode_hex_digit(chunk[1])?;
+    }
+    Ok(decoded)
+}
+
+fn decode_hex_digit(value: u8) -> Result<u8, RepositoryError> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err(RepositoryError::invalid_configuration()),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -93,6 +253,7 @@ pub struct LocalContentAddressedArtifactStore {
     root: Arc<PathBuf>,
     inline_threshold_bytes: usize,
     deployment_contract: ArtifactStoreDeploymentContract,
+    tenant_encryption: Option<TenantArtifactEncryptionKeyring>,
 }
 
 impl LocalContentAddressedArtifactStore {
@@ -105,6 +266,22 @@ impl LocalContentAddressedArtifactStore {
             root: Arc::new(root),
             inline_threshold_bytes,
             deployment_contract: ArtifactStoreDeploymentContract::single_process_local(),
+            tenant_encryption: None,
+        })
+    }
+
+    /// Opens a local store that encrypts tenant-scoped terminal objects.
+    pub async fn open_with_tenant_encryption(
+        root: PathBuf,
+        inline_threshold_bytes: usize,
+        tenant_encryption: TenantArtifactEncryptionKeyring,
+    ) -> Result<Self, RepositoryError> {
+        let root = open_root(root, inline_threshold_bytes).await?;
+        Ok(Self {
+            root: Arc::new(root),
+            inline_threshold_bytes,
+            deployment_contract: ArtifactStoreDeploymentContract::single_process_local(),
+            tenant_encryption: Some(tenant_encryption),
         })
     }
 
@@ -130,6 +307,31 @@ impl LocalContentAddressedArtifactStore {
                 marker.store_id,
                 marker.namespace,
             ),
+            tenant_encryption: None,
+        })
+    }
+
+    /// Opens a shared store with a Secret-backed tenant encryption keyring.
+    pub async fn open_shared_with_tenant_encryption(
+        root: PathBuf,
+        inline_threshold_bytes: usize,
+        namespace: impl Into<String>,
+        tenant_encryption: TenantArtifactEncryptionKeyring,
+    ) -> Result<Self, RepositoryError> {
+        let namespace = namespace.into();
+        if !valid_namespace(&namespace) {
+            return Err(RepositoryError::invalid_configuration());
+        }
+        let root = open_root(root, inline_threshold_bytes).await?;
+        let marker = open_shared_marker(&root, &namespace).await?;
+        Ok(Self {
+            root: Arc::new(root),
+            inline_threshold_bytes,
+            deployment_contract: artifact_store_adapter::shared_deployment_contract(
+                marker.store_id,
+                marker.namespace,
+            ),
+            tenant_encryption: Some(tenant_encryption),
         })
     }
 
@@ -202,6 +404,229 @@ impl LocalContentAddressedArtifactStore {
         }
         Ok(())
     }
+
+    fn encode_stored_bytes(
+        &self,
+        artifact: &ArtifactRef,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, RepositoryError> {
+        let Some(keyring) = self.tenant_encryption.as_ref() else {
+            return Ok(bytes.to_vec());
+        };
+        let Some(tenant_digest) = scoped_tenant_digest(artifact, bytes)? else {
+            return Ok(bytes.to_vec());
+        };
+        let key_version = keyring.active_key_version();
+        let key_version_length = u8::try_from(key_version.len())
+            .map_err(|_| RepositoryError::invalid_configuration())?;
+        let key = keyring.encryption_key(key_version, &tenant_digest)?;
+        let mut nonce_bytes = [0_u8; TENANT_ENCRYPTION_NONCE_BYTES];
+        SystemRandom::new()
+            .fill(&mut nonce_bytes)
+            .map_err(|_| storage_failure())?;
+        let nonce = Nonce::assume_unique_for_key(nonce_bytes);
+        let aad = tenant_encryption_aad(artifact, key_version, &tenant_digest)?;
+        let mut encrypted = bytes.to_vec();
+        key.seal_in_place_append_tag(nonce, Aad::from(aad.as_slice()), &mut encrypted)
+            .map_err(|_| storage_failure())?;
+        let mut stored = Vec::with_capacity(
+            TENANT_ENCRYPTION_MAGIC.len()
+                + 1
+                + key_version.len()
+                + tenant_digest.len()
+                + nonce_bytes.len()
+                + encrypted.len(),
+        );
+        stored.extend_from_slice(TENANT_ENCRYPTION_MAGIC);
+        stored.push(key_version_length);
+        stored.extend_from_slice(key_version.as_bytes());
+        stored.extend_from_slice(&tenant_digest);
+        stored.extend_from_slice(&nonce_bytes);
+        stored.extend_from_slice(&encrypted);
+        Ok(stored)
+    }
+
+    fn decode_stored_bytes(
+        &self,
+        artifact: &ArtifactRef,
+        stored: &[u8],
+    ) -> Result<Vec<u8>, RepositoryError> {
+        if artifact.media_type() != Some(TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE)
+            || !stored.starts_with(TENANT_ENCRYPTION_MAGIC)
+        {
+            return Ok(stored.to_vec());
+        }
+        let keyring = self
+            .tenant_encryption
+            .as_ref()
+            .ok_or_else(RepositoryError::invalid_configuration)?;
+        let key_version_length = usize::from(
+            *stored
+                .get(TENANT_ENCRYPTION_MAGIC.len())
+                .ok_or_else(RepositoryError::invalid_data)?,
+        );
+        if key_version_length == 0 || key_version_length > TENANT_ENCRYPTION_MAX_KEY_VERSION_BYTES {
+            return Err(RepositoryError::invalid_data());
+        }
+        let version_start = TENANT_ENCRYPTION_MAGIC.len() + 1;
+        let version_end = version_start
+            .checked_add(key_version_length)
+            .ok_or_else(RepositoryError::invalid_data)?;
+        let digest_end = version_end
+            .checked_add(TENANT_ENCRYPTION_DIGEST_BYTES)
+            .ok_or_else(RepositoryError::invalid_data)?;
+        let nonce_end = digest_end
+            .checked_add(TENANT_ENCRYPTION_NONCE_BYTES)
+            .ok_or_else(RepositoryError::invalid_data)?;
+        let key_version = std::str::from_utf8(
+            stored
+                .get(version_start..version_end)
+                .ok_or_else(RepositoryError::invalid_data)?,
+        )
+        .map_err(|_| RepositoryError::invalid_data())?;
+        if !valid_key_version(key_version) {
+            return Err(RepositoryError::invalid_data());
+        }
+        let tenant_digest: [u8; TENANT_ENCRYPTION_DIGEST_BYTES] = stored
+            .get(version_end..digest_end)
+            .ok_or_else(RepositoryError::invalid_data)?
+            .try_into()
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let nonce_bytes: [u8; TENANT_ENCRYPTION_NONCE_BYTES] = stored
+            .get(digest_end..nonce_end)
+            .ok_or_else(RepositoryError::invalid_data)?
+            .try_into()
+            .map_err(|_| RepositoryError::invalid_data())?;
+        let mut encrypted = stored
+            .get(nonce_end..)
+            .ok_or_else(RepositoryError::invalid_data)?
+            .to_vec();
+        if encrypted.len() < TENANT_ENCRYPTION_TAG_BYTES {
+            return Err(RepositoryError::invalid_data());
+        }
+        let key = keyring.encryption_key(key_version, &tenant_digest)?;
+        let aad = tenant_encryption_aad(artifact, key_version, &tenant_digest)?;
+        let plaintext = key
+            .open_in_place(
+                Nonce::assume_unique_for_key(nonce_bytes),
+                Aad::from(aad.as_slice()),
+                &mut encrypted,
+            )
+            .map_err(|_| RepositoryError::invalid_data())?
+            .to_vec();
+        if scoped_tenant_digest(artifact, &plaintext)? != Some(tenant_digest) {
+            return Err(RepositoryError::invalid_data());
+        }
+        Ok(plaintext)
+    }
+
+    async fn write_object_atomically(
+        &self,
+        artifact: &ArtifactRef,
+        path: &Path,
+        stored: &[u8],
+    ) -> Result<(), RepositoryError> {
+        let parent = path.parent().ok_or_else(RepositoryError::invalid_data)?;
+        let temporary = parent.join(format!(
+            ".{}.{}.staging",
+            self.hash_hex(artifact)?,
+            Uuid::new_v4().simple()
+        ));
+        let mut file = tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .await
+            .map_err(|_| storage_failure())?;
+        file.write_all(stored)
+            .await
+            .map_err(|_| storage_failure())?;
+        file.sync_all().await.map_err(|_| storage_failure())?;
+        drop(file);
+        match tokio::fs::rename(&temporary, path).await {
+            Ok(()) => Ok(()),
+            Err(_) if tokio::fs::metadata(path).await.is_ok() => {
+                let _ = tokio::fs::remove_file(&temporary).await;
+                Ok(())
+            }
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&temporary).await;
+                Err(storage_failure())
+            }
+        }
+    }
+}
+
+fn scoped_tenant_digest(
+    artifact: &ArtifactRef,
+    bytes: &[u8],
+) -> Result<Option<[u8; TENANT_ENCRYPTION_DIGEST_BYTES]>, RepositoryError> {
+    if artifact.media_type() != Some(TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE) {
+        return Ok(None);
+    }
+    let envelope =
+        serde_json::from_slice::<Value>(bytes).map_err(|_| RepositoryError::invalid_data())?;
+    let object = envelope
+        .as_object()
+        .ok_or_else(RepositoryError::invalid_data)?;
+    if object.get("kind").and_then(Value::as_str) != Some(TERMINAL_SCOPED_ARTIFACT_KIND) {
+        return Err(RepositoryError::invalid_data());
+    }
+    let scope = object
+        .get("scope")
+        .and_then(Value::as_str)
+        .ok_or_else(RepositoryError::invalid_data)?;
+    let tenant_and_scope = scope
+        .strip_prefix("tenant:")
+        .ok_or_else(RepositoryError::invalid_data)?;
+    if tenant_and_scope.is_empty() {
+        return Err(RepositoryError::invalid_data());
+    }
+    // The authenticated digest covers the complete tenant-prefixed scope.
+    // Identity components may legally contain ':', so parsing a delimiter
+    // here would collapse distinct tenants. A per-object subkey is stricter
+    // than reusing one key for every object owned by the same tenant.
+    let digest = digest::digest(&digest::SHA256, scope.as_bytes());
+    digest
+        .as_ref()
+        .try_into()
+        .map(Some)
+        .map_err(|_| RepositoryError::invalid_data())
+}
+
+fn tenant_encryption_aad(
+    artifact: &ArtifactRef,
+    key_version: &str,
+    tenant_digest: &[u8; TENANT_ENCRYPTION_DIGEST_BYTES],
+) -> Result<Vec<u8>, RepositoryError> {
+    let media_type = artifact.media_type().unwrap_or_default();
+    let mut aad = Vec::with_capacity(256);
+    append_aad_part(&mut aad, TENANT_ENCRYPTION_MAGIC)?;
+    append_aad_part(&mut aad, key_version.as_bytes())?;
+    append_aad_part(&mut aad, tenant_digest)?;
+    append_aad_part(&mut aad, artifact.content_hash().as_str().as_bytes())?;
+    append_aad_part(&mut aad, &artifact.size_bytes().to_be_bytes())?;
+    append_aad_part(&mut aad, media_type.as_bytes())?;
+    Ok(aad)
+}
+
+fn append_aad_part(output: &mut Vec<u8>, value: &[u8]) -> Result<(), RepositoryError> {
+    let length = u32::try_from(value.len()).map_err(|_| RepositoryError::invalid_data())?;
+    output.extend_from_slice(&length.to_be_bytes());
+    output.extend_from_slice(value);
+    Ok(())
+}
+
+fn stored_encryption_version(stored: &[u8]) -> Option<&str> {
+    if !stored.starts_with(TENANT_ENCRYPTION_MAGIC) {
+        return None;
+    }
+    let length = usize::from(*stored.get(TENANT_ENCRYPTION_MAGIC.len())?);
+    let start = TENANT_ENCRYPTION_MAGIC.len() + 1;
+    let end = start.checked_add(length)?;
+    std::str::from_utf8(stored.get(start..end)?)
+        .ok()
+        .filter(|version| valid_key_version(version))
 }
 
 #[async_trait]
@@ -235,38 +660,34 @@ impl WorkerArtifactStore for LocalContentAddressedArtifactStore {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|_| storage_failure())?;
-        if tokio::fs::metadata(&path).await.is_err() {
-            let temporary = parent.join(format!(
-                ".{}.{}.staging",
-                self.hash_hex(artifact)?,
-                Uuid::new_v4().simple()
-            ));
-            let mut file = tokio::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)
-                .await
-                .map_err(|_| storage_failure())?;
-            file.write_all(bytes).await.map_err(|_| storage_failure())?;
-            file.sync_all().await.map_err(|_| storage_failure())?;
-            drop(file);
-            match tokio::fs::rename(&temporary, &path).await {
-                Ok(()) => {}
-                Err(_) if tokio::fs::metadata(&path).await.is_ok() => {
-                    let _ = tokio::fs::remove_file(&temporary).await;
-                }
-                Err(_) => {
-                    let _ = tokio::fs::remove_file(&temporary).await;
-                    return Err(storage_failure());
-                }
+        let desired = self.encode_stored_bytes(artifact, bytes)?;
+        let existing = match tokio::fs::read(&path).await {
+            Ok(existing) => Some(existing),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(storage_failure()),
+        };
+        let replace = if let Some(existing) = existing.as_ref() {
+            let decoded = self.decode_stored_bytes(artifact, existing)?;
+            if decoded != bytes {
+                return Err(RepositoryError::invalid_data());
             }
+            desired.starts_with(TENANT_ENCRYPTION_MAGIC)
+                && stored_encryption_version(existing)
+                    != stored_encryption_version(desired.as_slice())
+        } else {
+            true
+        };
+        if replace {
+            self.write_object_atomically(artifact, &path, &desired)
+                .await?;
         }
         let stored = tokio::fs::read(&path)
             .await
             .map_err(|_| storage_failure())?;
-        let actual_hash = ContentHash::from_bytes(&stored);
+        let plaintext = self.decode_stored_bytes(artifact, &stored)?;
+        let actual_hash = ContentHash::from_bytes(&plaintext);
         let actual_size =
-            u64::try_from(stored.len()).map_err(|_| RepositoryError::invalid_data())?;
+            u64::try_from(plaintext.len()).map_err(|_| RepositoryError::invalid_data())?;
         if actual_hash != *artifact.content_hash() || actual_size != artifact.size_bytes() {
             return Err(RepositoryError::invalid_data());
         }
@@ -290,9 +711,16 @@ impl WorkerArtifactStore for LocalContentAddressedArtifactStore {
         let link_metadata = tokio::fs::symlink_metadata(&path)
             .await
             .map_err(|_| storage_failure())?;
+        let maximum_stored_bytes = artifact
+            .size_bytes()
+            .checked_add(
+                u64::try_from(TENANT_ENCRYPTION_MAX_OVERHEAD)
+                    .map_err(|_| RepositoryError::invalid_configuration())?,
+            )
+            .ok_or_else(RepositoryError::invalid_configuration)?;
         if !link_metadata.file_type().is_file()
             || link_metadata.file_type().is_symlink()
-            || link_metadata.len() != artifact.size_bytes()
+            || link_metadata.len() > maximum_stored_bytes
         {
             return Err(RepositoryError::invalid_data());
         }
@@ -303,21 +731,31 @@ impl WorkerArtifactStore for LocalContentAddressedArtifactStore {
             .await
             .map_err(|_| storage_failure())?;
         let metadata = file.metadata().await.map_err(|_| storage_failure())?;
-        if !metadata.is_file() || metadata.len() != artifact.size_bytes() {
+        if !metadata.is_file() || metadata.len() != link_metadata.len() {
             return Err(RepositoryError::invalid_data());
         }
 
         let read_limit = u64::try_from(max_bytes)
             .map_err(|_| RepositoryError::invalid_configuration())?
-            .checked_add(1)
+            .checked_add(
+                u64::try_from(TENANT_ENCRYPTION_MAX_OVERHEAD)
+                    .map_err(|_| RepositoryError::invalid_configuration())?,
+            )
+            .and_then(|limit| limit.checked_add(1))
             .ok_or_else(RepositoryError::invalid_configuration)?;
-        let mut bytes = Vec::with_capacity(
-            usize::try_from(artifact.size_bytes()).map_err(|_| RepositoryError::invalid_data())?,
+        let mut stored = Vec::with_capacity(
+            usize::try_from(metadata.len()).map_err(|_| RepositoryError::invalid_data())?,
         );
         file.take(read_limit)
-            .read_to_end(&mut bytes)
+            .read_to_end(&mut stored)
             .await
             .map_err(|_| storage_failure())?;
+        if u64::try_from(stored.len()).map_err(|_| RepositoryError::invalid_data())?
+            != metadata.len()
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+        let bytes = self.decode_stored_bytes(artifact, &stored)?;
         let actual_size =
             u64::try_from(bytes.len()).map_err(|_| RepositoryError::invalid_data())?;
         if actual_size != artifact.size_bytes()
@@ -430,6 +868,32 @@ async fn read_shared_marker(path: &Path) -> Result<SharedStoreMarker, Repository
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn encryption_keyring(
+        active: &str,
+        entries: &[(&str, &str)],
+    ) -> TenantArtifactEncryptionKeyring {
+        let value = Value::Object(
+            entries
+                .iter()
+                .map(|(version, key)| ((*version).to_owned(), Value::String((*key).to_owned())))
+                .collect(),
+        );
+        TenantArtifactEncryptionKeyring::from_secret_json(
+            active,
+            &serde_json::to_string(&value).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn scoped_bytes(tenant: &str, scope: &str, marker: &str) -> Vec<u8> {
+        serde_jcs::to_vec(&serde_json::json!({
+            "kind": TERMINAL_SCOPED_ARTIFACT_KIND,
+            "scope": format!("tenant:{tenant}:{scope}"),
+            "value": {"marker": marker},
+        }))
+        .unwrap()
+    }
 
     #[tokio::test]
     async fn local_store_is_content_addressed_verified_and_idempotent() {
@@ -545,6 +1009,189 @@ mod tests {
                 .unwrap_err()
                 .code(),
             REPOSITORY_DATA_INVALID
+        );
+    }
+
+    #[tokio::test]
+    async fn tenant_scoped_objects_are_encrypted_authenticated_and_deleted() {
+        let directory = tempfile::tempdir().unwrap();
+        let keyring = encryption_keyring(
+            "v1",
+            &[(
+                "v1",
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )],
+        );
+        let store = LocalContentAddressedArtifactStore::open_with_tenant_encryption(
+            directory.path().join("objects"),
+            8,
+            keyring,
+        )
+        .await
+        .unwrap();
+        let bytes = scoped_bytes("tenant-a", "message:one", "PRIVATE-MARKER");
+        let artifact = store
+            .artifact_for_bytes(&bytes, Some(TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE.to_owned()))
+            .unwrap();
+        let locator = store.storage_locator(&artifact).unwrap();
+        store.put_and_verify(&artifact, &bytes).await.unwrap();
+
+        let path = store.path_for(&artifact).unwrap();
+        let stored = tokio::fs::read(&path).await.unwrap();
+        assert!(stored.starts_with(TENANT_ENCRYPTION_MAGIC));
+        assert_eq!(stored_encryption_version(&stored), Some("v1"));
+        assert!(!stored
+            .windows(b"PRIVATE-MARKER".len())
+            .any(|window| window == b"PRIVATE-MARKER"));
+        assert!(!stored
+            .windows(b"tenant-a".len())
+            .any(|window| window == b"tenant-a"));
+        assert_eq!(
+            store
+                .read_and_verify(&artifact, &locator, bytes.len())
+                .await
+                .unwrap(),
+            bytes
+        );
+
+        let digest_offset = TENANT_ENCRYPTION_MAGIC.len() + 1 + "v1".len();
+        let mut tampered = stored;
+        tampered[digest_offset] ^= 1;
+        tokio::fs::write(&path, tampered).await.unwrap();
+        assert_eq!(
+            store
+                .read_and_verify(&artifact, &locator, bytes.len())
+                .await
+                .unwrap_err()
+                .code(),
+            REPOSITORY_DATA_INVALID
+        );
+        store.delete(&artifact, &locator).await.unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn tenant_key_rotation_reads_old_versions_and_rewrites_legacy_plaintext() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("objects");
+        let legacy = LocalContentAddressedArtifactStore::open(root.clone(), 8)
+            .await
+            .unwrap();
+        let legacy_bytes = scoped_bytes("tenant-a", "message:legacy", "legacy");
+        let legacy_artifact = legacy
+            .artifact_for_bytes(
+                &legacy_bytes,
+                Some(TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE.to_owned()),
+            )
+            .unwrap();
+        legacy
+            .put_and_verify(&legacy_artifact, &legacy_bytes)
+            .await
+            .unwrap();
+        assert!(!tokio::fs::read(legacy.path_for(&legacy_artifact).unwrap())
+            .await
+            .unwrap()
+            .starts_with(TENANT_ENCRYPTION_MAGIC));
+
+        let rotating = LocalContentAddressedArtifactStore::open_with_tenant_encryption(
+            root.clone(),
+            8,
+            encryption_keyring(
+                "v2",
+                &[
+                    (
+                        "v1",
+                        "1111111111111111111111111111111111111111111111111111111111111111",
+                    ),
+                    (
+                        "v2",
+                        "2222222222222222222222222222222222222222222222222222222222222222",
+                    ),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+        rotating
+            .put_and_verify(&legacy_artifact, &legacy_bytes)
+            .await
+            .unwrap();
+        let migrated = tokio::fs::read(rotating.path_for(&legacy_artifact).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(stored_encryption_version(&migrated), Some("v2"));
+
+        let old_bytes = scoped_bytes("tenant-a", "message:old-v1", "old");
+        let old_artifact = rotating
+            .artifact_for_bytes(
+                &old_bytes,
+                Some(TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE.to_owned()),
+            )
+            .unwrap();
+        let v1_store = LocalContentAddressedArtifactStore::open_with_tenant_encryption(
+            root.clone(),
+            8,
+            encryption_keyring(
+                "v1",
+                &[(
+                    "v1",
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                )],
+            ),
+        )
+        .await
+        .unwrap();
+        v1_store
+            .put_and_verify(&old_artifact, &old_bytes)
+            .await
+            .unwrap();
+        assert_eq!(
+            rotating
+                .read_and_verify(
+                    &old_artifact,
+                    &rotating.storage_locator(&old_artifact).unwrap(),
+                    old_bytes.len(),
+                )
+                .await
+                .unwrap(),
+            old_bytes
+        );
+
+        let v2_only = LocalContentAddressedArtifactStore::open_with_tenant_encryption(
+            root,
+            8,
+            encryption_keyring(
+                "v2",
+                &[(
+                    "v2",
+                    "2222222222222222222222222222222222222222222222222222222222222222",
+                )],
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v2_only
+                .read_and_verify(
+                    &legacy_artifact,
+                    &v2_only.storage_locator(&legacy_artifact).unwrap(),
+                    legacy_bytes.len(),
+                )
+                .await
+                .unwrap(),
+            legacy_bytes
+        );
+        assert_eq!(
+            v2_only
+                .read_and_verify(
+                    &old_artifact,
+                    &v2_only.storage_locator(&old_artifact).unwrap(),
+                    old_bytes.len(),
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            REPOSITORY_CONFIGURATION_INVALID
         );
     }
 

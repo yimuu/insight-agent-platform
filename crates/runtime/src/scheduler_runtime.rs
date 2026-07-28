@@ -48,8 +48,8 @@ use insight_engine::{
         TaskExecutionRequest, WorkerExecutionContext, WorkerExecutorRegistry, WorkerFailure,
         WorkerFailureClass, WorkerRuntimeServices, WORKER_MODEL_TOOL_CLAIM_INVALID,
     },
-    EffectEvidence, SchedulerAction, SchedulerDecision, SchedulerPlanner, SchedulerQuiescence,
-    SchedulerTaskKind, TransitionOutcome, ValueRef,
+    EffectEvidence, PlannedSchedulerAction, SchedulerAction, SchedulerDecision, SchedulerPlanner,
+    SchedulerQuiescence, SchedulerTaskKind, TransitionOutcome, ValueRef,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -153,6 +153,31 @@ impl SchedulerWorkerFailurePolicy for TerminalSchedulerWorkerFailurePolicy {
         };
         let disposition = SchedulerFailureDisposition::Terminal;
         SchedulerTaskFailure::from_worker_failure(claim, failure, evidence, disposition)
+    }
+}
+
+/// Prepares non-authoritative side data needed by one scheduler action before
+/// the repository attempts its atomic commit. Implementations may write only
+/// replay-safe staging state; the repository transaction remains the sole
+/// authority for consuming that state.
+#[async_trait]
+pub trait SchedulerActionPreparer: Send + Sync {
+    async fn prepare_scheduler_action(
+        &self,
+        action: &PlannedSchedulerAction,
+    ) -> Result<(), RepositoryError>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopSchedulerActionPreparer;
+
+#[async_trait]
+impl SchedulerActionPreparer for NoopSchedulerActionPreparer {
+    async fn prepare_scheduler_action(
+        &self,
+        _action: &PlannedSchedulerAction,
+    ) -> Result<(), RepositoryError> {
+        Ok(())
     }
 }
 
@@ -478,6 +503,28 @@ where
     R: SchedulerDurableRepository + ?Sized,
     I: SchedulerCrashInjector,
 {
+    drive_scheduler_once_with_preparer(
+        repository,
+        linked,
+        fence,
+        crash,
+        &NoopSchedulerActionPreparer,
+    )
+    .await
+}
+
+async fn drive_scheduler_once_with_preparer<R, I, P>(
+    repository: &R,
+    linked: &LinkedPlan<'_>,
+    fence: &FencedSchedulerRunCommand,
+    crash: &I,
+    preparer: &P,
+) -> Result<SchedulerDriveOutcome, RepositoryError>
+where
+    R: SchedulerDurableRepository + ?Sized,
+    I: SchedulerCrashInjector,
+    P: SchedulerActionPreparer + ?Sized,
+{
     let planner = SchedulerPlanner::new(linked);
     let loaded = repository.load_scheduler_facts(fence.run_id()).await;
     let (decision, has_checkpoints) = match loaded {
@@ -550,6 +597,7 @@ where
     if downstream_admission {
         crash.hit(SchedulerCrashPoint::BeforeDownstreamAdmission)?;
     }
+    preparer.prepare_scheduler_action(&action).await?;
     let outcome = repository.commit_scheduler_action(fence, &action).await?;
     let receipt = match outcome {
         TransitionOutcome::Committed { result } => result,
@@ -581,11 +629,36 @@ where
     R: SchedulerDurableRepository + ?Sized,
     I: SchedulerCrashInjector,
 {
+    drive_scheduler_until_quiescent_with_preparer(
+        repository,
+        linked,
+        fence,
+        crash,
+        max_actions,
+        &NoopSchedulerActionPreparer,
+    )
+    .await
+}
+
+pub async fn drive_scheduler_until_quiescent_with_preparer<R, I, P>(
+    repository: &R,
+    linked: &LinkedPlan<'_>,
+    fence: &FencedSchedulerRunCommand,
+    crash: &I,
+    max_actions: u32,
+    preparer: &P,
+) -> Result<SchedulerRecoveryOutcome, RepositoryError>
+where
+    R: SchedulerDurableRepository + ?Sized,
+    I: SchedulerCrashInjector,
+    P: SchedulerActionPreparer + ?Sized,
+{
     if max_actions == 0 {
         return Err(repository_invalid_configuration());
     }
     for _ in 0..max_actions {
-        match drive_scheduler_once(repository, linked, fence, crash).await? {
+        match drive_scheduler_once_with_preparer(repository, linked, fence, crash, preparer).await?
+        {
             SchedulerDriveOutcome::Applied(_) => {}
             SchedulerDriveOutcome::Quiescent(quiescence) => {
                 return Ok(SchedulerRecoveryOutcome::Quiescent(quiescence))

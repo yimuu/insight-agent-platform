@@ -1,11 +1,18 @@
 # Limited-resource Kubernetes benchmark
 
 The Helm chart deploys one runtime Pod and one PostgreSQL 16 Pod. Benchmark
-profiles are overlays on `values-benchmark.yaml`:
+profiles for the 2026-07-26 **durable-runtime** capacity program are overlays
+on `values-benchmark.yaml`:
 
-- `values-benchmark-limited.yaml`: Gate A, `500m / 256Mi` per service;
-- `values-benchmark-c1.yaml`: Gate B/C/D C1 capacity;
-- `values-benchmark-c2.yaml`: Gate B/C/D qualification ceiling.
+- `values-benchmark-limited.yaml`: durable-runtime Gate A, `500m / 256Mi` per
+  service;
+- `values-benchmark-c1.yaml`: durable-runtime Gate B/C/D C1 capacity;
+- `values-benchmark-c2.yaml`: durable-runtime Gate B/C/D qualification ceiling.
+
+Terminal-only Phase 0 and Gate A～D do not use this durable soak wrapper. See
+[`bench/phase0-full`](../phase0-full/),
+[`bench/terminal-only`](../terminal-only/), and the
+[Terminal-only qualification guide](../../docs/current/terminal-only-qualification.md).
 
 The artifact volume uses a PVC because its durable authority must survive
 runtime Pod replacement. C1/C2 also enable PostgreSQL persistence so aged and
@@ -78,8 +85,9 @@ BENCH_NAMESPACE=insight-bench-c1 BENCH_RELEASE=c1 \
   bench/results/2026-07-26-optimized/c1-aged-idle
 ```
 
-Gate D fault injection helpers terminate only the durable work LISTEN backend,
-or delete the exact runtime Pod after observing a claimed scheduler task:
+Durable-runtime Gate D fault injection helpers terminate only the durable work
+LISTEN backend, or delete the exact runtime Pod after observing a claimed
+scheduler task:
 
 ```bash
 BENCH_NAMESPACE=insight-bench-c1 BENCH_RELEASE=c1 \
@@ -91,9 +99,10 @@ BENCH_NAMESPACE=insight-bench-c1 BENCH_RELEASE=c1 \
   bench/results/2026-07-26-optimized/c1-soak-runtime-restart
 ```
 
-For a repeatable 2-hour or 24-hour Gate D, use the wrapper below. It keeps the
-load at 10 arrivals/s and injects the listener fault at 20 minutes and the
-claimed-task runtime restart at 45 minutes. The offsets can be changed with
+For a repeatable 2-hour or 24-hour durable-runtime Gate D, use the wrapper
+below. It keeps the load at 10 arrivals/s and injects the listener fault at 20
+minutes and the claimed-task runtime restart at 45 minutes. The offsets can be
+changed with
 `BENCH_LISTENER_FAULT_DELAY_SECONDS` and
 `BENCH_RUNTIME_RESTART_DELAY_SECONDS` for a smoke test.
 

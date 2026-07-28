@@ -146,7 +146,7 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(tables.len(), 52, "the complete table contract must install");
+    assert_eq!(tables.len(), 63, "the complete table contract must install");
     for table in [
         "durable_schema_contract",
         "workflow_runs",
@@ -159,6 +159,17 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
         "model_tool_calls",
         "wait_late_audit_outbox",
         "workflow_retrieval_publications",
+        "full_conversation_turns",
+        "terminal_runtime_instances",
+        "terminal_artifact_staging",
+        "terminal_content_deletion_jobs",
+        "terminal_run_admissions",
+        "terminal_run_results",
+        "conversations",
+        "conversation_tombstones",
+        "conversation_messages",
+        "conversation_summaries",
+        "conversation_summary_jobs",
     ] {
         assert!(
             tables.contains(table),
@@ -178,7 +189,7 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .collect::<BTreeSet<_>>();
     assert_eq!(
         indexes.len(),
-        167,
+        197,
         "all explicit and constraint-backed indexes must be installed"
     );
     for (index, table) in [
@@ -200,6 +211,15 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
         ("idx_wait_late_audit_pending", "wait_late_audit_outbox"),
         ("idx_wait_late_audit_reclaim", "wait_late_audit_outbox"),
         ("uq_wait_late_audit_claim_token", "wait_late_audit_outbox"),
+        ("idx_conversations_created_retention", "conversations"),
+        (
+            "idx_terminal_artifact_staging_pending",
+            "terminal_artifact_staging",
+        ),
+        (
+            "idx_terminal_artifact_staging_reclaim",
+            "terminal_artifact_staging",
+        ),
     ] {
         assert!(
             indexes.contains(&(index.to_owned(), table.to_owned())),
@@ -281,6 +301,27 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
              ORDER BY retain_until,run_id,public_event_id LIMIT 8",
             "idx_public_outbox_retention",
         ),
+        (
+            "EXPLAIN
+             SELECT conversation_id,tenant_id FROM conversations
+             WHERE created_at<statement_timestamp()
+             ORDER BY created_at,conversation_id LIMIT 8",
+            "idx_conversations_created_retention",
+        ),
+        (
+            "EXPLAIN
+             SELECT staging_id FROM terminal_artifact_staging
+             WHERE staging_state='pending' AND available_at<=statement_timestamp()
+             ORDER BY available_at,created_at,staging_id LIMIT 8",
+            "idx_terminal_artifact_staging_pending",
+        ),
+        (
+            "EXPLAIN
+             SELECT staging_id FROM terminal_artifact_staging
+             WHERE staging_state='claimed' AND claim_expires_at<=statement_timestamp()
+             ORDER BY claim_expires_at,staging_id LIMIT 8",
+            "idx_terminal_artifact_staging_reclaim",
+        ),
     ] {
         let plan = sqlx::query_scalar::<_, String>(query)
             .fetch_all(&mut *plan_transaction)
@@ -297,6 +338,15 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
                 normalized.contains("index cond:")
                     && normalized.contains("retain_until <= statement_timestamp()"),
                 "retention deadline must be an index range condition, not a post-index filter: {plan:?}"
+            );
+        }
+        if expected_index == "idx_conversations_created_retention" {
+            let normalized = plan.join(" ").to_ascii_lowercase();
+            assert!(
+                normalized.contains("index cond:")
+                    && normalized.contains("created_at < statement_timestamp()"),
+                "Conversation cutoff must be an index range condition, not a historical-table scan: \
+                 {plan:?}"
             );
         }
     }
@@ -362,7 +412,13 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     let recovery_trigger = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_triggerdef(trigger_row.oid)
          FROM pg_catalog.pg_trigger AS trigger_row
+         JOIN pg_catalog.pg_class AS table_row
+           ON table_row.oid=trigger_row.tgrelid
+         JOIN pg_catalog.pg_namespace AS namespace_row
+           ON namespace_row.oid=table_row.relnamespace
          WHERE trigger_row.tgname='run_recovery_work_wakeup'
+           AND table_row.relname='workflow_runs'
+           AND namespace_row.nspname=current_schema()
            AND NOT trigger_row.tgisinternal",
     )
     .fetch_one(&schema.control)

@@ -14,3 +14,6 @@
 | 规范 | 状态 | 目标 |
 |---|---|---|
 | [Durable Runtime 50 活跃 Run 并发优化](2026-07-26-durable-runtime-50-active-runs-optimization.md) | Implemented / capacity-qualified；24h RC qualification 延后 | 降低数据库空轮询与历史扫描成本，在有限资源下验证 50 个活跃 Run |
+
+最近完成的 Terminal-only Runtime 与 Conversation 规范已移入
+[`archive/specs`](../archive/specs/2026-07-27-terminal-only-runtime-and-conversations.md)。

@@ -4621,6 +4621,7 @@ async fn apply_scheduler_action(
             tx, run_id, lifecycle, output, error_code,
         )
         .await?;
+        super::postgres::insert_full_conversation_terminal_message(tx, run_id, output).await?;
         super::postgres::register_terminal_artifact_retention_postgres(
             tx,
             run_id,

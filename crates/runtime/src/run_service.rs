@@ -9,6 +9,7 @@ use std::{
     error::Error,
     fmt,
     fmt::Write as _,
+    panic::AssertUnwindSafe,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc, Mutex, RwLock, Weak,
@@ -16,6 +17,7 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use futures::FutureExt;
 use insight_dsl::{
     GraphAuthorDocument, GraphSemanticEditBatch, StoredGraphView, TraceOverlay, ViewDocument,
@@ -28,15 +30,16 @@ use insight_durable::{
     AcknowledgeArtifactDeletionCommand, BeginMigrationCommand, BindArtifactStoreAuthorityCommand,
     ClaimHumanWorkItemCommand, ClaimSchedulerRunCommand, CompleteHumanWorkItemCommand,
     ContinueAsNewCommand, CreateRunCommand, DurableResponseSnapshot, FencedSchedulerRunCommand,
-    FinalizeMigrationCommand, FireTimerCommand, ForkRunCommand, HumanTaskPrincipal, HumanWorkItem,
-    HumanWorkItemId, MigrationMappingCompatibility, ModelToolBatchActivation, ModelToolTaskClaim,
-    NoSchedulerCrash, OrderedPublicEventRead, OrphanSweepCommand, PlanPublicationOutcome,
-    PublicEventPosition, PublicRunAttachment, PublicationHead, PublicationOrigin,
-    PublishVersionedPlanCommand, ReceiveSignalCommand, RecoveryRevisionSpec, RecoveryRunReceipt,
-    RedriveRunCommand, RepositoryError, ResolveSignalCommand, RunProjection,
-    SchedulerDurableRepository, SchedulerTaskClaim, SignalInboxState, VersionedPlan,
-    VersionedPlanCatalog, WorkClass, REPOSITORY_ARTIFACT_STORE_CONFLICT,
-    REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_INTENT_CONFLICT, REPOSITORY_REDRIVE_REQUIRES_FORK,
+    FinalizeMigrationCommand, FireTimerCommand, ForkRunCommand, FullConversationRunAdmission,
+    HumanTaskPrincipal, HumanWorkItem, HumanWorkItemId, MigrationMappingCompatibility,
+    ModelToolBatchActivation, ModelToolTaskClaim, NoSchedulerCrash, OrderedPublicEventRead,
+    OrphanSweepCommand, PlanPublicationOutcome, PublicEventPosition, PublicRunAttachment,
+    PublicationHead, PublicationOrigin, PublishVersionedPlanCommand, ReceiveSignalCommand,
+    RecoveryRevisionSpec, RecoveryRunReceipt, RedriveRunCommand, RepositoryError,
+    ResolveSignalCommand, RunProjection, SchedulerDurableRepository, SchedulerTaskClaim,
+    SignalInboxState, VersionedPlan, VersionedPlanCatalog, WorkClass,
+    REPOSITORY_ARTIFACT_STORE_CONFLICT, REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_INTENT_CONFLICT,
+    REPOSITORY_REDRIVE_REQUIRES_FORK,
 };
 use insight_engine::{
     artifact_store::{ArtifactStoreDeploymentCapability, WorkerArtifactStore},
@@ -47,14 +50,15 @@ use insight_engine::{
     worker::WorkerExecutorRegistry,
     AdmissionState, ArtifactId, ArtifactRef, ContentHash, DefinitionRevisionId,
     ExecutionEventContext, ExecutionEventPayload, ExecutionRevisionPin, MigrationNodeMapping,
-    NodeId, PendingExecutionEvent, PublicEventEnvelope, PublicEventPayload, PublicFailureKind,
-    PublicFailureSummary, RunId, RunLifecycle as EngineRunLifecycle, RunLineageKind, RuntimeValue,
+    NodeId, PendingExecutionEvent, PersistenceMode, PlannedSchedulerAction, PublicEventEnvelope,
+    PublicEventPayload, PublicFailureKind, PublicFailureSummary, RunId,
+    RunLifecycle as EngineRunLifecycle, RunLineageKind, RuntimeValue, SchedulerAction,
     SchedulerCheckpointId, TerminationReason, TransitionKey, TransitionOutcome,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{
-    sync::{broadcast, Mutex as AsyncMutex, Notify},
+    sync::{broadcast, Mutex as AsyncMutex, Notify, OwnedMutexGuard},
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -65,20 +69,28 @@ pub use insight_durable::{PendingMigrationWait, ProductionRunRepository, RunRepo
 use crate::{
     catalog::{
         subflow_registry_for_available, subflow_registry_for_stored, AgentStreamingSourceKind,
-        DeployedAgent, DeploymentRiskDiagnostic, LeafDeploymentResolver, PublishedAgent,
+        DeployedAgent, DeploymentPersistencePolicy, DeploymentRiskDiagnostic,
+        LeafDeploymentResolver, PublishedAgent,
     },
     scheduler_runtime::{
         consume_claimed_model_tool_task_with_observer,
         consume_claimed_scheduler_task_with_artifact_store_and_retrieval_observer,
-        drive_scheduler_until_quiescent, FrozenSchedulerWorkerFailurePolicy,
-        SchedulerRecoveryOutcome, SchedulerWorkerPumpOutcome,
+        drive_scheduler_until_quiescent_with_preparer, FrozenSchedulerWorkerFailurePolicy,
+        SchedulerActionPreparer, SchedulerRecoveryOutcome, SchedulerWorkerPumpOutcome,
+    },
+    terminal_only::{
+        estimated_json_tokens, flat_summary_value, normalized_summary_entries,
+        qualification_summary_delay_from_environment, summary_preview, ConversationAttachedTurn,
+        ConversationDetachedTurn, ConversationMessagePageView, ConversationMessageView,
+        ConversationVisibilityGuard, RunPersistenceCapability, TerminalAttachedRun,
+        TerminalOnlyRunConfig, TerminalOnlyRunEngine, TerminalOnlyStore, SUMMARY_MAX_ENTRIES,
     },
 };
 
 use super::{
     CompletedFunctionCallTailPublication, InMemoryLiveResponseBroker, LiveResponseBroker,
-    LiveResponseBrokerCapability, LiveResponseByteLimits, LiveResponseItemIdentity,
-    LiveResponseSubscriber,
+    LiveResponseBrokerCapability, LiveResponseBrokerError, LiveResponseByteLimits,
+    LiveResponseDelivery, LiveResponseItemIdentity, LiveResponseSubscriber,
 };
 
 const PRODUCTION_TRANSITION_DOMAIN: &str = "production.run-service";
@@ -93,6 +105,16 @@ const MAX_PUBLIC_EVENT_BATCH: u32 = 256;
 const MAX_PUBLIC_EVENT_PRUNE_BATCH: u32 = 256;
 const MAX_PUBLIC_EVENT_RETENTION: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
 const MAX_RUNTIME_INGRESS_BATCH: u32 = 256;
+const FULL_CONVERSATION_SUMMARY_TIMEOUT: Duration = Duration::from_secs(30);
+const FULL_CONVERSATION_SUMMARY_CLAIM_LEASE: Duration = Duration::from_secs(35);
+const FULL_CONVERSATION_RETENTION_CADENCE: Duration = Duration::from_secs(60);
+const FULL_CONVERSATION_RETENTION_BATCH_SIZE: u32 = 100;
+const MAX_FULL_CONVERSATION_RETENTION_BATCHES_PER_CYCLE: usize = 64;
+const FULL_CONVERSATION_RETENTION_BATCH_BUDGET: usize = 22;
+const FULL_CONVERSATION_CONTENT_DELETION_BATCH_BUDGET: usize = 21;
+const FULL_CONVERSATION_STAGING_BATCH_BUDGET: usize = 21;
+const FULL_CONVERSATION_RETENTION_CYCLE_BUDGET: Duration = Duration::from_secs(45);
+const FULL_CONVERSATION_MAINTENANCE_CLAIM_LEASE: chrono::Duration = chrono::Duration::seconds(60);
 const MAX_HUMAN_TASK_LIST: u32 = 1_024;
 const MAX_SIGNAL_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_PUBLIC_ARTIFACT_SNAPSHOT_VALUES: usize = 100_000;
@@ -144,6 +166,20 @@ struct RunServiceMetrics {
     notification_publish_requests: AtomicU64,
     notification_published: AtomicU64,
     notification_publish_errors: AtomicU64,
+    full_conversation_user_messages: AtomicU64,
+    full_conversation_assistant_messages: AtomicU64,
+    full_conversation_context_messages: AtomicU64,
+    full_conversation_context_tokens: AtomicU64,
+    full_conversation_summary_succeeded: AtomicU64,
+    full_conversation_summary_failed: AtomicU64,
+    full_conversation_retention_conversations_deleted: AtomicU64,
+    full_conversation_retention_runs_deleted: AtomicU64,
+    full_conversation_retention_batches: AtomicU64,
+    full_conversation_retention_backlog_pending: AtomicBool,
+    full_conversation_content_deletion_batches: AtomicU64,
+    full_conversation_content_deletion_backlog_pending: AtomicBool,
+    full_conversation_staging_batches: AtomicU64,
+    full_conversation_staging_backlog_pending: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -654,6 +690,7 @@ pub struct RunServiceConfig {
     pub live_response_max_run_bytes: usize,
     pub terminal_barrier_timeout: Duration,
     pub outbound_write_timeout: Duration,
+    pub graph_persistence_policy: DeploymentPersistencePolicy,
 }
 
 impl RunServiceConfig {
@@ -689,6 +726,7 @@ impl RunServiceConfig {
             live_response_max_run_bytes: 16 * 1_024 * 1_024,
             terminal_barrier_timeout: Duration::from_secs(2),
             outbound_write_timeout: Duration::from_secs(10),
+            graph_persistence_policy: DeploymentPersistencePolicy::full(),
         }
     }
 
@@ -796,6 +834,11 @@ impl RunServiceConfig {
         self.live_response_max_frame_bytes = max_frame_bytes;
         self.live_response_max_item_bytes = max_item_bytes;
         self.live_response_max_run_bytes = max_run_bytes;
+        self
+    }
+
+    pub fn with_graph_persistence_policy(mut self, policy: DeploymentPersistencePolicy) -> Self {
+        self.graph_persistence_policy = policy;
         self
     }
 
@@ -990,6 +1033,122 @@ fn graph_surface_unavailable(_: RepositoryError) -> ServiceError {
     )
 }
 
+fn terminal_only_not_installed() -> ServiceError {
+    ServiceError::new(
+        "TERMINAL_ONLY_UNAVAILABLE",
+        "terminal-only Run service is unavailable",
+    )
+}
+
+fn require_default_full_tenant(tenant_id: &str) -> Result<(), ServiceError> {
+    if tenant_id == "default" {
+        Ok(())
+    } else {
+        Err(ServiceError::new("RUN_NOT_FOUND", "Run not found"))
+    }
+}
+
+fn validate_full_conversation_identity(value: &str) -> Result<(), ServiceError> {
+    if value.is_empty()
+        || value.len() > 256
+        || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(ServiceError::new(
+            "CONVERSATION_REQUEST_INVALID",
+            "conversation request identity is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_full_conversation_hash(value: &Value) -> Result<ContentHash, ServiceError> {
+    serde_jcs::to_vec(value)
+        .map(|bytes| ContentHash::from_bytes(&bytes))
+        .map_err(|_| {
+            ServiceError::new(
+                "CONVERSATION_INPUT_INVALID",
+                "conversation content is invalid",
+            )
+        })
+}
+
+fn full_conversation_public_id(prefix: &str, values: &[&str]) -> String {
+    let mut bytes = format!("full-conversation/{prefix}/v1").into_bytes();
+    for value in values {
+        bytes.push(0);
+        bytes.extend_from_slice(value.as_bytes());
+    }
+    format!(
+        "{prefix}_{}",
+        ContentHash::from_bytes(&bytes)
+            .as_str()
+            .trim_start_matches("sha256:")
+    )
+}
+
+fn full_conversation_mutation_index(conversation_id: &str, stripe_count: usize) -> usize {
+    let identity = full_conversation_public_id("lock", &[conversation_id]);
+    let suffix = identity.rsplit('_').next().unwrap_or_default();
+    let value = u64::from_str_radix(&suffix[..suffix.len().min(16)], 16).unwrap_or_default();
+    usize::try_from(value).unwrap_or_default() % stripe_count.max(1)
+}
+
+fn estimated_full_conversation_tokens(value: &Value) -> Result<usize, ServiceError> {
+    serde_jcs::to_vec(value)
+        .map(|bytes| bytes.len().saturating_add(3) / 4)
+        .map_err(|_| {
+            ServiceError::new(
+                "CONVERSATION_CONTENT_UNAVAILABLE",
+                "conversation context is invalid",
+            )
+        })
+}
+
+fn full_conversation_store_error(error: RepositoryError) -> ServiceError {
+    match error.code() {
+        insight_durable::terminal_store::CONVERSATION_NOT_FOUND => {
+            ServiceError::new("CONVERSATION_NOT_FOUND", "conversation was not found")
+        }
+        insight_durable::terminal_store::CONVERSATION_ARCHIVED => {
+            ServiceError::new("CONVERSATION_ARCHIVED", "conversation is archived")
+        }
+        insight_durable::terminal_store::CONVERSATION_OWNERSHIP_MISMATCH => ServiceError::new(
+            "CONVERSATION_OWNERSHIP_MISMATCH",
+            "conversation ownership does not match the requested principal",
+        ),
+        REPOSITORY_INTENT_CONFLICT | REPOSITORY_CONSTRAINT_CONFLICT => ServiceError::new(
+            "RUN_CONFLICT",
+            "Conversation request conflicts with stored authority",
+        ),
+        _ => ServiceError::new(
+            "CONVERSATION_UNAVAILABLE",
+            "Conversation storage is unavailable",
+        ),
+    }
+}
+
+fn redact_deleted_conversation_run(record: &mut RunRecord) {
+    record.input_summary = json!({"redacted": true});
+    match &mut record.lifecycle {
+        RunLifecycle::Completed { output } => {
+            output.content = None;
+            output.format = None;
+            output.data = Value::Null;
+        }
+        RunLifecycle::Failed { error } => {
+            error.code = "RUN_CONTENT_REDACTED".to_owned();
+            error.message = "Run content was deleted".to_owned();
+        }
+        RunLifecycle::Cancelled { error } | RunLifecycle::Interrupted { error } => {
+            error.code = "RUN_CONTENT_REDACTED".to_owned();
+            error.message = "Run content was deleted".to_owned();
+        }
+        RunLifecycle::Created | RunLifecycle::Running => {}
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RequestMetadata {
     pub request_id: Option<String>,
@@ -1097,6 +1256,211 @@ pub struct AttachedRun {
     pub live_response_broker: Arc<dyn LiveResponseBroker>,
     pub terminal_barrier_timeout: Duration,
     pub outbound_write_timeout: Duration,
+    pub conversation_privacy: Option<ConversationStreamPrivacy>,
+}
+
+#[derive(Clone)]
+pub struct ConversationStreamPrivacy {
+    inner: Arc<ConversationStreamPrivacyInner>,
+}
+
+pub(crate) struct ConversationStreamPrivacyInner {
+    cancellation: CancellationToken,
+    in_flight_deliveries: AtomicUsize,
+    delivery_quiesced: Notify,
+}
+
+pub struct ConversationStreamDelivery {
+    inner: Arc<ConversationStreamPrivacyInner>,
+}
+
+/// Opaque response-lifetime privacy read lease. Unlike the exclusive
+/// Conversation mutation stripe, leases are concurrent; DELETE cancels every
+/// registered lease and waits only for frames already handed to transport. An
+/// unpolled body is cancelled without blocking DELETE.
+pub struct ConversationResponseVisibilityGuard {
+    privacy: ConversationStreamPrivacy,
+}
+
+impl ConversationResponseVisibilityGuard {
+    pub(crate) fn new(privacy: ConversationStreamPrivacy) -> Self {
+        Self { privacy }
+    }
+
+    #[doc(hidden)]
+    pub fn is_cancelled(&self) -> bool {
+        self.privacy.is_cancelled()
+    }
+
+    #[doc(hidden)]
+    pub fn try_begin_delivery(&self) -> Option<ConversationStreamDelivery> {
+        self.privacy.try_begin_delivery()
+    }
+}
+
+impl Drop for ConversationStreamDelivery {
+    fn drop(&mut self) {
+        if self
+            .inner
+            .in_flight_deliveries
+            .fetch_sub(1, Ordering::AcqRel)
+            == 1
+        {
+            self.inner.delivery_quiesced.notify_waiters();
+        }
+    }
+}
+
+impl ConversationStreamPrivacy {
+    #[doc(hidden)]
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(ConversationStreamPrivacyInner {
+                cancellation: CancellationToken::new(),
+                in_flight_deliveries: AtomicUsize::new(0),
+                delivery_quiesced: Notify::new(),
+            }),
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.cancellation.is_cancelled()
+    }
+
+    pub async fn cancelled(&self) {
+        self.inner.cancellation.cancelled().await;
+    }
+
+    #[doc(hidden)]
+    pub fn cancel(&self) {
+        self.inner.cancellation.cancel();
+    }
+
+    pub fn try_begin_delivery(&self) -> Option<ConversationStreamDelivery> {
+        if self.is_cancelled() {
+            return None;
+        }
+        self.inner
+            .in_flight_deliveries
+            .fetch_add(1, Ordering::AcqRel);
+        if self.is_cancelled() {
+            drop(ConversationStreamDelivery {
+                inner: Arc::clone(&self.inner),
+            });
+            return None;
+        }
+        Some(ConversationStreamDelivery {
+            inner: Arc::clone(&self.inner),
+        })
+    }
+
+    #[doc(hidden)]
+    pub async fn cancel_and_wait(&self) {
+        self.cancel();
+        loop {
+            let notified = self.inner.delivery_quiesced.notified();
+            if self.inner.in_flight_deliveries.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    pub(crate) fn downgrade(&self) -> Weak<ConversationStreamPrivacyInner> {
+        Arc::downgrade(&self.inner)
+    }
+}
+
+pub(crate) async fn cancel_conversation_streams(
+    streams: &Mutex<BTreeMap<String, Vec<Weak<ConversationStreamPrivacyInner>>>>,
+    conversation_id: &str,
+) {
+    let streams = streams
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(conversation_id)
+        .unwrap_or_default();
+    let streams = streams
+        .into_iter()
+        .filter_map(|stream| stream.upgrade())
+        .map(|inner| ConversationStreamPrivacy { inner })
+        .collect::<Vec<_>>();
+    for stream in &streams {
+        stream.cancel();
+    }
+    for stream in streams {
+        stream.cancel_and_wait().await;
+    }
+}
+
+/// Opaque, content-free fence held while a full Conversation stream publishes
+/// its terminal tail and terminal frame.
+pub struct FullConversationVisibilityGuard {
+    _mutation: OwnedMutexGuard<()>,
+}
+
+enum FullRunResponseVisibility {
+    Standalone,
+    Visible(ConversationResponseVisibilityGuard),
+    Deleted,
+}
+
+#[derive(Clone, Copy)]
+enum FullConversationRunAuthorization {
+    Standalone,
+    Bound { deleted: bool },
+}
+
+impl FullConversationRunAuthorization {
+    const fn is_bound(self) -> bool {
+        matches!(self, Self::Bound { .. })
+    }
+
+    const fn is_deleted(self) -> bool {
+        matches!(self, Self::Bound { deleted: true })
+    }
+}
+
+/// Attached creation result selected from the immutable Deployment Revision's
+/// persistence policy. Full and terminal-only streaming remain separate
+/// internally so terminal-only Runs never acquire a durable event-log
+/// subscription.
+pub enum AnyAttachedRun {
+    Full(AttachedRun),
+    TerminalOnly(TerminalAttachedRun),
+}
+
+pub struct AnyConversationAttachedTurn {
+    pub user_message: ConversationMessageView,
+    pub attached: AnyAttachedRun,
+    pub replayed: bool,
+}
+
+struct FullConversationAdmissionResult {
+    user_message: ConversationMessageView,
+    projection: RunProjection,
+    receiver: Option<broadcast::Receiver<()>>,
+    live_response: Option<Box<dyn LiveResponseSubscriber>>,
+    conversation_privacy: Option<ConversationStreamPrivacy>,
+    replayed: bool,
+}
+
+struct ReplayWithoutLiveTail {
+    run_id: RunId,
+}
+
+#[async_trait]
+impl LiveResponseSubscriber for ReplayWithoutLiveTail {
+    fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    async fn recv(&mut self) -> Result<LiveResponseDelivery, LiveResponseBrokerError> {
+        Err(LiveResponseBrokerError::new(
+            "LIVE_RESPONSE_REPLAY",
+            "replayed attached Run has no second live response tail",
+        ))
+    }
 }
 
 #[derive(Debug)]
@@ -1268,6 +1632,16 @@ struct RunServiceInner {
     background: AsyncMutex<Vec<JoinHandle<()>>>,
     live: Mutex<BTreeMap<String, broadcast::Sender<()>>>,
     active_runs: Mutex<BTreeSet<String>>,
+    terminal: RwLock<Option<TerminalOnlyRunEngine>>,
+    conversation_store: RwLock<Option<Arc<dyn TerminalOnlyStore>>>,
+    conversation_config: RwLock<Option<TerminalOnlyRunConfig>>,
+    full_conversation_mutations: Vec<Arc<AsyncMutex<()>>>,
+    full_conversation_streams: Mutex<BTreeMap<String, Vec<Weak<ConversationStreamPrivacyInner>>>>,
+    /// Process-local coalescing state. `true` records a trigger that arrived
+    /// while the Conversation worker was already active and requests one more
+    /// bounded pass before the worker retires.
+    full_conversation_summary_jobs: Mutex<BTreeMap<String, bool>>,
+    full_conversation_summary_delay: RwLock<Duration>,
 }
 
 impl RunService {
@@ -1499,6 +1873,11 @@ impl RunService {
                 ));
             }
         }
+        let durable_coordinator_enabled = config.graph_persistence_policy.persistence_mode()
+            == PersistenceMode::Full
+            || agents
+                .archived_deployments()
+                .any(|agent| agent.persistence_mode() == PersistenceMode::Full);
         let service = Self {
             inner: Arc::new(RunServiceInner {
                 agents,
@@ -1520,18 +1899,158 @@ impl RunService {
                 background: AsyncMutex::new(Vec::new()),
                 live: Mutex::new(BTreeMap::new()),
                 active_runs: Mutex::new(BTreeSet::new()),
+                terminal: RwLock::new(None),
+                conversation_store: RwLock::new(None),
+                conversation_config: RwLock::new(None),
+                full_conversation_mutations: (0..64)
+                    .map(|_| Arc::new(AsyncMutex::new(())))
+                    .collect(),
+                full_conversation_streams: Mutex::new(BTreeMap::new()),
+                full_conversation_summary_jobs: Mutex::new(BTreeMap::new()),
+                full_conversation_summary_delay: RwLock::new(Duration::ZERO),
             }),
         };
-        service.reconcile_startup().await?;
-        service.spawn_background().await;
-        service
-            .inner
-            .wake_work(WORK_ALL, CoordinatorWakeupSource::Safety);
+        if durable_coordinator_enabled {
+            service.reconcile_startup().await?;
+            service.spawn_background().await;
+            service
+                .inner
+                .wake_work(WORK_ALL, CoordinatorWakeupSource::Safety);
+        }
         Ok(service)
     }
 
     pub fn agents(&self) -> &DeployedAgentCatalog {
         &self.inner.agents
+    }
+
+    /// Installs the process-local terminal-only runtime alongside the durable
+    /// coordinator. The reader/Conversation surface remains installed even
+    /// when the startup catalog has no current terminal-only revision: graph
+    /// publication can add one later, and historical terminal results must
+    /// remain queryable until retention removes them.
+    pub async fn enable_terminal_only(
+        &self,
+        store: Arc<dyn TerminalOnlyStore>,
+        endpoint: String,
+        config: TerminalOnlyRunConfig,
+    ) -> Result<(), ServiceError> {
+        let summary_delay = qualification_summary_delay_from_environment()?;
+        if self.terminal_engine().is_some() {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_CONFIG_INVALID",
+                "terminal-only runtime is already installed",
+            ));
+        }
+        let artifact_store = self.inner.artifact_store.clone().ok_or_else(|| {
+            ServiceError::new(
+                PLATFORM_PRODUCTION_REQUIRES_ARTIFACT_STORE,
+                "terminal-only Run service requires an Artifact store",
+            )
+        })?;
+        let conversation_store = Arc::clone(&store);
+        let engine = TerminalOnlyRunEngine::start(
+            store,
+            self.inner.agents.clone(),
+            Arc::clone(&self.inner.workers),
+            artifact_store,
+            Arc::clone(&self.inner.live_response_broker),
+            endpoint,
+            config,
+        )
+        .await?;
+        let rejected_engine = {
+            let mut terminal = self
+                .inner
+                .terminal
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if terminal.is_some() {
+                Some(engine)
+            } else {
+                *terminal = Some(engine);
+                None
+            }
+        };
+        if let Some(engine) = rejected_engine {
+            engine.shutdown(Duration::from_secs(1)).await?;
+            return Err(ServiceError::new(
+                "RUN_SERVICE_CONFIG_INVALID",
+                "terminal-only runtime is already installed",
+            ));
+        }
+        *self
+            .inner
+            .conversation_store
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(conversation_store);
+        *self
+            .inner
+            .conversation_config
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(config);
+        *self
+            .inner
+            .full_conversation_summary_delay
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = summary_delay;
+        Ok(())
+    }
+
+    /// Installs the shared Conversation repository for full-persistence
+    /// deployments when the terminal-only execution engine itself is disabled.
+    pub fn enable_conversations(
+        &self,
+        store: Arc<dyn TerminalOnlyStore>,
+        config: TerminalOnlyRunConfig,
+    ) -> Result<(), ServiceError> {
+        let config = config.validate()?;
+        let summary_delay = qualification_summary_delay_from_environment()?;
+        if self
+            .inner
+            .conversation_store
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_CONFIG_INVALID",
+                "Conversation repository is already installed",
+            ));
+        }
+        *self
+            .inner
+            .conversation_store
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(store);
+        *self
+            .inner
+            .conversation_config
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(config);
+        *self
+            .inner
+            .full_conversation_summary_delay
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = summary_delay;
+        Ok(())
+    }
+
+    /// Runs one bounded retention/deletion/staging cycle for a full-only
+    /// Conversation deployment. This is a no-op while the terminal-only
+    /// engine is installed, because that engine owns the same maintenance
+    /// queues.
+    #[doc(hidden)]
+    pub async fn run_full_conversation_maintenance_once(&self) -> Result<(), ServiceError> {
+        self.inner.run_full_conversation_maintenance(true).await
+    }
+
+    fn terminal_engine(&self) -> Option<TerminalOnlyRunEngine> {
+        self.inner
+            .terminal
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Renders bounded-cardinality runtime metrics in the Prometheus text
@@ -1727,6 +2246,163 @@ impl RunService {
                 counter.load(Ordering::Relaxed)
             );
         }
+        output.push_str(
+            "# HELP conversation_messages_total Conversation messages committed by persistence mode and role.\n\
+             # TYPE conversation_messages_total counter\n",
+        );
+        let _ = writeln!(
+            output,
+            "conversation_messages_total{{role=\"user\",persistence_mode=\"full\"}} {}",
+            metrics
+                .full_conversation_user_messages
+                .load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "conversation_messages_total{{role=\"assistant\",persistence_mode=\"full\"}} {}",
+            metrics
+                .full_conversation_assistant_messages
+                .load(Ordering::Relaxed)
+        );
+        output.push_str(
+            "# HELP conversation_context_messages Messages in the most recently assembled Conversation context.\n\
+             # TYPE conversation_context_messages gauge\n",
+        );
+        let _ = writeln!(
+            output,
+            "conversation_context_messages{{persistence_mode=\"full\"}} {}",
+            metrics
+                .full_conversation_context_messages
+                .load(Ordering::Relaxed)
+        );
+        output.push_str(
+            "# HELP conversation_context_tokens Estimated tokens in the most recently assembled Conversation context.\n\
+             # TYPE conversation_context_tokens gauge\n",
+        );
+        let _ = writeln!(
+            output,
+            "conversation_context_tokens{{persistence_mode=\"full\"}} {}",
+            metrics
+                .full_conversation_context_tokens
+                .load(Ordering::Relaxed)
+        );
+        output.push_str(
+            "# HELP conversation_summary_jobs_active Process-local coalesced Conversation summary jobs.\n\
+             # TYPE conversation_summary_jobs_active gauge\n",
+        );
+        let summary_jobs_active = self
+            .inner
+            .full_conversation_summary_jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        let _ = writeln!(
+            output,
+            "conversation_summary_jobs_active{{persistence_mode=\"full\"}} {summary_jobs_active}"
+        );
+        output.push_str(
+            "# HELP conversation_summary_jobs_total Conversation summary job outcomes.\n\
+             # TYPE conversation_summary_jobs_total counter\n",
+        );
+        let _ = writeln!(
+            output,
+            "conversation_summary_jobs_total{{result=\"succeeded\",persistence_mode=\"full\"}} {}",
+            metrics
+                .full_conversation_summary_succeeded
+                .load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "conversation_summary_jobs_total{{result=\"failed\",persistence_mode=\"full\"}} {}",
+            metrics
+                .full_conversation_summary_failed
+                .load(Ordering::Relaxed)
+        );
+        output.push_str(
+            "# HELP conversation_retention_deleted_total Rows removed by bounded full-persistence Conversation retention.\n\
+             # TYPE conversation_retention_deleted_total counter\n",
+        );
+        let _ = writeln!(
+            output,
+            "conversation_retention_deleted_total{{kind=\"conversation\",persistence_mode=\"full\"}} {}",
+            metrics
+                .full_conversation_retention_conversations_deleted
+                .load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "conversation_retention_deleted_total{{kind=\"run\",persistence_mode=\"full\"}} {}",
+            metrics
+                .full_conversation_retention_runs_deleted
+                .load(Ordering::Relaxed)
+        );
+        output.push_str(
+            "# HELP conversation_retention_batches_total Bounded full-persistence retention batch pairs attempted.\n\
+             # TYPE conversation_retention_batches_total counter\n",
+        );
+        let _ = writeln!(
+            output,
+            "conversation_retention_batches_total{{persistence_mode=\"full\"}} {}",
+            metrics
+                .full_conversation_retention_batches
+                .load(Ordering::Relaxed)
+        );
+        output.push_str(
+            "# HELP conversation_retention_backlog_pending Whether the last bounded full-persistence retention cycle exhausted its drain budget.\n\
+             # TYPE conversation_retention_backlog_pending gauge\n",
+        );
+        let _ = writeln!(
+            output,
+            "conversation_retention_backlog_pending{{persistence_mode=\"full\"}} {}",
+            u8::from(
+                metrics
+                    .full_conversation_retention_backlog_pending
+                    .load(Ordering::Relaxed)
+            )
+        );
+        output.push_str(
+            "# HELP conversation_maintenance_batches_total Bounded full-persistence object maintenance batches attempted.\n\
+             # TYPE conversation_maintenance_batches_total counter\n",
+        );
+        let _ = writeln!(
+            output,
+            "conversation_maintenance_batches_total{{queue=\"content_deletion\",persistence_mode=\"full\"}} {}",
+            metrics
+                .full_conversation_content_deletion_batches
+                .load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "conversation_maintenance_batches_total{{queue=\"artifact_staging\",persistence_mode=\"full\"}} {}",
+            metrics
+                .full_conversation_staging_batches
+                .load(Ordering::Relaxed)
+        );
+        output.push_str(
+            "# HELP conversation_maintenance_backlog_pending Whether the last bounded object maintenance cycle left a saturated or failed queue.\n\
+             # TYPE conversation_maintenance_backlog_pending gauge\n",
+        );
+        let _ = writeln!(
+            output,
+            "conversation_maintenance_backlog_pending{{queue=\"content_deletion\",persistence_mode=\"full\"}} {}",
+            u8::from(
+                metrics
+                    .full_conversation_content_deletion_backlog_pending
+                    .load(Ordering::Relaxed)
+            )
+        );
+        let _ = writeln!(
+            output,
+            "conversation_maintenance_backlog_pending{{queue=\"artifact_staging\",persistence_mode=\"full\"}} {}",
+            u8::from(
+                metrics
+                    .full_conversation_staging_backlog_pending
+                    .load(Ordering::Relaxed)
+            )
+        );
+        if let Some(terminal) = self.terminal_engine() {
+            output.push_str(&terminal.prometheus_metrics());
+        }
         output
     }
 
@@ -1778,10 +2454,16 @@ impl RunService {
 
     pub fn begin_shutdown(&self) {
         self.inner.accepting.store(false, Ordering::Release);
+        if let Some(terminal) = self.terminal_engine() {
+            terminal.begin_shutdown();
+        }
     }
 
     pub async fn shutdown(&self, grace: Duration) -> Result<(), ServiceError> {
         self.begin_shutdown();
+        if let Some(terminal) = self.terminal_engine() {
+            terminal.shutdown(grace).await?;
+        }
         self.inner.shutdown.cancel();
         let handles = std::mem::take(&mut *self.inner.background.lock().await);
         tokio::time::timeout(grace, async {
@@ -1789,6 +2471,15 @@ impl RunService {
                 handle.await.map_err(|_| {
                     ServiceError::new("RUN_SERVICE_UNAVAILABLE", "background pump panicked")
                 })?;
+            }
+            while !self
+                .inner
+                .full_conversation_summary_jobs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
             self.inner
                 .live_response_broker
@@ -1832,6 +2523,15 @@ impl RunService {
             return Err(ServiceError::new(
                 "RUN_SERVICE_STOPPING",
                 "Run service is stopping",
+            ));
+        }
+        if self
+            .terminal_engine()
+            .is_some_and(|terminal| !terminal.is_ready())
+        {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_UNAVAILABLE",
+                "terminal-only runtime owner lease is unavailable",
             ));
         }
         Ok(())
@@ -1974,14 +2674,18 @@ impl RunService {
                 )
             })?;
         let deployed = Arc::new(
-            DeployedAgent::publish(Arc::clone(&published), resolver.as_ref(), subflows).map_err(
-                |_| {
-                    ServiceError::new(
-                        "GRAPH_PUBLICATION_INVALID",
-                        "graph publication cannot resolve its deployment bindings",
-                    )
-                },
-            )?,
+            DeployedAgent::publish_with_persistence_policy(
+                Arc::clone(&published),
+                resolver.as_ref(),
+                subflows,
+                self.inner.config.graph_persistence_policy,
+            )
+            .map_err(|_| {
+                ServiceError::new(
+                    "GRAPH_PUBLICATION_INVALID",
+                    "graph publication cannot resolve its deployment bindings",
+                )
+            })?,
         );
         if self.inner.config.deployment_mode == RunServiceDeploymentMode::Production
             && self.inner.live_response_broker.deployment_capability()
@@ -2125,8 +2829,20 @@ impl RunService {
     }
 
     pub async fn execution_graph(&self, run_id: &str) -> Result<GraphAuthorDocument, ServiceError> {
+        self.execution_graph_for_principal("default", None, run_id)
+            .await
+    }
+
+    pub async fn execution_graph_for_principal(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        run_id: &str,
+    ) -> Result<GraphAuthorDocument, ServiceError> {
         let run_id = RunId::new(run_id.to_owned())
             .map_err(|_| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
+        self.run_persistence_capability_for_principal(tenant_id, user_id, run_id.as_str())
+            .await?;
         let projection = self
             .inner
             .repository
@@ -2149,9 +2865,36 @@ impl RunService {
     }
 
     pub async fn trace_overlay(&self, run_id: &str) -> Result<TraceOverlay, ServiceError> {
+        self.trace_overlay_for_tenant("default", run_id).await
+    }
+
+    pub async fn trace_overlay_for_tenant(
+        &self,
+        tenant_id: &str,
+        run_id: &str,
+    ) -> Result<TraceOverlay, ServiceError> {
+        self.trace_overlay_for_principal(tenant_id, None, run_id)
+            .await
+    }
+
+    pub async fn trace_overlay_for_principal(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        run_id: &str,
+    ) -> Result<TraceOverlay, ServiceError> {
         let run_id = RunId::new(run_id.to_owned())
             .map_err(|_| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
-        let graph = self.execution_graph(run_id.as_str()).await?;
+        if self
+            .authorize_full_conversation_principal(tenant_id, user_id, &run_id)
+            .await?
+            .is_deleted()
+        {
+            return Err(ServiceError::new("RUN_NOT_FOUND", "Run not found"));
+        }
+        let graph = self
+            .execution_graph_for_principal(tenant_id, user_id, run_id.as_str())
+            .await?;
         self.inner
             .repository
             .load_trace_overlay(graph.document_id(), &run_id)
@@ -2180,6 +2923,37 @@ impl RunService {
         input: Value,
         request: RequestMetadata,
     ) -> Result<RunRecord, ServiceError> {
+        self.create_detached_for_tenant("default", agent_id, input, request)
+            .await
+    }
+
+    pub async fn create_detached_for_tenant(
+        &self,
+        tenant_id: &str,
+        agent_id: &str,
+        input: Value,
+        request: RequestMetadata,
+    ) -> Result<RunRecord, ServiceError> {
+        if self
+            .inner
+            .agents
+            .get(agent_id)
+            .is_some_and(|agent| agent.persistence_mode() == PersistenceMode::TerminalOnly)
+        {
+            return self
+                .terminal_engine()
+                .ok_or_else(terminal_only_not_installed)?
+                .create_detached_for_tenant(
+                    tenant_id,
+                    agent_id,
+                    input,
+                    request
+                        .request_id
+                        .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
+                )
+                .await;
+        }
+        require_default_full_tenant(tenant_id)?;
         let (projection, _, _) = self
             .create_run(
                 agent_id,
@@ -2202,6 +2976,48 @@ impl RunService {
         input: Value,
         request: RequestMetadata,
     ) -> Result<RunRecord, ServiceError> {
+        self.create_detached_from_deployment_for_tenant(
+            "default",
+            agent_id,
+            deployment_revision_id,
+            input,
+            request,
+        )
+        .await
+    }
+
+    pub async fn create_detached_from_deployment_for_tenant(
+        &self,
+        tenant_id: &str,
+        agent_id: &str,
+        deployment_revision_id: &str,
+        input: Value,
+        request: RequestMetadata,
+    ) -> Result<RunRecord, ServiceError> {
+        if self
+            .inner
+            .agents
+            .get_deployment(deployment_revision_id)
+            .is_some_and(|agent| {
+                agent.published().metadata().id == agent_id
+                    && agent.persistence_mode() == PersistenceMode::TerminalOnly
+            })
+        {
+            return self
+                .terminal_engine()
+                .ok_or_else(terminal_only_not_installed)?
+                .create_detached_from_deployment(
+                    tenant_id,
+                    agent_id,
+                    deployment_revision_id,
+                    input,
+                    request
+                        .request_id
+                        .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
+                )
+                .await;
+        }
+        require_default_full_tenant(tenant_id)?;
         let agent = self
             .inner
             .load_exact_durable_deployment(deployment_revision_id)
@@ -2219,6 +3035,8 @@ impl RunService {
                 request,
                 PublicRunAttachment::Detached,
                 false,
+                None,
+                None,
                 None,
             )
             .await?;
@@ -2260,7 +3078,43 @@ impl RunService {
             live_response_broker: Arc::clone(&self.inner.live_response_broker),
             terminal_barrier_timeout: self.inner.config.terminal_barrier_timeout,
             outbound_write_timeout: self.inner.config.outbound_write_timeout,
+            conversation_privacy: None,
         })
+    }
+
+    /// Creates an attached Run through the persistence engine frozen into the
+    /// selected Deployment Revision.
+    pub async fn create_attached_any(
+        &self,
+        tenant_id: &str,
+        agent_id: &str,
+        input: Value,
+        request: RequestMetadata,
+    ) -> Result<AnyAttachedRun, ServiceError> {
+        if self
+            .inner
+            .agents
+            .get(agent_id)
+            .is_some_and(|agent| agent.persistence_mode() == PersistenceMode::TerminalOnly)
+        {
+            let attached = self
+                .terminal_engine()
+                .ok_or_else(terminal_only_not_installed)?
+                .create_attached(
+                    tenant_id,
+                    agent_id,
+                    input,
+                    request
+                        .request_id
+                        .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
+                )
+                .await?;
+            return Ok(AnyAttachedRun::TerminalOnly(attached));
+        }
+        require_default_full_tenant(tenant_id)?;
+        self.create_attached(agent_id, input, request)
+            .await
+            .map(AnyAttachedRun::Full)
     }
 
     async fn create_run(
@@ -2294,6 +3148,8 @@ impl RunService {
                     attachment,
                     subscribe,
                     Some(head),
+                    None,
+                    None,
                 )
                 .await
             {
@@ -2327,6 +3183,7 @@ impl RunService {
         Ok((deployed, head))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_run_with_agent(
         &self,
         agent: Arc<DeployedAgent>,
@@ -2335,6 +3192,8 @@ impl RunService {
         attachment: PublicRunAttachment,
         subscribe: bool,
         expected_publication_head: Option<PublicationHead>,
+        run_id_override: Option<RunId>,
+        full_conversation: Option<FullConversationRunAdmission>,
     ) -> Result<
         (
             RunProjection,
@@ -2365,8 +3224,12 @@ impl RunService {
             .published()
             .normalize_input(input)
             .map_err(|_| ServiceError::new("INPUT_INVALID", "agent input is invalid"))?;
-        let run_id = RunId::new(format!("run_{}", Uuid::new_v4().simple()))
-            .map_err(|_| ServiceError::new("RUN_CONFLICT", "failed to allocate Run identity"))?;
+        let run_id = match run_id_override {
+            Some(run_id) => run_id,
+            None => RunId::new(format!("run_{}", Uuid::new_v4().simple())).map_err(|_| {
+                ServiceError::new("RUN_CONFLICT", "failed to allocate Run identity")
+            })?,
+        };
         match self.inner.reserve_active_run(&run_id, false) {
             ActiveRunReservation::NewlyReserved => {}
             ActiveRunReservation::Existing => {
@@ -2422,6 +3285,10 @@ impl RunService {
         .with_public_metadata(request_id, attachment)?;
         let command = match expected_publication_head {
             Some(head) => command.with_expected_publication_head(head)?,
+            None => command,
+        };
+        let command = match full_conversation {
+            Some(conversation) => command.with_full_conversation(conversation)?,
             None => command,
         };
         let create_key = transition_key("create", &[run_id.as_str()])?;
@@ -3091,15 +3958,1599 @@ impl RunService {
     }
 
     pub async fn get_run(&self, run_id: &str) -> Result<RunRecord, ServiceError> {
+        self.get_run_for_tenant("default", run_id).await
+    }
+
+    pub async fn get_run_for_tenant(
+        &self,
+        tenant_id: &str,
+        run_id: &str,
+    ) -> Result<RunRecord, ServiceError> {
+        self.get_run_for_principal(tenant_id, None, run_id).await
+    }
+
+    pub async fn get_run_for_principal(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        run_id: &str,
+    ) -> Result<RunRecord, ServiceError> {
         let run_id = RunId::new(run_id.to_owned())
             .map_err(|_| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
-        let projection = self
-            .inner
-            .repository
-            .load_run(&run_id)
+        if let Some(projection) = self.inner.repository.load_run(&run_id).await? {
+            let authorization = self
+                .authorize_full_conversation_principal(tenant_id, user_id, &run_id)
+                .await?;
+            let mut record = self.inner.record(&projection).await?;
+            if authorization.is_deleted() {
+                redact_deleted_conversation_run(&mut record);
+            }
+            return Ok(record);
+        }
+        self.terminal_engine()
+            .ok_or_else(|| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?
+            .get_run_for_principal(tenant_id, user_id, run_id.as_str())
+            .await
+    }
+
+    pub async fn run_persistence_capability(
+        &self,
+        tenant_id: &str,
+        run_id: &str,
+    ) -> Result<RunPersistenceCapability, ServiceError> {
+        self.run_persistence_capability_for_principal(tenant_id, None, run_id)
+            .await
+    }
+
+    pub async fn run_persistence_capability_for_principal(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        run_id: &str,
+    ) -> Result<RunPersistenceCapability, ServiceError> {
+        let run_id = RunId::new(run_id.to_owned())
+            .map_err(|_| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
+        if self.inner.repository.load_run(&run_id).await?.is_some() {
+            let authorization = self
+                .authorize_full_conversation_principal(tenant_id, user_id, &run_id)
+                .await?;
+            return Ok(if authorization.is_bound() {
+                RunPersistenceCapability::FULL_CONVERSATION
+            } else {
+                RunPersistenceCapability::FULL
+            });
+        }
+        self.terminal_engine()
+            .ok_or_else(|| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?
+            .get_run_for_principal(tenant_id, user_id, run_id.as_str())
+            .await?;
+        Ok(RunPersistenceCapability::TERMINAL_ONLY)
+    }
+
+    /// Fails with the stable public 422 capability code when a terminal-only
+    /// or restart-only Run is sent to an operator recovery surface.
+    pub async fn require_full_recovery_capability(
+        &self,
+        tenant_id: &str,
+        run_id: &str,
+    ) -> Result<(), ServiceError> {
+        self.require_full_recovery_capability_for_principal(tenant_id, None, run_id)
+            .await
+    }
+
+    pub async fn require_full_recovery_capability_for_principal(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        run_id: &str,
+    ) -> Result<(), ServiceError> {
+        if self
+            .run_persistence_capability_for_principal(tenant_id, user_id, run_id)
             .await?
-            .ok_or_else(|| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
-        self.inner.record(&projection).await
+            .persistence_mode
+            == PersistenceMode::TerminalOnly
+        {
+            return Err(self
+                .terminal_engine()
+                .map_or_else(terminal_only_not_installed, |engine| {
+                    engine.capability_unavailable()
+                }));
+        }
+        let run_id = RunId::new(run_id.to_owned())
+            .map_err(|_| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
+        let authorization = self
+            .authorize_full_conversation_principal(tenant_id, user_id, &run_id)
+            .await?;
+        if authorization.is_deleted() {
+            return Err(ServiceError::new("RUN_NOT_FOUND", "Run not found"));
+        }
+        if authorization.is_bound() {
+            return Err(ServiceError::new(
+                "RUN_FULL_CONVERSATION_CAPABILITY_UNAVAILABLE",
+                "Conversation-bound full Runs do not support recovery lineage",
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn create_conversation(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        agent_id: &str,
+        request_id: &str,
+    ) -> Result<insight_durable::terminal_store::Conversation, ServiceError> {
+        let agent = self
+            .inner
+            .agents
+            .get(agent_id)
+            .ok_or_else(|| ServiceError::new("AGENT_NOT_FOUND", "agent not found"))?;
+        if agent.persistence_mode() == PersistenceMode::TerminalOnly {
+            return self
+                .terminal_engine()
+                .ok_or_else(terminal_only_not_installed)?
+                .create_conversation(tenant_id, user_id, agent_id, request_id)
+                .await;
+        }
+        validate_full_conversation_identity(tenant_id)?;
+        validate_full_conversation_identity(user_id)?;
+        validate_full_conversation_identity(request_id)?;
+        let (store, config) = self.conversation_components()?;
+        if !config.conversations_enabled {
+            return Err(ServiceError::new(
+                "CONVERSATION_UNAVAILABLE",
+                "Conversation API is disabled",
+            ));
+        }
+        store
+            .create_conversation(insight_durable::terminal_store::NewConversation {
+                conversation_id: full_conversation_public_id(
+                    "conv",
+                    &[tenant_id, user_id, request_id],
+                ),
+                tenant_id: tenant_id.to_owned(),
+                user_id: user_id.to_owned(),
+                agent_id: agent_id.to_owned(),
+                persistence_mode: PersistenceMode::Full,
+                deployment_revision_id: agent.deployment_revision_id().clone(),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .map(|outcome| outcome.conversation)
+            .map_err(full_conversation_store_error)
+    }
+
+    pub fn conversation_page_limits(&self) -> Result<(u32, u32), ServiceError> {
+        let (_, config) = self.conversation_components()?;
+        config
+            .conversations_enabled
+            .then_some((
+                config.message_page_size_default,
+                config.message_page_size_max,
+            ))
+            .ok_or_else(|| {
+                ServiceError::new("CONVERSATION_UNAVAILABLE", "Conversation API is disabled")
+            })
+    }
+
+    pub async fn get_conversation(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Result<insight_durable::terminal_store::Conversation, ServiceError> {
+        if let Some(engine) = self.terminal_engine() {
+            return engine
+                .get_conversation(conversation_id, tenant_id, user_id)
+                .await;
+        }
+        let (store, config) = self.conversation_components()?;
+        if !config.conversations_enabled {
+            return Err(ServiceError::new(
+                "CONVERSATION_UNAVAILABLE",
+                "Conversation API is disabled",
+            ));
+        }
+        store
+            .get_conversation(insight_durable::terminal_store::ConversationQuery {
+                conversation_id: conversation_id.to_owned(),
+                tenant_id: tenant_id.to_owned(),
+                user_id: user_id.to_owned(),
+            })
+            .await
+            .map_err(full_conversation_store_error)?
+            .ok_or_else(|| {
+                ServiceError::new("CONVERSATION_NOT_FOUND", "conversation was not found")
+            })
+    }
+
+    pub async fn list_conversation_messages(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+        before: Option<insight_durable::terminal_store::MessageCursor>,
+        limit: u32,
+    ) -> Result<ConversationMessagePageView, ServiceError> {
+        if let Some(engine) = self.terminal_engine() {
+            return engine
+                .list_conversation_messages(conversation_id, tenant_id, user_id, before, limit)
+                .await;
+        }
+        let (store, config) = self.conversation_components()?;
+        if !config.conversations_enabled || limit == 0 || limit > config.message_page_size_max {
+            return Err(ServiceError::new(
+                "CONVERSATION_REQUEST_INVALID",
+                "conversation message page size is invalid",
+            ));
+        }
+        let page = store
+            .page_conversation_messages(insight_durable::terminal_store::MessagePageQuery {
+                conversation: insight_durable::terminal_store::ConversationQuery {
+                    conversation_id: conversation_id.to_owned(),
+                    tenant_id: tenant_id.to_owned(),
+                    user_id: user_id.to_owned(),
+                },
+                before,
+                limit,
+            })
+            .await
+            .map_err(full_conversation_store_error)?
+            .ok_or_else(|| {
+                ServiceError::new("CONVERSATION_NOT_FOUND", "conversation was not found")
+            })?;
+        let mut messages = Vec::with_capacity(page.messages.len());
+        for message in page.messages {
+            messages.push(self.full_conversation_message_view(message).await?);
+        }
+        Ok(ConversationMessagePageView {
+            messages,
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    pub async fn create_conversation_detached_turn(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+        request_id: &str,
+        content: Value,
+    ) -> Result<ConversationDetachedTurn, ServiceError> {
+        let conversation = self
+            .get_conversation(conversation_id, tenant_id, user_id)
+            .await?;
+        if conversation.persistence_mode == PersistenceMode::Full {
+            return self
+                .create_full_conversation_detached_turn(conversation, request_id, content)
+                .await;
+        }
+        self.terminal_engine()
+            .ok_or_else(terminal_only_not_installed)?
+            .create_conversation_detached_turn(
+                conversation_id,
+                tenant_id,
+                user_id,
+                request_id,
+                content,
+            )
+            .await
+    }
+
+    pub async fn create_conversation_attached_turn(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+        request_id: &str,
+        content: Value,
+    ) -> Result<AnyConversationAttachedTurn, ServiceError> {
+        let conversation = self
+            .get_conversation(conversation_id, tenant_id, user_id)
+            .await?;
+        if conversation.persistence_mode == PersistenceMode::Full {
+            return self
+                .create_full_conversation_attached_turn(conversation, request_id, content)
+                .await;
+        }
+        let turn: ConversationAttachedTurn = self
+            .terminal_engine()
+            .ok_or_else(terminal_only_not_installed)?
+            .create_conversation_attached_turn(
+                conversation_id,
+                tenant_id,
+                user_id,
+                request_id,
+                content,
+            )
+            .await?;
+        Ok(AnyConversationAttachedTurn {
+            user_message: turn.user_message,
+            attached: AnyAttachedRun::TerminalOnly(turn.attached),
+            replayed: turn.replayed,
+        })
+    }
+
+    async fn create_full_conversation_detached_turn(
+        &self,
+        conversation: insight_durable::terminal_store::Conversation,
+        request_id: &str,
+        content: Value,
+    ) -> Result<ConversationDetachedTurn, ServiceError> {
+        let summary_conversation = conversation.clone();
+        let admitted = self
+            .admit_full_conversation_turn(
+                conversation,
+                request_id,
+                content,
+                PublicRunAttachment::Detached,
+                false,
+            )
+            .await?;
+        if !admitted.replayed {
+            self.schedule_full_conversation_summary_after_run(
+                summary_conversation,
+                admitted.projection.run_id().clone(),
+            );
+        }
+        Ok(ConversationDetachedTurn {
+            user_message: admitted.user_message,
+            run: self.inner.record(&admitted.projection).await?,
+            replayed: admitted.replayed,
+        })
+    }
+
+    async fn create_full_conversation_attached_turn(
+        &self,
+        conversation: insight_durable::terminal_store::Conversation,
+        request_id: &str,
+        content: Value,
+    ) -> Result<AnyConversationAttachedTurn, ServiceError> {
+        let summary_conversation = conversation.clone();
+        let admitted = self
+            .admit_full_conversation_turn(
+                conversation,
+                request_id,
+                content,
+                PublicRunAttachment::Attached,
+                true,
+            )
+            .await?;
+        if !admitted.replayed {
+            self.schedule_full_conversation_summary_after_run(
+                summary_conversation,
+                admitted.projection.run_id().clone(),
+            );
+        }
+        let replayed = admitted.replayed;
+        let user_message = admitted.user_message.clone();
+        let attached = self.full_attached_from_admission(admitted)?;
+        Ok(AnyConversationAttachedTurn {
+            user_message,
+            attached: AnyAttachedRun::Full(attached),
+            replayed,
+        })
+    }
+
+    fn register_full_conversation_stream(
+        &self,
+        conversation_id: &str,
+    ) -> ConversationStreamPrivacy {
+        let privacy = ConversationStreamPrivacy::new();
+        let mut streams = self
+            .inner
+            .full_conversation_streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let streams = streams.entry(conversation_id.to_owned()).or_default();
+        streams.retain(|stream| stream.strong_count() > 0);
+        streams.push(privacy.downgrade());
+        privacy
+    }
+
+    async fn admit_full_conversation_turn(
+        &self,
+        conversation: insight_durable::terminal_store::Conversation,
+        request_id: &str,
+        content: Value,
+        attachment: PublicRunAttachment,
+        subscribe: bool,
+    ) -> Result<FullConversationAdmissionResult, ServiceError> {
+        validate_full_conversation_identity(request_id)?;
+        let (store, config) = self.conversation_components()?;
+        if !config.conversations_enabled {
+            return Err(ServiceError::new(
+                "CONVERSATION_UNAVAILABLE",
+                "Conversation API is disabled",
+            ));
+        }
+        let user_content_hash = canonical_full_conversation_hash(&content)?;
+        let mutation = full_conversation_mutation_index(
+            &conversation.conversation_id,
+            self.inner.full_conversation_mutations.len(),
+        );
+        let _mutation = Arc::clone(&self.inner.full_conversation_mutations[mutation])
+            .lock_owned()
+            .await;
+        let turn_query = insight_durable::terminal_store::FullConversationTurnQuery {
+            tenant_id: conversation.tenant_id.clone(),
+            request_id: request_id.to_owned(),
+            conversation_id: conversation.conversation_id.clone(),
+            user_id: conversation.user_id.clone(),
+        };
+        if let Some(replayed) = store
+            .get_full_conversation_turn(turn_query.clone())
+            .await
+            .map_err(full_conversation_store_error)?
+        {
+            if replayed.user_message.content_hash != user_content_hash {
+                return Err(ServiceError::new(
+                    "RUN_CONFLICT",
+                    "Conversation request identity was reused with different content",
+                ));
+            }
+            let projection = self
+                .inner
+                .repository
+                .load_run(&replayed.run_id)
+                .await?
+                .ok_or_else(|| {
+                    ServiceError::new("RUN_NOT_FOUND", "full Conversation Run was not found")
+                })?;
+            if projection.agent_id() != conversation.agent_id {
+                return Err(ServiceError::new(
+                    "CONVERSATION_OWNERSHIP_MISMATCH",
+                    "conversation Run does not match its bound agent",
+                ));
+            }
+            let (receiver, live_response) = if subscribe {
+                let live_response = self
+                    .inner
+                    .live_response_broker
+                    .subscribe(replayed.run_id.clone())
+                    .await
+                    .unwrap_or_else(|_| {
+                        Box::new(ReplayWithoutLiveTail {
+                            run_id: replayed.run_id.clone(),
+                        })
+                    });
+                (
+                    Some(self.inner.open_subscription(&replayed.run_id)),
+                    Some(live_response),
+                )
+            } else {
+                (None, None)
+            };
+            return Ok(FullConversationAdmissionResult {
+                user_message: self
+                    .full_conversation_message_view(replayed.user_message)
+                    .await?,
+                projection,
+                receiver,
+                live_response,
+                conversation_privacy: subscribe
+                    .then(|| self.register_full_conversation_stream(&conversation.conversation_id)),
+                replayed: true,
+            });
+        }
+        if conversation.archived_at.is_some() {
+            return Err(ServiceError::new(
+                "CONVERSATION_ARCHIVED",
+                "conversation is archived",
+            ));
+        }
+        // A crashed process may miss the post-terminal background trigger.
+        // Enqueue catch-up without joining it: the current turn always uses
+        // the latest already-committed summary plus recent durable messages.
+        self.enqueue_full_conversation_summary(conversation.clone());
+        let run_id = RunId::new(full_conversation_public_id(
+            "run",
+            &[
+                &conversation.tenant_id,
+                &conversation.conversation_id,
+                request_id,
+            ],
+        ))
+        .map_err(|_| ServiceError::new("RUN_CONFLICT", "failed to allocate Run identity"))?;
+        let user_message_id = full_conversation_public_id(
+            "msg",
+            &[
+                &conversation.conversation_id,
+                &conversation.user_id,
+                request_id,
+                "user",
+            ],
+        );
+        let assistant_message_id = full_conversation_public_id(
+            "msg",
+            &[
+                &conversation.conversation_id,
+                &conversation.user_id,
+                request_id,
+                "assistant",
+            ],
+        );
+        let content_bytes = serde_jcs::to_vec(&content).map_err(|_| {
+            ServiceError::new("CONVERSATION_REQUEST_INVALID", "message content is invalid")
+        })?;
+        let (user_content_inline, user_content_ref) =
+            if content_bytes.len() > config.inline_content_max_bytes {
+                let (reference, _) = self
+                    .put_full_conversation_artifact(
+                        &conversation.tenant_id,
+                        insight_durable::terminal_store::TerminalArtifactSourceKind::UserMessage,
+                        &user_message_id,
+                        format!(
+                            "conversation-message:{}:{}",
+                            conversation.conversation_id, user_message_id
+                        ),
+                        &content,
+                    )
+                    .await?;
+                (None, Some(reference))
+            } else {
+                (Some(content.clone()), None)
+            };
+        for _ in 0..MAX_PUBLICATION_ADMISSION_ATTEMPTS {
+            let context_query = insight_durable::terminal_store::ConversationQuery {
+                conversation_id: conversation.conversation_id.clone(),
+                tenant_id: conversation.tenant_id.clone(),
+                user_id: conversation.user_id.clone(),
+            };
+            let context = store
+                .load_conversation_context(
+                    insight_durable::terminal_store::ConversationContextQuery {
+                        conversation: context_query.clone(),
+                        recent_message_limit: config.recent_context_messages,
+                    },
+                )
+                .await
+                .map_err(full_conversation_store_error)?
+                .ok_or_else(|| {
+                    ServiceError::new("CONVERSATION_NOT_FOUND", "conversation was not found")
+                })?;
+            let context_message_order = context
+                .messages
+                .iter()
+                .map(|message| message.message_order)
+                .chain(
+                    context
+                        .summary
+                        .iter()
+                        .map(|summary| summary.through_message_order),
+                )
+                .max()
+                .unwrap_or(0);
+            let context_value = self
+                .full_conversation_context_value(
+                    context,
+                    &context_query,
+                    config.recent_context_messages,
+                    config.summary_trigger_tokens,
+                )
+                .await?;
+            let selected_context_hash = canonical_full_conversation_hash(&context_value)?;
+            let full_conversation = FullConversationRunAdmission::new(
+                conversation.conversation_id.clone(),
+                conversation.tenant_id.clone(),
+                conversation.user_id.clone(),
+                conversation.agent_id.clone(),
+                user_message_id.clone(),
+                assistant_message_id.clone(),
+                user_content_inline.clone(),
+                user_content_ref.clone(),
+                user_content_hash.clone(),
+                selected_context_hash,
+                context_message_order,
+                chrono::Utc::now(),
+            )?;
+            let input = json!({
+                "message": content.clone(),
+                "conversation_context": context_value,
+            });
+            let agent = self
+                .inner
+                .load_exact_durable_deployment(conversation.deployment_revision_id.as_str())
+                .await?;
+            if agent.persistence_mode() != PersistenceMode::Full
+                || agent.published().metadata().id != conversation.agent_id
+            {
+                return Err(ServiceError::new(
+                    "CONVERSATION_OWNERSHIP_MISMATCH",
+                    "conversation is not bound to a full-persistence deployment",
+                ));
+            }
+            if agent
+                .published()
+                .plan()
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.kind(), NodeKind::SubflowCall(_)))
+            {
+                return Err(ServiceError::new(
+                    "RUN_CAPABILITY_UNAVAILABLE",
+                    "Conversation-bound full Runs do not support subflow lineage",
+                ));
+            }
+            match self
+                .create_run_with_agent(
+                    agent,
+                    input.clone(),
+                    RequestMetadata {
+                        request_id: Some(request_id.to_owned()),
+                    },
+                    attachment,
+                    subscribe,
+                    None,
+                    Some(run_id.clone()),
+                    Some(full_conversation.clone()),
+                )
+                .await
+            {
+                Err(error) if error.code() == "AGENT_PUBLICATION_CHANGED" => continue,
+                Err(error) if error.code() == "RUN_CONFLICT" => {
+                    let replayed = store
+                        .get_full_conversation_turn(turn_query.clone())
+                        .await
+                        .map_err(full_conversation_store_error)?;
+                    let Some(replayed) = replayed else {
+                        continue;
+                    };
+                    if replayed.user_message.content_hash != user_content_hash {
+                        return Err(error);
+                    }
+                    let projection = self
+                        .inner
+                        .repository
+                        .load_run(&replayed.run_id)
+                        .await?
+                        .ok_or_else(|| {
+                            ServiceError::new(
+                                "RUN_NOT_FOUND",
+                                "full Conversation Run was not found",
+                            )
+                        })?;
+                    let (receiver, live_response) = if subscribe {
+                        let live_response = self
+                            .inner
+                            .live_response_broker
+                            .subscribe(replayed.run_id.clone())
+                            .await
+                            .unwrap_or_else(|_| {
+                                Box::new(ReplayWithoutLiveTail {
+                                    run_id: replayed.run_id.clone(),
+                                })
+                            });
+                        (
+                            Some(self.inner.open_subscription(&replayed.run_id)),
+                            Some(live_response),
+                        )
+                    } else {
+                        (None, None)
+                    };
+                    return Ok(FullConversationAdmissionResult {
+                        user_message: self
+                            .full_conversation_message_view(replayed.user_message)
+                            .await?,
+                        projection,
+                        receiver,
+                        live_response,
+                        conversation_privacy: subscribe.then(|| {
+                            self.register_full_conversation_stream(&conversation.conversation_id)
+                        }),
+                        replayed: true,
+                    });
+                }
+                Err(error) => return Err(error),
+                Ok((projection, receiver, live_response)) => {
+                    let stored = store
+                        .get_full_conversation_turn(turn_query.clone())
+                        .await
+                        .map_err(full_conversation_store_error)?
+                        .ok_or_else(|| {
+                            ServiceError::new(
+                                "RUN_CONFLICT",
+                                "full Conversation admission was not committed",
+                            )
+                        })?;
+                    if stored.run_id != run_id {
+                        return Err(ServiceError::new(
+                            "RUN_CONFLICT",
+                            "Conversation request identity conflicts with another Run",
+                        ));
+                    }
+                    self.inner
+                        .metrics
+                        .full_conversation_user_messages
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Ok(FullConversationAdmissionResult {
+                        user_message: self
+                            .full_conversation_message_view(stored.user_message)
+                            .await?,
+                        projection,
+                        receiver,
+                        live_response,
+                        conversation_privacy: subscribe.then(|| {
+                            self.register_full_conversation_stream(&conversation.conversation_id)
+                        }),
+                        replayed: false,
+                    });
+                }
+            }
+        }
+        Err(ServiceError::new(
+            "RUN_CONFLICT",
+            "agent publication kept changing during Conversation admission",
+        ))
+    }
+
+    fn full_attached_from_admission(
+        &self,
+        mut admitted: FullConversationAdmissionResult,
+    ) -> Result<AttachedRun, ServiceError> {
+        let receiver = admitted
+            .receiver
+            .take()
+            .ok_or_else(|| ServiceError::new("RUN_CONFLICT", "attached subscription missing"))?;
+        let live_response = admitted.live_response.take().ok_or_else(|| {
+            ServiceError::new(
+                "RUN_CONFLICT",
+                "attached live response subscription missing",
+            )
+        })?;
+        let conversation_privacy = admitted.conversation_privacy.take().ok_or_else(|| {
+            ServiceError::new(
+                "RUN_CONFLICT",
+                "attached Conversation privacy registration missing",
+            )
+        })?;
+        Ok(AttachedRun {
+            run_id: admitted.projection.run_id().as_str().to_owned(),
+            response_id: admitted.projection.response_id().to_owned(),
+            request_id: admitted.projection.request_id().to_owned(),
+            subscription: RunSubscription {
+                run_id: admitted.projection.run_id().as_str().to_owned(),
+                run_id_model: admitted.projection.run_id().clone(),
+                receiver,
+                owner: Arc::downgrade(&self.inner),
+                position: None,
+                last_seq: 0,
+                terminal: false,
+            },
+            live_response,
+            live_response_broker: Arc::clone(&self.inner.live_response_broker),
+            terminal_barrier_timeout: self.inner.config.terminal_barrier_timeout,
+            outbound_write_timeout: self.inner.config.outbound_write_timeout,
+            conversation_privacy: Some(conversation_privacy),
+        })
+    }
+
+    async fn full_conversation_message_view(
+        &self,
+        message: insight_durable::terminal_store::ConversationMessage,
+    ) -> Result<ConversationMessageView, ServiceError> {
+        let content = match &message.content {
+            insight_durable::terminal_store::ConversationContent::Inline(value) => value.clone(),
+            insight_durable::terminal_store::ConversationContent::Ref(reference) => {
+                self.read_full_conversation_artifact(reference).await?
+            }
+        };
+        Ok(ConversationMessageView {
+            message_id: message.message_id,
+            conversation_id: message.conversation_id,
+            message_order: message.message_order,
+            role: message.role,
+            run_id: message.run_id,
+            content,
+            content_hash: message.content_hash,
+            created_at: message.created_at,
+        })
+    }
+
+    async fn full_conversation_context_value(
+        &self,
+        mut context: insight_durable::terminal_store::ConversationContext,
+        conversation: &insight_durable::terminal_store::ConversationQuery,
+        recent_message_limit: u32,
+        token_budget: usize,
+    ) -> Result<Value, ServiceError> {
+        let summary = match context.summary {
+            Some(summary) => match self
+                .read_full_conversation_artifact(&summary.summary_ref)
+                .await
+            {
+                Ok(value) => Some(value),
+                Err(_) => {
+                    let (store, _) = self.conversation_components()?;
+                    let page = store
+                        .page_conversation_messages(
+                            insight_durable::terminal_store::MessagePageQuery {
+                                conversation: conversation.clone(),
+                                before: None,
+                                limit: recent_message_limit,
+                            },
+                        )
+                        .await
+                        .map_err(full_conversation_store_error)?
+                        .ok_or_else(|| {
+                            ServiceError::new(
+                                "CONVERSATION_NOT_FOUND",
+                                "conversation was not found",
+                            )
+                        })?;
+                    context.messages = page.messages;
+                    context.messages.reverse();
+                    None
+                }
+            },
+            None => None,
+        };
+        let mut selected = Vec::new();
+        for message in context.messages.into_iter().rev() {
+            let content = match &message.content {
+                insight_durable::terminal_store::ConversationContent::Inline(value) => {
+                    value.clone()
+                }
+                insight_durable::terminal_store::ConversationContent::Ref(reference) => {
+                    self.read_full_conversation_artifact(reference).await?
+                }
+            };
+            let candidate = json!({
+                "message_order": message.message_order,
+                "role": message.role,
+                "content": content,
+            });
+            let mut next = selected.clone();
+            next.push(candidate.clone());
+            next.reverse();
+            let context = json!({"summary": summary.clone(), "messages": next});
+            if estimated_full_conversation_tokens(&context)? > token_budget {
+                break;
+            }
+            selected.push(candidate);
+        }
+        selected.reverse();
+        let selected_count = selected.len();
+        let context = json!({"summary": summary, "messages": selected});
+        let context_tokens = estimated_full_conversation_tokens(&context)?;
+        if context_tokens <= token_budget {
+            self.inner.metrics.full_conversation_context_messages.store(
+                u64::try_from(selected_count).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+            self.inner.metrics.full_conversation_context_tokens.store(
+                u64::try_from(context_tokens).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+            Ok(context)
+        } else {
+            self.inner
+                .metrics
+                .full_conversation_context_messages
+                .store(0, Ordering::Relaxed);
+            self.inner
+                .metrics
+                .full_conversation_context_tokens
+                .store(0, Ordering::Relaxed);
+            Ok(json!({"summary": null, "messages": []}))
+        }
+    }
+
+    async fn read_full_conversation_artifact(
+        &self,
+        reference: &str,
+    ) -> Result<Value, ServiceError> {
+        let artifact: ArtifactRef = serde_json::from_str(reference).map_err(|_| {
+            ServiceError::new(
+                "CONVERSATION_CONTENT_UNAVAILABLE",
+                "conversation content ref is invalid",
+            )
+        })?;
+        let store = self.inner.artifact_store.as_ref().ok_or_else(|| {
+            ServiceError::new(
+                "CONVERSATION_CONTENT_UNAVAILABLE",
+                "conversation content store is unavailable",
+            )
+        })?;
+        let locator = store
+            .storage_locator(&artifact)
+            .map_err(ServiceError::from)?;
+        let bytes = store
+            .read_and_verify(&artifact, &locator, 64 * 1024 * 1024)
+            .await
+            .map_err(ServiceError::from)?;
+        let mut value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            ServiceError::new(
+                "CONVERSATION_CONTENT_UNAVAILABLE",
+                "conversation content is invalid",
+            )
+        })?;
+        if artifact.media_type() == Some("application/vnd.insight.terminal-object.v1+json") {
+            let object = value.as_object_mut().ok_or_else(|| {
+                ServiceError::new(
+                    "CONVERSATION_CONTENT_UNAVAILABLE",
+                    "scoped conversation content is invalid",
+                )
+            })?;
+            if object.get("kind").and_then(Value::as_str) != Some("insight_terminal_object") {
+                return Err(ServiceError::new(
+                    "CONVERSATION_CONTENT_UNAVAILABLE",
+                    "scoped conversation content is invalid",
+                ));
+            }
+            return object.remove("value").ok_or_else(|| {
+                ServiceError::new(
+                    "CONVERSATION_CONTENT_UNAVAILABLE",
+                    "scoped conversation content is invalid",
+                )
+            });
+        }
+        Ok(value)
+    }
+
+    fn schedule_full_conversation_summary_after_run(
+        &self,
+        conversation: insight_durable::terminal_store::Conversation,
+        run_id: RunId,
+    ) {
+        if self.inner.shutdown.is_cancelled() {
+            return;
+        }
+        let service = self.clone();
+        tokio::spawn(async move {
+            let timeout = service
+                .conversation_components()
+                .map(|(_, config)| config.run_timeout.saturating_add(Duration::from_secs(1)))
+                .unwrap_or(Duration::from_secs(1));
+            let terminal = tokio::select! {
+                _ = service.inner.shutdown.cancelled() => false,
+                terminal = tokio::time::timeout(timeout, async {
+                    loop {
+                        match service.inner.repository.load_run(&run_id).await {
+                            Ok(Some(projection)) if projection.lifecycle().is_terminal() => {
+                                break true;
+                            }
+                            Ok(Some(_)) => tokio::time::sleep(Duration::from_millis(20)).await,
+                            _ => break false,
+                        }
+                    }
+                }) => terminal.unwrap_or(false),
+            };
+            if terminal {
+                service
+                    .inner
+                    .metrics
+                    .full_conversation_assistant_messages
+                    .fetch_add(1, Ordering::Relaxed);
+                service.enqueue_full_conversation_summary(conversation);
+            }
+        });
+    }
+
+    fn enqueue_full_conversation_summary(
+        &self,
+        conversation: insight_durable::terminal_store::Conversation,
+    ) {
+        if self.inner.shutdown.is_cancelled() {
+            return;
+        }
+        let conversation_id = conversation.conversation_id.clone();
+        let should_spawn = {
+            let mut jobs = self
+                .inner
+                .full_conversation_summary_jobs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match jobs.entry(conversation_id.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(false);
+                    true
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    *entry.get_mut() = true;
+                    false
+                }
+            }
+        };
+        if !should_spawn {
+            return;
+        }
+        let service = self.clone();
+        tokio::spawn(async move {
+            let worker =
+                AssertUnwindSafe(service.run_full_conversation_summary_worker(conversation))
+                    .catch_unwind()
+                    .await;
+            if worker.is_err() {
+                service
+                    .inner
+                    .metrics
+                    .full_conversation_summary_failed
+                    .fetch_add(1, Ordering::Relaxed);
+                service
+                    .inner
+                    .full_conversation_summary_jobs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&conversation_id);
+                tracing::warn!(conversation_id, "full Conversation summary worker panicked");
+            }
+        });
+    }
+
+    async fn run_full_conversation_summary_worker(
+        &self,
+        conversation: insight_durable::terminal_store::Conversation,
+    ) {
+        loop {
+            if self.inner.shutdown.is_cancelled() {
+                self.finish_full_conversation_summary_pass(&conversation.conversation_id, false);
+                return;
+            }
+            let summary_delay = *self
+                .inner
+                .full_conversation_summary_delay
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !summary_delay.is_zero() {
+                tokio::select! {
+                    _ = self.inner.shutdown.cancelled() => {
+                        self.finish_full_conversation_summary_pass(
+                            &conversation.conversation_id,
+                            false,
+                        );
+                        return;
+                    }
+                    () = tokio::time::sleep(summary_delay) => {}
+                }
+            }
+            match self
+                .run_claimed_full_conversation_summary(conversation.clone())
+                .await
+            {
+                Ok(Some(())) => {
+                    self.inner
+                        .metrics
+                        .full_conversation_summary_succeeded
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.inner
+                        .metrics
+                        .full_conversation_summary_failed
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        conversation_id = conversation.conversation_id.as_str(),
+                        code = error.code(),
+                        "full Conversation summary job failed"
+                    );
+                }
+            }
+            if !self.finish_full_conversation_summary_pass(&conversation.conversation_id, true) {
+                return;
+            }
+        }
+    }
+
+    fn finish_full_conversation_summary_pass(
+        &self,
+        conversation_id: &str,
+        allow_repeat: bool,
+    ) -> bool {
+        let mut jobs = self
+            .inner
+            .full_conversation_summary_jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if allow_repeat && jobs.get(conversation_id).copied() == Some(true) {
+            jobs.insert(conversation_id.to_owned(), false);
+            true
+        } else {
+            jobs.remove(conversation_id);
+            false
+        }
+    }
+
+    async fn run_claimed_full_conversation_summary(
+        &self,
+        conversation: insight_durable::terminal_store::Conversation,
+    ) -> Result<Option<()>, ServiceError> {
+        let (store, _) = self.conversation_components()?;
+        let eligible = tokio::select! {
+            _ = self.inner.shutdown.cancelled() => {
+                return Err(ServiceError::new(
+                    "RUN_SERVICE_STOPPING",
+                    "Run service is stopping",
+                ));
+            }
+            result = tokio::time::timeout(
+                FULL_CONVERSATION_SUMMARY_TIMEOUT,
+                self.full_conversation_summary_is_eligible(&conversation),
+            ) => result.map_err(|_| {
+                ServiceError::new(
+                    "CONVERSATION_SUMMARY_TIMEOUT",
+                    "Conversation summary eligibility preflight timed out",
+                )
+            })??,
+        };
+        if !eligible {
+            return Ok(None);
+        }
+        if self.inner.shutdown.is_cancelled() {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_STOPPING",
+                "Run service is stopping",
+            ));
+        }
+        let query = insight_durable::terminal_store::ConversationQuery {
+            conversation_id: conversation.conversation_id.clone(),
+            tenant_id: conversation.tenant_id.clone(),
+            user_id: conversation.user_id.clone(),
+        };
+        let claim_token = format!("summary_{}", Uuid::new_v4().simple());
+        let claimed_at = chrono::Utc::now();
+        let claim_expires_at = claimed_at
+            + chrono::Duration::from_std(FULL_CONVERSATION_SUMMARY_CLAIM_LEASE).map_err(|_| {
+                ServiceError::new(
+                    "RUN_SERVICE_CONFIG_INVALID",
+                    "Conversation summary claim lease is invalid",
+                )
+            })?;
+        let claimed = store
+            .try_claim_conversation_summary_job(
+                insight_durable::terminal_store::ClaimConversationSummaryJob {
+                    conversation: query,
+                    claim_token: claim_token.clone(),
+                    claimed_by: self.inner.owner.clone(),
+                    claim_expires_at,
+                    created_at: claimed_at,
+                },
+            )
+            .await
+            .map_err(full_conversation_store_error)?;
+        if !claimed {
+            return Ok(None);
+        }
+
+        let conversation_id = conversation.conversation_id.clone();
+        let generation = tokio::select! {
+            _ = self.inner.shutdown.cancelled() => Err(ServiceError::new(
+                "RUN_SERVICE_STOPPING",
+                "Run service is stopping",
+            )),
+            result = tokio::time::timeout(
+                FULL_CONVERSATION_SUMMARY_TIMEOUT,
+                AssertUnwindSafe(self.generate_full_conversation_summary(conversation))
+                    .catch_unwind(),
+            ) => match result {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(ServiceError::new(
+                    "CONVERSATION_SUMMARY_FAILED",
+                    "Conversation summary worker panicked",
+                )),
+                Err(_) => Err(ServiceError::new(
+                    "CONVERSATION_SUMMARY_TIMEOUT",
+                    "Conversation summary job timed out",
+                )),
+            },
+        };
+        let released = store
+            .release_conversation_summary_job(
+                insight_durable::terminal_store::ReleaseConversationSummaryJob {
+                    conversation_id,
+                    claim_token,
+                    claimed_by: self.inner.owner.clone(),
+                },
+            )
+            .await
+            .map_err(full_conversation_store_error)?;
+        if !released {
+            return Err(ServiceError::new(
+                "CONVERSATION_SUMMARY_CLAIM_LOST",
+                "Conversation summary claim was lost before release",
+            ));
+        }
+        generation.map(Some)
+    }
+
+    async fn full_conversation_summary_is_eligible(
+        &self,
+        conversation: &insight_durable::terminal_store::Conversation,
+    ) -> Result<bool, ServiceError> {
+        let (store, config) = self.conversation_components()?;
+        let query = insight_durable::terminal_store::ConversationQuery {
+            conversation_id: conversation.conversation_id.clone(),
+            tenant_id: conversation.tenant_id.clone(),
+            user_id: conversation.user_id.clone(),
+        };
+        let previous_boundary = store
+            .latest_conversation_summary(query.clone())
+            .await
+            .map_err(full_conversation_store_error)?
+            .as_ref()
+            .map_or(0, |summary| summary.through_message_order);
+        let mut before = None;
+        let mut message_count = 0_usize;
+        let mut token_count = 0_usize;
+        loop {
+            let page = store
+                .page_conversation_messages(insight_durable::terminal_store::MessagePageQuery {
+                    conversation: query.clone(),
+                    before,
+                    limit: 200,
+                })
+                .await
+                .map_err(full_conversation_store_error)?
+                .ok_or_else(|| {
+                    ServiceError::new("CONVERSATION_NOT_FOUND", "conversation was not found")
+                })?;
+            for message in page.messages {
+                if message.message_order <= previous_boundary {
+                    return Ok(false);
+                }
+                let content = match &message.content {
+                    insight_durable::terminal_store::ConversationContent::Inline(value) => {
+                        value.clone()
+                    }
+                    insight_durable::terminal_store::ConversationContent::Ref(reference) => {
+                        self.read_full_conversation_artifact(reference).await?
+                    }
+                };
+                message_count = message_count.saturating_add(1);
+                token_count =
+                    token_count.saturating_add(estimated_full_conversation_tokens(&content)?);
+                if message_count
+                    >= usize::try_from(config.summary_trigger_messages).unwrap_or(usize::MAX)
+                    || token_count >= config.summary_trigger_tokens
+                {
+                    return Ok(true);
+                }
+            }
+            match page.next_cursor {
+                Some(cursor) => before = Some(cursor),
+                None => return Ok(false),
+            }
+        }
+    }
+
+    async fn generate_full_conversation_summary(
+        &self,
+        conversation: insight_durable::terminal_store::Conversation,
+    ) -> Result<(), ServiceError> {
+        let (store, config) = self.conversation_components()?;
+        let query = insight_durable::terminal_store::ConversationQuery {
+            conversation_id: conversation.conversation_id.clone(),
+            tenant_id: conversation.tenant_id.clone(),
+            user_id: conversation.user_id.clone(),
+        };
+        let previous = store
+            .latest_conversation_summary(query.clone())
+            .await
+            .map_err(full_conversation_store_error)?;
+        let previous_boundary = previous
+            .as_ref()
+            .map_or(0, |summary| summary.through_message_order);
+        let backlog_limit = usize::try_from(config.summary_trigger_messages)
+            .unwrap_or(usize::MAX)
+            .saturating_add(usize::try_from(config.recent_context_messages).unwrap_or(0))
+            .max(200);
+        let mut before = None;
+        let mut messages = Vec::new();
+        'pages: loop {
+            let page = store
+                .page_conversation_messages(insight_durable::terminal_store::MessagePageQuery {
+                    conversation: query.clone(),
+                    before,
+                    limit: 200,
+                })
+                .await
+                .map_err(full_conversation_store_error)?
+                .ok_or_else(|| {
+                    ServiceError::new("CONVERSATION_NOT_FOUND", "conversation was not found")
+                })?;
+            for message in page.messages {
+                if message.message_order <= previous_boundary {
+                    break 'pages;
+                }
+                messages.push(message);
+                if messages.len() > backlog_limit {
+                    return Err(ServiceError::new(
+                        "CONVERSATION_SUMMARY_BACKLOG",
+                        "conversation summary backlog exceeds the bounded job size",
+                    ));
+                }
+            }
+            match page.next_cursor {
+                Some(cursor) => before = Some(cursor),
+                None => break,
+            }
+        }
+        let mut selected = Vec::with_capacity(messages.len());
+        let mut token_count = 0_usize;
+        for message in messages {
+            let content = match &message.content {
+                insight_durable::terminal_store::ConversationContent::Inline(value) => {
+                    value.clone()
+                }
+                insight_durable::terminal_store::ConversationContent::Ref(reference) => {
+                    self.read_full_conversation_artifact(reference).await?
+                }
+            };
+            token_count = token_count.saturating_add(estimated_full_conversation_tokens(&content)?);
+            selected.push((message, content));
+        }
+        if selected.len() < usize::try_from(config.summary_trigger_messages).unwrap_or(usize::MAX)
+            && token_count < config.summary_trigger_tokens
+        {
+            return Ok(());
+        }
+        let keep = usize::try_from(config.recent_context_messages)
+            .unwrap_or(usize::MAX)
+            .min(selected.len());
+        let summarized = &selected[keep..];
+        let Some(boundary) = summarized.first() else {
+            return Ok(());
+        };
+        let mut new_entries = Vec::with_capacity(summarized.len());
+        for (message, content) in summarized.iter().rev() {
+            new_entries.push(json!({
+                "role": match message.role {
+                    insight_durable::terminal_store::ConversationRole::User => "user",
+                    insight_durable::terminal_store::ConversationRole::Assistant => "assistant",
+                },
+                "content_hash": message.content_hash.as_str(),
+                "preview": summary_preview(content),
+            }));
+        }
+        let mut entries = match previous.as_ref() {
+            Some(summary) => {
+                let previous = self
+                    .read_full_conversation_artifact(&summary.summary_ref)
+                    .await?;
+                normalized_summary_entries(&previous)
+            }
+            None => Vec::new(),
+        };
+        entries.extend(new_entries);
+        if entries.len() > SUMMARY_MAX_ENTRIES {
+            entries.drain(..entries.len() - SUMMARY_MAX_ENTRIES);
+        }
+        let summary_budget = config.summary_trigger_tokens.saturating_div(2).max(64);
+        let mut summary_value =
+            flat_summary_value(previous_boundary, boundary.0.message_order, &entries);
+        while !entries.is_empty() && estimated_json_tokens(&summary_value)? > summary_budget {
+            entries.remove(0);
+            summary_value =
+                flat_summary_value(previous_boundary, boundary.0.message_order, &entries);
+        }
+        if estimated_json_tokens(&summary_value)? > summary_budget {
+            return Err(ServiceError::new(
+                "CONVERSATION_SUMMARY_INVALID",
+                "conversation summary exceeds its hard size budget",
+            ));
+        }
+        let source_id = format!(
+            "{}:{}",
+            conversation.conversation_id, boundary.0.message_order
+        );
+        let (summary_ref, summary_hash) = self
+            .put_full_conversation_artifact(
+                &conversation.tenant_id,
+                insight_durable::terminal_store::TerminalArtifactSourceKind::ConversationSummary,
+                &source_id,
+                format!(
+                    "conversation-summary:{}:{}",
+                    conversation.conversation_id, boundary.0.message_order
+                ),
+                &summary_value,
+            )
+            .await?;
+        store
+            .put_conversation_summary(insight_durable::terminal_store::NewConversationSummary {
+                conversation: query,
+                through_message_order: boundary.0.message_order,
+                summary_ref,
+                summary_hash,
+                model_revision: "extractive-full-v1".to_owned(),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .map(|_| ())
+            .map_err(full_conversation_store_error)
+    }
+
+    async fn put_full_conversation_artifact(
+        &self,
+        tenant_id: &str,
+        source_kind: insight_durable::terminal_store::TerminalArtifactSourceKind,
+        source_id: &str,
+        scope: String,
+        value: &Value,
+    ) -> Result<(String, ContentHash), ServiceError> {
+        stage_full_conversation_artifact(
+            self.inner.as_ref(),
+            tenant_id,
+            source_kind,
+            source_id,
+            scope,
+            value,
+            None,
+        )
+        .await
+    }
+
+    fn conversation_components(
+        &self,
+    ) -> Result<(Arc<dyn TerminalOnlyStore>, TerminalOnlyRunConfig), ServiceError> {
+        let store = self
+            .inner
+            .conversation_store
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| {
+                ServiceError::new("CONVERSATION_UNAVAILABLE", "Conversation API is disabled")
+            })?;
+        let config = self
+            .inner
+            .conversation_config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .copied()
+            .ok_or_else(|| {
+                ServiceError::new("CONVERSATION_UNAVAILABLE", "Conversation API is disabled")
+            })?;
+        Ok((store, config))
+    }
+
+    pub async fn archive_conversation(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Result<insight_durable::terminal_store::Conversation, ServiceError> {
+        if let Some(engine) = self.terminal_engine() {
+            return engine
+                .archive_conversation(conversation_id, tenant_id, user_id)
+                .await;
+        }
+        let (store, config) = self.conversation_components()?;
+        if !config.conversations_enabled {
+            return Err(ServiceError::new(
+                "CONVERSATION_UNAVAILABLE",
+                "Conversation API is disabled",
+            ));
+        }
+        match store
+            .archive_conversation(
+                insight_durable::terminal_store::ConversationQuery {
+                    conversation_id: conversation_id.to_owned(),
+                    tenant_id: tenant_id.to_owned(),
+                    user_id: user_id.to_owned(),
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .map_err(full_conversation_store_error)?
+        {
+            insight_durable::terminal_store::ArchiveOutcome::Archived { conversation, .. } => {
+                Ok(conversation)
+            }
+            insight_durable::terminal_store::ArchiveOutcome::NotFound => Err(ServiceError::new(
+                "CONVERSATION_NOT_FOUND",
+                "conversation was not found",
+            )),
+        }
+    }
+
+    pub async fn delete_conversation(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Result<bool, ServiceError> {
+        let (store, config) = self.conversation_components()?;
+        if !config.conversations_enabled {
+            return Err(ServiceError::new(
+                "CONVERSATION_UNAVAILABLE",
+                "Conversation API is disabled",
+            ));
+        }
+        let query = insight_durable::terminal_store::ConversationQuery {
+            conversation_id: conversation_id.to_owned(),
+            tenant_id: tenant_id.to_owned(),
+            user_id: user_id.to_owned(),
+        };
+        if store
+            .get_conversation(query.clone())
+            .await
+            .map_err(full_conversation_store_error)?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        tokio::time::timeout(
+            config.terminal_commit_retry,
+            cancel_conversation_streams(&self.inner.full_conversation_streams, conversation_id),
+        )
+        .await
+        .map_err(|_| {
+            ServiceError::new(
+                "CONVERSATION_UNAVAILABLE",
+                "Conversation streams could not be quiesced before deletion",
+            )
+        })?;
+        let mutation = full_conversation_mutation_index(
+            conversation_id,
+            self.inner.full_conversation_mutations.len(),
+        );
+        let _mutation = Arc::clone(&self.inner.full_conversation_mutations[mutation])
+            .lock_owned()
+            .await;
+        tokio::time::timeout(
+            config.terminal_commit_retry,
+            cancel_conversation_streams(&self.inner.full_conversation_streams, conversation_id),
+        )
+        .await
+        .map_err(|_| {
+            ServiceError::new(
+                "CONVERSATION_UNAVAILABLE",
+                "Conversation streams could not be quiesced before deletion",
+            )
+        })?;
+        if store
+            .get_conversation(query.clone())
+            .await
+            .map_err(full_conversation_store_error)?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let run_ids = store
+            .list_full_conversation_run_ids(query.clone())
+            .await
+            .map_err(full_conversation_store_error)?;
+        tokio::time::timeout(config.terminal_commit_retry, async {
+            loop {
+                let mut pending = false;
+                for run_id in &run_ids {
+                    let Some(projection) = self.inner.repository.load_run(run_id).await? else {
+                        continue;
+                    };
+                    if projection.lifecycle().is_terminal() {
+                        continue;
+                    }
+                    pending = true;
+                    self.cancel_model(run_id.clone()).await?;
+                }
+                if !pending {
+                    return Ok::<(), ServiceError>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            ServiceError::new(
+                "CONVERSATION_UNAVAILABLE",
+                "Conversation Runs could not be quiesced before deletion",
+            )
+        })??;
+        if let Some(engine) = self.terminal_engine() {
+            return engine
+                .delete_conversation(conversation_id, tenant_id, user_id)
+                .await;
+        }
+        match store
+            .delete_conversation(query)
+            .await
+            .map_err(full_conversation_store_error)?
+        {
+            insight_durable::terminal_store::PrivacyDeleteOutcome::Deleted { .. } => Ok(true),
+            insight_durable::terminal_store::PrivacyDeleteOutcome::NotFound => Ok(false),
+        }
     }
 
     /// Reads one Artifact only when its exact ArtifactRef is already present
@@ -3111,9 +5562,39 @@ impl RunService {
         run_id: &str,
         artifact_id: &str,
     ) -> Result<PublicArtifact, ServiceError> {
+        self.read_public_artifact_for_tenant("default", run_id, artifact_id)
+            .await
+    }
+
+    pub async fn read_public_artifact_for_tenant(
+        &self,
+        tenant_id: &str,
+        run_id: &str,
+        artifact_id: &str,
+    ) -> Result<PublicArtifact, ServiceError> {
+        self.read_public_artifact_for_principal(tenant_id, None, run_id, artifact_id)
+            .await
+    }
+
+    pub async fn read_public_artifact_for_principal(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        run_id: &str,
+        artifact_id: &str,
+    ) -> Result<PublicArtifact, ServiceError> {
         let not_found = || ServiceError::new("ARTIFACT_NOT_FOUND", "Artifact not found");
         let run_id = RunId::new(run_id.to_owned()).map_err(|_| not_found())?;
         let artifact_id = ArtifactId::new(artifact_id.to_owned()).map_err(|_| not_found())?;
+        match self
+            .authorize_full_conversation_principal(tenant_id, user_id, &run_id)
+            .await
+        {
+            Ok(authorization) if !authorization.is_deleted() => {}
+            Ok(_) => return Err(not_found()),
+            Err(error) if error.code() == "RUN_NOT_FOUND" => return Err(not_found()),
+            Err(error) => return Err(error),
+        }
         let snapshot = self
             .inner
             .repository
@@ -3611,9 +6092,390 @@ impl RunService {
     }
 
     pub async fn cancel(&self, run_id: &str) -> Result<RunRecord, ServiceError> {
+        self.cancel_for_tenant("default", run_id).await
+    }
+
+    pub async fn cancel_for_tenant(
+        &self,
+        tenant_id: &str,
+        run_id: &str,
+    ) -> Result<RunRecord, ServiceError> {
+        self.cancel_for_principal(tenant_id, None, run_id).await
+    }
+
+    pub async fn cancel_for_principal(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        run_id: &str,
+    ) -> Result<RunRecord, ServiceError> {
         let run_id = RunId::new(run_id.to_owned())
             .map_err(|_| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
-        self.cancel_model(run_id).await
+        if self.inner.repository.load_run(&run_id).await?.is_none() {
+            return self
+                .terminal_engine()
+                .ok_or_else(|| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?
+                .cancel_for_principal(tenant_id, user_id, run_id.as_str())
+                .await;
+        }
+        let authorization = self
+            .authorize_full_conversation_principal(tenant_id, user_id, &run_id)
+            .await?;
+        let mut record = self.cancel_model(run_id).await?;
+        if authorization.is_deleted() {
+            redact_deleted_conversation_run(&mut record);
+        }
+        Ok(record)
+    }
+
+    async fn authorize_full_conversation_principal(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        run_id: &RunId,
+    ) -> Result<FullConversationRunAuthorization, ServiceError> {
+        let store = self
+            .inner
+            .conversation_store
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(store) = store else {
+            return require_default_full_tenant(tenant_id)
+                .map(|()| FullConversationRunAuthorization::Standalone);
+        };
+        let bound_tenant = store
+            .full_conversation_run_tenant(run_id)
+            .await
+            .map_err(full_conversation_store_error)?;
+        match bound_tenant.as_deref() {
+            Some(bound) if bound != tenant_id => {
+                return Err(ServiceError::new("RUN_NOT_FOUND", "Run not found"));
+            }
+            Some(_) => {}
+            None => {
+                require_default_full_tenant(tenant_id)?;
+                return Ok(FullConversationRunAuthorization::Standalone);
+            }
+        }
+        let expected_user =
+            user_id.ok_or_else(|| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
+        if store
+            .full_conversation_run_user(run_id)
+            .await
+            .map_err(full_conversation_store_error)?
+            .as_deref()
+            != Some(expected_user)
+        {
+            return Err(ServiceError::new("RUN_NOT_FOUND", "Run not found"));
+        }
+        let deleted = store
+            .full_conversation_run_is_deleted(run_id)
+            .await
+            .map(|deleted| deleted.unwrap_or(false))
+            .map_err(full_conversation_store_error)?;
+        Ok(FullConversationRunAuthorization::Bound { deleted })
+    }
+
+    /// Acquires the same content-free mutation fence used by full
+    /// Conversation privacy deletion, then revalidates exact
+    /// conversation/tenant/user/run membership.
+    pub async fn acquire_visible_full_conversation_run(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+        run_id: &str,
+    ) -> Result<FullConversationVisibilityGuard, ServiceError> {
+        let run_id = RunId::new(run_id.to_owned())
+            .map_err(|_| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
+        self.acquire_visible_full_conversation_response(
+            insight_durable::terminal_store::ConversationQuery {
+                conversation_id: conversation_id.to_owned(),
+                tenant_id: tenant_id.to_owned(),
+                user_id: user_id.to_owned(),
+            },
+            Some(&run_id),
+        )
+        .await
+    }
+
+    async fn acquire_visible_full_conversation_response(
+        &self,
+        query: insight_durable::terminal_store::ConversationQuery,
+        expected_run_id: Option<&RunId>,
+    ) -> Result<FullConversationVisibilityGuard, ServiceError> {
+        let (store, config) = self.conversation_components()?;
+        if !config.conversations_enabled {
+            return Err(ServiceError::new(
+                "CONVERSATION_UNAVAILABLE",
+                "Conversation API is disabled",
+            ));
+        }
+        let mutation = full_conversation_mutation_index(
+            &query.conversation_id,
+            self.inner.full_conversation_mutations.len(),
+        );
+        let mutation = Arc::clone(&self.inner.full_conversation_mutations[mutation])
+            .lock_owned()
+            .await;
+        if store
+            .get_conversation(query.clone())
+            .await
+            .map_err(full_conversation_store_error)?
+            .is_none()
+        {
+            return Err(if expected_run_id.is_some() {
+                ServiceError::new("RUN_NOT_FOUND", "Run not found")
+            } else {
+                ServiceError::new("CONVERSATION_NOT_FOUND", "conversation was not found")
+            });
+        }
+        if let Some(expected_run_id) = expected_run_id {
+            if !store
+                .list_full_conversation_run_ids(query)
+                .await
+                .map_err(full_conversation_store_error)?
+                .contains(expected_run_id)
+            {
+                return Err(ServiceError::new("RUN_NOT_FOUND", "Run not found"));
+            }
+        }
+        Ok(FullConversationVisibilityGuard {
+            _mutation: mutation,
+        })
+    }
+
+    async fn acquire_full_conversation_response_visibility(
+        &self,
+        query: insight_durable::terminal_store::ConversationQuery,
+    ) -> Result<ConversationResponseVisibilityGuard, ServiceError> {
+        let (store, config) = self.conversation_components()?;
+        if !config.conversations_enabled {
+            return Err(ServiceError::new(
+                "CONVERSATION_UNAVAILABLE",
+                "Conversation API is disabled",
+            ));
+        }
+        let mutation = full_conversation_mutation_index(
+            &query.conversation_id,
+            self.inner.full_conversation_mutations.len(),
+        );
+        let _mutation = Arc::clone(&self.inner.full_conversation_mutations[mutation])
+            .lock_owned()
+            .await;
+        if store
+            .get_conversation(query.clone())
+            .await
+            .map_err(full_conversation_store_error)?
+            .is_none()
+        {
+            return Err(ServiceError::new(
+                "CONVERSATION_NOT_FOUND",
+                "conversation was not found",
+            ));
+        }
+        let privacy = self.register_full_conversation_stream(&query.conversation_id);
+        Ok(ConversationResponseVisibilityGuard::new(privacy))
+    }
+
+    /// Revalidates a finite Conversation response under its persistence
+    /// engine's exact privacy-delete stripe.
+    pub async fn acquire_conversation_response_visibility(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Result<ConversationResponseVisibilityGuard, ServiceError> {
+        let (store, config) = self.conversation_components()?;
+        if !config.conversations_enabled {
+            return Err(ServiceError::new(
+                "CONVERSATION_UNAVAILABLE",
+                "Conversation API is disabled",
+            ));
+        }
+        let query = insight_durable::terminal_store::ConversationQuery {
+            conversation_id: conversation_id.to_owned(),
+            tenant_id: tenant_id.to_owned(),
+            user_id: user_id.to_owned(),
+        };
+        let conversation = store
+            .get_conversation(query.clone())
+            .await
+            .map_err(full_conversation_store_error)?
+            .ok_or_else(|| {
+                ServiceError::new("CONVERSATION_NOT_FOUND", "conversation was not found")
+            })?;
+        match conversation.persistence_mode {
+            PersistenceMode::Full => {
+                self.acquire_full_conversation_response_visibility(query)
+                    .await
+            }
+            PersistenceMode::TerminalOnly => {
+                self.terminal_engine()
+                    .ok_or_else(terminal_only_not_installed)?
+                    .acquire_conversation_response_visibility(conversation_id, tenant_id, user_id)
+                    .await
+            }
+        }
+    }
+
+    async fn full_run_response_visibility(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        run_id: &RunId,
+    ) -> Result<FullRunResponseVisibility, ServiceError> {
+        let store = self
+            .inner
+            .conversation_store
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(store) = store else {
+            require_default_full_tenant(tenant_id)?;
+            return Ok(FullRunResponseVisibility::Standalone);
+        };
+        let Some(conversation_id) = store
+            .full_conversation_run_conversation_id(run_id)
+            .await
+            .map_err(full_conversation_store_error)?
+        else {
+            require_default_full_tenant(tenant_id)?;
+            return Ok(FullRunResponseVisibility::Standalone);
+        };
+        let mutation = full_conversation_mutation_index(
+            &conversation_id,
+            self.inner.full_conversation_mutations.len(),
+        );
+        let _mutation = Arc::clone(&self.inner.full_conversation_mutations[mutation])
+            .lock_owned()
+            .await;
+
+        if store
+            .full_conversation_run_tenant(run_id)
+            .await
+            .map_err(full_conversation_store_error)?
+            .as_deref()
+            != Some(tenant_id)
+        {
+            return Err(ServiceError::new("RUN_NOT_FOUND", "Run not found"));
+        }
+        let expected_user =
+            user_id.ok_or_else(|| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
+        if store
+            .full_conversation_run_user(run_id)
+            .await
+            .map_err(full_conversation_store_error)?
+            .as_deref()
+            != Some(expected_user)
+        {
+            return Err(ServiceError::new("RUN_NOT_FOUND", "Run not found"));
+        }
+        if store
+            .full_conversation_run_is_deleted(run_id)
+            .await
+            .map_err(full_conversation_store_error)?
+            .unwrap_or(true)
+        {
+            return Ok(FullRunResponseVisibility::Deleted);
+        }
+        let query = insight_durable::terminal_store::ConversationQuery {
+            conversation_id,
+            tenant_id: tenant_id.to_owned(),
+            user_id: expected_user.to_owned(),
+        };
+        if store
+            .get_conversation(query.clone())
+            .await
+            .map_err(full_conversation_store_error)?
+            .is_none()
+            || !store
+                .list_full_conversation_run_ids(query.clone())
+                .await
+                .map_err(full_conversation_store_error)?
+                .contains(run_id)
+        {
+            return Err(ServiceError::new("RUN_NOT_FOUND", "Run not found"));
+        }
+        let privacy = self.register_full_conversation_stream(&query.conversation_id);
+        Ok(FullRunResponseVisibility::Visible(
+            ConversationResponseVisibilityGuard::new(privacy),
+        ))
+    }
+
+    /// Final privacy calibration for a finite Run response. If full
+    /// Conversation deletion won the stripe, content is redacted before the
+    /// response can be serialized. Otherwise the returned guard must live
+    /// through body delivery.
+    pub async fn finalize_run_response_visibility(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        run: &mut RunRecord,
+    ) -> Result<Option<ConversationResponseVisibilityGuard>, ServiceError> {
+        let run_id = RunId::new(run.run_id.clone())
+            .map_err(|_| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
+        if self.inner.repository.load_run(&run_id).await?.is_some() {
+            return match self
+                .full_run_response_visibility(tenant_id, user_id, &run_id)
+                .await?
+            {
+                FullRunResponseVisibility::Standalone => Ok(None),
+                FullRunResponseVisibility::Visible(guard) => Ok(Some(guard)),
+                FullRunResponseVisibility::Deleted => {
+                    redact_deleted_conversation_run(run);
+                    Ok(None)
+                }
+            };
+        }
+        self.terminal_engine()
+            .ok_or_else(|| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?
+            .acquire_run_response_visibility(tenant_id, user_id, run_id.as_str())
+            .await
+    }
+
+    /// Acquires a privacy fence for content surfaces that cannot be redacted
+    /// (trace and Artifact bytes). Deleted Conversation content is therefore
+    /// indistinguishable from a missing Run.
+    pub async fn acquire_run_content_response_visibility(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        run_id: &str,
+    ) -> Result<Option<ConversationResponseVisibilityGuard>, ServiceError> {
+        let run_id = RunId::new(run_id.to_owned())
+            .map_err(|_| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
+        if self.inner.repository.load_run(&run_id).await?.is_some() {
+            return match self
+                .full_run_response_visibility(tenant_id, user_id, &run_id)
+                .await?
+            {
+                FullRunResponseVisibility::Standalone => Ok(None),
+                FullRunResponseVisibility::Visible(guard) => Ok(Some(guard)),
+                FullRunResponseVisibility::Deleted => {
+                    Err(ServiceError::new("RUN_NOT_FOUND", "Run not found"))
+                }
+            };
+        }
+        self.terminal_engine()
+            .ok_or_else(|| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?
+            .acquire_run_response_visibility(tenant_id, user_id, run_id.as_str())
+            .await
+    }
+
+    /// Acquires a content-free privacy fence immediately before a
+    /// terminal-only Conversation SSE stream publishes its terminal frame.
+    pub async fn acquire_visible_terminal_conversation_run(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        run_id: &str,
+    ) -> Result<ConversationVisibilityGuard, ServiceError> {
+        self.terminal_engine()
+            .ok_or_else(terminal_only_not_installed)?
+            .acquire_conversation_visibility_guard(tenant_id, user_id, run_id)
+            .await
     }
 
     async fn cancel_model(&self, run_id: RunId) -> Result<RunRecord, ServiceError> {
@@ -3665,7 +6527,198 @@ impl RunService {
         tasks.push(spawn_work_notification_publisher(Arc::clone(&self.inner)));
         if self.inner.artifact_store.is_some() {
             tasks.push(spawn_artifact_gc_pump(Arc::clone(&self.inner)));
+            tasks.push(spawn_full_conversation_maintenance_pump(Arc::clone(
+                &self.inner,
+            )));
         }
+    }
+}
+
+fn full_conversation_terminal_staging_error() -> RepositoryError {
+    insight_engine::repository::adapter::repository_error(
+        insight_engine::repository::REPOSITORY_STORAGE_FAILURE,
+        "full Conversation terminal artifact staging failed",
+    )
+}
+
+async fn stage_full_conversation_artifact(
+    inner: &RunServiceInner,
+    tenant_id: &str,
+    source_kind: insight_durable::terminal_store::TerminalArtifactSourceKind,
+    source_id: &str,
+    scope: String,
+    value: &Value,
+    stage_anchor: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+) -> Result<(String, ContentHash), ServiceError> {
+    let envelope = json!({
+        "kind": "insight_terminal_object",
+        "scope": format!("tenant:{tenant_id}:{scope}"),
+        "value": value,
+    });
+    let bytes = serde_jcs::to_vec(&envelope).map_err(|_| {
+        ServiceError::new(
+            "CONVERSATION_CONTENT_UNAVAILABLE",
+            "conversation content is invalid",
+        )
+    })?;
+    let artifact_store = inner.artifact_store.as_ref().ok_or_else(|| {
+        ServiceError::new(
+            "CONVERSATION_CONTENT_UNAVAILABLE",
+            "conversation content store is unavailable",
+        )
+    })?;
+    let artifact = artifact_store
+        .artifact_for_bytes(
+            &bytes,
+            Some(insight_durable::terminal_store::TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE.to_owned()),
+        )
+        .map_err(|_| {
+            ServiceError::new(
+                "CONVERSATION_CONTENT_UNAVAILABLE",
+                "conversation artifact is invalid",
+            )
+        })?;
+    let reference = serde_json::to_string(&artifact).map_err(|_| {
+        ServiceError::new(
+            "CONVERSATION_CONTENT_UNAVAILABLE",
+            "conversation artifact reference is invalid",
+        )
+    })?;
+    let config = inner
+        .conversation_config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .copied()
+        .ok_or_else(|| {
+            ServiceError::new("CONVERSATION_UNAVAILABLE", "Conversation API is disabled")
+        })?;
+    let store = inner
+        .conversation_store
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .ok_or_else(|| {
+            ServiceError::new("CONVERSATION_UNAVAILABLE", "Conversation API is disabled")
+        })?;
+    let retry_grace = config
+        .terminal_commit_retry
+        .saturating_mul(2)
+        .max(Duration::from_secs(1));
+    let grace = chrono::Duration::from_std(if stage_anchor.is_some() {
+        retry_grace.max(config.run_timeout)
+    } else {
+        retry_grace
+    })
+    .map_err(|_| {
+        ServiceError::new(
+            "CONVERSATION_CONTENT_UNAVAILABLE",
+            "conversation artifact grace is invalid",
+        )
+    })?;
+    let (created_at, available_at) = match stage_anchor {
+        Some((created_at, deadline_at)) => (created_at, deadline_at + grace),
+        None => {
+            let created_at = chrono::Utc::now();
+            (created_at, created_at + grace)
+        }
+    };
+    store
+        .stage_terminal_artifact(insight_durable::terminal_store::NewTerminalArtifactStage {
+            tenant_id: tenant_id.to_owned(),
+            content_ref: reference.clone(),
+            content_hash: artifact.content_hash().clone(),
+            source_kind,
+            source_id: source_id.to_owned(),
+            available_at,
+            created_at,
+        })
+        .await
+        .map_err(full_conversation_store_error)?;
+    let (hash, size) = artifact_store
+        .put_and_verify(&artifact, &bytes)
+        .await
+        .map_err(|_| {
+            ServiceError::new(
+                "CONVERSATION_CONTENT_UNAVAILABLE",
+                "conversation artifact write failed",
+            )
+        })?;
+    if hash != *artifact.content_hash() || size != artifact.size_bytes() {
+        return Err(ServiceError::new(
+            "CONVERSATION_CONTENT_UNAVAILABLE",
+            "conversation artifact verification failed",
+        ));
+    }
+    Ok((reference, hash))
+}
+
+#[async_trait]
+impl SchedulerActionPreparer for RunServiceInner {
+    async fn prepare_scheduler_action(
+        &self,
+        action: &PlannedSchedulerAction,
+    ) -> Result<(), RepositoryError> {
+        let SchedulerAction::CompleteRun { output, .. } = action.intent().action() else {
+            return Ok(());
+        };
+        let Some(store) = self
+            .conversation_store
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        else {
+            return Ok(());
+        };
+        let Some(config) = self
+            .conversation_config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .copied()
+        else {
+            return Ok(());
+        };
+        let tenant_id = store
+            .full_conversation_run_tenant(action.intent().run_id())
+            .await
+            .map_err(|_| full_conversation_terminal_staging_error())?;
+        let Some(tenant_id) = tenant_id else {
+            return Ok(());
+        };
+        let projection = self
+            .repository
+            .load_run(action.intent().run_id())
+            .await?
+            .ok_or_else(full_conversation_terminal_staging_error)?;
+        let bytes = serde_jcs::to_vec(output.value())
+            .map_err(|_| full_conversation_terminal_staging_error())?;
+        if bytes.len() <= config.inline_content_max_bytes {
+            return Ok(());
+        }
+        let deadline_at = match projection.deadline_at() {
+            Some(deadline_at) => deadline_at,
+            None => {
+                projection.created_at()
+                    + chrono::Duration::from_std(config.run_timeout)
+                        .map_err(|_| full_conversation_terminal_staging_error())?
+            }
+        };
+        stage_full_conversation_artifact(
+            self,
+            &tenant_id,
+            insight_durable::terminal_store::TerminalArtifactSourceKind::AssistantMessage,
+            action.intent().run_id().as_str(),
+            format!(
+                "conversation-assistant:{}",
+                action.intent().run_id().as_str()
+            ),
+            output.value(),
+            Some((projection.created_at(), deadline_at)),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|_| full_conversation_terminal_staging_error())
     }
 }
 
@@ -3730,6 +6783,12 @@ struct LiveRunGuard<'a> {
     remove: bool,
 }
 
+struct FullConversationMaintenanceComponents {
+    store: Arc<dyn TerminalOnlyStore>,
+    artifact_store: Arc<dyn WorkerArtifactStore>,
+    config: TerminalOnlyRunConfig,
+}
+
 impl<'a> LiveRunGuard<'a> {
     fn new(owner: &'a RunServiceInner, run_id: &'a RunId) -> Self {
         Self {
@@ -3753,6 +6812,321 @@ impl Drop for LiveRunGuard<'_> {
 }
 
 impl RunServiceInner {
+    fn full_conversation_retention_cadence(&self) -> Option<Duration> {
+        if self
+            .terminal
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return None;
+        }
+        let config = self
+            .conversation_config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .copied()?;
+        let _ = config;
+        Some(FULL_CONVERSATION_RETENTION_CADENCE)
+    }
+
+    fn full_conversation_maintenance_components(
+        &self,
+    ) -> Option<FullConversationMaintenanceComponents> {
+        if self
+            .terminal
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return None;
+        }
+        let store = self
+            .conversation_store
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        let artifact_store = self.artifact_store.clone()?;
+        let config = self
+            .conversation_config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .copied()?;
+        Some(FullConversationMaintenanceComponents {
+            store,
+            artifact_store,
+            config,
+        })
+    }
+
+    async fn delete_full_conversation_artifact(
+        artifact_store: &dyn WorkerArtifactStore,
+        reference: &str,
+    ) -> Result<(), ServiceError> {
+        let artifact: ArtifactRef = serde_json::from_str(reference).map_err(|_| {
+            ServiceError::new(
+                "CONVERSATION_CONTENT_UNAVAILABLE",
+                "conversation artifact reference is invalid",
+            )
+        })?;
+        let locator = artifact_store
+            .storage_locator(&artifact)
+            .map_err(ServiceError::from)?;
+        artifact_store
+            .delete(&artifact, &locator)
+            .await
+            .map_err(ServiceError::from)
+    }
+
+    async fn run_full_conversation_maintenance(
+        &self,
+        include_retention: bool,
+    ) -> Result<(), ServiceError> {
+        let Some(FullConversationMaintenanceComponents {
+            store,
+            artifact_store,
+            config,
+        }) = self.full_conversation_maintenance_components()
+        else {
+            return Ok(());
+        };
+        let cycle_started = tokio::time::Instant::now();
+        let mut batches_used = 0_usize;
+        let retention_observed_at = chrono::Utc::now();
+        if include_retention {
+            self.metrics
+                .full_conversation_retention_backlog_pending
+                .store(true, Ordering::Relaxed);
+            let conversation_retention = chrono::Duration::from_std(config.conversation_retention)
+                .map_err(|_| {
+                    ServiceError::new(
+                        "RUN_SERVICE_CONFIG_INVALID",
+                        "Conversation retention duration is invalid",
+                    )
+                })?;
+            let run_retention = chrono::Duration::from_std(config.run_retention).map_err(|_| {
+                ServiceError::new(
+                    "RUN_SERVICE_CONFIG_INVALID",
+                    "terminal Run retention duration is invalid",
+                )
+            })?;
+            let conversation_before = retention_observed_at - conversation_retention;
+            let run_before = retention_observed_at - run_retention;
+            let mut backlog_pending = true;
+            let mut retention_batches_used = 0_usize;
+            while retention_batches_used < FULL_CONVERSATION_RETENTION_BATCH_BUDGET
+                && batches_used < MAX_FULL_CONVERSATION_RETENTION_BATCHES_PER_CYCLE
+                && cycle_started.elapsed() < FULL_CONVERSATION_RETENTION_CYCLE_BUDGET
+            {
+                retention_batches_used += 1;
+                batches_used += 1;
+                let conversations = store
+                    .delete_conversations_before(
+                        insight_durable::terminal_store::BoundedRetention {
+                            before: conversation_before,
+                            limit: FULL_CONVERSATION_RETENTION_BATCH_SIZE,
+                        },
+                    )
+                    .await
+                    .map_err(full_conversation_store_error)?;
+                let runs = store
+                    .delete_terminal_runs_before(
+                        insight_durable::terminal_store::BoundedRetention {
+                            before: run_before,
+                            limit: FULL_CONVERSATION_RETENTION_BATCH_SIZE,
+                        },
+                    )
+                    .await
+                    .map_err(full_conversation_store_error)?;
+                self.metrics
+                    .full_conversation_retention_conversations_deleted
+                    .fetch_add(conversations.deleted, Ordering::Relaxed);
+                self.metrics
+                    .full_conversation_retention_runs_deleted
+                    .fetch_add(runs.deleted, Ordering::Relaxed);
+                self.metrics
+                    .full_conversation_retention_batches
+                    .fetch_add(1, Ordering::Relaxed);
+
+                let saturated = conversations.deleted
+                    >= u64::from(FULL_CONVERSATION_RETENTION_BATCH_SIZE)
+                    || runs.deleted >= u64::from(FULL_CONVERSATION_RETENTION_BATCH_SIZE);
+                if !saturated {
+                    backlog_pending = false;
+                    break;
+                }
+            }
+            self.metrics
+                .full_conversation_retention_backlog_pending
+                .store(backlog_pending, Ordering::Relaxed);
+        }
+
+        // Retention and privacy deletion enqueue object work transactionally;
+        // consume those jobs in the same maintenance cycle before sweeping
+        // producer stages.
+        let observed_at = chrono::Utc::now();
+        let claim_expires_at = observed_at + FULL_CONVERSATION_MAINTENANCE_CLAIM_LEASE;
+        self.metrics
+            .full_conversation_content_deletion_backlog_pending
+            .store(true, Ordering::Relaxed);
+        let mut content_deletion_backlog = true;
+        let content_deletion_batch_budget = if include_retention {
+            FULL_CONVERSATION_CONTENT_DELETION_BATCH_BUDGET
+        } else {
+            MAX_FULL_CONVERSATION_RETENTION_BATCHES_PER_CYCLE / 2
+        };
+        let mut content_deletion_batches_used = 0_usize;
+        while content_deletion_batches_used < content_deletion_batch_budget
+            && batches_used < MAX_FULL_CONVERSATION_RETENTION_BATCHES_PER_CYCLE
+            && cycle_started.elapsed() < FULL_CONVERSATION_RETENTION_CYCLE_BUDGET
+        {
+            content_deletion_batches_used += 1;
+            batches_used += 1;
+            self.metrics
+                .full_conversation_content_deletion_batches
+                .fetch_add(1, Ordering::Relaxed);
+            let claims = store
+                .claim_content_deletion_jobs(
+                    insight_durable::terminal_store::ClaimContentDeletionJobs {
+                        claimed_by: self.owner.clone(),
+                        observed_at,
+                        claim_expires_at,
+                        limit: FULL_CONVERSATION_RETENTION_BATCH_SIZE,
+                    },
+                )
+                .await
+                .map_err(full_conversation_store_error)?;
+            let saturated = claims.len()
+                >= usize::try_from(FULL_CONVERSATION_RETENTION_BATCH_SIZE).unwrap_or(usize::MAX);
+            let mut failed = false;
+            for claim in claims {
+                if Self::delete_full_conversation_artifact(
+                    artifact_store.as_ref(),
+                    &claim.job.content_ref,
+                )
+                .await
+                .is_err()
+                {
+                    failed = true;
+                    break;
+                }
+                store
+                    .ack_content_deletion_job(
+                        insight_durable::terminal_store::AckContentDeletionJob {
+                            deletion_job_id: claim.job.deletion_job_id,
+                            claim_token: claim.claim_token,
+                        },
+                    )
+                    .await
+                    .map_err(full_conversation_store_error)?;
+            }
+            if failed {
+                break;
+            }
+            if !saturated {
+                content_deletion_backlog = false;
+                break;
+            }
+        }
+        self.metrics
+            .full_conversation_content_deletion_backlog_pending
+            .store(content_deletion_backlog, Ordering::Relaxed);
+
+        self.metrics
+            .full_conversation_staging_backlog_pending
+            .store(true, Ordering::Relaxed);
+        let mut staging_backlog = true;
+        let staging_batch_budget = if include_retention {
+            FULL_CONVERSATION_STAGING_BATCH_BUDGET
+        } else {
+            MAX_FULL_CONVERSATION_RETENTION_BATCHES_PER_CYCLE / 2
+        };
+        let mut staging_batches_used = 0_usize;
+        while staging_batches_used < staging_batch_budget
+            && batches_used < MAX_FULL_CONVERSATION_RETENTION_BATCHES_PER_CYCLE
+            && cycle_started.elapsed() < FULL_CONVERSATION_RETENTION_CYCLE_BUDGET
+        {
+            staging_batches_used += 1;
+            batches_used += 1;
+            self.metrics
+                .full_conversation_staging_batches
+                .fetch_add(1, Ordering::Relaxed);
+            let claims = store
+                .claim_terminal_artifact_stages(
+                    insight_durable::terminal_store::ClaimTerminalArtifactStages {
+                        claimed_by: self.owner.clone(),
+                        observed_at,
+                        claim_expires_at,
+                        limit: FULL_CONVERSATION_RETENTION_BATCH_SIZE,
+                    },
+                )
+                .await
+                .map_err(full_conversation_store_error)?;
+            let saturated = claims.len()
+                >= usize::try_from(FULL_CONVERSATION_RETENTION_BATCH_SIZE).unwrap_or(usize::MAX);
+            let mut failed = false;
+            for claim in claims {
+                match store
+                    .resolve_terminal_artifact_stage(
+                        insight_durable::terminal_store::ResolveTerminalArtifactStage {
+                            staging_id: claim.stage.staging_id.clone(),
+                            claim_token: claim.claim_token.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(full_conversation_store_error)?
+                {
+                    insight_durable::terminal_store::TerminalArtifactStageDisposition::Authoritative
+                    | insight_durable::terminal_store::TerminalArtifactStageDisposition::Lost => {}
+                    insight_durable::terminal_store::TerminalArtifactStageDisposition::DeleteOrphan => {
+                        let artifact =
+                            match serde_json::from_str::<ArtifactRef>(&claim.stage.content_ref) {
+                                Ok(artifact) => artifact,
+                                Err(_) => {
+                                    failed = true;
+                                    break;
+                                }
+                            };
+                        if artifact.media_type()
+                            != Some(insight_durable::terminal_store::TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE)
+                            || Self::delete_full_conversation_artifact(
+                                artifact_store.as_ref(),
+                                &claim.stage.content_ref,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            failed = true;
+                            break;
+                        }
+                        store
+                            .ack_terminal_artifact_stage(
+                                insight_durable::terminal_store::AckTerminalArtifactStage {
+                                    staging_id: claim.stage.staging_id,
+                                    claim_token: claim.claim_token,
+                                },
+                            )
+                            .await
+                            .map_err(full_conversation_store_error)?;
+                    }
+                }
+            }
+            if failed {
+                break;
+            }
+            if !saturated {
+                staging_backlog = false;
+                break;
+            }
+        }
+        self.metrics
+            .full_conversation_staging_backlog_pending
+            .store(staging_backlog, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn wake_work(&self, work: u8, source: CoordinatorWakeupSource) {
         if source == CoordinatorWakeupSource::Completion {
             self.request_cross_process_work_hint();
@@ -4069,12 +7443,13 @@ impl RunServiceInner {
             .linked_plan()
             .map_err(|_| ServiceError::new("RUN_DEPLOYMENT_UNAVAILABLE", "Plan link failed"))?;
         let projection_version_before_drive = projection.projection_version();
-        let drive = drive_scheduler_until_quiescent(
+        let drive = drive_scheduler_until_quiescent_with_preparer(
             self.repository.as_ref(),
             &linked,
             &fence,
             &NoSchedulerCrash,
             self.config.scheduler_action_budget,
+            self,
         )
         .await;
         self.release_lease(fence).await?;
@@ -5527,6 +8902,38 @@ fn spawn_artifact_gc_pump(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
     })
 }
 
+fn spawn_full_conversation_maintenance_pump(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut artifact_interval = tokio::time::interval(Duration::from_secs(5));
+        artifact_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut next_retention = tokio::time::Instant::now();
+        loop {
+            tokio::select! {
+                _ = inner.shutdown.cancelled() => return,
+                _ = artifact_interval.tick() => {}
+            }
+            let now = tokio::time::Instant::now();
+            let retention_cadence = inner.full_conversation_retention_cadence();
+            let include_retention = match retention_cadence {
+                Some(cadence) if now >= next_retention => {
+                    // This deadline is advanced before I/O so a failing store
+                    // cannot turn the 5-second object-maintenance loop into a
+                    // retention scan loop.
+                    next_retention = now + cadence;
+                    true
+                }
+                Some(_) | None => false,
+            };
+            if let Err(error) = inner
+                .run_full_conversation_maintenance(include_retention)
+                .await
+            {
+                tracing::warn!(code = error.code(), "full Conversation maintenance failed");
+            }
+        }
+    })
+}
+
 pub(crate) async fn test_run_event(
     service: &RunService,
     run_id: &RunId,
@@ -5568,6 +8975,94 @@ pub(crate) fn test_has_live_subscription(service: &RunService, run_id: &RunId) -
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .contains_key(run_id.as_str())
+}
+
+#[cfg(test)]
+mod conversation_stream_privacy_tests {
+    use super::*;
+
+    fn private_run(lifecycle: RunLifecycle) -> RunRecord {
+        let now = chrono::Utc::now();
+        RunRecord {
+            run_id: "run_private_redaction".to_owned(),
+            response_id: "resp_private_redaction".to_owned(),
+            projection_version: 1,
+            request_id: "request-redaction".to_owned(),
+            agent_id: "agent-redaction".to_owned(),
+            agent_version: "1".to_owned(),
+            attachment: RunAttachment::Detached,
+            lifecycle,
+            started_at: Some(now),
+            ended_at: Some(now),
+            updated_at: now,
+            input_summary: json!({"private": "deleted-content-marker"}),
+        }
+    }
+
+    #[test]
+    fn deleted_conversation_redaction_clears_success_and_failure_payloads() {
+        let terminal_states = [
+            RunLifecycle::Completed {
+                output: RunOutput {
+                    content: Some("deleted-content-marker".to_owned()),
+                    format: Some("text".to_owned()),
+                    data: json!({"private": "deleted-content-marker"}),
+                },
+            },
+            RunLifecycle::Failed {
+                error: RunFailure {
+                    kind: FailureKind::Workflow,
+                    code: "deleted-content-marker".to_owned(),
+                    message: "deleted-content-marker".to_owned(),
+                },
+            },
+            RunLifecycle::Cancelled {
+                error: StopError {
+                    code: "deleted-content-marker".to_owned(),
+                    message: "deleted-content-marker".to_owned(),
+                },
+            },
+            RunLifecycle::Interrupted {
+                error: StopError {
+                    code: "deleted-content-marker".to_owned(),
+                    message: "deleted-content-marker".to_owned(),
+                },
+            },
+        ];
+
+        for lifecycle in terminal_states {
+            let expected_status = lifecycle.status();
+            let mut record = private_run(lifecycle);
+            redact_deleted_conversation_run(&mut record);
+            assert_eq!(record.status(), expected_status);
+            assert!(
+                !serde_json::to_string(&record)
+                    .unwrap()
+                    .contains("deleted-content-marker"),
+                "redacted terminal state still exposed deleted content"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn second_delete_sweep_cancels_a_stream_registered_after_preflight() {
+        let streams = Mutex::new(BTreeMap::new());
+        cancel_conversation_streams(&streams, "conversation-race").await;
+
+        let late = ConversationStreamPrivacy::new();
+        streams
+            .lock()
+            .unwrap()
+            .entry("conversation-race".to_owned())
+            .or_insert_with(Vec::new)
+            .push(late.downgrade());
+        cancel_conversation_streams(&streams, "conversation-race").await;
+
+        assert!(
+            late.is_cancelled(),
+            "the in-lock delete sweep must cancel registration that raced preflight"
+        );
+    }
 }
 
 #[cfg(test)]

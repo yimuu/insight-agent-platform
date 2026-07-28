@@ -12,7 +12,9 @@
 3. [DSL v1 指南](current/dsl.md)：编写 Agent；
 4. [HTTP 与 SSE API](current/api.md)：创建、观察和控制 Run；
 5. [部署与运维](current/operations.md)：配置生产环境；
-6. [开发指南](current/development.md)：修改和验证实现。
+6. [Terminal-only 验收与 WAL 资格](current/terminal-only-qualification.md)：复现 Phase 0 与
+   Gate A～D；
+7. [开发指南](current/development.md)：修改和验证实现。
 
 ## 当前文档
 
@@ -22,6 +24,7 @@
 | [DSL v1 指南](current/dsl.md) | Agent 作者 | 作者语法、类型、表达式、控制流 |
 | [HTTP 与 SSE API](current/api.md) | API 使用者 | 路由、幂等、响应流和人工任务 |
 | [部署与运维](current/operations.md) | 运维、平台开发者 | Schema 预置、数据库、Artifact、认证 |
+| [Terminal-only 验收与 WAL 资格](current/terminal-only-qualification.md) | 运维、审阅者 | Phase 0、Gate A～D、WAL、故障与 Conversation 资格 |
 | [开发指南](current/development.md) | 贡献者 | 代码导航、测试和 CI 门禁 |
 
 ## 活动设计规范
@@ -32,6 +35,13 @@
 | 规范 | 状态 | 目标 |
 |---|---|---|
 | [Durable Runtime 50 活跃 Run 并发优化](specs/2026-07-26-durable-runtime-50-active-runs-optimization.md) | Implemented / capacity-qualified（24h RC 延后） | 保留 durable PostgreSQL，在有限资源下验证 50 个活跃 Run |
+
+Terminal-only 已于 2026-07-28 完成 Phase 0、Gate A～D 与完成定义 1～12，状态为
+`Implemented / capacity-qualified`。设计记录已移入
+[归档规范](archive/specs/2026-07-27-terminal-only-runtime-and-conversations.md)，当前复现方法见
+[资格指南](current/terminal-only-qualification.md)，完整数字见
+[资格报告](../bench/reports/2026-07-27-terminal-only-runtime-and-conversations-qualified.md)。
+独立 rollout 决策仍保持平台默认 `full`，Gate 通过不自动修改默认值。
 
 ## 权威关系
 

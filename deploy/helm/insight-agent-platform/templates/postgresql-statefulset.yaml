@@ -58,11 +58,21 @@ spec:
             - -c
             - shared_preload_libraries=pg_stat_statements
             - -c
+            - pg_stat_statements.track=all
+            - -c
             - track_io_timing=on
             - -c
             - max_connections={{ .Values.postgresql.maxConnections }}
             - -c
             - shared_buffers={{ .Values.postgresql.sharedBuffers }}
+            - -c
+            - max_wal_size={{ .Values.postgresql.maxWalSize }}
+            - -c
+            - wal_keep_size={{ .Values.postgresql.walKeepSize }}
+            - -c
+            - checkpoint_timeout={{ .Values.postgresql.checkpointTimeout }}
+            - -c
+            - checkpoint_completion_target={{ .Values.postgresql.checkpointCompletionTarget }}
             - -c
             - log_lock_waits={{ .Values.postgresql.logLockWaits }}
             - -c

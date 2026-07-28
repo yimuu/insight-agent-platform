@@ -9,6 +9,13 @@ pub mod run_service;
 
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
 pub use insight_engine::execution::{RunError, RunErrorKind};
+pub use insight_runtime::{
+    Conversation, ConversationAttachedTurn, ConversationContent, ConversationDetachedTurn,
+    ConversationMessage, ConversationMessagePage, ConversationMessagePageView,
+    ConversationMessageView, ConversationRole, MessageCursor, RecoveryCapability,
+    RunPersistenceCapability, TerminalAttachedRun, TerminalOnlyRunConfig, TerminalOnlyRunEngine,
+    TerminalOnlyStore, TerminalRunSubscription,
+};
 pub use postgres_response_broker::{
     postgres_live_response_channel, PostgresLiveResponseBroker, PostgresLiveResponseBrokerOptions,
     POSTGRES_LIVE_RESPONSE_MAX_NOTIFY_BYTES,
@@ -31,7 +38,7 @@ pub use response_stream::{
     RESPONSE_STREAM_PROTOCOL_VERSION,
 };
 pub use run_service::{
-    AttachedRun, DeployedAgentCatalog, ForkRecoveryOptions, GraphPublication,
+    AnyAttachedRun, AttachedRun, DeployedAgentCatalog, ForkRecoveryOptions, GraphPublication,
     MigrationNodeMappingRequest, ProductionRunRepository, PublicArtifact, RecoveryOperation,
     RecoveryRequestMetadata, RecoveryReusePolicy, RecoveryRunResult, RequestMetadata,
     RunRepositoryCapability, RunService, RunServiceConfig, RunSubscription, ServiceError,

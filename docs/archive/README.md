@@ -13,6 +13,13 @@
 归档文档保留原始标题、日期和大部分正文，以便理解当时为什么作出某项决定。文件中的状态、示例、
 代码路径、依赖版本、验证结果和未完成事项不应直接用于当前实现。
 
+## 最近完成记录
+
+| 记录 | 状态 | 当前入口 |
+|---|---|---|
+| [Terminal-only Runtime 存储与 Conversation 规范](specs/2026-07-27-terminal-only-runtime-and-conversations.md) | Implemented / capacity-qualified（2026-07-28） | [资格指南](../current/terminal-only-qualification.md)、[资格报告](../../bench/reports/2026-07-27-terminal-only-runtime-and-conversations-qualified.md) |
+| [Terminal-only 默认模式 rollout 决策](reviews/2026-07-28-terminal-only-default-rollout-decision.md) | Accepted：默认保持 `full` | [部署与运维](../current/operations.md) |
+
 当前入口：
 
 - [文档首页](../README.md)

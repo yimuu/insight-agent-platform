@@ -1,9 +1,10 @@
 # Insight Agent Platform
 
-Insight Agent Platform 是一个以 Rust 实现的 DSL v1 持久化图执行运行时。Agent 作者编写结构化
-YAML，平台在启动时将其编译为不可变、类型化的 Canonical Plan，再由数据库驱动的调度器执行。
-进程重启、Worker lease 过期、信号/超时竞态与取消都通过持久化状态和 first-winner 事务恢复，
-不依赖进程内执行栈重放。
+Insight Agent Platform 是一个以 Rust 实现的 DSL v1 图执行运行时。Agent 作者编写结构化 YAML，
+平台在启动时将其编译为不可变、类型化的 Canonical Plan；Deployment Revision 同时冻结 `full`
+或 `terminal_only` persistence policy。`full` 使用数据库驱动的 scheduler、checkpoint、
+lease/fence 与恢复；显式 opt-in 的 `terminal_only` 在 owner 进程内执行，只持久化 admission 和
+最终结果，进程失败会中断未完成 Run。Quickstart 和平台默认值继续为 `full`。
 
 当前只支持 `insight.agent/v1`，不提供旧 DSL 或旧运行内核兼容层。
 
@@ -80,6 +81,8 @@ workflow:
 - [DSL v1 指南](docs/current/dsl.md)：Agent 结构、类型、表达式和控制流；
 - [HTTP 与 SSE API](docs/current/api.md)：路由、幂等要求和响应流；
 - [部署与运维](docs/current/operations.md)：Schema 预置、配置、存储、认证和生命周期；
+- [Terminal-only 验收与 WAL 资格](docs/current/terminal-only-qualification.md)：已通过的 Phase 0、
+  Gate A～D 和资格证据；
 - [开发指南](docs/current/development.md)：代码导航和验证命令；
 - [变更记录](CHANGELOG.md)：发布版本的重要变化与兼容性说明。
 

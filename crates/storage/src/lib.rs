@@ -5,6 +5,7 @@ mod graph_repository;
 pub mod postgres_config;
 pub mod postgres_response_broker;
 pub mod repository;
+pub mod terminal_store;
 
 pub use repository::{
     schema_contract::{
@@ -14,3 +15,4 @@ pub use repository::{
     },
     PostgresDurableRepository, SqliteDurableRepository,
 };
+pub use terminal_store::*;

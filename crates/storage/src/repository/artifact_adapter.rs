@@ -333,6 +333,62 @@ async fn lock_postgres_artifact_object(
     Ok(())
 }
 
+async fn lock_postgres_terminal_deletion_fence(
+    transaction: &mut Transaction<'_, Postgres>,
+    content_hash: &ContentHash,
+) -> Result<(), RepositoryError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 812493764366122121::bigint))")
+        .bind(content_hash.as_str())
+        .execute(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
+    Ok(())
+}
+
+async fn sqlite_terminal_deletion_fence_exists(
+    transaction: &mut Transaction<'_, Sqlite>,
+    content_hash: &ContentHash,
+) -> Result<bool, RepositoryError> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT
+           EXISTS(
+                SELECT 1 FROM terminal_content_deletion_jobs
+                WHERE content_hash=? AND job_state='claimed'
+           )
+           OR EXISTS(
+                SELECT 1 FROM terminal_artifact_staging
+                WHERE content_hash=? AND staging_state='claimed'
+           )",
+    )
+    .bind(content_hash.as_str())
+    .bind(content_hash.as_str())
+    .fetch_one(&mut **transaction)
+    .await
+    .map(|value| value != 0)
+    .map_err(RepositoryError::storage)
+}
+
+async fn postgres_terminal_deletion_fence_exists(
+    transaction: &mut Transaction<'_, Postgres>,
+    content_hash: &ContentHash,
+) -> Result<bool, RepositoryError> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT
+           EXISTS(
+                SELECT 1 FROM terminal_content_deletion_jobs
+                WHERE content_hash=$1 AND job_state='claimed'
+           )
+           OR EXISTS(
+                SELECT 1 FROM terminal_artifact_staging
+                WHERE content_hash=$1 AND staging_state='claimed'
+           )",
+    )
+    .bind(content_hash.as_str())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)
+}
+
 async fn sqlite_artifact_object_is_deleting(
     transaction: &mut Transaction<'_, Sqlite>,
     content_hash: &ContentHash,
@@ -990,13 +1046,18 @@ impl ArtifactDurableRepository for SqliteDurableRepository {
         let _writer = self.writer.lock().await;
         let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
         ensure_sqlite_run(&mut transaction, command.run_id()).await?;
-        if !sqlite_artifact_object_size_matches(
+        if sqlite_terminal_deletion_fence_exists(
             &mut transaction,
             command.artifact().content_hash(),
-            artifact_contract_adapter::stage_storage_locator(&command),
-            command.artifact().size_bytes(),
         )
         .await?
+            || !sqlite_artifact_object_size_matches(
+                &mut transaction,
+                command.artifact().content_hash(),
+                artifact_contract_adapter::stage_storage_locator(&command),
+                command.artifact().size_bytes(),
+            )
+            .await?
             || sqlite_artifact_object_is_deleting(
                 &mut transaction,
                 command.artifact().content_hash(),
@@ -2204,13 +2265,20 @@ impl ArtifactDurableRepository for PostgresDurableRepository {
             artifact_contract_adapter::stage_storage_locator(&command),
         )
         .await?;
-        if !postgres_artifact_object_size_matches(
+        lock_postgres_terminal_deletion_fence(&mut transaction, command.artifact().content_hash())
+            .await?;
+        if postgres_terminal_deletion_fence_exists(
             &mut transaction,
             command.artifact().content_hash(),
-            artifact_contract_adapter::stage_storage_locator(&command),
-            command.artifact().size_bytes(),
         )
         .await?
+            || !postgres_artifact_object_size_matches(
+                &mut transaction,
+                command.artifact().content_hash(),
+                artifact_contract_adapter::stage_storage_locator(&command),
+                command.artifact().size_bytes(),
+            )
+            .await?
             || postgres_artifact_object_is_deleting(
                 &mut transaction,
                 command.artifact().content_hash(),

@@ -1545,13 +1545,6 @@ async fn postgres_attached_public_lifecycle_is_ordered_private_and_replay_idempo
         attached.subscription.recv().await.unwrap_err().code(),
         "SUBSCRIPTION_TERMINAL"
     );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), public_listener.recv())
-            .await
-            .is_err(),
-        "runtime publication must use local delivery without a per-event transactional NOTIFY"
-    );
-
     let rows = sqlx::query_as::<_, (String, String, String, i64, i32)>(
         "SELECT outbox.event_kind,outbox.public_event_id,outbox.safe_envelope::text,
                 event.seq,outbox.public_ordinal
@@ -1565,6 +1558,19 @@ async fn postgres_attached_public_lifecycle_is_ordered_private_and_replay_idempo
     .fetch_all(&control)
     .await
     .unwrap();
+    let notification_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    loop {
+        match tokio::time::timeout_at(notification_deadline, public_listener.recv()).await {
+            Ok(Ok(notification)) => assert!(
+                !rows
+                    .iter()
+                    .any(|row| row.1.as_str() == notification.payload()),
+                "runtime publication must use local delivery without a per-event transactional NOTIFY"
+            ),
+            Ok(Err(error)) => panic!("public-event listener failed: {error}"),
+            Err(_) => break,
+        }
+    }
     assert_eq!(rows.len(), 5);
     assert_eq!(
         rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),

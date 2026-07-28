@@ -12,7 +12,8 @@ pub mod retrieval_adapter;
 pub mod worker;
 
 pub use insight_engine::{
-    aggregate, control, error, event, identity, plan, recovery, run, scheduler, scope, state, value,
+    aggregate, control, error, event, identity, persistence, plan, recovery, run, scheduler, scope,
+    state, value,
 };
 
 pub mod retrieval {
@@ -32,7 +33,7 @@ pub use aggregate::{
 };
 pub use artifact_store::{
     ArtifactStoreDeploymentCapability, ArtifactStoreDeploymentContract,
-    LocalContentAddressedArtifactStore, WorkerArtifactStore,
+    LocalContentAddressedArtifactStore, TenantArtifactEncryptionKeyring, WorkerArtifactStore,
 };
 pub use control::{
     ApplyOutcome, BranchCorrelation, BranchDecision, ChildRequirement, ChildSettlement,
@@ -63,6 +64,7 @@ pub use leaf_adapters::{
     production_worker_registry_with_live_response, ActionTaskExecutor, LlmTaskExecutor,
     LlmTokenObservation,
 };
+pub use persistence::PersistenceMode;
 pub use plan::{
     BranchCaseId, ControlEdge, ControlEdgeId, ControlPort, ControlPortId, ControlRoute,
     DataBinding, DataBindingId, DataPort, DataPortId, DescriptorConfigurationContract,

@@ -5,6 +5,7 @@ use insight_agent_platform::{
         ArtifactStoreProvider, AuthConfig, DeploymentMode, HistoryConfig,
         LiveResponseBrokerProvider, PlatformConfig, PlatformConfigError,
     },
+    engine::PersistenceMode,
     resources::config::load_model_registry_with_env,
 };
 use tempfile::tempdir;
@@ -113,6 +114,25 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
         DeploymentMode::SingleProcessDevelopment
     );
     assert_eq!(config.runtime.max_concurrent_operations, 32);
+    assert_eq!(
+        config.runtime.default_persistence_mode,
+        PersistenceMode::Full
+    );
+    assert!(config.runtime.terminal_only.enabled);
+    assert_eq!(
+        config.runtime.terminal_only.owner_lease,
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        config.runtime.terminal_only.owner_heartbeat,
+        Duration::from_secs(10)
+    );
+    assert_eq!(
+        config.runtime.terminal_only.terminal_commit_retry,
+        Duration::from_secs(10)
+    );
+    assert!(!config.runtime.terminal_only.allow_volatile_waits);
+    assert_eq!(config.runtime.terminal_only.max_concurrent_runs, 50);
     assert_eq!(config.runtime.max_concurrent_operations_per_run, 256);
     assert_eq!(config.runtime.operation_timeout, Duration::from_secs(30));
     assert_eq!(
@@ -205,6 +225,313 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
     );
     assert_eq!(config.artifacts.gc_interval, Duration::from_secs(60));
     assert_eq!(config.artifacts.deletion_claim_seconds, 60);
+    assert!(config.conversations.enabled);
+    assert_eq!(config.conversations.inline_content_max_bytes, 8_192);
+    assert_eq!(config.conversations.message_page_size_default, 50);
+    assert_eq!(config.conversations.message_page_size_max, 200);
+    assert_eq!(config.conversations.summary_trigger_messages, 30);
+    assert_eq!(config.conversations.summary_trigger_tokens, 24_000);
+    assert_eq!(config.conversations.recent_context_messages, 20);
+    assert_eq!(config.conversations.retention_days, 90);
+    assert_eq!(config.runtime.terminal_only.run_retention_days, 30);
+}
+
+#[test]
+fn terminal_only_runtime_policy_is_closed_defaulted_and_bounded() {
+    let terminal_only = "runtime:\n  default_persistence_mode: terminal_only\n  terminal_only:\n    enabled: true\n    owner_lease_seconds: 60\n    owner_heartbeat_seconds: 20\n    terminal_commit_retry_seconds: 15\n    run_retention_days: 45\n    allow_volatile_waits: true\n    max_concurrent_runs: 75";
+    let yaml = base_yaml("  mode: disabled").replace("runtime:", terminal_only);
+    let (_directory, path) = write_config(&yaml);
+    let config = load(&path, BTreeMap::new()).unwrap();
+    assert_eq!(
+        config.runtime.default_persistence_mode,
+        PersistenceMode::TerminalOnly
+    );
+    assert_eq!(
+        config.runtime.terminal_only.owner_lease,
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        config.runtime.terminal_only.owner_heartbeat,
+        Duration::from_secs(20)
+    );
+    assert_eq!(
+        config.runtime.terminal_only.terminal_commit_retry,
+        Duration::from_secs(15)
+    );
+    assert_eq!(config.runtime.terminal_only.run_retention_days, 45);
+    assert!(config.runtime.terminal_only.allow_volatile_waits);
+    assert_eq!(config.runtime.terminal_only.max_concurrent_runs, 75);
+
+    for (valid, invalid, code) in [
+        (
+            "  default_persistence_mode: terminal_only",
+            "  default_persistence_mode: checkpointed",
+            "PLATFORM_CONFIG_INVALID",
+        ),
+        (
+            "    owner_lease_seconds: 60",
+            "    owner_lease_seconds: 2",
+            "PLATFORM_RUNTIME_INVALID",
+        ),
+        (
+            "    owner_heartbeat_seconds: 20",
+            "    owner_heartbeat_seconds: 21",
+            "PLATFORM_RUNTIME_INVALID",
+        ),
+        (
+            "    terminal_commit_retry_seconds: 15",
+            "    terminal_commit_retry_seconds: 0",
+            "PLATFORM_RUNTIME_INVALID",
+        ),
+        (
+            "    run_retention_days: 45",
+            "    run_retention_days: 0",
+            "PLATFORM_RUNTIME_INVALID",
+        ),
+        (
+            "    max_concurrent_runs: 75",
+            "    max_concurrent_runs: 10001",
+            "PLATFORM_RUNTIME_INVALID",
+        ),
+    ] {
+        let invalid_yaml = yaml.replace(valid, invalid);
+        let (_directory, path) = write_config(&invalid_yaml);
+        assert_eq!(load(&path, BTreeMap::new()).unwrap_err().code(), code);
+    }
+
+    let unknown = yaml.replace(
+        "    allow_volatile_waits: true",
+        "    allow_volatile_waits: true\n    checkpoint_events: false",
+    );
+    let (_directory, path) = write_config(&unknown);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_CONFIG_INVALID"
+    );
+}
+
+#[test]
+fn conversation_policy_is_closed_and_all_numeric_fields_are_bounded() {
+    let conversations = "conversations:\n  enabled: true\n  inline_content_max_bytes: 16384\n  message_page_size_default: 25\n  message_page_size_max: 150\n  summary_trigger_messages: 40\n  summary_trigger_tokens: 32000\n  recent_context_messages: 10\n  retention_days: 365\nruntime:";
+    let yaml = base_yaml("  mode: disabled").replace("runtime:", conversations);
+    let (_directory, path) = write_config(&yaml);
+    let config = load(&path, BTreeMap::new()).unwrap();
+    assert_eq!(config.conversations.inline_content_max_bytes, 16_384);
+    assert_eq!(config.conversations.message_page_size_default, 25);
+    assert_eq!(config.conversations.message_page_size_max, 150);
+    assert_eq!(config.conversations.summary_trigger_messages, 40);
+    assert_eq!(config.conversations.summary_trigger_tokens, 32_000);
+    assert_eq!(config.conversations.recent_context_messages, 10);
+    assert_eq!(config.conversations.retention_days, 365);
+
+    for (valid, invalid) in [
+        (
+            "  inline_content_max_bytes: 16384",
+            "  inline_content_max_bytes: 255",
+        ),
+        (
+            "  message_page_size_default: 25",
+            "  message_page_size_default: 151",
+        ),
+        (
+            "  message_page_size_max: 150",
+            "  message_page_size_max: 201",
+        ),
+        (
+            "  summary_trigger_messages: 40",
+            "  summary_trigger_messages: 1",
+        ),
+        (
+            "  summary_trigger_tokens: 32000",
+            "  summary_trigger_tokens: 255",
+        ),
+        (
+            "  recent_context_messages: 10",
+            "  recent_context_messages: 41",
+        ),
+        ("  retention_days: 365", "  retention_days: 0"),
+    ] {
+        let invalid_yaml = yaml.replace(valid, invalid);
+        let (_directory, path) = write_config(&invalid_yaml);
+        assert_eq!(
+            load(&path, BTreeMap::new()).unwrap_err().code(),
+            "PLATFORM_CONVERSATIONS_INVALID"
+        );
+    }
+
+    let unknown = yaml.replace(
+        "  retention_days: 365",
+        "  retention_days: 365\n  persist_sse_chunks: true",
+    );
+    let (_directory, path) = write_config(&unknown);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_CONFIG_INVALID"
+    );
+}
+
+#[test]
+fn persistence_environment_surface_strictly_overrides_yaml_then_defaults() {
+    let yaml = base_yaml("  mode: disabled").replace(
+        "runtime:",
+        "conversations:\n  enabled: false\n  inline_content_max_bytes: 4096\n  message_page_size_default: 10\n  message_page_size_max: 20\n  summary_trigger_messages: 25\n  summary_trigger_tokens: 12000\n  recent_context_messages: 5\n  retention_days: 30\nruntime:\n  default_persistence_mode: full\n  terminal_only:\n    enabled: false\n    owner_lease_seconds: 30\n    owner_heartbeat_seconds: 10\n    terminal_commit_retry_seconds: 10\n    run_retention_days: 30\n    allow_volatile_waits: false\n    max_concurrent_runs: 50",
+    );
+    let (_directory, path) = write_config(&yaml);
+    let environment = BTreeMap::from([
+        (
+            "INSIGHT_RUNTIME__DEFAULT_PERSISTENCE_MODE".to_owned(),
+            "terminal_only".to_owned(),
+        ),
+        (
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__ENABLED".to_owned(),
+            "true".to_owned(),
+        ),
+        (
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__OWNER_LEASE_SECONDS".to_owned(),
+            "60".to_owned(),
+        ),
+        (
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__OWNER_HEARTBEAT_SECONDS".to_owned(),
+            "20".to_owned(),
+        ),
+        (
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__TERMINAL_COMMIT_RETRY_SECONDS".to_owned(),
+            "15".to_owned(),
+        ),
+        (
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__RUN_RETENTION_DAYS".to_owned(),
+            "45".to_owned(),
+        ),
+        (
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__ALLOW_VOLATILE_WAITS".to_owned(),
+            "true".to_owned(),
+        ),
+        (
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__MAX_CONCURRENT_RUNS".to_owned(),
+            "75".to_owned(),
+        ),
+        (
+            "INSIGHT_CONVERSATIONS__ENABLED".to_owned(),
+            "true".to_owned(),
+        ),
+        (
+            "INSIGHT_CONVERSATIONS__INLINE_CONTENT_MAX_BYTES".to_owned(),
+            "16384".to_owned(),
+        ),
+        (
+            "INSIGHT_CONVERSATIONS__MESSAGE_PAGE_SIZE_DEFAULT".to_owned(),
+            "25".to_owned(),
+        ),
+        (
+            "INSIGHT_CONVERSATIONS__MESSAGE_PAGE_SIZE_MAX".to_owned(),
+            "150".to_owned(),
+        ),
+        (
+            "INSIGHT_CONVERSATIONS__SUMMARY_TRIGGER_MESSAGES".to_owned(),
+            "40".to_owned(),
+        ),
+        (
+            "INSIGHT_CONVERSATIONS__SUMMARY_TRIGGER_TOKENS".to_owned(),
+            "32000".to_owned(),
+        ),
+        (
+            "INSIGHT_CONVERSATIONS__RECENT_CONTEXT_MESSAGES".to_owned(),
+            "10".to_owned(),
+        ),
+        (
+            "INSIGHT_CONVERSATIONS__RETENTION_DAYS".to_owned(),
+            "365".to_owned(),
+        ),
+    ]);
+    let config = load(&path, environment).unwrap();
+    assert_eq!(
+        config.runtime.default_persistence_mode,
+        PersistenceMode::TerminalOnly
+    );
+    assert!(config.runtime.terminal_only.enabled);
+    assert_eq!(
+        config.runtime.terminal_only.owner_lease,
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        config.runtime.terminal_only.owner_heartbeat,
+        Duration::from_secs(20)
+    );
+    assert_eq!(
+        config.runtime.terminal_only.terminal_commit_retry,
+        Duration::from_secs(15)
+    );
+    assert_eq!(config.runtime.terminal_only.run_retention_days, 45);
+    assert!(config.runtime.terminal_only.allow_volatile_waits);
+    assert_eq!(config.runtime.terminal_only.max_concurrent_runs, 75);
+    assert!(config.conversations.enabled);
+    assert_eq!(config.conversations.inline_content_max_bytes, 16_384);
+    assert_eq!(config.conversations.message_page_size_default, 25);
+    assert_eq!(config.conversations.message_page_size_max, 150);
+    assert_eq!(config.conversations.summary_trigger_messages, 40);
+    assert_eq!(config.conversations.summary_trigger_tokens, 32_000);
+    assert_eq!(config.conversations.recent_context_messages, 10);
+    assert_eq!(config.conversations.retention_days, 365);
+}
+
+#[test]
+fn persistence_environment_values_are_strict_and_share_yaml_bounds() {
+    let (_directory, path) = write_config(&base_yaml("  mode: disabled"));
+    for (name, value, code) in [
+        (
+            "INSIGHT_RUNTIME__DEFAULT_PERSISTENCE_MODE",
+            "FULL",
+            "PLATFORM_RUNTIME_INVALID",
+        ),
+        (
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__ENABLED",
+            "1",
+            "PLATFORM_RUNTIME_INVALID",
+        ),
+        (
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__OWNER_HEARTBEAT_SECONDS",
+            "11",
+            "PLATFORM_RUNTIME_INVALID",
+        ),
+        (
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__MAX_CONCURRENT_RUNS",
+            "-1",
+            "PLATFORM_RUNTIME_INVALID",
+        ),
+        (
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__MAX_CONCURRENT_RUNS",
+            "+1",
+            "PLATFORM_RUNTIME_INVALID",
+        ),
+        (
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__RUN_RETENTION_DAYS",
+            "0",
+            "PLATFORM_RUNTIME_INVALID",
+        ),
+        (
+            "INSIGHT_CONVERSATIONS__ENABLED",
+            "yes",
+            "PLATFORM_CONVERSATIONS_INVALID",
+        ),
+        (
+            "INSIGHT_CONVERSATIONS__MESSAGE_PAGE_SIZE_MAX",
+            "many",
+            "PLATFORM_CONVERSATIONS_INVALID",
+        ),
+        (
+            "INSIGHT_CONVERSATIONS__RECENT_CONTEXT_MESSAGES",
+            "201",
+            "PLATFORM_CONVERSATIONS_INVALID",
+        ),
+        (
+            "INSIGHT_CONVERSATIONS__RETENTION_DAYS",
+            "0",
+            "PLATFORM_CONVERSATIONS_INVALID",
+        ),
+    ] {
+        let error = load(&path, BTreeMap::from([(name.to_owned(), value.to_owned())])).unwrap_err();
+        assert_eq!(error.code(), code, "{name}");
+    }
 }
 
 #[test]
@@ -353,6 +680,74 @@ fn artifact_provider_contract_is_explicit_and_production_requires_shared_namespa
         ArtifactStoreProvider::SharedFilesystem
     );
     assert_eq!(shared.artifacts.namespace.as_deref(), Some("production"));
+}
+
+#[test]
+fn tenant_artifact_encryption_uses_a_strict_secret_backed_versioned_keyring() {
+    let yaml = base_yaml("  mode: disabled").replace(
+        "runtime:",
+        "artifacts:\n  provider: local_filesystem\n  directory: objects\n  inline_threshold_bytes: 1024\n  tenant_encryption:\n    active_key_version: v2\n    keyring_env: TENANT_KEYRING\n  orphan_retention: 2h\n  gc_interval: 15s\n  deletion_claim_seconds: 30\nruntime:",
+    );
+    let (_directory, path) = write_config(&yaml);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_SECRET_MISSING"
+    );
+
+    let valid_secret = r#"{"v1":"1111111111111111111111111111111111111111111111111111111111111111","v2":"2222222222222222222222222222222222222222222222222222222222222222"}"#;
+    let config = load(
+        &path,
+        BTreeMap::from([("TENANT_KEYRING".to_owned(), valid_secret.to_owned())]),
+    )
+    .unwrap();
+    let encryption = config.artifacts.tenant_encryption.as_ref().unwrap();
+    assert_eq!(encryption.active_key_version, "v2");
+    let debug = format!("{encryption:?}");
+    assert!(debug.contains("REDACTED"));
+    assert!(!debug.contains("2222222222222222"));
+
+    for invalid_secret in [
+        "{}",
+        r#"{"v1":"1111"}"#,
+        r#"{"v1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+    ] {
+        assert_eq!(
+            load(
+                &path,
+                BTreeMap::from([("TENANT_KEYRING".to_owned(), invalid_secret.to_owned())]),
+            )
+            .unwrap_err()
+            .code(),
+            "PLATFORM_ARTIFACTS_INVALID"
+        );
+    }
+
+    let missing_active = yaml.replace("active_key_version: v2", "active_key_version: v3");
+    let (_directory, path) = write_config(&missing_active);
+    assert_eq!(
+        load(
+            &path,
+            BTreeMap::from([("TENANT_KEYRING".to_owned(), valid_secret.to_owned())]),
+        )
+        .unwrap_err()
+        .code(),
+        "PLATFORM_ARTIFACTS_INVALID"
+    );
+
+    let unknown = yaml.replace(
+        "    keyring_env: TENANT_KEYRING",
+        "    keyring_env: TENANT_KEYRING\n    plaintext_fallback: true",
+    );
+    let (_directory, path) = write_config(&unknown);
+    assert_eq!(
+        load(
+            &path,
+            BTreeMap::from([("TENANT_KEYRING".to_owned(), valid_secret.to_owned())]),
+        )
+        .unwrap_err()
+        .code(),
+        "PLATFORM_CONFIG_INVALID"
+    );
 }
 
 #[test]

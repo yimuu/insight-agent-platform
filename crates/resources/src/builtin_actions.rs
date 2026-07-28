@@ -1,4 +1,10 @@
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::BTreeSet,
+    fmt::Write as _,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -6,6 +12,7 @@ use chrono_tz::Tz;
 use futures::StreamExt;
 use reqwest::{redirect::Policy, Url};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::time::sleep;
 
 use insight_engine::{author::CompileError, execution::RunError};
@@ -102,6 +109,218 @@ impl Action for TextMetricsAction {
             "words": text.split_whitespace().count(),
             "lines": text.lines().count(),
         }))
+    }
+}
+
+/// Explicitly opt-in qualification action. It records every provider
+/// invocation separately from the idempotency-key-deduplicated external
+/// effects so Gate C can distinguish an accidental replay from a
+/// client-authorized retry with a new request ID.
+#[derive(Debug, Clone)]
+struct QualificationEffectMarkerAction {
+    ledger_directory: PathBuf,
+}
+
+impl QualificationEffectMarkerAction {
+    fn from_environment() -> Result<Self, CompileError> {
+        let ledger_directory = std::env::var_os("TERMINAL_QUALIFICATION_EFFECT_LEDGER")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                CompileError::new(
+                    "ACTION_CONFIG_INVALID",
+                    "qualification.effect_marker requires TERMINAL_QUALIFICATION_EFFECT_LEDGER",
+                )
+            })?;
+        Ok(Self { ledger_directory })
+    }
+}
+
+fn qualification_effect_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[async_trait]
+impl Action for QualificationEffectMarkerAction {
+    fn descriptor(&self) -> ActionDescriptor {
+        ActionDescriptor {
+            id: "qualification.effect_marker",
+            version: "1.0.0",
+            input_schema: json!({
+                "type":"object",
+                "required":["effect_id", "idempotency_key"],
+                "properties":{
+                    "effect_id":{
+                        "type":"string",
+                        "minLength":1,
+                        "maxLength":256,
+                        "pattern":"^[A-Za-z0-9._:-]+$"
+                    },
+                    "idempotency_key":{
+                        "type":"string",
+                        "minLength":1,
+                        "maxLength":256,
+                        "pattern":"^[A-Za-z0-9._:-]+$"
+                    }
+                },
+                "additionalProperties":false
+            }),
+            output_schema: json!({
+                "type":"object",
+                "required":["effect_id", "idempotency_key", "occurrence"],
+                "properties":{
+                    "effect_id":{"type":"string"},
+                    "idempotency_key":{"type":"string"},
+                    "occurrence":{"type":"integer", "minimum":1}
+                },
+                "additionalProperties":false
+            }),
+            effect: EffectClass::Mutating,
+            idempotency: IdempotencyClass::Idempotent,
+            cancellation: CancellationClass::NotSupported,
+            required_capabilities: BTreeSet::new(),
+        }
+    }
+
+    async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
+        let effect_id = input
+            .get("effect_id")
+            .and_then(Value::as_str)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 256
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+                    })
+            })
+            .ok_or_else(|| {
+                RunError::operation("ACTION_INPUT_INVALID", "qualification effect_id is invalid")
+            })?;
+        let digest = Sha256::digest(effect_id.as_bytes());
+        let idempotency_key = input
+            .get("idempotency_key")
+            .and_then(Value::as_str)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 256
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+                    })
+            })
+            .ok_or_else(|| {
+                RunError::operation(
+                    "ACTION_INPUT_INVALID",
+                    "qualification idempotency_key is invalid",
+                )
+            })?;
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        let effect_filename = format!("{digest_hex}.ledger");
+        let attempt_filename = format!("{digest_hex}.attempts");
+        let directory = self.ledger_directory.clone();
+        let effect_id = effect_id.to_owned();
+        let effect_id_for_write = effect_id.clone();
+        let idempotency_key = idempotency_key.to_owned();
+        let idempotency_key_for_write = idempotency_key.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guard = qualification_effect_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::fs::create_dir_all(&directory).map_err(|_| {
+                RunError::operation(
+                    "QUALIFICATION_LEDGER_UNAVAILABLE",
+                    "qualification ledger is unavailable",
+                )
+            })?;
+            let attempt_path = directory.join(attempt_filename);
+            let mut attempt_file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&attempt_path)
+                .map_err(|_| {
+                    RunError::operation(
+                        "QUALIFICATION_LEDGER_UNAVAILABLE",
+                        "qualification attempt ledger is unavailable",
+                    )
+                })?;
+            use std::io::Write as _;
+            writeln!(
+                attempt_file,
+                "{effect_id_for_write}\t{idempotency_key_for_write}"
+            )
+            .map_err(|_| {
+                RunError::operation(
+                    "QUALIFICATION_LEDGER_UNAVAILABLE",
+                    "qualification attempt ledger is unavailable",
+                )
+            })?;
+            attempt_file.sync_all().map_err(|_| {
+                RunError::operation(
+                    "QUALIFICATION_LEDGER_UNAVAILABLE",
+                    "qualification attempt ledger is unavailable",
+                )
+            })?;
+
+            let effect_path = directory.join(effect_filename);
+            let existing = match std::fs::read_to_string(&effect_path) {
+                Ok(existing) => existing,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(_) => {
+                    return Err(RunError::operation(
+                        "QUALIFICATION_LEDGER_UNAVAILABLE",
+                        "qualification ledger is unavailable",
+                    ));
+                }
+            };
+            let existing_lines = existing.lines().collect::<Vec<_>>();
+            if existing_lines.iter().any(|line| {
+                line.split_once('\t')
+                    .is_some_and(|(_, key)| key == idempotency_key_for_write)
+            }) {
+                return Ok(existing_lines.len());
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&effect_path)
+                .map_err(|_| {
+                    RunError::operation(
+                        "QUALIFICATION_LEDGER_UNAVAILABLE",
+                        "qualification ledger is unavailable",
+                    )
+                })?;
+            writeln!(file, "{effect_id_for_write}\t{idempotency_key_for_write}").map_err(|_| {
+                RunError::operation(
+                    "QUALIFICATION_LEDGER_UNAVAILABLE",
+                    "qualification ledger is unavailable",
+                )
+            })?;
+            file.sync_all().map_err(|_| {
+                RunError::operation(
+                    "QUALIFICATION_LEDGER_UNAVAILABLE",
+                    "qualification ledger is unavailable",
+                )
+            })?;
+            let occurrence = existing_lines.len().saturating_add(1);
+            Ok::<_, RunError>(occurrence)
+        })
+        .await
+        .map_err(|_| {
+            RunError::operation(
+                "QUALIFICATION_LEDGER_UNAVAILABLE",
+                "qualification ledger worker failed",
+            )
+        })?
+        .map(|occurrence| {
+            json!({
+                "effect_id": effect_id,
+                "idempotency_key": idempotency_key,
+                "occurrence": occurrence
+            })
+        })
     }
 }
 
@@ -266,6 +485,9 @@ pub fn builtin_action_registry(
                 )
             })?)?,
             "example.text_metrics" => registry.register(TextMetricsAction)?,
+            "qualification.effect_marker" => {
+                registry.register(QualificationEffectMarkerAction::from_environment()?)?
+            }
             _ => {
                 return Err(CompileError::new(
                     "ACTION_NOT_FOUND",

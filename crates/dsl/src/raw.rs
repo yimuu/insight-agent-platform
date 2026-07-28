@@ -8,7 +8,7 @@ use yaml_rust2::{
 };
 
 use crate::{DslParseError, DslPath};
-use insight_engine::author::adapter as author_adapter;
+use insight_engine::{author::adapter as author_adapter, PersistenceMode};
 
 use super::{DUPLICATE_KEY, PARSE_FAILED};
 
@@ -21,6 +21,11 @@ pub struct RawDocument {
     pub kind: String,
     #[serde(default)]
     pub metadata: Option<RawMetadata>,
+    /// Deployment policy is parsed on the strict Agent surface but is not
+    /// lowered into Canonical Plan semantics. The runtime publication boundary
+    /// freezes it into the Deployment Revision instead.
+    #[serde(default)]
+    pub execution: Option<RawExecutionPolicy>,
     #[serde(default)]
     pub types: BTreeMap<String, Value>,
     #[serde(default)]
@@ -30,6 +35,13 @@ pub struct RawDocument {
     pub inputs: BTreeMap<String, Value>,
     pub output: Value,
     pub workflow: RawWorkflow,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RawExecutionPolicy {
+    #[serde(default)]
+    pub persistence_mode: Option<PersistenceMode>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -214,6 +226,7 @@ fn error_path(rendered: &str) -> Option<DslPath> {
 mod tests {
     use super::parse;
     use crate::DUPLICATE_KEY;
+    use insight_engine::PersistenceMode;
 
     #[test]
     fn duplicate_keys_are_rejected_before_materialization() {
@@ -223,5 +236,25 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code(), DUPLICATE_KEY);
         assert_eq!(error.path().unwrap().to_string(), "$.kind");
+    }
+
+    #[test]
+    fn deployment_persistence_policy_uses_the_closed_wire_vocabulary() {
+        let source = "api_version: insight.agent/v1\nkind: agent\nexecution:\n  persistence_mode: terminal_only\ninputs: {}\noutput: string\nworkflow:\n  steps:\n    - return: done\n";
+        let document = parse(source).unwrap();
+        assert_eq!(
+            document.execution.unwrap().persistence_mode,
+            Some(PersistenceMode::TerminalOnly)
+        );
+
+        for invalid in [
+            source.replace("terminal_only", "checkpointed"),
+            source.replace(
+                "  persistence_mode: terminal_only",
+                "  persistence_mode: terminal_only\n  replay_events: false",
+            ),
+        ] {
+            assert!(parse(&invalid).is_err());
+        }
     }
 }

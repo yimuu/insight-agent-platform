@@ -1,3 +1,70 @@
+{{- if not (has .Values.runtime.defaultPersistenceMode (list "full" "terminal_only")) }}
+{{- fail "runtime.defaultPersistenceMode must be full or terminal_only" }}
+{{- end }}
+{{- if or (lt (int .Values.runtime.terminalOnly.ownerLeaseSeconds) 3) (gt (int .Values.runtime.terminalOnly.ownerLeaseSeconds) 300) }}
+{{- fail "runtime.terminalOnly.ownerLeaseSeconds must be between 3 and 300" }}
+{{- end }}
+{{- if or (lt (int .Values.runtime.terminalOnly.ownerHeartbeatSeconds) 1) (gt (int .Values.runtime.terminalOnly.ownerHeartbeatSeconds) 100) }}
+{{- fail "runtime.terminalOnly.ownerHeartbeatSeconds must be between 1 and 100" }}
+{{- end }}
+{{- if gt (mul (int .Values.runtime.terminalOnly.ownerHeartbeatSeconds) 3) (int .Values.runtime.terminalOnly.ownerLeaseSeconds) }}
+{{- fail "runtime.terminalOnly.ownerHeartbeatSeconds must not exceed one third of ownerLeaseSeconds" }}
+{{- end }}
+{{- if or (lt (int .Values.runtime.terminalOnly.terminalCommitRetrySeconds) 1) (gt (int .Values.runtime.terminalOnly.terminalCommitRetrySeconds) 300) }}
+{{- fail "runtime.terminalOnly.terminalCommitRetrySeconds must be between 1 and 300" }}
+{{- end }}
+{{- if or (lt (int .Values.runtime.terminalOnly.runRetentionDays) 1) (gt (int .Values.runtime.terminalOnly.runRetentionDays) 3650) }}
+{{- fail "runtime.terminalOnly.runRetentionDays must be between 1 and 3650" }}
+{{- end }}
+{{- if or (lt (int .Values.runtime.terminalOnly.maxConcurrentRuns) 1) (gt (int .Values.runtime.terminalOnly.maxConcurrentRuns) 10000) }}
+{{- fail "runtime.terminalOnly.maxConcurrentRuns must be between 1 and 10000" }}
+{{- end }}
+{{- if and .Values.runtime.terminalOnly.enabled (ne (int .Values.replicaCount) 1) }}
+{{- fail "terminal_only v1 requires replicaCount=1 while runtime.terminalOnly.enabled is true" }}
+{{- end }}
+{{- if not (regexMatch "^[1-9][0-9]*s$" .Values.runtime.shutdownHardDeadline) }}
+{{- fail "runtime.shutdownHardDeadline must be a positive integer number of seconds" }}
+{{- end }}
+{{- $shutdownHardSeconds := int (trimSuffix "s" .Values.runtime.shutdownHardDeadline) }}
+{{- if le (int .Values.runtime.terminationGracePeriodSeconds) $shutdownHardSeconds }}
+{{- fail "runtime.terminationGracePeriodSeconds must exceed runtime.shutdownHardDeadline" }}
+{{- end }}
+{{- if and .Values.artifacts.tenantEncryption.enabled (empty .Values.artifacts.tenantEncryption.existingSecret) }}
+{{- fail "artifacts.tenantEncryption.existingSecret is required when tenant encryption is enabled" }}
+{{- end }}
+{{- if or (lt (int .Values.runtime.qualificationFaults.admissionDelayMs) 0) (gt (int .Values.runtime.qualificationFaults.admissionDelayMs) 30000) }}
+{{- fail "runtime.qualificationFaults.admissionDelayMs must be between 0 and 30000" }}
+{{- end }}
+{{- if or (lt (int .Values.runtime.qualificationFaults.postCommitDelayMs) 0) (gt (int .Values.runtime.qualificationFaults.postCommitDelayMs) 30000) }}
+{{- fail "runtime.qualificationFaults.postCommitDelayMs must be between 0 and 30000" }}
+{{- end }}
+{{- if or (lt (int .Values.runtime.qualificationFaults.summaryDelayMs) 0) (gt (int .Values.runtime.qualificationFaults.summaryDelayMs) 30000) }}
+{{- fail "runtime.qualificationFaults.summaryDelayMs must be between 0 and 30000" }}
+{{- end }}
+{{- if and (not .Values.qualification.enabled) (or (ne (int .Values.runtime.qualificationFaults.admissionDelayMs) 0) (ne (int .Values.runtime.qualificationFaults.postCommitDelayMs) 0) (ne (int .Values.runtime.qualificationFaults.summaryDelayMs) 0)) }}
+{{- fail "runtime.qualificationFaults require qualification.enabled=true" }}
+{{- end }}
+{{- if or (lt (int .Values.conversations.inlineContentMaxBytes) 256) (gt (int .Values.conversations.inlineContentMaxBytes) 1048576) }}
+{{- fail "conversations.inlineContentMaxBytes must be between 256 and 1048576" }}
+{{- end }}
+{{- if or (lt (int .Values.conversations.messagePageSizeMax) 1) (gt (int .Values.conversations.messagePageSizeMax) 200) }}
+{{- fail "conversations.messagePageSizeMax must be between 1 and 200" }}
+{{- end }}
+{{- if or (lt (int .Values.conversations.messagePageSizeDefault) 1) (gt (int .Values.conversations.messagePageSizeDefault) (int .Values.conversations.messagePageSizeMax)) }}
+{{- fail "conversations.messagePageSizeDefault must be positive and no greater than messagePageSizeMax" }}
+{{- end }}
+{{- if or (lt (int .Values.conversations.summaryTriggerMessages) 2) (gt (int .Values.conversations.summaryTriggerMessages) 10000) }}
+{{- fail "conversations.summaryTriggerMessages must be between 2 and 10000" }}
+{{- end }}
+{{- if or (lt (int .Values.conversations.summaryTriggerTokens) 256) (gt (int .Values.conversations.summaryTriggerTokens) 1000000) }}
+{{- fail "conversations.summaryTriggerTokens must be between 256 and 1000000" }}
+{{- end }}
+{{- if or (lt (int .Values.conversations.recentContextMessages) 1) (gt (int .Values.conversations.recentContextMessages) 200) (gt (int .Values.conversations.recentContextMessages) (int .Values.conversations.summaryTriggerMessages)) }}
+{{- fail "conversations.recentContextMessages must be between 1 and 200 and no greater than summaryTriggerMessages" }}
+{{- end }}
+{{- if or (lt (int .Values.conversations.retentionDays) 1) (gt (int .Values.conversations.retentionDays) 3650) }}
+{{- fail "conversations.retentionDays must be between 1 and 3650" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,8 +83,7 @@ data:
     agents:
       directory: /app/agents
       enabled:
-        - action_demo
-        - benchmark_wait
+        {{- toYaml .Values.agents.enabled | nindent 8 }}
 
     models:
       config: /app/config-runtime/models.yaml
@@ -25,6 +91,9 @@ data:
     actions:
       enabled:
         - example.text_metrics
+        {{- if .Values.qualification.enabled }}
+        - qualification.effect_marker
+        {{- end }}
 
     history:
       provider: postgres
@@ -36,6 +105,11 @@ data:
       namespace: {{ .Values.artifacts.namespace | quote }}
       directory: {{ .Values.artifacts.mountPath | quote }}
       inline_threshold_bytes: 65536
+      {{- if .Values.artifacts.tenantEncryption.enabled }}
+      tenant_encryption:
+        active_key_version: {{ .Values.artifacts.tenantEncryption.activeKeyVersion | quote }}
+        keyring_env: INSIGHT_ARTIFACT_TENANT_KEYRING
+      {{- end }}
       max_read_bytes: 67108864
       orphan_retention: 1h
       reference_retention: 1d
@@ -43,6 +117,15 @@ data:
       deletion_claim_seconds: 60
 
     runtime:
+      default_persistence_mode: {{ .Values.runtime.defaultPersistenceMode | quote }}
+      terminal_only:
+        enabled: {{ .Values.runtime.terminalOnly.enabled }}
+        owner_lease_seconds: {{ .Values.runtime.terminalOnly.ownerLeaseSeconds }}
+        owner_heartbeat_seconds: {{ .Values.runtime.terminalOnly.ownerHeartbeatSeconds }}
+        terminal_commit_retry_seconds: {{ .Values.runtime.terminalOnly.terminalCommitRetrySeconds }}
+        run_retention_days: {{ .Values.runtime.terminalOnly.runRetentionDays }}
+        allow_volatile_waits: {{ .Values.runtime.terminalOnly.allowVolatileWaits }}
+        max_concurrent_runs: {{ .Values.runtime.terminalOnly.maxConcurrentRuns }}
       max_concurrent_runs: {{ .Values.runtime.maxConcurrentRuns }}
       max_concurrent_operations: {{ .Values.runtime.maxConcurrentOperations }}
       max_concurrent_operations_per_run: {{ .Values.runtime.maxConcurrentOperationsPerRun }}
@@ -74,13 +157,35 @@ data:
       shutdown_grace_period: {{ .Values.runtime.shutdownGracePeriod }}
       shutdown_hard_deadline: {{ .Values.runtime.shutdownHardDeadline }}
 
+    conversations:
+      enabled: {{ .Values.conversations.enabled }}
+      inline_content_max_bytes: {{ .Values.conversations.inlineContentMaxBytes }}
+      message_page_size_default: {{ .Values.conversations.messagePageSizeDefault }}
+      message_page_size_max: {{ .Values.conversations.messagePageSizeMax }}
+      summary_trigger_messages: {{ .Values.conversations.summaryTriggerMessages }}
+      summary_trigger_tokens: {{ .Values.conversations.summaryTriggerTokens }}
+      recent_context_messages: {{ .Values.conversations.recentContextMessages }}
+      retention_days: {{ .Values.conversations.retentionDays }}
+
   models.yaml: |
     version: 1
     models:
-      unused_benchmark_model:
+      {{- if .Values.qualification.enabled }}
+      terminal_stream_fixture_model:
         type: open_ai_chat
-        base_url: https://models.example.invalid/v1
-        model: unused-benchmark-model
+        base_url: {{ .Values.models.terminalStreamBaseUrl | quote }}
+        model: terminal-stream-fixture
+        capabilities: []
+        transport:
+          plaintext_http: trusted_private
+        connect_timeout: 1s
+        request_timeout: 60s
+      {{- else }}
+      default_placeholder_model:
+        type: open_ai_chat
+        base_url: {{ .Values.models.defaultBaseUrl | quote }}
+        model: placeholder-chat-model
         capabilities: []
         connect_timeout: 1s
-        request_timeout: 5s
+        request_timeout: 60s
+      {{- end }}

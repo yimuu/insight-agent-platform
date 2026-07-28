@@ -3,8 +3,9 @@ use serde_json::Value;
 
 use insight_durable::model::adapter as durable_model_adapter;
 pub use insight_durable::{
-    CommitReceipt, CreateRunCommand, PublicEventIntent, PublicRunAttachment, PublicationHead,
-    PublicationOrigin, RunProjection, RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
+    CommitReceipt, CreateRunCommand, FullConversationRunAdmission, PublicEventIntent,
+    PublicRunAttachment, PublicationHead, PublicationOrigin, RunProjection, RunTransitionCommand,
+    VersionedPlan, VersionedPlanCatalog,
 };
 
 use super::RepositoryError;
@@ -196,6 +197,7 @@ pub(crate) trait CreateRunCommandAdapter {
     fn run_timeout_ms(&self) -> Option<u64>;
     fn artifact_reference_retention_seconds(&self) -> u32;
     fn expected_publication_head(&self) -> Option<&PublicationHead>;
+    fn full_conversation(&self) -> Option<&FullConversationRunAdmission>;
 }
 
 impl CreateRunCommandAdapter for CreateRunCommand {
@@ -231,6 +233,9 @@ impl CreateRunCommandAdapter for CreateRunCommand {
     }
     fn expected_publication_head(&self) -> Option<&PublicationHead> {
         durable_model_adapter::create_run_expected_publication_head(self)
+    }
+    fn full_conversation(&self) -> Option<&FullConversationRunAdmission> {
+        durable_model_adapter::create_run_full_conversation(self)
     }
 }
 

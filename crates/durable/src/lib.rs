@@ -30,6 +30,7 @@ pub mod recovery_repository;
 pub mod retrieval_publication;
 #[doc(hidden)]
 pub mod scheduler_repository;
+pub mod terminal_store;
 #[doc(hidden)]
 pub mod work_wakeup;
 
@@ -114,10 +115,10 @@ pub use insight_engine::repository::{
     REPOSITORY_SCHEDULER_CRASH_INJECTED, REPOSITORY_STORAGE_FAILURE,
 };
 pub use model::{
-    CommitReceipt, CreateRunCommand, DurableResponseSnapshot, PlanInstallOutcome,
-    PlanPublicationOutcome, PublicEventIntent, PublicRunAttachment, PublicationHead,
-    PublicationOrigin, PublishVersionedPlanCommand, ResponseTerminalKind, ResponseUsageStatus,
-    RunProjection, RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
+    CommitReceipt, CreateRunCommand, DurableResponseSnapshot, FullConversationRunAdmission,
+    PlanInstallOutcome, PlanPublicationOutcome, PublicEventIntent, PublicRunAttachment,
+    PublicationHead, PublicationOrigin, PublishVersionedPlanCommand, ResponseTerminalKind,
+    ResponseUsageStatus, RunProjection, RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
 };
 pub use model_tool_parent_resume::ModelToolParentResume;
 pub use model_tool_queue::{

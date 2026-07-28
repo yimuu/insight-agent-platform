@@ -31,6 +31,7 @@ spec:
         {{- end }}
     spec:
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.runtime.terminationGracePeriodSeconds }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -66,6 +67,25 @@ spec:
                   key: {{ .Values.externalDatabase.databaseUrlKey }}
             - name: RUST_LOG
               value: {{ .Values.runtime.rustLog | quote }}
+            {{- if .Values.artifacts.tenantEncryption.enabled }}
+            - name: INSIGHT_ARTIFACT_TENANT_KEYRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.artifacts.tenantEncryption.existingSecret | quote }}
+                  key: {{ .Values.artifacts.tenantEncryption.keyringKey | quote }}
+            {{- end }}
+            {{- if .Values.qualification.enabled }}
+            - name: INSIGHT_QUALIFICATION_ENABLED
+              value: "true"
+            - name: TERMINAL_QUALIFICATION_EFFECT_LEDGER
+              value: {{ printf "%s/qualification-effects" .Values.artifacts.mountPath | quote }}
+            - name: INSIGHT_TERMINAL_QUALIFICATION_ADMISSION_DELAY_MS
+              value: {{ .Values.runtime.qualificationFaults.admissionDelayMs | quote }}
+            - name: INSIGHT_TERMINAL_QUALIFICATION_POST_COMMIT_DELAY_MS
+              value: {{ .Values.runtime.qualificationFaults.postCommitDelayMs | quote }}
+            - name: INSIGHT_TERMINAL_QUALIFICATION_SUMMARY_DELAY_MS
+              value: {{ .Values.runtime.qualificationFaults.summaryDelayMs | quote }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 3000

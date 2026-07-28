@@ -44,6 +44,17 @@ workflow:
 `metadata` 可以省略；`types`、`prompts` 和 `errors` 按 Agent 需要声明。`workflow.steps` 是作者层的
 顺序入口，最终必须以类型正确的 `return` 或 `raise` 闭合所有可达路径。
 
+Deployment persistence policy 是可选的严格顶层字段：
+
+```yaml
+execution:
+  persistence_mode: terminal_only
+```
+
+可选值只有 `full` 和 `terminal_only`；未知值或 `execution` 下的未知字段会在 parse 阶段失败。
+未声明时当前平台默认使用 `full`。该字段不改变 Canonical Plan 控制流，而是在 publication 时进入
+不可变 Deployment Revision identity；Run 请求不能覆盖它。
+
 ## 类型与输入
 
 内建基础类型包括 `string`、`integer`、`number`、`boolean`、`any` 和 `Message`。数组写成
@@ -133,6 +144,11 @@ JSON Schema；compiler 会生成并执行输入、节点响应和最终输出校
 
 `human_task` 是独立的持久化工作项，不是 signal 的别名。候选人、候选组、响应类型和 claim lease
 都必须显式声明。
+
+上述 human task、外部 signal wait、长 timer、durable child subflow 和依赖 durable effect fence 的
+provider 与 terminal-only v1 不兼容，publication 会静态拒绝。`allow_volatile_waits` 默认关闭；当前
+版本显式打开时也只允许接受进程退出即丢失语义的有界短 timer，external signal 和 human task
+仍会被拒绝，不能把任何 volatile wait 描述为可恢复等待。
 
 ## 示例与相关文档
 

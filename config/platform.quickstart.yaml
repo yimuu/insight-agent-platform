@@ -32,6 +32,15 @@ artifacts:
   deletion_claim_seconds: 60
 
 runtime:
+  default_persistence_mode: full
+  terminal_only:
+    enabled: true
+    owner_lease_seconds: 30
+    owner_heartbeat_seconds: 10
+    terminal_commit_retry_seconds: 10
+    run_retention_days: 30
+    allow_volatile_waits: false
+    max_concurrent_runs: 50
   max_concurrent_runs: 4
   max_concurrent_operations: 4
   max_concurrent_operations_per_run: 2
@@ -62,3 +71,13 @@ runtime:
   readiness_probe_timeout: 2s
   shutdown_grace_period: 30s
   shutdown_hard_deadline: 35s
+
+conversations:
+  enabled: true
+  inline_content_max_bytes: 8192
+  message_page_size_default: 50
+  message_page_size_max: 200
+  summary_trigger_messages: 30
+  summary_trigger_tokens: 24000
+  recent_context_messages: 20
+  retention_days: 90

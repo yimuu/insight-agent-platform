@@ -17,11 +17,17 @@ const REQUIRED_TABLES: &[&str] = &[
     "artifacts",
     "control_tokens",
     "control_transition_results",
+    "conversation_messages",
+    "conversation_summaries",
+    "conversation_summary_jobs",
+    "conversation_tombstones",
+    "conversations",
     "deployment_revisions",
     "durable_schema_contract",
     "execution_events",
     "fork_groups",
     "fork_legs",
+    "full_conversation_turns",
     "graph_view_documents",
     "human_work_items",
     "join_arrivals",
@@ -54,6 +60,11 @@ const REQUIRED_TABLES: &[&str] = &[
     "scope_instances",
     "signals_inbox",
     "task_outbox",
+    "terminal_artifact_staging",
+    "terminal_content_deletion_jobs",
+    "terminal_run_admissions",
+    "terminal_run_results",
+    "terminal_runtime_instances",
     "timers",
     "wait_late_audit_outbox",
     "workflow_definition_public_metadata",
@@ -97,6 +108,19 @@ fn table_names(sql: &str) -> BTreeSet<String> {
         if window[0].eq_ignore_ascii_case("create") && window[1].eq_ignore_ascii_case("table") {
             names.insert(
                 window[2]
+                    .trim_matches('"')
+                    .trim_start_matches("public.")
+                    .to_ascii_lowercase(),
+            );
+        }
+    }
+    for window in tokens.windows(4) {
+        if window[0].eq_ignore_ascii_case("create")
+            && window[1].eq_ignore_ascii_case("unlogged")
+            && window[2].eq_ignore_ascii_case("table")
+        {
+            names.insert(
+                window[3]
                     .trim_matches('"')
                     .trim_start_matches("public.")
                     .to_ascii_lowercase(),
@@ -219,6 +243,38 @@ fn durable_safety_authorities_remain_present_in_both_final_schemas() {
     }
 }
 
+#[test]
+fn terminal_and_conversation_schema_layout_matches_the_lightweight_contract() {
+    let postgres = normalize(support::POSTGRES_SCHEMA);
+    let sqlite = normalize(support::SQLITE_SCHEMA);
+    assert!(postgres.contains("create unlogged table terminal_runtime_instances"));
+    assert!(sqlite.contains("create table terminal_runtime_instances"));
+    for schema in [&postgres, &sqlite] {
+        for table in [
+            "terminal_artifact_staging",
+            "terminal_run_admissions",
+            "terminal_run_results",
+            "conversations",
+            "conversation_messages",
+            "conversation_summaries",
+        ] {
+            assert!(schema.contains(&format!("create table {table}")));
+        }
+        assert!(schema.contains("idx_terminal_run_admissions_retention"));
+        assert!(schema.contains("idx_terminal_artifact_staging_pending"));
+        assert!(schema.contains("idx_terminal_artifact_staging_reclaim"));
+        assert!(schema.contains("idx_terminal_content_deletion_jobs_pending"));
+        assert!(schema.contains("idx_terminal_content_deletion_jobs_reclaim"));
+        assert!(schema.contains("idx_conversation_messages_page"));
+        assert!(schema.contains("uq_conversation_assistant_run"));
+        assert!(schema.contains("idx_conversations_created_retention"));
+        assert!(schema.contains("(output_ref is null) = (output_hash is null)"));
+        assert!(!schema.contains("idx_conversations_archived_retention"));
+        assert!(!schema.contains("terminal_run_results_terminal_state_idx"));
+    }
+    assert!(postgres.contains("create sequence conversation_message_order_seq cache 1000"));
+}
+
 #[tokio::test]
 async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
     let temporary = tempfile::tempdir().unwrap();
@@ -279,7 +335,7 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(indexes.len(), 43, "all explicit indexes must be installed");
+    assert_eq!(indexes.len(), 52, "all explicit indexes must be installed");
     for (index, table) in [
         ("idx_runs_dispatch", "workflow_runs"),
         ("idx_runs_recovery", "workflow_runs"),
@@ -299,6 +355,15 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
         ("idx_wait_late_audit_pending", "wait_late_audit_outbox"),
         ("idx_wait_late_audit_reclaim", "wait_late_audit_outbox"),
         ("uq_wait_late_audit_claim_token", "wait_late_audit_outbox"),
+        ("idx_conversations_created_retention", "conversations"),
+        (
+            "idx_terminal_artifact_staging_pending",
+            "terminal_artifact_staging",
+        ),
+        (
+            "idx_terminal_artifact_staging_reclaim",
+            "terminal_artifact_staging",
+        ),
     ] {
         assert!(
             indexes.contains(&(index.to_owned(), table.to_owned())),
@@ -312,6 +377,29 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
              WHERE task_state='pending' AND available_at<='9999-12-31T23:59:59.999Z'
              ORDER BY available_at,run_id,task_id LIMIT 8",
             "idx_task_outbox_dispatch",
+        ),
+        (
+            "EXPLAIN QUERY PLAN
+             SELECT conversation_id,tenant_id FROM conversations
+             WHERE created_at<'9999-12-31T23:59:59.999Z'
+             ORDER BY created_at,conversation_id LIMIT 8",
+            "idx_conversations_created_retention",
+        ),
+        (
+            "EXPLAIN QUERY PLAN
+             SELECT staging_id FROM terminal_artifact_staging
+             WHERE staging_state='pending'
+               AND available_at<='9999-12-31T23:59:59.999Z'
+             ORDER BY available_at,created_at,staging_id LIMIT 8",
+            "idx_terminal_artifact_staging_pending",
+        ),
+        (
+            "EXPLAIN QUERY PLAN
+             SELECT staging_id FROM terminal_artifact_staging
+             WHERE staging_state='claimed'
+               AND claim_expires_at<='9999-12-31T23:59:59.999Z'
+             ORDER BY claim_expires_at,staging_id LIMIT 8",
+            "idx_terminal_artifact_staging_reclaim",
         ),
         (
             "EXPLAIN QUERY PLAN
@@ -561,6 +649,61 @@ async fn sqlite_nonempty_target_is_rejected_without_publishing_contract_metadata
         .unwrap(),
         0
     );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_terminal_hash_and_identifier_checks_are_exact_lower_hex_contracts() {
+    let temporary = tempfile::tempdir().unwrap();
+    let database = temporary.path().join("strict-terminal-hash.sqlite3");
+    support::provision_sqlite_database(&database).await;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(database)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    let invalid_hash = format!("sha256:{}z", "a".repeat(63));
+    let valid_stage_id = format!("terminal_stage_{}", "a".repeat(64));
+    assert!(sqlx::query(
+        "INSERT INTO terminal_artifact_staging(
+             staging_id,tenant_id,content_ref,content_hash,source_kind,source_id,
+             available_at,created_at
+         ) VALUES (?,?,?,?,?,?,?,?)",
+    )
+    .bind(&valid_stage_id)
+    .bind("tenant")
+    .bind("content-ref")
+    .bind(invalid_hash)
+    .bind("run_output")
+    .bind("source")
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(&pool)
+    .await
+    .is_err());
+
+    let invalid_stage_id = format!("terminal_stage_{}z", "a".repeat(63));
+    assert!(sqlx::query(
+        "INSERT INTO terminal_artifact_staging(
+             staging_id,tenant_id,content_ref,content_hash,source_kind,source_id,
+             available_at,created_at
+         ) VALUES (?,?,?,?,?,?,?,?)",
+    )
+    .bind(invalid_stage_id)
+    .bind("tenant")
+    .bind("content-ref-2")
+    .bind(format!("sha256:{}", "b".repeat(64)))
+    .bind("run_output")
+    .bind("source-2")
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(&pool)
+    .await
+    .is_err());
     pool.close().await;
 }
 

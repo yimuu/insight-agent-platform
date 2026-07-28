@@ -32,7 +32,7 @@ pub use sqlite::SqliteDurableRepository;
 
 pub(crate) use error::RepositoryErrorExt;
 
-fn database_time(value: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+pub(crate) fn database_time(value: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp_micros(value.timestamp_micros())
         .expect("a valid DateTime always has a representable microsecond timestamp")
 }

@@ -5,19 +5,19 @@
 适用版本：`insight.agent/v1`
 
 Insight Agent Platform 将作者编写的结构化 YAML 或画布 Graph 编译为同一个不可变、类型化的
-Canonical Plan。调度器只根据 Plan、持久化事实和数据库时间作出决定，Worker 通过带 fence 的
-lease 执行并提交结果。
+Canonical Plan。Deployment Revision 另外冻结 `full` 或 `terminal_only` persistence policy；Run
+不能覆盖该故障语义。
 
 ```text
 Agent YAML / Graph Author Document
               ↓ parse / type-check / link
         Canonical Typed Plan
-              ↓ durable admission
-Run → Scope → Activation → Attempt
-              ↓ lease / heartbeat / fenced commit
-PostgreSQL（生产）/ SQLite（单进程开发）
+              ↓ immutable Deployment policy
+        ┌──── full ────→ durable scheduler/checkpoint/lease
+Run ────┤
+        └ terminal_only → process-local scheduler → terminal result
               ↓
-content-addressed Artifact store
+PostgreSQL（生产）/ SQLite（单进程开发） + Artifact store
 ```
 
 ## 核心对象
@@ -28,16 +28,22 @@ content-addressed Artifact store
 - **Scope**：结构化控制流产生的持久化执行范围；
 - **Activation**：Plan 节点的一次逻辑激活，具有稳定身份；
 - **Attempt**：Worker 对 Activation 的一次带 lease 执行尝试；
-- **Artifact**：超过内联阈值的大值或二进制内容，按内容寻址保存。
+- **Artifact**：超过内联阈值的大值或二进制内容，按内容寻址保存；Conversation/terminal scoped
+  envelope 可在对象层按 tenant 派生 key 做带版本 AEAD 加密。
 
 Run 始终固定到不可变 revision。ViewDocument 和 trace overlay 用于布局与观察，不参与执行真相。
+Deployment binding hash 包含 persistence policy，因此相同 Plan 的 `full` 与 `terminal_only`
+Deployment Revision 必须具有不同 identity。旧 revision 未携带该字段时按历史合同解释为 `full`。
 
 ## 核心不变量
 
-- Run、Scope、Activation、Attempt、控制 token、timer、signal 和 task outbox 都有稳定身份并持久化；
-- scheduler 不依赖进程内调用栈或内存事件历史恢复；
-- Worker lease 使用 epoch/fence，过期 Worker 不能覆盖新的权威结果；
-- 终态、join、signal/timeout 和 cancel/success 竞态由数据库事务决定唯一赢家；
+- `full` Run 的 Scope、Activation、Attempt、控制 token、timer、signal 和 task outbox 具有稳定的
+  持久化身份；其 scheduler 不依赖进程内调用栈或内存事件历史恢复；
+- `terminal_only` 只持久化 revision-bound admission、terminal result 及可选 Conversation 最终消息；
+  执行期 Scope、Activation、Attempt 和 wait state 不是恢复权威；
+- `full` Worker lease 使用 epoch/fence；terminal-only owner fence 只阻止过期 owner 的迟到
+  terminal commit，两者都不允许旧执行者覆盖新的权威结果；
+- `full` 的 join、signal/timeout 等竞态和两种路径的 terminal commit 都由数据库事务决定唯一赢家；
 - 外部副作用默认只承诺 at-least-once，不能伪装成 exactly-once；
 - 小值内联，大值写入 Artifact store，并在结果事务中提交引用；
 - 生产 runtime 必须共享 PostgreSQL 16 和同一个物理 Artifact store；
@@ -60,7 +66,9 @@ Run 始终固定到不可变 revision。ViewDocument 和 trace overlay 用于布
 `engine`/`durable` 所有的 ports 在根 composition 中组合；workspace member 直接导入 owner crate，
 不通过根 facade 形成反向依赖。
 
-## 执行与恢复
+## 两条执行路径
+
+`full` 路径保留现有 durable contract：
 
 admission 创建持久化 Run；进程级 `WorkCoordinator` 合并数据库通知、本地提交提示、deadline 和
 5 秒安全轮询，再按空闲 execution permit 有界领取工作。worker 不再各自轮询所有 durable queue。
@@ -83,11 +91,44 @@ lease、timer、signal、admission 或 outbox 的权威。
 暂停只阻止新的调度 admission；取消、超时和信号仍通过持久化控制意图收敛。redrive、fork、
 migrate 与 continue-as-new 都基于固定 revision、checkpoint 和服务端推导的兼容证据工作。
 
+`terminal_only` 使用独立的进程内 scheduler/active registry，不调用 full repository 的 execution
+event、projection/scheduler checkpoint、claim/lease、public ledger 或 replay 写路径。持久化权威
+只有 admission 和 terminal result；Conversation turn 另外原子写入 user/final assistant message。
+owner instance lease 只用于判断无 result admission 已中断，并阻止过期 owner 的迟到 terminal
+commit。进程失败后不 recovery、不接管、不自动 retry，也不承诺外部副作用 exactly-once。
+
+terminal-only publication 会静态拒绝 durable wait、人工作业、长 timer、durable child subflow 和要求
+durable effect fence 的 provider。对 terminal-only Run 调用 pause/resume、signal、redrive、fork、
+migrate 或 continue-as-new 属于 capability error，不会退回 full 引擎。
+
+## Conversation
+
+Conversation 是 tenant/user 与 Agent 的多轮消息容器，不是 workflow checkpoint 或长期 Agent
+memory。它只保存不可变 user/assistant 最终消息和低频不可变 summary；SSE token/delta、provider
+chunk、Run 中间状态与 tool scratchpad 不进入 Conversation 表。一个 turn 的 user message 与
+admission 原子提交，terminal result 与 assistant message 原子提交。Prompt context 由“最新有效
+summary + 其后的最近消息”构成，数量和 token budget 有界；summary object 缺失或损坏时会丢弃
+该优化并从整个 Conversation 重新读取精确的最近消息后缀。
+
+`message_order` 的权威范围是单个 Conversation。PostgreSQL repository 在 transaction-scoped
+per-Conversation advisory lock 下，通过已有 cursor index 求 `MAX(message_order)+1`；SQLite 的单
+writer transaction 使用相同规则。这样既保证已提交消息在 Conversation 内唯一、严格递增和 cursor
+稳定，也让顺序对应同一 Conversation 的 repository 串行提交次序，而不需要更新 Conversation head
+row。schema 的 global cached sequence 只作为 direct-SQL default 保留：连接池 backend 各自预留的
+cache 区间可能让后提交消息取得更小的旧缓存值，因此它不作为 runtime 的 Conversation 排序权威。
+
+超过 inline 阈值的 user/final assistant/summary 内容写入 tenant/source scoped object，message
+只保存 ref 与原始内容 hash。object 先进入 replay-safe staging，随后与权威 message 或 summary
+在同一事务消费；失败提交不会留下半个 terminal result。启用 terminal-only engine 时由它唯一执行
+privacy deletion 与 orphan staging 回收；仅启用 full Conversation 时由 RunService maintenance
+pump 执行同一闭环以及有界 Conversation/历史 terminal Run retention，二者不会同时 claim。
+
 ## 公共响应与内部事实
 
-Detached Run 通过查询接口读取 durable projection。Attached Run 使用 live-only SSE 投影实时内容，
-不提供 `Last-Event-ID` replay；临时 delta 是有界、best-effort 数据，最终 durable terminal snapshot
-才是交付权威。runtime 发布 Public Event 后直接执行本地 durable-by-ID 投递，不在每个 outbox
+Detached Run 通过查询接口读取其 persistence mode 对应的状态或已提交 terminal result。Attached
+Run 使用 live-only SSE 投影实时内容，不提供 `Last-Event-ID` replay；临时 delta 是有界、
+best-effort 数据，最终已持久化的 terminal snapshot 才是交付权威。full runtime 发布 Public Event
+后直接执行本地 durable-by-ID 投递，不在每个 outbox
 publication 权威事务中发送 PostgreSQL 通知；远端订阅者以 100ms 有界 durable-order poll 保证进展，
 非 runtime publisher 仍可发 commit-scoped hint。内部 execution ledger 不直接暴露为公共事件历史。
 
@@ -96,5 +137,6 @@ publication 权威事务中发送 PostgreSQL 通知；远端订阅者以 100ms �
 - [DSL v1 指南](dsl.md)
 - [HTTP 与 SSE API](api.md)
 - [部署与运维](operations.md)
+- [Terminal-only 验收与 WAL 资格](terminal-only-qualification.md)
 - [开发指南](development.md)
 - [文档权威关系](../README.md#权威关系)

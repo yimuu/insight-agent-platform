@@ -36,7 +36,7 @@ GraphAuthorDocument 在发布时重新验证并编译为 Canonical Plan。ViewDo
 | `POST` | `/v1/agents/{agent_id}/deployments/{deployment_revision_id}/runs` | 从指定 Deployment Revision 创建 pinned Run |
 | `POST` | `/v1/agents/{agent_id}/runs` | 创建 Detached Run |
 | `POST` | `/v1/agents/{agent_id}/runs/stream` | 创建 Attached SSE Run |
-| `GET` | `/v1/runs/{run_id}` | 查询 durable Run projection |
+| `GET` | `/v1/runs/{run_id}` | 查询 Run 状态与已持久化终态；恢复/重放能力由 DTO capability 区分 |
 | `DELETE` | `/v1/runs/{run_id}` | 请求取消 |
 | `GET` | `/v1/runs/{run_id}/execution-graph` | 读取固定 revision 的执行图 |
 | `GET` | `/v1/runs/{run_id}/trace` | 读取 trace overlay |
@@ -53,6 +53,17 @@ GraphAuthorDocument 在发布时重新验证并编译为 Canonical Plan。ViewDo
 `expected_projection_version`；checkpoint hash、effect proof 和 revision/schema 兼容证据由服务端
 从 durable authority 推导，客户端不能注入。
 
+`GET/DELETE /v1/runs/{run_id}` 以及 pause、resume、signal 和 recovery capability 检查对普通
+Run 接受可选 `X-Tenant-ID`，未提供时使用兼容默认值 `default`。Conversation turn 创建的 Run
+绑定完整 Conversation principal；客户端断线后必须继续携带同一组可信 `X-Tenant-ID` 与
+`X-User-ID`。缺少 user、跨 tenant 或跨 user 查询统一返回 404。
+
+Conversation privacy delete 删除 messages、summaries 和关联 scoped objects。Full runtime 的
+workflow payload 仍属于独立 Run audit/retention authority，不作为 Conversation object 重复删除；
+所有公共 payload 读取在 Conversation tombstone 后 fail closed：Run GET 只返回已清除
+input/output/error 的终态，artifact、trace 与 recovery 派生面返回 not found，execution graph 只返
+回不含 Run payload 的冻结 Plan。
+
 Run admission 容量与业务状态冲突是两个不同合同：
 
 | 条件 | HTTP | code | Header |
@@ -62,6 +73,35 @@ Run admission 容量与业务状态冲突是两个不同合同：
 
 客户端收到 429 后应使用 exponential backoff 与 jitter；不能无间隔重试。容量拒绝没有创建 Run，
 也不应被统计为成功 create latency。
+
+所有 Run DTO 显式返回 Deployment Revision 冻结的持久化语义：
+
+```json
+{
+  "persistence_mode": "terminal_only",
+  "recovery_capability": "none",
+  "event_replay": false,
+  "volatile_waits_enabled": false,
+  "wait_recovery": "none"
+}
+```
+
+独立的 `full` Run 对应 `recovery_capability: "full"` 和 `event_replay: true`。
+Conversation-bound `full` Run 对应 `recovery_capability: "restart_only"` 和
+`event_replay: true`：平台可在进程重启后恢复其原执行，但不开放会派生或改变 Conversation
+lineage 的 pause、resume、signal、redrive、fork、migrate 或 continue-as-new。
+`terminal_only` Run 对应 `recovery_capability: "none"` 和 `event_replay: false`，不保存恢复
+checkpoint。对后两类 Run 调用上述不支持的接口都会返回 `422`，且不带 `Retry-After`；public error
+code 相同，安全 message 按能力原因区分：
+
+| Run 能力 | code | message |
+|---|---|---|
+| `restart_only` | `RUN_CAPABILITY_UNAVAILABLE` | `Conversation-bound full Runs do not support recovery lineage` |
+| `none` | `RUN_CAPABILITY_UNAVAILABLE` | `this run does not persist recovery checkpoints` |
+
+Agent discovery 额外返回 immutable Deployment Revision 的
+`volatile_waits_enabled` 与 `wait_recovery`。若显式启用 process-local wait，
+`volatile_waits_enabled` 为 `true`，但 `wait_recovery` 仍为 `none`，表示 Pod/进程退出会丢失等待。
 
 ## Attached SSE
 
@@ -78,6 +118,38 @@ best-effort；发生丢失时客户端通过 `workflow.stream.gap` 和最终快�
 
 `stream` 只控制 Provider 请求模式，`publish` 只控制 provisional 内容可见性。无论组合如何，最终
 快照都包含强类型 workflow result、持久化 response identity 和 OpenAI 命名的 token usage。
+Conversation Attached turn 的 terminal frame 还必须等待 `Run result + assistant message` 同一事务
+提交；token/delta 和 provider chunk 不写入 Conversation。Privacy delete 开始时服务端会取消该
+Conversation 的活动 SSE dispatcher；之后不再入队 live 内容，尚未被传输层消费的有界 delta 队列
+会被丢弃。已线性化为先于 delete 的 socket write 无法撤回，但 `DELETE` 成功后不会继续暴露缓冲或
+新产生的私密 frame。
+
+## Conversation
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| `POST` | `/v1/conversations` | 创建绑定 tenant/user/agent 的 Conversation |
+| `GET` | `/v1/conversations/{conversation_id}` | 读取 metadata |
+| `GET` | `/v1/conversations/{conversation_id}/messages` | cursor 分页读取消息 |
+| `POST` | `/v1/conversations/{conversation_id}/messages` | 追加 user message 并创建 Detached Run |
+| `POST` | `/v1/conversations/{conversation_id}/messages/stream` | 追加 user message 并创建 Attached SSE Run |
+| `POST` | `/v1/conversations/{conversation_id}/archive` | 幂等归档 |
+| `DELETE` | `/v1/conversations/{conversation_id}` | 执行 privacy delete |
+
+当前 HTTP principal carrier 是必填的 `X-Tenant-ID` 与 `X-User-ID`。它们必须由可信认证层注入或
+覆盖，不能直接信任公网客户端提供的值；后续 IdP principal resolver 可以替换 carrier，但不得改变
+repository 的 tenant/user ownership 校验。所有 Conversation 写请求还要求非空 `X-Request-ID`。
+
+创建 body 为 `{"agent_id":"..."}`，追加消息 body 为 `{"content":...}`，archive body 为 `{}`；
+这些 body 都 strict reject 未知字段。消息列表使用
+`?cursor=<opaque>&limit=<configured-max>`；默认部署为 `limit=50`、最大 200，实际边界取运行时
+Conversation 配置。cursor 是无 padding 的 canonical base64url，
+内部只编码 `(message_order,message_id)`，客户端不得构造 offset。页面按
+`message_order DESC` 返回，并以 `next_cursor` 继续读取更旧消息。
+
+Conversation 只返回不可变 user/assistant message；最终 assistant message 绑定唯一 `run_id`。
+archive 不删除内容，`DELETE` 才进入 retention/privacy 删除语义。跨 tenant/user 读取统一表现为
+`404 CONVERSATION_NOT_FOUND`，不会泄漏资源是否存在。
 
 ## 人工任务
 

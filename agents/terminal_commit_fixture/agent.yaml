@@ -1,0 +1,20 @@
+api_version: insight.agent/v1
+kind: agent
+
+metadata:
+  id: terminal_commit_fixture
+  name: Terminal Commit Fixture
+  description: Immediate deterministic result used to pause between terminal commit and SSE.
+
+execution:
+  persistence_mode: terminal_only
+
+inputs:
+  message: any
+  conversation_context: any
+
+output: any
+
+workflow:
+  steps:
+    - return: $message

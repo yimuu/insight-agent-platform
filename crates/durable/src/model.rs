@@ -562,6 +562,12 @@ pub mod adapter {
         command.expected_publication_head()
     }
 
+    pub fn create_run_full_conversation(
+        command: &CreateRunCommand,
+    ) -> Option<&FullConversationRunAdmission> {
+        command.full_conversation()
+    }
+
     pub fn public_event_intent(payload: PublicEventPayload) -> PublicEventIntent {
         PublicEventIntent::new(payload)
     }
@@ -1020,6 +1026,135 @@ impl PublicRunAttachment {
     }
 }
 
+/// Conversation metadata that is committed in the same transaction as a
+/// durable/full Run admission.
+///
+/// This lives in the durable contract rather than the lightweight terminal
+/// store so the full scheduler can preserve its existing execution authority
+/// while sharing the Conversation message tables.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FullConversationRunAdmission {
+    conversation_id: String,
+    tenant_id: String,
+    user_id: String,
+    agent_id: String,
+    user_message_id: String,
+    assistant_message_id: String,
+    user_content_inline: Option<Value>,
+    user_content_ref: Option<String>,
+    user_content_hash: ContentHash,
+    selected_context_hash: ContentHash,
+    context_message_order: i64,
+    created_at: DateTime<Utc>,
+}
+
+impl FullConversationRunAdmission {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        conversation_id: impl Into<String>,
+        tenant_id: impl Into<String>,
+        user_id: impl Into<String>,
+        agent_id: impl Into<String>,
+        user_message_id: impl Into<String>,
+        assistant_message_id: impl Into<String>,
+        user_content_inline: Option<Value>,
+        user_content_ref: Option<String>,
+        user_content_hash: ContentHash,
+        selected_context_hash: ContentHash,
+        context_message_order: i64,
+        created_at: DateTime<Utc>,
+    ) -> Result<Self, RepositoryError> {
+        let admission = Self {
+            conversation_id: conversation_id.into(),
+            tenant_id: tenant_id.into(),
+            user_id: user_id.into(),
+            agent_id: agent_id.into(),
+            user_message_id: user_message_id.into(),
+            assistant_message_id: assistant_message_id.into(),
+            user_content_inline,
+            user_content_ref,
+            user_content_hash,
+            selected_context_hash,
+            context_message_order,
+            created_at,
+        };
+        for value in [
+            &admission.conversation_id,
+            &admission.tenant_id,
+            &admission.user_id,
+            &admission.agent_id,
+            &admission.user_message_id,
+            &admission.assistant_message_id,
+        ] {
+            validate_body_free_label(value)?;
+        }
+        if admission.context_message_order < 0 {
+            return Err(RepositoryError::invalid_data());
+        }
+        if admission.user_content_inline.is_some() == admission.user_content_ref.is_some()
+            || admission
+                .user_content_ref
+                .as_ref()
+                .is_some_and(|reference| {
+                    reference.is_empty()
+                        || reference.len() > 16 * 1024
+                        || reference.chars().any(char::is_control)
+                })
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+        Ok(admission)
+    }
+
+    pub fn conversation_id(&self) -> &str {
+        &self.conversation_id
+    }
+
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
+    pub fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
+    pub fn user_message_id(&self) -> &str {
+        &self.user_message_id
+    }
+
+    pub fn assistant_message_id(&self) -> &str {
+        &self.assistant_message_id
+    }
+
+    pub fn user_content_inline(&self) -> Option<&Value> {
+        self.user_content_inline.as_ref()
+    }
+
+    pub fn user_content_ref(&self) -> Option<&str> {
+        self.user_content_ref.as_deref()
+    }
+
+    pub fn user_content_hash(&self) -> &ContentHash {
+        &self.user_content_hash
+    }
+
+    pub fn selected_context_hash(&self) -> &ContentHash {
+        &self.selected_context_hash
+    }
+
+    pub fn context_message_order(&self) -> i64 {
+        self.context_message_order
+    }
+
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CreateRunCommand {
     run_id: RunId,
@@ -1038,6 +1173,8 @@ pub struct CreateRunCommand {
     /// the same transaction that creates the Run.
     #[serde(skip_serializing_if = "Option::is_none")]
     expected_publication_head: Option<PublicationHead>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    full_conversation: Option<FullConversationRunAdmission>,
 }
 
 impl CreateRunCommand {
@@ -1063,6 +1200,7 @@ impl CreateRunCommand {
             run_timeout_ms: None,
             artifact_reference_retention_seconds: 30 * 24 * 60 * 60,
             expected_publication_head: None,
+            full_conversation: None,
         })
     }
 
@@ -1120,6 +1258,14 @@ impl CreateRunCommand {
         Ok(self)
     }
 
+    pub fn with_full_conversation(
+        mut self,
+        conversation: FullConversationRunAdmission,
+    ) -> Result<Self, RepositoryError> {
+        self.full_conversation = Some(conversation);
+        Ok(self)
+    }
+
     pub fn run_id(&self) -> &RunId {
         &self.run_id
     }
@@ -1166,6 +1312,10 @@ impl CreateRunCommand {
 
     pub(crate) fn expected_publication_head(&self) -> Option<&PublicationHead> {
         self.expected_publication_head.as_ref()
+    }
+
+    pub(crate) fn full_conversation(&self) -> Option<&FullConversationRunAdmission> {
+        self.full_conversation.as_ref()
     }
 }
 

@@ -7,6 +7,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- 显式 opt-in 的 `terminal_only` 执行路径，只持久化 admission 与 terminal result；进程失败时
+  未完成 Run 明确进入 `interrupted`，不伪装成可恢复执行。
+- tenant/user 隔离的 Conversation、message、summary、cursor pagination、archive 与 privacy
+  delete API。
+- tenant-scoped Artifact encryption、retention/deletion maintenance，以及 Phase 0、Gate A～D
+  fail-closed qualification harness。
+
+### Changed
+
+- Deployment Revision identity 冻结 `full|terminal_only` persistence policy；Run DTO 显式返回
+  recovery、event replay 与 wait capability。
+- Quickstart、Helm chart 和未声明 Deployment Revision 的默认 persistence mode 继续为 `full`；
+  `terminal_only` 仍需兼容的 Deployment Revision 显式选择。
+
+### Security
+
+- Conversation principal、tombstone 后公共读取、跨 tenant object 删除和密文明文泄漏均由
+  repository/API 合同与资格测试覆盖。
+
 ## [0.1.0] - 2026-07-25
 
 首个公开开发版本。`0.1.x` 阶段的公开合同仍可能发生不兼容调整。

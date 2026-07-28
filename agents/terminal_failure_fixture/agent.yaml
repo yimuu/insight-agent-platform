@@ -1,0 +1,45 @@
+api_version: insight.agent/v1
+kind: agent
+
+metadata:
+  id: terminal_failure_fixture
+  name: Terminal Failure Fixture
+  description: External effect plus bounded volatile timer for terminal-only interruption qualification.
+
+execution:
+  persistence_mode: terminal_only
+
+types:
+  FailureRequest:
+    fields:
+      text: string
+      effect_id: string
+      idempotency_key: string
+  EffectReceipt:
+    fields:
+      effect_id: string
+      idempotency_key: string
+      occurrence: integer
+
+inputs:
+  message: FailureRequest
+  conversation_context: any
+
+output: any
+
+workflow:
+  steps:
+    - type: action
+      id: record_effect
+      call: qualification.effect_marker
+      inputs:
+        effect_id: $message.effect_id
+        idempotency_key: $message.idempotency_key
+      response: EffectReceipt
+
+    - id: failure_window
+      wait: {duration_ms: 15000}
+
+    - return:
+        message: $message
+        effect: $record_effect

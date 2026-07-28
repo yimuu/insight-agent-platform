@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use insight_engine::PersistenceMode;
 use insight_storage::postgres_config::PostgresHistoryUrlError;
 use serde::Deserialize;
 
@@ -148,6 +149,7 @@ pub struct ArtifactsConfig {
     pub namespace: Option<String>,
     pub directory: PathBuf,
     pub inline_threshold_bytes: usize,
+    pub tenant_encryption: Option<TenantArtifactEncryptionConfig>,
     /// Maximum bytes returned by one authorized Artifact read.
     pub max_read_bytes: usize,
     pub orphan_retention: Duration,
@@ -155,6 +157,13 @@ pub struct ArtifactsConfig {
     pub reference_retention: Duration,
     pub gc_interval: Duration,
     pub deletion_claim_seconds: u32,
+}
+
+/// Secret-backed, versioned tenant keyring for scoped Artifact envelopes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantArtifactEncryptionConfig {
+    pub active_key_version: String,
+    pub keyring: SecretString,
 }
 
 impl HistoryConfig {
@@ -176,8 +185,25 @@ pub struct SchedulerConfig {
     pub notification_reconnect_interval: Duration,
 }
 
+/// Process-level settings for the best-effort terminal-only execution path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalOnlyRuntimeConfig {
+    pub enabled: bool,
+    pub owner_lease: Duration,
+    pub owner_heartbeat: Duration,
+    pub terminal_commit_retry: Duration,
+    pub run_retention_days: u32,
+    pub allow_volatile_waits: bool,
+    pub max_concurrent_runs: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeConfig {
+    /// Fallback for author documents that do not declare an immutable
+    /// Deployment Revision persistence policy. This remains `full` until a
+    /// separate rollout decision changes it.
+    pub default_persistence_mode: PersistenceMode,
+    pub terminal_only: TerminalOnlyRuntimeConfig,
     pub max_concurrent_runs: usize,
     pub max_concurrent_operations: usize,
     pub max_concurrent_operations_per_run: usize,
@@ -200,6 +226,19 @@ pub struct RuntimeConfig {
     pub shutdown_hard_deadline: Duration,
 }
 
+/// Persistent Conversation storage and context-selection policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConversationsConfig {
+    pub enabled: bool,
+    pub inline_content_max_bytes: usize,
+    pub message_page_size_default: usize,
+    pub message_page_size_max: usize,
+    pub summary_trigger_messages: usize,
+    pub summary_trigger_tokens: usize,
+    pub recent_context_messages: usize,
+    pub retention_days: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformConfig {
     pub deployment_mode: DeploymentMode,
@@ -212,6 +251,7 @@ pub struct PlatformConfig {
     pub history: HistoryConfig,
     pub artifacts: ArtifactsConfig,
     pub runtime: RuntimeConfig,
+    pub conversations: ConversationsConfig,
 }
 
 impl PlatformConfig {
@@ -243,8 +283,8 @@ impl PlatformConfig {
                 format!("failed to read platform config '{}'", path.display()),
             )
         })?;
-        let raw: PlatformYaml = crate::yaml::from_str(&yaml, crate::yaml::YamlSurface::Platform)
-            .map_err(|error| {
+        let mut raw: PlatformYaml =
+            crate::yaml::from_str(&yaml, crate::yaml::YamlSurface::Platform).map_err(|error| {
                 PlatformConfigError::new(
                     "PLATFORM_CONFIG_INVALID",
                     format!("invalid platform config: {error}"),
@@ -259,6 +299,7 @@ impl PlatformConfig {
                 ),
             ));
         }
+        apply_persistence_environment(&mut raw, &get_env)?;
         let parent = path.parent().ok_or_else(|| {
             PlatformConfigError::new(
                 "PLATFORM_CONFIG_INVALID",
@@ -289,8 +330,9 @@ impl PlatformConfig {
                 "deployment_mode=production requires history.provider=postgres",
             ));
         }
-        let artifacts = resolve_artifacts(parent, raw.artifacts, raw.deployment_mode)?;
+        let artifacts = resolve_artifacts(parent, raw.artifacts, raw.deployment_mode, &get_env)?;
         let runtime = resolve_runtime(raw.runtime, raw.deployment_mode)?;
+        let conversations = resolve_conversations(raw.conversations)?;
         Ok(Self {
             deployment_mode: raw.deployment_mode,
             bind_addr,
@@ -302,6 +344,7 @@ impl PlatformConfig {
             history,
             artifacts,
             runtime,
+            conversations,
         })
     }
 }
@@ -347,6 +390,8 @@ struct PlatformYaml {
     #[serde(default)]
     artifacts: Option<ArtifactsYaml>,
     runtime: RuntimeYaml,
+    #[serde(default)]
+    conversations: Option<ConversationsYaml>,
 }
 
 impl<'de> Deserialize<'de> for DeploymentMode {
@@ -443,6 +488,8 @@ struct ArtifactsYaml {
     directory: PathBuf,
     inline_threshold_bytes: usize,
     #[serde(default)]
+    tenant_encryption: Option<TenantArtifactEncryptionYaml>,
+    #[serde(default)]
     max_read_bytes: Option<usize>,
     orphan_retention: String,
     #[serde(default)]
@@ -453,7 +500,18 @@ struct ArtifactsYaml {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TenantArtifactEncryptionYaml {
+    active_key_version: String,
+    keyring_env: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RuntimeYaml {
+    #[serde(default)]
+    default_persistence_mode: PersistenceMode,
+    #[serde(default)]
+    terminal_only: Option<TerminalOnlyRuntimeYaml>,
     max_concurrent_runs: usize,
     max_concurrent_operations: usize,
     max_concurrent_operations_per_run: usize,
@@ -476,6 +534,295 @@ struct RuntimeYaml {
     readiness_probe_timeout: Option<String>,
     shutdown_grace_period: Option<String>,
     shutdown_hard_deadline: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalOnlyRuntimeYaml {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default = "default_owner_lease_seconds")]
+    owner_lease_seconds: u64,
+    #[serde(default = "default_owner_heartbeat_seconds")]
+    owner_heartbeat_seconds: u64,
+    #[serde(default = "default_terminal_commit_retry_seconds")]
+    terminal_commit_retry_seconds: u64,
+    #[serde(default = "default_terminal_run_retention_days")]
+    run_retention_days: u32,
+    #[serde(default)]
+    allow_volatile_waits: bool,
+    #[serde(default = "default_terminal_max_concurrent_runs")]
+    max_concurrent_runs: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConversationsYaml {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default = "default_inline_content_max_bytes")]
+    inline_content_max_bytes: usize,
+    #[serde(default = "default_message_page_size")]
+    message_page_size_default: usize,
+    #[serde(default = "default_message_page_size_max")]
+    message_page_size_max: usize,
+    #[serde(default = "default_summary_trigger_messages")]
+    summary_trigger_messages: usize,
+    #[serde(default = "default_summary_trigger_tokens")]
+    summary_trigger_tokens: usize,
+    #[serde(default = "default_recent_context_messages")]
+    recent_context_messages: usize,
+    #[serde(default = "default_conversation_retention_days")]
+    retention_days: u32,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn default_owner_lease_seconds() -> u64 {
+    30
+}
+
+const fn default_owner_heartbeat_seconds() -> u64 {
+    10
+}
+
+const fn default_terminal_commit_retry_seconds() -> u64 {
+    10
+}
+
+const fn default_terminal_run_retention_days() -> u32 {
+    30
+}
+
+const fn default_terminal_max_concurrent_runs() -> usize {
+    50
+}
+
+const fn default_inline_content_max_bytes() -> usize {
+    8_192
+}
+
+const fn default_message_page_size() -> usize {
+    50
+}
+
+const fn default_message_page_size_max() -> usize {
+    200
+}
+
+const fn default_summary_trigger_messages() -> usize {
+    30
+}
+
+const fn default_summary_trigger_tokens() -> usize {
+    24_000
+}
+
+const fn default_recent_context_messages() -> usize {
+    20
+}
+
+const fn default_conversation_retention_days() -> u32 {
+    90
+}
+
+fn default_terminal_only_yaml() -> TerminalOnlyRuntimeYaml {
+    TerminalOnlyRuntimeYaml {
+        enabled: true,
+        owner_lease_seconds: default_owner_lease_seconds(),
+        owner_heartbeat_seconds: default_owner_heartbeat_seconds(),
+        terminal_commit_retry_seconds: default_terminal_commit_retry_seconds(),
+        run_retention_days: default_terminal_run_retention_days(),
+        allow_volatile_waits: false,
+        max_concurrent_runs: default_terminal_max_concurrent_runs(),
+    }
+}
+
+fn default_conversations_yaml() -> ConversationsYaml {
+    ConversationsYaml {
+        enabled: true,
+        inline_content_max_bytes: default_inline_content_max_bytes(),
+        message_page_size_default: default_message_page_size(),
+        message_page_size_max: default_message_page_size_max(),
+        summary_trigger_messages: default_summary_trigger_messages(),
+        summary_trigger_tokens: default_summary_trigger_tokens(),
+        recent_context_messages: default_recent_context_messages(),
+        retention_days: default_conversation_retention_days(),
+    }
+}
+
+fn apply_persistence_environment(
+    raw: &mut PlatformYaml,
+    get_env: &impl Fn(&str) -> Option<String>,
+) -> Result<(), PlatformConfigError> {
+    if let Some(value) = get_env("INSIGHT_RUNTIME__DEFAULT_PERSISTENCE_MODE") {
+        raw.runtime.default_persistence_mode = match value.as_str() {
+            "full" => PersistenceMode::Full,
+            "terminal_only" => PersistenceMode::TerminalOnly,
+            _ => {
+                return Err(runtime_environment_error(
+                    "INSIGHT_RUNTIME__DEFAULT_PERSISTENCE_MODE",
+                    "full or terminal_only",
+                ))
+            }
+        };
+    }
+
+    let terminal_only = raw
+        .runtime
+        .terminal_only
+        .get_or_insert_with(default_terminal_only_yaml);
+    if let Some(value) = get_env("INSIGHT_RUNTIME__TERMINAL_ONLY__ENABLED") {
+        terminal_only.enabled =
+            parse_runtime_environment_bool("INSIGHT_RUNTIME__TERMINAL_ONLY__ENABLED", &value)?;
+    }
+    if let Some(value) = get_env("INSIGHT_RUNTIME__TERMINAL_ONLY__OWNER_LEASE_SECONDS") {
+        terminal_only.owner_lease_seconds = parse_runtime_environment_number(
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__OWNER_LEASE_SECONDS",
+            &value,
+        )?;
+    }
+    if let Some(value) = get_env("INSIGHT_RUNTIME__TERMINAL_ONLY__OWNER_HEARTBEAT_SECONDS") {
+        terminal_only.owner_heartbeat_seconds = parse_runtime_environment_number(
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__OWNER_HEARTBEAT_SECONDS",
+            &value,
+        )?;
+    }
+    if let Some(value) = get_env("INSIGHT_RUNTIME__TERMINAL_ONLY__TERMINAL_COMMIT_RETRY_SECONDS") {
+        terminal_only.terminal_commit_retry_seconds = parse_runtime_environment_number(
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__TERMINAL_COMMIT_RETRY_SECONDS",
+            &value,
+        )?;
+    }
+    if let Some(value) = get_env("INSIGHT_RUNTIME__TERMINAL_ONLY__RUN_RETENTION_DAYS") {
+        terminal_only.run_retention_days = parse_runtime_environment_number(
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__RUN_RETENTION_DAYS",
+            &value,
+        )?;
+    }
+    if let Some(value) = get_env("INSIGHT_RUNTIME__TERMINAL_ONLY__ALLOW_VOLATILE_WAITS") {
+        terminal_only.allow_volatile_waits = parse_runtime_environment_bool(
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__ALLOW_VOLATILE_WAITS",
+            &value,
+        )?;
+    }
+    if let Some(value) = get_env("INSIGHT_RUNTIME__TERMINAL_ONLY__MAX_CONCURRENT_RUNS") {
+        terminal_only.max_concurrent_runs = parse_runtime_environment_number(
+            "INSIGHT_RUNTIME__TERMINAL_ONLY__MAX_CONCURRENT_RUNS",
+            &value,
+        )?;
+    }
+
+    let conversations = raw
+        .conversations
+        .get_or_insert_with(default_conversations_yaml);
+    if let Some(value) = get_env("INSIGHT_CONVERSATIONS__ENABLED") {
+        conversations.enabled =
+            parse_conversation_environment_bool("INSIGHT_CONVERSATIONS__ENABLED", &value)?;
+    }
+    if let Some(value) = get_env("INSIGHT_CONVERSATIONS__INLINE_CONTENT_MAX_BYTES") {
+        conversations.inline_content_max_bytes = parse_conversation_environment_number(
+            "INSIGHT_CONVERSATIONS__INLINE_CONTENT_MAX_BYTES",
+            &value,
+        )?;
+    }
+    if let Some(value) = get_env("INSIGHT_CONVERSATIONS__MESSAGE_PAGE_SIZE_DEFAULT") {
+        conversations.message_page_size_default = parse_conversation_environment_number(
+            "INSIGHT_CONVERSATIONS__MESSAGE_PAGE_SIZE_DEFAULT",
+            &value,
+        )?;
+    }
+    if let Some(value) = get_env("INSIGHT_CONVERSATIONS__MESSAGE_PAGE_SIZE_MAX") {
+        conversations.message_page_size_max = parse_conversation_environment_number(
+            "INSIGHT_CONVERSATIONS__MESSAGE_PAGE_SIZE_MAX",
+            &value,
+        )?;
+    }
+    if let Some(value) = get_env("INSIGHT_CONVERSATIONS__SUMMARY_TRIGGER_MESSAGES") {
+        conversations.summary_trigger_messages = parse_conversation_environment_number(
+            "INSIGHT_CONVERSATIONS__SUMMARY_TRIGGER_MESSAGES",
+            &value,
+        )?;
+    }
+    if let Some(value) = get_env("INSIGHT_CONVERSATIONS__SUMMARY_TRIGGER_TOKENS") {
+        conversations.summary_trigger_tokens = parse_conversation_environment_number(
+            "INSIGHT_CONVERSATIONS__SUMMARY_TRIGGER_TOKENS",
+            &value,
+        )?;
+    }
+    if let Some(value) = get_env("INSIGHT_CONVERSATIONS__RECENT_CONTEXT_MESSAGES") {
+        conversations.recent_context_messages = parse_conversation_environment_number(
+            "INSIGHT_CONVERSATIONS__RECENT_CONTEXT_MESSAGES",
+            &value,
+        )?;
+    }
+    if let Some(value) = get_env("INSIGHT_CONVERSATIONS__RETENTION_DAYS") {
+        conversations.retention_days =
+            parse_conversation_environment_number("INSIGHT_CONVERSATIONS__RETENTION_DAYS", &value)?;
+    }
+    Ok(())
+}
+
+fn parse_runtime_environment_bool(name: &str, value: &str) -> Result<bool, PlatformConfigError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(runtime_environment_error(name, "true or false")),
+    }
+}
+
+fn parse_conversation_environment_bool(
+    name: &str,
+    value: &str,
+) -> Result<bool, PlatformConfigError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(conversation_environment_error(name, "true or false")),
+    }
+}
+
+fn parse_runtime_environment_number<T>(name: &str, value: &str) -> Result<T, PlatformConfigError>
+where
+    T: std::str::FromStr,
+{
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(runtime_environment_error(
+            name,
+            "an unsigned base-10 integer",
+        ));
+    }
+    value
+        .parse()
+        .map_err(|_| runtime_environment_error(name, "an unsigned base-10 integer"))
+}
+
+fn parse_conversation_environment_number<T>(
+    name: &str,
+    value: &str,
+) -> Result<T, PlatformConfigError>
+where
+    T: std::str::FromStr,
+{
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(conversation_environment_error(
+            name,
+            "an unsigned base-10 integer",
+        ));
+    }
+    value
+        .parse()
+        .map_err(|_| conversation_environment_error(name, "an unsigned base-10 integer"))
+}
+
+fn runtime_environment_error(name: &str, expected: &str) -> PlatformConfigError {
+    runtime_error(format!("environment variable '{name}' must be {expected}"))
+}
+
+fn conversation_environment_error(name: &str, expected: &str) -> PlatformConfigError {
+    conversation_error(format!("environment variable '{name}' must be {expected}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -651,6 +998,7 @@ fn resolve_artifacts(
     parent: &Path,
     artifacts: Option<ArtifactsYaml>,
     deployment_mode: DeploymentMode,
+    get_env: &impl Fn(&str) -> Option<String>,
 ) -> Result<ArtifactsConfig, PlatformConfigError> {
     let artifacts = match artifacts {
         Some(artifacts) => artifacts,
@@ -665,6 +1013,7 @@ fn resolve_artifacts(
             namespace: None,
             directory: PathBuf::from("../data/artifacts"),
             inline_threshold_bytes: 64 * 1024,
+            tenant_encryption: None,
             max_read_bytes: Some(64 * 1024 * 1024),
             orphan_retention: "24h".to_owned(),
             reference_retention: Some("30d".to_owned()),
@@ -727,11 +1076,44 @@ fn resolve_artifacts(
             "artifact reference retention must be between one second and ten years",
         ));
     }
+    let tenant_encryption = artifacts
+        .tenant_encryption
+        .map(|encryption| {
+            let active_key_version = encryption.active_key_version.trim().to_owned();
+            if active_key_version.is_empty()
+                || active_key_version.len() > 64
+                || !active_key_version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                return Err(PlatformConfigError::new(
+                    "PLATFORM_ARTIFACTS_INVALID",
+                    "artifacts.tenant_encryption.active_key_version is invalid",
+                ));
+            }
+            let keyring = required_secret(&encryption.keyring_env, get_env)?;
+            insight_storage::artifact_store::TenantArtifactEncryptionKeyring::from_secret_json(
+                active_key_version.clone(),
+                keyring.expose(),
+            )
+            .map_err(|_| {
+                PlatformConfigError::new(
+                    "PLATFORM_ARTIFACTS_INVALID",
+                    "artifacts tenant encryption keyring is invalid",
+                )
+            })?;
+            Ok(TenantArtifactEncryptionConfig {
+                active_key_version,
+                keyring,
+            })
+        })
+        .transpose()?;
     Ok(ArtifactsConfig {
         provider: artifacts.provider,
         namespace: artifacts.namespace,
         directory: resolve_path(parent, &artifacts.directory),
         inline_threshold_bytes: artifacts.inline_threshold_bytes,
+        tenant_encryption,
         max_read_bytes,
         orphan_retention: positive_artifact_duration(
             &artifacts.orphan_retention,
@@ -762,6 +1144,7 @@ fn resolve_runtime(
     raw: RuntimeYaml,
     deployment_mode: DeploymentMode,
 ) -> Result<RuntimeConfig, PlatformConfigError> {
+    let terminal_only = resolve_terminal_only(raw.terminal_only)?;
     let capacities = [
         raw.max_concurrent_runs,
         raw.max_concurrent_operations,
@@ -821,6 +1204,8 @@ fn resolve_runtime(
         return Err(runtime_error("runtime LLM tool hard limits are invalid"));
     }
     Ok(RuntimeConfig {
+        default_persistence_mode: raw.default_persistence_mode,
+        terminal_only,
         max_concurrent_runs: raw.max_concurrent_runs,
         max_concurrent_operations: raw.max_concurrent_operations,
         max_concurrent_operations_per_run: raw.max_concurrent_operations_per_run,
@@ -840,6 +1225,98 @@ fn resolve_runtime(
         readiness_probe_timeout,
         shutdown_grace_period,
         shutdown_hard_deadline,
+    })
+}
+
+fn resolve_terminal_only(
+    raw: Option<TerminalOnlyRuntimeYaml>,
+) -> Result<TerminalOnlyRuntimeConfig, PlatformConfigError> {
+    let raw = raw.unwrap_or_else(default_terminal_only_yaml);
+    if !(3..=300).contains(&raw.owner_lease_seconds) {
+        return Err(runtime_error(
+            "runtime.terminal_only.owner_lease_seconds must be between 3 and 300",
+        ));
+    }
+    if !(1..=100).contains(&raw.owner_heartbeat_seconds)
+        || raw.owner_heartbeat_seconds > raw.owner_lease_seconds / 3
+    {
+        return Err(runtime_error(
+            "runtime.terminal_only.owner_heartbeat_seconds must be positive and no greater than one third of owner_lease_seconds",
+        ));
+    }
+    if !(1..=300).contains(&raw.terminal_commit_retry_seconds) {
+        return Err(runtime_error(
+            "runtime.terminal_only.terminal_commit_retry_seconds must be between 1 and 300",
+        ));
+    }
+    if !(1..=3_650).contains(&raw.run_retention_days) {
+        return Err(runtime_error(
+            "runtime.terminal_only.run_retention_days must be between 1 and 3650",
+        ));
+    }
+    if !(1..=10_000).contains(&raw.max_concurrent_runs) {
+        return Err(runtime_error(
+            "runtime.terminal_only.max_concurrent_runs must be between 1 and 10000",
+        ));
+    }
+    Ok(TerminalOnlyRuntimeConfig {
+        enabled: raw.enabled,
+        owner_lease: Duration::from_secs(raw.owner_lease_seconds),
+        owner_heartbeat: Duration::from_secs(raw.owner_heartbeat_seconds),
+        terminal_commit_retry: Duration::from_secs(raw.terminal_commit_retry_seconds),
+        run_retention_days: raw.run_retention_days,
+        allow_volatile_waits: raw.allow_volatile_waits,
+        max_concurrent_runs: raw.max_concurrent_runs,
+    })
+}
+
+fn resolve_conversations(
+    raw: Option<ConversationsYaml>,
+) -> Result<ConversationsConfig, PlatformConfigError> {
+    let raw = raw.unwrap_or_else(default_conversations_yaml);
+    if !(256..=1_048_576).contains(&raw.inline_content_max_bytes) {
+        return Err(conversation_error(
+            "conversations.inline_content_max_bytes must be between 256 and 1048576",
+        ));
+    }
+    if !(1..=200).contains(&raw.message_page_size_max)
+        || !(1..=raw.message_page_size_max).contains(&raw.message_page_size_default)
+    {
+        return Err(conversation_error(
+            "conversation page sizes must be positive, bounded by 200, and default must not exceed max",
+        ));
+    }
+    if !(2..=10_000).contains(&raw.summary_trigger_messages) {
+        return Err(conversation_error(
+            "conversations.summary_trigger_messages must be between 2 and 10000",
+        ));
+    }
+    if !(256..=1_000_000).contains(&raw.summary_trigger_tokens) {
+        return Err(conversation_error(
+            "conversations.summary_trigger_tokens must be between 256 and 1000000",
+        ));
+    }
+    if !(1..=200).contains(&raw.recent_context_messages)
+        || raw.recent_context_messages > raw.summary_trigger_messages
+    {
+        return Err(conversation_error(
+            "conversations.recent_context_messages must be between 1 and 200 and no greater than summary_trigger_messages",
+        ));
+    }
+    if !(1..=3_650).contains(&raw.retention_days) {
+        return Err(conversation_error(
+            "conversations.retention_days must be between 1 and 3650",
+        ));
+    }
+    Ok(ConversationsConfig {
+        enabled: raw.enabled,
+        inline_content_max_bytes: raw.inline_content_max_bytes,
+        message_page_size_default: raw.message_page_size_default,
+        message_page_size_max: raw.message_page_size_max,
+        summary_trigger_messages: raw.summary_trigger_messages,
+        summary_trigger_tokens: raw.summary_trigger_tokens,
+        recent_context_messages: raw.recent_context_messages,
+        retention_days: raw.retention_days,
     })
 }
 
@@ -1014,6 +1491,10 @@ fn required_secret(
 
 fn runtime_error(message: impl Into<String>) -> PlatformConfigError {
     PlatformConfigError::new("PLATFORM_RUNTIME_INVALID", message)
+}
+
+fn conversation_error(message: impl Into<String>) -> PlatformConfigError {
+    PlatformConfigError::new("PLATFORM_CONVERSATIONS_INVALID", message)
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf, PlatformConfigError> {

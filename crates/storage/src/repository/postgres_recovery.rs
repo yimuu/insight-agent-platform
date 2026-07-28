@@ -2415,6 +2415,7 @@ async fn terminalize_source(
         Some(public_error_code),
     )
     .await?;
+    super::postgres::insert_full_conversation_terminal_message(tx, &source.run_id, None).await?;
     super::postgres::register_terminal_artifact_retention_postgres(
         tx,
         &source.run_id,

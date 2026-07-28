@@ -22,15 +22,15 @@ use insight_durable::{model::adapter as durable_model_adapter, VersionedPlan};
 use insight_engine::{
     plan::{
         DescriptorConfigurationContract, DescriptorContract, DescriptorContractRegistry,
-        DescriptorFieldContract, DescriptorValue, DescriptorValueSchema, LeafTaskDescriptor,
-        LeafTaskKind, LinkedPlan, NodeKind, PlanIndex, PlanInputErrorKind, PortName,
-        SubflowContractRegistry, SubflowInterfaceContract, VersionTag, WorkerContract,
+        DescriptorFieldContract, DescriptorValue, DescriptorValueSchema, ExpressionLanguage,
+        LeafTaskDescriptor, LeafTaskKind, LinkedPlan, NodeKind, PlanIndex, PlanInputErrorKind,
+        PortName, SubflowContractRegistry, SubflowInterfaceContract, VersionTag, WorkerContract,
         WorkerInputPortContract,
     },
     worker::{LeafTaskExecutor, WorkerExecutorRegistry},
     ContentHash, DefinitionRevisionId, DeploymentRevisionId, EffectIdempotency,
-    ExecutionRevisionPin, NodeId, Plan, RuntimeValue, SchedulerTaskKind, WorkerCancellation,
-    WorkerEffectClass, WorkerEffectPolicy,
+    ExecutionRevisionPin, NodeId, PersistenceMode, Plan, RuntimeValue, SchedulerTaskKind,
+    WorkerCancellation, WorkerEffectClass, WorkerEffectPolicy,
 };
 use insight_resources::{
     actions::{ActionRegistry, CancellationClass, EffectClass, IdempotencyClass, ToolPublicPolicy},
@@ -43,12 +43,124 @@ use serde_json::{Map, Value};
 const AGENT_FILE: &str = "agent.yaml";
 const DEFINITION_REVISION_DOMAIN: &[u8] = b"insight-agent/definition-revision/v1";
 const DEPLOYMENT_REVISION_DOMAIN: &str = "insight-agent/deployment-revision/v1";
+const DEPLOYMENT_POLICY_SCHEMA_VERSION: u32 = 1;
 
 /// Explicit production-link capability for scheduler-native LLM tool
 /// continuation. The default production resolver deliberately does not grant
 /// this capability until the durable continuation state machine is enabled.
 pub const LLM_TOOL_CONTINUATION_CAPABILITY: &str = "runtime.llm_tool_continuation.v1";
 const LLM_TOOL_CONTINUATION_UNAVAILABLE: &str = "LLM_TOOL_CONTINUATION_UNAVAILABLE";
+
+/// Immutable execution/storage semantics frozen into a Deployment Revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeploymentPersistencePolicy {
+    persistence_mode: PersistenceMode,
+    allow_volatile_waits: bool,
+    execution_budget_ms: u64,
+}
+
+impl DeploymentPersistencePolicy {
+    pub const fn full() -> Self {
+        Self {
+            persistence_mode: PersistenceMode::Full,
+            allow_volatile_waits: false,
+            execution_budget_ms: 0,
+        }
+    }
+
+    pub fn terminal_only(
+        allow_volatile_waits: bool,
+        execution_budget: Duration,
+    ) -> Result<Self, CompileError> {
+        let execution_budget_ms = u64::try_from(execution_budget.as_millis())
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                CompileError::new(
+                    "TERMINAL_ONLY_POLICY_INVALID",
+                    "terminal-only execution budget must be a positive u64 millisecond duration",
+                )
+            })?;
+        Ok(Self {
+            persistence_mode: PersistenceMode::TerminalOnly,
+            allow_volatile_waits,
+            execution_budget_ms,
+        })
+    }
+
+    pub const fn persistence_mode(self) -> PersistenceMode {
+        self.persistence_mode
+    }
+
+    pub const fn allow_volatile_waits(self) -> bool {
+        self.allow_volatile_waits
+    }
+
+    pub const fn execution_budget_ms(self) -> u64 {
+        self.execution_budget_ms
+    }
+}
+
+impl Default for DeploymentPersistencePolicy {
+    fn default() -> Self {
+        Self::full()
+    }
+}
+
+/// Publication-time feature gate and compatibility bounds for terminal-only
+/// Deployment Revisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalOnlyDeploymentConfig {
+    enabled: bool,
+    allow_volatile_waits: bool,
+    execution_budget: Duration,
+}
+
+impl TerminalOnlyDeploymentConfig {
+    pub fn new(
+        enabled: bool,
+        allow_volatile_waits: bool,
+        execution_budget: Duration,
+    ) -> Result<Self, CompileError> {
+        if execution_budget.is_zero() || u64::try_from(execution_budget.as_millis()).is_err() {
+            return Err(CompileError::new(
+                "TERMINAL_ONLY_POLICY_INVALID",
+                "terminal-only execution budget must be a positive u64 millisecond duration",
+            ));
+        }
+        Ok(Self {
+            enabled,
+            allow_volatile_waits,
+            execution_budget,
+        })
+    }
+
+    pub fn resolve(
+        self,
+        persistence_mode: PersistenceMode,
+    ) -> Result<DeploymentPersistencePolicy, CompileError> {
+        match persistence_mode {
+            PersistenceMode::Full => Ok(DeploymentPersistencePolicy::full()),
+            PersistenceMode::TerminalOnly if !self.enabled => Err(CompileError::new(
+                "TERMINAL_ONLY_DISABLED",
+                "terminal-only Deployment Revisions are disabled by platform policy",
+            )),
+            PersistenceMode::TerminalOnly => DeploymentPersistencePolicy::terminal_only(
+                self.allow_volatile_waits,
+                self.execution_budget,
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDeploymentPolicy {
+    schema_version: u32,
+    persistence_mode: PersistenceMode,
+    allow_volatile_waits: bool,
+    execution_budget_ms: u64,
+}
 
 /// Closed, machine-readable deployment risk taxonomy. Diagnostics are review
 /// evidence only and never mutate the frozen worker policy.
@@ -244,6 +356,7 @@ impl AgentStreamingContract {
 pub struct PublishedAgent {
     metadata: Metadata,
     definition_revision_id: DefinitionRevisionId,
+    declared_persistence_mode: Option<PersistenceMode>,
     author_source: String,
     prompt_files: BTreeMap<String, String>,
     plan: Plan,
@@ -257,6 +370,10 @@ impl PublishedAgent {
 
     pub fn definition_revision_id(&self) -> &DefinitionRevisionId {
         &self.definition_revision_id
+    }
+
+    pub fn declared_persistence_mode(&self) -> Option<PersistenceMode> {
+        self.declared_persistence_mode
     }
 
     pub fn author_source(&self) -> &str {
@@ -368,6 +485,18 @@ impl PublishedAgent {
         description: impl Into<String>,
         graph: GraphAuthorDocument,
     ) -> Result<Self, CompileError> {
+        Self::from_verified_graph_with_persistence(agent_id, name, description, graph, None)
+    }
+
+    /// Builds a graph publication candidate with an explicit Deployment
+    /// persistence policy. The policy remains outside Canonical Plan semantics.
+    pub fn from_verified_graph_with_persistence(
+        agent_id: impl Into<String>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        graph: GraphAuthorDocument,
+        persistence_mode: Option<PersistenceMode>,
+    ) -> Result<Self, CompileError> {
         graph
             .validate()
             .map_err(|error| CompileError::new("GRAPH_DOCUMENT_INVALID", error.to_string()))?;
@@ -382,6 +511,7 @@ impl PublishedAgent {
                 description: description.into(),
             },
             definition_revision_id,
+            declared_persistence_mode: persistence_mode,
             author_source: String::new(),
             prompt_files: BTreeMap::new(),
             plan,
@@ -437,6 +567,7 @@ impl PublishedAgent {
             ));
         }
         validate_published_llm_contracts(&canonical)?;
+        let persistence_mode = stored_deployment_policy(plan)?.0.persistence_mode;
         Ok(Self {
             metadata: Metadata {
                 id: plan.agent_id().to_owned(),
@@ -444,6 +575,7 @@ impl PublishedAgent {
                 description: plan.public_description().to_owned(),
             },
             definition_revision_id: plan.definition_revision_id().clone(),
+            declared_persistence_mode: Some(persistence_mode),
             author_source: String::new(),
             prompt_files: BTreeMap::new(),
             plan: canonical,
@@ -482,6 +614,7 @@ impl PublishedAgent {
             ));
         }
         validate_published_llm_contracts(&canonical)?;
+        let persistence_mode = stored_deployment_policy(plan)?.0.persistence_mode;
         let author_source = durable_model_adapter::versioned_plan_author_document(plan)
             .get("source")
             .and_then(Value::as_str)
@@ -494,6 +627,7 @@ impl PublishedAgent {
                 description: plan.public_description().to_owned(),
             },
             definition_revision_id: plan.definition_revision_id().clone(),
+            declared_persistence_mode: Some(persistence_mode),
             author_source,
             prompt_files: BTreeMap::new(),
             plan: canonical,
@@ -1659,6 +1793,7 @@ impl LeafDeploymentResolver for OwnedProductionLeafDeploymentResolver {
 pub struct DeployedAgent {
     published: Arc<PublishedAgent>,
     deployment_revision_id: DeploymentRevisionId,
+    persistence_policy: DeploymentPersistencePolicy,
     descriptors: DescriptorContractRegistry,
     subflows: SubflowContractRegistry,
     versioned_plan: VersionedPlan,
@@ -1670,6 +1805,20 @@ impl DeployedAgent {
         published: Arc<PublishedAgent>,
         resolver: &dyn LeafDeploymentResolver,
         subflows: SubflowContractRegistry,
+    ) -> Result<Self, CompileError> {
+        Self::publish_with_persistence_policy(
+            published,
+            resolver,
+            subflows,
+            DeploymentPersistencePolicy::full(),
+        )
+    }
+
+    pub fn publish_with_persistence_policy(
+        published: Arc<PublishedAgent>,
+        resolver: &dyn LeafDeploymentResolver,
+        subflows: SubflowContractRegistry,
+        persistence_policy: DeploymentPersistencePolicy,
     ) -> Result<Self, CompileError> {
         let plan = published.plan();
         let index = PlanIndex::new(plan).map_err(plan_compile_error)?;
@@ -1764,6 +1913,7 @@ impl DeployedAgent {
         // This is both a pre-publication proof and the object the scheduler
         // will reconstruct for every planning pass.
         let linked = LinkedPlan::link(plan, &descriptors, &subflows).map_err(plan_compile_error)?;
+        validate_persistence_compatibility(plan, &linked, persistence_policy)?;
 
         // A parent deployment is not immutable unless every child execution
         // revision is part of its binding identity.  The author document only
@@ -1794,6 +1944,7 @@ impl DeployedAgent {
                 },
             }));
         }
+        resolved_bindings.push(deployment_policy_document(persistence_policy));
 
         let descriptor_contracts = Value::Array(descriptor_documents);
         let resolved_bindings = Value::Array(resolved_bindings);
@@ -1878,6 +2029,7 @@ impl DeployedAgent {
         Ok(Self {
             published,
             deployment_revision_id,
+            persistence_policy,
             descriptors,
             subflows,
             versioned_plan,
@@ -1891,6 +2043,7 @@ impl DeployedAgent {
         versioned_plan: VersionedPlan,
         subflows: SubflowContractRegistry,
     ) -> Result<Self, CompileError> {
+        let (persistence_policy, has_stored_policy) = stored_deployment_policy(&versioned_plan)?;
         let deployment_identity = serde_json::json!({
             "domain": DEPLOYMENT_REVISION_DOMAIN,
             "definition_revision_id": versioned_plan.definition_revision_id(),
@@ -2053,6 +2206,7 @@ impl DeployedAgent {
         }
 
         let linked = LinkedPlan::link(plan, &descriptors, &subflows).map_err(plan_compile_error)?;
+        validate_persistence_compatibility(plan, &linked, persistence_policy)?;
         for node in plan.nodes() {
             let Some(contract) = linked.subflow(node.id()) else {
                 continue;
@@ -2096,7 +2250,8 @@ impl DeployedAgent {
             }
         }
         if descriptor_documents.len() != leaf_count + subflow_count
-            || resolved_bindings.len() != leaf_count + subflow_count
+            || resolved_bindings.len()
+                != leaf_count + subflow_count + usize::from(has_stored_policy)
             || worker_documents.len() != leaf_count
         {
             return Err(stored_deployment_invalid(
@@ -2106,6 +2261,7 @@ impl DeployedAgent {
 
         Ok(Self {
             deployment_revision_id: versioned_plan.deployment_revision_id().clone(),
+            persistence_policy,
             published,
             descriptors,
             subflows,
@@ -2120,6 +2276,14 @@ impl DeployedAgent {
 
     pub fn deployment_revision_id(&self) -> &DeploymentRevisionId {
         &self.deployment_revision_id
+    }
+
+    pub fn persistence_policy(&self) -> DeploymentPersistencePolicy {
+        self.persistence_policy
+    }
+
+    pub fn persistence_mode(&self) -> PersistenceMode {
+        self.persistence_policy.persistence_mode()
     }
 
     pub fn versioned_plan(&self) -> &VersionedPlan {
@@ -2159,6 +2323,262 @@ impl DeployedAgent {
             )
         })
     }
+}
+
+fn deployment_policy_document(policy: DeploymentPersistencePolicy) -> Value {
+    serde_json::json!({
+        "deployment_policy": StoredDeploymentPolicy {
+            schema_version: DEPLOYMENT_POLICY_SCHEMA_VERSION,
+            persistence_mode: policy.persistence_mode,
+            allow_volatile_waits: policy.allow_volatile_waits,
+            execution_budget_ms: policy.execution_budget_ms,
+        }
+    })
+}
+
+fn stored_deployment_policy(
+    plan: &VersionedPlan,
+) -> Result<(DeploymentPersistencePolicy, bool), CompileError> {
+    let documents = durable_model_adapter::versioned_plan_resolved_bindings(plan)
+        .as_array()
+        .ok_or_else(|| stored_deployment_invalid("stored resolved bindings must be an array"))?;
+    let mut stored_policy = None;
+    for document in documents {
+        if document.get("node_id").is_some() {
+            continue;
+        }
+        let object = document.as_object().ok_or_else(|| {
+            stored_deployment_invalid("stored deployment policy document must be an object")
+        })?;
+        if object.len() != 1 || !object.contains_key("deployment_policy") {
+            return Err(stored_deployment_invalid(
+                "stored resolved bindings contain an unsupported non-node document",
+            ));
+        }
+        if stored_policy.is_some() {
+            return Err(stored_deployment_invalid(
+                "stored deployment policy is duplicated",
+            ));
+        }
+        let wire = serde_json::from_value::<StoredDeploymentPolicy>(
+            object
+                .get("deployment_policy")
+                .cloned()
+                .expect("the exact policy key was checked"),
+        )
+        .map_err(|_| stored_deployment_invalid("stored deployment policy is invalid"))?;
+        if wire.schema_version != DEPLOYMENT_POLICY_SCHEMA_VERSION {
+            return Err(stored_deployment_invalid(
+                "stored deployment policy schema version is unsupported",
+            ));
+        }
+        let policy = match wire.persistence_mode {
+            PersistenceMode::Full
+                if !wire.allow_volatile_waits && wire.execution_budget_ms == 0 =>
+            {
+                DeploymentPersistencePolicy::full()
+            }
+            PersistenceMode::TerminalOnly if wire.execution_budget_ms > 0 => {
+                DeploymentPersistencePolicy {
+                    persistence_mode: wire.persistence_mode,
+                    allow_volatile_waits: wire.allow_volatile_waits,
+                    execution_budget_ms: wire.execution_budget_ms,
+                }
+            }
+            _ => {
+                return Err(stored_deployment_invalid(
+                    "stored deployment policy fields are inconsistent",
+                ))
+            }
+        };
+        stored_policy = Some(policy);
+    }
+    Ok(match stored_policy {
+        Some(policy) => (policy, true),
+        // Pre-cutover Deployment Revisions did not carry this document and
+        // retain the historical full-durability contract.
+        None => (DeploymentPersistencePolicy::full(), false),
+    })
+}
+
+fn validate_persistence_compatibility(
+    plan: &Plan,
+    linked: &LinkedPlan<'_>,
+    policy: DeploymentPersistencePolicy,
+) -> Result<(), CompileError> {
+    if policy.persistence_mode == PersistenceMode::Full {
+        return Ok(());
+    }
+    let mut conservative_workflow_budget_ms = 0_u128;
+    let execution_budget_ms = u128::from(policy.execution_budget_ms);
+    for node in plan.nodes() {
+        match node.kind() {
+            NodeKind::HumanTask(_) => {
+                return Err(terminal_only_incompatible(
+                    node.id(),
+                    "human tasks require durable work-item and signal authority",
+                ))
+            }
+            NodeKind::WaitSignal(_) => {
+                return Err(terminal_only_incompatible(
+                    node.id(),
+                    "external signal delivery requires durable signal authority",
+                ))
+            }
+            NodeKind::Timer(timer) => {
+                if !policy.allow_volatile_waits {
+                    return Err(terminal_only_incompatible(
+                        node.id(),
+                        "timer waits are disabled unless allow_volatile_waits is true",
+                    ));
+                }
+                let delay_ms = (timer.delay_ms.language == ExpressionLanguage::Literal)
+                    .then(|| serde_json::from_str::<Value>(&timer.delay_ms.source).ok())
+                    .flatten()
+                    .and_then(|value| value.as_f64());
+                if delay_ms.is_none_or(|delay| {
+                    !delay.is_finite() || delay < 0.0 || delay > policy.execution_budget_ms as f64
+                }) {
+                    return Err(terminal_only_incompatible(
+                        node.id(),
+                        "timer delay must be a static value within the terminal-only execution budget",
+                    ));
+                }
+                conservative_workflow_budget_ms = conservative_workflow_budget_ms
+                    .saturating_add(delay_ms.unwrap_or_default().ceil() as u128);
+            }
+            NodeKind::Loop(loop_descriptor) => {
+                let Some(deadline_ms) = loop_descriptor.deadline_ms else {
+                    return Err(terminal_only_incompatible(
+                        node.id(),
+                        "loop must declare a deadline within the terminal-only execution budget",
+                    ));
+                };
+                if deadline_ms > policy.execution_budget_ms {
+                    return Err(terminal_only_incompatible(
+                        node.id(),
+                        "loop must declare a deadline within the terminal-only execution budget",
+                    ));
+                }
+                // Fail closed: the body may consume its own frozen worker
+                // budget before the loop controller reaches its declared
+                // deadline, so count both when deriving a conservative whole
+                // workflow upper bound.
+                conservative_workflow_budget_ms =
+                    conservative_workflow_budget_ms.saturating_add(u128::from(deadline_ms));
+            }
+            NodeKind::SubflowCall(_) => {
+                return Err(terminal_only_incompatible(
+                    node.id(),
+                    "subflow calls currently require durable child-run authority",
+                ))
+            }
+            _ => {}
+        }
+
+        let Some(contract) = linked.descriptor(node.id()) else {
+            if conservative_workflow_budget_ms > execution_budget_ms {
+                return Err(terminal_only_incompatible(
+                    node.id(),
+                    "conservative workflow execution budget exceeds the terminal-only execution budget",
+                ));
+            }
+            continue;
+        };
+        let worker_policy = contract.worker().effect_policy();
+        if worker_requires_durable_fence(worker_policy)
+            || binding_requires_durable_fence(contract.deployment_binding())
+        {
+            return Err(terminal_only_incompatible(
+                node.id(),
+                "provider contract requires a durable effect fence",
+            ));
+        }
+        let worker_budget_ms = worker_retry_worst_case_ms(worker_policy);
+        if worker_budget_ms > execution_budget_ms {
+            return Err(terminal_only_incompatible(
+                node.id(),
+                "worker retry, backoff, and timeout budget exceeds the terminal-only execution budget",
+            ));
+        }
+        conservative_workflow_budget_ms =
+            conservative_workflow_budget_ms.saturating_add(worker_budget_ms);
+        if conservative_workflow_budget_ms > execution_budget_ms {
+            return Err(terminal_only_incompatible(
+                node.id(),
+                "conservative workflow execution budget exceeds the terminal-only execution budget",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn worker_retry_worst_case_ms(policy: &WorkerEffectPolicy) -> u128 {
+    let attempts = u128::from(policy.max_attempts());
+    let mut budget = attempts.saturating_mul(u128::from(policy.timeout_ms()));
+    for attempt in 1..policy.max_attempts() {
+        let exponent = attempt.saturating_sub(1).min(63);
+        let backoff = policy
+            .initial_backoff_ms()
+            .saturating_mul(1_u64 << exponent)
+            .min(policy.max_backoff_ms());
+        budget = budget.saturating_add(u128::from(backoff));
+    }
+    budget
+}
+
+fn worker_requires_durable_fence(policy: &WorkerEffectPolicy) -> bool {
+    policy.effect_class() == WorkerEffectClass::Mutating
+        && policy.effect_idempotency() == EffectIdempotency::NonIdempotent
+}
+
+fn binding_requires_durable_fence(binding: &Value) -> bool {
+    let declares_capability = binding
+        .get("required_capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|capabilities| {
+            capabilities.iter().any(|capability| {
+                matches!(
+                    capability.as_str(),
+                    Some("runtime.durable_effect_fence.v1" | "durable_effect_fence")
+                )
+            })
+        });
+    let nested_tool_requires_fence =
+        binding
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|tools| {
+                tools.iter().any(|tool| {
+                    tool.get("effect_policy")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<WorkerEffectPolicy>(value).ok())
+                        .as_ref()
+                        .is_some_and(worker_requires_durable_fence)
+                        || tool
+                            .get("required_capabilities")
+                            .and_then(Value::as_array)
+                            .is_some_and(|capabilities| {
+                                capabilities.iter().any(|capability| {
+                                    matches!(
+                                        capability.as_str(),
+                                        Some(
+                                            "runtime.durable_effect_fence.v1"
+                                                | "durable_effect_fence"
+                                        )
+                                    )
+                                })
+                            })
+                })
+            });
+    declares_capability || nested_tool_requires_fence
+}
+
+fn terminal_only_incompatible(node_id: &NodeId, reason: &str) -> CompileError {
+    CompileError::new(
+        "TERMINAL_ONLY_WORKFLOW_INCOMPATIBLE",
+        format!("node '{node_id}' is incompatible with terminal-only persistence: {reason}"),
+    )
 }
 
 fn stored_deployment_invalid(message: impl Into<String>) -> CompileError {
@@ -2255,6 +2675,24 @@ pub fn deploy_agents(
     catalog: &AgentCatalog,
     resolver: &dyn LeafDeploymentResolver,
 ) -> Result<Vec<Arc<DeployedAgent>>, CompileError> {
+    deploy_agents_with_persistence(
+        catalog,
+        resolver,
+        PersistenceMode::Full,
+        TerminalOnlyDeploymentConfig::new(false, false, Duration::from_millis(1))
+            .expect("the internal disabled terminal-only policy is valid"),
+    )
+}
+
+/// Publishes enabled agents while resolving an omitted author policy from one
+/// process-wide default. The resolved policy is content-addressed into each
+/// immutable Deployment Revision.
+pub fn deploy_agents_with_persistence(
+    catalog: &AgentCatalog,
+    resolver: &dyn LeafDeploymentResolver,
+    default_persistence_mode: PersistenceMode,
+    terminal_only: TerminalOnlyDeploymentConfig,
+) -> Result<Vec<Arc<DeployedAgent>>, CompileError> {
     let mut revision_owner = BTreeMap::<DefinitionRevisionId, String>::new();
     for agent in catalog.list() {
         if revision_owner
@@ -2326,7 +2764,16 @@ pub fn deploy_agents(
                 )
             })?;
             let subflows = subflow_registry_for(&published, &revision_owner, &deployed)?;
-            let deployment = Arc::new(DeployedAgent::publish(published, resolver, subflows)?);
+            let persistence_mode = published
+                .declared_persistence_mode()
+                .unwrap_or(default_persistence_mode);
+            let persistence_policy = terminal_only.resolve(persistence_mode)?;
+            let deployment = Arc::new(DeployedAgent::publish_with_persistence_policy(
+                published,
+                resolver,
+                subflows,
+                persistence_policy,
+            )?);
             deployed.insert(id, deployment);
         }
     }
@@ -2577,6 +3024,10 @@ pub fn compile_agent_dir(directory: &Path) -> Result<PublishedAgent, CompileErro
         )
     })?;
     let raw = insight_dsl::parse(&source).map_err(CompileError::from)?;
+    let declared_persistence_mode = raw
+        .execution
+        .as_ref()
+        .and_then(|execution| execution.persistence_mode);
     let document = insight_dsl::validate(raw)?;
     let metadata = document.metadata.clone().ok_or_else(|| {
         CompileError::new(
@@ -2602,6 +3053,7 @@ pub fn compile_agent_dir(directory: &Path) -> Result<PublishedAgent, CompileErro
     Ok(PublishedAgent {
         metadata,
         definition_revision_id,
+        declared_persistence_mode,
         author_source: source,
         prompt_files,
         plan,

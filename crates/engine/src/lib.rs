@@ -19,6 +19,7 @@ pub mod identity;
 #[doc(hidden)]
 pub mod internal;
 pub mod outcome;
+pub mod persistence;
 pub mod plan;
 pub mod recovery;
 pub mod repository;
@@ -32,6 +33,7 @@ pub mod scheduler_adapter;
 pub mod schema;
 pub mod scope;
 pub mod state;
+pub mod terminal;
 pub mod value;
 pub mod worker;
 
@@ -69,6 +71,7 @@ pub use identity::{
     DeploymentRevisionId, DynamicKey, EffectId, ForkGroupId, Generation, LeaseEpoch, LegId, NodeId,
     PortId, RunId, ScopeInstanceId,
 };
+pub use persistence::PersistenceMode;
 pub use plan::{
     BranchCaseId, ControlEdge, ControlEdgeId, ControlPort, ControlPortId, ControlRoute,
     DataBinding, DataBindingId, DataPort, DataPortId, DescriptorConfigurationContract,
@@ -110,5 +113,6 @@ pub use state::{
     LeaseExpiryDisposition, LeaseFence, RunLifecycle, RunState, TerminationClaim,
     TerminationIntent, TerminationReason,
 };
+pub use terminal::{TerminalSchedulerApply, TerminalSchedulerState};
 pub use value::{ArtifactRef, InlineValueRef, ValueRef};
 pub use worker_contract::WorkerFailureClass;

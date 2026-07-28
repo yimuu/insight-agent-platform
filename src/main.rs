@@ -1,9 +1,10 @@
-use std::{error::Error, future::IntoFuture, io, sync::Arc};
+use std::{error::Error, ffi::OsStr, future::IntoFuture, io, sync::Arc};
 
 use insight_agent_platform::{
     catalog::{
-        compile_enabled_agents, deploy_agents, OwnedProductionLeafDeploymentResolver,
-        ProductionLeafDeploymentResolver,
+        compile_enabled_agents, deploy_agents_with_persistence,
+        OwnedProductionLeafDeploymentResolver, ProductionLeafDeploymentResolver,
+        TerminalOnlyDeploymentConfig,
     },
     config::{
         ArtifactStoreProvider, DeploymentMode, HistoryConfig, LiveResponseBrokerProvider,
@@ -12,7 +13,7 @@ use insight_agent_platform::{
     engine::{
         production_worker_registry_with_live_response_and_retrievals,
         repository::{PostgresDurableRepository, SqliteDurableRepository},
-        LocalContentAddressedArtifactStore,
+        LocalContentAddressedArtifactStore, TenantArtifactEncryptionKeyring, WorkerArtifactStore,
     },
     resources::{
         builtin_actions::{builtin_action_registry, RestrictedHttpGetAction},
@@ -22,7 +23,8 @@ use insight_agent_platform::{
     runtime::{
         DeployedAgentCatalog, InMemoryLiveResponseBroker, LiveResponseBroker,
         LiveResponseByteLimits, PostgresLiveResponseBroker, PostgresLiveResponseBrokerOptions,
-        ProductionRunRepository, RunService, RunServiceConfig, WorkCoordinatorConfig,
+        ProductionRunRepository, RunService, RunServiceConfig, TerminalOnlyRunConfig,
+        TerminalOnlyStore, WorkCoordinatorConfig,
     },
 };
 use insight_api::v1::{build_router, ApiAuth, ApiState, BearerHumanPrincipalResolver};
@@ -32,6 +34,9 @@ type MainResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 const PROCESS_PANICKED_CODE: &str = "PROCESS_PANICKED";
 const PROCESS_PANICKED_MESSAGE: &str = "process panic captured";
 const RUNTIME_POSTGRES_APPLICATION_NAME: &str = "insight-agent-platform-runtime";
+const QUALIFICATION_ENABLED_ENV: &str = "INSIGHT_QUALIFICATION_ENABLED";
+const QUALIFICATION_SELF_ABORT_HANDOFF_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(250);
 
 #[tokio::main]
 async fn main() -> MainResult<()> {
@@ -39,6 +44,9 @@ async fn main() -> MainResult<()> {
     init_tracing();
     install_sanitized_panic_hook();
 
+    let qualification_enabled = qualification_enabled_from_environment()?;
+    let mut qualification_self_abort =
+        QualificationSelfAbortControl::prepare(qualification_enabled)?;
     let config = PlatformConfig::from_env()?;
     let models = load_model_registry(&config.models.config)?;
     let http_get = config
@@ -78,9 +86,26 @@ async fn main() -> MainResult<()> {
                 config.runtime.max_llm_tool_calls,
             )?,
     );
-    let deployed = deploy_agents(&published, &resolver)?;
+    let terminal_execution_budget = config
+        .runtime
+        .terminal_only
+        .owner_lease
+        .min(config.runtime.shutdown_grace_period);
+    let terminal_only_deployment = TerminalOnlyDeploymentConfig::new(
+        config.runtime.terminal_only.enabled,
+        config.runtime.terminal_only.allow_volatile_waits,
+        terminal_execution_budget,
+    )?;
+    let graph_persistence_policy =
+        terminal_only_deployment.resolve(config.runtime.default_persistence_mode)?;
+    let deployed = deploy_agents_with_persistence(
+        &published,
+        &resolver,
+        config.runtime.default_persistence_mode,
+        terminal_only_deployment,
+    )?;
     let agents = DeployedAgentCatalog::new(deployed)?;
-    let (repository, live_response_broker) =
+    let (repository, terminal_store, live_response_broker) =
         initialize_repository_and_live_response(&config.history, config.runtime.response_stream)
             .await?;
     let workers = production_worker_registry_with_live_response_and_retrievals(
@@ -89,28 +114,62 @@ async fn main() -> MainResult<()> {
         &retrievals,
         Arc::clone(&live_response_broker),
     )?;
-    let artifact_store = Arc::new(match config.artifacts.provider {
-        ArtifactStoreProvider::LocalFilesystem => {
-            LocalContentAddressedArtifactStore::open(
-                config.artifacts.directory.clone(),
-                config.artifacts.inline_threshold_bytes,
+    let tenant_encryption = config
+        .artifacts
+        .tenant_encryption
+        .as_ref()
+        .map(|encryption| {
+            TenantArtifactEncryptionKeyring::from_secret_json(
+                encryption.active_key_version.clone(),
+                encryption.keyring.expose(),
             )
-            .await?
-        }
-        ArtifactStoreProvider::SharedFilesystem => {
-            LocalContentAddressedArtifactStore::open_shared(
-                config.artifacts.directory.clone(),
-                config.artifacts.inline_threshold_bytes,
-                config.artifacts.namespace.clone().ok_or_else(|| {
+        })
+        .transpose()?;
+    let artifact_store: Arc<dyn WorkerArtifactStore> =
+        Arc::new(match (config.artifacts.provider, tenant_encryption) {
+            (ArtifactStoreProvider::LocalFilesystem, None) => {
+                LocalContentAddressedArtifactStore::open(
+                    config.artifacts.directory.clone(),
+                    config.artifacts.inline_threshold_bytes,
+                )
+                .await?
+            }
+            (ArtifactStoreProvider::LocalFilesystem, Some(encryption)) => {
+                LocalContentAddressedArtifactStore::open_with_tenant_encryption(
+                    config.artifacts.directory.clone(),
+                    config.artifacts.inline_threshold_bytes,
+                    encryption,
+                )
+                .await?
+            }
+            (ArtifactStoreProvider::SharedFilesystem, encryption) => {
+                let namespace = config.artifacts.namespace.clone().ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "shared Artifact namespace is missing",
                     )
-                })?,
-            )
-            .await?
-        }
-    });
+                })?;
+                match encryption {
+                    Some(encryption) => {
+                        LocalContentAddressedArtifactStore::open_shared_with_tenant_encryption(
+                            config.artifacts.directory.clone(),
+                            config.artifacts.inline_threshold_bytes,
+                            namespace,
+                            encryption,
+                        )
+                        .await?
+                    }
+                    None => {
+                        LocalContentAddressedArtifactStore::open_shared(
+                            config.artifacts.directory.clone(),
+                            config.artifacts.inline_threshold_bytes,
+                            namespace,
+                        )
+                        .await?
+                    }
+                }
+            }
+        });
     let service_config = match config.deployment_mode {
         DeploymentMode::Production => RunServiceConfig::production(
             config.runtime.max_concurrent_runs,
@@ -155,17 +214,51 @@ async fn main() -> MainResult<()> {
         config.runtime.response_stream.max_frame_bytes,
         config.runtime.response_stream.max_item_bytes,
         config.runtime.response_stream.max_run_bytes,
-    );
+    )
+    .with_graph_persistence_policy(graph_persistence_policy);
     let service = RunService::start_with_artifact_store_graph_publication_and_live_response(
         agents,
         repository,
         workers,
         live_response_broker,
-        artifact_store,
+        Arc::clone(&artifact_store),
         graph_publication_resolver,
         service_config,
     )
     .await?;
+    let terminal_runtime_config = TerminalOnlyRunConfig {
+        owner_lease: config.runtime.terminal_only.owner_lease,
+        owner_heartbeat: config.runtime.terminal_only.owner_heartbeat,
+        terminal_commit_retry: config.runtime.terminal_only.terminal_commit_retry,
+        run_timeout: config.runtime.run_timeout.min(terminal_execution_budget),
+        max_concurrent_runs: config.runtime.terminal_only.max_concurrent_runs,
+        conversations_enabled: config.conversations.enabled,
+        inline_content_max_bytes: config.conversations.inline_content_max_bytes,
+        message_page_size_default: config.conversations.message_page_size_default as u32,
+        message_page_size_max: config.conversations.message_page_size_max as u32,
+        recent_context_messages: config.conversations.recent_context_messages as u32,
+        summary_trigger_messages: config.conversations.summary_trigger_messages as u32,
+        summary_trigger_tokens: config.conversations.summary_trigger_tokens,
+        run_retention: std::time::Duration::from_secs(
+            u64::from(config.runtime.terminal_only.run_retention_days) * 24 * 60 * 60,
+        ),
+        conversation_retention: std::time::Duration::from_secs(
+            u64::from(config.conversations.retention_days) * 24 * 60 * 60,
+        ),
+        terminal_barrier_timeout: config.runtime.response_stream.terminal_barrier_timeout,
+        outbound_write_timeout: config.runtime.response_stream.outbound_write_timeout,
+    };
+    if config.runtime.terminal_only.enabled {
+        service
+            .enable_terminal_only(
+                terminal_store,
+                format!("http://{}", config.bind_addr),
+                terminal_runtime_config,
+            )
+            .await?;
+    } else if config.conversations.enabled {
+        service.enable_conversations(terminal_store, terminal_runtime_config)?;
+    }
 
     let app = build_router(ApiState {
         service: service.clone(),
@@ -212,6 +305,89 @@ async fn main() -> MainResult<()> {
             ))??;
             Ok(())
         }
+        self_abort = qualification_self_abort.wait() => {
+            self_abort?;
+            tracing::error!(
+                code = "QUALIFICATION_SELF_ABORT",
+                "qualification-only process self-abort triggered"
+            );
+            // Let the short-lived `kubectl exec` signal sender observe a
+            // successful `kill(2)` before PID 1 terminates. The harness still
+            // proves the subsequent abort independently from Pod status and
+            // the previous-container log marker.
+            tokio::time::sleep(QUALIFICATION_SELF_ABORT_HANDOFF_DELAY).await;
+            std::process::abort();
+        }
+    }
+}
+
+struct QualificationSelfAbortControl {
+    enabled: bool,
+    #[cfg(unix)]
+    signal: Option<tokio::signal::unix::Signal>,
+}
+
+impl QualificationSelfAbortControl {
+    fn prepare(enabled: bool) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            let signal = if enabled {
+                Some(tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::user_defined2(),
+                )?)
+            } else {
+                None
+            };
+            Ok(Self { enabled, signal })
+        }
+        #[cfg(not(unix))]
+        {
+            if enabled {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "qualification self-abort requires SIGUSR2 support",
+                ));
+            }
+            Ok(Self { enabled })
+        }
+    }
+
+    async fn wait(&mut self) -> io::Result<()> {
+        if !self.enabled {
+            return std::future::pending().await;
+        }
+        #[cfg(unix)]
+        {
+            self.signal
+                .as_mut()
+                .expect("enabled qualification control owns a SIGUSR2 stream")
+                .recv()
+                .await
+                .ok_or_else(|| io::Error::other("qualification SIGUSR2 stream closed"))
+        }
+        #[cfg(not(unix))]
+        {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "qualification self-abort requires SIGUSR2 support",
+            ))
+        }
+    }
+}
+
+fn qualification_enabled_from_environment() -> io::Result<bool> {
+    qualification_enabled_value(std::env::var_os(QUALIFICATION_ENABLED_ENV).as_deref())
+}
+
+fn qualification_enabled_value(value: Option<&OsStr>) -> io::Result<bool> {
+    match value.and_then(OsStr::to_str) {
+        None if value.is_none() => Ok(false),
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "INSIGHT_QUALIFICATION_ENABLED must be true or false",
+        )),
     }
 }
 
@@ -243,6 +419,7 @@ async fn initialize_repository_and_live_response(
     response_stream: ResponseStreamConfig,
 ) -> MainResult<(
     Arc<dyn ProductionRunRepository>,
+    Arc<dyn TerminalOnlyStore>,
     Arc<dyn LiveResponseBroker>,
 )> {
     match config {
@@ -254,8 +431,9 @@ async fn initialize_repository_and_live_response(
                 )
                 .into());
             }
-            let repository = Arc::new(SqliteDurableRepository::connect_path(path).await?)
-                as Arc<dyn ProductionRunRepository>;
+            let concrete = Arc::new(SqliteDurableRepository::connect_path(path).await?);
+            let repository: Arc<dyn ProductionRunRepository> = concrete.clone();
+            let terminal_store: Arc<dyn TerminalOnlyStore> = concrete;
             let broker = Arc::new(InMemoryLiveResponseBroker::new_with_limits(
                 response_stream.body_queue_capacity,
                 response_stream.control_queue_capacity,
@@ -265,7 +443,7 @@ async fn initialize_repository_and_live_response(
                     response_stream.max_run_bytes,
                 )?,
             )?) as Arc<dyn LiveResponseBroker>;
-            Ok((repository, broker))
+            Ok((repository, terminal_store, broker))
         }
         HistoryConfig::Postgres {
             database_url,
@@ -305,7 +483,10 @@ async fn initialize_repository_and_live_response(
                     .await?,
                 ),
             };
-            Ok((Arc::new(repository), broker))
+            let concrete = Arc::new(repository);
+            let production: Arc<dyn ProductionRunRepository> = concrete.clone();
+            let terminal_store: Arc<dyn TerminalOnlyStore> = concrete;
+            Ok((production, terminal_store, broker))
         }
     }
 }
@@ -346,4 +527,34 @@ async fn wait_for_shutdown_signal() -> io::Result<()> {
 #[cfg(not(unix))]
 async fn wait_for_shutdown_signal() -> io::Result<()> {
     tokio::signal::ctrl_c().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qualification_self_abort_enablement_is_closed() {
+        assert!(!qualification_enabled_value(None).unwrap());
+        assert!(qualification_enabled_value(Some(OsStr::new("true"))).unwrap());
+        assert!(!qualification_enabled_value(Some(OsStr::new("false"))).unwrap());
+        assert!(qualification_enabled_value(Some(OsStr::new("1"))).is_err());
+        assert!(qualification_enabled_value(Some(OsStr::new("TRUE"))).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn qualification_self_abort_receives_handled_sigusr2() {
+        let mut control = QualificationSelfAbortControl::prepare(true).unwrap();
+        let process_id = std::process::id().to_string();
+        let sender = std::process::Command::new("kill")
+            .args(["-USR2", process_id.as_str()])
+            .status()
+            .unwrap();
+        assert!(sender.success());
+        tokio::time::timeout(std::time::Duration::from_secs(1), control.wait())
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }

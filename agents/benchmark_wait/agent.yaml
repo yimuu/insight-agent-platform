@@ -9,6 +9,9 @@ metadata:
 inputs: {}
 output: string
 
+execution:
+  persistence_mode: full
+
 workflow:
   steps:
     - id: gate

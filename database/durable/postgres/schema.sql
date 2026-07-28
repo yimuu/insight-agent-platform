@@ -2008,6 +2008,311 @@ CREATE TABLE workflow_definition_public_metadata (
     CONSTRAINT workflow_definition_public_metadata_public_description_check CHECK ((length(public_description) <= 4096))
 );
 
+CREATE UNLOGGED TABLE terminal_runtime_instances (
+    instance_id text NOT NULL PRIMARY KEY,
+    owner_epoch bigint NOT NULL,
+    endpoint text NOT NULL,
+    lease_expires_at timestamp with time zone NOT NULL,
+    started_at timestamp with time zone NOT NULL,
+    CONSTRAINT terminal_runtime_instances_instance_id_check
+        CHECK ((instance_id <> ''::text) AND (octet_length(instance_id) <= 256)),
+    CONSTRAINT terminal_runtime_instances_owner_epoch_check CHECK (owner_epoch >= 1),
+    CONSTRAINT terminal_runtime_instances_endpoint_check
+        CHECK ((endpoint <> ''::text) AND (octet_length(endpoint) <= 4096)),
+    CONSTRAINT terminal_runtime_instances_lease_check
+        CHECK (lease_expires_at >= started_at)
+);
+
+CREATE TABLE terminal_run_admissions (
+    run_id text NOT NULL PRIMARY KEY,
+    tenant_id text NOT NULL,
+    request_id text NOT NULL,
+    agent_id text NOT NULL,
+    definition_revision_id text NOT NULL,
+    deployment_revision_id text NOT NULL,
+    conversation_id text,
+    user_message_id text,
+    input_ref text,
+    input_hash text NOT NULL,
+    selected_context_hash text,
+    owner_instance_id text NOT NULL,
+    owner_epoch bigint NOT NULL,
+    accepted_at timestamp with time zone NOT NULL,
+    CONSTRAINT terminal_run_admissions_tenant_request_key UNIQUE (tenant_id, request_id),
+    CONSTRAINT terminal_run_admissions_run_id_check
+        CHECK ((run_id <> ''::text) AND (octet_length(run_id) <= 256)),
+    CONSTRAINT terminal_run_admissions_tenant_id_check
+        CHECK ((tenant_id <> ''::text) AND (octet_length(tenant_id) <= 256)),
+    CONSTRAINT terminal_run_admissions_request_id_check
+        CHECK ((request_id <> ''::text) AND (octet_length(request_id) <= 256)),
+    CONSTRAINT terminal_run_admissions_agent_id_check
+        CHECK ((agent_id <> ''::text) AND (octet_length(agent_id) <= 256)),
+    CONSTRAINT terminal_run_admissions_definition_revision_id_check
+        CHECK ((definition_revision_id <> ''::text) AND
+               (octet_length(definition_revision_id) <= 256)),
+    CONSTRAINT terminal_run_admissions_deployment_revision_id_check
+        CHECK ((deployment_revision_id <> ''::text) AND
+               (octet_length(deployment_revision_id) <= 256)),
+    CONSTRAINT terminal_run_admissions_conversation_pair_check
+        CHECK ((conversation_id IS NULL) = (user_message_id IS NULL)),
+    CONSTRAINT terminal_run_admissions_input_hash_check
+        CHECK (input_hash ~ '^sha256:[0-9a-f]{64}$'::text),
+    CONSTRAINT terminal_run_admissions_selected_context_hash_check
+        CHECK ((selected_context_hash IS NULL) OR
+               (selected_context_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT terminal_run_admissions_owner_instance_id_check
+        CHECK ((owner_instance_id <> ''::text) AND
+               (octet_length(owner_instance_id) <= 256)),
+    CONSTRAINT terminal_run_admissions_owner_epoch_check CHECK (owner_epoch >= 1)
+);
+
+CREATE INDEX idx_terminal_run_admissions_retention
+    ON terminal_run_admissions (accepted_at, run_id);
+
+CREATE TABLE terminal_run_results (
+    run_id text NOT NULL PRIMARY KEY
+        REFERENCES terminal_run_admissions(run_id) ON DELETE CASCADE,
+    terminal_state text NOT NULL,
+    response_id text NOT NULL UNIQUE,
+    output_ref text,
+    output_hash text,
+    error_code text,
+    usage_json jsonb,
+    started_at timestamp with time zone NOT NULL,
+    terminal_at timestamp with time zone NOT NULL,
+    CONSTRAINT terminal_run_results_terminal_state_check
+        CHECK (terminal_state = ANY (
+            ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text, 'timed_out'::text]
+        )),
+    CONSTRAINT terminal_run_results_response_id_check
+        CHECK ((response_id <> ''::text) AND (octet_length(response_id) <= 256)),
+    CONSTRAINT terminal_run_results_output_hash_check
+        CHECK ((output_hash IS NULL) OR
+               (output_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT terminal_run_results_output_pair_check
+        CHECK ((output_ref IS NULL) = (output_hash IS NULL)),
+    CONSTRAINT terminal_run_results_terminal_time_check CHECK (terminal_at >= started_at)
+);
+
+CREATE TABLE terminal_content_deletion_jobs (
+    deletion_job_id text NOT NULL PRIMARY KEY,
+    tenant_id text NOT NULL,
+    content_ref text NOT NULL,
+    content_hash text,
+    source_kind text NOT NULL,
+    source_id text NOT NULL,
+    job_state text NOT NULL DEFAULT 'pending',
+    available_at timestamp with time zone NOT NULL,
+    claim_token text,
+    claimed_by text,
+    claim_expires_at timestamp with time zone,
+    attempts bigint NOT NULL DEFAULT 0,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT terminal_content_deletion_jobs_source_key
+        UNIQUE (tenant_id, content_ref, source_kind, source_id),
+    CONSTRAINT terminal_content_deletion_jobs_id_check
+        CHECK ((deletion_job_id <> ''::text) AND
+               (octet_length(deletion_job_id) <= 256)),
+    CONSTRAINT terminal_content_deletion_jobs_tenant_check
+        CHECK ((tenant_id <> ''::text) AND (octet_length(tenant_id) <= 256)),
+    CONSTRAINT terminal_content_deletion_jobs_ref_check
+        CHECK ((content_ref <> ''::text) AND (octet_length(content_ref) <= 16384)),
+    CONSTRAINT terminal_content_deletion_jobs_hash_check
+        CHECK ((content_hash IS NULL) OR
+               (content_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT terminal_content_deletion_jobs_source_kind_check
+        CHECK (source_kind = ANY (
+            ARRAY[
+                'terminal_run_retention'::text,
+                'conversation_privacy'::text,
+                'conversation_retention'::text
+            ]
+        )),
+    CONSTRAINT terminal_content_deletion_jobs_source_id_check
+        CHECK ((source_id <> ''::text) AND (octet_length(source_id) <= 256)),
+    CONSTRAINT terminal_content_deletion_jobs_state_check
+        CHECK (job_state = ANY (ARRAY['pending'::text, 'claimed'::text])),
+    CONSTRAINT terminal_content_deletion_jobs_attempts_check CHECK (attempts >= 0),
+    CONSTRAINT terminal_content_deletion_jobs_claim_check
+        CHECK (
+            (job_state = 'pending'::text AND claim_token IS NULL AND
+             claimed_by IS NULL AND claim_expires_at IS NULL)
+            OR
+            (job_state = 'claimed'::text AND claim_token IS NOT NULL AND
+             claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL)
+        )
+);
+
+CREATE INDEX idx_terminal_content_deletion_jobs_pending
+    ON terminal_content_deletion_jobs (available_at, created_at, deletion_job_id)
+    WHERE job_state = 'pending'::text;
+
+CREATE INDEX idx_terminal_content_deletion_jobs_reclaim
+    ON terminal_content_deletion_jobs (claim_expires_at, deletion_job_id)
+    WHERE job_state = 'claimed'::text;
+
+CREATE TABLE terminal_artifact_staging (
+    staging_id text NOT NULL PRIMARY KEY,
+    tenant_id text NOT NULL,
+    content_ref text NOT NULL UNIQUE,
+    content_hash text NOT NULL,
+    source_kind text NOT NULL,
+    source_id text NOT NULL,
+    staging_state text NOT NULL DEFAULT 'pending',
+    available_at timestamp with time zone NOT NULL,
+    claim_token text,
+    claimed_by text,
+    claim_expires_at timestamp with time zone,
+    attempts bigint NOT NULL DEFAULT 0,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT terminal_artifact_staging_source_key
+        UNIQUE (tenant_id, source_kind, source_id),
+    CONSTRAINT terminal_artifact_staging_id_check
+        CHECK (staging_id ~ '^terminal_stage_[0-9a-f]{64}$'::text),
+    CONSTRAINT terminal_artifact_staging_tenant_check
+        CHECK ((tenant_id <> ''::text) AND (octet_length(tenant_id) <= 256)),
+    CONSTRAINT terminal_artifact_staging_ref_check
+        CHECK ((content_ref <> ''::text) AND (octet_length(content_ref) <= 16384)),
+    CONSTRAINT terminal_artifact_staging_hash_check
+        CHECK (content_hash ~ '^sha256:[0-9a-f]{64}$'::text),
+    CONSTRAINT terminal_artifact_staging_source_kind_check
+        CHECK (source_kind = ANY (
+            ARRAY[
+                'run_output'::text,
+                'user_message'::text,
+                'assistant_message'::text,
+                'conversation_summary'::text
+            ]
+        )),
+    CONSTRAINT terminal_artifact_staging_source_id_check
+        CHECK ((source_id <> ''::text) AND (octet_length(source_id) <= 512)),
+    CONSTRAINT terminal_artifact_staging_state_check
+        CHECK (staging_state = ANY (ARRAY['pending'::text, 'claimed'::text])),
+    CONSTRAINT terminal_artifact_staging_attempts_check CHECK (attempts >= 0),
+    CONSTRAINT terminal_artifact_staging_available_check CHECK (available_at >= created_at),
+    CONSTRAINT terminal_artifact_staging_claim_check
+        CHECK (
+            (staging_state = 'pending'::text AND claim_token IS NULL AND
+             claimed_by IS NULL AND claim_expires_at IS NULL)
+            OR
+            (staging_state = 'claimed'::text AND claim_token IS NOT NULL AND
+             claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL)
+        )
+);
+
+CREATE INDEX idx_terminal_artifact_staging_pending
+    ON terminal_artifact_staging (available_at, created_at, staging_id)
+    WHERE staging_state = 'pending'::text;
+
+CREATE INDEX idx_terminal_artifact_staging_reclaim
+    ON terminal_artifact_staging (claim_expires_at, staging_id)
+    WHERE staging_state = 'claimed'::text;
+
+CREATE TABLE conversations (
+    conversation_id text NOT NULL PRIMARY KEY,
+    tenant_id text NOT NULL,
+    user_id text NOT NULL,
+    agent_id text NOT NULL,
+    persistence_mode text NOT NULL,
+    deployment_revision_id text NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    archived_at timestamp with time zone,
+    CONSTRAINT conversations_conversation_id_check
+        CHECK ((conversation_id <> ''::text) AND (octet_length(conversation_id) <= 256)),
+    CONSTRAINT conversations_tenant_id_check
+        CHECK ((tenant_id <> ''::text) AND (octet_length(tenant_id) <= 256)),
+    CONSTRAINT conversations_user_id_check
+        CHECK ((user_id <> ''::text) AND (octet_length(user_id) <= 256)),
+    CONSTRAINT conversations_agent_id_check
+        CHECK ((agent_id <> ''::text) AND (octet_length(agent_id) <= 256)),
+    CONSTRAINT conversations_persistence_mode_check
+        CHECK (persistence_mode = ANY (ARRAY['full'::text, 'terminal_only'::text])),
+    CONSTRAINT conversations_deployment_revision_id_check
+        CHECK ((deployment_revision_id <> ''::text) AND
+               (octet_length(deployment_revision_id) <= 256)),
+    CONSTRAINT conversations_archive_time_check
+        CHECK ((archived_at IS NULL) OR (archived_at >= created_at))
+);
+
+CREATE INDEX idx_conversations_created_retention
+    ON conversations (created_at, conversation_id);
+
+CREATE TABLE conversation_tombstones (
+    conversation_id text NOT NULL PRIMARY KEY,
+    deleted_at timestamp with time zone NOT NULL,
+    CONSTRAINT conversation_tombstones_conversation_id_check
+        CHECK ((conversation_id <> ''::text) AND (octet_length(conversation_id) <= 256))
+);
+
+CREATE SEQUENCE conversation_message_order_seq CACHE 1000;
+
+CREATE TABLE conversation_messages (
+    message_id text NOT NULL PRIMARY KEY,
+    conversation_id text NOT NULL
+        REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+    message_order bigint NOT NULL DEFAULT nextval('conversation_message_order_seq'),
+    role text NOT NULL,
+    run_id text,
+    content_inline jsonb,
+    content_ref text,
+    content_hash text NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT conversation_messages_conversation_order_key
+        UNIQUE (conversation_id, message_order),
+    CONSTRAINT conversation_messages_message_id_check
+        CHECK ((message_id <> ''::text) AND (octet_length(message_id) <= 256)),
+    CONSTRAINT conversation_messages_message_order_check CHECK (message_order >= 1),
+    CONSTRAINT conversation_messages_role_check
+        CHECK (role = ANY (ARRAY['user'::text, 'assistant'::text])),
+    CONSTRAINT conversation_messages_assistant_run_check
+        CHECK ((role <> 'assistant'::text) OR (run_id IS NOT NULL)),
+    CONSTRAINT conversation_messages_content_check
+        CHECK ((content_inline IS NULL) <> (content_ref IS NULL)),
+    CONSTRAINT conversation_messages_content_hash_check
+        CHECK (content_hash ~ '^sha256:[0-9a-f]{64}$'::text)
+);
+
+CREATE INDEX idx_conversation_messages_page
+    ON conversation_messages (conversation_id, message_order DESC);
+
+CREATE UNIQUE INDEX uq_conversation_assistant_run
+    ON conversation_messages (conversation_id, run_id)
+    WHERE role = 'assistant'::text;
+
+CREATE TABLE conversation_summaries (
+    conversation_id text NOT NULL
+        REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+    through_message_order bigint NOT NULL,
+    summary_ref text NOT NULL,
+    summary_hash text NOT NULL,
+    model_revision text NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    PRIMARY KEY (conversation_id, through_message_order),
+    CONSTRAINT conversation_summaries_through_order_check
+        CHECK (through_message_order >= 1),
+    CONSTRAINT conversation_summaries_summary_ref_check
+        CHECK ((summary_ref <> ''::text) AND (octet_length(summary_ref) <= 16384)),
+    CONSTRAINT conversation_summaries_summary_hash_check
+        CHECK (summary_hash ~ '^sha256:[0-9a-f]{64}$'::text),
+    CONSTRAINT conversation_summaries_model_revision_check
+        CHECK ((model_revision <> ''::text) AND (octet_length(model_revision) <= 256))
+);
+
+CREATE TABLE conversation_summary_jobs (
+    conversation_id text NOT NULL PRIMARY KEY
+        REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+    claim_token text NOT NULL UNIQUE,
+    claimed_by text NOT NULL,
+    claim_expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT conversation_summary_jobs_claim_token_check
+        CHECK ((claim_token <> ''::text) AND (octet_length(claim_token) <= 256)),
+    CONSTRAINT conversation_summary_jobs_claimed_by_check
+        CHECK ((claimed_by <> ''::text) AND (octet_length(claimed_by) <= 256)),
+    CONSTRAINT conversation_summary_jobs_expiry_check
+        CHECK (claim_expires_at > created_at)
+);
+
 CREATE TABLE workflow_definition_revisions (
     definition_id text NOT NULL,
     definition_revision_id text NOT NULL,
@@ -2128,6 +2433,37 @@ CREATE TABLE workflow_runs (
     CONSTRAINT workflow_runs_request_id_check CHECK ((request_id <> ''::text)),
     CONSTRAINT workflow_runs_scheduler_lease_epoch_check CHECK ((scheduler_lease_epoch >= 0))
 );
+
+CREATE TABLE full_conversation_turns (
+    tenant_id text NOT NULL,
+    request_id text NOT NULL,
+    conversation_id text NOT NULL,
+    user_id text NOT NULL,
+    run_id text NOT NULL,
+    user_message_id text NOT NULL,
+    assistant_message_id text NOT NULL,
+    user_content_hash text NOT NULL,
+    selected_context_hash text NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    PRIMARY KEY (tenant_id, request_id),
+    UNIQUE (run_id),
+    UNIQUE (user_message_id),
+    UNIQUE (assistant_message_id),
+    CONSTRAINT full_conversation_turns_identity_check CHECK (
+        tenant_id <> '' AND octet_length(tenant_id) <= 256 AND
+        request_id <> '' AND octet_length(request_id) <= 256 AND
+        user_id <> '' AND octet_length(user_id) <= 256 AND
+        user_message_id <> '' AND octet_length(user_message_id) <= 256 AND
+        assistant_message_id <> '' AND octet_length(assistant_message_id) <= 256
+    ),
+    CONSTRAINT full_conversation_turns_hash_check CHECK (
+        user_content_hash ~ '^sha256:[0-9a-f]{64}$'::text AND
+        selected_context_hash ~ '^sha256:[0-9a-f]{64}$'::text
+    )
+);
+
+CREATE INDEX idx_full_conversation_turns_conversation
+    ON full_conversation_turns (conversation_id, created_at, run_id);
 
 ALTER TABLE ONLY agent_publication_heads
     ADD CONSTRAINT agent_publication_heads_definition_id_key UNIQUE (definition_id);
@@ -2485,6 +2821,10 @@ ALTER TABLE ONLY workflow_retrieval_publications
 
 ALTER TABLE ONLY workflow_runs
     ADD CONSTRAINT workflow_runs_pkey PRIMARY KEY (run_id);
+
+ALTER TABLE ONLY full_conversation_turns
+    ADD CONSTRAINT full_conversation_turns_run_id_fkey
+    FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id) ON DELETE CASCADE;
 
 CREATE INDEX idx_activation_dispatch ON node_activations USING btree (run_id, lifecycle, scope_instance_id, activation_id) WHERE (lifecycle = ANY (ARRAY['ready'::text, 'retry_wait'::text, 'waiting'::text]));
 
@@ -3038,7 +3378,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-cd9a5c3f-5f12-46d2-ab96-78820a13186f',
+    'durable-schema-df877850-ed09-4f96-ac0f-e7f0576c1743',
     'postgres'
 );
 

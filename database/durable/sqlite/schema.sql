@@ -2657,6 +2657,274 @@ BEGIN
     SELECT RAISE(ABORT, 'workflow retrieval publication is immutable');
 END;
 
+CREATE TABLE terminal_runtime_instances(
+  instance_id TEXT NOT NULL PRIMARY KEY,
+  owner_epoch INTEGER NOT NULL CHECK(owner_epoch >= 1),
+  endpoint TEXT NOT NULL CHECK(endpoint <> '' AND length(CAST(endpoint AS BLOB)) <= 4096),
+  lease_expires_at TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  CHECK(instance_id <> '' AND length(CAST(instance_id AS BLOB)) <= 256),
+  CHECK(lease_expires_at >= started_at)
+);
+
+CREATE TABLE terminal_run_admissions(
+  run_id TEXT NOT NULL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  definition_revision_id TEXT NOT NULL,
+  deployment_revision_id TEXT NOT NULL,
+  conversation_id TEXT,
+  user_message_id TEXT,
+  input_ref TEXT,
+  input_hash TEXT NOT NULL,
+  selected_context_hash TEXT,
+  owner_instance_id TEXT NOT NULL,
+  owner_epoch INTEGER NOT NULL CHECK(owner_epoch >= 1),
+  accepted_at TEXT NOT NULL,
+  UNIQUE(tenant_id, request_id),
+  CHECK(run_id <> '' AND length(CAST(run_id AS BLOB)) <= 256),
+  CHECK(tenant_id <> '' AND length(CAST(tenant_id AS BLOB)) <= 256),
+  CHECK(request_id <> '' AND length(CAST(request_id AS BLOB)) <= 256),
+  CHECK(agent_id <> '' AND length(CAST(agent_id AS BLOB)) <= 256),
+  CHECK(definition_revision_id <> '' AND
+        length(CAST(definition_revision_id AS BLOB)) <= 256),
+  CHECK(deployment_revision_id <> '' AND
+        length(CAST(deployment_revision_id AS BLOB)) <= 256),
+  CHECK((conversation_id IS NULL) = (user_message_id IS NULL)),
+  CHECK(length(input_hash) = 71 AND substr(input_hash, 1, 7) = 'sha256:' AND
+        substr(input_hash, 8) NOT GLOB '*[^0-9a-f]*'),
+  CHECK(selected_context_hash IS NULL OR
+        (length(selected_context_hash) = 71 AND
+         substr(selected_context_hash, 1, 7) = 'sha256:' AND
+         substr(selected_context_hash, 8) NOT GLOB '*[^0-9a-f]*')),
+  CHECK(owner_instance_id <> '' AND
+        length(CAST(owner_instance_id AS BLOB)) <= 256)
+);
+
+CREATE INDEX idx_terminal_run_admissions_retention
+ON terminal_run_admissions(accepted_at, run_id);
+
+CREATE TABLE terminal_run_results(
+  run_id TEXT NOT NULL PRIMARY KEY
+    REFERENCES terminal_run_admissions(run_id) ON DELETE CASCADE,
+  terminal_state TEXT NOT NULL
+    CHECK(terminal_state IN('succeeded', 'failed', 'cancelled', 'timed_out')),
+  response_id TEXT NOT NULL UNIQUE
+    CHECK(response_id <> '' AND length(CAST(response_id AS BLOB)) <= 256),
+  output_ref TEXT,
+  output_hash TEXT CHECK(output_hash IS NULL OR
+    (length(output_hash) = 71 AND substr(output_hash, 1, 7) = 'sha256:' AND
+     substr(output_hash, 8) NOT GLOB '*[^0-9a-f]*')),
+  error_code TEXT,
+  usage_json TEXT CHECK(usage_json IS NULL OR json_valid(usage_json)),
+  started_at TEXT NOT NULL,
+  terminal_at TEXT NOT NULL,
+  CHECK((output_ref IS NULL) = (output_hash IS NULL)),
+  CHECK(terminal_at >= started_at)
+);
+
+CREATE TABLE terminal_content_deletion_jobs(
+  deletion_job_id TEXT NOT NULL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  content_ref TEXT NOT NULL,
+  content_hash TEXT CHECK(content_hash IS NULL OR
+    (length(content_hash) = 71 AND substr(content_hash, 1, 7) = 'sha256:' AND
+     substr(content_hash, 8) NOT GLOB '*[^0-9a-f]*')),
+  source_kind TEXT NOT NULL
+    CHECK(source_kind IN(
+      'terminal_run_retention',
+      'conversation_privacy',
+      'conversation_retention'
+    )),
+  source_id TEXT NOT NULL,
+  job_state TEXT NOT NULL DEFAULT 'pending'
+    CHECK(job_state IN('pending', 'claimed')),
+  available_at TEXT NOT NULL,
+  claim_token TEXT,
+  claimed_by TEXT,
+  claim_expires_at TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+  created_at TEXT NOT NULL,
+  UNIQUE(tenant_id, content_ref, source_kind, source_id),
+  CHECK(deletion_job_id <> '' AND length(CAST(deletion_job_id AS BLOB)) <= 256),
+  CHECK(tenant_id <> '' AND length(CAST(tenant_id AS BLOB)) <= 256),
+  CHECK(content_ref <> '' AND length(CAST(content_ref AS BLOB)) <= 16384),
+  CHECK(source_id <> '' AND length(CAST(source_id AS BLOB)) <= 256),
+  CHECK(
+    (job_state = 'pending' AND claim_token IS NULL AND
+     claimed_by IS NULL AND claim_expires_at IS NULL)
+    OR
+    (job_state = 'claimed' AND claim_token IS NOT NULL AND
+     claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL)
+  )
+);
+
+CREATE INDEX idx_terminal_content_deletion_jobs_pending
+ON terminal_content_deletion_jobs(available_at, created_at, deletion_job_id)
+WHERE job_state = 'pending';
+
+CREATE INDEX idx_terminal_content_deletion_jobs_reclaim
+ON terminal_content_deletion_jobs(claim_expires_at, deletion_job_id)
+WHERE job_state = 'claimed';
+
+CREATE TABLE terminal_artifact_staging(
+  staging_id TEXT NOT NULL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  content_ref TEXT NOT NULL UNIQUE,
+  content_hash TEXT NOT NULL
+    CHECK(length(content_hash) = 71 AND substr(content_hash, 1, 7) = 'sha256:' AND
+          substr(content_hash, 8) NOT GLOB '*[^0-9a-f]*'),
+  source_kind TEXT NOT NULL
+    CHECK(source_kind IN(
+      'run_output',
+      'user_message',
+      'assistant_message',
+      'conversation_summary'
+    )),
+  source_id TEXT NOT NULL,
+  staging_state TEXT NOT NULL DEFAULT 'pending'
+    CHECK(staging_state IN('pending', 'claimed')),
+  available_at TEXT NOT NULL,
+  claim_token TEXT,
+  claimed_by TEXT,
+  claim_expires_at TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+  created_at TEXT NOT NULL,
+  UNIQUE(tenant_id, source_kind, source_id),
+  CHECK(length(staging_id) = 79 AND
+        substr(staging_id, 1, 15) = 'terminal_stage_' AND
+        substr(staging_id, 16) NOT GLOB '*[^0-9a-f]*'),
+  CHECK(tenant_id <> '' AND length(CAST(tenant_id AS BLOB)) <= 256),
+  CHECK(content_ref <> '' AND length(CAST(content_ref AS BLOB)) <= 16384),
+  CHECK(source_id <> '' AND length(CAST(source_id AS BLOB)) <= 512),
+  CHECK(available_at >= created_at),
+  CHECK(
+    (staging_state = 'pending' AND claim_token IS NULL AND
+     claimed_by IS NULL AND claim_expires_at IS NULL)
+    OR
+    (staging_state = 'claimed' AND claim_token IS NOT NULL AND
+     claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL)
+  )
+);
+
+CREATE INDEX idx_terminal_artifact_staging_pending
+ON terminal_artifact_staging(available_at, created_at, staging_id)
+WHERE staging_state = 'pending';
+
+CREATE INDEX idx_terminal_artifact_staging_reclaim
+ON terminal_artifact_staging(claim_expires_at, staging_id)
+WHERE staging_state = 'claimed';
+
+CREATE TABLE conversations(
+  conversation_id TEXT NOT NULL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  persistence_mode TEXT NOT NULL CHECK(persistence_mode IN('full', 'terminal_only')),
+  deployment_revision_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  archived_at TEXT,
+  CHECK(conversation_id <> '' AND length(CAST(conversation_id AS BLOB)) <= 256),
+  CHECK(tenant_id <> '' AND length(CAST(tenant_id AS BLOB)) <= 256),
+  CHECK(user_id <> '' AND length(CAST(user_id AS BLOB)) <= 256),
+  CHECK(agent_id <> '' AND length(CAST(agent_id AS BLOB)) <= 256),
+  CHECK(deployment_revision_id <> '' AND
+        length(CAST(deployment_revision_id AS BLOB)) <= 256),
+  CHECK(archived_at IS NULL OR archived_at >= created_at)
+);
+
+CREATE INDEX idx_conversations_created_retention
+ON conversations(created_at, conversation_id);
+
+CREATE TABLE conversation_tombstones(
+  conversation_id TEXT NOT NULL PRIMARY KEY,
+  deleted_at TEXT NOT NULL,
+  CHECK(conversation_id <> '' AND length(CAST(conversation_id AS BLOB)) <= 256)
+);
+
+CREATE TABLE conversation_messages(
+  message_id TEXT NOT NULL PRIMARY KEY,
+  conversation_id TEXT NOT NULL
+    REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+  message_order INTEGER NOT NULL CHECK(message_order >= 1),
+  role TEXT NOT NULL CHECK(role IN('user', 'assistant')),
+  run_id TEXT,
+  content_inline TEXT CHECK(content_inline IS NULL OR json_valid(content_inline)),
+  content_ref TEXT,
+  content_hash TEXT NOT NULL
+    CHECK(length(content_hash) = 71 AND substr(content_hash, 1, 7) = 'sha256:' AND
+          substr(content_hash, 8) NOT GLOB '*[^0-9a-f]*'),
+  created_at TEXT NOT NULL,
+  UNIQUE(conversation_id, message_order),
+  CHECK(role <> 'assistant' OR run_id IS NOT NULL),
+  CHECK((content_inline IS NULL) <> (content_ref IS NULL))
+);
+
+CREATE INDEX idx_conversation_messages_page
+ON conversation_messages(conversation_id, message_order DESC);
+
+CREATE UNIQUE INDEX uq_conversation_assistant_run
+ON conversation_messages(conversation_id, run_id)
+WHERE role = 'assistant';
+
+CREATE TABLE conversation_summaries(
+  conversation_id TEXT NOT NULL
+    REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+  through_message_order INTEGER NOT NULL CHECK(through_message_order >= 1),
+  summary_ref TEXT NOT NULL
+    CHECK(summary_ref <> '' AND length(CAST(summary_ref AS BLOB)) <= 16384),
+  summary_hash TEXT NOT NULL
+    CHECK(length(summary_hash) = 71 AND substr(summary_hash, 1, 7) = 'sha256:' AND
+          substr(summary_hash, 8) NOT GLOB '*[^0-9a-f]*'),
+  model_revision TEXT NOT NULL
+    CHECK(model_revision <> '' AND length(CAST(model_revision AS BLOB)) <= 256),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(conversation_id, through_message_order)
+);
+
+CREATE TABLE conversation_summary_jobs(
+  conversation_id TEXT NOT NULL PRIMARY KEY
+    REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+  claim_token TEXT NOT NULL UNIQUE,
+  claimed_by TEXT NOT NULL,
+  claim_expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  CHECK(claim_token <> '' AND length(CAST(claim_token AS BLOB)) <= 256),
+  CHECK(claimed_by <> '' AND length(CAST(claimed_by AS BLOB)) <= 256),
+  CHECK(claim_expires_at > created_at)
+);
+
+CREATE TABLE full_conversation_turns(
+  tenant_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  run_id TEXT NOT NULL
+    REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+  user_message_id TEXT NOT NULL UNIQUE,
+  assistant_message_id TEXT NOT NULL UNIQUE,
+  user_content_hash TEXT NOT NULL
+    CHECK(length(user_content_hash) = 71 AND
+          substr(user_content_hash, 1, 7) = 'sha256:' AND
+          substr(user_content_hash, 8) NOT GLOB '*[^0-9a-f]*'),
+  selected_context_hash TEXT NOT NULL
+    CHECK(length(selected_context_hash) = 71 AND
+          substr(selected_context_hash, 1, 7) = 'sha256:' AND
+          substr(selected_context_hash, 8) NOT GLOB '*[^0-9a-f]*'),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(tenant_id, request_id),
+  UNIQUE(run_id),
+  CHECK(tenant_id <> '' AND length(CAST(tenant_id AS BLOB)) <= 256),
+  CHECK(request_id <> '' AND length(CAST(request_id AS BLOB)) <= 256),
+  CHECK(user_id <> '' AND length(CAST(user_id AS BLOB)) <= 256),
+  CHECK(user_message_id <> '' AND length(CAST(user_message_id AS BLOB)) <= 256),
+  CHECK(assistant_message_id <> '' AND length(CAST(assistant_message_id AS BLOB)) <= 256)
+);
+
+CREATE INDEX idx_full_conversation_turns_conversation
+ON full_conversation_turns(conversation_id, created_at, run_id);
+
 CREATE TABLE durable_schema_contract (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     contract_id TEXT NOT NULL,
@@ -2667,7 +2935,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-cd9a5c3f-5f12-46d2-ab96-78820a13186f',
+    'durable-schema-df877850-ed09-4f96-ac0f-e7f0576c1743',
     'sqlite'
 );
 

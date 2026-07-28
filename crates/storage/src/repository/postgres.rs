@@ -49,9 +49,10 @@ use super::postgres_projection::{
 use super::schema_contract::{validate_contract_row, POSTGRES_SCHEMA_BACKEND};
 use super::{
     CommitReceipt, CreateRunCommand, DurableRepository, DurableResponseSnapshot,
-    PlanInstallOutcome, PlanPublicationOutcome, PublicationHead, PublicationOrigin,
-    PublishVersionedPlanCommand, RepositoryError, RunProjection, RunTransitionCommand,
-    VersionedPlan, VersionedPlanCatalog, REPOSITORY_PLAN_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
+    FullConversationRunAdmission, PlanInstallOutcome, PlanPublicationOutcome, PublicationHead,
+    PublicationOrigin, PublishVersionedPlanCommand, RepositoryError, RunProjection,
+    RunTransitionCommand, VersionedPlan, VersionedPlanCatalog, REPOSITORY_CONSTRAINT_CONFLICT,
+    REPOSITORY_PLAN_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
 };
 
 fn plan_conflict() -> RepositoryError {
@@ -66,6 +67,232 @@ pub(crate) fn run_not_found() -> RepositoryError {
         REPOSITORY_RUN_NOT_FOUND,
         "durable workflow run was not found",
     )
+}
+
+fn conversation_conflict() -> RepositoryError {
+    RepositoryError::new(
+        REPOSITORY_CONSTRAINT_CONFLICT,
+        "durable Conversation admission conflicts with stored authority",
+    )
+}
+
+async fn insert_full_conversation_admission(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    request_id: &str,
+    definition_id: &str,
+    deployment_revision_id: &DeploymentRevisionId,
+    input: &Value,
+    admission: &FullConversationRunAdmission,
+) -> Result<(), RepositoryError> {
+    if let Some(inline) = admission.user_content_inline() {
+        let (_, actual_content_hash) = canonical_value(inline)?;
+        if &actual_content_hash != admission.user_content_hash() {
+            return Err(RepositoryError::invalid_data());
+        }
+    }
+    let input_message = input
+        .get("message")
+        .ok_or_else(RepositoryError::invalid_data)?;
+    let input_context = input
+        .get("conversation_context")
+        .ok_or_else(RepositoryError::invalid_data)?;
+    let (_, input_message_hash) = canonical_value(input_message)?;
+    let (_, input_context_hash) = canonical_value(input_context)?;
+    if &input_message_hash != admission.user_content_hash()
+        || &input_context_hash != admission.selected_context_hash()
+    {
+        return Err(RepositoryError::invalid_data());
+    }
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(
+             hashtextextended($1, 6075990668891974961::bigint)
+         )",
+    )
+    .bind(admission.conversation_id())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let conversation = sqlx::query_as::<_, (String, String, String, Option<DateTime<Utc>>)>(
+        "SELECT agent_id,persistence_mode,deployment_revision_id,archived_at
+         FROM conversations
+         WHERE conversation_id=$1 AND tenant_id=$2 AND user_id=$3
+         FOR UPDATE",
+    )
+    .bind(admission.conversation_id())
+    .bind(admission.tenant_id())
+    .bind(admission.user_id())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .ok_or_else(conversation_conflict)?;
+    let definition_agent = sqlx::query_scalar::<_, String>(
+        "SELECT agent_id FROM workflow_definitions WHERE definition_id=$1",
+    )
+    .bind(definition_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .ok_or_else(conversation_conflict)?;
+    if conversation.0 != admission.agent_id()
+        || definition_agent != admission.agent_id()
+        || conversation.1 != "full"
+        || conversation.2 != deployment_revision_id.as_str()
+        || conversation.3.is_some()
+    {
+        return Err(conversation_conflict());
+    }
+    let current_message_order = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(message_order),0)
+         FROM conversation_messages WHERE conversation_id=$1",
+    )
+    .bind(admission.conversation_id())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if current_message_order != admission.context_message_order() {
+        return Err(conversation_conflict());
+    }
+    let message_order = current_message_order.saturating_add(1);
+    if let Some(reference) = admission.user_content_ref() {
+        crate::terminal_store::staging_postgres::consume_terminal_artifact_stage(
+            transaction,
+            admission.tenant_id(),
+            reference,
+            crate::terminal_store::TerminalArtifactSourceKind::UserMessage,
+            admission.user_message_id(),
+        )
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO conversation_messages (
+             message_id,conversation_id,message_order,role,run_id,content_inline,
+             content_ref,content_hash,created_at
+         ) VALUES ($1,$2,$3,'user',$4,$5,$6,$7,$8)",
+    )
+    .bind(admission.user_message_id())
+    .bind(admission.conversation_id())
+    .bind(message_order)
+    .bind(run_id.as_str())
+    .bind(admission.user_content_inline())
+    .bind(admission.user_content_ref())
+    .bind(admission.user_content_hash().as_str())
+    .bind(admission.created_at())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    sqlx::query(
+        "INSERT INTO full_conversation_turns (
+             tenant_id,request_id,conversation_id,user_id,run_id,user_message_id,
+             assistant_message_id,user_content_hash,selected_context_hash,created_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    )
+    .bind(admission.tenant_id())
+    .bind(request_id)
+    .bind(admission.conversation_id())
+    .bind(admission.user_id())
+    .bind(run_id.as_str())
+    .bind(admission.user_message_id())
+    .bind(admission.assistant_message_id())
+    .bind(admission.user_content_hash().as_str())
+    .bind(admission.selected_context_hash().as_str())
+    .bind(admission.created_at())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    Ok(())
+}
+
+pub(crate) async fn insert_full_conversation_terminal_message(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    output: Option<&Value>,
+) -> Result<(), RepositoryError> {
+    let output = output.cloned().unwrap_or(Value::Null);
+    let binding = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT conversation_id,assistant_message_id,tenant_id
+         FROM full_conversation_turns WHERE run_id=$1",
+    )
+    .bind(run_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let Some((conversation_id, assistant_message_id, tenant_id)) = binding else {
+        return Ok(());
+    };
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(
+             hashtextextended($1, 6075990668891974961::bigint)
+         )",
+    )
+    .bind(&conversation_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if !sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+             SELECT 1 FROM conversations WHERE conversation_id=$1
+         )",
+    )
+    .bind(&conversation_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    {
+        return Ok(());
+    }
+    let (_, content_hash) = canonical_value(&output)?;
+    let staging_id = crate::terminal_store::terminal_artifact_staging_id(
+        &tenant_id,
+        crate::terminal_store::TerminalArtifactSourceKind::AssistantMessage,
+        run_id.as_str(),
+    );
+    let content_ref = sqlx::query_scalar::<_, String>(
+        "SELECT content_ref FROM terminal_artifact_staging
+         WHERE staging_id=$1 AND tenant_id=$2 AND source_kind='assistant_message'
+           AND source_id=$3 AND staging_state='pending'",
+    )
+    .bind(staging_id)
+    .bind(&tenant_id)
+    .bind(run_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if let Some(reference) = content_ref.as_deref() {
+        crate::terminal_store::staging_postgres::consume_terminal_artifact_stage(
+            transaction,
+            &tenant_id,
+            reference,
+            crate::terminal_store::TerminalArtifactSourceKind::AssistantMessage,
+            run_id.as_str(),
+        )
+        .await?;
+    }
+    let message_order = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(message_order),0)+1
+         FROM conversation_messages WHERE conversation_id=$1",
+    )
+    .bind(&conversation_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    sqlx::query(
+        "INSERT INTO conversation_messages (
+             message_id,conversation_id,message_order,role,run_id,content_inline,
+             content_ref,content_hash,created_at
+         ) VALUES ($1,$2,$3,'assistant',$4,$5,$6,$7,CURRENT_TIMESTAMP)",
+    )
+    .bind(&assistant_message_id)
+    .bind(&conversation_id)
+    .bind(message_order)
+    .bind(run_id.as_str())
+    .bind(content_ref.is_none().then_some(&output))
+    .bind(content_ref.as_deref())
+    .bind(content_hash.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    Ok(())
 }
 
 struct PostgresWorkNotificationStream {
@@ -706,6 +933,18 @@ impl DurableRepository for PostgresDurableRepository {
         .execute(&mut *transaction)
         .await
         .map_err(RepositoryError::storage)?;
+        if let Some(conversation) = command.full_conversation() {
+            insert_full_conversation_admission(
+                &mut transaction,
+                command.run_id(),
+                command.request_id(),
+                command.definition_id(),
+                command.deployment_revision_id(),
+                command.input(),
+                conversation,
+            )
+            .await?;
+        }
         finalize_projection_checkpoints(&mut transaction, command.run_id(), &event_id).await?;
         transaction
             .commit()
@@ -892,6 +1131,12 @@ impl DurableRepository for PostgresDurableRepository {
                 intent_hash.as_str(),
                 &event_id,
                 event_seq,
+            )
+            .await?;
+            insert_full_conversation_terminal_message(
+                &mut transaction,
+                command.run_id(),
+                model_adapter::run_transition_terminal_output(&command),
             )
             .await?;
         }

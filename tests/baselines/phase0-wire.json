@@ -833,6 +833,26 @@
       }
     }
   ],
+  "api": {
+    "run_persistence_capabilities": [
+      {
+        "persistence_mode": "full",
+        "recovery_capability": "full",
+        "event_replay": true
+      },
+      {
+        "persistence_mode": "full",
+        "recovery_capability": "restart_only",
+        "event_replay": true
+      },
+      {
+        "persistence_mode": "terminal_only",
+        "recovery_capability": "none",
+        "event_replay": false
+      }
+    ],
+    "conversation_message_cursor": "eyJtZXNzYWdlX29yZGVyIjo0MiwibWVzc2FnZV9pZCI6Im1lc3NhZ2VfcGhhc2UwIn0"
+  },
   "history": {
     "run_statuses": [
       "created",

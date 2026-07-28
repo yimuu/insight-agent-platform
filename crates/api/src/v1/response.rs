@@ -101,6 +101,16 @@ impl From<ServiceError> for ApiError {
                 "SIGNAL_TYPE_MISMATCH",
                 "signal payload does not match the wait contract",
             ),
+            "CONVERSATION_REQUEST_INVALID" => Self::new(
+                StatusCode::BAD_REQUEST,
+                "CONVERSATION_REQUEST_INVALID",
+                "conversation request is invalid",
+            ),
+            "CONVERSATION_INPUT_INVALID" => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "CONVERSATION_INPUT_INVALID",
+                "conversation message does not match the Agent input contract",
+            ),
             "AGENT_NOT_FOUND" => {
                 Self::new(StatusCode::NOT_FOUND, "AGENT_NOT_FOUND", "agent not found")
             }
@@ -113,6 +123,11 @@ impl From<ServiceError> for ApiError {
                 "graph author resource was not found",
             ),
             "RUN_NOT_FOUND" => Self::new(StatusCode::NOT_FOUND, "RUN_NOT_FOUND", "run not found"),
+            "CONVERSATION_NOT_FOUND" | "CONVERSATION_OWNERSHIP_MISMATCH" => Self::new(
+                StatusCode::NOT_FOUND,
+                "CONVERSATION_NOT_FOUND",
+                "conversation not found",
+            ),
             "ARTIFACT_NOT_FOUND" => Self::new(
                 StatusCode::NOT_FOUND,
                 "ARTIFACT_NOT_FOUND",
@@ -128,10 +143,25 @@ impl From<ServiceError> for ApiError {
                 "RUN_CAPACITY_EXCEEDED",
                 "active Run capacity is exhausted",
             ),
+            "RUN_CAPABILITY_UNAVAILABLE" => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "RUN_CAPABILITY_UNAVAILABLE",
+                "this run does not persist recovery checkpoints",
+            ),
+            "RUN_FULL_CONVERSATION_CAPABILITY_UNAVAILABLE" => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "RUN_CAPABILITY_UNAVAILABLE",
+                "Conversation-bound full Runs do not support recovery lineage",
+            ),
             "RUN_CONFLICT" => Self::new(
                 StatusCode::CONFLICT,
                 "RUN_CONFLICT",
                 "run request conflicts with current runtime state",
+            ),
+            "CONVERSATION_ARCHIVED" | "CONVERSATION_CONFLICT" => Self::new(
+                StatusCode::CONFLICT,
+                error.code(),
+                "conversation conflicts with its current state",
             ),
             "GRAPH_PUBLICATION_CONFLICT" | "GRAPH_VIEW_CONFLICT" | "GRAPH_EDIT_CONFLICT" => {
                 Self::new(
@@ -220,13 +250,19 @@ impl From<ServiceError> for ApiError {
                 "HUMAN_TASK_COMPLETION_CONFLICT",
                 "human task completion conflicts with its claim",
             ),
-            "RUN_SERVICE_STOPPING" | "RUN_SERVICE_UNAVAILABLE" | "RUN_DEPLOYMENT_UNAVAILABLE" => {
-                Self::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "RUN_SERVICE_UNAVAILABLE",
-                    "run service is unavailable",
-                )
-            }
+            "RUN_SERVICE_STOPPING"
+            | "RUN_SERVICE_UNAVAILABLE"
+            | "RUN_DEPLOYMENT_UNAVAILABLE"
+            | "TERMINAL_ONLY_UNAVAILABLE" => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "RUN_SERVICE_UNAVAILABLE",
+                "run service is unavailable",
+            ),
+            "CONVERSATION_UNAVAILABLE" => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "CONVERSATION_UNAVAILABLE",
+                "conversation service is unavailable",
+            ),
             "GRAPH_PUBLICATION_UNAVAILABLE" | "GRAPH_SURFACE_UNAVAILABLE" => Self::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 error.code(),
@@ -245,15 +281,28 @@ impl From<ServiceError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let retry_after = self.code == "RUN_CAPACITY_EXCEEDED";
-        let mut response = (
-            self.status,
-            Json(ApiResponse {
-                code: self.code,
-                message: self.message,
-                data: serde_json::json!({}),
-            }),
-        )
-            .into_response();
+        let mut response = if self.code == "RUN_CAPABILITY_UNAVAILABLE" {
+            (
+                self.status,
+                Json(serde_json::json!({
+                    "error": {
+                        "code": self.code,
+                        "message": self.message,
+                    }
+                })),
+            )
+                .into_response()
+        } else {
+            (
+                self.status,
+                Json(ApiResponse {
+                    code: self.code,
+                    message: self.message,
+                    data: serde_json::json!({}),
+                }),
+            )
+                .into_response()
+        };
         if retry_after {
             response
                 .headers_mut()
@@ -291,5 +340,61 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&conflict_body).unwrap()["code"],
             "RUN_CONFLICT"
         );
+    }
+
+    #[tokio::test]
+    async fn unavailable_terminal_only_capability_is_a_typed_422() {
+        let response = ApiError::from(ServiceError::new(
+            "RUN_CAPABILITY_UNAVAILABLE",
+            "runtime detail must not leak",
+        ))
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!response.headers().contains_key("retry-after"));
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "error": {
+                    "code": "RUN_CAPABILITY_UNAVAILABLE",
+                    "message": "this run does not persist recovery checkpoints",
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_full_conversation_capability_is_a_reason_specific_typed_422() {
+        let response = ApiError::from(ServiceError::new(
+            "RUN_FULL_CONVERSATION_CAPABILITY_UNAVAILABLE",
+            "runtime detail must not leak",
+        ))
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!response.headers().contains_key("retry-after"));
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "error": {
+                    "code": "RUN_CAPABILITY_UNAVAILABLE",
+                    "message": "Conversation-bound full Runs do not support recovery lineage",
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_ownership_mismatch_is_indistinguishable_from_not_found() {
+        let response = ApiError::from(ServiceError::new(
+            "CONVERSATION_OWNERSHIP_MISMATCH",
+            "private ownership detail",
+        ))
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        assert_eq!(body["code"], "CONVERSATION_NOT_FOUND");
+        assert!(!body.to_string().contains("ownership"));
     }
 }

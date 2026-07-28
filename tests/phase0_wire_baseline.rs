@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, Utc};
 use insight_agent_platform::{
+    api::v1::{ConversationMessageCursor, RunPersistenceCapability},
     dsl::{compile_source, CompileOptions},
     engine::{
         ActivationId, AttemptNo, DefinitionRevisionId, ExecutionEventContext,
@@ -738,6 +739,21 @@ fn outcome_baseline() -> Value {
     })
 }
 
+fn api_baseline() -> Value {
+    let cursor = ConversationMessageCursor {
+        message_order: 42,
+        message_id: "message_phase0".to_owned(),
+    };
+    json!({
+        "run_persistence_capabilities": [
+            RunPersistenceCapability::FULL,
+            RunPersistenceCapability::FULL_CONVERSATION,
+            RunPersistenceCapability::TERMINAL_ONLY,
+        ],
+        "conversation_message_cursor": cursor.encode(),
+    })
+}
+
 fn actual_baseline() -> Value {
     let source = include_str!("fixtures/dsl/linear.yaml");
     let plan = compile_source(
@@ -857,6 +873,7 @@ fn actual_baseline() -> Value {
         "legacy_run_events": legacy_events,
         "response_stream_event_types": ResponseStreamEventType::ALL,
         "response_stream_events": response_events,
+        "api": api_baseline(),
         "history": history_baseline(),
         "outcome": outcome_baseline(),
     })

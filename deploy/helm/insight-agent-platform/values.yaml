@@ -9,6 +9,24 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+agents:
+  enabled:
+    - action_demo
+    - benchmark_wait
+    - conversation_demo
+
+models:
+  # The model registry contract requires at least one alias even when the
+  # selected Agents are action-only. This inert HTTPS placeholder is never
+  # contacted by action_demo and should be overridden by model-using installs.
+  defaultBaseUrl: https://models.example.invalid/v1
+  terminalStreamBaseUrl: https://models.example.invalid/v1
+
+# Enables only deterministic qualification fixtures and private fault
+# injection. Keep false for ordinary installations.
+qualification:
+  enabled: false
+
 service:
   type: ClusterIP
   port: 3000
@@ -40,6 +58,20 @@ resources:
 runtime:
   rustLog: warn
   databasePoolMaxConnections: 10
+  # The first rollout remains full; terminal_only is an explicit opt-in.
+  defaultPersistenceMode: full
+  terminalOnly:
+    enabled: true
+    ownerLeaseSeconds: 30
+    ownerHeartbeatSeconds: 10
+    terminalCommitRetrySeconds: 10
+    runRetentionDays: 30
+    allowVolatileWaits: false
+    maxConcurrentRuns: 50
+  qualificationFaults:
+    admissionDelayMs: 0
+    postCommitDelayMs: 0
+    summaryDelayMs: 0
   maxConcurrentRuns: 16
   maxConcurrentOperations: 16
   maxConcurrentOperationsPerRun: 4
@@ -56,12 +88,29 @@ runtime:
   publicEventRetention: 1h
   publicEventPruneInterval: 1m
   readinessProbeTimeout: 2s
-  shutdownGracePeriod: 20s
-  shutdownHardDeadline: 25s
+  shutdownGracePeriod: 30s
+  shutdownHardDeadline: 35s
+  # Kubernetes must not SIGKILL the Pod before the application hard deadline.
+  terminationGracePeriodSeconds: 40
+
+conversations:
+  enabled: true
+  inlineContentMaxBytes: 8192
+  messagePageSizeDefault: 50
+  messagePageSizeMax: 200
+  summaryTriggerMessages: 30
+  summaryTriggerTokens: 24000
+  recentContextMessages: 20
+  retentionDays: 90
 
 artifacts:
   namespace: benchmark
   mountPath: /data/artifacts
+  tenantEncryption:
+    enabled: false
+    activeKeyVersion: v1
+    existingSecret: ""
+    keyringKey: keyring.json
   persistence:
     # Shared artifact authority must survive runtime Pod replacement.
     enabled: true
@@ -86,6 +135,11 @@ postgresql:
     database: insight_agent_platform
   maxConnections: 100
   sharedBuffers: 64MB
+  maxWalSize: 1GB
+  # Ordinary deployments do not retain extra WAL for qualification inspection.
+  walKeepSize: 0
+  checkpointTimeout: 5min
+  checkpointCompletionTarget: 0.9
   logLockWaits: false
   deadlockTimeout: 1s
   tls:

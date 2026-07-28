@@ -4900,6 +4900,8 @@ async fn apply_scheduler_action(
             error_code,
         )
         .await?;
+        super::sqlite::insert_full_conversation_terminal_message(transaction, run_id, output)
+            .await?;
         super::sqlite::register_terminal_artifact_retention_sqlite(
             transaction,
             run_id,

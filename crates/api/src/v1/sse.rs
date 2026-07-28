@@ -3,35 +3,312 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     convert::Infallible,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
     time::Duration,
 };
 
+use async_trait::async_trait;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::Stream;
 use insight_engine::{
-    events::protocol::{RunEvent, RunEventType},
+    events::protocol::RunEventType,
     response::{
-        DurableResponseSnapshot, LiveResponseDelivery, PublicResponse, ResponseObjectKind,
-        ResponseStatus, ResponseStreamEvent, ResponseTerminalKind, WorkflowCompleted,
-        WorkflowFailure, WorkflowStopReason, WorkflowStopped, WorkflowStreamGapAction,
+        DurableResponseSnapshot, LiveResponseBroker, LiveResponseDelivery, LiveResponseSubscriber,
+        PublicResponse, ResponseObjectKind, ResponseStatus, ResponseStreamEvent,
+        ResponseTerminalKind, WorkflowCompleted, WorkflowFailure, WorkflowStopReason,
+        WorkflowStopped, WorkflowStreamGapAction,
     },
     RunId,
 };
-use insight_runtime::AttachedRun;
+use insight_runtime::{
+    terminal_only::{TerminalAttachedRun, TerminalRunSubscription},
+    AttachedRun, ConversationStreamDelivery, ConversationStreamPrivacy,
+    ConversationVisibilityGuard, FullConversationVisibilityGuard, RunService, RunSubscription,
+};
 use serde::de::DeserializeOwned;
 use tokio::{sync::mpsc, time::Instant};
-use tokio_stream::wrappers::ReceiverStream;
 
 const OUTBOUND_EVENT_CAPACITY: usize = 32;
+
+struct OutboundEvent {
+    event: Result<Event, Infallible>,
+    terminal_barrier: Option<Arc<dyn TerminalFrameBarrier>>,
+}
+
+struct ResponseOutboundStream {
+    inner: mpsc::Receiver<OutboundEvent>,
+    conversation_privacy: Option<ConversationStreamPrivacy>,
+    delivered_conversation_privacy: Option<ConversationStreamDelivery>,
+    delivered_terminal_barrier: Option<Arc<dyn TerminalFrameBarrier>>,
+}
+
+impl ResponseOutboundStream {
+    fn new(
+        receiver: mpsc::Receiver<OutboundEvent>,
+        conversation_privacy: Option<ConversationStreamPrivacy>,
+    ) -> Self {
+        Self {
+            inner: receiver,
+            conversation_privacy,
+            delivered_conversation_privacy: None,
+            delivered_terminal_barrier: None,
+        }
+    }
+}
+
+impl Stream for ResponseOutboundStream {
+    type Item = Result<Event, Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.delivered_conversation_privacy = None;
+        if self
+            .conversation_privacy
+            .as_ref()
+            .is_some_and(ConversationStreamPrivacy::is_cancelled)
+        {
+            self.inner.close();
+            while self.inner.try_recv().is_ok() {}
+            self.delivered_terminal_barrier = None;
+            return Poll::Ready(None);
+        }
+        // A terminal fence is retained across the poll that hands the frame
+        // to Axum/Hyper. It is released only when transport asks for the next
+        // frame (or drops the stream), so privacy DELETE cannot complete in
+        // the gap between queueing and consuming the terminal frame.
+        self.delivered_terminal_barrier = None;
+        match self.inner.poll_recv(context) {
+            Poll::Ready(Some(outbound)) => {
+                if let Some(privacy) = self.conversation_privacy.clone() {
+                    let Some(delivery) = privacy.try_begin_delivery() else {
+                        self.inner.close();
+                        while self.inner.try_recv().is_ok() {}
+                        return Poll::Ready(None);
+                    };
+                    self.delivered_conversation_privacy = Some(delivery);
+                }
+                self.delivered_terminal_barrier = outbound.terminal_barrier;
+                Poll::Ready(Some(outbound.event))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Terminal-frame barrier checked after the authoritative snapshot and live
+/// tail are calibrated, immediately before the HTTP stream may publish its
+/// terminal frame.
+///
+/// Conversation turns use this seam to make the atomic
+/// `run result + assistant message` transaction an explicit transport
+/// prerequisite and to recheck privacy authority. Implementations must not
+/// carry terminal content in the barrier itself.
+#[async_trait]
+pub trait TerminalFrameBarrier: Send + Sync {
+    async fn wait_until_committed(
+        &self,
+        run_id: &str,
+        response_id: &str,
+    ) -> Result<(), TerminalFrameBarrierError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalFrameBarrierError {
+    code: &'static str,
+    message: &'static str,
+}
+
+impl TerminalFrameBarrierError {
+    pub const fn new(code: &'static str, message: &'static str) -> Self {
+        Self { code, message }
+    }
+
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub const fn message(&self) -> &'static str {
+        self.message
+    }
+}
+
+struct SnapshotCommitBarrier;
+
+#[async_trait]
+impl TerminalFrameBarrier for SnapshotCommitBarrier {
+    async fn wait_until_committed(
+        &self,
+        _run_id: &str,
+        _response_id: &str,
+    ) -> Result<(), TerminalFrameBarrierError> {
+        // For ordinary Runs the response snapshot itself is the commit
+        // authority loaded immediately before this hook.
+        Ok(())
+    }
+}
+
+struct FullConversationSnapshotCommitBarrier {
+    service: RunService,
+    conversation_id: String,
+    tenant_id: String,
+    user_id: String,
+    visibility_guard: tokio::sync::Mutex<Option<FullConversationVisibilityGuard>>,
+}
+
+struct TerminalConversationSnapshotCommitBarrier {
+    service: RunService,
+    tenant_id: String,
+    user_id: String,
+    visibility_guard: tokio::sync::Mutex<Option<ConversationVisibilityGuard>>,
+}
+
+#[async_trait]
+impl TerminalFrameBarrier for TerminalConversationSnapshotCommitBarrier {
+    async fn wait_until_committed(
+        &self,
+        run_id: &str,
+        _response_id: &str,
+    ) -> Result<(), TerminalFrameBarrierError> {
+        let guard = self
+            .service
+            .acquire_visible_terminal_conversation_run(&self.tenant_id, &self.user_id, run_id)
+            .await
+            .map_err(|_| {
+                TerminalFrameBarrierError::new(
+                    "RUN_NOT_FOUND",
+                    "Conversation Run is no longer available",
+                )
+            })?;
+        *self.visibility_guard.lock().await = Some(guard);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl TerminalFrameBarrier for FullConversationSnapshotCommitBarrier {
+    async fn wait_until_committed(
+        &self,
+        run_id: &str,
+        _response_id: &str,
+    ) -> Result<(), TerminalFrameBarrierError> {
+        let guard = self
+            .service
+            .acquire_visible_full_conversation_run(
+                &self.conversation_id,
+                &self.tenant_id,
+                &self.user_id,
+                run_id,
+            )
+            .await
+            .map_err(|_| {
+                TerminalFrameBarrierError::new(
+                    "RUN_NOT_FOUND",
+                    "Conversation Run is no longer available",
+                )
+            })?;
+        *self.visibility_guard.lock().await = Some(guard);
+        Ok(())
+    }
+}
 
 pub(crate) fn response_stream(
     attached: AttachedRun,
     keep_alive_interval: Duration,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    response_stream_with_terminal_barrier(
+        attached,
+        keep_alive_interval,
+        Arc::new(SnapshotCommitBarrier),
+    )
+}
+
+pub(crate) fn full_conversation_response_stream(
+    attached: AttachedRun,
+    keep_alive_interval: Duration,
+    service: RunService,
+    conversation_id: String,
+    tenant_id: String,
+    user_id: String,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    response_stream_with_terminal_barrier(
+        attached,
+        keep_alive_interval,
+        Arc::new(FullConversationSnapshotCommitBarrier {
+            service,
+            conversation_id,
+            tenant_id,
+            user_id,
+            visibility_guard: tokio::sync::Mutex::new(None),
+        }),
+    )
+}
+
+pub(crate) fn terminal_response_stream(
+    attached: TerminalAttachedRun,
+    keep_alive_interval: Duration,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    terminal_response_stream_with_terminal_barrier(
+        attached,
+        keep_alive_interval,
+        Arc::new(SnapshotCommitBarrier),
+    )
+}
+
+pub(crate) fn terminal_conversation_response_stream(
+    attached: TerminalAttachedRun,
+    keep_alive_interval: Duration,
+    service: RunService,
+    tenant_id: String,
+    user_id: String,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    terminal_response_stream_with_terminal_barrier(
+        attached,
+        keep_alive_interval,
+        Arc::new(TerminalConversationSnapshotCommitBarrier {
+            service,
+            tenant_id,
+            user_id,
+            visibility_guard: tokio::sync::Mutex::new(None),
+        }),
+    )
+}
+
+pub(crate) fn response_stream_with_terminal_barrier(
+    attached: AttachedRun,
+    keep_alive_interval: Duration,
+    terminal_frame_barrier: Arc<dyn TerminalFrameBarrier>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    response_stream_from_attached(
+        ResponseAttachedRun::from_durable(attached),
+        keep_alive_interval,
+        terminal_frame_barrier,
+    )
+}
+
+pub(crate) fn terminal_response_stream_with_terminal_barrier(
+    attached: TerminalAttachedRun,
+    keep_alive_interval: Duration,
+    terminal_frame_barrier: Arc<dyn TerminalFrameBarrier>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    response_stream_from_attached(
+        ResponseAttachedRun::from_terminal(attached),
+        keep_alive_interval,
+        terminal_frame_barrier,
+    )
+}
+
+fn response_stream_from_attached(
+    attached: ResponseAttachedRun,
+    keep_alive_interval: Duration,
+    terminal_frame_barrier: Arc<dyn TerminalFrameBarrier>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let outbound_write_timeout = attached.outbound_write_timeout;
+    let conversation_privacy = attached.conversation_privacy.clone();
     let (sender, receiver) = mpsc::channel(OUTBOUND_EVENT_CAPACITY);
     tokio::spawn(async move {
-        let mut dispatcher = ResponseDispatcher::new(attached);
+        let mut dispatcher = ResponseDispatcher::new(attached, terminal_frame_barrier);
         loop {
             let public_event = tokio::select! {
                 _ = sender.closed() => {
@@ -42,11 +319,26 @@ pub(crate) fn response_stream(
                     );
                     break;
                 }
+                _ = conversation_privacy_cancelled(dispatcher.conversation_privacy()) => {
+                    tracing::debug!(
+                        run_id = dispatcher.run_id(),
+                        code = "SSE_CONVERSATION_PRIVACY_DELETED",
+                        "response stream stopped before publishing more Conversation content"
+                    );
+                    break;
+                }
                 public_event = dispatcher.next_event() => match public_event {
                     Some(public_event) => public_event,
                     None => break,
                 },
             };
+            if dispatcher
+                .conversation_privacy()
+                .as_ref()
+                .is_some_and(ConversationStreamPrivacy::is_cancelled)
+            {
+                break;
+            }
             let terminal = public_event.is_terminal();
             let encoded = match encode_event(&public_event) {
                 Ok(encoded) => encoded,
@@ -60,7 +352,16 @@ pub(crate) fn response_stream(
                     break;
                 }
             };
-            match tokio::time::timeout(outbound_write_timeout, sender.send(Ok(encoded))).await {
+            let terminal_barrier = terminal.then(|| Arc::clone(&dispatcher.terminal_frame_barrier));
+            match tokio::time::timeout(
+                outbound_write_timeout,
+                sender.send(OutboundEvent {
+                    event: Ok(encoded),
+                    terminal_barrier,
+                }),
+            )
+            .await
+            {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) | Err(_) => {
                     tracing::debug!(
@@ -77,15 +378,100 @@ pub(crate) fn response_stream(
         }
     });
 
-    Sse::new(ReceiverStream::new(receiver)).keep_alive(
+    Sse::new(ResponseOutboundStream::new(receiver, conversation_privacy)).keep_alive(
         KeepAlive::new()
             .interval(keep_alive_interval)
             .text("keep-alive"),
     )
 }
 
+async fn conversation_privacy_cancelled(privacy: Option<ConversationStreamPrivacy>) {
+    match privacy {
+        Some(privacy) => privacy.cancelled().await,
+        None => futures::future::pending::<()>().await,
+    }
+}
+
+#[async_trait]
+trait TerminalSnapshotSource: Send {
+    async fn recv_terminal_snapshot(&mut self) -> Result<DurableResponseSnapshot, &'static str>;
+}
+
+#[async_trait]
+impl TerminalSnapshotSource for RunSubscription {
+    async fn recv_terminal_snapshot(&mut self) -> Result<DurableResponseSnapshot, &'static str> {
+        loop {
+            match self.recv().await {
+                Ok(event)
+                    if matches!(
+                        event.event_type,
+                        RunEventType::RunCompleted
+                            | RunEventType::RunFailed
+                            | RunEventType::RunCancelled
+                            | RunEventType::RunInterrupted
+                    ) =>
+                {
+                    return self
+                        .load_response_snapshot()
+                        .await
+                        .map_err(|error| error.code());
+                }
+                Ok(_) => {}
+                Err(error) => return Err(error.code()),
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl TerminalSnapshotSource for TerminalRunSubscription {
+    async fn recv_terminal_snapshot(&mut self) -> Result<DurableResponseSnapshot, &'static str> {
+        self.recv_terminal().await.map_err(|error| error.code())
+    }
+}
+
+struct ResponseAttachedRun {
+    run_id: String,
+    response_id: String,
+    subscription: Box<dyn TerminalSnapshotSource>,
+    live_response: Box<dyn LiveResponseSubscriber>,
+    live_response_broker: Arc<dyn LiveResponseBroker>,
+    terminal_barrier_timeout: Duration,
+    outbound_write_timeout: Duration,
+    conversation_privacy: Option<ConversationStreamPrivacy>,
+}
+
+impl ResponseAttachedRun {
+    fn from_durable(attached: AttachedRun) -> Self {
+        Self {
+            run_id: attached.run_id,
+            response_id: attached.response_id,
+            subscription: Box::new(attached.subscription),
+            live_response: attached.live_response,
+            live_response_broker: attached.live_response_broker,
+            terminal_barrier_timeout: attached.terminal_barrier_timeout,
+            outbound_write_timeout: attached.outbound_write_timeout,
+            conversation_privacy: attached.conversation_privacy,
+        }
+    }
+
+    fn from_terminal(attached: TerminalAttachedRun) -> Self {
+        Self {
+            run_id: attached.run_id,
+            response_id: attached.response_id,
+            subscription: Box::new(attached.subscription),
+            live_response: attached.live_response,
+            live_response_broker: attached.live_response_broker,
+            terminal_barrier_timeout: attached.terminal_barrier_timeout,
+            outbound_write_timeout: attached.outbound_write_timeout,
+            conversation_privacy: attached.conversation_privacy,
+        }
+    }
+}
+
 struct ResponseDispatcher {
-    attached: AttachedRun,
+    attached: ResponseAttachedRun,
+    terminal_frame_barrier: Arc<dyn TerminalFrameBarrier>,
     pending: VecDeque<ResponseStreamEvent>,
     next_sequence: u64,
     terminal_snapshot: Option<DurableResponseSnapshot>,
@@ -98,7 +484,10 @@ struct ResponseDispatcher {
 }
 
 impl ResponseDispatcher {
-    fn new(attached: AttachedRun) -> Self {
+    fn new(
+        attached: ResponseAttachedRun,
+        terminal_frame_barrier: Arc<dyn TerminalFrameBarrier>,
+    ) -> Self {
         let response = PublicResponse {
             id: attached.response_id.clone(),
             object: ResponseObjectKind::Response,
@@ -109,6 +498,7 @@ impl ResponseDispatcher {
         };
         Self {
             attached,
+            terminal_frame_barrier,
             pending: VecDeque::from([
                 ResponseStreamEvent::ResponseCreated {
                     sequence_number: 0,
@@ -132,6 +522,10 @@ impl ResponseDispatcher {
 
     fn run_id(&self) -> &str {
         &self.attached.run_id
+    }
+
+    fn conversation_privacy(&self) -> Option<ConversationStreamPrivacy> {
+        self.attached.conversation_privacy.clone()
     }
 
     fn allocate_sequence(&mut self) -> u64 {
@@ -186,29 +580,22 @@ impl ResponseDispatcher {
             }
 
             if self.live_open {
-                let durable = &mut self.attached.subscription;
+                let terminal = &mut self.attached.subscription;
                 let live = &mut self.attached.live_response;
                 tokio::select! {
-                    durable_event = durable.recv() => {
-                        match durable_event {
-                            Ok(event) if run_event_is_terminal(&event) => {
-                                if !self.begin_terminal_barrier().await {
-                                    let sequence = self.allocate_sequence();
-                                    self.done = true;
-                                    return Some(protocol_error(
-                                        sequence,
-                                        "RESPONSE_SNAPSHOT_UNAVAILABLE",
-                                        "terminal response snapshot is unavailable",
-                                    ));
+                    terminal_snapshot = terminal.recv_terminal_snapshot() => {
+                        match terminal_snapshot {
+                            Ok(snapshot) => {
+                                if let Err(error) = self.begin_terminal_barrier(snapshot).await {
+                                    return Some(self.terminal_barrier_error(error));
                                 }
                             }
-                            Ok(_) => {}
-                            Err(error) => {
+                            Err(code) => {
                                 let sequence = self.allocate_sequence();
                                 self.done = true;
                                 return Some(protocol_error(
                                     sequence,
-                                    error.code(),
+                                    code,
                                     "response stream closed before terminal calibration",
                                 ));
                             }
@@ -226,25 +613,18 @@ impl ResponseDispatcher {
                     }
                 }
             } else {
-                match self.attached.subscription.recv().await {
-                    Ok(event) if run_event_is_terminal(&event) => {
-                        if !self.begin_terminal_barrier().await {
-                            let sequence = self.allocate_sequence();
-                            self.done = true;
-                            return Some(protocol_error(
-                                sequence,
-                                "RESPONSE_SNAPSHOT_UNAVAILABLE",
-                                "terminal response snapshot is unavailable",
-                            ));
+                match self.attached.subscription.recv_terminal_snapshot().await {
+                    Ok(snapshot) => {
+                        if let Err(error) = self.begin_terminal_barrier(snapshot).await {
+                            return Some(self.terminal_barrier_error(error));
                         }
                     }
-                    Ok(_) => {}
-                    Err(error) => {
+                    Err(code) => {
                         let sequence = self.allocate_sequence();
                         self.done = true;
                         return Some(protocol_error(
                             sequence,
-                            error.code(),
+                            code,
                             "response stream closed before terminal calibration",
                         ));
                     }
@@ -253,18 +633,26 @@ impl ResponseDispatcher {
         }
     }
 
-    async fn begin_terminal_barrier(&mut self) -> bool {
-        let snapshot = match self.attached.subscription.load_response_snapshot().await {
-            Ok(snapshot) => snapshot,
-            Err(_) => return false,
-        };
+    async fn begin_terminal_barrier(
+        &mut self,
+        snapshot: DurableResponseSnapshot,
+    ) -> Result<(), TerminalFrameBarrierError> {
+        self.terminal_frame_barrier
+            .wait_until_committed(&self.attached.run_id, &self.attached.response_id)
+            .await?;
         if let Ok(run_id) = RunId::new(self.attached.run_id.clone()) {
             let _ = self.attached.live_response_broker.close_run(&run_id);
         }
         self.terminal_snapshot = Some(snapshot);
         self.terminal_barrier_deadline =
             Some(Instant::now() + self.attached.terminal_barrier_timeout);
-        true
+        Ok(())
+    }
+
+    fn terminal_barrier_error(&mut self, error: TerminalFrameBarrierError) -> ResponseStreamEvent {
+        let sequence = self.allocate_sequence();
+        self.done = true;
+        protocol_error(sequence, error.code(), error.message())
     }
 
     fn project_live_delivery(
@@ -421,16 +809,6 @@ fn protocol_error(
     }
 }
 
-fn run_event_is_terminal(event: &RunEvent) -> bool {
-    matches!(
-        event.event_type,
-        RunEventType::RunCompleted
-            | RunEventType::RunFailed
-            | RunEventType::RunCancelled
-            | RunEventType::RunInterrupted
-    )
-}
-
 fn encode_event(event: &ResponseStreamEvent) -> Result<Event, axum::Error> {
     Event::default()
         .event(event.event_type().as_str())
@@ -439,11 +817,105 @@ fn encode_event(event: &ResponseStreamEvent) -> Result<Event, axum::Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
 
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use insight_engine::{
+        response::{
+            adapter::durable_response_snapshot_new, DurableResponseSnapshot, ResponseTerminalKind,
+            ResponseUsageStatus,
+        },
+        ContentHash, RunId,
+    };
+    use insight_runtime::{InMemoryLiveResponseBroker, LiveResponseBroker};
     use serde_json::json;
+    use tokio::sync::Notify;
 
-    use super::{manifest_items_without_terminal_evidence, protocol_error};
+    use super::{
+        manifest_items_without_terminal_evidence, protocol_error, ResponseAttachedRun,
+        ResponseDispatcher, ResponseOutboundStream, SnapshotCommitBarrier, TerminalFrameBarrier,
+        TerminalFrameBarrierError, TerminalSnapshotSource,
+    };
+
+    struct UnusedTerminalSource;
+
+    #[async_trait]
+    impl TerminalSnapshotSource for UnusedTerminalSource {
+        async fn recv_terminal_snapshot(
+            &mut self,
+        ) -> Result<DurableResponseSnapshot, &'static str> {
+            panic!("terminal snapshot was installed directly by the test")
+        }
+    }
+
+    struct DeleteRaceBarrier {
+        entered: Notify,
+        release: Notify,
+        deleted: AtomicBool,
+    }
+
+    #[async_trait]
+    impl TerminalFrameBarrier for DeleteRaceBarrier {
+        async fn wait_until_committed(
+            &self,
+            _run_id: &str,
+            _response_id: &str,
+        ) -> Result<(), TerminalFrameBarrierError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            if self.deleted.load(Ordering::Acquire) {
+                Err(TerminalFrameBarrierError::new(
+                    "RUN_NOT_FOUND",
+                    "Conversation Run is no longer available",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn terminal_snapshot_with_marker(marker: &str) -> DurableResponseSnapshot {
+        let response_id = "resp_privacy_race".to_owned();
+        let response = json!({
+            "id": response_id,
+            "object": "response",
+            "status": "completed",
+            "output": [{"marker": marker}],
+            "usage": null,
+            "error": null
+        });
+        let workflow = json!({"output": {"marker": marker}});
+        let manifest = json!([]);
+        let projection = json!({
+            "response_id": response_id,
+            "terminal_kind": "response.completed",
+            "response": response,
+            "workflow": workflow,
+            "public_item_manifest": manifest,
+            "usage": serde_json::Value::Null,
+            "usage_status": "unavailable",
+        });
+        let hash = ContentHash::from_bytes(&serde_jcs::to_vec(&projection).unwrap());
+        durable_response_snapshot_new(
+            response_id,
+            ResponseTerminalKind::Completed,
+            response,
+            workflow,
+            manifest,
+            None,
+            ResponseUsageStatus::Unavailable,
+            hash,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn response_stream_envelope_has_no_replay_id() {
@@ -476,6 +948,135 @@ mod tests {
                 &BTreeMap::from([("msg_completed".to_owned(), 7)]),
             ),
             vec![("msg_completed".to_owned(), 1, 8)]
+        );
+    }
+
+    #[tokio::test]
+    async fn privacy_delete_after_commit_before_terminal_frame_cannot_leak_snapshot() {
+        const PRIVATE_MARKER: &str = "private-terminal-marker";
+        let run_id = RunId::new("run_privacy_race").unwrap();
+        let broker = Arc::new(InMemoryLiveResponseBroker::new(4, 4).unwrap());
+        let live_response = broker.subscribe(run_id.clone()).await.unwrap();
+        let barrier = Arc::new(DeleteRaceBarrier {
+            entered: Notify::new(),
+            release: Notify::new(),
+            deleted: AtomicBool::new(false),
+        });
+        let attached = ResponseAttachedRun {
+            run_id: run_id.to_string(),
+            response_id: "resp_privacy_race".to_owned(),
+            subscription: Box::new(UnusedTerminalSource),
+            live_response,
+            live_response_broker: broker,
+            terminal_barrier_timeout: Duration::from_secs(1),
+            outbound_write_timeout: Duration::from_secs(1),
+            conversation_privacy: None,
+        };
+        let mut dispatcher = ResponseDispatcher::new(attached, barrier.clone());
+        dispatcher.pending.clear();
+        dispatcher.live_open = false;
+
+        let snapshot = terminal_snapshot_with_marker(PRIVATE_MARKER);
+        let next = tokio::spawn(async move {
+            if let Err(error) = dispatcher.begin_terminal_barrier(snapshot).await {
+                return dispatcher.terminal_barrier_error(error);
+            }
+            dispatcher.next_event().await.unwrap()
+        });
+        barrier.entered.notified().await;
+        // This models DELETE completing after the result commit while the
+        // terminal-frame authority check is deliberately paused.
+        barrier.deleted.store(true, Ordering::Release);
+        barrier.release.notify_one();
+
+        let event = next.await.unwrap();
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert_eq!(event.event_type().as_str(), "error");
+        assert!(!encoded.contains(PRIVATE_MARKER));
+        assert!(encoded.contains("RUN_NOT_FOUND"));
+    }
+
+    #[tokio::test]
+    async fn transport_retains_terminal_fence_until_frame_is_consumed() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let barrier: Arc<dyn TerminalFrameBarrier> = Arc::new(SnapshotCommitBarrier);
+        sender
+            .send(super::OutboundEvent {
+                event: Ok(axum::response::sse::Event::default().event("response.completed")),
+                terminal_barrier: Some(Arc::clone(&barrier)),
+            })
+            .await
+            .unwrap();
+        drop(sender);
+        let mut stream = ResponseOutboundStream::new(receiver, None);
+
+        assert!(stream.next().await.is_some());
+        assert_eq!(
+            Arc::strong_count(&barrier),
+            2,
+            "transport must retain the privacy fence with the delivered terminal frame"
+        );
+        assert!(stream.next().await.is_none());
+        assert_eq!(Arc::strong_count(&barrier), 1);
+    }
+
+    #[tokio::test]
+    async fn privacy_delete_discards_already_buffered_live_delta() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let privacy = insight_runtime::ConversationStreamPrivacy::new();
+        sender
+            .send(super::OutboundEvent {
+                event: Ok(axum::response::sse::Event::default()
+                    .event("response.output_text.delta")
+                    .data("private-buffered-delta")),
+                terminal_barrier: None,
+            })
+            .await
+            .unwrap();
+        privacy.cancel();
+
+        let mut stream = ResponseOutboundStream::new(receiver, Some(privacy));
+        assert!(
+            stream.next().await.is_none(),
+            "a buffered private delta must not be observable after privacy deletion starts"
+        );
+        assert!(sender.is_closed());
+    }
+
+    #[tokio::test]
+    async fn privacy_delete_waits_for_in_flight_poll_and_no_frame_follows_completion() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let privacy = insight_runtime::ConversationStreamPrivacy::new();
+        for marker in ["linearized-before-delete", "must-never-follow-delete"] {
+            sender
+                .send(super::OutboundEvent {
+                    event: Ok(axum::response::sse::Event::default()
+                        .event("response.output_text.delta")
+                        .data(marker)),
+                    terminal_barrier: None,
+                })
+                .await
+                .unwrap();
+        }
+        drop(sender);
+        let mut stream = ResponseOutboundStream::new(receiver, Some(privacy.clone()));
+        assert!(stream.next().await.is_some());
+
+        let mut deletion = tokio::spawn(async move { privacy.cancel_and_wait().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut deletion)
+                .await
+                .is_err(),
+            "DELETE must not complete while a frame delivery poll is in flight"
+        );
+        assert!(
+            stream.next().await.is_none(),
+            "the buffered post-cancel frame must be discarded"
+        );
+        deletion.await.unwrap();
+        assert!(
+            stream.next().await.is_none(),
+            "no frame may be delivered after DELETE completes"
         );
     }
 }

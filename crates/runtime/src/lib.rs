@@ -9,8 +9,14 @@ pub mod response_stream;
 pub mod retrieval_adapter;
 pub mod run_service;
 pub mod scheduler_runtime;
+pub mod terminal_execution;
+pub mod terminal_only;
 
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
+pub use insight_durable::terminal_store::{
+    Conversation, ConversationContent, ConversationMessage, ConversationMessagePage,
+    ConversationRole, MessageCursor,
+};
 pub use insight_engine::execution::{RunError, RunErrorKind};
 pub use response_stream::{
     CompletedFunctionCallPublication, CompletedFunctionCallTailPublication,
@@ -30,9 +36,20 @@ pub use response_stream::{
     RESPONSE_STREAM_PROTOCOL_VERSION,
 };
 pub use run_service::{
-    AttachedRun, DeployedAgentCatalog, ForkRecoveryOptions, GraphPublication,
-    MigrationNodeMappingRequest, ProductionRunRepository, PublicArtifact, RecoveryOperation,
-    RecoveryRequestMetadata, RecoveryReusePolicy, RecoveryRunResult, RequestMetadata,
-    RunRepositoryCapability, RunService, RunServiceConfig, RunSubscription, ServiceError,
-    SubscriptionError, WorkCoordinatorConfig,
+    AnyAttachedRun, AttachedRun, ConversationResponseVisibilityGuard, ConversationStreamDelivery,
+    ConversationStreamPrivacy, DeployedAgentCatalog, ForkRecoveryOptions,
+    FullConversationVisibilityGuard, GraphPublication, MigrationNodeMappingRequest,
+    ProductionRunRepository, PublicArtifact, RecoveryOperation, RecoveryRequestMetadata,
+    RecoveryReusePolicy, RecoveryRunResult, RequestMetadata, RunRepositoryCapability, RunService,
+    RunServiceConfig, RunSubscription, ServiceError, SubscriptionError, WorkCoordinatorConfig,
+};
+pub use terminal_execution::{
+    execute_terminal_plan, TerminalExecutionConfig, TerminalExecutionError,
+    TerminalExecutionOutcome, TerminalFailureKind,
+};
+pub use terminal_only::{
+    ConversationAttachedTurn, ConversationDetachedTurn, ConversationMessagePageView,
+    ConversationMessageView, ConversationVisibilityGuard, RecoveryCapability,
+    RunPersistenceCapability, TerminalAttachedRun, TerminalOnlyRunConfig, TerminalOnlyRunEngine,
+    TerminalOnlyStore, TerminalRunSubscription,
 };

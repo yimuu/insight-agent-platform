@@ -1605,7 +1605,9 @@ fn model_run_id(value: String) -> Result<RunId, RepositoryError> {
 mod tests {
     use chrono::{DateTime, Utc};
     use insight_durable::model::adapter as model_adapter;
-    use insight_durable::{CreateRunCommand, DurableRepository, VersionedPlan};
+    use insight_durable::{
+        CreateRunCommand, DurableRepository, PublicEventNotificationStream, VersionedPlan,
+    };
     use insight_engine::{
         ActivationId, AdmissionState, AttemptNo, ContentHash, DefinitionRevisionId,
         DeploymentRevisionId, ExecutionEventContext, ExecutionEventEnvelope, ExecutionEventPayload,
@@ -1676,6 +1678,23 @@ mod tests {
         SqliteDurableRepository::connect_path(database)
             .await
             .unwrap()
+    }
+
+    async fn recv_public_notification_for(
+        listener: &mut dyn PublicEventNotificationStream,
+        expected_id: &str,
+        timeout_message: &str,
+    ) -> String {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let notification = tokio::time::timeout_at(deadline, listener.recv())
+                .await
+                .expect(timeout_message)
+                .unwrap();
+            if notification == expected_id {
+                return notification;
+            }
+        }
     }
 
     #[tokio::test]
@@ -3617,11 +3636,12 @@ mod tests {
             .publish_public_event(&created[0], 60)
             .await
             .unwrap());
-        let created_notification =
-            tokio::time::timeout(std::time::Duration::from_secs(5), listener.recv())
-                .await
-                .expect("run.created publication must wake the listener")
-                .unwrap();
+        let created_notification = recv_public_notification_for(
+            listener.as_mut(),
+            created[0].public_event_id(),
+            "run.created publication must wake the listener",
+        )
+        .await;
         assert_eq!(created_notification, created[0].public_event_id());
 
         let first = repository
@@ -3654,10 +3674,12 @@ mod tests {
             .await
             .unwrap());
 
-        let notification = tokio::time::timeout(std::time::Duration::from_secs(5), listener.recv())
-            .await
-            .expect("committed publication must wake the listener")
-            .unwrap();
+        let notification = recv_public_notification_for(
+            listener.as_mut(),
+            winner[0].public_event_id(),
+            "committed publication must wake the listener",
+        )
+        .await;
         assert_eq!(notification, winner[0].public_event_id());
 
         let durable = repository
@@ -3809,11 +3831,12 @@ mod tests {
             .publish_public_event(&retention_claim, 1)
             .await
             .unwrap());
-        let retention_notification =
-            tokio::time::timeout(std::time::Duration::from_secs(5), listener.recv())
-                .await
-                .expect("nonterminal publication must also wake the listener")
-                .unwrap();
+        let retention_notification = recv_public_notification_for(
+            listener.as_mut(),
+            &retention_event_id,
+            "nonterminal publication must also wake the listener",
+        )
+        .await;
         assert_eq!(retention_notification, retention_event_id);
 
         let (published_at, retain_until) =

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use insight_dsl::{CompileOptions, GraphAuthorDocument, GraphDocumentId};
 use insight_engine::{
@@ -7,16 +7,18 @@ use insight_engine::{
         DescriptorValue, LeafTaskDescriptor, LeafTaskKind, PlanIndex, SubflowContractRegistry,
         ValueSource, VersionTag,
     },
-    ContentHash, DefinitionRevisionId, NodeId,
+    ContentHash, DefinitionRevisionId, EffectIdempotency, NodeId, PersistenceMode,
+    WorkerCancellation, WorkerEffectClass, WorkerEffectPolicy,
 };
 use insight_runtime::catalog::{
-    compile_agent_dir, compile_enabled_agents, deploy_agents, AgentStreamingContract,
-    DeployedAgent, DeploymentRiskCode, DeploymentRiskDiagnostic, DeploymentRiskSeverity,
-    LeafDeploymentResolver, PublishedAgent, ResolvedLeafDeployment,
+    compile_agent_dir, compile_enabled_agents, deploy_agents, deploy_agents_with_persistence,
+    AgentStreamingContract, DeployedAgent, DeploymentPersistencePolicy, DeploymentRiskCode,
+    DeploymentRiskDiagnostic, DeploymentRiskSeverity, LeafDeploymentResolver, PublishedAgent,
+    ResolvedLeafDeployment, TerminalOnlyDeploymentConfig,
 };
 use serde_json::json;
 
-#[allow(unused_macros)]
+#[macro_use]
 #[path = "../../../tests/support/workspace_assets.rs"]
 mod workspace_assets;
 
@@ -40,14 +42,82 @@ impl LeafDeploymentResolver for FixtureResolver {
     }
 }
 
+struct SafeFixtureResolver;
+
+impl LeafDeploymentResolver for SafeFixtureResolver {
+    fn resolve_leaf(
+        &self,
+        kind: LeafTaskKind,
+        descriptor: &LeafTaskDescriptor,
+    ) -> Result<ResolvedLeafDeployment, CompileError> {
+        let resolved = FixtureResolver.resolve_leaf(kind, descriptor)?;
+        let effect_policy = WorkerEffectPolicy::frozen(
+            WorkerEffectClass::ReadOnly,
+            EffectIdempotency::Idempotent,
+            1,
+            0,
+            0,
+            20,
+            WorkerCancellation::Cooperative,
+        )
+        .unwrap();
+        Ok(resolved.with_effect_policy(effect_policy))
+    }
+}
+
+struct RetryingFixtureResolver;
+
+impl LeafDeploymentResolver for RetryingFixtureResolver {
+    fn resolve_leaf(
+        &self,
+        kind: LeafTaskKind,
+        descriptor: &LeafTaskDescriptor,
+    ) -> Result<ResolvedLeafDeployment, CompileError> {
+        let resolved = FixtureResolver.resolve_leaf(kind, descriptor)?;
+        Ok(resolved.with_effect_policy(
+            WorkerEffectPolicy::frozen(
+                WorkerEffectClass::ReadOnly,
+                EffectIdempotency::Idempotent,
+                2,
+                1,
+                1,
+                10,
+                WorkerCancellation::Cooperative,
+            )
+            .unwrap(),
+        ))
+    }
+}
+
+fn published_fixture(id: &str, source: &str) -> Arc<PublishedAgent> {
+    let graph = GraphAuthorDocument::from_structured_source(
+        GraphDocumentId::new(format!("{id}_graph")).unwrap(),
+        source,
+        CompileOptions::new(
+            DefinitionRevisionId::new(format!("{id}_definition_revision")).unwrap(),
+            format!("{id}/agent.yaml"),
+            source,
+        ),
+    )
+    .unwrap();
+    Arc::new(PublishedAgent::from_verified_graph(id, id, "persistence fixture", graph).unwrap())
+}
+
 #[test]
 fn all_checked_in_agents_compile_into_verified_immutable_revisions() {
     let root = workspace_assets::workspace_path("agents");
     let enabled = BTreeSet::from([
         "action_demo".to_owned(),
+        "benchmark_wait".to_owned(),
+        "conversation_context_probe".to_owned(),
+        "conversation_demo".to_owned(),
         "medical_report_interpreter".to_owned(),
         "parallel_researcher".to_owned(),
         "researcher".to_owned(),
+        "terminal_commit_fixture".to_owned(),
+        "terminal_failure_fixture".to_owned(),
+        "terminal_llm_failure_fixture".to_owned(),
+        "terminal_stream_fixture".to_owned(),
         "workflow_failure_demo".to_owned(),
     ]);
     let catalog = compile_enabled_agents(&root, &enabled).unwrap();
@@ -62,6 +132,68 @@ fn all_checked_in_agents_compile_into_verified_immutable_revisions() {
             agent.definition_revision_id()
         );
     }
+}
+
+fn qualification_overlay_enabled_agents() -> BTreeSet<String> {
+    let values = workspace_asset_str!(
+        "deploy/helm/insight-agent-platform/values-terminal-only-qualification.yaml"
+    );
+    let enabled_marker = "  enabled:\n";
+    let enabled_start = values
+        .find(enabled_marker)
+        .expect("qualification values must contain agents.enabled")
+        + enabled_marker.len();
+    values[enabled_start..]
+        .lines()
+        .take_while(|line| line.starts_with("    - "))
+        .map(|line| line.trim_start_matches("    - ").to_owned())
+        .collect()
+}
+
+#[test]
+fn qualification_helm_catalog_resolves_without_a_durable_coordinator() {
+    let values = workspace_asset_str!(
+        "deploy/helm/insight-agent-platform/values-terminal-only-qualification.yaml"
+    );
+    assert!(
+        values.contains("defaultPersistenceMode: terminal_only"),
+        "qualification Helm values must retain the terminal-only process default"
+    );
+
+    let enabled = qualification_overlay_enabled_agents();
+    assert!(!enabled.is_empty());
+    assert!(!enabled.contains("benchmark_wait"));
+    let catalog =
+        compile_enabled_agents(&workspace_assets::workspace_path("agents"), &enabled).unwrap();
+    let deployment_config =
+        TerminalOnlyDeploymentConfig::new(true, true, Duration::from_secs(30)).unwrap();
+    let graph_policy = deployment_config
+        .resolve(PersistenceMode::TerminalOnly)
+        .unwrap();
+    let resolved = catalog
+        .list()
+        .map(|agent| {
+            deployment_config
+                .resolve(
+                    agent
+                        .declared_persistence_mode()
+                        .unwrap_or(PersistenceMode::TerminalOnly),
+                )
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(resolved
+        .iter()
+        .all(|policy| policy.persistence_mode() == PersistenceMode::TerminalOnly));
+    let durable_coordinator_enabled = graph_policy.persistence_mode() == PersistenceMode::Full
+        || resolved
+            .iter()
+            .any(|policy| policy.persistence_mode() == PersistenceMode::Full);
+    assert!(
+        !durable_coordinator_enabled,
+        "qualification catalog must not start durable background pumps"
+    );
 }
 
 #[test]
@@ -402,6 +534,253 @@ fn deployment_publication_contextually_links_every_leaf_and_freezes_binding_iden
     assert!(stored["author_document"]
         .as_object()
         .is_some_and(|document| !document.contains_key("input_normalization")));
+}
+
+#[test]
+fn persistence_policy_is_immutable_and_part_of_deployment_identity() {
+    let source = r#"api_version: insight.agent/v1
+kind: agent
+inputs: {}
+output: string
+workflow:
+  steps:
+    - return: done
+"#;
+    let published = published_fixture("persistence_identity", source);
+    let full = DeployedAgent::publish(
+        Arc::clone(&published),
+        &FixtureResolver,
+        SubflowContractRegistry::new(),
+    )
+    .unwrap();
+    let terminal = DeployedAgent::publish_with_persistence_policy(
+        published,
+        &FixtureResolver,
+        SubflowContractRegistry::new(),
+        DeploymentPersistencePolicy::terminal_only(false, Duration::from_secs(30)).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(full.persistence_mode(), PersistenceMode::Full);
+    assert_eq!(terminal.persistence_mode(), PersistenceMode::TerminalOnly);
+    assert_ne!(
+        full.versioned_plan().binding_hash(),
+        terminal.versioned_plan().binding_hash()
+    );
+    assert_ne!(
+        full.deployment_revision_id(),
+        terminal.deployment_revision_id()
+    );
+    let wire = serde_json::to_value(terminal.versioned_plan()).unwrap();
+    assert!(wire["resolved_bindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|document| {
+            document["deployment_policy"]["persistence_mode"] == json!("terminal_only")
+                && document["deployment_policy"]["allow_volatile_waits"] == json!(false)
+                && document["deployment_policy"]["execution_budget_ms"] == json!(30_000)
+        }));
+}
+
+#[test]
+fn omitted_deployment_policy_defaults_to_full_and_explicit_terminal_only_obeys_feature_gate() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("terminal_agent");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("agent.yaml"),
+        r#"api_version: insight.agent/v1
+kind: agent
+metadata:
+  id: terminal_agent
+  name: Terminal Agent
+execution:
+  persistence_mode: terminal_only
+inputs: {}
+output: string
+workflow:
+  steps:
+    - return: done
+"#,
+    )
+    .unwrap();
+    let enabled = BTreeSet::from(["terminal_agent".to_owned()]);
+    let catalog = compile_enabled_agents(directory.path(), &enabled).unwrap();
+    assert_eq!(
+        catalog
+            .get("terminal_agent")
+            .unwrap()
+            .declared_persistence_mode(),
+        Some(PersistenceMode::TerminalOnly)
+    );
+
+    let disabled = deploy_agents(&catalog, &FixtureResolver).unwrap_err();
+    assert_eq!(disabled.code(), "TERMINAL_ONLY_DISABLED");
+
+    let terminal = deploy_agents_with_persistence(
+        &catalog,
+        &FixtureResolver,
+        PersistenceMode::Full,
+        TerminalOnlyDeploymentConfig::new(true, false, Duration::from_secs(30)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        terminal[0].persistence_mode(),
+        PersistenceMode::TerminalOnly
+    );
+
+    let implicit = published_fixture(
+        "implicit_full",
+        "api_version: insight.agent/v1\nkind: agent\ninputs: {}\noutput: string\nworkflow:\n  steps:\n    - return: done\n",
+    );
+    let implicit =
+        DeployedAgent::publish(implicit, &FixtureResolver, SubflowContractRegistry::new()).unwrap();
+    assert_eq!(implicit.persistence_mode(), PersistenceMode::Full);
+}
+
+#[test]
+fn terminal_only_validator_rejects_durable_waits_long_timers_and_effect_fences() {
+    let terminal_policy =
+        DeploymentPersistencePolicy::terminal_only(false, Duration::from_millis(20)).unwrap();
+    let volatile_policy =
+        DeploymentPersistencePolicy::terminal_only(true, Duration::from_millis(20)).unwrap();
+
+    let signal = published_fixture(
+        "terminal_signal",
+        "api_version: insight.agent/v1\nkind: agent\ninputs: {}\noutput: string\nworkflow:\n  steps:\n    - id: gate\n      wait: {signal: continue, response: string}\n    - return: $gate\n",
+    );
+    let error = DeployedAgent::publish_with_persistence_policy(
+        signal,
+        &FixtureResolver,
+        SubflowContractRegistry::new(),
+        volatile_policy,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "TERMINAL_ONLY_WORKFLOW_INCOMPATIBLE");
+
+    let short_timer = published_fixture(
+        "terminal_short_timer",
+        "api_version: insight.agent/v1\nkind: agent\ninputs: {}\noutput: string\nworkflow:\n  steps:\n    - id: delay\n      wait: {duration_ms: 20}\n    - return: done\n",
+    );
+    DeployedAgent::publish_with_persistence_policy(
+        short_timer,
+        &FixtureResolver,
+        SubflowContractRegistry::new(),
+        volatile_policy,
+    )
+    .unwrap();
+
+    let long_timer = published_fixture(
+        "terminal_long_timer",
+        "api_version: insight.agent/v1\nkind: agent\ninputs: {}\noutput: string\nworkflow:\n  steps:\n    - id: delay\n      wait: {duration_ms: 21}\n    - return: done\n",
+    );
+    let error = DeployedAgent::publish_with_persistence_policy(
+        long_timer,
+        &FixtureResolver,
+        SubflowContractRegistry::new(),
+        volatile_policy,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "TERMINAL_ONLY_WORKFLOW_INCOMPATIBLE");
+
+    let loop_without_deadline = published_fixture(
+        "terminal_unbounded_loop",
+        "api_version: insight.agent/v1\nkind: agent\ninputs: {seed: string}\noutput: string\nworkflow:\n  steps:\n    - id: repeat\n      loop:\n        initial: $seed\n        until: true\n        max_iterations: 2\n        steps:\n          - id: next_state\n            type: retrieval\n            retrieval: fixture.search\n            inputs: {query: $state}\n            response: string\n          - yield: $next_state\n    - return: $repeat\n",
+    );
+    let error = DeployedAgent::publish_with_persistence_policy(
+        loop_without_deadline,
+        &SafeFixtureResolver,
+        SubflowContractRegistry::new(),
+        volatile_policy,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "TERMINAL_ONLY_WORKFLOW_INCOMPATIBLE");
+
+    let bounded_loop = published_fixture(
+        "terminal_bounded_loop",
+        "api_version: insight.agent/v1\nkind: agent\ninputs: {seed: string}\noutput: string\nworkflow:\n  steps:\n    - id: repeat\n      loop:\n        initial: $seed\n        until: true\n        max_iterations: 2\n        deadline_ms: 20\n        steps:\n          - id: next_state\n            type: retrieval\n            retrieval: fixture.search\n            inputs: {query: $state}\n            response: string\n          - yield: $next_state\n    - return: $repeat\n",
+    );
+    DeployedAgent::publish_with_persistence_policy(
+        bounded_loop,
+        &SafeFixtureResolver,
+        SubflowContractRegistry::new(),
+        DeploymentPersistencePolicy::terminal_only(true, Duration::from_millis(40)).unwrap(),
+    )
+    .unwrap();
+
+    let human = published_fixture(
+        "terminal_human",
+        "api_version: insight.agent/v1\nkind: agent\ninputs: {}\noutput: string\nworkflow:\n  steps:\n    - id: review\n      human_task: {signal: review, request: Review, response: string}\n    - return: $review\n",
+    );
+    let error = DeployedAgent::publish_with_persistence_policy(
+        human,
+        &FixtureResolver,
+        SubflowContractRegistry::new(),
+        volatile_policy,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "TERMINAL_ONLY_WORKFLOW_INCOMPATIBLE");
+
+    let fenced_action = published_fixture(
+        "terminal_fenced_action",
+        "api_version: insight.agent/v1\nkind: agent\ninputs: {}\noutput: string\nworkflow:\n  steps:\n    - type: action\n      id: mutate\n      call: fixture.mutate\n      inputs: {}\n      response: string\n    - return: $mutate\n",
+    );
+    let error = DeployedAgent::publish_with_persistence_policy(
+        fenced_action,
+        &FixtureResolver,
+        SubflowContractRegistry::new(),
+        terminal_policy,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "TERMINAL_ONLY_WORKFLOW_INCOMPATIBLE");
+}
+
+#[test]
+fn terminal_only_validator_rejects_worker_retry_and_aggregate_workflow_over_budget() {
+    let policy =
+        DeploymentPersistencePolicy::terminal_only(true, Duration::from_millis(20)).unwrap();
+    let worker = published_fixture(
+        "terminal_retry_budget",
+        "api_version: insight.agent/v1\nkind: agent\ninputs: {query: string}\noutput: string\nworkflow:\n  steps:\n    - id: search\n      type: retrieval\n      retrieval: fixture.search\n      inputs: {query: $query}\n      response: string\n    - return: $search\n",
+    );
+    let error = DeployedAgent::publish_with_persistence_policy(
+        worker,
+        &RetryingFixtureResolver,
+        SubflowContractRegistry::new(),
+        policy,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "TERMINAL_ONLY_WORKFLOW_INCOMPATIBLE");
+    assert!(error.message().contains("retry, backoff, and timeout"));
+
+    let aggregate = published_fixture(
+        "terminal_aggregate_budget",
+        "api_version: insight.agent/v1\nkind: agent\ninputs: {query: string}\noutput: string\nworkflow:\n  steps:\n    - id: delay\n      wait: {duration_ms: 10}\n    - id: search\n      type: retrieval\n      retrieval: fixture.search\n      inputs: {query: $query}\n      response: string\n    - return: $search\n",
+    );
+    let error = DeployedAgent::publish_with_persistence_policy(
+        aggregate,
+        &SafeFixtureResolver,
+        SubflowContractRegistry::new(),
+        policy,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "TERMINAL_ONLY_WORKFLOW_INCOMPATIBLE");
+    assert!(error.message().contains("conservative workflow"));
+
+    let loop_then_timer = published_fixture(
+        "terminal_loop_then_timer_budget",
+        "api_version: insight.agent/v1\nkind: agent\ninputs: {seed: string}\noutput: string\nworkflow:\n  steps:\n    - id: repeat\n      loop:\n        initial: $seed\n        until: true\n        max_iterations: 2\n        deadline_ms: 20\n        steps:\n          - id: next_state\n            type: retrieval\n            retrieval: fixture.search\n            inputs: {query: $state}\n            response: string\n          - yield: $next_state\n    - id: delay\n      wait: {duration_ms: 1}\n    - return: $repeat\n",
+    );
+    let error = DeployedAgent::publish_with_persistence_policy(
+        loop_then_timer,
+        &SafeFixtureResolver,
+        SubflowContractRegistry::new(),
+        DeploymentPersistencePolicy::terminal_only(true, Duration::from_millis(40)).unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "TERMINAL_ONLY_WORKFLOW_INCOMPATIBLE");
+    assert!(error.message().contains("conservative workflow"));
 }
 
 #[test]

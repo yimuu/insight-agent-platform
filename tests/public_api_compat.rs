@@ -8,7 +8,11 @@ use std::{future::Future, sync::Arc};
 
 use axum::{http::HeaderMap, Router};
 use insight_agent_platform::{
-    api::v1::{build_router, ApiAuth, ApiState, HumanPrincipalResolver, ResolvedHumanPrincipal},
+    api::v1::{
+        build_router, ApiAuth, ApiState, ConversationMessageCursor, HumanPrincipalResolver,
+        RecoveryCapability, ResolvedHumanPrincipal, RunDto, RunPersistenceCapability,
+        TerminalFrameBarrier,
+    },
     config::AuthConfig,
     dsl::{
         compile_source, CompileError, CompileOptions, GraphAuthorDocument, GraphSurfaceRepository,
@@ -115,6 +119,36 @@ fn root_facade_keeps_key_paths_signatures_and_type_identity() {
 
     fn accept_run_service(_: RunService) {}
     let _ = accept_run_service as fn(RunService);
+
+    fn api_persistence_mode_is_engine_persistence_mode(
+        mode: insight_agent_platform::engine::PersistenceMode,
+    ) -> insight_agent_platform::api::v1::PersistenceMode {
+        mode
+    }
+    let _ = api_persistence_mode_is_engine_persistence_mode
+        as fn(
+            insight_agent_platform::engine::PersistenceMode,
+        ) -> insight_agent_platform::api::v1::PersistenceMode;
+
+    let capability = RunPersistenceCapability::TERMINAL_ONLY;
+    assert_eq!(capability.recovery_capability, RecoveryCapability::None);
+    assert!(!capability.event_replay);
+    let full_conversation = RunPersistenceCapability::FULL_CONVERSATION;
+    assert_eq!(
+        full_conversation.recovery_capability,
+        RecoveryCapability::RestartOnly
+    );
+    assert!(full_conversation.event_replay);
+    let cursor = ConversationMessageCursor {
+        message_order: 1,
+        message_id: "message-1".to_owned(),
+    };
+    assert!(!cursor.encode().is_empty());
+
+    fn accept_run_dto(_: RunDto) {}
+    let _ = accept_run_dto as fn(RunDto);
+    fn accept_terminal_frame_barrier(_: Arc<dyn TerminalFrameBarrier>) {}
+    let _ = accept_terminal_frame_barrier as fn(Arc<dyn TerminalFrameBarrier>);
 
     // These inherent methods currently cross the intended workspace crate
     // boundary.  Their exact downstream call signatures must remain usable

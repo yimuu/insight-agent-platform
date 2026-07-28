@@ -32,6 +32,7 @@ jsonschema = { version = "0.47", default-features = false }
 log = "0.4"
 regex = "=1.13.0"
 reqwest = { version = "0.13", features = ["json", "stream", "rustls"], default-features = false }
+ring = "0.17"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.2"

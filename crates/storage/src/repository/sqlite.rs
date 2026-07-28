@@ -4,6 +4,7 @@ use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
+use serde_json::Value;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
     Row, Sqlite, SqlitePool, Transaction,
@@ -48,9 +49,10 @@ use super::sqlite_projection::{
 };
 use super::{
     CommitReceipt, CreateRunCommand, DurableRepository, DurableResponseSnapshot,
-    PlanInstallOutcome, PlanPublicationOutcome, PublicationHead, PublicationOrigin,
-    PublishVersionedPlanCommand, RepositoryError, RunProjection, RunTransitionCommand,
-    VersionedPlan, VersionedPlanCatalog, REPOSITORY_PLAN_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
+    FullConversationRunAdmission, PlanInstallOutcome, PlanPublicationOutcome, PublicationHead,
+    PublicationOrigin, PublishVersionedPlanCommand, RepositoryError, RunProjection,
+    RunTransitionCommand, VersionedPlan, VersionedPlanCatalog, REPOSITORY_CONSTRAINT_CONFLICT,
+    REPOSITORY_PLAN_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
 };
 
 fn plan_conflict() -> RepositoryError {
@@ -65,6 +67,214 @@ fn run_not_found() -> RepositoryError {
         REPOSITORY_RUN_NOT_FOUND,
         "durable workflow run was not found",
     )
+}
+
+fn conversation_conflict() -> RepositoryError {
+    RepositoryError::new(
+        REPOSITORY_CONSTRAINT_CONFLICT,
+        "durable Conversation admission conflicts with stored authority",
+    )
+}
+
+async fn insert_full_conversation_admission(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &RunId,
+    request_id: &str,
+    definition_id: &str,
+    deployment_revision_id: &DeploymentRevisionId,
+    input: &Value,
+    admission: &FullConversationRunAdmission,
+) -> Result<(), RepositoryError> {
+    let user_content = match admission.user_content_inline() {
+        Some(inline) => {
+            let (canonical, actual_content_hash) = canonical_value(inline)?;
+            if &actual_content_hash != admission.user_content_hash() {
+                return Err(RepositoryError::invalid_data());
+            }
+            Some(canonical)
+        }
+        None => None,
+    };
+    let input_message = input
+        .get("message")
+        .ok_or_else(RepositoryError::invalid_data)?;
+    let input_context = input
+        .get("conversation_context")
+        .ok_or_else(RepositoryError::invalid_data)?;
+    let (_, input_message_hash) = canonical_value(input_message)?;
+    let (_, input_context_hash) = canonical_value(input_context)?;
+    if &input_message_hash != admission.user_content_hash()
+        || &input_context_hash != admission.selected_context_hash()
+    {
+        return Err(RepositoryError::invalid_data());
+    }
+    let conversation = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+        "SELECT agent_id,persistence_mode,deployment_revision_id,archived_at
+         FROM conversations
+         WHERE conversation_id=? AND tenant_id=? AND user_id=?",
+    )
+    .bind(admission.conversation_id())
+    .bind(admission.tenant_id())
+    .bind(admission.user_id())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .ok_or_else(conversation_conflict)?;
+    let definition_agent = sqlx::query_scalar::<_, String>(
+        "SELECT agent_id FROM workflow_definitions WHERE definition_id=?",
+    )
+    .bind(definition_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .ok_or_else(conversation_conflict)?;
+    if conversation.0 != admission.agent_id()
+        || definition_agent != admission.agent_id()
+        || conversation.1 != "full"
+        || conversation.2 != deployment_revision_id.as_str()
+        || conversation.3.is_some()
+    {
+        return Err(conversation_conflict());
+    }
+    let current_message_order = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(message_order),0)
+         FROM conversation_messages WHERE conversation_id=?",
+    )
+    .bind(admission.conversation_id())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if current_message_order != admission.context_message_order() {
+        return Err(conversation_conflict());
+    }
+    let message_order = current_message_order.saturating_add(1);
+    if let Some(reference) = admission.user_content_ref() {
+        crate::terminal_store::staging_sqlite::consume_terminal_artifact_stage(
+            transaction,
+            admission.tenant_id(),
+            reference,
+            crate::terminal_store::TerminalArtifactSourceKind::UserMessage,
+            admission.user_message_id(),
+        )
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO conversation_messages (
+             message_id,conversation_id,message_order,role,run_id,content_inline,
+             content_ref,content_hash,created_at
+         ) VALUES (?,?,?,'user',?,?,?,?,?)",
+    )
+    .bind(admission.user_message_id())
+    .bind(admission.conversation_id())
+    .bind(message_order)
+    .bind(run_id.as_str())
+    .bind(user_content)
+    .bind(admission.user_content_ref())
+    .bind(admission.user_content_hash().as_str())
+    .bind(admission.created_at())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    sqlx::query(
+        "INSERT INTO full_conversation_turns (
+             tenant_id,request_id,conversation_id,user_id,run_id,user_message_id,
+             assistant_message_id,user_content_hash,selected_context_hash,created_at
+         ) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(admission.tenant_id())
+    .bind(request_id)
+    .bind(admission.conversation_id())
+    .bind(admission.user_id())
+    .bind(run_id.as_str())
+    .bind(admission.user_message_id())
+    .bind(admission.assistant_message_id())
+    .bind(admission.user_content_hash().as_str())
+    .bind(admission.selected_context_hash().as_str())
+    .bind(admission.created_at())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    Ok(())
+}
+
+pub(crate) async fn insert_full_conversation_terminal_message(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &RunId,
+    output: Option<&serde_json::Value>,
+) -> Result<(), RepositoryError> {
+    let output = output.cloned().unwrap_or(serde_json::Value::Null);
+    let binding = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT conversation_id,assistant_message_id,tenant_id
+         FROM full_conversation_turns WHERE run_id=?",
+    )
+    .bind(run_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    let Some((conversation_id, assistant_message_id, tenant_id)) = binding else {
+        return Ok(());
+    };
+    if sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM conversations WHERE conversation_id=?")
+        .bind(&conversation_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?
+        == 0
+    {
+        return Ok(());
+    }
+    let (content, content_hash) = canonical_value(&output)?;
+    let staging_id = crate::terminal_store::terminal_artifact_staging_id(
+        &tenant_id,
+        crate::terminal_store::TerminalArtifactSourceKind::AssistantMessage,
+        run_id.as_str(),
+    );
+    let content_ref = sqlx::query_scalar::<_, String>(
+        "SELECT content_ref FROM terminal_artifact_staging
+         WHERE staging_id=? AND tenant_id=? AND source_kind='assistant_message'
+           AND source_id=? AND staging_state='pending'",
+    )
+    .bind(staging_id)
+    .bind(&tenant_id)
+    .bind(run_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if let Some(reference) = content_ref.as_deref() {
+        crate::terminal_store::staging_sqlite::consume_terminal_artifact_stage(
+            transaction,
+            &tenant_id,
+            reference,
+            crate::terminal_store::TerminalArtifactSourceKind::AssistantMessage,
+            run_id.as_str(),
+        )
+        .await?;
+    }
+    let message_order = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(message_order),0)+1
+         FROM conversation_messages WHERE conversation_id=?",
+    )
+    .bind(&conversation_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    sqlx::query(
+        "INSERT INTO conversation_messages (
+             message_id,conversation_id,message_order,role,run_id,content_inline,
+             content_ref,content_hash,created_at
+         ) VALUES (?,?,?,'assistant',?,?,?,?,CURRENT_TIMESTAMP)",
+    )
+    .bind(&assistant_message_id)
+    .bind(&conversation_id)
+    .bind(message_order)
+    .bind(run_id.as_str())
+    .bind(content_ref.is_none().then_some(content))
+    .bind(content_ref.as_deref())
+    .bind(content_hash.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -142,6 +352,14 @@ impl SqliteDurableRepository {
             writer: Arc::new(Mutex::new(())),
         };
         repository.validate_schema_contract().await?;
+        // SQLite's owner table is intentionally process-ephemeral. Clearing it
+        // whenever a repository opens mirrors PostgreSQL UNLOGGED reset
+        // semantics and prevents a restarted process from reviving admissions
+        // owned by its previous epoch.
+        sqlx::query("DELETE FROM terminal_runtime_instances")
+            .execute(&repository.pool)
+            .await
+            .map_err(RepositoryError::storage)?;
         Ok(repository)
     }
 
@@ -485,6 +703,18 @@ impl DurableRepository for SqliteDurableRepository {
         .execute(&mut *transaction)
         .await
         .map_err(RepositoryError::storage)?;
+        if let Some(conversation) = command.full_conversation() {
+            insert_full_conversation_admission(
+                &mut transaction,
+                command.run_id(),
+                command.request_id(),
+                command.definition_id(),
+                command.deployment_revision_id(),
+                command.input(),
+                conversation,
+            )
+            .await?;
+        }
         finalize_projection_checkpoints(&mut transaction, command.run_id(), &event_id).await?;
 
         transaction
@@ -655,6 +885,12 @@ impl DurableRepository for SqliteDurableRepository {
                 intent_hash.as_str(),
                 &event_id,
                 event_seq,
+            )
+            .await?;
+            insert_full_conversation_terminal_message(
+                &mut transaction,
+                command.run_id(),
+                model_adapter::run_transition_terminal_output(&command),
             )
             .await?;
         }

@@ -21,7 +21,10 @@ use insight_engine::{
 };
 use insight_storage::{
     artifact_store::{LocalContentAddressedArtifactStore, WorkerArtifactStore},
-    PostgresDurableRepository, SqliteDurableRepository,
+    AckTerminalArtifactStage, ClaimTerminalArtifactStages, NewTerminalArtifactStage,
+    PostgresDurableRepository, ResolveTerminalArtifactStage, SqliteDurableRepository,
+    TerminalArtifactSourceKind, TerminalArtifactStageDisposition, TerminalArtifactStagingStore,
+    TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE,
 };
 use serde_json::{json, Value};
 use sqlx::{
@@ -594,10 +597,174 @@ where
     ));
 }
 
+async fn assert_terminal_orphan_fences_full_stage<R>(repository: &R, label: &str)
+where
+    R: ArtifactDurableRepository + DurableRepository + TerminalArtifactStagingStore,
+{
+    let now = Utc::now();
+    let bytes = format!("terminal-orphan-fence-{label}").into_bytes();
+    let artifact = ArtifactRef::new(
+        ArtifactId::new(format!("artifact_terminal_orphan_fence_{label}")).unwrap(),
+        ContentHash::from_bytes(&bytes),
+        u64::try_from(bytes.len()).unwrap(),
+        Some(TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE.to_owned()),
+    )
+    .unwrap();
+    let stage = repository
+        .stage_terminal_artifact(NewTerminalArtifactStage {
+            tenant_id: format!("tenant_terminal_orphan_fence_{label}"),
+            content_ref: serde_json::to_string(&artifact).unwrap(),
+            content_hash: artifact.content_hash().clone(),
+            source_kind: TerminalArtifactSourceKind::RunOutput,
+            source_id: format!("source_terminal_orphan_fence_{label}"),
+            available_at: now,
+            created_at: now,
+        })
+        .await
+        .unwrap()
+        .stage;
+    let claim = repository
+        .claim_terminal_artifact_stages(ClaimTerminalArtifactStages {
+            claimed_by: format!("collector_terminal_orphan_fence_{label}"),
+            observed_at: now,
+            claim_expires_at: now + Duration::minutes(1),
+            limit: 1,
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|claim| claim.stage.staging_id == stage.staging_id)
+        .unwrap();
+    assert_eq!(
+        repository
+            .resolve_terminal_artifact_stage(ResolveTerminalArtifactStage {
+                staging_id: claim.stage.staging_id.clone(),
+                claim_token: claim.claim_token.clone(),
+            })
+            .await
+            .unwrap(),
+        TerminalArtifactStageDisposition::DeleteOrphan
+    );
+
+    let run = create_run(
+        repository,
+        &format!("terminal_orphan_fence_{label}"),
+        json!({"input": "fence"}),
+    )
+    .await;
+    let locator = StorageLocator::new(format!(
+        "content-addressed:v1/{}",
+        artifact.content_hash().as_str()
+    ))
+    .unwrap();
+    assert_eq!(
+        repository
+            .stage_artifact(StageArtifactCommand::new(
+                run.clone(),
+                artifact.clone(),
+                locator.clone(),
+                None,
+            ))
+            .await
+            .unwrap(),
+        TransitionOutcome::StateConflict,
+        "a claimed terminal orphan must fence a concurrent full-runtime stage"
+    );
+    assert!(repository
+        .ack_terminal_artifact_stage(AckTerminalArtifactStage {
+            staging_id: claim.stage.staging_id,
+            claim_token: claim.claim_token,
+        })
+        .await
+        .unwrap());
+    assert!(matches!(
+        repository
+            .stage_artifact(StageArtifactCommand::new(run, artifact, locator, None))
+            .await
+            .unwrap(),
+        TransitionOutcome::Committed { .. }
+    ));
+}
+
 #[tokio::test]
 async fn sqlite_payload_and_artifact_repository_is_run_scoped_and_fail_closed() {
-    let (_database, repository) = support::temporary_sqlite_repository().await;
+    let (database, repository) = support::temporary_sqlite_repository().await;
     assert_repository_contract(&repository, "sqlite").await;
+    assert_terminal_orphan_fences_full_stage(&repository, "sqlite").await;
+
+    let control = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(database.path().join("durable.sqlite3"))
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    let bytes = b"claimed-content-deletion-fence";
+    let fenced = ArtifactRef::new(
+        ArtifactId::new("artifact_claimed_content_deletion_fence").unwrap(),
+        ContentHash::from_bytes(bytes),
+        u64::try_from(bytes.len()).unwrap(),
+        Some(TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE.to_owned()),
+    )
+    .unwrap();
+    let fenced_ref = serde_json::to_string(&fenced).unwrap();
+    sqlx::query(
+        "INSERT INTO terminal_content_deletion_jobs(
+             deletion_job_id,tenant_id,content_ref,content_hash,source_kind,source_id,
+             job_state,available_at,claim_token,claimed_by,claim_expires_at,attempts,created_at
+         ) VALUES (?,?,?,?,?,?,'claimed',?,?,?,?,1,?)",
+    )
+    .bind("terminal_delete_claimed_fence")
+    .bind("tenant_claimed_fence")
+    .bind(&fenced_ref)
+    .bind(fenced.content_hash().as_str())
+    .bind("terminal_run_retention")
+    .bind("source_claimed_fence")
+    .bind(Utc::now())
+    .bind("delete_claim_claimed_fence")
+    .bind("collector_claimed_fence")
+    .bind(Utc::now() + Duration::minutes(1))
+    .bind(Utc::now())
+    .execute(&control)
+    .await
+    .unwrap();
+    assert!(repository
+        .stage_terminal_artifact(NewTerminalArtifactStage {
+            tenant_id: "tenant_claimed_fence".to_owned(),
+            content_ref: fenced_ref,
+            content_hash: fenced.content_hash().clone(),
+            source_kind: TerminalArtifactSourceKind::RunOutput,
+            source_id: "new_terminal_source_claimed_fence".to_owned(),
+            available_at: Utc::now(),
+            created_at: Utc::now(),
+        })
+        .await
+        .is_err());
+    let run = create_run(
+        &repository,
+        "claimed_content_deletion_fence",
+        json!({"input": "fence"}),
+    )
+    .await;
+    assert_eq!(
+        repository
+            .stage_artifact(StageArtifactCommand::new(
+                run,
+                fenced.clone(),
+                StorageLocator::new(format!(
+                    "content-addressed:v1/{}",
+                    fenced.content_hash().as_str()
+                ))
+                .unwrap(),
+                None,
+            ))
+            .await
+            .unwrap(),
+        TransitionOutcome::StateConflict
+    );
+    control.close().await;
 }
 
 #[tokio::test]
@@ -991,6 +1158,7 @@ async fn postgres_payload_and_artifact_repository_contract_when_available() {
         .await
         .unwrap();
     assert_repository_contract(&repository, "postgres").await;
+    assert_terminal_orphan_fences_full_stage(&repository, "postgres").await;
     drop(repository);
     sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&admin)

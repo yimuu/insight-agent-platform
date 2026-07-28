@@ -32,6 +32,11 @@ cargo deny check
 完整 PostgreSQL 门禁必须在 PostgreSQL 16 上以 `CI=1` 运行，并设置
 `RUN_HISTORY_POSTGRES_URL` 和 `TEST_POSTGRES_URL`。CI 中这些变量必须存在，相关门禁不能静默跳过。
 
+容量、WAL、真实进程故障和百万行 Conversation 查询不是普通单元 CI 的替代品，也不能由 smoke
+结果代替。Terminal-only 的 Phase 0 与 Gate A～D 使用独立的 fresh namespace、固定 workload 和
+fail-closed evaluator；当前进度、复现命令及正式证据路径见
+[Terminal-only 验收与 WAL 资格](terminal-only-qualification.md)。
+
 ## 代码导航
 
 | 路径 | 职责 |

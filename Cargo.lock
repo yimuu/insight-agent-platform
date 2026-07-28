@@ -1250,12 +1250,15 @@ dependencies = [
 name = "insight-api"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
+ "chrono",
  "futures",
  "insight-dsl",
  "insight-engine",
  "insight-runtime",
  "serde",
+ "serde_jcs",
  "serde_json",
  "tokio",
  "tokio-stream",
@@ -1364,6 +1367,7 @@ dependencies = [
  "insight-durable",
  "insight-engine",
  "log",
+ "ring",
  "serde",
  "serde_jcs",
  "serde_json",
