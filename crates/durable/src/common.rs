@@ -4,7 +4,9 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
-use insight_engine::response::{WorkflowToolPublicProjection, WorkflowToolResult};
+use insight_engine::response::{
+    public_failure_message, WorkflowToolPublicProjection, WorkflowToolResult,
+};
 use insight_engine::worker::{ModelCallCompletion, ModelFinishReason};
 use insight_engine::{
     ActivationId, AdmissionState, AttemptNo, ContentHash, EventSeq, ExecutionEventEnvelope,
@@ -327,7 +329,7 @@ pub(crate) fn build_terminal_response_snapshot(
     let public_error = match lifecycle {
         RunLifecycle::Failed => Some(serde_json::json!({
             "code": error_code.unwrap_or("RUN_FAILED"),
-            "message": "run failed",
+            "message": public_failure_message(error_code.unwrap_or("RUN_FAILED")),
             "param": Value::Null,
         })),
         RunLifecycle::TimedOut => Some(serde_json::json!({
@@ -369,7 +371,7 @@ pub(crate) fn build_terminal_response_snapshot(
                 "error".to_owned(),
                 serde_json::json!({
                     "code": error_code.unwrap_or("RUN_FAILED"),
-                    "message": "run failed",
+                    "message": public_failure_message(error_code.unwrap_or("RUN_FAILED")),
                 }),
             );
         }
@@ -1694,6 +1696,38 @@ mod tests {
         let replay = build_replay();
         assert_eq!(first.workflow, replay.workflow);
         assert_eq!(first.snapshot_hash, replay.snapshot_hash);
+    }
+
+    #[test]
+    fn terminal_provider_failures_publish_specific_body_free_messages() {
+        let run_id = RunId::new("run_terminal_provider_failure").unwrap();
+        let snapshot = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+            run_id: &run_id,
+            lifecycle: RunLifecycle::Failed,
+            output: None,
+            error_code: Some("LLM_PROVIDER_CONNECTION_FAILED"),
+            items: Vec::new(),
+            model_calls: Vec::new(),
+            tool_results: Vec::new(),
+            retrievals: Vec::new(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            snapshot.response["error"],
+            json!({
+                "code": "LLM_PROVIDER_CONNECTION_FAILED",
+                "message": "failed to connect to model provider",
+                "param": Value::Null,
+            })
+        );
+        assert_eq!(
+            snapshot.workflow["error"],
+            json!({
+                "code": "LLM_PROVIDER_CONNECTION_FAILED",
+                "message": "failed to connect to model provider",
+            })
+        );
     }
 
     #[test]

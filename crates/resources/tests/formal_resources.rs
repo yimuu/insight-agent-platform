@@ -712,6 +712,8 @@ async fn openai_adapter_serializes_formal_messages_and_allowed_parameters() {
         assert_eq!(request["stream_options"], json!({"include_usage":true}));
         assert_eq!(request["temperature"], 0.2);
         assert_eq!(request["max_tokens"], 64);
+        assert_eq!(request["enable_thinking"], false);
+        assert_eq!(request["parallel_tool_calls"], true);
         assert_eq!(request["response_format"]["type"], "json_schema");
         assert_eq!(
             request["response_format"]["json_schema"]["name"],
@@ -760,7 +762,12 @@ async fn openai_adapter_serializes_formal_messages_and_allowed_parameters() {
                 ]),
             ),
         ],
-        parameters: json!({"temperature":0.2, "max_tokens":64}),
+        parameters: json!({
+            "temperature":0.2,
+            "max_tokens":64,
+            "enable_thinking":false,
+            "parallel_tool_calls":true
+        }),
         response_format: Some(ChatResponseFormat::JsonSchema {
             name: "response".to_string(),
             schema: json!({"type":"object", "additionalProperties":false}),
@@ -988,6 +995,16 @@ async fn openai_typed_stream_exposes_tool_argument_deltas_finish_and_partial_usa
             json!(["city"])
         );
         write_sse_headers(&mut socket).await;
+        let reasoning = json!({
+            "choices":[{
+                "delta":{
+                    "content":null,
+                    "reasoning_content":"private reasoning is not public output",
+                    "tool_calls":null
+                },
+                "finish_reason":null
+            }]
+        });
         let first = json!({
             "choices":[{
                 "delta":{"tool_calls":[{
@@ -1003,7 +1020,9 @@ async fn openai_typed_stream_exposes_tool_argument_deltas_finish_and_partial_usa
             "choices":[{
                 "delta":{"tool_calls":[{
                     "index":0,
-                    "function":{"arguments":"\"Paris\"}"}
+                    "id":"",
+                    "type":"",
+                    "function":{"name":"","arguments":"\"Paris\"}"}
                 }]},
                 "finish_reason":null
             }]
@@ -1014,8 +1033,10 @@ async fn openai_typed_stream_exposes_tool_argument_deltas_finish_and_partial_usa
         });
         socket
             .write_all(
-                format!("data: {first}\n\ndata: {second}\n\ndata: {terminal}\n\ndata: [DONE]\n\n")
-                    .as_bytes(),
+                format!(
+                    "data: {reasoning}\n\ndata: {first}\n\ndata: {second}\n\ndata: {terminal}\n\ndata: [DONE]\n\n"
+                )
+                .as_bytes(),
             )
             .await
             .unwrap();
@@ -1553,6 +1574,8 @@ fn openai_adapter_rejects_unknown_or_out_of_range_parameters() {
             "top_p":1,
             "frequency_penalty":-2,
             "presence_penalty":2,
+            "enable_thinking":false,
+            "parallel_tool_calls":true,
             "stop":["END"]
         }))
         .unwrap();
@@ -1756,7 +1779,7 @@ async fn openai_errors_and_debug_never_expose_api_key_or_response_body() {
         Ok(_) => panic!("expected upstream status failure"),
         Err(error) => error,
     };
-    assert_eq!(error.code(), "UPSTREAM_STATUS");
+    assert_eq!(error.code(), "UPSTREAM_AUTHENTICATION");
     let message = error.to_string();
     assert!(message.contains("401"));
     assert!(!message.contains(&api_key));
@@ -1819,7 +1842,7 @@ async fn openai_client_does_not_follow_redirects_or_leak_authorization_to_locati
         Err(error) => error,
     };
 
-    assert_eq!(error.code(), "UPSTREAM_STATUS");
+    assert_eq!(error.code(), "UPSTREAM_REQUEST_REJECTED");
     assert!(error.to_string().contains("302"));
     assert!(
         tokio::time::timeout(Duration::from_millis(10), second_request_seen.notified())
@@ -1920,6 +1943,69 @@ async fn current_time_and_text_metrics_actions_return_schema_valid_outputs() {
         .await
         .unwrap();
     assert_eq!(metrics, json!({"characters":20, "words":4, "lines":2}));
+}
+
+#[tokio::test]
+async fn model_tool_demo_actions_return_schema_valid_outputs() {
+    let registry = builtin_action_registry(
+        &[
+            "current_time".to_string(),
+            "text_metrics".to_string(),
+            "integer_calculator".to_string(),
+            "text_replace".to_string(),
+        ],
+        None,
+    )
+    .unwrap();
+
+    for action_name in [
+        "current_time",
+        "text_metrics",
+        "integer_calculator",
+        "text_replace",
+    ] {
+        let action = registry.resolve(action_name).unwrap();
+        let policy = action.public_policy();
+        assert!(policy.call, "{action_name} must publish lifecycle metadata");
+        assert!(matches!(
+            policy.arguments,
+            insight_resources::actions::ToolPublicArguments::Private
+        ));
+        assert!(policy.result_schema.is_none());
+    }
+
+    let metrics = registry
+        .resolve("text_metrics")
+        .unwrap()
+        .call(json!({"text":"hello 世界\nsecond line"}), action_context())
+        .await
+        .unwrap();
+    assert_eq!(metrics, json!({"characters":20, "words":4, "lines":2}));
+
+    let product = registry
+        .resolve("integer_calculator")
+        .unwrap()
+        .call(
+            json!({"operation":"multiply", "left":17, "right":23}),
+            action_context(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(product, json!({"value":391}));
+
+    let replaced = registry
+        .resolve("text_replace")
+        .unwrap()
+        .call(
+            json!({"text":"hello world, world", "find":"world", "replacement":"Rust"}),
+            action_context(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replaced,
+        json!({"text":"hello Rust, Rust", "replacements":2})
+    );
 }
 
 #[tokio::test]

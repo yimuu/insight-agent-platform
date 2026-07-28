@@ -47,6 +47,7 @@ use insight_engine::{
     history::types::{summarize_input, RunAttachment, RunLifecycle, RunRecord, StopError},
     outcome::{FailureKind, RunFailure, RunOutput},
     plan::{DataPort, DataPortId, NodeKind, PlanIndex, PortDirection},
+    response::public_failure_message,
     worker::WorkerExecutorRegistry,
     AdmissionState, ArtifactId, ArtifactRef, ContentHash, DefinitionRevisionId,
     ExecutionEventContext, ExecutionEventPayload, ExecutionRevisionPin, MigrationNodeMapping,
@@ -7898,10 +7899,11 @@ impl RunServiceInner {
             RunEventType::RunFailed if projection.lifecycle() == EngineRunLifecycle::TimedOut => {
                 ("RUN_TIMEOUT".to_owned(), "run timed out")
             }
-            RunEventType::RunFailed | RunEventType::OperationFailed => (
-                failure_code.unwrap_or_else(|| "RUN_FAILED".to_owned()),
-                "run failed",
-            ),
+            RunEventType::RunFailed | RunEventType::OperationFailed => {
+                let code = failure_code.unwrap_or_else(|| "RUN_FAILED".to_owned());
+                let message = public_failure_message(&code);
+                (code, message)
+            }
             _ => ("OK".to_owned(), "ok"),
         };
         let event = if code == "OK" {
@@ -7942,14 +7944,17 @@ impl RunServiceInner {
             EngineRunLifecycle::Succeeded => RunLifecycle::Completed {
                 output: public_output(projection.output().cloned().unwrap_or(Value::Null)),
             },
-            EngineRunLifecycle::Failed => RunLifecycle::Failed {
-                error: RunFailure {
-                    kind: terminal_failure_kind(terminal_envelope.as_ref()),
-                    code: terminal_failure_code(terminal_envelope.as_ref())
-                        .unwrap_or_else(|| "RUN_FAILED".to_owned()),
-                    message: "run failed".to_owned(),
-                },
-            },
+            EngineRunLifecycle::Failed => {
+                let code = terminal_failure_code(terminal_envelope.as_ref())
+                    .unwrap_or_else(|| "RUN_FAILED".to_owned());
+                RunLifecycle::Failed {
+                    error: RunFailure {
+                        kind: terminal_failure_kind(terminal_envelope.as_ref()),
+                        message: public_failure_message(&code).to_owned(),
+                        code,
+                    },
+                }
+            }
             EngineRunLifecycle::TimedOut => RunLifecycle::Failed {
                 error: RunFailure {
                     kind: FailureKind::Timeout,

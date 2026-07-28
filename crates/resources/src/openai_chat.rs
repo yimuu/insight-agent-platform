@@ -7,8 +7,8 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream, StreamExt};
-use reqwest::{redirect::Policy, Client, Response, Url};
-use serde::{Deserialize, Serialize};
+use reqwest::{redirect::Policy, Client, Response, StatusCode, Url};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 
 use insight_engine::{
@@ -328,6 +328,7 @@ impl OpenAiChatModel {
         let prepared = self.prepare_request(request)?;
         tracing::info!(
             event_name = "openai.request",
+            provider_origin = endpoint_origin(&self.endpoint),
             model = self.model.as_str(),
             request_mode = match mode {
                 ChatRequestMode::Complete => "complete",
@@ -335,6 +336,7 @@ impl OpenAiChatModel {
             },
             messages_count = prepared.messages_count,
             image_parts_count = prepared.image_parts_count,
+            tools_count = prepared.tools.len(),
             parameters_keys_count = prepared.parameters_keys_count,
             "sending OpenAI-compatible chat request"
         );
@@ -368,18 +370,42 @@ impl OpenAiChatModel {
             None => request,
         };
         let response = request.send().await.map_err(|error| {
+            let transport_kind = classify_request_error(&error);
+            let failure_code = classify_request_failure_code(&error);
+            tracing::warn!(
+                event_name = "openai.request_failed",
+                provider_origin = endpoint_origin(&self.endpoint),
+                model = self.model.as_str(),
+                request_mode = match mode {
+                    ChatRequestMode::Complete => "complete",
+                    ChatRequestMode::Streaming => "streaming",
+                },
+                failure_code,
+                transport_kind,
+                "OpenAI-compatible chat request failed"
+            );
             RunError::operation(
-                "UPSTREAM_TRANSPORT",
-                format!(
-                    "chat provider request failed ({})",
-                    classify_request_error(&error)
-                ),
+                failure_code,
+                format!("chat provider request failed ({transport_kind})"),
             )
         })?;
         let status = response.status();
         if !status.is_success() {
+            let failure_code = classify_status_failure_code(status);
+            tracing::warn!(
+                event_name = "openai.request_failed",
+                provider_origin = endpoint_origin(&self.endpoint),
+                model = self.model.as_str(),
+                request_mode = match mode {
+                    ChatRequestMode::Complete => "complete",
+                    ChatRequestMode::Streaming => "streaming",
+                },
+                failure_code,
+                http_status = status.as_u16(),
+                "OpenAI-compatible chat request failed"
+            );
             return Err(RunError::operation(
-                "UPSTREAM_STATUS",
+                failure_code,
                 format!("chat provider returned HTTP {}", status.as_u16()),
             ));
         }
@@ -981,7 +1007,7 @@ fn trim_ascii_space(bytes: &[u8]) -> &[u8] {
 
 #[derive(Deserialize)]
 struct OpenAiChunk {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     choices: Vec<OpenAiStreamChoice>,
     usage: Option<Value>,
 }
@@ -995,7 +1021,7 @@ struct OpenAiStreamChoice {
 #[derive(Deserialize)]
 struct OpenAiDelta {
     content: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     tool_calls: Vec<OpenAiToolCallDelta>,
 }
 
@@ -1030,7 +1056,7 @@ struct OpenAiCompleteChoice {
 struct OpenAiCompleteMessage {
     #[serde(default)]
     content: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     tool_calls: Vec<OpenAiCompleteToolCall>,
 }
 
@@ -1072,26 +1098,24 @@ fn openai_chunk_events(
     }
     let mut tool_call_deltas = Vec::with_capacity(choice.delta.tool_calls.len());
     for call in choice.delta.tool_calls {
-        if call.kind.as_deref().is_some_and(|kind| kind != "function")
-            || call.id.as_deref().is_some_and(str::is_empty)
-        {
+        let kind = normalize_optional_stream_identity(call.kind);
+        let id = normalize_optional_stream_identity(call.id);
+        if kind.as_deref().is_some_and(|kind| kind != "function") {
             return Err(invalid_stream_payload());
         }
         let function = call.function.unwrap_or(OpenAiFunctionDelta {
             name: None,
             arguments: None,
         });
-        if function.name.as_deref().is_some_and(str::is_empty) {
-            return Err(invalid_stream_payload());
-        }
+        let name = normalize_optional_stream_identity(function.name);
         let arguments_delta = function.arguments.unwrap_or_default();
         if arguments_delta.len() > limits.max_chunk_text_bytes {
             return Err(model_response_too_large());
         }
         tool_call_deltas.push(ChatToolCallDelta {
             index: call.index,
-            id: call.id,
-            name: function.name,
+            id,
+            name,
             arguments_delta,
         });
     }
@@ -1105,6 +1129,18 @@ fn openai_chunk_events(
         usage,
     };
     Ok((!event.is_empty()).then_some(event).into_iter().collect())
+}
+
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+fn normalize_optional_stream_identity(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
 }
 
 async fn read_bounded_complete_body(
@@ -1267,6 +1303,8 @@ fn parameter_schema() -> Value {
             "top_p":{"type":"number", "minimum":0, "maximum":1},
             "frequency_penalty":{"type":"number", "minimum":-2, "maximum":2},
             "presence_penalty":{"type":"number", "minimum":-2, "maximum":2},
+            "enable_thinking":{"type":"boolean"},
+            "parallel_tool_calls":{"type":"boolean"},
             "stop":{
                 "oneOf":[
                     {"type":"string"},
@@ -1366,5 +1404,29 @@ fn classify_request_error(error: &reqwest::Error) -> &'static str {
         "request"
     } else {
         "transport"
+    }
+}
+
+fn classify_request_failure_code(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "UPSTREAM_TIMEOUT"
+    } else if error.is_connect() {
+        "UPSTREAM_CONNECTION"
+    } else if error.is_request() {
+        "UPSTREAM_REQUEST"
+    } else {
+        "UPSTREAM_TRANSPORT"
+    }
+}
+
+fn classify_status_failure_code(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        401 => "UPSTREAM_AUTHENTICATION",
+        403 => "UPSTREAM_PERMISSION",
+        408 | 504 => "UPSTREAM_TIMEOUT",
+        429 => "UPSTREAM_RATE_LIMIT",
+        500..=599 => "UPSTREAM_UNAVAILABLE",
+        300..=499 => "UPSTREAM_REQUEST_REJECTED",
+        _ => "UPSTREAM_STATUS",
     }
 }

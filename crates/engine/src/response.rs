@@ -316,6 +316,25 @@ pub struct WorkflowPublicError {
     pub message: String,
 }
 
+/// Returns one bounded, body-free explanation for stable infrastructure
+/// failure codes. Unknown codes remain intentionally generic.
+pub fn public_failure_message(code: &str) -> &'static str {
+    match code {
+        "LLM_PROVIDER_AUTHENTICATION_FAILED" => "model provider authentication failed",
+        "LLM_PROVIDER_PERMISSION_DENIED" => "model provider denied access",
+        "LLM_PROVIDER_CONNECTION_FAILED" => "failed to connect to model provider",
+        "LLM_PROVIDER_REQUEST_TIMEOUT" => "model provider request timed out",
+        "LLM_PROVIDER_REQUEST_REJECTED" => "model provider rejected the request",
+        "LLM_PROVIDER_RATE_LIMITED" => "model provider rate limit exceeded",
+        "LLM_PROVIDER_UNAVAILABLE" => "model provider is unavailable",
+        "LLM_PROVIDER_STREAM_FAILED" => "model provider stream failed",
+        "LLM_PROVIDER_RESPONSE_INVALID" => "model provider returned an invalid response",
+        "LLM_PROVIDER_RESPONSE_TOO_LARGE" => "model provider response exceeded the size limit",
+        "LLM_PROVIDER_FAILED" => "model provider request failed",
+        _ => "run failed",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowStopReason {

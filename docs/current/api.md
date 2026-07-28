@@ -126,6 +126,31 @@ best-effort；发生丢失时客户端通过 `workflow.stream.gap` 和最终快�
 
 `stream` 只控制 Provider 请求模式，`publish` 只控制 provisional 内容可见性。无论组合如何，最终
 快照都包含强类型 workflow result、持久化 response identity 和 OpenAI 命名的 token usage。
+模型工具的实时状态使用 `workflow.tool.started`、`workflow.tool.completed` 和
+`workflow.tool.failed`；客户端应以 `call_id` 关联同一次调用。工具名、参数和结果分别受冻结的
+Action `public_policy` 与 LLM `publish` 双重授权；内置 `tool_assistant` 示例仅公开工具名和状态，
+因此 `started.arguments` 缺省且 `completed.content` 为空。只有显式授权
+`arguments: all` 的工具才会另外发送标准 `response.output_item.*` function-call 与
+`response.function_call_arguments.*` 事件。
+LLM 基础设施失败会使用脱敏且可操作的稳定分类，不会把 Provider 响应正文、请求正文或凭据放入
+终态：
+
+| code | message |
+|---|---|
+| `LLM_PROVIDER_AUTHENTICATION_FAILED` | `model provider authentication failed` |
+| `LLM_PROVIDER_PERMISSION_DENIED` | `model provider denied access` |
+| `LLM_PROVIDER_CONNECTION_FAILED` | `failed to connect to model provider` |
+| `LLM_PROVIDER_REQUEST_TIMEOUT` | `model provider request timed out` |
+| `LLM_PROVIDER_REQUEST_REJECTED` | `model provider rejected the request` |
+| `LLM_PROVIDER_RATE_LIMITED` | `model provider rate limit exceeded` |
+| `LLM_PROVIDER_UNAVAILABLE` | `model provider is unavailable` |
+| `LLM_PROVIDER_STREAM_FAILED` | `model provider stream failed` |
+| `LLM_PROVIDER_RESPONSE_INVALID` | `model provider returned an invalid response` |
+| `LLM_PROVIDER_RESPONSE_TOO_LARGE` | `model provider response exceeded the size limit` |
+| `LLM_PROVIDER_FAILED` | `model provider request failed` |
+
+内部日志另外记录固定字段 `provider_origin`、`model`、`request_mode`、`failure_code`，并按失败阶段
+记录 `transport_kind` 或 `http_status`；这些字段仍不包含 Provider body 或凭据。
 Conversation Attached turn 的 terminal frame 还必须等待 `Run result + assistant message` 同一事务
 提交；token/delta 和 provider chunk 不写入 Conversation。Privacy delete 开始时服务端会取消该
 Conversation 的活动 SSE dispatcher；之后不再入队 live 内容，尚未被传输层消费的有界 delta 队列

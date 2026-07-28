@@ -19,8 +19,16 @@ use insight_engine::{author::CompileError, execution::RunError};
 
 use super::actions::{
     Action, ActionCapability, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass,
-    EffectClass, IdempotencyClass,
+    EffectClass, IdempotencyClass, ToolPublicArguments, ToolPublicPolicy,
 };
+
+fn public_tool_status_policy() -> ToolPublicPolicy {
+    ToolPublicPolicy {
+        call: true,
+        arguments: ToolPublicArguments::Private,
+        result_schema: None,
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct CurrentTimeAction;
@@ -52,6 +60,10 @@ impl Action for CurrentTimeAction {
         }
     }
 
+    fn public_policy(&self) -> ToolPublicPolicy {
+        public_tool_status_policy()
+    }
+
     async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
         let timezone = input
             .get("timezone")
@@ -74,22 +86,197 @@ pub struct TextMetricsAction;
 #[async_trait]
 impl Action for TextMetricsAction {
     fn descriptor(&self) -> ActionDescriptor {
+        text_metrics_descriptor("example.text_metrics")
+    }
+
+    async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
+        text_metrics_result(&input)
+    }
+}
+
+fn text_metrics_descriptor(id: &'static str) -> ActionDescriptor {
+    ActionDescriptor {
+        id,
+        version: "1.0.0",
+        input_schema: json!({
+            "type":"object",
+            "description":"Count Unicode characters, whitespace-separated words, and lines.",
+            "required":["text"],
+            "properties":{
+                "text":{
+                    "type":"string",
+                    "description":"The text to measure."
+                }
+            },
+            "additionalProperties":false
+        }),
+        output_schema: json!({
+            "type":"object",
+            "required":["characters", "words", "lines"],
+            "properties":{
+                "characters":{"type":"integer", "minimum":0},
+                "words":{"type":"integer", "minimum":0},
+                "lines":{"type":"integer", "minimum":0}
+            },
+            "additionalProperties":false
+        }),
+        effect: EffectClass::Pure,
+        idempotency: IdempotencyClass::Idempotent,
+        cancellation: CancellationClass::NotSupported,
+        required_capabilities: BTreeSet::new(),
+    }
+}
+
+fn text_metrics_result(input: &Value) -> Result<Value, RunError> {
+    let text = input
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RunError::operation("ACTION_INPUT_INVALID", "text metrics requires text"))?;
+    Ok(json!({
+        "characters": text.chars().count(),
+        "words": text.split_whitespace().count(),
+        "lines": text.lines().count(),
+    }))
+}
+
+/// Provider-facing alias for the existing dotted example Action. Function tool
+/// names deliberately use the portable `[A-Za-z0-9_-]` vocabulary.
+#[derive(Debug, Clone, Copy)]
+struct TextMetricsToolAction;
+
+#[async_trait]
+impl Action for TextMetricsToolAction {
+    fn descriptor(&self) -> ActionDescriptor {
+        text_metrics_descriptor("text_metrics")
+    }
+
+    fn public_policy(&self) -> ToolPublicPolicy {
+        public_tool_status_policy()
+    }
+
+    async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
+        text_metrics_result(&input)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IntegerCalculatorAction;
+
+#[async_trait]
+impl Action for IntegerCalculatorAction {
+    fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "example.text_metrics",
+            id: "integer_calculator",
             version: "1.0.0",
             input_schema: json!({
                 "type":"object",
-                "required":["text"],
-                "properties":{"text":{"type":"string"}},
+                "description":"Perform exact checked arithmetic on two signed integers.",
+                "required":["operation", "left", "right"],
+                "properties":{
+                    "operation":{
+                        "type":"string",
+                        "description":"The arithmetic operation to perform.",
+                        "enum":["add", "subtract", "multiply"]
+                    },
+                    "left":{
+                        "type":"integer",
+                        "description":"The left operand."
+                    },
+                    "right":{
+                        "type":"integer",
+                        "description":"The right operand."
+                    }
+                },
                 "additionalProperties":false
             }),
             output_schema: json!({
                 "type":"object",
-                "required":["characters", "words", "lines"],
+                "required":["value"],
+                "properties":{"value":{"type":"integer"}},
+                "additionalProperties":false
+            }),
+            effect: EffectClass::Pure,
+            idempotency: IdempotencyClass::Idempotent,
+            cancellation: CancellationClass::NotSupported,
+            required_capabilities: BTreeSet::new(),
+        }
+    }
+
+    fn public_policy(&self) -> ToolPublicPolicy {
+        public_tool_status_policy()
+    }
+
+    async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
+        let operation = input
+            .get("operation")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                RunError::operation("ACTION_INPUT_INVALID", "calculator operation is invalid")
+            })?;
+        let left = input.get("left").and_then(Value::as_i64).ok_or_else(|| {
+            RunError::operation("ACTION_INPUT_INVALID", "calculator left operand is invalid")
+        })?;
+        let right = input.get("right").and_then(Value::as_i64).ok_or_else(|| {
+            RunError::operation(
+                "ACTION_INPUT_INVALID",
+                "calculator right operand is invalid",
+            )
+        })?;
+        let value = match operation {
+            "add" => left.checked_add(right),
+            "subtract" => left.checked_sub(right),
+            "multiply" => left.checked_mul(right),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            RunError::operation(
+                "ACTION_INPUT_INVALID",
+                "calculator operation is unsupported or overflowed",
+            )
+        })?;
+        Ok(json!({"value": value}))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextReplaceAction;
+
+#[async_trait]
+impl Action for TextReplaceAction {
+    fn descriptor(&self) -> ActionDescriptor {
+        ActionDescriptor {
+            id: "text_replace",
+            version: "1.0.0",
+            input_schema: json!({
+                "type":"object",
+                "description":"Replace every non-overlapping occurrence of one literal string.",
+                "required":["text", "find", "replacement"],
                 "properties":{
-                    "characters":{"type":"integer", "minimum":0},
-                    "words":{"type":"integer", "minimum":0},
-                    "lines":{"type":"integer", "minimum":0}
+                    "text":{
+                        "type":"string",
+                        "description":"The source text.",
+                        "maxLength":2000
+                    },
+                    "find":{
+                        "type":"string",
+                        "description":"The non-empty literal string to find.",
+                        "minLength":1,
+                        "maxLength":256
+                    },
+                    "replacement":{
+                        "type":"string",
+                        "description":"The replacement string.",
+                        "maxLength":256
+                    }
+                },
+                "additionalProperties":false
+            }),
+            output_schema: json!({
+                "type":"object",
+                "required":["text", "replacements"],
+                "properties":{
+                    "text":{"type":"string", "maxLength":524288},
+                    "replacements":{"type":"integer", "minimum":0}
                 },
                 "additionalProperties":false
             }),
@@ -100,14 +287,30 @@ impl Action for TextMetricsAction {
         }
     }
 
+    fn public_policy(&self) -> ToolPublicPolicy {
+        public_tool_status_policy()
+    }
+
     async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
         let text = input.get("text").and_then(Value::as_str).ok_or_else(|| {
-            RunError::operation("ACTION_INPUT_INVALID", "text metrics requires text")
+            RunError::operation("ACTION_INPUT_INVALID", "text replacement source is invalid")
         })?;
+        let find = input
+            .get("find")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                RunError::operation("ACTION_INPUT_INVALID", "text replacement target is invalid")
+            })?;
+        let replacement = input
+            .get("replacement")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                RunError::operation("ACTION_INPUT_INVALID", "text replacement value is invalid")
+            })?;
         Ok(json!({
-            "characters": text.chars().count(),
-            "words": text.split_whitespace().count(),
-            "lines": text.lines().count(),
+            "text": text.replace(find, replacement),
+            "replacements": text.matches(find).count(),
         }))
     }
 }
@@ -485,6 +688,9 @@ pub fn builtin_action_registry(
                 )
             })?)?,
             "example.text_metrics" => registry.register(TextMetricsAction)?,
+            "text_metrics" => registry.register(TextMetricsToolAction)?,
+            "integer_calculator" => registry.register(IntegerCalculatorAction)?,
+            "text_replace" => registry.register(TextReplaceAction)?,
             "qualification.effect_marker" => {
                 registry.register(QualificationEffectMarkerAction::from_environment()?)?
             }

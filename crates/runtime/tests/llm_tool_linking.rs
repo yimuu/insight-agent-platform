@@ -8,6 +8,7 @@ use insight_resources::{
         Action, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass, EffectClass,
         IdempotencyClass, ToolPublicArguments, ToolPublicPolicy,
     },
+    builtin_actions::builtin_action_registry,
     models::{
         ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability, ModelDeploymentIdentity,
         ModelRegistry, ModelRequestCapability,
@@ -280,6 +281,81 @@ fn linker_resolves_whitelist_request_mode_and_freezes_effective_public_policy() 
         private_deployment.deployment_revision_id(),
         "the Agent-side publish decision participates in frozen deployment identity"
     );
+}
+
+#[test]
+fn checked_in_multi_tool_agent_links_four_provider_safe_actions() {
+    let mut models = ModelRegistry::default();
+    models
+        .register_versioned(
+            "general_chat",
+            ModelDeploymentIdentity::new(
+                "fixture-model-worker-v2",
+                json!({"adapter": "fixture", "provider_model": "fixture-model"}),
+            )
+            .unwrap(),
+            ModeModel {
+                request_capabilities: BTreeSet::from([
+                    ModelRequestCapability::Complete,
+                    ModelRequestCapability::Streaming,
+                ]),
+            },
+        )
+        .unwrap();
+    let actions = builtin_action_registry(
+        &[
+            "current_time".to_owned(),
+            "text_metrics".to_owned(),
+            "integer_calculator".to_owned(),
+            "text_replace".to_owned(),
+        ],
+        None,
+    )
+    .unwrap();
+    let agent_root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../agents/tool_assistant");
+    let published = Arc::new(compile_agent_dir(&agent_root).unwrap());
+    let deployment = DeployedAgent::publish(
+        published,
+        &ProductionLeafDeploymentResolver::new(&models, &actions)
+            .with_llm_tool_continuation_capability()
+            .with_llm_tool_limits(16, 64)
+            .unwrap(),
+        SubflowContractRegistry::new(),
+    )
+    .unwrap();
+    let binding = llm_binding(&deployment);
+    let names = binding["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        names,
+        vec![
+            "current_time",
+            "text_metrics",
+            "integer_calculator",
+            "text_replace"
+        ]
+    );
+    assert!(names.iter().all(|name| {
+        !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    }));
+    for tool in binding["tools"].as_array().unwrap() {
+        assert_eq!(
+            tool["effective_public_policy"],
+            json!({"call": true, "arguments": "private", "result": null}),
+            "{} must publish status without exposing arguments or results",
+            tool["name"]
+        );
+    }
 }
 
 #[test]

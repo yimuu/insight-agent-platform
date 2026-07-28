@@ -131,6 +131,31 @@ JSON Schema；compiler 会生成并执行输入、节点响应和最终输出校
 互相独立，最终结果始终按 `response` 类型验证。Prompt 可以用 `inline` 或相对 Agent 文件的 `file`
 声明，message 中的文本槽引用 Prompt 名称。
 
+LLM 节点可以通过部署时冻结的白名单调用注册 Action：
+
+```yaml
+- type: llm
+  id: answer
+  model: general_chat
+  messages:
+    - role: user
+      content:
+        - text: request
+  tools: [current_time, text_metrics, integer_calculator, text_replace]
+  tool_choice: auto
+  tool_limits:
+    max_rounds: 8
+    max_calls: 16
+  response: string
+```
+
+`tool_choice` 支持 `auto`、`required` 或白名单中的一个工具名。模型只能产生调用意图；运行时仍会
+校验工具名、参数 JSON Schema、调用轮数和总次数，再执行对应 Action 并把类型化结果续接给模型。
+工具事件采用 Agent `publish` 与 Action `public_policy` 双重授权。示例中的四个工具只公开
+`workflow.tool.started`、`workflow.tool.completed`、`workflow.tool.failed` 生命周期元数据，
+不会公开参数或结果，前端可以按 `call_id` 展示执行状态。完整示例见
+[`tool_assistant`](../../agents/tool_assistant/agent.yaml)。
+
 ## 控制流
 
 - `if / elif / else` 选择执行路径；

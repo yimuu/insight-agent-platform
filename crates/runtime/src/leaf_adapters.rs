@@ -65,6 +65,16 @@ const LLM_MESSAGE_INVALID: &str = "LLM_MESSAGE_INVALID";
 const LLM_REQUEST_TOO_LARGE: &str = "LLM_REQUEST_TOO_LARGE";
 const LLM_RESPONSE_INVALID: &str = "LLM_RESPONSE_INVALID";
 const LLM_PROVIDER_FAILED: &str = "LLM_PROVIDER_FAILED";
+const LLM_PROVIDER_AUTHENTICATION_FAILED: &str = "LLM_PROVIDER_AUTHENTICATION_FAILED";
+const LLM_PROVIDER_PERMISSION_DENIED: &str = "LLM_PROVIDER_PERMISSION_DENIED";
+const LLM_PROVIDER_CONNECTION_FAILED: &str = "LLM_PROVIDER_CONNECTION_FAILED";
+const LLM_PROVIDER_REQUEST_TIMEOUT: &str = "LLM_PROVIDER_REQUEST_TIMEOUT";
+const LLM_PROVIDER_REQUEST_REJECTED: &str = "LLM_PROVIDER_REQUEST_REJECTED";
+const LLM_PROVIDER_RATE_LIMITED: &str = "LLM_PROVIDER_RATE_LIMITED";
+const LLM_PROVIDER_UNAVAILABLE: &str = "LLM_PROVIDER_UNAVAILABLE";
+const LLM_PROVIDER_STREAM_FAILED: &str = "LLM_PROVIDER_STREAM_FAILED";
+const LLM_PROVIDER_RESPONSE_INVALID: &str = "LLM_PROVIDER_RESPONSE_INVALID";
+const LLM_PROVIDER_RESPONSE_TOO_LARGE: &str = "LLM_PROVIDER_RESPONSE_TOO_LARGE";
 const MODEL_OUTPUT_TRUNCATED: &str = "MODEL_OUTPUT_TRUNCATED";
 const MODEL_OUTPUT_FILTERED: &str = "MODEL_OUTPUT_FILTERED";
 const MODEL_FINISH_REASON_INVALID: &str = "MODEL_FINISH_REASON_INVALID";
@@ -2164,12 +2174,46 @@ fn require_live(
 }
 
 fn map_llm_error(error: RunError) -> WorkerFailure {
+    let provider_error_kind = match error.kind() {
+        RunErrorKind::Operation => "operation",
+        RunErrorKind::Timeout => "timeout",
+        RunErrorKind::Stop => "stop",
+        RunErrorKind::Infrastructure => "infrastructure",
+    };
+    let (public_error_code, retryable) = llm_provider_public_failure(error.code());
+    tracing::warn!(
+        event_name = "llm.provider_failure",
+        provider_error_code = error.code(),
+        provider_error_kind,
+        public_error_code,
+        retryable,
+        "LLM provider operation failed"
+    );
     match error.kind() {
         RunErrorKind::Stop => control(WORKER_CANCELLED),
         RunErrorKind::Timeout => control(WORKER_DEADLINE_EXCEEDED),
         RunErrorKind::Operation | RunErrorKind::Infrastructure => {
-            infrastructure(LLM_PROVIDER_FAILED, true)
+            infrastructure(public_error_code, retryable)
         }
+    }
+}
+
+fn llm_provider_public_failure(provider_error_code: &str) -> (&'static str, bool) {
+    match provider_error_code {
+        "UPSTREAM_AUTHENTICATION" => (LLM_PROVIDER_AUTHENTICATION_FAILED, false),
+        "UPSTREAM_PERMISSION" => (LLM_PROVIDER_PERMISSION_DENIED, false),
+        "UPSTREAM_CONNECTION" => (LLM_PROVIDER_CONNECTION_FAILED, true),
+        "UPSTREAM_TIMEOUT" => (LLM_PROVIDER_REQUEST_TIMEOUT, true),
+        "UPSTREAM_REQUEST" | "UPSTREAM_REQUEST_REJECTED" => (LLM_PROVIDER_REQUEST_REJECTED, false),
+        "UPSTREAM_RATE_LIMIT" => (LLM_PROVIDER_RATE_LIMITED, true),
+        "UPSTREAM_UNAVAILABLE" => (LLM_PROVIDER_UNAVAILABLE, true),
+        "UPSTREAM_STREAM" | "UPSTREAM_STREAM_INCOMPLETE" => (LLM_PROVIDER_STREAM_FAILED, true),
+        "UPSTREAM_STREAM_INVALID" | "UPSTREAM_RESPONSE_INVALID" => {
+            (LLM_PROVIDER_RESPONSE_INVALID, true)
+        }
+        "MODEL_RESPONSE_TOO_LARGE" => (LLM_PROVIDER_RESPONSE_TOO_LARGE, false),
+        "UPSTREAM_TRANSPORT" | "UPSTREAM_RESPONSE" => (LLM_PROVIDER_CONNECTION_FAILED, true),
+        _ => (LLM_PROVIDER_FAILED, true),
     }
 }
 
@@ -2317,6 +2361,47 @@ mod tests {
         catalog::{LeafDeploymentResolver, ProductionLeafDeploymentResolver},
         response_stream::InMemoryLiveResponseBroker,
     };
+
+    #[test]
+    fn provider_errors_map_to_specific_body_free_public_failures() {
+        let cases = [
+            (
+                "UPSTREAM_AUTHENTICATION",
+                LLM_PROVIDER_AUTHENTICATION_FAILED,
+                false,
+            ),
+            ("UPSTREAM_PERMISSION", LLM_PROVIDER_PERMISSION_DENIED, false),
+            ("UPSTREAM_CONNECTION", LLM_PROVIDER_CONNECTION_FAILED, true),
+            ("UPSTREAM_TIMEOUT", LLM_PROVIDER_REQUEST_TIMEOUT, true),
+            (
+                "UPSTREAM_REQUEST_REJECTED",
+                LLM_PROVIDER_REQUEST_REJECTED,
+                false,
+            ),
+            ("UPSTREAM_RATE_LIMIT", LLM_PROVIDER_RATE_LIMITED, true),
+            ("UPSTREAM_UNAVAILABLE", LLM_PROVIDER_UNAVAILABLE, true),
+            (
+                "UPSTREAM_STREAM_INVALID",
+                LLM_PROVIDER_RESPONSE_INVALID,
+                true,
+            ),
+            (
+                "MODEL_RESPONSE_TOO_LARGE",
+                LLM_PROVIDER_RESPONSE_TOO_LARGE,
+                false,
+            ),
+        ];
+
+        for (provider_code, public_code, retryable) in cases {
+            let failure = map_llm_error(RunError::operation(
+                provider_code,
+                "provider body secret must not cross the worker boundary",
+            ));
+            assert_eq!(failure.class(), WorkerFailureClass::InfrastructureFailure);
+            assert_eq!(failure.code(), public_code);
+            assert_eq!(failure.retryable(), retryable);
+        }
+    }
 
     #[derive(Debug, Clone)]
     struct CapturingModel {

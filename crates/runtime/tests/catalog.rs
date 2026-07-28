@@ -118,6 +118,7 @@ fn all_checked_in_agents_compile_into_verified_immutable_revisions() {
         "terminal_failure_fixture".to_owned(),
         "terminal_llm_failure_fixture".to_owned(),
         "terminal_stream_fixture".to_owned(),
+        "tool_assistant".to_owned(),
         "workflow_failure_demo".to_owned(),
     ]);
     let catalog = compile_enabled_agents(&root, &enabled).unwrap();

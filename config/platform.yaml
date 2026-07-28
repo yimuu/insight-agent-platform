@@ -12,6 +12,7 @@ agents:
     - medical_report_interpreter
     - parallel_researcher
     - researcher
+    - tool_assistant
 
 models:
   config: models.yaml
@@ -20,6 +21,9 @@ actions:
   enabled:
     - current_time
     - example.text_metrics
+    - text_metrics
+    - integer_calculator
+    - text_replace
 
 history:
   provider: postgres

@@ -636,6 +636,7 @@ fn checked_in_agents_and_markdown_prompts_compile_through() {
         "medical_report_interpreter",
         "parallel_researcher",
         "researcher",
+        "tool_assistant",
         "workflow_failure_demo",
     ] {
         let directory = root.join(agent);
