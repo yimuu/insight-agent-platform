@@ -81,13 +81,12 @@ workflow:
 - [DSL v1 指南](docs/current/dsl.md)：Agent 结构、类型、表达式和控制流；
 - [HTTP 与 SSE API](docs/current/api.md)：路由、幂等要求和响应流；
 - [部署与运维](docs/current/operations.md)：Schema 预置、配置、存储、认证和生命周期；
-- [Terminal-only 验收与 WAL 资格](docs/current/terminal-only-qualification.md)：已通过的 Phase 0、
-  Gate A～D 和资格证据；
 - [开发指南](docs/current/development.md)：代码导航和验证命令；
 - [变更记录](CHANGELOG.md)：发布版本的重要变化与兼容性说明。
 
 当前行为由上述文档、公开 schema、编译器与 verifier、数据库约束及测试共同定义。历史设计、
-实施计划和评审记录集中保存在 [`docs/archive/`](docs/archive/README.md)，不代表当前生产合同。
+实施计划、评审和已完成资格验收记录集中保存在
+[`docs/archive/`](docs/archive/README.md)，不代表当前生产合同。
 
 ## 验证
 

@@ -16,10 +16,10 @@ schema、Helm、benchmark、HTTP/SSE 合同
 
 关联证据：
 
-- [Durable Runtime 50 活跃 Run 并发优化规范](../../specs/2026-07-26-durable-runtime-50-active-runs-optimization.md)
+- [Durable Runtime 50 活跃 Run 并发优化规范](2026-07-26-durable-runtime-50-active-runs-optimization.md)
 - [Durable Runtime 50 并发优化与容量资格报告](../../../bench/reports/2026-07-26-durable-runtime-50-active-runs-optimized.md)
 - [Terminal-only Runtime 与 Conversation 资格报告](../../../bench/reports/2026-07-27-terminal-only-runtime-and-conversations-qualified.md)
-- [Terminal-only 验收与 WAL 资格](../../current/terminal-only-qualification.md)
+- [Terminal-only 验收与 WAL 资格](../qualifications/2026-07-28-terminal-only-qualification.md)
 - [Terminal-only 默认模式 rollout 决策](../reviews/2026-07-28-terminal-only-default-rollout-decision.md)
 
 ## 1. 决策摘要

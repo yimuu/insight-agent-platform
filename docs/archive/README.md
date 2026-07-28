@@ -8,6 +8,7 @@
 | [`specs/`](specs/) | 已完成、被吸收、被替代或废弃的设计 |
 | [`plans/`](plans/) | 已完成或失效的实施步骤与任务清单 |
 | [`reviews/`](reviews/) | 特定时间点的代码、依赖和整改快照 |
+| [`qualifications/`](qualifications/README.md) | 已完成的容量、故障与发布资格验收记录 |
 | [`migrations/`](migrations/) | 旧 DSL 或运行时切换说明 |
 
 归档文档保留原始标题、日期和大部分正文，以便理解当时为什么作出某项决定。文件中的状态、示例、
@@ -17,7 +18,9 @@
 
 | 记录 | 状态 | 当前入口 |
 |---|---|---|
-| [Terminal-only Runtime 存储与 Conversation 规范](specs/2026-07-27-terminal-only-runtime-and-conversations.md) | Implemented / capacity-qualified（2026-07-28） | [资格指南](../current/terminal-only-qualification.md)、[资格报告](../../bench/reports/2026-07-27-terminal-only-runtime-and-conversations-qualified.md) |
+| [Durable Runtime 50 活跃 Run 并发优化规范](specs/2026-07-26-durable-runtime-50-active-runs-optimization.md) | Implemented / capacity-qualified（2026-07-27） | [24 小时 RC 资格验收](../qualifications/durable-runtime-24h-rc.md) |
+| [Terminal-only Runtime 存储与 Conversation 规范](specs/2026-07-27-terminal-only-runtime-and-conversations.md) | Implemented / capacity-qualified（2026-07-28） | [部署与运维](../current/operations.md) |
+| [Terminal-only 验收与 WAL 资格](qualifications/2026-07-28-terminal-only-qualification.md) | Qualified（2026-07-28） | [资格报告](../../bench/reports/2026-07-27-terminal-only-runtime-and-conversations-qualified.md) |
 | [Terminal-only 默认模式 rollout 决策](reviews/2026-07-28-terminal-only-default-rollout-decision.md) | Accepted：默认保持 `full` | [部署与运维](../current/operations.md) |
 
 当前入口：

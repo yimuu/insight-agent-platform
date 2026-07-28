@@ -29,7 +29,8 @@ Run 创建请求不能覆盖该值。作者未声明时使用 `runtime.default_p
 默认值明确保持 `full`，`terminal_only` 只允许兼容的 immutable Deployment Revision 显式
 opt-in。容量资格只是修改默认值的前置证据，不会自动授权切换；2026-07-28 的 Phase 0、
 Gate A～D 与完成定义 1～12 已全部通过，整体状态为 Qualified，正式结果见
-[Terminal-only 验收与 WAL 资格](terminal-only-qualification.md)。独立 rollout 决议仍保留
+[Terminal-only 验收与 WAL 资格归档](../archive/qualifications/2026-07-28-terminal-only-qualification.md)。
+独立 rollout 决议仍保留
 `full` 默认值，未来切换需要新的显式评审。`full` 使用既有 event、
 checkpoint、lease/fence 和恢复路径。`terminal_only` 只持久化 admission 与 terminal result，
 执行中间状态只在 owner 进程内存在；进程或数据库重启会令未完成 Run 变成 `interrupted`，不会自动

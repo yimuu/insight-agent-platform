@@ -137,6 +137,5 @@ publication 权威事务中发送 PostgreSQL 通知；远端订阅者以 100ms �
 - [DSL v1 指南](dsl.md)
 - [HTTP 与 SSE API](api.md)
 - [部署与运维](operations.md)
-- [Terminal-only 验收与 WAL 资格](terminal-only-qualification.md)
 - [开发指南](development.md)
 - [文档权威关系](../README.md#权威关系)

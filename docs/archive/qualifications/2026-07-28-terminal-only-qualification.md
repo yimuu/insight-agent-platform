@@ -1,17 +1,23 @@
 # Terminal-only 验收与 WAL 资格
 
-状态：Current
+日期：2026-07-28
 
-## 当前资格进度
+状态：Archived / Qualified
+
+> 归档说明：Phase 0、Gate A～D、最终静态验证链和规范完成定义 1～12 已全部通过。本文件保存当时的
+> 可重复验收方法、判定门槛与证据路径；当前运行合同以 [`docs/current`](../../current/README.md)
+> 为准。
+
+## 最终资格结果
 
 资格状态：**Qualified（2026-07-28）**
 
 Phase 0、Gate A～D、最终静态验证链和规范完成定义 1～12 已全部通过。完整结论见
-[资格报告](../../bench/reports/2026-07-27-terminal-only-runtime-and-conversations-qualified.md)，
+[资格报告](../../../bench/reports/2026-07-27-terminal-only-runtime-and-conversations-qualified.md)，
 原设计已归档为
-[Implemented / capacity-qualified 规范](../archive/specs/2026-07-27-terminal-only-runtime-and-conversations.md)。
+[Implemented / capacity-qualified 规范](../specs/2026-07-27-terminal-only-runtime-and-conversations.md)。
 资格通过不自动授权修改默认值；独立
-[rollout 决策](../archive/reviews/2026-07-28-terminal-only-default-rollout-decision.md)
+[rollout 决策](../reviews/2026-07-28-terminal-only-default-rollout-decision.md)
 仍要求 Quickstart、chart 和未声明 Deployment Revision 使用 `full`，`terminal_only` 只由兼容的
 immutable Deployment Revision 显式 opt-in。
 
@@ -27,10 +33,10 @@ Gate B 同一连续窗口保持
 `fsync=on`、`full_page_writes=on`、`synchronous_commit=on`，54 张 full durable 表 delta
 全部为 0，物理 WAL 覆盖率为 `1.0008314585`。结束后 workload 和 port-forward 已清理，8Gi/2Gi
 PVC 保留正式数据；见
-[`cleanup-evidence.json`](../../bench/results/2026-07-28-terminal-only-qualified/gate-b-10rps-2h-final2/cleanup-evidence.json)。
+[`cleanup-evidence.json`](../../../bench/results/2026-07-28-terminal-only-qualified/gate-b-10rps-2h-final2/cleanup-evidence.json)。
 
-本页定义 terminal-only Gate A～D 的可重复验收方法。脚本位于
-[`bench/terminal-only`](../../bench/terminal-only)，所有判定均 fail-closed：缺少
+本记录保存 terminal-only Gate A～D 的可重复验收方法。脚本位于
+[`bench/terminal-only`](../../../bench/terminal-only)，所有判定均 fail-closed：缺少
 `pg_stat_statements`、弱化 PostgreSQL durability、没有产生故障窗口，或缺少规定规模时都会失败，
 不会把 smoke 结果标成 qualification。
 
@@ -59,10 +65,10 @@ PVC 保留正式数据；见
 `TERMINAL_BENCH_POSTGRES_URL`；Kubernetes 内置 PostgreSQL 则设置
 `BENCH_NAMESPACE`、`BENCH_RELEASE`，脚本会在确定的 PostgreSQL Pod 内运行 `psql`。资格结果目录必须
 保留镜像 digest、commit、最终 Helm values/manifest、节点和 PostgreSQL 版本；可以继续使用
-[`bench/k8s/run-profile.sh`](../../bench/k8s/run-profile.sh) 的环境捕获作为外层封装。
+[`bench/k8s/run-profile.sh`](../../../bench/k8s/run-profile.sh) 的环境捕获作为外层封装。
 
 Kubernetes 资格必须显式叠加
-[`values-terminal-only-qualification.yaml`](../../deploy/helm/insight-agent-platform/values-terminal-only-qualification.yaml)；
+[`values-terminal-only-qualification.yaml`](../../../deploy/helm/insight-agent-platform/values-terminal-only-qualification.yaml)；
 该 overlay 才会启用 provider-idempotent effect/attempt ledger、确定性故障 Agent 和私有 fault
 delay，并要求 Secret-backed tenant Artifact encryption。普通 chart 默认
 不发布这些测试能力。正式 Gate B 必须先由
@@ -102,14 +108,14 @@ helm upgrade --install terminal-wal deploy/helm/insight-agent-platform \
 ## Phase 0：独立 full-runtime 基线
 
 Gate A～D 之前的 Phase 0 使用独立的
-[`bench/phase0-full`](../../bench/phase0-full) harness，对现有 `full` durable engine
+[`bench/phase0-full`](../../../bench/phase0-full) harness，对现有 `full` durable engine
 取证；它不套用 terminal-only 的旧 ledger `+0`、16KiB/Run 或 32KiB/Run 门槛。正式 profile
 固定 `action_demo` 和字节不变的请求体，先执行不计入边界的 1 分钟 warm-up，再以 10 arrivals/s
 运行恰好 10 分钟，共 6,000 个 scheduled arrivals。
 
 旧 full 结果的两小时 WAL 精确差值为 `71,033,480,938` bytes、accepted 为 `71,801`，约等于
 同速率每 10 分钟 5.5GiB WAL。为了在 workload 后读取完整精确 LSN 区间，Phase 0 必须最后叠加
-[`values-phase0-full-baseline.yaml`](../../deploy/helm/insight-agent-platform/values-phase0-full-baseline.yaml)：
+[`values-phase0-full-baseline.yaml`](../../../deploy/helm/insight-agent-platform/values-phase0-full-baseline.yaml)：
 它固定单副本 `full`、仅发布 `action_demo`，使用 PostgreSQL/Artifact `24Gi/2Gi` PVC、
 `max_wal_size=4GB` 和 `wal_keep_size=8GB`。必须从
 `preflight-fresh-qualification.sh` 证明不存在的 namespace/release/PVC 开始；数据库 preflight
@@ -142,8 +148,8 @@ LSN byte span 的覆盖均必须在 95%～105%。block reference 会把 heap/ind
 relation，分别报告 payload、Artifact metadata、structural、mixed 和 unmapped；payload/object
 与 structural 的可解释覆盖必须至少 95%，外部 Artifact object bytes 另按 volume delta 报告。
 旧两小时值只保留作对比，不能重新标成新一轮的 ≥95% 归因证据。复现、容量原因和人工报告模板见
-[`bench/phase0-full/README.md`](../../bench/phase0-full/README.md) 与
-[`report-template.md`](../../bench/phase0-full/report-template.md)。
+[`bench/phase0-full/README.md`](../../../bench/phase0-full/README.md) 与
+[`report-template.md`](../../../bench/phase0-full/report-template.md)。
 
 ## Gate A：精确写路径
 
@@ -368,7 +374,7 @@ worker crash、terminal commit 后 SSE 前 kill 也要按下表记录，HTTP 状
 | summary worker crash | turn terminal | 恰好 1 | summary 可稍后重试 | 不影响 |
 
 summary worker crash 由
-[`run-summary-worker-crash.sh`](../../bench/terminal-only/run-summary-worker-crash.sh)
+[`run-summary-worker-crash.sh`](../../../bench/terminal-only/run-summary-worker-crash.sh)
 单独取证：脚本先证明达到阈值的 job 处于可观察的 delayed active 窗口且 DB 尚无 summary，再硬杀
 runtime；清除 delay 后的新 turn 必须在正常预算内完成、使用精确 recent tail fallback，并触发后续
 summary retry。删除 summary object 的读取失败由 `run-context-summary.sh` 另行验证，不能把该场景
@@ -453,13 +459,13 @@ Run GET `output.data` 和 assistant message content。
 
 ## 报告与判定
 
-复制 [`bench/terminal-only/report-template.md`](../../bench/terminal-only/report-template.md) 填写。
+复制 [`bench/terminal-only/report-template.md`](../../../bench/terminal-only/report-template.md) 填写。
 报告必须同时链接 raw before/after snapshot、k6 summary/log、top WAL SQL、table/index size、
 PostgreSQL 设置、runtime metrics/RSS、Pod event/log、failure classification 和 privacy receipt。
 没有实际运行两小时或缺少外部故障条件时，状态只能写 `Not run`/`Blocked`，不能写 `Passed`。
 
 2026-07-28 的正式资格结果以
-[已签署资格报告](../../bench/reports/2026-07-27-terminal-only-runtime-and-conversations-qualified.md)
+[已签署资格报告](../../../bench/reports/2026-07-27-terminal-only-runtime-and-conversations-qualified.md)
 和其链接的 immutable raw evidence 为准。Gate B 的 k6 客户端曾报告约 400,006 个 time series 的
 高基数警告；它没有改变精确 arrival/closure 或数据库判定，但扩大 profile 前应先收敛客户端
 URL/tag 基数，避免压测工具自身成为容量限制。

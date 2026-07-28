@@ -11,9 +11,12 @@
 
 ## 当前规范
 
-| 规范 | 状态 | 目标 |
-|---|---|---|
-| [Durable Runtime 50 活跃 Run 并发优化](2026-07-26-durable-runtime-50-active-runs-optimization.md) | Implemented / capacity-qualified；24h RC qualification 延后 | 降低数据库空轮询与历史扫描成本，在有限资源下验证 50 个活跃 Run |
+当前没有尚在设计或实施的活动规范。
 
-最近完成的 Terminal-only Runtime 与 Conversation 规范已移入
-[`archive/specs`](../archive/specs/2026-07-27-terminal-only-runtime-and-conversations.md)。
+最近完成的规范：
+
+- [Durable Runtime 50 活跃 Run 并发优化](../archive/specs/2026-07-26-durable-runtime-50-active-runs-optimization.md)；
+- [Terminal-only Runtime 与 Conversation](../archive/specs/2026-07-27-terminal-only-runtime-and-conversations.md)。
+
+尚未完成的 24 小时 release-candidate soak 属于资格验收，不是活动设计规范；见
+[Durable Runtime 24 小时 RC 资格验收](../qualifications/durable-runtime-24h-rc.md)。

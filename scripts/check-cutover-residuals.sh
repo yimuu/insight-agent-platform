@@ -104,7 +104,8 @@ report_matches \
   "active configuration contains a deleted runtime setting" \
   -nEH \
   '(operation_cancel_grace_period|max_template_output_bytes|journal_capacity|journal_batch_size|journal_operation_timeout)' \
-  "${production_source_roots[@]}" config agents README.md docs/README.md docs/current/*.md
+  "${production_source_roots[@]}" config agents README.md docs/README.md docs/current/*.md \
+  docs/qualifications/*.md
 
 # Author-controlled positive surfaces must use the current DSL. Negative fixtures are
 # selected by name and intentionally excluded from this scan.
@@ -130,7 +131,7 @@ report_matches \
   "active documentation describes a deleted production contract" \
   -nEH \
   '(Region/SSA|RegionYield|Branch/Phi|runtime-local-only|scope_scheduler|mark_incomplete_interrupted|api_version:[[:space:]]*insight\.agent/v2|type:[[:space:]]*switch([[:space:]]|$)|core\.branch_end|formal_v2|legacy scheduler|migrations/durable|schema_migrations|migration manifest|自动(执行|运行).*(migration|迁移))' \
-  README.md docs/README.md docs/current/*.md
+  README.md docs/README.md docs/current/*.md docs/qualifications/*.md
 
 if ((failed != 0)); then
   exit 1

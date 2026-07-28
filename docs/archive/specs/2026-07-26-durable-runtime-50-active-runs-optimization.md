@@ -2,15 +2,22 @@
 
 日期：2026-07-26
 
-状态：Implemented / capacity-qualified（最终 v3 Gate A/B/C 与 Gate D 2 小时均通过；
+状态：Archived / Implemented / capacity-qualified（最终 v3 Gate A/B/C 与 Gate D 2 小时均通过；
 24 小时 RC qualification 延后执行）
+
+归档日期：2026-07-28
+
+> 归档说明：本规范的实现与 capacity qualification 已于 2026-07-27 完成。尚未执行的 24 小时
+> release-candidate soak 已拆分为独立的
+> [活动资格验收](../../qualifications/durable-runtime-24h-rc.md)，不再让已完成设计停留在
+> `docs/specs`。
 
 目标版本：pre-1.0 performance cutover
 
 影响范围：`insight-runtime`、`insight-durable`、`insight-storage`、`insight-api`、平台配置、
 Helm chart、benchmark
 
-基线证据：[Kubernetes 有限资源压测报告](../../bench/reports/2026-07-25-k8s-limited-resource.md)
+基线证据：[Kubernetes 有限资源压测报告](../../../bench/reports/2026-07-25-k8s-limited-resource.md)
 
 ## 1. 决策摘要
 
@@ -98,7 +105,7 @@ task queue。worker 数越大，空队列查询、连接池竞争和 recovery �
 本规范的 P0 实现已落地，最终资格镜像为
 `insight-agent-platform:qualification-v3@sha256:7801bd7c572fc850bd63af23e64d22ef64bca94b301da6faa990e0724833be64`，
 schema contract 为 `durable-schema-cd9a5c3f-5f12-46d2-ab96-78820a13186f`。正式结果见
-[容量资格报告](../../bench/reports/2026-07-26-durable-runtime-50-active-runs-optimized.md)。
+[容量资格报告](../../../bench/reports/2026-07-26-durable-runtime-50-active-runs-optimized.md)。
 
 - Gate A：limited `500m/256Mi` 下 50 个 waiting Run 保持 30 分钟，200/200 收敛，429、slot
   恢复和 listener 重连均通过；
@@ -585,7 +592,8 @@ capacity profile 采用资源矩阵，选择满足标准的最小档位：
 
 ### 9.5 Gate D：稳定性
 
-合入和本轮容量资格 gate 为 2 小时 soak；发布候选需要保存一份 24 小时 soak evidence。
+合入和本轮容量资格 gate 为 2 小时 soak；发布候选需要保存一份 24 小时 soak evidence，后续状态由
+[Durable Runtime 24 小时 RC 资格验收](../../qualifications/durable-runtime-24h-rc.md)跟踪。
 
 要求：
 
@@ -647,7 +655,7 @@ PostgreSQL 与 SQLite 必须覆盖：
 | Phase 0～4 | 已实施并通过代码、contract、Helm 和 Gate A/B/C 验证 |
 | Phase 5 / Gate A～C | 已通过 |
 | Phase 5 / Gate D 2h | v3 已通过；故障恢复、内存趋势和一致性门槛均关闭 |
-| Phase 5 / Gate D 24h | 延后到 release-candidate qualification；两次本机运行均因 OrbStack host sleep 失效，第二次已由 macOS 日志确认为 `Clamshell Sleep`。下一次要求 always-on runner，且不阻塞本轮 capacity qualification 收尾 |
+| Phase 5 / Gate D 24h | 已拆分到[独立 RC qualification](../../qualifications/durable-runtime-24h-rc.md)；两次本机运行均因 OrbStack host sleep 失效，第二次已由 macOS 日志确认为 `Clamshell Sleep` |
 
 ### Phase 0：固定证据与观测口径
 
@@ -701,7 +709,7 @@ PostgreSQL 与 SQLite 必须覆盖：
 - 依次执行 Gate A、B、C、D；
 - 对失败档位保留原始结果，不选择性删除；
 - 生成新的容量报告，并明确硬件、存储和 workload 限制；
-- 全部实现完成后将本规范移入 `docs/archive/specs`。
+- 全部实现完成后将本规范移入 `docs/archive/specs`（已完成）。
 
 ## 12. 交付清单
 
@@ -754,9 +762,10 @@ PostgreSQL 与 SQLite 必须覆盖：
 1. 在 always-on runner 上完成不中断的 24 小时 soak；
 2. 终态成功率、deadlock、OOM、Pod restart、内存趋势和一致性满足 Gate D 门槛；
 3. 保存完整证据并更新容量报告；
-4. 将规范改为无条件 release-candidate-qualified 后移入历史档案。
+4. 将活动资格跟踪改为 release-candidate-qualified，并移入 `docs/archive/qualifications`。
 
 当前可靠表述是：单实例已验证 50 个 durable active/waiting Run；C1 已验证 50 个短本地 action
 同时到达，以及 10 arrival/s 的 2 小时负载。该结论不覆盖 50 路真实 LLM/retrieval、跨 AZ、
 多 runtime 全局配额或 24 小时发布资格。本轮目标已按 capacity-qualified 结束；24 小时 soak
-作为独立 RC follow-up 保留在 `docs/specs`，完成前不移入历史档案。
+作为独立 RC follow-up 由
+[活动资格验收](../../qualifications/durable-runtime-24h-rc.md)跟踪，本规范现已归档。

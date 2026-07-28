@@ -12,7 +12,7 @@ on `values-benchmark.yaml`:
 Terminal-only Phase 0 and Gate A～D do not use this durable soak wrapper. See
 [`bench/phase0-full`](../phase0-full/),
 [`bench/terminal-only`](../terminal-only/), and the
-[Terminal-only qualification guide](../../docs/current/terminal-only-qualification.md).
+[archived Terminal-only qualification record](../../docs/archive/qualifications/2026-07-28-terminal-only-qualification.md).
 
 The artifact volume uses a PVC because its durable authority must survive
 runtime Pod replacement. C1/C2 also enable PostgreSQL persistence so aged and

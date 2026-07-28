@@ -34,8 +34,8 @@ cargo deny check
 
 容量、WAL、真实进程故障和百万行 Conversation 查询不是普通单元 CI 的替代品，也不能由 smoke
 结果代替。Terminal-only 的 Phase 0 与 Gate A～D 使用独立的 fresh namespace、固定 workload 和
-fail-closed evaluator；当前进度、复现命令及正式证据路径见
-[Terminal-only 验收与 WAL 资格](terminal-only-qualification.md)。
+fail-closed evaluator；已完成的复现命令及正式证据路径保存在
+[Terminal-only 验收与 WAL 资格归档](../archive/qualifications/2026-07-28-terminal-only-qualification.md)。
 
 ## 代码导航
 

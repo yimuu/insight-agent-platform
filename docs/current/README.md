@@ -7,7 +7,6 @@
 - [DSL v1 指南](dsl.md)
 - [HTTP 与 SSE API](api.md)
 - [部署与运维](operations.md)
-- [Terminal-only 验收与 WAL 资格](terminal-only-qualification.md)（Qualified，2026-07-28）
 - [开发指南](development.md)
 
 当前行为由这些文档、公开 schema、compiler/verifier、数据库约束和测试共同定义。已完成的详细
