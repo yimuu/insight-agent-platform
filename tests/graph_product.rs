@@ -744,6 +744,25 @@ async fn wait_for_completed(service: &RunService, run_id: &str) {
     }
 }
 
+async fn wait_for_running(service: &RunService, run_id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = service.get_run(run_id).await.unwrap().status();
+        if status == RunStatus::Running {
+            return;
+        }
+        assert!(
+            !status.is_terminal(),
+            "Graph-authored Run became terminal before opening its signal wait: {status:?}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "Graph-authored Run did not reach running state"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn exercise_graph_product(
     repository: Arc<dyn ProductionRunRepository>,
     service_config: RunServiceConfig,
@@ -1142,11 +1161,7 @@ async fn exercise_graph_product(
         .published()
         .metadata()
         .clone();
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    assert_eq!(
-        service.get_run(&restart_run.run_id).await.unwrap().status(),
-        RunStatus::Running
-    );
+    wait_for_running(&service, &restart_run.run_id).await;
     service.shutdown(Duration::from_secs(2)).await.unwrap();
 
     let unavailable = RunService::start_with_artifact_store_and_graph_publication(

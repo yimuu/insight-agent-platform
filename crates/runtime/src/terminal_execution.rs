@@ -214,6 +214,7 @@ struct TerminalExecutionObservations {
 }
 
 /// Execute one verified deployment entirely in process.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_terminal_plan(
     agent: Arc<DeployedAgent>,
     workers: Arc<WorkerExecutorRegistry>,
