@@ -6,9 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub use insight_engine::response::{
-    DurableResponseSnapshot, ResponseTerminalKind, ResponseUsageStatus,
-};
+pub use insight_engine::run_stream::{DurableRunStreamSnapshot, RunTerminalKind, RunUsageStatus};
 
 use insight_engine::{
     plan::{Plan, PlanInputContract},

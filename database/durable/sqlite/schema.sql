@@ -2384,25 +2384,19 @@ OR finish_reason IN('stop', 'tool_calls', 'length', 'content_filter', 'invalid')
   PRIMARY KEY(run_id, activation_id, attempt_no, model_call_no),
   FOREIGN KEY(run_id) REFERENCES workflow_runs(run_id) ON DELETE RESTRICT
 );
-CREATE TABLE response_snapshots(
+CREATE TABLE run_stream_snapshots(
   run_id TEXT NOT NULL PRIMARY KEY,
-  response_id TEXT NOT NULL,
-  terminal_kind TEXT NOT NULL CHECK(terminal_kind IN('response.completed',
-'response.failed',
-'workflow.response.timed_out',
-'workflow.response.cancelled',
-'workflow.response.interrupted')),
-  response_status TEXT NOT NULL CHECK(response_status IN('completed', 'failed', 'cancelled', 'incomplete')),
-  response_payload TEXT NOT NULL CHECK(json_valid(response_payload)),
-  workflow_payload TEXT NOT NULL CHECK(json_valid(workflow_payload)),
+  protocol TEXT NOT NULL CHECK(protocol = 'run-stream/v1'),
+  terminal_kind TEXT NOT NULL CHECK(terminal_kind IN('run.lifecycle.completed',
+'run.lifecycle.failed',
+'run.lifecycle.timed_out',
+'run.lifecycle.cancelled',
+'run.lifecycle.interrupted')),
+  run_payload TEXT NOT NULL CHECK(json_valid(run_payload)),
   public_item_manifest TEXT NOT NULL CHECK(json_valid(public_item_manifest)),
-  usage TEXT CHECK(usage IS NULL OR json_valid(usage)),
-  usage_status TEXT NOT NULL CHECK(usage_status IN('complete', 'partial', 'unavailable')),
   snapshot_hash TEXT NOT NULL CHECK(length(snapshot_hash) = 71 AND snapshot_hash LIKE 'sha256:%'),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(response_id),
-  FOREIGN KEY(run_id) REFERENCES workflow_runs(run_id) ON DELETE RESTRICT,
-  FOREIGN KEY(response_id) REFERENCES workflow_runs(response_id) ON DELETE RESTRICT
+  FOREIGN KEY(run_id) REFERENCES workflow_runs(run_id) ON DELETE RESTRICT
 );
 CREATE TABLE model_tool_call_batches(
   run_id TEXT NOT NULL,
@@ -2942,7 +2936,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-d98dcd93-4911-426d-a826-9d8a5b04b461',
+    'durable-schema-ed759e21-5c5d-42e9-90d3-744029ea19b2',
     'sqlite'
 );
 

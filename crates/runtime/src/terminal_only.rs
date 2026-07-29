@@ -41,9 +41,9 @@ use insight_engine::{
     repository::{
         REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_INTENT_CONFLICT, REPOSITORY_STORAGE_FAILURE,
     },
-    response::{
-        adapter::durable_response_snapshot_new, DurableResponseSnapshot, LiveResponseBroker,
-        LiveResponseSubscriber,
+    run_stream::{
+        adapter::durable_run_stream_snapshot_new, DurableRunStreamSnapshot, LiveRunStreamBroker,
+        LiveRunStreamSubscriber,
     },
     ContentHash, PersistenceMode, RunId, RuntimeValue,
 };
@@ -223,8 +223,8 @@ pub struct TerminalAttachedRun {
     pub response_id: String,
     pub request_id: String,
     pub subscription: TerminalRunSubscription,
-    pub live_response: Box<dyn LiveResponseSubscriber>,
-    pub live_response_broker: Arc<dyn LiveResponseBroker>,
+    pub live_run_stream: Box<dyn LiveRunStreamSubscriber>,
+    pub live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
     pub terminal_barrier_timeout: Duration,
     pub outbound_write_timeout: Duration,
     pub conversation_privacy: Option<ConversationStreamPrivacy>,
@@ -238,7 +238,7 @@ pub struct ConversationVisibilityGuard {
 
 pub struct TerminalRunSubscription {
     run_id: RunId,
-    receiver: watch::Receiver<Option<DurableResponseSnapshot>>,
+    receiver: watch::Receiver<Option<DurableRunStreamSnapshot>>,
     cancellation: CancellationToken,
     terminal: bool,
 }
@@ -248,7 +248,7 @@ impl TerminalRunSubscription {
         &self.run_id
     }
 
-    pub async fn recv_terminal(&mut self) -> Result<DurableResponseSnapshot, ServiceError> {
+    pub async fn recv_terminal(&mut self) -> Result<DurableRunStreamSnapshot, ServiceError> {
         if self.terminal {
             return self
                 .receiver
@@ -268,7 +268,7 @@ impl TerminalRunSubscription {
         }
     }
 
-    pub fn load_response_snapshot(&self) -> Option<DurableResponseSnapshot> {
+    pub fn load_run_stream_snapshot(&self) -> Option<DurableRunStreamSnapshot> {
         self.receiver.borrow().clone()
     }
 }
@@ -315,7 +315,7 @@ struct ActiveTerminalRun {
     conversation_id: Option<String>,
     owner: RuntimeOwner,
     cancellation: CancellationToken,
-    terminal: watch::Sender<Option<DurableResponseSnapshot>>,
+    terminal: watch::Sender<Option<DurableRunStreamSnapshot>>,
     attachment: RunAttachment,
 }
 
@@ -357,7 +357,7 @@ struct TerminalOnlyRunEngineInner {
     agents: DeployedAgentCatalog,
     workers: Arc<insight_engine::worker::WorkerExecutorRegistry>,
     artifact_store: Arc<dyn WorkerArtifactStore>,
-    live_response_broker: Arc<dyn LiveResponseBroker>,
+    live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
     owner: RwLock<RuntimeOwner>,
     endpoint: String,
     config: TerminalOnlyRunConfig,
@@ -396,7 +396,7 @@ impl TerminalOnlyRunEngine {
         agents: DeployedAgentCatalog,
         workers: Arc<insight_engine::worker::WorkerExecutorRegistry>,
         artifact_store: Arc<dyn WorkerArtifactStore>,
-        live_response_broker: Arc<dyn LiveResponseBroker>,
+        live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
         endpoint: String,
         config: TerminalOnlyRunConfig,
     ) -> Result<Self, ServiceError> {
@@ -440,7 +440,7 @@ impl TerminalOnlyRunEngine {
                 agents,
                 workers,
                 artifact_store,
-                live_response_broker,
+                live_run_stream_broker,
                 owner: RwLock::new(owner),
                 endpoint,
                 config,
@@ -1645,9 +1645,9 @@ impl TerminalOnlyRunEngine {
         let Some((receiver, cancellation)) = active else {
             return self.attach_terminal_replay(admission).await;
         };
-        let live_response = self
+        let live_run_stream = self
             .inner
-            .live_response_broker
+            .live_run_stream_broker
             .subscribe(admission.run_id.clone())
             .await
             .map_err(|_| terminal_unavailable())?;
@@ -1661,8 +1661,8 @@ impl TerminalOnlyRunEngine {
                 cancellation,
                 terminal: false,
             },
-            live_response,
-            live_response_broker: Arc::clone(&self.inner.live_response_broker),
+            live_run_stream,
+            live_run_stream_broker: Arc::clone(&self.inner.live_run_stream_broker),
             terminal_barrier_timeout: self.inner.config.terminal_barrier_timeout,
             outbound_write_timeout: self.inner.config.outbound_write_timeout,
             conversation_privacy: None,
@@ -1739,13 +1739,16 @@ impl TerminalOnlyRunEngine {
         };
         let snapshot = terminal_snapshot(&admission.run_id, &outcome)?;
         let (_terminal, receiver) = watch::channel(Some(snapshot));
-        let live_response = self
+        let live_run_stream = self
             .inner
-            .live_response_broker
+            .live_run_stream_broker
             .subscribe(admission.run_id.clone())
             .await
             .map_err(|_| terminal_unavailable())?;
-        let _ = self.inner.live_response_broker.close_run(&admission.run_id);
+        let _ = self
+            .inner
+            .live_run_stream_broker
+            .close_run(&admission.run_id);
         Ok(Some(TerminalAttachedRun {
             run_id: admission.run_id.as_str().to_owned(),
             response_id: response_id(&admission.run_id),
@@ -1756,8 +1759,8 @@ impl TerminalOnlyRunEngine {
                 cancellation: CancellationToken::new(),
                 terminal: true,
             },
-            live_response,
-            live_response_broker: Arc::clone(&self.inner.live_response_broker),
+            live_run_stream,
+            live_run_stream_broker: Arc::clone(&self.inner.live_run_stream_broker),
             terminal_barrier_timeout: self.inner.config.terminal_barrier_timeout,
             outbound_write_timeout: self.inner.config.outbound_write_timeout,
             conversation_privacy: None,
@@ -1804,7 +1807,7 @@ impl TerminalOnlyRunEngine {
         let run_id = admission.run_id.clone();
         let request_id = admission.request_id.clone();
         let attached_cancellation = cancellation.clone();
-        let live_response_broker = Arc::clone(&self.inner.live_response_broker);
+        let live_run_stream_broker = Arc::clone(&self.inner.live_run_stream_broker);
         let cleanup = ActiveRunCleanup {
             inner: Arc::downgrade(&self.inner),
             run_id: admission.run_id.clone(),
@@ -1830,10 +1833,10 @@ impl TerminalOnlyRunEngine {
         // broker subscription failure may fail this request, but it can never
         // strand the already-durable admission in Active under a healthy
         // owner: execution still reaches a fenced terminal commit.
-        let live_response = if attachment == RunAttachment::Attached {
+        let live_run_stream = if attachment == RunAttachment::Attached {
             Some(
                 self.inner
-                    .live_response_broker
+                    .live_run_stream_broker
                     .subscribe(run_id.clone())
                     .await
                     .map_err(|_| terminal_unavailable())?,
@@ -1841,7 +1844,7 @@ impl TerminalOnlyRunEngine {
         } else {
             None
         };
-        let attached = live_response.map(|live_response| TerminalAttachedRun {
+        let attached = live_run_stream.map(|live_run_stream| TerminalAttachedRun {
             run_id: run_id.as_str().to_owned(),
             response_id,
             request_id,
@@ -1851,8 +1854,8 @@ impl TerminalOnlyRunEngine {
                 cancellation: attached_cancellation,
                 terminal: false,
             },
-            live_response,
-            live_response_broker,
+            live_run_stream,
+            live_run_stream_broker,
             terminal_barrier_timeout: self.inner.config.terminal_barrier_timeout,
             outbound_write_timeout: self.inner.config.outbound_write_timeout,
             conversation_privacy: None,
@@ -1867,7 +1870,7 @@ impl TerminalOnlyRunEngine {
         normalized: RuntimeValue,
         pending_conversation: Option<PendingConversationCommit>,
         cancellation: CancellationToken,
-        terminal: watch::Sender<Option<DurableResponseSnapshot>>,
+        terminal: watch::Sender<Option<DurableRunStreamSnapshot>>,
     ) -> Result<(), ServiceError> {
         // These delays are deliberately private qualification failpoints.
         // Production defaults are zero; the Helm Gate C harness temporarily
@@ -1901,7 +1904,7 @@ impl TerminalOnlyRunEngine {
             normalized,
             cancellation.clone(),
             execution_config,
-            Arc::clone(&self.inner.live_response_broker),
+            Arc::clone(&self.inner.live_run_stream_broker),
         )
         .await
         {
@@ -1970,7 +1973,10 @@ impl TerminalOnlyRunEngine {
             &cancellation,
         )
         .await;
-        let _ = self.inner.live_response_broker.close_run(&admission.run_id);
+        let _ = self
+            .inner
+            .live_run_stream_broker
+            .close_run(&admission.run_id);
         if let Some(snapshot) = snapshot {
             let _ = terminal.send(Some(snapshot));
         }
@@ -3336,7 +3342,7 @@ impl Drop for ActiveRunCleanup {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(self.run_id.as_str());
-            let _ = inner.live_response_broker.close_run(&self.run_id);
+            let _ = inner.live_run_stream_broker.close_run(&self.run_id);
         }
     }
 }
@@ -3396,9 +3402,9 @@ fn terminal_state(outcome: &TerminalExecutionOutcome) -> TerminalState {
 fn terminal_snapshot(
     run_id: &RunId,
     outcome: &TerminalExecutionOutcome,
-) -> Result<DurableResponseSnapshot, ServiceError> {
+) -> Result<DurableRunStreamSnapshot, ServiceError> {
     use insight_durable::common::adapter::{
-        build_terminal_response_snapshot, TerminalResponseSnapshotInput,
+        build_terminal_run_stream_snapshot, TerminalRunStreamSnapshotInput,
     };
     let (lifecycle, output, error) = match outcome {
         TerminalExecutionOutcome::Succeeded { output, .. } => {
@@ -3416,7 +3422,7 @@ fn terminal_snapshot(
             (insight_engine::RunLifecycle::TimedOut, None, None)
         }
     };
-    let pending = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+    let pending = build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
         run_id,
         lifecycle,
         output,
@@ -3427,14 +3433,11 @@ fn terminal_snapshot(
         retrievals: Vec::new(),
     })
     .map_err(|_| terminal_unavailable())?;
-    durable_response_snapshot_new(
-        pending.response_id,
+    durable_run_stream_snapshot_new(
+        pending.run_id,
         pending.terminal_kind,
-        pending.response,
-        pending.workflow,
+        pending.run,
         pending.manifest,
-        pending.usage,
-        pending.usage_status,
         pending.snapshot_hash,
     )
     .map_err(|_| terminal_unavailable())

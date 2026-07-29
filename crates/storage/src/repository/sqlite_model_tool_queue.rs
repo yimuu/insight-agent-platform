@@ -19,7 +19,7 @@ use insight_durable::model_tool_queue::adapter::{
     parse_frozen_model_tool_contract, validate_tool_arguments, validate_tool_result,
 };
 
-use insight_engine::response::{WorkflowToolPublicProjection, WorkflowToolResult};
+use insight_engine::run_stream::{RunToolPublicProjection, RunToolResult};
 use insight_engine::worker::ResponseItemAuthority;
 use insight_engine::{
     AttemptNo, ContentHash, EffectEvidence, EffectIdempotency, LeaseEpoch, RunId, SchedulerTaskId,
@@ -238,7 +238,7 @@ async fn parent_operation_deadline_sqlite(
 async fn validate_projected_tool_artifacts_sqlite(
     tx: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
-    projected: Option<&WorkflowToolResult>,
+    projected: Option<&RunToolResult>,
 ) -> Result<(), RepositoryError> {
     let Some(projected) = projected else {
         return Ok(());
@@ -246,7 +246,7 @@ async fn validate_projected_tool_artifacts_sqlite(
     for artifact in projected
         .content()
         .iter()
-        .filter_map(insight_engine::response::WorkflowToolContent::artifact)
+        .filter_map(insight_engine::run_stream::RunToolContent::artifact)
     {
         let exact = sqlx::query_scalar::<_, i64>(
             "SELECT EXISTS(
@@ -556,10 +556,9 @@ pub(crate) async fn activate_model_tool_call_batch_sqlite(
             .ok_or_else(RepositoryError::invalid_data)?;
         let arguments = decode_json_text(row, "arguments")?;
         validate_tool_arguments(&action, &arguments)?;
-        let public_projection = WorkflowToolPublicProjection::from_frozen_effective_policy(
-            action.effective_public_policy(),
-        )
-        .map_err(|_| RepositoryError::invalid_data())?;
+        let public_projection =
+            RunToolPublicProjection::from_frozen_effective_policy(action.effective_public_policy())
+                .map_err(|_| RepositoryError::invalid_data())?;
         let projected_arguments = public_projection
             .project_validated_completed_arguments(&arguments)
             .map_err(|_| RepositoryError::invalid_data())?;
@@ -2162,7 +2161,7 @@ pub(crate) async fn commit_model_tool_call_outcome_sqlite(
                 return Ok(ModelToolTaskTransitionOutcome::StateConflict);
             }
             validate_tool_result(&action, result)?;
-            let public_result = WorkflowToolPublicProjection::from_frozen_effective_policy(
+            let public_result = RunToolPublicProjection::from_frozen_effective_policy(
                 action.effective_public_policy(),
             )
             .and_then(|projection| {

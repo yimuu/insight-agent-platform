@@ -17,11 +17,10 @@ use chrono::{DateTime, Utc};
 use futures::FutureExt;
 use insight_durable::model_tool_queue::adapter as model_tool_adapter;
 use insight_engine::{
-    response::{
-        CompletedFunctionCallTailPublication, LiveResponseBroker, LiveResponseItemIdentity,
-        LiveResponsePayload, LiveResponsePublication, LiveResponsePublishOutcome,
-        LiveWorkflowObservationIdentity, WorkflowPublicError, WorkflowToolPublicProjection,
-        WorkflowToolResult,
+    run_stream::{
+        CompletedFunctionCallTailPublication, LiveRunObservationIdentity, LiveRunStreamBroker,
+        LiveRunStreamItemIdentity, LiveRunStreamPayload, LiveRunStreamPublication,
+        LiveRunStreamPublishOutcome, RunPublicError, RunToolPublicProjection, RunToolResult,
     },
     worker::{
         adapter as worker_adapter, ModelCallAuthority, ModelContinuationTurn,
@@ -97,7 +96,7 @@ pub enum TerminalExecutionOutcome {
         #[serde(skip_serializing_if = "Option::is_none")]
         usage: Option<Value>,
         #[serde(default)]
-        tool_results: Vec<WorkflowToolResult>,
+        tool_results: Vec<RunToolResult>,
     },
     Failed {
         failure_kind: TerminalFailureKind,
@@ -107,15 +106,15 @@ pub enum TerminalExecutionOutcome {
         #[serde(skip_serializing_if = "Option::is_none")]
         usage: Option<Value>,
         #[serde(default)]
-        tool_results: Vec<WorkflowToolResult>,
+        tool_results: Vec<RunToolResult>,
     },
     Cancelled {
         #[serde(default)]
-        tool_results: Vec<WorkflowToolResult>,
+        tool_results: Vec<RunToolResult>,
     },
     TimedOut {
         #[serde(default)]
-        tool_results: Vec<WorkflowToolResult>,
+        tool_results: Vec<RunToolResult>,
     },
 }
 
@@ -150,7 +149,7 @@ impl TerminalExecutionOutcome {
         }
     }
 
-    pub fn tool_results(&self) -> &[WorkflowToolResult] {
+    pub fn tool_results(&self) -> &[RunToolResult] {
         match self {
             Self::Succeeded { tool_results, .. }
             | Self::Failed { tool_results, .. }
@@ -208,8 +207,8 @@ impl std::fmt::Display for TerminalExecutionError {
 impl std::error::Error for TerminalExecutionError {}
 
 struct TerminalExecutionObservations {
-    live_response_broker: Arc<dyn LiveResponseBroker>,
-    tool_results: Vec<WorkflowToolResult>,
+    live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
+    tool_results: Vec<RunToolResult>,
     public_output_index: Arc<AtomicU32>,
 }
 
@@ -223,7 +222,7 @@ pub async fn execute_terminal_plan(
     input: RuntimeValue,
     cancellation: CancellationToken,
     config: TerminalExecutionConfig,
-    live_response_broker: Arc<dyn LiveResponseBroker>,
+    live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
 ) -> Result<TerminalExecutionOutcome, TerminalExecutionError> {
     if agent.persistence_mode() != PersistenceMode::TerminalOnly {
         return Err(TerminalExecutionError::infrastructure(
@@ -240,7 +239,7 @@ pub async fn execute_terminal_plan(
         TerminalSchedulerState::new(insight_engine::SchedulerFacts::new(run_id, 0, input));
     let mut usage = TerminalUsage::default();
     let mut observations = TerminalExecutionObservations {
-        live_response_broker,
+        live_run_stream_broker,
         tool_results: Vec::new(),
         public_output_index: Arc::new(AtomicU32::new(0)),
     };
@@ -523,7 +522,7 @@ async fn execute_model_with_tools(
         total_calls =
             total_calls.saturating_add(u32::try_from(batch.calls().len()).unwrap_or(u32::MAX));
         publish_terminal_function_call_tails(
-            observations.live_response_broker.as_ref(),
+            observations.live_run_stream_broker.as_ref(),
             request,
             attempt,
             batch,
@@ -597,7 +596,7 @@ async fn execute_model_with_tools(
         }
         let run_id = request.run_id().clone();
         let activation_id = request.activation_id().clone();
-        let broker = Arc::clone(&observations.live_response_broker);
+        let broker = Arc::clone(&observations.live_run_stream_broker);
         let public_output_index = Arc::clone(&observations.public_output_index);
         let completed = futures::future::join_all(prepared.into_iter().map(
             |(call, action, tool_task_id, tool_request, tool_cancellation)| {
@@ -618,7 +617,7 @@ async fn execute_model_with_tools(
                     )?;
                     let mut local_usage = TerminalUsage::default();
                     let mut local_observations = TerminalExecutionObservations {
-                        live_response_broker: broker,
+                        live_run_stream_broker: broker,
                         tool_results: Vec::new(),
                         public_output_index,
                     };
@@ -720,7 +719,7 @@ async fn execute_model_with_tools(
 }
 
 fn publish_terminal_function_call_tails(
-    broker: &dyn LiveResponseBroker,
+    broker: &dyn LiveRunStreamBroker,
     request: &TaskExecutionRequest,
     attempt: u32,
     batch: &ModelToolCallBatch,
@@ -751,7 +750,7 @@ fn publish_terminal_function_call_tails(
                 false,
             )
         })?;
-        let identity = LiveResponseItemIdentity::new(
+        let identity = LiveRunStreamItemIdentity::new(
             request.run_id().clone(),
             request.activation_id().clone(),
             attempt_no,
@@ -797,15 +796,15 @@ fn publish_terminal_function_call_tails(
 }
 
 struct TerminalToolPublication {
-    broker: Arc<dyn LiveResponseBroker>,
-    projection: WorkflowToolPublicProjection,
+    broker: Arc<dyn LiveRunStreamBroker>,
+    projection: RunToolPublicProjection,
     run_id: RunId,
     activation_id: insight_engine::ActivationId,
     source_id: String,
     call_id: String,
     tool_name: String,
     started_arguments: Option<Value>,
-    active_identity: Option<LiveWorkflowObservationIdentity>,
+    active_identity: Option<LiveRunObservationIdentity>,
     next_local_sequence: u64,
     first_started_at: Option<Instant>,
     progress_window_started_at: Instant,
@@ -816,7 +815,7 @@ struct TerminalToolPublication {
 impl TerminalToolPublication {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        broker: Arc<dyn LiveResponseBroker>,
+        broker: Arc<dyn LiveRunStreamBroker>,
         run_id: &RunId,
         activation_id: &insight_engine::ActivationId,
         source_id: &str,
@@ -826,7 +825,7 @@ impl TerminalToolPublication {
         arguments: &Value,
     ) -> Result<Self, WorkerFailure> {
         let projection =
-            WorkflowToolPublicProjection::from_frozen_effective_policy(effective_public_policy)
+            RunToolPublicProjection::from_frozen_effective_policy(effective_public_policy)
                 .map_err(|_| {
                     worker_failure(
                         WorkerFailureClass::InvariantCorruption,
@@ -874,7 +873,7 @@ impl TerminalToolPublication {
         let Ok(attempt_no) = AttemptNo::new(attempt) else {
             return;
         };
-        let Ok(identity) = LiveWorkflowObservationIdentity::new(
+        let Ok(identity) = LiveRunObservationIdentity::new(
             self.run_id.clone(),
             self.activation_id.clone(),
             attempt_no,
@@ -885,7 +884,7 @@ impl TerminalToolPublication {
         self.first_started_at.get_or_insert_with(Instant::now);
         self.active_identity = Some(identity);
         self.next_local_sequence = 0;
-        self.emit(LiveResponsePayload::ToolStarted {
+        self.emit(LiveRunStreamPayload::ToolStarted {
             call_id: self.call_id.clone(),
             tool_name: self.tool_name.clone(),
             arguments: self.started_arguments.clone(),
@@ -920,7 +919,7 @@ impl TerminalToolPublication {
         }
         self.progress_total = self.progress_total.saturating_add(1);
         self.progress_in_window = self.progress_in_window.saturating_add(1);
-        let outcome = self.emit(LiveResponsePayload::ToolProgress {
+        let outcome = self.emit(LiveRunStreamPayload::ToolProgress {
             call_id: self.call_id.clone(),
             tool_name: self.tool_name.clone(),
             content,
@@ -929,9 +928,9 @@ impl TerminalToolPublication {
             if matches!(
                 outcome,
                 Some(
-                    LiveResponsePublishOutcome::Enqueued
-                        | LiveResponsePublishOutcome::EnqueuedAfterGap
-                        | LiveResponsePublishOutcome::EnqueuedAfterBestEffortLoss
+                    LiveRunStreamPublishOutcome::Enqueued
+                        | LiveRunStreamPublishOutcome::EnqueuedAfterGap
+                        | LiveRunStreamPublishOutcome::EnqueuedAfterBestEffortLoss
                 )
             ) {
                 worker_adapter::ModelToolProgressDisposition::Published
@@ -941,7 +940,7 @@ impl TerminalToolPublication {
         )
     }
 
-    fn completed(&mut self, value: &Value) -> Result<Option<WorkflowToolResult>, WorkerFailure> {
+    fn completed(&mut self, value: &Value) -> Result<Option<RunToolResult>, WorkerFailure> {
         let projected = self
             .projection
             .project_validated_completed_result(self.call_id.clone(), self.tool_name.clone(), value)
@@ -958,19 +957,17 @@ impl TerminalToolPublication {
         }
         let result = match projected {
             Some(result) => result,
-            None => {
-                WorkflowToolResult::new(self.call_id.clone(), self.tool_name.clone(), Vec::new())
-                    .map_err(|_| {
-                        worker_failure(
-                            WorkerFailureClass::InvariantCorruption,
-                            TERMINAL_MODEL_TOOL_PUBLIC_RESULT_INVALID,
-                            false,
-                        )
-                    })?
-            }
+            None => RunToolResult::new(self.call_id.clone(), self.tool_name.clone(), Vec::new())
+                .map_err(|_| {
+                    worker_failure(
+                        WorkerFailureClass::InvariantCorruption,
+                        TERMINAL_MODEL_TOOL_PUBLIC_RESULT_INVALID,
+                        false,
+                    )
+                })?,
         };
         let duration_ms = self.duration_ms();
-        self.emit(LiveResponsePayload::ToolCompleted {
+        self.emit(LiveRunStreamPayload::ToolCompleted {
             call_id: self.call_id.clone(),
             tool_name: self.tool_name.clone(),
             duration_ms,
@@ -1004,11 +1001,11 @@ impl TerminalToolPublication {
                 "The tool could not be completed."
             }
         };
-        self.emit(LiveResponsePayload::ToolFailed {
+        self.emit(LiveRunStreamPayload::ToolFailed {
             call_id: self.call_id.clone(),
             tool_name: self.tool_name.clone(),
             duration_ms: self.duration_ms(),
-            error: WorkflowPublicError {
+            error: RunPublicError {
                 code: failure.code().to_owned(),
                 message: message.to_owned(),
             },
@@ -1022,9 +1019,9 @@ impl TerminalToolPublication {
             .unwrap_or(0)
     }
 
-    fn emit(&mut self, payload: LiveResponsePayload) -> Option<LiveResponsePublishOutcome> {
+    fn emit(&mut self, payload: LiveRunStreamPayload) -> Option<LiveRunStreamPublishOutcome> {
         let identity = self.active_identity.clone()?;
-        let publication = LiveResponsePublication::new_workflow_observation(
+        let publication = LiveRunStreamPublication::new_run_observation(
             identity,
             self.next_local_sequence,
             payload,
@@ -1307,8 +1304,8 @@ fn worker_failure(class: WorkerFailureClass, code: &'static str, retryable: bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::response_stream::InMemoryLiveResponseBroker;
-    use insight_engine::response::{LiveResponseDelivery, ResponseStreamEvent};
+    use crate::run_stream::InMemoryLiveRunStreamBroker;
+    use insight_engine::run_stream::{LiveRunStreamDelivery, RunStreamEvent};
 
     #[tokio::test(start_paused = true)]
     async fn retry_backoff_is_cut_off_by_the_hard_run_deadline() {
@@ -1323,7 +1320,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_tool_publication_emits_progress_terminal_result_and_rejects_late_updates() {
-        let broker = Arc::new(InMemoryLiveResponseBroker::new(16, 4).unwrap());
+        let broker = Arc::new(InMemoryLiveRunStreamBroker::new(16, 4).unwrap());
         let run_id = RunId::new("run_terminal_progress").unwrap();
         let mut subscriber = broker.subscribe(run_id.clone()).await.unwrap();
         let progress_schema = json!({
@@ -1391,23 +1388,17 @@ mod tests {
 
         let mut events = Vec::new();
         for sequence in 0..3 {
-            let LiveResponseDelivery::Publication(publication) = subscriber.recv().await.unwrap()
+            let LiveRunStreamDelivery::Publication(publication) = subscriber.recv().await.unwrap()
             else {
                 panic!("expected a terminal-only tool publication");
             };
             events.push(publication.into_public_event(sequence));
         }
-        assert!(matches!(
-            events[0],
-            ResponseStreamEvent::WorkflowToolStarted { .. }
-        ));
-        assert!(matches!(
-            events[1],
-            ResponseStreamEvent::WorkflowToolProgress { .. }
-        ));
+        assert!(matches!(events[0], RunStreamEvent::RunToolStarted { .. }));
+        assert!(matches!(events[1], RunStreamEvent::RunToolProgress { .. }));
         assert!(matches!(
             events[2],
-            ResponseStreamEvent::WorkflowToolCompleted { duration_ms: _, .. }
+            RunStreamEvent::RunToolCompleted { duration_ms: _, .. }
         ));
     }
 }
@@ -1415,7 +1406,7 @@ mod tests {
 fn terminal_outcome(
     terminal: Option<&RunTerminalFact>,
     usage: Option<Value>,
-    tool_results: Vec<WorkflowToolResult>,
+    tool_results: Vec<RunToolResult>,
 ) -> Result<TerminalExecutionOutcome, TerminalExecutionError> {
     match terminal
         .ok_or_else(|| TerminalExecutionError::infrastructure(TERMINAL_EXECUTION_INVALID))?

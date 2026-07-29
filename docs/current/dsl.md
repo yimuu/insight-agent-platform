@@ -151,8 +151,8 @@ LLM 节点可以通过部署时冻结的白名单调用注册 Action：
 
 `tool_choice` 支持 `auto`、`required` 或白名单中的一个工具名。模型只能产生调用意图；运行时仍会
 校验工具名、参数 JSON Schema、调用轮数和总次数，再执行对应 Action 并把类型化结果续接给模型。
-模型输出的 `response.function_call_arguments.*` 只表示调用意图；只有
-`workflow.tool.started/progress/completed/failed` 表示平台真实执行 Action。前端必须按
+模型输出的 `run.output.function_call.arguments.*` 只表示调用意图；只有
+`run.tool.started/progress/completed/failed` 表示平台真实执行 Action。前端必须按
 `call_id` 合并两者，同名工具的并行调用不能按名称合并。
 
 工具活动采用 LLM `publish` 与 Action 冻结 `public_policy` 双重授权。第三方 Action 默认完全私有；

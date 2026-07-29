@@ -133,7 +133,7 @@ struct FixtureExecutor;
 
 #[async_trait]
 impl LeafTaskExecutor for FixtureExecutor {
-    fn live_response_capable(&self) -> bool {
+    fn live_run_stream_capable(&self) -> bool {
         true
     }
 
@@ -695,7 +695,7 @@ async fn assert_discovery_version(app: &Router, agent_id: &str, expected_version
     assert_eq!(
         listed_agent["streaming"],
         json!({
-            "protocol": "response-stream/v1",
+            "protocol": "run-stream/v1",
             "transport": "sse",
             "live_only": true,
             "sources": []
@@ -1401,7 +1401,7 @@ async fn postgres_production_graph_publication_rejects_public_streaming_without_
         .unwrap_err();
     assert_eq!(
         error.code(),
-        "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER"
+        "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER"
     );
     let after = repository.load_versioned_plan_catalog().await.unwrap();
     assert_eq!(after.plans().len(), before.plans().len());

@@ -75,7 +75,7 @@ use super::{
     ModelToolTaskCommitReceipt, ModelToolTaskHeartbeatOutcome, ModelToolTaskOutcome,
     ModelToolTaskTransitionOutcome,
 };
-use insight_engine::response::WorkflowToolPublicProjection;
+use insight_engine::run_stream::RunToolPublicProjection;
 
 const MAX_CLAIM_SECONDS: u32 = 3_600;
 const MAX_CLAIM_LIMIT: u32 = 1_000;
@@ -4892,7 +4892,7 @@ async fn apply_scheduler_action(
             run_id,
         )
         .await?;
-        super::sqlite::persist_terminal_response_snapshot_sqlite(
+        super::sqlite::persist_terminal_run_stream_snapshot_sqlite(
             transaction,
             run_id,
             lifecycle,
@@ -11066,10 +11066,9 @@ async fn reserve_model_call_public_function_item_sqlite(
     let action = tools
         .get(tool_name)
         .ok_or_else(RepositoryError::invalid_data)?;
-    let projection = WorkflowToolPublicProjection::from_frozen_effective_policy(
-        action.effective_public_policy(),
-    )
-    .map_err(|_| RepositoryError::invalid_data())?;
+    let projection =
+        RunToolPublicProjection::from_frozen_effective_policy(action.effective_public_policy())
+            .map_err(|_| RepositoryError::invalid_data())?;
     if call_index >= max_calls || !projection.raw_argument_deltas_authorized() {
         return Err(RepositoryError::invalid_configuration());
     }

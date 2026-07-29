@@ -1549,7 +1549,7 @@ async fn attached_terminal_sse_is_emitted_only_after_result_and_assistant_commit
             bytes.extend_from_slice(&chunk.unwrap());
             assert!(bytes.len() <= MAX_HTTP_BODY_BYTES);
             if !observed_terminal
-                && String::from_utf8_lossy(&bytes).contains("event: response.completed")
+                && String::from_utf8_lossy(&bytes).contains("event: run.lifecycle.completed")
             {
                 observed_terminal = true;
                 let terminal_state = sqlx::query_scalar::<_, String>(
@@ -1584,7 +1584,7 @@ async fn attached_terminal_sse_is_emitted_only_after_result_and_assistant_commit
             let event = frame
                 .lines()
                 .find_map(|line| line.strip_prefix("event: "))?;
-            (event == "response.completed").then(|| {
+            (event == "run.lifecycle.completed").then(|| {
                 let data = frame
                     .lines()
                     .find_map(|line| line.strip_prefix("data: "))
@@ -1592,8 +1592,8 @@ async fn attached_terminal_sse_is_emitted_only_after_result_and_assistant_commit
                 serde_json::from_str::<Value>(data).unwrap()
             })
         })
-        .expect("terminal response.completed frame");
-    assert_eq!(terminal["workflow"]["result"], streamed_message);
+        .expect("terminal run.lifecycle.completed frame");
+    assert_eq!(terminal["run"]["result"], streamed_message);
 
     let page = wait_for_assistant(&fixture.app, &conversation_id, &run_id).await;
     let messages = page["data"]["messages"].as_array().unwrap();
@@ -2051,7 +2051,7 @@ async fn full_persistence_conversation_is_atomic_idempotent_streamable_and_tenan
     .expect("full Conversation SSE did not reach EOF")
     .unwrap();
     let raw = String::from_utf8(bytes.to_vec()).unwrap();
-    assert!(raw.contains("event: response.completed"), "{raw}");
+    assert!(raw.contains("event: run.lifecycle.completed"), "{raw}");
     assert_eq!(
         sqlx::query_scalar::<_, String>("SELECT lifecycle FROM workflow_runs WHERE run_id=?")
             .bind(&streamed_run_id)
@@ -2095,8 +2095,12 @@ async fn full_persistence_conversation_is_atomic_idempotent_streamable_and_tenan
     .unwrap();
     let replayed_stream = String::from_utf8(replayed_stream.to_vec()).unwrap();
     assert!(
-        replayed_stream.contains("event: response.completed"),
+        replayed_stream.contains("event: run.lifecycle.completed"),
         "{replayed_stream}"
+    );
+    assert!(
+        !replayed_stream.contains("event: run.lifecycle.running"),
+        "terminal replay must not synthesize running: {replayed_stream}"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -2521,6 +2525,20 @@ async fn full_conversation_summary_worker_is_non_blocking_and_locally_coalesced(
         );
         let run_id = response.headers()["x-run-id"].to_str().unwrap().to_owned();
         wait_for_assistant(&fixture.app, &conversation_id, &run_id).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if prometheus_sample(
+                    &fixture.service.prometheus_metrics(),
+                    "conversation_summary_jobs_active{persistence_mode=\"full\"}",
+                ) == 1
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the coalesced summary worker did not become active");
         assert_eq!(
             prometheus_sample(
                 &fixture.service.prometheus_metrics(),

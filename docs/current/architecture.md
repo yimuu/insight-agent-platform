@@ -58,7 +58,7 @@ Deployment Revision 必须具有不同 identity。旧 revision 未携带该字�
 | `insight-durable` | 后端中立的持久化 ports、commands、claims、receipts 和 projection models |
 | `insight-resources` | Model/Action/Retrieval SPI、registry 与具体 provider |
 | `insight-storage` | SQLite/PostgreSQL、Graph SQL、Artifact store 和 PostgreSQL live broker adapter |
-| `insight-runtime` | catalog/deployment、leaf adapter、WorkCoordinator、RunService 和 live response |
+| `insight-runtime` | catalog/deployment、leaf adapter、WorkCoordinator、RunService 和 live Run stream |
 | `insight-api` | Axum HTTP、认证、请求/错误映射和 SSE transport |
 | `insight-agent-platform` | 根 facade、平台配置、进程 bootstrap 和 binary composition |
 
@@ -123,11 +123,13 @@ cache 区间可能让后提交消息取得更小的旧缓存值，因此它不�
 privacy deletion 与 orphan staging 回收；仅启用 full Conversation 时由 RunService maintenance
 pump 执行同一闭环以及有界 Conversation/历史 terminal Run retention，二者不会同时 claim。
 
-## 公共响应与内部事实
+## 公共 Run stream 与内部事实
 
 Detached Run 通过查询接口读取其 persistence mode 对应的状态或已提交 terminal result。Attached
-Run 使用 live-only SSE 投影实时内容，不提供 `Last-Event-ID` replay；临时 delta 是有界、
-best-effort 数据，最终已持久化的 terminal snapshot 才是交付权威。full runtime 发布 Public Event
+Run 使用闭合的 `run-stream/v1` live-only SSE 投影实时内容，不提供 `Last-Event-ID` replay；临时
+delta 是有界、best-effort 数据，最终已持久化的状态特化 `run` snapshot 才是交付权威。Full
+runtime 将 canonical payload 存入 `run_stream_snapshots.run_payload`；Terminal-only 从相同类型
+构建完全一致的终态 wire，但不为 delta 或工具进度增加持久化写入。full runtime 发布 Public Event
 后直接执行本地 durable-by-ID 投递，不在每个 outbox
 publication 权威事务中发送 PostgreSQL 通知；远端订阅者以 100ms 有界 durable-order poll 保证进展，
 非 runtime publisher 仍可发 commit-scoped hint。内部 execution ledger 不直接暴露为公共事件历史。

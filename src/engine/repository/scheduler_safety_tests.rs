@@ -44,11 +44,10 @@ use super::{
     ModelToolFailureClass, ModelToolParentResume, ModelToolTaskDisposition,
     ModelToolTaskHeartbeatOutcome, ModelToolTaskOutcome, ModelToolTaskTransitionOutcome,
     ModelToolWorkerPumpOutcome, NoSchedulerCrash, PlanInstallOutcome, PostgresDurableRepository,
-    ResponseUsageStatus, SchedulerCrashPoint, SchedulerDurableRepository,
-    SchedulerFailureDisposition, SchedulerLeaseRepository, SchedulerRecoveryOutcome,
-    SchedulerTaskClaim, SchedulerTaskClaimMode, SchedulerTaskCommitOutcome, SchedulerTaskFailure,
-    SchedulerTaskHeartbeatOutcome, SchedulerTaskOutcome, SchedulerTaskSuccess,
-    SqliteDurableRepository, VersionedPlan,
+    SchedulerCrashPoint, SchedulerDurableRepository, SchedulerFailureDisposition,
+    SchedulerLeaseRepository, SchedulerRecoveryOutcome, SchedulerTaskClaim, SchedulerTaskClaimMode,
+    SchedulerTaskCommitOutcome, SchedulerTaskFailure, SchedulerTaskHeartbeatOutcome,
+    SchedulerTaskOutcome, SchedulerTaskSuccess, SqliteDurableRepository, VersionedPlan,
 };
 
 const DEADLINE_AGENT: &str = r#"api_version: insight.agent/v1
@@ -1238,13 +1237,13 @@ where
     R: SchedulerDurableRepository + ?Sized,
 {
     let snapshot = repository
-        .load_response_snapshot(run_id)
+        .load_run_stream_snapshot(run_id)
         .await
         .unwrap()
-        .expect("terminal response snapshot");
-    assert_eq!(snapshot.usage_status(), ResponseUsageStatus::Complete);
+        .expect("terminal Run snapshot");
+    assert_eq!(snapshot.run()["usage_status"], "complete");
     assert_eq!(
-        snapshot.usage(),
+        snapshot.run().get("usage"),
         Some(&json!({
             "input_tokens": 110,
             "input_tokens_details": {"cached_tokens": 112},
@@ -1270,7 +1269,7 @@ async fn drive_until_response_snapshot<R>(
 {
     for _ in 0..8 {
         if repository
-            .load_response_snapshot(run_id)
+            .load_run_stream_snapshot(run_id)
             .await
             .unwrap()
             .is_some()
@@ -1284,7 +1283,7 @@ async fn drive_until_response_snapshot<R>(
             super::SchedulerDriveOutcome::Applied(_)
         ));
     }
-    panic!("scheduler did not commit a terminal response snapshot");
+    panic!("scheduler did not commit a terminal Run snapshot");
 }
 
 async fn prepare_sqlite_task(
@@ -2454,11 +2453,11 @@ async fn sqlite_public_retry_appends_identity_and_preserves_failed_incomplete_it
     drive_until_response_snapshot(&repository, &linked, &fence, &run_id).await;
 
     let snapshot = repository
-        .load_response_snapshot(&run_id)
+        .load_run_stream_snapshot(&run_id)
         .await
         .unwrap()
         .unwrap();
-    let output = snapshot.response()["output"].as_array().unwrap();
+    let output = snapshot.run()["output"].as_array().unwrap();
     assert_eq!(output.len(), 2);
     assert_eq!(output[0]["id"], failed_item.item_id());
     assert_eq!(output[0]["type"], "function_call");
@@ -2467,16 +2466,16 @@ async fn sqlite_public_retry_appends_identity_and_preserves_failed_incomplete_it
     assert_eq!(output[1]["id"], completed_item.item_id());
     assert_eq!(output[1]["type"], "message");
     assert_eq!(output[1]["status"], "completed");
-    assert_eq!(snapshot.workflow()["result"], json!("late-success"));
+    assert_eq!(snapshot.run()["result"], json!("late-success"));
     let manifest = snapshot.public_item_manifest().as_array().unwrap();
     assert_eq!(manifest[0]["attempt_no"], 1);
     assert_eq!(manifest[0]["status"], "incomplete");
     assert_eq!(manifest[0]["seal_index"], 2);
     assert_eq!(manifest[1]["attempt_no"], 2);
     assert_eq!(manifest[1]["status"], "completed");
-    assert_eq!(snapshot.usage_status(), ResponseUsageStatus::Complete);
+    assert_eq!(snapshot.run()["usage_status"], "complete");
     assert_eq!(
-        snapshot.usage(),
+        snapshot.run().get("usage"),
         Some(&json!({
             "input_tokens": 30,
             "input_tokens_details": {"cached_tokens": 32},
@@ -2580,13 +2579,13 @@ async fn sqlite_failed_and_cancelled_runs_retain_fenced_reported_usage() {
             lifecycle,
         );
         let snapshot = repository
-            .load_response_snapshot(run_id)
+            .load_run_stream_snapshot(run_id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(snapshot.usage_status(), ResponseUsageStatus::Complete);
+        assert_eq!(snapshot.run()["usage_status"], "complete");
         assert_eq!(
-            snapshot.usage(),
+            snapshot.run().get("usage"),
             Some(&json!({
                 "input_tokens": base,
                 "input_tokens_details": {"cached_tokens": base + 1},
@@ -2933,11 +2932,11 @@ async fn postgres_public_retry_appends_identity_and_preserves_failed_incomplete_
     drive_until_response_snapshot(&repository, &linked, &fence, &run_id).await;
 
     let snapshot = repository
-        .load_response_snapshot(&run_id)
+        .load_run_stream_snapshot(&run_id)
         .await
         .unwrap()
         .unwrap();
-    let output = snapshot.response()["output"].as_array().unwrap();
+    let output = snapshot.run()["output"].as_array().unwrap();
     assert_eq!(output.len(), 2);
     assert_eq!(output[0]["id"], failed_item.item_id());
     assert_eq!(output[0]["status"], "incomplete");
@@ -2950,9 +2949,9 @@ async fn postgres_public_retry_appends_identity_and_preserves_failed_incomplete_
     assert_eq!(manifest[0]["seal_index"], 2);
     assert_eq!(manifest[1]["attempt_no"], 2);
     assert_eq!(manifest[1]["status"], "completed");
-    assert_eq!(snapshot.usage_status(), ResponseUsageStatus::Complete);
+    assert_eq!(snapshot.run()["usage_status"], "complete");
     assert_eq!(
-        snapshot.usage(),
+        snapshot.run().get("usage"),
         Some(&json!({
             "input_tokens": 30,
             "input_tokens_details": {"cached_tokens": 32},

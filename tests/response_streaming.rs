@@ -21,7 +21,7 @@ use insight_agent_platform::{
     },
     dsl::CompileError,
     engine::{
-        plan::LeafTaskDescriptor, production_worker_registry_with_live_response,
+        plan::LeafTaskDescriptor, production_worker_registry_with_live_run_stream,
         LocalContentAddressedArtifactStore, RunId, SubflowContractRegistry, VersionTag,
     },
     history::types::RunStatus,
@@ -34,11 +34,11 @@ use insight_agent_platform::{
         },
     },
     runtime::{
-        DeployedAgentCatalog, InMemoryLiveResponseBroker, LiveResponseBroker,
-        LiveResponseBrokerCapability, LiveResponseBrokerError, LiveResponseCloseOutcome,
-        LiveResponsePublication, LiveResponsePublishOutcome, LiveResponseSeal,
-        LiveResponseSubscriber, ProductionRunRepository, ResponseStreamEvent, RunError, RunService,
-        RunServiceConfig,
+        DeployedAgentCatalog, InMemoryLiveRunStreamBroker, LiveRunStreamBroker,
+        LiveRunStreamBrokerCapability, LiveRunStreamBrokerError, LiveRunStreamCloseOutcome,
+        LiveRunStreamPublication, LiveRunStreamPublishOutcome, LiveRunStreamSeal,
+        LiveRunStreamSubscriber, ProductionRunRepository, RunError, RunService, RunServiceConfig,
+        RunStreamEvent,
     },
 };
 use insight_api::v1::{build_router, ApiAuth, ApiState};
@@ -438,43 +438,43 @@ impl LeafDeploymentResolver for GraphPublicationResolver {
 
 #[derive(Clone)]
 struct DropSealAndCloseBroker {
-    inner: InMemoryLiveResponseBroker,
+    inner: InMemoryLiveRunStreamBroker,
 }
 
 #[async_trait]
-impl LiveResponseBroker for DropSealAndCloseBroker {
-    fn deployment_capability(&self) -> LiveResponseBrokerCapability {
+impl LiveRunStreamBroker for DropSealAndCloseBroker {
+    fn deployment_capability(&self) -> LiveRunStreamBrokerCapability {
         self.inner.deployment_capability()
     }
 
     async fn check_readiness(
         &self,
         readiness_timeout: Duration,
-    ) -> Result<(), LiveResponseBrokerError> {
+    ) -> Result<(), LiveRunStreamBrokerError> {
         self.inner.check_readiness(readiness_timeout).await
     }
 
-    async fn shutdown(&self, grace: Duration) -> Result<(), LiveResponseBrokerError> {
+    async fn shutdown(&self, grace: Duration) -> Result<(), LiveRunStreamBrokerError> {
         self.inner.shutdown(grace).await
     }
 
     async fn subscribe(
         &self,
         run_id: RunId,
-    ) -> Result<Box<dyn LiveResponseSubscriber>, LiveResponseBrokerError> {
+    ) -> Result<Box<dyn LiveRunStreamSubscriber>, LiveRunStreamBrokerError> {
         self.inner.subscribe(run_id).await
     }
 
-    fn publish(&self, publication: LiveResponsePublication) -> LiveResponsePublishOutcome {
+    fn publish(&self, publication: LiveRunStreamPublication) -> LiveRunStreamPublishOutcome {
         self.inner.publish(publication)
     }
 
-    fn seal(&self, _seal: LiveResponseSeal) -> LiveResponsePublishOutcome {
-        LiveResponsePublishOutcome::SealEnqueued
+    fn seal(&self, _seal: LiveRunStreamSeal) -> LiveRunStreamPublishOutcome {
+        LiveRunStreamPublishOutcome::SealEnqueued
     }
 
-    fn close_run(&self, _run_id: &RunId) -> LiveResponseCloseOutcome {
-        LiveResponseCloseOutcome::default()
+    fn close_run(&self, _run_id: &RunId) -> LiveRunStreamCloseOutcome {
+        LiveRunStreamCloseOutcome::default()
     }
 }
 
@@ -497,15 +497,15 @@ impl Fixture {
     }
 
     async fn start_with_timeouts(run_timeout: Duration, outbound_write_timeout: Duration) -> Self {
-        let broker: Arc<dyn LiveResponseBroker> =
-            Arc::new(InMemoryLiveResponseBroker::new(64, 16).unwrap());
+        let broker: Arc<dyn LiveRunStreamBroker> =
+            Arc::new(InMemoryLiveRunStreamBroker::new(64, 16).unwrap());
         Self::start_with_broker_and_timeouts(run_timeout, outbound_write_timeout, broker).await
     }
 
     async fn start_with_broker_and_timeouts(
         run_timeout: Duration,
         outbound_write_timeout: Duration,
-        broker: Arc<dyn LiveResponseBroker>,
+        broker: Arc<dyn LiveRunStreamBroker>,
     ) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().to_path_buf();
@@ -805,7 +805,7 @@ workflow:
         ));
 
         let workers =
-            production_worker_registry_with_live_response(&models, &actions, Arc::clone(&broker))
+            production_worker_registry_with_live_run_stream(&models, &actions, Arc::clone(&broker))
                 .unwrap();
         database::provision_sqlite_database(&root.join("response-stream.sqlite")).await;
         let repository: Arc<dyn ProductionRunRepository> = Arc::new(
@@ -827,7 +827,7 @@ workflow:
         config.outbound_write_timeout = outbound_write_timeout;
         config.artifact_gc_interval = Duration::from_secs(60);
         config.public_event_prune_interval = Duration::from_secs(60);
-        let service = RunService::start_with_artifact_store_graph_publication_and_live_response(
+        let service = RunService::start_with_artifact_store_graph_publication_and_live_run_stream(
             DeployedAgentCatalog::new(deployed).unwrap(),
             Arc::clone(&repository),
             workers,
@@ -857,7 +857,6 @@ workflow:
 
 struct Transcript {
     run_id: String,
-    response_id: String,
     values: Vec<Value>,
 }
 
@@ -872,7 +871,7 @@ impl Transcript {
     fn deltas(&self) -> Vec<&str> {
         self.values
             .iter()
-            .filter(|event| event["type"] == "response.output_text.delta")
+            .filter(|event| event["type"] == "run.output.text.delta")
             .map(|event| event["delta"].as_str().unwrap())
             .collect()
     }
@@ -889,7 +888,7 @@ fn reconstructed_public_text_items(
         .values
         .iter()
         .filter(|event| {
-            event["type"] == "response.output_item.added" && event["item"]["type"] == "message"
+            event["type"] == "run.output.item.added" && event["item"]["type"] == "message"
         })
         .map(|event| {
             (
@@ -905,7 +904,7 @@ fn reconstructed_public_text_items(
     for event in transcript
         .values
         .iter()
-        .filter(|event| event["type"] == "response.output_text.delta")
+        .filter(|event| event["type"] == "run.output.text.delta")
     {
         let item_id = event["item_id"].as_str().unwrap();
         assert_eq!(
@@ -925,9 +924,7 @@ fn assert_terminal_output_matches_reconstructed_text(
     items: &BTreeMap<String, u64>,
     text: &BTreeMap<String, String>,
 ) {
-    let output = transcript.terminal()["response"]["output"]
-        .as_array()
-        .unwrap();
+    let output = transcript.terminal()["run"]["output"].as_array().unwrap();
     assert_eq!(output.len(), items.len());
     for (output_index, item) in output.iter().enumerate() {
         let item_id = item["id"].as_str().unwrap();
@@ -944,7 +941,7 @@ fn assert_terminal_items_have_live_start_or_explicit_gap(
     transcript: &Transcript,
     expected_count: usize,
 ) {
-    let terminal_items = transcript.terminal()["response"]["output"]
+    let terminal_items = transcript.terminal()["run"]["output"]
         .as_array()
         .expect("terminal response output must be an array");
     assert_eq!(terminal_items.len(), expected_count);
@@ -953,7 +950,7 @@ fn assert_terminal_items_have_live_start_or_explicit_gap(
     for event in transcript
         .values
         .iter()
-        .filter(|event| event["type"] == "response.output_item.added")
+        .filter(|event| event["type"] == "run.output.item.added")
     {
         let item_id = event["item"]["id"]
             .as_str()
@@ -985,7 +982,7 @@ fn assert_terminal_items_have_live_start_or_explicit_gap(
             .values
             .iter()
             .find(|event| {
-                event["type"] == "workflow.stream.gap"
+                event["type"] == "run.stream.gap"
                     && event["item_id"] == item_id
                     && event["missing_from"] == 0
             })
@@ -1002,7 +999,7 @@ fn assert_terminal_items_have_live_start_or_explicit_gap(
 fn assert_completed_terminal(transcript: &Transcript) {
     assert_eq!(
         transcript.terminal()["type"],
-        "response.completed",
+        "run.lifecycle.completed",
         "expected a completed response terminal: {}",
         serde_json::to_string(&transcript.values).unwrap()
     );
@@ -1012,15 +1009,14 @@ fn assert_completed_terminal(transcript: &Transcript) {
 fn terminal_item_accounting_accepts_only_an_explicit_gap_for_a_missing_live_start() {
     let transcript = Transcript {
         run_id: "run_gap_accounting".to_owned(),
-        response_id: "resp_gap_accounting".to_owned(),
         values: vec![
             json!({
-                "type": "response.output_item.added",
+                "type": "run.output.item.added",
                 "output_index": 0,
                 "item": {"id": "msg_live"}
             }),
             json!({
-                "type": "workflow.stream.gap",
+                "type": "run.stream.gap",
                 "item_id": "msg_gapped",
                 "missing_from": 0,
                 "missing_to": 0,
@@ -1028,8 +1024,8 @@ fn terminal_item_accounting_accepts_only_an_explicit_gap_for_a_missing_live_star
                 "action": "discard_provisional_item"
             }),
             json!({
-                "type": "response.completed",
-                "response": {
+                "type": "run.lifecycle.completed",
+                "run": {
                     "output": [
                         {"id": "msg_live"},
                         {"id": "msg_gapped"}
@@ -1103,10 +1099,7 @@ async fn start_attached_response(
 
 async fn consume_attached_response(response: axum::response::Response) -> Transcript {
     let run_id = response.headers()["x-run-id"].to_str().unwrap().to_owned();
-    let response_id = response.headers()["x-response-id"]
-        .to_str()
-        .unwrap()
-        .to_owned();
+    assert!(!response.headers().contains_key("x-response-id"));
     let body = tokio::time::timeout(
         Duration::from_secs(5),
         to_bytes(response.into_body(), 1 << 20),
@@ -1114,7 +1107,7 @@ async fn consume_attached_response(response: axum::response::Response) -> Transc
     .await
     .expect("attached response did not reach terminal EOF")
     .unwrap();
-    parse_attached_transcript(run_id, response_id, body.to_vec())
+    parse_attached_transcript(run_id, body.to_vec())
 }
 
 async fn consume_attached_response_asserting_live_delta(
@@ -1122,10 +1115,7 @@ async fn consume_attached_response_asserting_live_delta(
     counters: &ModeCounters,
 ) -> Transcript {
     let run_id = response.headers()["x-run-id"].to_str().unwrap().to_owned();
-    let response_id = response.headers()["x-response-id"]
-        .to_str()
-        .unwrap()
-        .to_owned();
+    assert!(!response.headers().contains_key("x-response-id"));
     let completed_before = counters.streaming_finished.load(Ordering::SeqCst);
     let mut body = response.into_body().into_data_stream();
     let mut bytes = Vec::new();
@@ -1138,14 +1128,14 @@ async fn consume_attached_response_asserting_live_delta(
                 "attached response exceeded test bound"
             );
             let observed = String::from_utf8_lossy(&bytes);
-            if observed.contains("event: response.output_text.delta") {
+            if observed.contains("event: run.output.text.delta") {
                 assert_eq!(
                     counters.streaming_finished.load(Ordering::SeqCst),
                     completed_before,
                     "the first medical body delta must precede its model-call completion"
                 );
                 assert!(
-                    !observed.contains("event: response.completed"),
+                    !observed.contains("event: run.lifecycle.completed"),
                     "the first medical body delta must precede Run terminal"
                 );
                 return;
@@ -1174,10 +1164,10 @@ async fn consume_attached_response_asserting_live_delta(
     .await
     .expect("medical response did not reach terminal EOF");
 
-    parse_attached_transcript(run_id, response_id, bytes)
+    parse_attached_transcript(run_id, bytes)
 }
 
-fn parse_attached_transcript(run_id: String, response_id: String, body: Vec<u8>) -> Transcript {
+fn parse_attached_transcript(run_id: String, body: Vec<u8>) -> Transcript {
     let raw = String::from_utf8(body).unwrap();
     assert!(raw.lines().all(|line| !line.starts_with("id:")));
     assert!(!raw.contains("output_bytes"));
@@ -1186,7 +1176,7 @@ fn parse_attached_transcript(run_id: String, response_id: String, body: Vec<u8>)
         "the terminal frame must be followed by EOF"
     );
 
-    let mut events: Vec<ResponseStreamEvent> = Vec::new();
+    let mut events: Vec<RunStreamEvent> = Vec::new();
     let mut values = Vec::new();
     let frames = raw
         .split_terminator("\n\n")
@@ -1202,7 +1192,7 @@ fn parse_attached_transcript(run_id: String, response_id: String, body: Vec<u8>)
             .expect("every named SSE event has data");
         let value: Value = serde_json::from_str(data).unwrap();
         assert_eq!(value["type"], event_name);
-        assert!(!event_name.starts_with("run."));
+        assert!(event_name.starts_with("run."));
         assert!(!event_name.starts_with("operation."));
         assert_no_private_runtime_keys(&value);
         events.push(serde_json::from_value(value.clone()).unwrap());
@@ -1212,15 +1202,20 @@ fn parse_attached_transcript(run_id: String, response_id: String, body: Vec<u8>)
     for (expected, event) in events.iter().enumerate() {
         assert_eq!(event.sequence_number(), expected as u64);
     }
-    assert_eq!(values[0]["type"], "response.created");
-    assert_eq!(values[1]["type"], "response.in_progress");
-    assert_eq!(values[0]["response"]["id"], response_id);
-    assert_eq!(values[1]["response"]["id"], response_id);
-    assert!(events.last().unwrap().is_terminal());
+    assert_eq!(values[0]["type"], "run.lifecycle.created");
+    assert_eq!(values[1]["type"], "run.lifecycle.running");
+    assert_eq!(values[0]["run"]["id"], run_id);
+    assert_eq!(values[0]["run"]["status"], "created");
+    assert_eq!(values[1]["run"]["id"], run_id);
+    assert_eq!(values[1]["run"]["status"], "running");
+    assert!(events.last().unwrap().is_run_terminal());
     assert_eq!(
-        events.iter().filter(|event| event.is_terminal()).count(),
+        events
+            .iter()
+            .filter(|event| event.is_run_terminal())
+            .count(),
         1,
-        "a response stream must contain exactly one terminal event"
+        "a Run stream must contain exactly one terminal event"
     );
     let final_frame_event = frames
         .last()
@@ -1228,11 +1223,7 @@ fn parse_attached_transcript(run_id: String, response_id: String, body: Vec<u8>)
         .expect("the frame immediately before EOF must be a named terminal event");
     assert_eq!(final_frame_event, values.last().unwrap()["type"]);
 
-    Transcript {
-        run_id,
-        response_id,
-        values,
-    }
+    Transcript { run_id, values }
 }
 
 fn assert_no_private_runtime_keys(value: &Value) {
@@ -1240,8 +1231,8 @@ fn assert_no_private_runtime_keys(value: &Value) {
         Value::Object(object) => {
             for (key, value) in object {
                 assert!(
-                    !matches!(key.as_str(), "run" | "operation" | "output_bytes"),
-                    "private runtime field leaked into response stream: {key}"
+                    !matches!(key.as_str(), "operation" | "output_bytes"),
+                    "private runtime field leaked into Run stream: {key}"
                 );
                 assert_no_private_runtime_keys(value);
             }
@@ -1328,13 +1319,9 @@ async fn wait_for_run_status_through_transient_unavailability(
 async fn assert_terminal_matches_get(app: &Router, transcript: &Transcript) {
     let run = get_run(app, &transcript.run_id).await;
     assert_eq!(run["data"]["status"], "completed");
-    assert_eq!(run["data"]["response_id"], transcript.response_id);
+    assert_eq!(transcript.terminal()["run"]["id"], transcript.run_id);
     assert_eq!(
-        run["data"]["response_id"],
-        transcript.terminal()["response"]["id"]
-    );
-    assert_eq!(
-        transcript.terminal()["workflow"]["result"],
+        transcript.terminal()["run"]["result"],
         run["data"]["output"]["data"]
     );
     assert_eq!(run["data"]["output"]["data"], "fixture answer");
@@ -1352,31 +1339,37 @@ fn object_keys(value: &Value) -> BTreeSet<&str> {
 fn assert_terminal_union(
     transcript: &Transcript,
     event_type: &str,
-    response_status: &str,
-    workflow_keys: BTreeSet<&str>,
+    run_status: &str,
+    terminal_specific_keys: BTreeSet<&str>,
 ) {
     let terminal = transcript.terminal();
     assert_eq!(
         terminal["type"], event_type,
         "unexpected terminal envelope: {terminal}"
     );
-    assert_eq!(terminal["response"]["status"], response_status);
-    assert_eq!(terminal["response"]["id"], transcript.response_id);
-    assert_eq!(terminal["response"]["object"], "response");
-    assert_eq!(terminal["workflow"]["run_id"], transcript.run_id);
+    assert_eq!(terminal["run"]["status"], run_status);
+    assert_eq!(terminal["run"]["id"], transcript.run_id);
+    assert_eq!(terminal["run"]["object"], "run");
     assert_eq!(
         object_keys(terminal),
-        BTreeSet::from(["response", "sequence_number", "type", "workflow"])
+        BTreeSet::from(["run", "sequence_number", "type"])
     );
-    assert_eq!(
-        object_keys(&terminal["response"]),
-        BTreeSet::from(["error", "id", "object", "output", "status", "usage"])
-    );
-    assert_eq!(object_keys(&terminal["workflow"]), workflow_keys);
-    assert!(terminal["workflow"]["tool_results"].is_array());
-    assert!(terminal["workflow"]["retrievals"].is_array());
+    let mut expected_run_keys = BTreeSet::from([
+        "id",
+        "object",
+        "output",
+        "retrievals",
+        "status",
+        "tool_results",
+        "usage",
+        "usage_status",
+    ]);
+    expected_run_keys.extend(terminal_specific_keys);
+    assert_eq!(object_keys(&terminal["run"]), expected_run_keys);
+    assert!(terminal["run"]["tool_results"].is_array());
+    assert!(terminal["run"]["retrievals"].is_array());
     assert!(matches!(
-        terminal["workflow"]["usage_status"].as_str(),
+        terminal["run"]["usage_status"].as_str(),
         Some("complete" | "partial" | "unavailable")
     ));
 }
@@ -1657,18 +1650,12 @@ async fn terminal_lifecycle_matrix_is_closed_redacted_unique_and_immediately_eof
     .await;
     assert_terminal_union(
         &succeeded,
-        "response.completed",
+        "run.lifecycle.completed",
         "completed",
-        BTreeSet::from([
-            "result",
-            "retrievals",
-            "run_id",
-            "tool_results",
-            "usage_status",
-        ]),
+        BTreeSet::from(["result"]),
     );
-    assert_eq!(succeeded.terminal()["workflow"]["result"], "fixture answer");
-    assert!(succeeded.terminal()["response"]["error"].is_null());
+    assert_eq!(succeeded.terminal()["run"]["result"], "fixture answer");
+    assert!(succeeded.terminal()["run"].get("error").is_none());
 
     let failed = attached_transcript_with_body(
         &fixture.app,
@@ -1679,29 +1666,12 @@ async fn terminal_lifecycle_matrix_is_closed_redacted_unique_and_immediately_eof
     .await;
     assert_terminal_union(
         &failed,
-        "response.failed",
+        "run.lifecycle.failed",
         "failed",
-        BTreeSet::from([
-            "error",
-            "retrievals",
-            "run_id",
-            "tool_results",
-            "usage_status",
-        ]),
+        BTreeSet::from(["error"]),
     );
-    assert_eq!(
-        failed.terminal()["workflow"]["error"]["message"],
-        "run failed"
-    );
-    assert_eq!(
-        failed.terminal()["response"]["error"]["code"],
-        failed.terminal()["workflow"]["error"]["code"]
-    );
-    assert_eq!(
-        failed.terminal()["response"]["error"]["message"],
-        "run failed"
-    );
-    assert!(failed.terminal()["response"]["error"]["param"].is_null());
+    assert_eq!(failed.terminal()["run"]["error"]["message"], "run failed");
+    assert!(failed.terminal()["run"]["error"].get("param").is_none());
     assert!(!failed.terminal().to_string().contains(FAILURE_QUESTION));
 
     let timeout_fixture = Fixture::start_with_run_timeout(Duration::from_millis(500)).await;
@@ -1714,24 +1684,11 @@ async fn terminal_lifecycle_matrix_is_closed_redacted_unique_and_immediately_eof
     .await;
     assert_terminal_union(
         &timed_out,
-        "workflow.response.timed_out",
-        "failed",
-        BTreeSet::from([
-            "error",
-            "retrievals",
-            "run_id",
-            "tool_results",
-            "usage_status",
-        ]),
+        "run.lifecycle.timed_out",
+        "timed_out",
+        BTreeSet::from(["error"]),
     );
-    assert_eq!(
-        timed_out.terminal()["workflow"]["error"]["code"],
-        "RUN_TIMEOUT"
-    );
-    assert_eq!(
-        timed_out.terminal()["response"]["error"]["code"],
-        "RUN_TIMEOUT"
-    );
+    assert_eq!(timed_out.terminal()["run"]["error"]["code"], "RUN_TIMEOUT");
 
     let cancelled_response = start_attached_response(
         &fixture.app,
@@ -1756,18 +1713,12 @@ async fn terminal_lifecycle_matrix_is_closed_redacted_unique_and_immediately_eof
     let cancelled = consume_attached_response(cancelled_response).await;
     assert_terminal_union(
         &cancelled,
-        "workflow.response.cancelled",
+        "run.lifecycle.cancelled",
         "cancelled",
-        BTreeSet::from([
-            "reason",
-            "retrievals",
-            "run_id",
-            "tool_results",
-            "usage_status",
-        ]),
+        BTreeSet::new(),
     );
-    assert_eq!(cancelled.terminal()["workflow"]["reason"], "cancelled");
-    assert!(cancelled.terminal()["response"]["error"].is_null());
+    assert!(cancelled.terminal()["run"].get("reason").is_none());
+    assert!(cancelled.terminal()["run"].get("error").is_none());
 
     let interrupted_response = start_attached_response(
         &fixture.app,
@@ -1802,18 +1753,12 @@ async fn terminal_lifecycle_matrix_is_closed_redacted_unique_and_immediately_eof
     let interrupted = consume_attached_response(interrupted_response).await;
     assert_terminal_union(
         &interrupted,
-        "workflow.response.interrupted",
-        "incomplete",
-        BTreeSet::from([
-            "reason",
-            "retrievals",
-            "run_id",
-            "tool_results",
-            "usage_status",
-        ]),
+        "run.lifecycle.interrupted",
+        "interrupted",
+        BTreeSet::new(),
     );
-    assert_eq!(interrupted.terminal()["workflow"]["reason"], "interrupted");
-    assert!(interrupted.terminal()["response"]["error"].is_null());
+    assert!(interrupted.terminal()["run"].get("reason").is_none());
+    assert!(interrupted.terminal()["run"].get("error").is_none());
 
     for (transcript, get_status) in [
         (&succeeded, "completed"),
@@ -1823,11 +1768,9 @@ async fn terminal_lifecycle_matrix_is_closed_redacted_unique_and_immediately_eof
     ] {
         let run = get_run(&fixture.app, &transcript.run_id).await;
         assert_eq!(run["data"]["status"], get_status);
-        assert_eq!(run["data"]["response_id"], transcript.response_id);
     }
     let timed_out_run = get_run(&timeout_fixture.app, &timed_out.run_id).await;
     assert_eq!(timed_out_run["data"]["status"], "failed");
-    assert_eq!(timed_out_run["data"]["response_id"], timed_out.response_id);
 
     fixture
         .service
@@ -1859,17 +1802,16 @@ async fn checked_in_medical_agent_preserves_three_initial_items_and_one_follow_u
         consume_attached_response_asserting_live_delta(initial_response, &fixture.counters).await;
     assert_completed_terminal(&initial);
     assert_terminal_items_have_live_start_or_explicit_gap(&initial, 3);
-    assert_eq!(initial.terminal()["workflow"]["result"]["mode"], "initial");
+    assert_eq!(initial.terminal()["run"]["result"]["mode"], "initial");
     assert_eq!(
-        initial.terminal()["workflow"]["result"]["answer"],
+        initial.terminal()["run"]["result"]["answer"],
         "fixture answer\n\nfixture answer\n\nfixture answer"
     );
     let initial_run = get_run(&fixture.app, &initial.run_id).await;
     assert_eq!(
         initial_run["data"]["output"]["data"],
-        initial.terminal()["workflow"]["result"]
+        initial.terminal()["run"]["result"]
     );
-    assert_eq!(initial_run["data"]["response_id"], initial.response_id);
 
     let follow_up_response = start_attached_response(
         &fixture.app,
@@ -1890,7 +1832,7 @@ async fn checked_in_medical_agent_preserves_three_initial_items_and_one_follow_u
     assert_completed_terminal(&follow_up);
     assert_terminal_items_have_live_start_or_explicit_gap(&follow_up, 1);
     assert_eq!(
-        follow_up.terminal()["workflow"]["result"],
+        follow_up.terminal()["run"]["result"],
         json!({
             "mode": "follow_up",
             "answer": "fixture answer",
@@ -1902,9 +1844,8 @@ async fn checked_in_medical_agent_preserves_three_initial_items_and_one_follow_u
     let follow_up_run = get_run(&fixture.app, &follow_up.run_id).await;
     assert_eq!(
         follow_up_run["data"]["output"]["data"],
-        follow_up.terminal()["workflow"]["result"]
+        follow_up.terminal()["run"]["result"]
     );
-    assert_eq!(follow_up_run["data"]["response_id"], follow_up.response_id);
 
     fixture
         .service
@@ -1935,7 +1876,7 @@ async fn first_public_delta_arrives_before_the_model_call_finishes() {
         while let Some(chunk) = body.next().await {
             let chunk = chunk.unwrap();
             observed.push_str(std::str::from_utf8(&chunk).unwrap());
-            if observed.contains("event: response.output_text.delta") {
+            if observed.contains("event: run.output.text.delta") {
                 return;
             }
         }
@@ -1961,7 +1902,7 @@ async fn first_public_delta_arrives_before_the_model_call_finishes() {
         fixture.counters.streaming_finished.load(Ordering::SeqCst),
         1
     );
-    assert!(observed.contains("event: response.completed"));
+    assert!(observed.contains("event: run.lifecycle.completed"));
 
     fixture
         .service
@@ -1986,12 +1927,12 @@ async fn parallel_public_llm_deltas_interleave_without_crossing_item_identity() 
         2,
         "the fixture rendezvous proves both Provider calls were in flight together"
     );
-    assert_eq!(transcript.terminal()["type"], "response.completed");
+    assert_eq!(transcript.terminal()["type"], "run.lifecycle.completed");
 
     let deltas = transcript
         .values
         .iter()
-        .filter(|event| event["type"] == "response.output_text.delta")
+        .filter(|event| event["type"] == "run.output.text.delta")
         .collect::<Vec<_>>();
     assert_eq!(
         deltas
@@ -2021,13 +1962,13 @@ async fn parallel_public_llm_deltas_interleave_without_crossing_item_identity() 
     );
     assert_terminal_output_matches_reconstructed_text(&transcript, &items, &text);
     assert_eq!(
-        transcript.terminal()["workflow"]["result"],
+        transcript.terminal()["run"]["result"],
         json!({"left": "left-complete", "right": "right-complete"})
     );
 
     let snapshot = fixture
         .repository
-        .load_response_snapshot(&RunId::new(transcript.run_id.clone()).unwrap())
+        .load_run_stream_snapshot(&RunId::new(transcript.run_id.clone()).unwrap())
         .await
         .unwrap()
         .unwrap();
@@ -2074,12 +2015,12 @@ async fn workflow_loop_public_llm_occurrences_append_distinct_items_without_mixi
     .await;
 
     assert_eq!(fixture.isolation.loop_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(transcript.terminal()["type"], "response.failed");
+    assert_eq!(transcript.terminal()["type"], "run.lifecycle.failed");
 
     let deltas = transcript
         .values
         .iter()
-        .filter(|event| event["type"] == "response.output_text.delta")
+        .filter(|event| event["type"] == "run.output.text.delta")
         .collect::<Vec<_>>();
     assert_eq!(
         deltas
@@ -2106,7 +2047,7 @@ async fn workflow_loop_public_llm_occurrences_append_distinct_items_without_mixi
 
     let snapshot = fixture
         .repository
-        .load_response_snapshot(&RunId::new(transcript.run_id.clone()).unwrap())
+        .load_run_stream_snapshot(&RunId::new(transcript.run_id.clone()).unwrap())
         .await
         .unwrap()
         .unwrap();
@@ -2126,7 +2067,6 @@ async fn workflow_loop_public_llm_occurrences_append_distinct_items_without_mixi
 
     let run = get_run(&fixture.app, &transcript.run_id).await;
     assert_eq!(run["data"]["status"], "failed");
-    assert_eq!(run["data"]["response_id"], transcript.response_id);
 
     fixture
         .service
@@ -2137,8 +2077,8 @@ async fn workflow_loop_public_llm_occurrences_append_distinct_items_without_mixi
 
 #[tokio::test]
 async fn terminal_barrier_times_out_to_an_unknown_tail_gap_after_the_last_live_watermark() {
-    let broker: Arc<dyn LiveResponseBroker> = Arc::new(DropSealAndCloseBroker {
-        inner: InMemoryLiveResponseBroker::new(64, 16).unwrap(),
+    let broker: Arc<dyn LiveRunStreamBroker> = Arc::new(DropSealAndCloseBroker {
+        inner: InMemoryLiveRunStreamBroker::new(64, 16).unwrap(),
     });
     let fixture = Fixture::start_with_broker_and_timeouts(
         Duration::from_secs(10),
@@ -2151,7 +2091,7 @@ async fn terminal_barrier_times_out_to_an_unknown_tail_gap_after_the_last_live_w
     let gap_index = transcript
         .values
         .iter()
-        .position(|event| event["type"] == "workflow.stream.gap")
+        .position(|event| event["type"] == "run.stream.gap")
         .expect("a missing seal must be calibrated with an unknown-tail gap");
     let gap = &transcript.values[gap_index];
     assert_eq!(gap_index + 1, transcript.values.len() - 1);
@@ -2162,7 +2102,7 @@ async fn terminal_barrier_times_out_to_an_unknown_tail_gap_after_the_last_live_w
         gap["missing_from"].as_u64().unwrap() > 0,
         "the dispatcher must continue after its observed live watermark, not restart at zero"
     );
-    assert_eq!(transcript.terminal()["type"], "response.completed");
+    assert_eq!(transcript.terminal()["type"], "run.lifecycle.completed");
     assert_terminal_matches_get(&fixture.app, &transcript).await;
 
     fixture
@@ -2176,20 +2116,53 @@ async fn terminal_barrier_times_out_to_an_unknown_tail_gap_after_the_last_live_w
 async fn public_sse_protocol_covers_all_stream_publish_combinations() {
     let fixture = Fixture::start().await;
 
+    let discovery = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/agents/{}", agent_id(true, true)))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(discovery.status(), StatusCode::OK);
+    let discovery: Value =
+        serde_json::from_slice(&to_bytes(discovery.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(
+        discovery["data"]["streaming"],
+        json!({
+            "protocol": "run-stream/v1",
+            "transport": "sse",
+            "live_only": true,
+            "sources": [{
+                "id": "answer",
+                "kind": "llm",
+                "mode": "streaming",
+                "format": "text"
+            }]
+        }),
+        "discovery and the attached emitter must cut over as one cohort"
+    );
+
     let streaming_public = attached_transcript(&fixture.app, agent_id(true, true)).await;
+    assert_eq!(
+        streaming_public.values[0]["type"], "run.lifecycle.created",
+        "the actual first frame must agree with the discovered protocol"
+    );
     assert_eq!(
         streaming_public.event_types(),
         vec![
-            "response.created",
-            "response.in_progress",
-            "response.output_item.added",
-            "response.content_part.added",
-            "response.output_text.delta",
-            "response.output_text.delta",
-            "response.output_text.done",
-            "response.content_part.done",
-            "response.output_item.done",
-            "response.completed",
+            "run.lifecycle.created",
+            "run.lifecycle.running",
+            "run.output.item.added",
+            "run.output.content_part.added",
+            "run.output.text.delta",
+            "run.output.text.delta",
+            "run.output.text.done",
+            "run.output.content_part.done",
+            "run.output.item.done",
+            "run.lifecycle.completed",
         ],
         "unexpected stream: {}",
         serde_json::to_string_pretty(&streaming_public.values).unwrap()
@@ -2201,31 +2174,28 @@ async fn public_sse_protocol_covers_all_stream_publish_combinations() {
     assert_eq!(
         streaming_private.event_types(),
         vec![
-            "response.created",
-            "response.in_progress",
-            "response.completed"
+            "run.lifecycle.created",
+            "run.lifecycle.running",
+            "run.lifecycle.completed"
         ]
     );
     assert!(streaming_private.deltas().is_empty());
-    assert_eq!(
-        streaming_private.terminal()["response"]["output"],
-        json!([])
-    );
+    assert_eq!(streaming_private.terminal()["run"]["output"], json!([]));
     assert_terminal_matches_get(&fixture.app, &streaming_private).await;
 
     let complete_public = attached_transcript(&fixture.app, agent_id(false, true)).await;
     assert_eq!(
         complete_public.event_types(),
         vec![
-            "response.created",
-            "response.in_progress",
-            "response.output_item.added",
-            "response.content_part.added",
-            "response.output_text.delta",
-            "response.output_text.done",
-            "response.content_part.done",
-            "response.output_item.done",
-            "response.completed",
+            "run.lifecycle.created",
+            "run.lifecycle.running",
+            "run.output.item.added",
+            "run.output.content_part.added",
+            "run.output.text.delta",
+            "run.output.text.done",
+            "run.output.content_part.done",
+            "run.output.item.done",
+            "run.lifecycle.completed",
         ]
     );
     assert_eq!(complete_public.deltas(), vec!["fixture answer"]);
@@ -2235,13 +2205,13 @@ async fn public_sse_protocol_covers_all_stream_publish_combinations() {
     assert_eq!(
         complete_private.event_types(),
         vec![
-            "response.created",
-            "response.in_progress",
-            "response.completed"
+            "run.lifecycle.created",
+            "run.lifecycle.running",
+            "run.lifecycle.completed"
         ]
     );
     assert!(complete_private.deltas().is_empty());
-    assert_eq!(complete_private.terminal()["response"]["output"], json!([]));
+    assert_eq!(complete_private.terminal()["run"]["output"], json!([]));
     assert_terminal_matches_get(&fixture.app, &complete_private).await;
 
     assert_eq!(fixture.counters.streaming.load(Ordering::SeqCst), 2);
@@ -2252,26 +2222,11 @@ async fn public_sse_protocol_covers_all_stream_publish_combinations() {
         complete_public,
         complete_private,
     ] {
-        assert_eq!(
-            transcript.response_id,
-            transcript.terminal()["response"]["id"]
-        );
-        assert_eq!(
-            transcript.terminal()["response"]["usage"]["input_tokens"],
-            3
-        );
-        assert_eq!(
-            transcript.terminal()["response"]["usage"]["output_tokens"],
-            2
-        );
-        assert_eq!(
-            transcript.terminal()["response"]["usage"]["total_tokens"],
-            5
-        );
-        assert_eq!(
-            transcript.terminal()["workflow"]["usage_status"],
-            "complete"
-        );
+        assert_eq!(transcript.run_id, transcript.terminal()["run"]["id"]);
+        assert_eq!(transcript.terminal()["run"]["usage"]["input_tokens"], 3);
+        assert_eq!(transcript.terminal()["run"]["usage"]["output_tokens"], 2);
+        assert_eq!(transcript.terminal()["run"]["usage"]["total_tokens"], 5);
+        assert_eq!(transcript.terminal()["run"]["usage_status"], "complete");
     }
 
     fixture

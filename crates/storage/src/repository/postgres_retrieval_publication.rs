@@ -75,7 +75,7 @@ async fn validate_publication_artifacts_postgres(
     for artifact in public
         .iter()
         .flat_map(|retrieval| retrieval.results())
-        .filter_map(insight_engine::response::WorkflowRetrievalResult::artifact)
+        .filter_map(insight_engine::run_stream::RunRetrievalResult::artifact)
     {
         let row = sqlx::query(
             "SELECT content_hash,size_bytes,media_type,artifact_state
@@ -141,7 +141,7 @@ pub(crate) async fn validate_exact_retrieval_publication_postgres(
 pub(crate) async fn load_terminal_retrievals_postgres(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
-) -> Result<Vec<insight_engine::response::WorkflowRetrieval>, RepositoryError> {
+) -> Result<Vec<insight_engine::run_stream::RunRetrieval>, RepositoryError> {
     let query = format!(
         "SELECT {SELECT_COLUMNS} FROM workflow_retrieval_publications
          WHERE run_id=$1

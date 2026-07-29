@@ -21,40 +21,41 @@ use sqlx::{postgres::PgListener, PgPool};
 use tokio::{runtime::Handle, task::JoinHandle, time};
 use tokio_util::sync::CancellationToken;
 
-use insight_engine::response::adapter::{publication_from_source, publication_payload, RunQueue};
+use insight_engine::run_stream::adapter::{publication_from_source, publication_payload, RunQueue};
 #[cfg(test)]
-use insight_engine::response::ResponseStreamEvent;
-use insight_engine::response::{
-    LiveResponseBroker, LiveResponseBrokerCapability, LiveResponseBrokerError,
-    LiveResponseByteLimits, LiveResponseCloseOutcome, LiveResponseDelivery, LiveResponseGap,
-    LiveResponseItemIdentity, LiveResponsePayload, LiveResponsePublication,
-    LiveResponsePublishOutcome, LiveResponseSeal, LiveResponseSealStatus,
-    LiveResponseSourceIdentity, LiveResponseSubscriber, LiveWorkflowObservationIdentity,
-    ResponseContentPart, ResponseOutputItem, WorkflowPublicError, WorkflowRetrievalResult,
-    WorkflowToolContent, WorkflowToolProgressContent,
+use insight_engine::run_stream::RunStreamEvent;
+use insight_engine::run_stream::{
+    LiveRunObservationIdentity, LiveRunStreamBroker, LiveRunStreamBrokerCapability,
+    LiveRunStreamBrokerError, LiveRunStreamByteLimits, LiveRunStreamCloseOutcome,
+    LiveRunStreamDelivery, LiveRunStreamGap, LiveRunStreamItemIdentity, LiveRunStreamPayload,
+    LiveRunStreamPublication, LiveRunStreamPublishOutcome, LiveRunStreamSeal,
+    LiveRunStreamSealStatus, LiveRunStreamSourceIdentity, LiveRunStreamSubscriber,
+    RunOutputContentPart, RunOutputItem, RunPublicError, RunRetrievalResult, RunToolContent,
+    RunToolProgressContent,
 };
 use insight_engine::{ActivationId, AttemptNo, ContentHash, RunId};
 
-const POSTGRES_LIVE_RESPONSE_CONFIG_INVALID: &str = "POSTGRES_LIVE_RESPONSE_CONFIG_INVALID";
-const POSTGRES_LIVE_RESPONSE_UNAVAILABLE: &str = "POSTGRES_LIVE_RESPONSE_UNAVAILABLE";
-const POSTGRES_LIVE_RESPONSE_NOT_READY: &str = "POSTGRES_LIVE_RESPONSE_NOT_READY";
-const POSTGRES_LIVE_RESPONSE_SHUTDOWN_TIMEOUT: &str = "POSTGRES_LIVE_RESPONSE_SHUTDOWN_TIMEOUT";
-const POSTGRES_LIVE_RESPONSE_SUBSCRIBER_EXISTS: &str = "POSTGRES_LIVE_RESPONSE_SUBSCRIBER_EXISTS";
+const POSTGRES_LIVE_RUN_STREAM_CONFIG_INVALID: &str = "POSTGRES_LIVE_RUN_STREAM_CONFIG_INVALID";
+const POSTGRES_LIVE_RUN_STREAM_UNAVAILABLE: &str = "POSTGRES_LIVE_RUN_STREAM_UNAVAILABLE";
+const POSTGRES_LIVE_RUN_STREAM_NOT_READY: &str = "POSTGRES_LIVE_RUN_STREAM_NOT_READY";
+const POSTGRES_LIVE_RUN_STREAM_SHUTDOWN_TIMEOUT: &str = "POSTGRES_LIVE_RUN_STREAM_SHUTDOWN_TIMEOUT";
+const POSTGRES_LIVE_RUN_STREAM_SUBSCRIBER_EXISTS: &str =
+    "POSTGRES_LIVE_RUN_STREAM_SUBSCRIBER_EXISTS";
 
-const POSTGRES_LIVE_RESPONSE_WIRE_VERSION: u8 = 3;
-const POSTGRES_LIVE_RESPONSE_CHANNEL_PREFIX: &str = "insight_live_response_";
-const POSTGRES_LIVE_RESPONSE_CHANNEL_HASH_BYTES: usize = 40;
-const POSTGRES_LIVE_RESPONSE_READINESS_CHANNEL: &str = "insight_live_response_readiness_v1";
+const POSTGRES_LIVE_RUN_STREAM_WIRE_VERSION: u8 = 3;
+const POSTGRES_LIVE_RUN_STREAM_CHANNEL_PREFIX: &str = "insight_live_run_stream_";
+const POSTGRES_LIVE_RUN_STREAM_CHANNEL_HASH_BYTES: usize = 39;
+const POSTGRES_LIVE_RUN_STREAM_READINESS_CHANNEL: &str = "insight_live_run_stream_readiness_v1";
 const DEFAULT_OUTBOUND_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_OUTBOUND_REAPER_INTERVAL: Duration = Duration::from_secs(1);
 
 /// PostgreSQL requires the textual `NOTIFY` payload to be shorter than 8 KiB.
 /// This stricter ceiling leaves room for the server terminator and avoids
 /// relying on server-version-specific edge behavior.
-pub const POSTGRES_LIVE_RESPONSE_MAX_NOTIFY_BYTES: usize = 7_900;
+pub const POSTGRES_LIVE_RUN_STREAM_MAX_NOTIFY_BYTES: usize = 7_900;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PostgresLiveResponseBrokerOptions {
+pub struct PostgresLiveRunStreamBrokerOptions {
     pub body_queue_capacity: usize,
     pub control_queue_capacity: usize,
     pub max_notify_payload_bytes: usize,
@@ -65,28 +66,28 @@ pub struct PostgresLiveResponseBrokerOptions {
     pub outbound_idle_timeout: Duration,
 }
 
-impl PostgresLiveResponseBrokerOptions {
+impl PostgresLiveRunStreamBrokerOptions {
     pub fn new(
         body_queue_capacity: usize,
         control_queue_capacity: usize,
         max_notify_payload_bytes: usize,
-    ) -> Result<Self, LiveResponseBrokerError> {
+    ) -> Result<Self, LiveRunStreamBrokerError> {
         if body_queue_capacity == 0
             || control_queue_capacity == 0
             || max_notify_payload_bytes == 0
-            || max_notify_payload_bytes > POSTGRES_LIVE_RESPONSE_MAX_NOTIFY_BYTES
+            || max_notify_payload_bytes > POSTGRES_LIVE_RUN_STREAM_MAX_NOTIFY_BYTES
         {
-            return Err(LiveResponseBrokerError::new(
-                POSTGRES_LIVE_RESPONSE_CONFIG_INVALID,
-                "PostgreSQL live response broker bounds are invalid",
+            return Err(LiveRunStreamBrokerError::new(
+                POSTGRES_LIVE_RUN_STREAM_CONFIG_INVALID,
+                "PostgreSQL live Run stream broker bounds are invalid",
             ));
         }
         Ok(Self {
             body_queue_capacity,
             control_queue_capacity,
             max_notify_payload_bytes,
-            max_item_bytes: LiveResponseByteLimits::default().max_item_bytes,
-            max_run_bytes: LiveResponseByteLimits::default().max_run_bytes,
+            max_item_bytes: LiveRunStreamByteLimits::default().max_item_bytes,
+            max_run_bytes: LiveRunStreamByteLimits::default().max_run_bytes,
             outbound_idle_timeout: DEFAULT_OUTBOUND_IDLE_TIMEOUT,
         })
     }
@@ -95,8 +96,8 @@ impl PostgresLiveResponseBrokerOptions {
         mut self,
         max_item_bytes: usize,
         max_run_bytes: usize,
-    ) -> Result<Self, LiveResponseBrokerError> {
-        LiveResponseByteLimits::new(self.max_notify_payload_bytes, max_item_bytes, max_run_bytes)?;
+    ) -> Result<Self, LiveRunStreamBrokerError> {
+        LiveRunStreamByteLimits::new(self.max_notify_payload_bytes, max_item_bytes, max_run_bytes)?;
         self.max_item_bytes = max_item_bytes;
         self.max_run_bytes = max_run_bytes;
         Ok(self)
@@ -105,19 +106,19 @@ impl PostgresLiveResponseBrokerOptions {
     pub fn with_outbound_idle_timeout(
         mut self,
         outbound_idle_timeout: Duration,
-    ) -> Result<Self, LiveResponseBrokerError> {
+    ) -> Result<Self, LiveRunStreamBrokerError> {
         if outbound_idle_timeout.is_zero() {
-            return Err(LiveResponseBrokerError::new(
-                POSTGRES_LIVE_RESPONSE_CONFIG_INVALID,
-                "PostgreSQL live response broker idle timeout must be non-zero",
+            return Err(LiveRunStreamBrokerError::new(
+                POSTGRES_LIVE_RUN_STREAM_CONFIG_INVALID,
+                "PostgreSQL live Run stream broker idle timeout must be non-zero",
             ));
         }
         self.outbound_idle_timeout = outbound_idle_timeout;
         Ok(self)
     }
 
-    fn byte_limits(self) -> LiveResponseByteLimits {
-        LiveResponseByteLimits {
+    fn byte_limits(self) -> LiveRunStreamByteLimits {
+        LiveRunStreamByteLimits {
             max_frame_bytes: self.max_notify_payload_bytes,
             max_item_bytes: self.max_item_bytes,
             max_run_bytes: self.max_run_bytes,
@@ -125,7 +126,7 @@ impl PostgresLiveResponseBrokerOptions {
     }
 }
 
-impl Default for PostgresLiveResponseBrokerOptions {
+impl Default for PostgresLiveRunStreamBrokerOptions {
     fn default() -> Self {
         Self {
             body_queue_capacity: 256,
@@ -141,26 +142,26 @@ impl Default for PostgresLiveResponseBrokerOptions {
 /// Returns a stable PostgreSQL-safe channel for one complete Run identity.
 /// The fixed 160-bit digest keeps the identifier below PostgreSQL's 63-byte
 /// name limit without exposing or truncating the caller-provided Run ID.
-pub fn postgres_live_response_channel(run_id: &RunId) -> String {
+pub fn postgres_live_run_stream_channel(run_id: &RunId) -> String {
     let digest = ContentHash::from_bytes(run_id.as_str().as_bytes());
     let hex = digest
         .as_str()
         .strip_prefix("sha256:")
         .expect("ContentHash always uses the sha256 prefix");
     format!(
-        "{POSTGRES_LIVE_RESPONSE_CHANNEL_PREFIX}{}",
-        &hex[..POSTGRES_LIVE_RESPONSE_CHANNEL_HASH_BYTES]
+        "{POSTGRES_LIVE_RUN_STREAM_CHANNEL_PREFIX}{}",
+        &hex[..POSTGRES_LIVE_RUN_STREAM_CHANNEL_HASH_BYTES]
     )
 }
 
 #[derive(Clone)]
-pub struct PostgresLiveResponseBroker {
+pub struct PostgresLiveRunStreamBroker {
     inner: Arc<PostgresBrokerInner>,
 }
 
 struct PostgresBrokerInner {
     pool: PgPool,
-    options: PostgresLiveResponseBrokerOptions,
+    options: PostgresLiveRunStreamBrokerOptions,
     runtime: Handle,
     accepting: AtomicBool,
     outbound: Mutex<BTreeMap<RunId, Arc<OutboundRegistration>>>,
@@ -176,7 +177,7 @@ struct OutboundRegistration {
 
 struct OutboundActivity {
     last_activity: Instant,
-    open_items: BTreeSet<LiveResponseItemIdentity>,
+    open_items: BTreeSet<LiveRunStreamItemIdentity>,
 }
 
 struct InboundRegistration {
@@ -201,13 +202,13 @@ impl OutboundRegistration {
 
     /// Called while the broker's outbound map lock is held. That lock order
     /// makes registration versus final-seal retirement deterministic.
-    fn begin_item(&self, identity: &LiveResponseItemIdentity) {
+    fn begin_item(&self, identity: &LiveRunStreamItemIdentity) {
         let mut activity = lock(&self.activity);
         activity.last_activity = Instant::now();
         activity.open_items.insert(identity.clone());
     }
 
-    fn finish_item(&self, identity: &LiveResponseItemIdentity) -> bool {
+    fn finish_item(&self, identity: &LiveRunStreamItemIdentity) -> bool {
         let mut activity = lock(&self.activity);
         activity.last_activity = Instant::now();
         activity.open_items.remove(identity);
@@ -237,15 +238,15 @@ impl Drop for PostgresBrokerInner {
     }
 }
 
-impl PostgresLiveResponseBroker {
+impl PostgresLiveRunStreamBroker {
     /// Starts a live-only broker and verifies that the configured PostgreSQL
     /// endpoint supports a dedicated `LISTEN` connection. No schema is read or
     /// written by this adapter.
     pub async fn start(
         pool: PgPool,
-        options: PostgresLiveResponseBrokerOptions,
-    ) -> Result<Self, LiveResponseBrokerError> {
-        PostgresLiveResponseBrokerOptions::new(
+        options: PostgresLiveRunStreamBrokerOptions,
+    ) -> Result<Self, LiveRunStreamBrokerError> {
+        PostgresLiveRunStreamBrokerOptions::new(
             options.body_queue_capacity,
             options.control_queue_capacity,
             options.max_notify_payload_bytes,
@@ -254,9 +255,9 @@ impl PostgresLiveResponseBroker {
         .with_outbound_idle_timeout(options.outbound_idle_timeout)?;
         probe_postgres(&pool).await?;
         let runtime = Handle::try_current().map_err(|_| {
-            LiveResponseBrokerError::new(
-                POSTGRES_LIVE_RESPONSE_UNAVAILABLE,
-                "PostgreSQL live response broker requires a Tokio runtime",
+            LiveRunStreamBrokerError::new(
+                POSTGRES_LIVE_RUN_STREAM_UNAVAILABLE,
+                "PostgreSQL live Run stream broker requires a Tokio runtime",
             )
         })?;
         let inner = Arc::new(PostgresBrokerInner {
@@ -274,7 +275,7 @@ impl PostgresLiveResponseBroker {
         Ok(Self { inner })
     }
 
-    pub fn options(&self) -> PostgresLiveResponseBrokerOptions {
+    pub fn options(&self) -> PostgresLiveRunStreamBrokerOptions {
         self.inner.options
     }
 
@@ -287,18 +288,18 @@ impl PostgresLiveResponseBroker {
     pub async fn check_readiness(
         &self,
         readiness_timeout: Duration,
-    ) -> Result<(), LiveResponseBrokerError> {
+    ) -> Result<(), LiveRunStreamBrokerError> {
         if !self.is_accepting() {
-            return Err(LiveResponseBrokerError::new(
-                POSTGRES_LIVE_RESPONSE_NOT_READY,
-                "PostgreSQL live response broker is not accepting work",
+            return Err(LiveRunStreamBrokerError::new(
+                POSTGRES_LIVE_RUN_STREAM_NOT_READY,
+                "PostgreSQL live Run stream broker is not accepting work",
             ));
         }
         match time::timeout(readiness_timeout, probe_postgres(&self.inner.pool)).await {
             Ok(result) => result,
-            Err(_) => Err(LiveResponseBrokerError::new(
-                POSTGRES_LIVE_RESPONSE_NOT_READY,
-                "PostgreSQL live response broker readiness timed out",
+            Err(_) => Err(LiveRunStreamBrokerError::new(
+                POSTGRES_LIVE_RUN_STREAM_NOT_READY,
+                "PostgreSQL live Run stream broker readiness timed out",
             )),
         }
     }
@@ -306,7 +307,7 @@ impl PostgresLiveResponseBroker {
     /// Stops accepting publications, drains queued outbound observations for
     /// at most `grace`, and cancels all listeners. The body itself is never
     /// included in shutdown errors or diagnostics.
-    pub async fn shutdown(&self, grace: Duration) -> Result<(), LiveResponseBrokerError> {
+    pub async fn shutdown(&self, grace: Duration) -> Result<(), LiveRunStreamBrokerError> {
         self.inner.accepting.store(false, Ordering::Release);
         self.inner.maintenance_cancel.cancel();
 
@@ -337,7 +338,7 @@ impl PostgresLiveResponseBroker {
     fn outbound_registration(
         &self,
         run_id: &RunId,
-        item: Option<&LiveResponseItemIdentity>,
+        item: Option<&LiveRunStreamItemIdentity>,
     ) -> Option<Arc<OutboundRegistration>> {
         if !self.is_accepting() {
             return None;
@@ -378,7 +379,7 @@ impl PostgresLiveResponseBroker {
         &self,
         run_id: &RunId,
         registration: &Arc<OutboundRegistration>,
-        identity: &LiveResponseItemIdentity,
+        identity: &LiveRunStreamItemIdentity,
     ) {
         let removed = {
             let mut registrations = lock(&self.inner.outbound);
@@ -401,10 +402,10 @@ impl PostgresLiveResponseBroker {
     }
 }
 
-impl fmt::Debug for PostgresLiveResponseBroker {
+impl fmt::Debug for PostgresLiveRunStreamBroker {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("PostgresLiveResponseBroker")
+            .debug_struct("PostgresLiveRunStreamBroker")
             .field("options", &self.inner.options)
             .field("accepting", &self.is_accepting())
             .field("outbound_runs", &lock(&self.inner.outbound).len())
@@ -414,40 +415,40 @@ impl fmt::Debug for PostgresLiveResponseBroker {
 }
 
 #[async_trait]
-impl LiveResponseBroker for PostgresLiveResponseBroker {
-    fn deployment_capability(&self) -> LiveResponseBrokerCapability {
-        LiveResponseBrokerCapability::Shared
+impl LiveRunStreamBroker for PostgresLiveRunStreamBroker {
+    fn deployment_capability(&self) -> LiveRunStreamBrokerCapability {
+        LiveRunStreamBrokerCapability::Shared
     }
 
     async fn check_readiness(
         &self,
         readiness_timeout: Duration,
-    ) -> Result<(), LiveResponseBrokerError> {
-        PostgresLiveResponseBroker::check_readiness(self, readiness_timeout).await
+    ) -> Result<(), LiveRunStreamBrokerError> {
+        PostgresLiveRunStreamBroker::check_readiness(self, readiness_timeout).await
     }
 
-    async fn shutdown(&self, grace: Duration) -> Result<(), LiveResponseBrokerError> {
-        PostgresLiveResponseBroker::shutdown(self, grace).await
+    async fn shutdown(&self, grace: Duration) -> Result<(), LiveRunStreamBrokerError> {
+        PostgresLiveRunStreamBroker::shutdown(self, grace).await
     }
 
     async fn subscribe(
         &self,
         run_id: RunId,
-    ) -> Result<Box<dyn LiveResponseSubscriber>, LiveResponseBrokerError> {
+    ) -> Result<Box<dyn LiveRunStreamSubscriber>, LiveRunStreamBrokerError> {
         if !self.is_accepting() {
-            return Err(LiveResponseBrokerError::new(
-                POSTGRES_LIVE_RESPONSE_NOT_READY,
-                "PostgreSQL live response broker is not accepting subscriptions",
+            return Err(LiveRunStreamBrokerError::new(
+                POSTGRES_LIVE_RUN_STREAM_NOT_READY,
+                "PostgreSQL live Run stream broker is not accepting subscriptions",
             ));
         }
         if lock(&self.inner.inbound).contains_key(&run_id) {
-            return Err(LiveResponseBrokerError::new(
-                POSTGRES_LIVE_RESPONSE_SUBSCRIBER_EXISTS,
-                "a PostgreSQL live response subscriber already exists for this Run",
+            return Err(LiveRunStreamBrokerError::new(
+                POSTGRES_LIVE_RUN_STREAM_SUBSCRIBER_EXISTS,
+                "a PostgreSQL live Run stream subscriber already exists for this Run",
             ));
         }
 
-        let channel = postgres_live_response_channel(&run_id);
+        let channel = postgres_live_run_stream_channel(&run_id);
         let mut listener = PgListener::connect_with(&self.inner.pool)
             .await
             .map_err(|_| unavailable())?;
@@ -465,16 +466,16 @@ impl LiveResponseBroker for PostgresLiveResponseBroker {
         {
             let mut registrations = lock(&self.inner.inbound);
             if !self.is_accepting() {
-                return Err(LiveResponseBrokerError::new(
-                    POSTGRES_LIVE_RESPONSE_NOT_READY,
-                    "PostgreSQL live response broker is not accepting subscriptions",
+                return Err(LiveRunStreamBrokerError::new(
+                    POSTGRES_LIVE_RUN_STREAM_NOT_READY,
+                    "PostgreSQL live Run stream broker is not accepting subscriptions",
                 ));
             }
             match registrations.entry(run_id.clone()) {
                 Entry::Occupied(_) => {
-                    return Err(LiveResponseBrokerError::new(
-                        POSTGRES_LIVE_RESPONSE_SUBSCRIBER_EXISTS,
-                        "a PostgreSQL live response subscriber already exists for this Run",
+                    return Err(LiveRunStreamBrokerError::new(
+                        POSTGRES_LIVE_RUN_STREAM_SUBSCRIBER_EXISTS,
+                        "a PostgreSQL live Run stream subscriber already exists for this Run",
                     ));
                 }
                 Entry::Vacant(entry) => {
@@ -492,19 +493,19 @@ impl LiveResponseBroker for PostgresLiveResponseBroker {
                 }
             }
         }
-        Ok(Box::new(PostgresLiveResponseSubscriber {
+        Ok(Box::new(PostgresLiveRunStreamSubscriber {
             run_id,
             registration,
             owner: Arc::downgrade(&self.inner),
         }))
     }
 
-    fn publish(&self, publication: LiveResponsePublication) -> LiveResponsePublishOutcome {
+    fn publish(&self, publication: LiveRunStreamPublication) -> LiveRunStreamPublishOutcome {
         let run_id = publication.run_id().clone();
         let Some(registration) =
             self.outbound_registration(&run_id, publication.output_item_identity())
         else {
-            return LiveResponsePublishOutcome::RunClosed;
+            return LiveRunStreamPublishOutcome::RunClosed;
         };
         enqueue_outbound_publication(
             &registration.queue,
@@ -513,11 +514,11 @@ impl LiveResponseBroker for PostgresLiveResponseBroker {
         )
     }
 
-    fn seal(&self, seal: LiveResponseSeal) -> LiveResponsePublishOutcome {
+    fn seal(&self, seal: LiveRunStreamSeal) -> LiveRunStreamPublishOutcome {
         let run_id = seal.identity().run_id().clone();
         let identity = seal.identity().clone();
         let Some(registration) = self.outbound_registration(&run_id, None) else {
-            return LiveResponsePublishOutcome::RunClosed;
+            return LiveRunStreamPublishOutcome::RunClosed;
         };
         let outcome = match encode_seal(&seal, self.inner.options.max_notify_payload_bytes) {
             Ok(_) => registration.queue.seal(seal),
@@ -531,10 +532,10 @@ impl LiveResponseBroker for PostgresLiveResponseBroker {
         outcome
     }
 
-    fn close_run(&self, run_id: &RunId) -> LiveResponseCloseOutcome {
+    fn close_run(&self, run_id: &RunId) -> LiveRunStreamCloseOutcome {
         let outbound = lock(&self.inner.outbound).remove(run_id);
         let inbound = lock(&self.inner.inbound).remove(run_id);
-        let mut outcome = LiveResponseCloseOutcome::default();
+        let mut outcome = LiveRunStreamCloseOutcome::default();
         if let Some(registration) = outbound {
             outcome = registration.queue.close();
         }
@@ -546,24 +547,24 @@ impl LiveResponseBroker for PostgresLiveResponseBroker {
     }
 }
 
-struct PostgresLiveResponseSubscriber {
+struct PostgresLiveRunStreamSubscriber {
     run_id: RunId,
     registration: Arc<InboundRegistration>,
     owner: Weak<PostgresBrokerInner>,
 }
 
 #[async_trait]
-impl LiveResponseSubscriber for PostgresLiveResponseSubscriber {
+impl LiveRunStreamSubscriber for PostgresLiveRunStreamSubscriber {
     fn run_id(&self) -> &RunId {
         &self.run_id
     }
 
-    async fn recv(&mut self) -> Result<LiveResponseDelivery, LiveResponseBrokerError> {
+    async fn recv(&mut self) -> Result<LiveRunStreamDelivery, LiveRunStreamBrokerError> {
         self.registration.queue.recv().await
     }
 }
 
-impl Drop for PostgresLiveResponseSubscriber {
+impl Drop for PostgresLiveRunStreamSubscriber {
     fn drop(&mut self) {
         let Some(owner) = self.owner.upgrade() else {
             return;
@@ -588,28 +589,28 @@ impl Drop for PostgresLiveResponseSubscriber {
 
 fn enqueue_outbound_publication(
     queue: &RunQueue,
-    publication: LiveResponsePublication,
+    publication: LiveRunStreamPublication,
     max_notify_payload_bytes: usize,
-) -> LiveResponsePublishOutcome {
+) -> LiveRunStreamPublishOutcome {
     if encode_publication(&publication, max_notify_payload_bytes).is_ok() {
         return queue.publish(publication);
     }
     let local_sequence = publication.local_sequence();
     match publication.source().clone() {
-        LiveResponseSourceIdentity::OutputItem(identity) => {
+        LiveRunStreamSourceIdentity::OutputItem(identity) => {
             oversize_outcome(queue.discard_with_gap(identity, local_sequence))
         }
-        LiveResponseSourceIdentity::WorkflowObservation(identity) => {
-            queue.discard_workflow_observation(identity, local_sequence)
+        LiveRunStreamSourceIdentity::RunObservation(identity) => {
+            queue.discard_run_observation(identity, local_sequence)
         }
     }
 }
 
-fn oversize_outcome(outcome: LiveResponsePublishOutcome) -> LiveResponsePublishOutcome {
+fn oversize_outcome(outcome: LiveRunStreamPublishOutcome) -> LiveRunStreamPublishOutcome {
     match outcome {
-        LiveResponsePublishOutcome::DroppedWithGap
-        | LiveResponsePublishOutcome::EnqueuedAfterGap => {
-            LiveResponsePublishOutcome::DroppedOversizeWithGap
+        LiveRunStreamPublishOutcome::DroppedWithGap
+        | LiveRunStreamPublishOutcome::EnqueuedAfterGap => {
+            LiveRunStreamPublishOutcome::DroppedOversizeWithGap
         }
         other => other,
     }
@@ -686,26 +687,26 @@ async fn outbound_pump(
     queue: Arc<RunQueue>,
     max_notify_payload_bytes: usize,
 ) {
-    let channel = postgres_live_response_channel(&run_id);
+    let channel = postgres_live_run_stream_channel(&run_id);
     while let Ok(delivery) = queue.recv().await {
         let encoded = match delivery {
-            LiveResponseDelivery::Publication(publication) => {
+            LiveRunStreamDelivery::Publication(publication) => {
                 let source = publication.source().clone();
                 let local_sequence = publication.local_sequence();
                 match encode_publication(&publication, max_notify_payload_bytes) {
                     Ok(encoded) => Ok(encoded),
                     Err(_) => match source {
-                        LiveResponseSourceIdentity::OutputItem(identity) => {
-                            LiveResponseGap::known(identity, local_sequence, local_sequence)
+                        LiveRunStreamSourceIdentity::OutputItem(identity) => {
+                            LiveRunStreamGap::known(identity, local_sequence, local_sequence)
                                 .map_err(|_| WireError)
                                 .and_then(|gap| encode_gap(&gap, max_notify_payload_bytes))
                         }
-                        LiveResponseSourceIdentity::WorkflowObservation(_) => continue,
+                        LiveRunStreamSourceIdentity::RunObservation(_) => continue,
                     },
                 }
             }
-            LiveResponseDelivery::Gap(gap) => encode_gap(&gap, max_notify_payload_bytes),
-            LiveResponseDelivery::Seal(seal) => encode_seal(&seal, max_notify_payload_bytes),
+            LiveRunStreamDelivery::Gap(gap) => encode_gap(&gap, max_notify_payload_bytes),
+            LiveRunStreamDelivery::Seal(seal) => encode_seal(&seal, max_notify_payload_bytes),
         };
         let Ok(encoded) = encoded else {
             continue;
@@ -728,7 +729,7 @@ async fn inbound_pump(
     registration: Arc<InboundRegistration>,
     max_notify_payload_bytes: usize,
 ) {
-    let expected_channel = postgres_live_response_channel(&run_id);
+    let expected_channel = postgres_live_run_stream_channel(&run_id);
     loop {
         let notification = tokio::select! {
             _ = registration.cancel.cancelled() => break,
@@ -740,7 +741,7 @@ async fn inbound_pump(
         if notification.channel() != expected_channel {
             continue;
         }
-        let Ok(delivery) = PostgresLiveResponseWire::decode(
+        let Ok(delivery) = PostgresLiveRunStreamWire::decode(
             notification.payload(),
             &run_id,
             max_notify_payload_bytes,
@@ -748,13 +749,13 @@ async fn inbound_pump(
             continue;
         };
         match delivery {
-            LiveResponseDelivery::Publication(publication) => {
+            LiveRunStreamDelivery::Publication(publication) => {
                 let _ = registration.queue.publish(publication);
             }
-            LiveResponseDelivery::Gap(gap) => {
+            LiveRunStreamDelivery::Gap(gap) => {
                 let _ = registration.queue.accept_gap(gap);
             }
-            LiveResponseDelivery::Seal(seal) => {
+            LiveRunStreamDelivery::Seal(seal) => {
                 let _ = registration.queue.seal(seal);
             }
         }
@@ -762,7 +763,7 @@ async fn inbound_pump(
     registration.queue.close();
 }
 
-async fn probe_postgres(pool: &PgPool) -> Result<(), LiveResponseBrokerError> {
+async fn probe_postgres(pool: &PgPool) -> Result<(), LiveRunStreamBrokerError> {
     sqlx::query("SELECT 1")
         .execute(pool)
         .await
@@ -771,7 +772,7 @@ async fn probe_postgres(pool: &PgPool) -> Result<(), LiveResponseBrokerError> {
         .await
         .map_err(|_| unavailable())?;
     listener
-        .listen(POSTGRES_LIVE_RESPONSE_READINESS_CHANNEL)
+        .listen(POSTGRES_LIVE_RUN_STREAM_READINESS_CHANNEL)
         .await
         .map_err(|_| unavailable())?;
     Ok(())
@@ -780,7 +781,7 @@ async fn probe_postgres(pool: &PgPool) -> Result<(), LiveResponseBrokerError> {
 async fn wait_for_tasks(
     mut tasks: Vec<JoinHandle<()>>,
     grace: Duration,
-) -> Result<(), LiveResponseBrokerError> {
+) -> Result<(), LiveRunStreamBrokerError> {
     let completed = time::timeout(grace, async {
         for task in &mut tasks {
             let _ = task.await;
@@ -797,16 +798,16 @@ async fn wait_for_tasks(
     for task in tasks {
         let _ = task.await;
     }
-    Err(LiveResponseBrokerError::new(
-        POSTGRES_LIVE_RESPONSE_SHUTDOWN_TIMEOUT,
-        "PostgreSQL live response broker shutdown exceeded its grace period",
+    Err(LiveRunStreamBrokerError::new(
+        POSTGRES_LIVE_RUN_STREAM_SHUTDOWN_TIMEOUT,
+        "PostgreSQL live Run stream broker shutdown exceeded its grace period",
     ))
 }
 
-fn unavailable() -> LiveResponseBrokerError {
-    LiveResponseBrokerError::new(
-        POSTGRES_LIVE_RESPONSE_UNAVAILABLE,
-        "PostgreSQL live response broker is unavailable",
+fn unavailable() -> LiveRunStreamBrokerError {
+    LiveRunStreamBrokerError::new(
+        POSTGRES_LIVE_RUN_STREAM_UNAVAILABLE,
+        "PostgreSQL live Run stream broker is unavailable",
     )
 }
 
@@ -821,7 +822,7 @@ struct WireError;
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum PostgresLiveResponseWireRef<'a> {
+enum PostgresLiveRunStreamWireRef<'a> {
     Publication {
         schema_version: u8,
         source: WireSourceRef<'a>,
@@ -845,7 +846,7 @@ enum PostgresLiveResponseWireRef<'a> {
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum PostgresLiveResponseWire {
+enum PostgresLiveRunStreamWire {
     Publication {
         schema_version: u8,
         source: WireSource,
@@ -867,14 +868,14 @@ enum PostgresLiveResponseWire {
     },
 }
 
-impl PostgresLiveResponseWire {
+impl PostgresLiveRunStreamWire {
     fn decode(
         encoded: &str,
         expected_run_id: &RunId,
         max_notify_payload_bytes: usize,
-    ) -> Result<LiveResponseDelivery, WireError> {
+    ) -> Result<LiveRunStreamDelivery, WireError> {
         if encoded.len() > max_notify_payload_bytes
-            || encoded.len() > POSTGRES_LIVE_RESPONSE_MAX_NOTIFY_BYTES
+            || encoded.len() > POSTGRES_LIVE_RUN_STREAM_MAX_NOTIFY_BYTES
         {
             return Err(WireError);
         }
@@ -889,7 +890,7 @@ impl PostgresLiveResponseWire {
                 validate_wire_version(schema_version)?;
                 let source = source.into_live(expected_run_id)?;
                 publication_from_source(source, local_sequence, payload.into_live())
-                    .map(LiveResponseDelivery::Publication)
+                    .map(LiveRunStreamDelivery::Publication)
                     .map_err(|_| WireError)
             }
             Self::Gap {
@@ -903,13 +904,13 @@ impl PostgresLiveResponseWire {
                 let identity = source.into_output_item(expected_run_id)?;
                 let gap = match (missing_to, unknown_tail) {
                     (Some(missing_to), false) => {
-                        LiveResponseGap::known(identity, missing_from, missing_to)
+                        LiveRunStreamGap::known(identity, missing_from, missing_to)
                             .map_err(|_| WireError)?
                     }
-                    (None, true) => LiveResponseGap::unknown_tail(identity, missing_from),
+                    (None, true) => LiveRunStreamGap::unknown_tail(identity, missing_from),
                     (Some(_), true) | (None, false) => return Err(WireError),
                 };
-                Ok(LiveResponseDelivery::Gap(gap))
+                Ok(LiveRunStreamDelivery::Gap(gap))
             }
             Self::Seal {
                 schema_version,
@@ -920,10 +921,10 @@ impl PostgresLiveResponseWire {
                 validate_wire_version(schema_version)?;
                 let identity = source.into_output_item(expected_run_id)?;
                 let status = match status {
-                    WireSealStatus::Completed => LiveResponseSealStatus::Completed,
-                    WireSealStatus::Incomplete => LiveResponseSealStatus::Incomplete,
+                    WireSealStatus::Completed => LiveRunStreamSealStatus::Completed,
+                    WireSealStatus::Incomplete => LiveRunStreamSealStatus::Incomplete,
                 };
-                Ok(LiveResponseDelivery::Seal(LiveResponseSeal::new(
+                Ok(LiveRunStreamDelivery::Seal(LiveRunStreamSeal::new(
                     identity,
                     last_local_sequence,
                     status,
@@ -934,12 +935,12 @@ impl PostgresLiveResponseWire {
 }
 
 fn encode_publication(
-    publication: &LiveResponsePublication,
+    publication: &LiveRunStreamPublication,
     max_notify_payload_bytes: usize,
 ) -> Result<String, WireError> {
     encode_wire(
-        &PostgresLiveResponseWireRef::Publication {
-            schema_version: POSTGRES_LIVE_RESPONSE_WIRE_VERSION,
+        &PostgresLiveRunStreamWireRef::Publication {
+            schema_version: POSTGRES_LIVE_RUN_STREAM_WIRE_VERSION,
             source: WireSourceRef::from_live(publication.source()),
             local_sequence: publication.local_sequence(),
             payload: WirePayloadRef::from_live(publication_payload(publication)),
@@ -948,10 +949,13 @@ fn encode_publication(
     )
 }
 
-fn encode_gap(gap: &LiveResponseGap, max_notify_payload_bytes: usize) -> Result<String, WireError> {
+fn encode_gap(
+    gap: &LiveRunStreamGap,
+    max_notify_payload_bytes: usize,
+) -> Result<String, WireError> {
     encode_wire(
-        &PostgresLiveResponseWireRef::Gap {
-            schema_version: POSTGRES_LIVE_RESPONSE_WIRE_VERSION,
+        &PostgresLiveRunStreamWireRef::Gap {
+            schema_version: POSTGRES_LIVE_RUN_STREAM_WIRE_VERSION,
             source: WireSourceRef::OutputItem {
                 identity: WireOutputItemIdentityRef::from_live(gap.identity()),
             },
@@ -964,16 +968,16 @@ fn encode_gap(gap: &LiveResponseGap, max_notify_payload_bytes: usize) -> Result<
 }
 
 fn encode_seal(
-    seal: &LiveResponseSeal,
+    seal: &LiveRunStreamSeal,
     max_notify_payload_bytes: usize,
 ) -> Result<String, WireError> {
     let status = match seal.status() {
-        LiveResponseSealStatus::Completed => WireSealStatus::Completed,
-        LiveResponseSealStatus::Incomplete => WireSealStatus::Incomplete,
+        LiveRunStreamSealStatus::Completed => WireSealStatus::Completed,
+        LiveRunStreamSealStatus::Incomplete => WireSealStatus::Incomplete,
     };
     encode_wire(
-        &PostgresLiveResponseWireRef::Seal {
-            schema_version: POSTGRES_LIVE_RESPONSE_WIRE_VERSION,
+        &PostgresLiveRunStreamWireRef::Seal {
+            schema_version: POSTGRES_LIVE_RUN_STREAM_WIRE_VERSION,
             source: WireSourceRef::OutputItem {
                 identity: WireOutputItemIdentityRef::from_live(seal.identity()),
             },
@@ -985,11 +989,11 @@ fn encode_seal(
 }
 
 fn encode_wire(
-    wire: &PostgresLiveResponseWireRef<'_>,
+    wire: &PostgresLiveRunStreamWireRef<'_>,
     max_notify_payload_bytes: usize,
 ) -> Result<String, WireError> {
     if max_notify_payload_bytes == 0
-        || max_notify_payload_bytes > POSTGRES_LIVE_RESPONSE_MAX_NOTIFY_BYTES
+        || max_notify_payload_bytes > POSTGRES_LIVE_RUN_STREAM_MAX_NOTIFY_BYTES
     {
         return Err(WireError);
     }
@@ -1020,7 +1024,7 @@ impl std::io::Write for BoundedWireBuffer {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
             return Err(std::io::Error::other(
-                "PostgreSQL live response wire limit exceeded",
+                "PostgreSQL live Run stream wire limit exceeded",
             ));
         }
         self.bytes.extend_from_slice(bytes);
@@ -1033,7 +1037,7 @@ impl std::io::Write for BoundedWireBuffer {
 }
 
 fn validate_wire_version(schema_version: u8) -> Result<(), WireError> {
-    (schema_version == POSTGRES_LIVE_RESPONSE_WIRE_VERSION)
+    (schema_version == POSTGRES_LIVE_RUN_STREAM_WIRE_VERSION)
         .then_some(())
         .ok_or(WireError)
 }
@@ -1045,23 +1049,21 @@ enum WireSourceRef<'a> {
         #[serde(flatten)]
         identity: WireOutputItemIdentityRef<'a>,
     },
-    WorkflowObservation {
+    RunObservation {
         #[serde(flatten)]
-        identity: WireWorkflowObservationIdentityRef<'a>,
+        identity: WireRunObservationIdentityRef<'a>,
     },
 }
 
 impl<'a> WireSourceRef<'a> {
-    fn from_live(source: &'a LiveResponseSourceIdentity) -> Self {
+    fn from_live(source: &'a LiveRunStreamSourceIdentity) -> Self {
         match source {
-            LiveResponseSourceIdentity::OutputItem(identity) => Self::OutputItem {
+            LiveRunStreamSourceIdentity::OutputItem(identity) => Self::OutputItem {
                 identity: WireOutputItemIdentityRef::from_live(identity),
             },
-            LiveResponseSourceIdentity::WorkflowObservation(identity) => {
-                Self::WorkflowObservation {
-                    identity: WireWorkflowObservationIdentityRef::from_live(identity),
-                }
-            }
+            LiveRunStreamSourceIdentity::RunObservation(identity) => Self::RunObservation {
+                identity: WireRunObservationIdentityRef::from_live(identity),
+            },
         }
     }
 }
@@ -1077,7 +1079,7 @@ enum WireSource {
         item_id: String,
         output_index: u32,
     },
-    WorkflowObservation {
+    RunObservation {
         run_id: RunId,
         activation_id: ActivationId,
         attempt_no: AttemptNo,
@@ -1086,7 +1088,7 @@ enum WireSource {
 }
 
 impl WireSource {
-    fn into_live(self, expected_run_id: &RunId) -> Result<LiveResponseSourceIdentity, WireError> {
+    fn into_live(self, expected_run_id: &RunId) -> Result<LiveRunStreamSourceIdentity, WireError> {
         match self {
             Self::OutputItem {
                 run_id,
@@ -1099,7 +1101,7 @@ impl WireSource {
                 if &run_id != expected_run_id {
                     return Err(WireError);
                 }
-                LiveResponseItemIdentity::new(
+                LiveRunStreamItemIdentity::new(
                     run_id,
                     activation_id,
                     attempt_no,
@@ -1107,10 +1109,10 @@ impl WireSource {
                     item_id,
                     output_index,
                 )
-                .map(LiveResponseSourceIdentity::OutputItem)
+                .map(LiveRunStreamSourceIdentity::OutputItem)
                 .map_err(|_| WireError)
             }
-            Self::WorkflowObservation {
+            Self::RunObservation {
                 run_id,
                 activation_id,
                 attempt_no,
@@ -1119,8 +1121,8 @@ impl WireSource {
                 if &run_id != expected_run_id {
                     return Err(WireError);
                 }
-                LiveWorkflowObservationIdentity::new(run_id, activation_id, attempt_no, source_id)
-                    .map(LiveResponseSourceIdentity::WorkflowObservation)
+                LiveRunObservationIdentity::new(run_id, activation_id, attempt_no, source_id)
+                    .map(LiveRunStreamSourceIdentity::RunObservation)
                     .map_err(|_| WireError)
             }
         }
@@ -1129,10 +1131,10 @@ impl WireSource {
     fn into_output_item(
         self,
         expected_run_id: &RunId,
-    ) -> Result<LiveResponseItemIdentity, WireError> {
+    ) -> Result<LiveRunStreamItemIdentity, WireError> {
         match self.into_live(expected_run_id)? {
-            LiveResponseSourceIdentity::OutputItem(identity) => Ok(identity),
-            LiveResponseSourceIdentity::WorkflowObservation(_) => Err(WireError),
+            LiveRunStreamSourceIdentity::OutputItem(identity) => Ok(identity),
+            LiveRunStreamSourceIdentity::RunObservation(_) => Err(WireError),
         }
     }
 }
@@ -1148,7 +1150,7 @@ struct WireOutputItemIdentityRef<'a> {
 }
 
 impl<'a> WireOutputItemIdentityRef<'a> {
-    fn from_live(identity: &'a LiveResponseItemIdentity) -> Self {
+    fn from_live(identity: &'a LiveRunStreamItemIdentity) -> Self {
         Self {
             run_id: identity.run_id(),
             activation_id: identity.activation_id(),
@@ -1161,15 +1163,15 @@ impl<'a> WireOutputItemIdentityRef<'a> {
 }
 
 #[derive(Serialize)]
-struct WireWorkflowObservationIdentityRef<'a> {
+struct WireRunObservationIdentityRef<'a> {
     run_id: &'a RunId,
     activation_id: &'a ActivationId,
     attempt_no: AttemptNo,
     source_id: &'a str,
 }
 
-impl<'a> WireWorkflowObservationIdentityRef<'a> {
-    fn from_live(identity: &'a LiveWorkflowObservationIdentity) -> Self {
+impl<'a> WireRunObservationIdentityRef<'a> {
+    fn from_live(identity: &'a LiveRunObservationIdentity) -> Self {
         Self {
             run_id: identity.run_id(),
             activation_id: identity.activation_id(),
@@ -1190,11 +1192,11 @@ enum WireSealStatus {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum WirePayloadRef<'a> {
     OutputItemAdded {
-        item: &'a ResponseOutputItem,
+        item: &'a RunOutputItem,
     },
     ContentPartAdded {
         content_index: u32,
-        part: &'a ResponseContentPart,
+        part: &'a RunOutputContentPart,
     },
     OutputTextDelta {
         content_index: u32,
@@ -1206,7 +1208,7 @@ enum WirePayloadRef<'a> {
     },
     ContentPartDone {
         content_index: u32,
-        part: &'a ResponseContentPart,
+        part: &'a RunOutputContentPart,
     },
     FunctionCallArgumentsDelta {
         delta: &'a str,
@@ -1216,7 +1218,7 @@ enum WirePayloadRef<'a> {
         arguments: &'a str,
     },
     OutputItemDone {
-        item: &'a ResponseOutputItem,
+        item: &'a RunOutputItem,
     },
     FileSearchCallInProgress,
     FileSearchCallSearching,
@@ -1229,70 +1231,70 @@ enum WirePayloadRef<'a> {
     ToolProgress {
         call_id: &'a str,
         tool_name: &'a str,
-        content: &'a [WorkflowToolProgressContent],
+        content: &'a [RunToolProgressContent],
     },
     ToolCompleted {
         call_id: &'a str,
         tool_name: &'a str,
         duration_ms: u64,
-        content: &'a [WorkflowToolContent],
+        content: &'a [RunToolContent],
     },
     ToolFailed {
         call_id: &'a str,
         tool_name: &'a str,
         duration_ms: u64,
-        error: &'a WorkflowPublicError,
+        error: &'a RunPublicError,
     },
     RetrievalCompleted {
         retrieval_id: &'a str,
         query: &'a Option<String>,
-        results: &'a [WorkflowRetrievalResult],
+        results: &'a [RunRetrievalResult],
     },
 }
 
 impl<'a> WirePayloadRef<'a> {
-    fn from_live(payload: &'a LiveResponsePayload) -> Self {
+    fn from_live(payload: &'a LiveRunStreamPayload) -> Self {
         match payload {
-            LiveResponsePayload::OutputItemAdded { item } => Self::OutputItemAdded { item },
-            LiveResponsePayload::ContentPartAdded {
+            LiveRunStreamPayload::OutputItemAdded { item } => Self::OutputItemAdded { item },
+            LiveRunStreamPayload::ContentPartAdded {
                 content_index,
                 part,
             } => Self::ContentPartAdded {
                 content_index: *content_index,
                 part,
             },
-            LiveResponsePayload::OutputTextDelta {
+            LiveRunStreamPayload::OutputTextDelta {
                 content_index,
                 delta,
             } => Self::OutputTextDelta {
                 content_index: *content_index,
                 delta,
             },
-            LiveResponsePayload::OutputTextDone {
+            LiveRunStreamPayload::OutputTextDone {
                 content_index,
                 text,
             } => Self::OutputTextDone {
                 content_index: *content_index,
                 text,
             },
-            LiveResponsePayload::ContentPartDone {
+            LiveRunStreamPayload::ContentPartDone {
                 content_index,
                 part,
             } => Self::ContentPartDone {
                 content_index: *content_index,
                 part,
             },
-            LiveResponsePayload::FunctionCallArgumentsDelta { delta } => {
+            LiveRunStreamPayload::FunctionCallArgumentsDelta { delta } => {
                 Self::FunctionCallArgumentsDelta { delta }
             }
-            LiveResponsePayload::FunctionCallArgumentsDone { name, arguments } => {
+            LiveRunStreamPayload::FunctionCallArgumentsDone { name, arguments } => {
                 Self::FunctionCallArgumentsDone { name, arguments }
             }
-            LiveResponsePayload::OutputItemDone { item } => Self::OutputItemDone { item },
-            LiveResponsePayload::FileSearchCallInProgress => Self::FileSearchCallInProgress,
-            LiveResponsePayload::FileSearchCallSearching => Self::FileSearchCallSearching,
-            LiveResponsePayload::FileSearchCallCompleted => Self::FileSearchCallCompleted,
-            LiveResponsePayload::ToolStarted {
+            LiveRunStreamPayload::OutputItemDone { item } => Self::OutputItemDone { item },
+            LiveRunStreamPayload::FileSearchCallInProgress => Self::FileSearchCallInProgress,
+            LiveRunStreamPayload::FileSearchCallSearching => Self::FileSearchCallSearching,
+            LiveRunStreamPayload::FileSearchCallCompleted => Self::FileSearchCallCompleted,
+            LiveRunStreamPayload::ToolStarted {
                 call_id,
                 tool_name,
                 arguments,
@@ -1301,7 +1303,7 @@ impl<'a> WirePayloadRef<'a> {
                 tool_name,
                 arguments,
             },
-            LiveResponsePayload::ToolProgress {
+            LiveRunStreamPayload::ToolProgress {
                 call_id,
                 tool_name,
                 content,
@@ -1310,7 +1312,7 @@ impl<'a> WirePayloadRef<'a> {
                 tool_name,
                 content,
             },
-            LiveResponsePayload::ToolCompleted {
+            LiveRunStreamPayload::ToolCompleted {
                 call_id,
                 tool_name,
                 duration_ms,
@@ -1321,7 +1323,7 @@ impl<'a> WirePayloadRef<'a> {
                 duration_ms: *duration_ms,
                 content,
             },
-            LiveResponsePayload::ToolFailed {
+            LiveRunStreamPayload::ToolFailed {
                 call_id,
                 tool_name,
                 duration_ms,
@@ -1332,7 +1334,7 @@ impl<'a> WirePayloadRef<'a> {
                 duration_ms: *duration_ms,
                 error,
             },
-            LiveResponsePayload::RetrievalCompleted {
+            LiveRunStreamPayload::RetrievalCompleted {
                 retrieval_id,
                 query,
                 results,
@@ -1349,11 +1351,11 @@ impl<'a> WirePayloadRef<'a> {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum WirePayload {
     OutputItemAdded {
-        item: ResponseOutputItem,
+        item: RunOutputItem,
     },
     ContentPartAdded {
         content_index: u32,
-        part: ResponseContentPart,
+        part: RunOutputContentPart,
     },
     OutputTextDelta {
         content_index: u32,
@@ -1365,7 +1367,7 @@ enum WirePayload {
     },
     ContentPartDone {
         content_index: u32,
-        part: ResponseContentPart,
+        part: RunOutputContentPart,
     },
     FunctionCallArgumentsDelta {
         delta: String,
@@ -1375,7 +1377,7 @@ enum WirePayload {
         arguments: String,
     },
     OutputItemDone {
-        item: ResponseOutputItem,
+        item: RunOutputItem,
     },
     FileSearchCallInProgress,
     FileSearchCallSearching,
@@ -1388,74 +1390,74 @@ enum WirePayload {
     ToolProgress {
         call_id: String,
         tool_name: String,
-        content: Vec<WorkflowToolProgressContent>,
+        content: Vec<RunToolProgressContent>,
     },
     ToolCompleted {
         call_id: String,
         tool_name: String,
         duration_ms: u64,
-        content: Vec<WorkflowToolContent>,
+        content: Vec<RunToolContent>,
     },
     ToolFailed {
         call_id: String,
         tool_name: String,
         duration_ms: u64,
-        error: WorkflowPublicError,
+        error: RunPublicError,
     },
     RetrievalCompleted {
         retrieval_id: String,
         query: Option<String>,
-        results: Vec<WorkflowRetrievalResult>,
+        results: Vec<RunRetrievalResult>,
     },
 }
 
 impl WirePayload {
-    fn into_live(self) -> LiveResponsePayload {
+    fn into_live(self) -> LiveRunStreamPayload {
         match self {
-            Self::OutputItemAdded { item } => LiveResponsePayload::OutputItemAdded { item },
+            Self::OutputItemAdded { item } => LiveRunStreamPayload::OutputItemAdded { item },
             Self::ContentPartAdded {
                 content_index,
                 part,
-            } => LiveResponsePayload::ContentPartAdded {
+            } => LiveRunStreamPayload::ContentPartAdded {
                 content_index,
                 part,
             },
             Self::OutputTextDelta {
                 content_index,
                 delta,
-            } => LiveResponsePayload::OutputTextDelta {
+            } => LiveRunStreamPayload::OutputTextDelta {
                 content_index,
                 delta,
             },
             Self::OutputTextDone {
                 content_index,
                 text,
-            } => LiveResponsePayload::OutputTextDone {
+            } => LiveRunStreamPayload::OutputTextDone {
                 content_index,
                 text,
             },
             Self::ContentPartDone {
                 content_index,
                 part,
-            } => LiveResponsePayload::ContentPartDone {
+            } => LiveRunStreamPayload::ContentPartDone {
                 content_index,
                 part,
             },
             Self::FunctionCallArgumentsDelta { delta } => {
-                LiveResponsePayload::FunctionCallArgumentsDelta { delta }
+                LiveRunStreamPayload::FunctionCallArgumentsDelta { delta }
             }
             Self::FunctionCallArgumentsDone { name, arguments } => {
-                LiveResponsePayload::FunctionCallArgumentsDone { name, arguments }
+                LiveRunStreamPayload::FunctionCallArgumentsDone { name, arguments }
             }
-            Self::OutputItemDone { item } => LiveResponsePayload::OutputItemDone { item },
-            Self::FileSearchCallInProgress => LiveResponsePayload::FileSearchCallInProgress,
-            Self::FileSearchCallSearching => LiveResponsePayload::FileSearchCallSearching,
-            Self::FileSearchCallCompleted => LiveResponsePayload::FileSearchCallCompleted,
+            Self::OutputItemDone { item } => LiveRunStreamPayload::OutputItemDone { item },
+            Self::FileSearchCallInProgress => LiveRunStreamPayload::FileSearchCallInProgress,
+            Self::FileSearchCallSearching => LiveRunStreamPayload::FileSearchCallSearching,
+            Self::FileSearchCallCompleted => LiveRunStreamPayload::FileSearchCallCompleted,
             Self::ToolStarted {
                 call_id,
                 tool_name,
                 arguments,
-            } => LiveResponsePayload::ToolStarted {
+            } => LiveRunStreamPayload::ToolStarted {
                 call_id,
                 tool_name,
                 arguments,
@@ -1464,7 +1466,7 @@ impl WirePayload {
                 call_id,
                 tool_name,
                 content,
-            } => LiveResponsePayload::ToolProgress {
+            } => LiveRunStreamPayload::ToolProgress {
                 call_id,
                 tool_name,
                 content,
@@ -1474,7 +1476,7 @@ impl WirePayload {
                 tool_name,
                 duration_ms,
                 content,
-            } => LiveResponsePayload::ToolCompleted {
+            } => LiveRunStreamPayload::ToolCompleted {
                 call_id,
                 tool_name,
                 duration_ms,
@@ -1485,7 +1487,7 @@ impl WirePayload {
                 tool_name,
                 duration_ms,
                 error,
-            } => LiveResponsePayload::ToolFailed {
+            } => LiveRunStreamPayload::ToolFailed {
                 call_id,
                 tool_name,
                 duration_ms,
@@ -1495,7 +1497,7 @@ impl WirePayload {
                 retrieval_id,
                 query,
                 results,
-            } => LiveResponsePayload::RetrievalCompleted {
+            } => LiveRunStreamPayload::RetrievalCompleted {
                 retrieval_id,
                 query,
                 results,
@@ -1511,8 +1513,8 @@ mod tests {
 
     use super::*;
 
-    fn test_identity(run_id: RunId) -> LiveResponseItemIdentity {
-        LiveResponseItemIdentity::new(
+    fn test_identity(run_id: RunId) -> LiveRunStreamItemIdentity {
+        LiveRunStreamItemIdentity::new(
             run_id,
             ActivationId::new("activation_live_test").unwrap(),
             AttemptNo::FIRST,
@@ -1523,8 +1525,8 @@ mod tests {
         .unwrap()
     }
 
-    fn test_workflow_identity(run_id: RunId) -> LiveWorkflowObservationIdentity {
-        LiveWorkflowObservationIdentity::new(
+    fn test_workflow_identity(run_id: RunId) -> LiveRunObservationIdentity {
+        LiveRunObservationIdentity::new(
             run_id,
             ActivationId::new("activation_workflow_wire_test").unwrap(),
             AttemptNo::FIRST,
@@ -1534,14 +1536,14 @@ mod tests {
     }
 
     fn text_publication(
-        identity: LiveResponseItemIdentity,
+        identity: LiveRunStreamItemIdentity,
         local_sequence: u64,
         text: impl Into<String>,
-    ) -> LiveResponsePublication {
-        LiveResponsePublication::new(
+    ) -> LiveRunStreamPublication {
+        LiveRunStreamPublication::new(
             identity,
             local_sequence,
-            LiveResponsePayload::OutputTextDelta {
+            LiveRunStreamPayload::OutputTextDelta {
                 content_index: 0,
                 delta: text.into(),
             },
@@ -1550,13 +1552,13 @@ mod tests {
     }
 
     fn workflow_publication(
-        identity: LiveWorkflowObservationIdentity,
+        identity: LiveRunObservationIdentity,
         local_sequence: u64,
-    ) -> LiveResponsePublication {
-        LiveResponsePublication::new_workflow_observation(
+    ) -> LiveRunStreamPublication {
+        LiveRunStreamPublication::new_run_observation(
             identity,
             local_sequence,
-            LiveResponsePayload::ToolStarted {
+            LiveRunStreamPayload::ToolStarted {
                 call_id: "call_wire_test".to_owned(),
                 tool_name: "lookup".to_owned(),
                 arguments: Some(json!({"public": "argument"})),
@@ -1569,9 +1571,9 @@ mod tests {
     fn channel_uses_the_complete_run_identity_and_is_postgres_safe() {
         let first = RunId::new("run_shared_prefix_first").unwrap();
         let second = RunId::new("run_shared_prefix_second").unwrap();
-        let first_channel = postgres_live_response_channel(&first);
-        assert_eq!(first_channel, postgres_live_response_channel(&first));
-        assert_ne!(first_channel, postgres_live_response_channel(&second));
+        let first_channel = postgres_live_run_stream_channel(&first);
+        assert_eq!(first_channel, postgres_live_run_stream_channel(&first));
+        assert_ne!(first_channel, postgres_live_run_stream_channel(&second));
         assert!(first_channel.len() <= 63);
         assert!(first_channel
             .bytes()
@@ -1583,8 +1585,8 @@ mod tests {
         let run_id = RunId::new("run_wire_test").unwrap();
         let publication = text_publication(test_identity(run_id.clone()), 7, "private-body-marker");
         let encoded = encode_publication(&publication, 4 * 1_024).unwrap();
-        let delivery = PostgresLiveResponseWire::decode(&encoded, &run_id, 4 * 1_024).unwrap();
-        let LiveResponseDelivery::Publication(decoded) = delivery else {
+        let delivery = PostgresLiveRunStreamWire::decode(&encoded, &run_id, 4 * 1_024).unwrap();
+        let LiveRunStreamDelivery::Publication(decoded) = delivery else {
             panic!("publication wire must decode as a publication");
         };
         assert_eq!(decoded, publication);
@@ -1595,7 +1597,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("unexpected".to_owned(), json!(true));
-        assert!(PostgresLiveResponseWire::decode(
+        assert!(PostgresLiveRunStreamWire::decode(
             &serde_json::to_string(&unknown_field).unwrap(),
             &run_id,
             4 * 1_024,
@@ -1603,8 +1605,8 @@ mod tests {
         .is_err());
 
         let mut future_version: Value = serde_json::from_str(&encoded).unwrap();
-        future_version["schema_version"] = json!(POSTGRES_LIVE_RESPONSE_WIRE_VERSION + 1);
-        assert!(PostgresLiveResponseWire::decode(
+        future_version["schema_version"] = json!(POSTGRES_LIVE_RUN_STREAM_WIRE_VERSION + 1);
+        assert!(PostgresLiveRunStreamWire::decode(
             &serde_json::to_string(&future_version).unwrap(),
             &run_id,
             4 * 1_024,
@@ -1612,12 +1614,12 @@ mod tests {
         .is_err());
 
         let other_run = RunId::new("run_wire_other").unwrap();
-        assert!(PostgresLiveResponseWire::decode(&encoded, &other_run, 4 * 1_024).is_err());
+        assert!(PostgresLiveRunStreamWire::decode(&encoded, &other_run, 4 * 1_024).is_err());
 
         let workflow = workflow_publication(test_workflow_identity(run_id.clone()), 3);
         let workflow_encoded = encode_publication(&workflow, 4 * 1_024).unwrap();
-        let LiveResponseDelivery::Publication(decoded_workflow) =
-            PostgresLiveResponseWire::decode(&workflow_encoded, &run_id, 4 * 1_024).unwrap()
+        let LiveRunStreamDelivery::Publication(decoded_workflow) =
+            PostgresLiveRunStreamWire::decode(&workflow_encoded, &run_id, 4 * 1_024).unwrap()
         else {
             panic!("workflow wire must decode as a publication")
         };
@@ -1637,28 +1639,28 @@ mod tests {
             "tool_name": "lookup",
             "arguments": null
         });
-        assert!(PostgresLiveResponseWire::decode(
+        assert!(PostgresLiveRunStreamWire::decode(
             &serde_json::to_string(&wrong_payload).unwrap(),
             &run_id,
             4 * 1_024,
         )
         .is_err());
 
-        let seal = LiveResponseSeal::new(
+        let seal = LiveRunStreamSeal::new(
             test_identity(run_id.clone()),
             None,
-            LiveResponseSealStatus::Completed,
+            LiveRunStreamSealStatus::Completed,
         );
         let encoded_seal = encode_seal(&seal, 4 * 1_024).unwrap();
         let mut workflow_control_source: Value = serde_json::from_str(&encoded_seal).unwrap();
         workflow_control_source["source"] = json!({
-            "source_kind": "workflow_observation",
+            "source_kind": "run_observation",
             "run_id": run_id,
             "activation_id": "activation_workflow_wire_test",
             "attempt_no": 1,
             "source_id": "tool_source_wire_test"
         });
-        assert!(PostgresLiveResponseWire::decode(
+        assert!(PostgresLiveRunStreamWire::decode(
             &serde_json::to_string(&workflow_control_source).unwrap(),
             &RunId::new("run_wire_source_mismatch").unwrap(),
             4 * 1_024,
@@ -1667,7 +1669,7 @@ mod tests {
 
         let mut unknown_source: Value = serde_json::from_str(&encoded).unwrap();
         unknown_source["source"]["source_kind"] = json!("future_source");
-        assert!(PostgresLiveResponseWire::decode(
+        assert!(PostgresLiveRunStreamWire::decode(
             &serde_json::to_string(&unknown_source).unwrap(),
             &RunId::new("run_wire_source_mismatch").unwrap(),
             4 * 1_024,
@@ -1679,13 +1681,13 @@ mod tests {
     async fn oversize_publication_is_dropped_with_an_explicit_gap() {
         let run_id = RunId::new("run_oversize_test").unwrap();
         let identity = test_identity(run_id.clone());
-        let queue = RunQueue::new_with_limits(run_id, 4, 4, LiveResponseByteLimits::default());
+        let queue = RunQueue::new_with_limits(run_id, 4, 4, LiveRunStreamByteLimits::default());
         let publication = text_publication(identity.clone(), 0, "x".repeat(2_048));
         assert_eq!(
             enqueue_outbound_publication(&queue, publication, 512),
-            LiveResponsePublishOutcome::DroppedOversizeWithGap
+            LiveRunStreamPublishOutcome::DroppedOversizeWithGap
         );
-        let LiveResponseDelivery::Gap(gap) = queue.recv().await.unwrap() else {
+        let LiveRunStreamDelivery::Gap(gap) = queue.recv().await.unwrap() else {
             panic!("oversize publication must become a gap");
         };
         assert_eq!(gap.identity(), &identity);
@@ -1695,15 +1697,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversize_workflow_observation_is_best_effort_without_an_item_gap() {
+    async fn oversize_run_observation_is_best_effort_without_an_item_gap() {
         let run_id = RunId::new("run_workflow_oversize_test").unwrap();
         let observation = test_workflow_identity(run_id.clone());
         let queue =
-            RunQueue::new_with_limits(run_id.clone(), 4, 4, LiveResponseByteLimits::default());
-        let publication = LiveResponsePublication::new_workflow_observation(
+            RunQueue::new_with_limits(run_id.clone(), 4, 4, LiveRunStreamByteLimits::default());
+        let publication = LiveRunStreamPublication::new_run_observation(
             observation,
             0,
-            LiveResponsePayload::ToolStarted {
+            LiveRunStreamPayload::ToolStarted {
                 call_id: "call_wire_oversize".to_owned(),
                 tool_name: "lookup".to_owned(),
                 arguments: Some(json!({"value": "x".repeat(2_048)})),
@@ -1712,19 +1714,19 @@ mod tests {
         .unwrap();
         assert_eq!(
             enqueue_outbound_publication(&queue, publication, 512),
-            LiveResponsePublishOutcome::DroppedBestEffort
+            LiveRunStreamPublishOutcome::DroppedBestEffort
         );
 
-        let seal = LiveResponseSeal::new(
+        let seal = LiveRunStreamSeal::new(
             test_identity(run_id),
             None,
-            LiveResponseSealStatus::Completed,
+            LiveRunStreamSealStatus::Completed,
         );
         assert_eq!(
             queue.seal(seal.clone()),
-            LiveResponsePublishOutcome::SealEnqueued
+            LiveRunStreamPublishOutcome::SealEnqueued
         );
-        let LiveResponseDelivery::Seal(delivered) = queue.recv().await.unwrap() else {
+        let LiveRunStreamDelivery::Seal(delivered) = queue.recv().await.unwrap() else {
             panic!("workflow transport loss must not synthesize an output-item gap")
         };
         assert_eq!(delivered, seal);
@@ -1732,15 +1734,15 @@ mod tests {
 
     #[test]
     fn options_reject_the_postgres_notify_ceiling() {
-        assert!(PostgresLiveResponseBrokerOptions::new(1, 1, 1).is_ok());
-        assert!(PostgresLiveResponseBrokerOptions::new(0, 1, 1).is_err());
-        assert!(PostgresLiveResponseBrokerOptions::new(
+        assert!(PostgresLiveRunStreamBrokerOptions::new(1, 1, 1).is_ok());
+        assert!(PostgresLiveRunStreamBrokerOptions::new(0, 1, 1).is_err());
+        assert!(PostgresLiveRunStreamBrokerOptions::new(
             1,
             1,
-            POSTGRES_LIVE_RESPONSE_MAX_NOTIFY_BYTES + 1,
+            POSTGRES_LIVE_RUN_STREAM_MAX_NOTIFY_BYTES + 1,
         )
         .is_err());
-        assert!(PostgresLiveResponseBrokerOptions::new(1, 1, 1)
+        assert!(PostgresLiveRunStreamBrokerOptions::new(1, 1, 1)
             .unwrap()
             .with_outbound_idle_timeout(Duration::ZERO)
             .is_err());
@@ -1757,7 +1759,7 @@ mod tests {
                 run_id,
                 4,
                 4,
-                LiveResponseByteLimits::default(),
+                LiveRunStreamByteLimits::default(),
             ))
         };
         let stale = Arc::new(OutboundRegistration::new_at(
@@ -1780,7 +1782,7 @@ mod tests {
         expired[0].queue.close();
         assert_eq!(
             stale.queue.recv().await.unwrap_err().code(),
-            "LIVE_RESPONSE_STREAM_CLOSED"
+            "LIVE_RUN_STREAM_STREAM_CLOSED"
         );
     }
 
@@ -1788,7 +1790,7 @@ mod tests {
     fn a_registration_settles_only_after_its_last_parallel_item_seals() {
         let run_id = RunId::new("run_parallel_outbound_items").unwrap();
         let first = test_identity(run_id.clone());
-        let second = LiveResponseItemIdentity::new(
+        let second = LiveRunStreamItemIdentity::new(
             run_id.clone(),
             ActivationId::new("activation_live_second").unwrap(),
             AttemptNo::FIRST,
@@ -1801,7 +1803,7 @@ mod tests {
             run_id,
             4,
             4,
-            LiveResponseByteLimits::default(),
+            LiveRunStreamByteLimits::default(),
         )));
         registration.begin_item(&first);
         registration.begin_item(&second);
@@ -1819,18 +1821,18 @@ mod tests {
             .connect(&database_url)
             .await
             .unwrap();
-        let options = PostgresLiveResponseBrokerOptions::new(4, 4, 4 * 1_024)
+        let options = PostgresLiveRunStreamBrokerOptions::new(4, 4, 4 * 1_024)
             .unwrap()
             .with_outbound_idle_timeout(Duration::from_millis(40))
             .unwrap();
-        let broker = PostgresLiveResponseBroker::start(pool.clone(), options)
+        let broker = PostgresLiveRunStreamBroker::start(pool.clone(), options)
             .await
             .unwrap();
         let run_id = RunId::random();
         let identity = test_identity(run_id.clone());
         assert_eq!(
             broker.publish(text_publication(identity, 0, "detached-body")),
-            LiveResponsePublishOutcome::Enqueued
+            LiveRunStreamPublishOutcome::Enqueued
         );
         assert!(lock(&broker.inner.outbound).contains_key(&run_id));
 
@@ -1861,11 +1863,11 @@ mod tests {
             .connect(&database_url)
             .await
             .unwrap();
-        let options = PostgresLiveResponseBrokerOptions::new(8, 8, 4 * 1_024).unwrap();
-        let publisher = PostgresLiveResponseBroker::start(publisher_pool.clone(), options)
+        let options = PostgresLiveRunStreamBrokerOptions::new(8, 8, 4 * 1_024).unwrap();
+        let publisher = PostgresLiveRunStreamBroker::start(publisher_pool.clone(), options)
             .await
             .unwrap();
-        let subscriber = PostgresLiveResponseBroker::start(subscriber_pool.clone(), options)
+        let subscriber = PostgresLiveRunStreamBroker::start(subscriber_pool.clone(), options)
             .await
             .unwrap();
         publisher
@@ -1878,15 +1880,15 @@ mod tests {
         let mut subscription = subscriber.subscribe(run_id.clone()).await.unwrap();
         assert_eq!(
             publisher.publish(text_publication(identity.clone(), 0, "cross-broker-body",)),
-            LiveResponsePublishOutcome::Enqueued
+            LiveRunStreamPublishOutcome::Enqueued
         );
         assert_eq!(
-            publisher.seal(LiveResponseSeal::new(
+            publisher.seal(LiveRunStreamSeal::new(
                 identity.clone(),
                 Some(0),
-                LiveResponseSealStatus::Completed,
+                LiveRunStreamSealStatus::Completed,
             )),
-            LiveResponsePublishOutcome::SealEnqueued
+            LiveRunStreamPublishOutcome::SealEnqueued
         );
         assert!(
             !lock(&publisher.inner.outbound).contains_key(&run_id),
@@ -1897,13 +1899,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let LiveResponseDelivery::Publication(publication) = first else {
+        let LiveRunStreamDelivery::Publication(publication) = first else {
             panic!("body must arrive before its seal");
         };
         let public = publication.into_public_event(2);
         assert!(matches!(
             public,
-            ResponseStreamEvent::ResponseOutputTextDelta {
+            RunStreamEvent::RunOutputTextDelta {
                 delta,
                 ..
             } if delta == "cross-broker-body"
@@ -1913,7 +1915,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let LiveResponseDelivery::Seal(seal) = second else {
+        let LiveRunStreamDelivery::Seal(seal) = second else {
             panic!("the second delivery must be the item seal");
         };
         assert_eq!(seal.identity(), &identity);

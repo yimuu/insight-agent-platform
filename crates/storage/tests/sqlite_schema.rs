@@ -66,20 +66,23 @@ async fn sqlite_empty_file_and_partial_schema_are_not_initialized() {
 }
 
 #[tokio::test]
-async fn sqlite_wrong_contract_and_wrong_backend_fail_closed() {
+async fn sqlite_legacy_contract_and_wrong_backend_fail_closed() {
     let temporary = tempfile::tempdir().unwrap();
     let database = temporary.path().join("wrong-contract.sqlite3");
     support::provision_sqlite_database(&database).await;
     let pool = inspection_pool(&database).await;
 
-    sqlx::query("UPDATE durable_schema_contract SET contract_id='wrong-contract'")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE durable_schema_contract
+         SET contract_id='durable-schema-d98dcd93-4911-426d-a826-9d8a5b04b461'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let error = SqliteDurableRepository::connect_path(&database)
         .await
         .err()
-        .expect("a wrong contract ID must be rejected");
+        .expect("the pre-run-stream/v1 contract ID must be rejected");
     assert_eq!(error.code(), DATABASE_SCHEMA_CONTRACT_MISMATCH);
 
     sqlx::query(

@@ -2,7 +2,7 @@
 
 use insight_engine::history::types::RunRecord;
 use insight_runtime::{RecoveryOperation, RecoveryReusePolicy, RecoveryRunResult};
-use serde::Serialize;
+use serde::{ser::Error as _, Serialize, Serializer};
 
 pub use insight_engine::PersistenceMode;
 pub use insight_runtime::terminal_only::{RecoveryCapability, RunPersistenceCapability};
@@ -17,12 +17,31 @@ pub(crate) const fn run_persistence_capability_for_mode(
 }
 
 /// Public Run projection with its failure and replay semantics made explicit.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct RunDto {
-    #[serde(flatten)]
     pub run: RunRecord,
-    #[serde(flatten)]
     pub capability: RunPersistenceCapability,
+}
+
+impl Serialize for RunDto {
+    fn serialize<__S>(&self, serializer: __S) -> Result<__S::Ok, __S::Error>
+    where
+        __S: Serializer,
+    {
+        let mut run = serde_json::to_value(&self.run)
+            .map_err(|error| __S::Error::custom(error.to_string()))?;
+        let object = run
+            .as_object_mut()
+            .ok_or_else(|| __S::Error::custom("Run record must serialize as an object"))?;
+        object.remove("response_id");
+        let capability = serde_json::to_value(self.capability)
+            .map_err(|error| __S::Error::custom(error.to_string()))?;
+        let capability = capability
+            .as_object()
+            .ok_or_else(|| __S::Error::custom("Run capability must serialize as an object"))?;
+        object.extend(capability.clone());
+        run.serialize(serializer)
+    }
 }
 
 impl RunDto {
@@ -108,6 +127,7 @@ mod tests {
         assert_eq!(value["recovery_capability"], "none");
         assert_eq!(value["event_replay"], false);
         assert_eq!(value["run_id"], "run_terminal");
+        assert!(value.get("response_id").is_none());
         assert_eq!(value["status"], "completed");
     }
 

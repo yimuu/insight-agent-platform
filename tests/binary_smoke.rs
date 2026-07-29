@@ -386,7 +386,6 @@ async fn stock_production_binary_runs_and_restarts_with_a_no_ddl_postgres_role()
         drop(first_startup_guard);
         let attached = create_attached_action_and_read_response(&client, &first_base).await;
         let run_id = attached.run_id;
-        let response_id = attached.response_id;
         let completed = expect_json(
             format!("GET {first_base}/v1/runs/{run_id}"),
             client.get(format!("{first_base}/v1/runs/{run_id}")),
@@ -394,7 +393,6 @@ async fn stock_production_binary_runs_and_restarts_with_a_no_ddl_postgres_role()
         )
         .await;
         assert_eq!(completed["data"]["status"], "completed");
-        assert_eq!(completed["data"]["response_id"], response_id);
         assert_eq!(
             completed["data"]["output"],
             json!({"data":{"characters":16,"words":3,"lines":1}})
@@ -428,7 +426,6 @@ async fn stock_production_binary_runs_and_restarts_with_a_no_ddl_postgres_role()
         )
         .await;
         assert_eq!(recovered["data"]["status"], "completed");
-        assert_eq!(recovered["data"]["response_id"], response_id);
         assert_eq!(recovered["data"]["attachment"], "attached");
         assert_eq!(
             recovered["data"]["output"],
@@ -495,7 +492,6 @@ fn postgres_binary_test_url() -> Option<String> {
 #[derive(Debug)]
 struct AttachedActionEvidence {
     run_id: String,
-    response_id: String,
 }
 
 async fn create_attached_action_and_read_response(
@@ -529,12 +525,7 @@ async fn create_attached_action_and_read_response(
         .and_then(|value| value.to_str().ok())
         .expect("attached action response must expose x-run-id")
         .to_owned();
-    let response_id = response
-        .headers()
-        .get("x-response-id")
-        .and_then(|value| value.to_str().ok())
-        .expect("attached action response must expose x-response-id")
-        .to_owned();
+    assert!(!response.headers().contains_key("x-response-id"));
     let body = response
         .text()
         .await
@@ -544,15 +535,14 @@ async fn create_attached_action_and_read_response(
         events.len() >= 3,
         "attached action response must expose created, in-progress, and terminal events: {body}"
     );
-    assert_eq!(events[0]["type"], "response.created");
-    assert_eq!(events[1]["type"], "response.in_progress");
+    assert_eq!(events[0]["type"], "run.lifecycle.created");
+    assert_eq!(events[1]["type"], "run.lifecycle.running");
     let terminal = events.last().unwrap();
-    assert_eq!(terminal["type"], "response.completed");
-    assert_eq!(terminal["response"]["id"], response_id);
-    assert_eq!(terminal["response"]["status"], "completed");
-    assert_eq!(terminal["workflow"]["run_id"], run_id);
+    assert_eq!(terminal["type"], "run.lifecycle.completed");
+    assert_eq!(terminal["run"]["id"], run_id);
+    assert_eq!(terminal["run"]["status"], "completed");
     assert_eq!(
-        terminal["workflow"]["result"],
+        terminal["run"]["result"],
         json!({"characters":16,"words":3,"lines":1})
     );
     let mut previous_sequence = None;
@@ -569,10 +559,7 @@ async fn create_attached_action_and_read_response(
         previous_sequence = Some(sequence);
     }
 
-    AttachedActionEvidence {
-        run_id,
-        response_id,
-    }
+    AttachedActionEvidence { run_id }
 }
 
 fn decode_sse_json_events(body: &str) -> Vec<Value> {

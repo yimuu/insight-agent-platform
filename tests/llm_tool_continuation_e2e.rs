@@ -22,7 +22,7 @@ use insight_agent_platform::{
     },
     dsl::CompileError,
     engine::{
-        plan::LeafTaskDescriptor, production_worker_registry_with_live_response, LeafTaskKind,
+        plan::LeafTaskDescriptor, production_worker_registry_with_live_run_stream, LeafTaskKind,
         LocalContentAddressedArtifactStore, SubflowContractRegistry, WorkerEffectPolicy,
     },
     resources::{
@@ -38,8 +38,8 @@ use insight_agent_platform::{
         },
     },
     runtime::{
-        DeployedAgentCatalog, InMemoryLiveResponseBroker, LiveResponseBroker,
-        ProductionRunRepository, ResponseStreamEvent, RunError, RunService, RunServiceConfig,
+        DeployedAgentCatalog, InMemoryLiveRunStreamBroker, LiveRunStreamBroker,
+        ProductionRunRepository, RunError, RunService, RunServiceConfig, RunStreamEvent,
         TerminalOnlyRunConfig, TerminalOnlyStore,
     },
 };
@@ -567,11 +567,11 @@ workflow:
             .unwrap(),
         );
 
-        let broker = Arc::new(InMemoryLiveResponseBroker::new(64, 16).unwrap());
-        let workers = production_worker_registry_with_live_response(
+        let broker = Arc::new(InMemoryLiveRunStreamBroker::new(64, 16).unwrap());
+        let workers = production_worker_registry_with_live_run_stream(
             &models,
             &actions,
-            Arc::clone(&broker) as Arc<dyn LiveResponseBroker>,
+            Arc::clone(&broker) as Arc<dyn LiveRunStreamBroker>,
         )
         .unwrap();
         let database = root.join("durable.sqlite");
@@ -595,11 +595,11 @@ workflow:
         config.outbound_write_timeout = Duration::from_secs(2);
         config.artifact_gc_interval = Duration::from_secs(60);
         config.public_event_prune_interval = Duration::from_secs(60);
-        let service = RunService::start_with_artifact_store_graph_publication_and_live_response(
+        let service = RunService::start_with_artifact_store_graph_publication_and_live_run_stream(
             DeployedAgentCatalog::new(vec![full_deployed, terminal_deployed]).unwrap(),
             repository.clone() as Arc<dyn ProductionRunRepository>,
             workers,
-            broker as Arc<dyn LiveResponseBroker>,
+            broker as Arc<dyn LiveRunStreamBroker>,
             artifact_store,
             Arc::new(resolver),
             config,
@@ -650,7 +650,6 @@ workflow:
 
 struct Transcript {
     run_id: String,
-    response_id: String,
     raw_sse: String,
     events: Vec<Value>,
 }
@@ -689,10 +688,7 @@ async fn attached_transcript(app: &Router, model: &ModelState, agent_id: &str) -
         .unwrap()
         .starts_with("text/event-stream"));
     let run_id = response.headers()["x-run-id"].to_str().unwrap().to_owned();
-    let response_id = response.headers()["x-response-id"]
-        .to_str()
-        .unwrap()
-        .to_owned();
+    assert!(!response.headers().contains_key("x-response-id"));
     let mut body = response.into_body().into_data_stream();
     let mut bytes = Vec::new();
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -700,13 +696,13 @@ async fn attached_transcript(app: &Router, model: &ModelState, agent_id: &str) -
             bytes.extend_from_slice(&chunk.unwrap());
             assert!(bytes.len() <= 1 << 20, "response exceeded test bound");
             let observed = String::from_utf8_lossy(&bytes);
-            if observed.contains("event: response.function_call_arguments.delta") {
+            if observed.contains("event: run.output.function_call.arguments.delta") {
                 assert!(
                     !model.first_round_finished.load(Ordering::SeqCst),
                     "the first function-argument delta must precede Provider completion"
                 );
                 assert!(
-                    !observed.contains("event: response.completed"),
+                    !observed.contains("event: run.lifecycle.completed"),
                     "the first function-argument delta must precede Run terminal"
                 );
                 return;
@@ -743,22 +739,25 @@ async fn attached_transcript(app: &Router, model: &ModelState, agent_id: &str) -
         let value: Value = serde_json::from_str(data).unwrap();
         assert_eq!(value["type"], event_name);
         assert_no_private_runtime_keys(&value);
-        typed.push(serde_json::from_value::<ResponseStreamEvent>(value.clone()).unwrap());
+        typed.push(serde_json::from_value::<RunStreamEvent>(value.clone()).unwrap());
         events.push(value);
     }
     assert!(!events.is_empty());
     for (sequence, event) in typed.iter().enumerate() {
         assert_eq!(event.sequence_number(), sequence as u64);
     }
-    assert_eq!(events[0]["type"], "response.created");
-    assert_eq!(events[1]["type"], "response.in_progress");
-    assert_eq!(events[0]["response"]["id"], response_id);
-    assert!(typed.last().unwrap().is_terminal());
-    assert_eq!(typed.iter().filter(|event| event.is_terminal()).count(), 1);
+    assert_eq!(events[0]["type"], "run.lifecycle.created");
+    assert_eq!(events[1]["type"], "run.lifecycle.running");
+    assert_eq!(events[0]["run"]["id"], run_id);
+    assert_eq!(events[0]["run"]["status"], "created");
+    assert!(typed.last().unwrap().is_run_terminal());
+    assert_eq!(
+        typed.iter().filter(|event| event.is_run_terminal()).count(),
+        1
+    );
 
     Transcript {
         run_id,
-        response_id,
         raw_sse: raw,
         events,
     }
@@ -769,7 +768,7 @@ fn assert_no_private_runtime_keys(value: &Value) {
         Value::Object(object) => {
             for (key, value) in object {
                 assert!(
-                    !matches!(key.as_str(), "run" | "operation" | "output_bytes"),
+                    !matches!(key.as_str(), "operation" | "output_bytes"),
                     "private runtime field leaked: {key}"
                 );
                 assert_no_private_runtime_keys(value);
@@ -871,10 +870,9 @@ async fn assert_no_secret_in_durable_state(database: &PathBuf, run_id: &str) {
              WHERE run_id=? ORDER BY output_index",
         ),
         (
-            "response_snapshots",
-            "SELECT response_payload || workflow_payload || public_item_manifest || \
-                    coalesce(usage,'') \
-             FROM response_snapshots WHERE run_id=?",
+            "run_stream_snapshots",
+            "SELECT run_payload || public_item_manifest \
+             FROM run_stream_snapshots WHERE run_id=?",
         ),
         (
             "model_call_usage",
@@ -968,19 +966,18 @@ fn assert_public_events(transcript: &Transcript) {
         .events
         .iter()
         .position(|event| {
-            event["type"] == "response.output_item.added"
-                && event["item"]["type"] == "function_call"
+            event["type"] == "run.output.item.added" && event["item"]["type"] == "function_call"
         })
         .expect("standard function-call item was not published");
     assert_eq!(
         &types[function_start..function_start + 6],
         &[
-            "response.output_item.added",
-            "response.function_call_arguments.delta",
-            "response.function_call_arguments.delta",
-            "response.function_call_arguments.delta",
-            "response.function_call_arguments.done",
-            "response.output_item.done",
+            "run.output.item.added",
+            "run.output.function_call.arguments.delta",
+            "run.output.function_call.arguments.delta",
+            "run.output.function_call.arguments.delta",
+            "run.output.function_call.arguments.done",
+            "run.output.item.done",
         ]
     );
     let frames = &transcript.events[function_start..function_start + 6];
@@ -1008,24 +1005,24 @@ fn assert_public_events(transcript: &Transcript) {
         .events
         .iter()
         .enumerate()
-        .filter(|(_, event)| event["type"] == "workflow.tool.started")
+        .filter(|(_, event)| event["type"] == "run.tool.started")
         .collect::<Vec<_>>();
     let completed = transcript
         .events
         .iter()
         .enumerate()
-        .filter(|(_, event)| event["type"] == "workflow.tool.completed")
+        .filter(|(_, event)| event["type"] == "run.tool.completed")
         .collect::<Vec<_>>();
     let failed = transcript
         .events
         .iter()
-        .filter(|event| event["type"] == "workflow.tool.failed")
+        .filter(|event| event["type"] == "run.tool.failed")
         .collect::<Vec<_>>();
     let progress = transcript
         .events
         .iter()
         .enumerate()
-        .filter(|(_, event)| event["type"] == "workflow.tool.progress")
+        .filter(|(_, event)| event["type"] == "run.tool.progress")
         .collect::<Vec<_>>();
     assert_eq!(started.len(), 2);
     assert_eq!(progress.len(), 4);
@@ -1072,15 +1069,15 @@ fn assert_public_events(transcript: &Transcript) {
 
     let terminal = transcript.terminal();
     assert_eq!(
-        terminal["type"], "response.completed",
+        terminal["type"], "run.lifecycle.completed",
         "unexpected terminal envelope: {terminal}"
     );
-    assert_eq!(terminal["response"]["id"], transcript.response_id);
-    assert_eq!(terminal["response"]["status"], "completed");
-    assert_eq!(terminal["workflow"]["result"], FINAL_TEXT);
-    assert_eq!(terminal["workflow"]["usage_status"], "complete");
+    assert_eq!(terminal["run"]["id"], transcript.run_id);
+    assert_eq!(terminal["run"]["status"], "completed");
+    assert_eq!(terminal["run"]["result"], FINAL_TEXT);
+    assert_eq!(terminal["run"]["usage_status"], "complete");
     assert_eq!(
-        terminal["response"]["usage"],
+        terminal["run"]["usage"],
         json!({
             "input_tokens": 30,
             "input_tokens_details": {"cached_tokens": 3},
@@ -1090,18 +1087,15 @@ fn assert_public_events(transcript: &Transcript) {
         })
     );
     assert_eq!(
-        terminal["workflow"]["tool_results"],
+        terminal["run"]["tool_results"],
         json!([{
             "call_id": CALL_ID,
             "tool_name": "lookup",
             "content": [{"type": "output_json", "json": {"answer": "42"}}]
         }])
     );
-    assert!(terminal["workflow"]["retrievals"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    let output = terminal["response"]["output"].as_array().unwrap();
+    assert!(terminal["run"]["retrievals"].as_array().unwrap().is_empty());
+    let output = terminal["run"]["output"].as_array().unwrap();
     assert_eq!(
         output.len(),
         2,
@@ -1129,7 +1123,7 @@ fn assert_public_events(transcript: &Transcript) {
         .events
         .iter()
         .filter(|event| {
-            event["type"] == "response.output_item.added" && event["item"]["type"] == "message"
+            event["type"] == "run.output.item.added" && event["item"]["type"] == "message"
         })
         .collect::<Vec<_>>();
     assert_eq!(message_additions.len(), 1);
@@ -1362,7 +1356,7 @@ async fn assert_durable_authority(
     let public_duration_ms = transcript
         .events
         .iter()
-        .find(|event| event["type"] == "workflow.tool.completed")
+        .find(|event| event["type"] == "run.tool.completed")
         .unwrap()["duration_ms"]
         .as_u64()
         .unwrap();
@@ -1458,11 +1452,11 @@ async fn attached_run_executes_one_durable_tool_round_and_publishes_the_sealed_c
     assert_public_events(&transcript);
     assert_no_secret_in_public_surfaces(&transcript, &run);
     assert_eq!(run["data"]["status"], "completed");
-    assert_eq!(run["data"]["response_id"], transcript.response_id);
+    assert!(run["data"].get("response_id").is_none());
     assert_eq!(run["data"]["output"]["data"], FINAL_TEXT);
     assert_eq!(
         run["data"]["output"]["data"],
-        transcript.terminal()["workflow"]["result"]
+        transcript.terminal()["run"]["result"]
     );
 }
 
@@ -1475,19 +1469,19 @@ async fn terminal_only_attached_run_uses_the_same_progress_wire_and_persists_cal
         .events
         .iter()
         .enumerate()
-        .filter(|(_, event)| event["type"] == "workflow.tool.started")
+        .filter(|(_, event)| event["type"] == "run.tool.started")
         .collect::<Vec<_>>();
     let progress = transcript
         .events
         .iter()
         .enumerate()
-        .filter(|(_, event)| event["type"] == "workflow.tool.progress")
+        .filter(|(_, event)| event["type"] == "run.tool.progress")
         .collect::<Vec<_>>();
     let completed = transcript
         .events
         .iter()
         .enumerate()
-        .filter(|(_, event)| event["type"] == "workflow.tool.completed")
+        .filter(|(_, event)| event["type"] == "run.tool.completed")
         .collect::<Vec<_>>();
     assert_eq!(started.len(), 1);
     assert_eq!(progress.len(), 2);
@@ -1510,17 +1504,17 @@ async fn terminal_only_attached_run_uses_the_same_progress_wire_and_persists_cal
     assert!(transcript
         .events
         .iter()
-        .any(|event| event["type"] == "response.function_call_arguments.done"));
+        .any(|event| event["type"] == "run.output.function_call.arguments.done"));
     assert!(transcript
         .events
         .iter()
-        .any(|event| event["type"] == "response.output_text.delta"));
+        .any(|event| event["type"] == "run.output.text.delta"));
 
     let terminal = transcript.terminal();
-    assert_eq!(terminal["type"], "response.completed");
-    assert_eq!(terminal["workflow"]["result"], FINAL_TEXT);
+    assert_eq!(terminal["type"], "run.lifecycle.completed");
+    assert_eq!(terminal["run"]["result"], FINAL_TEXT);
     assert_eq!(
-        terminal["workflow"]["tool_results"],
+        terminal["run"]["tool_results"],
         json!([{
             "call_id": CALL_ID,
             "tool_name": "lookup",
@@ -1528,17 +1522,21 @@ async fn terminal_only_attached_run_uses_the_same_progress_wire_and_persists_cal
         }])
     );
     assert_eq!(
-        terminal["workflow"]
+        terminal["run"]
             .as_object()
             .unwrap()
             .keys()
             .map(String::as_str)
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
+            "id",
+            "object",
+            "output",
             "retrievals",
             "result",
-            "run_id",
+            "status",
             "tool_results",
+            "usage",
             "usage_status"
         ])
     );
@@ -1567,8 +1565,51 @@ async fn terminal_only_attached_run_uses_the_same_progress_wire_and_persists_cal
     assert_eq!(stored.get::<String, _>("terminal_state"), "succeeded");
     assert_eq!(
         serde_json::from_str::<Value>(&stored.get::<String, _>("tool_results_json")).unwrap(),
-        terminal["workflow"]["tool_results"]
+        terminal["run"]["tool_results"]
     );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM terminal_run_admissions WHERE run_id=?")
+            .bind(&transcript.run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM terminal_run_results WHERE run_id=?")
+            .bind(&transcript.run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    let full_runtime_rows = sqlx::query_as::<_, (String, i64)>(
+        "WITH selected(run_id) AS (VALUES (?))
+         SELECT 'execution_events',COUNT(*) FROM execution_events
+           WHERE run_id=(SELECT run_id FROM selected)
+         UNION ALL SELECT 'public_event_outbox',COUNT(*) FROM public_event_outbox
+           WHERE run_id=(SELECT run_id FROM selected)
+         UNION ALL SELECT 'response_public_items',COUNT(*) FROM response_public_items
+           WHERE run_id=(SELECT run_id FROM selected)
+         UNION ALL SELECT 'model_call_usage',COUNT(*) FROM model_call_usage
+           WHERE run_id=(SELECT run_id FROM selected)
+         UNION ALL SELECT 'model_tool_call_batches',COUNT(*) FROM model_tool_call_batches
+           WHERE run_id=(SELECT run_id FROM selected)
+         UNION ALL SELECT 'model_tool_calls',COUNT(*) FROM model_tool_calls
+           WHERE run_id=(SELECT run_id FROM selected)
+         UNION ALL SELECT 'run_stream_snapshots',COUNT(*) FROM run_stream_snapshots
+           WHERE run_id=(SELECT run_id FROM selected)",
+    )
+    .bind(&transcript.run_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    for (table, rows) in full_runtime_rows {
+        assert_eq!(
+            rows, 0,
+            "terminal-only output deltas and tool progress must not add {table} writes"
+        );
+    }
     pool.close().await;
 }
 #[path = "support/database.rs"]

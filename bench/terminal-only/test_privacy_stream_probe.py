@@ -27,7 +27,7 @@ class PrivacyTimelineTests(unittest.TestCase):
     def test_pre_delete_delta_and_eof_pass(self) -> None:
         self.assertEqual(
             PROBE.evaluate_timeline(
-                [frame("response.output_text.delta", 10)],
+                [frame("run.output.text.delta", 10)],
                 20,
             ),
             [],
@@ -36,8 +36,8 @@ class PrivacyTimelineTests(unittest.TestCase):
     def test_post_delete_delta_fails(self) -> None:
         failures = PROBE.evaluate_timeline(
             [
-                frame("response.output_text.delta", 10),
-                frame("response.output_text.delta", 21),
+                frame("run.output.text.delta", 10),
+                frame("run.output.text.delta", 21),
             ],
             20,
         )
@@ -48,7 +48,7 @@ class PrivacyTimelineTests(unittest.TestCase):
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed["event"], "comment")
         failures = PROBE.evaluate_timeline(
-            [frame("response.output_text.delta", 10), parsed],
+            [frame("run.output.text.delta", 10), parsed],
             20,
         )
         self.assertTrue(any("comment" in failure for failure in failures))
@@ -58,7 +58,7 @@ class PrivacyTimelineTests(unittest.TestCase):
             with self.subTest(event=event):
                 failures = PROBE.evaluate_timeline(
                     [
-                        frame("response.output_text.delta", 10),
+                        frame("run.output.text.delta", 10),
                         frame(event, 21),
                     ],
                     20,

@@ -2407,7 +2407,7 @@ async fn terminalize_source(
         &source.run_id,
     )
     .await?;
-    super::postgres::persist_terminal_response_snapshot_postgres(
+    super::postgres::persist_terminal_run_stream_snapshot_postgres(
         tx,
         &source.run_id,
         RunLifecycle::Cancelled,

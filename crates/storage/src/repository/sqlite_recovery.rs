@@ -2392,7 +2392,7 @@ async fn terminalize_source(
         &source.run_id,
     )
     .await?;
-    super::sqlite::persist_terminal_response_snapshot_sqlite(
+    super::sqlite::persist_terminal_run_stream_snapshot_sqlite(
         tx,
         &source.run_id,
         RunLifecycle::Cancelled,

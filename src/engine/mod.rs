@@ -61,7 +61,7 @@ pub use identity::{
 };
 pub use leaf_adapters::{
     production_worker_registry, production_worker_registry_with_leaf_adapters,
-    production_worker_registry_with_live_response, ActionTaskExecutor, LlmTaskExecutor,
+    production_worker_registry_with_live_run_stream, ActionTaskExecutor, LlmTaskExecutor,
     LlmTokenObservation,
 };
 pub use persistence::PersistenceMode;
@@ -90,7 +90,7 @@ pub use retrieval::{
     RETRIEVAL_BINDING_INVALID, RETRIEVAL_COMPLETION_INVALID,
 };
 pub use retrieval_adapter::{
-    install_retrieval_workers, production_worker_registry_with_live_response_and_retrievals,
+    install_retrieval_workers, production_worker_registry_with_live_run_stream_and_retrievals,
     production_worker_registry_with_retrievals, RetrievalTaskExecutor,
 };
 pub use run::{

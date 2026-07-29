@@ -69,7 +69,7 @@ runtime:
     notification_reconnect_interval: 250ms
   max_llm_tool_rounds: 16
   max_llm_tool_calls: 64
-  response_stream:
+  run_stream:
     broker: postgres_notify
     body_queue_capacity: 256
     control_queue_capacity: 32

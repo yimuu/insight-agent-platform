@@ -12,13 +12,13 @@ use sqlx::{
 };
 
 use insight_durable::common::adapter::{
-    self as common_contract_adapter, build_terminal_response_snapshot, canonical_intent_hash,
+    self as common_contract_adapter, build_terminal_run_stream_snapshot, canonical_intent_hash,
     canonical_value, decode_public_projection_decision, decode_stored_execution_event,
     durable_public_event_envelope, event_id, i64_from_u64, parse_admission_state,
     parse_run_lifecycle, payload_id, project_terminal_tool_results, public_event_id,
     public_event_ordinal, u64_from_i64, validate_inline_payload, StoredExecutionEventRow,
     StoredModelCallUsage, StoredPublicProjectionDecision, StoredResponseItem,
-    StoredSucceededModelToolCall, TerminalResponseSnapshotInput,
+    StoredSucceededModelToolCall, TerminalRunStreamSnapshotInput,
 };
 use insight_durable::model::adapter as model_adapter;
 use insight_durable::production::adapter as production_contract_adapter;
@@ -27,9 +27,10 @@ use insight_durable::{
     ProductionRunRepository, RunRepositoryCapability, SchedulerLeaseRepository, WorkClass,
     WorkNotificationStream, WorkWakeupRepository, WORK_NOTIFY_CHANNEL_PREFIX,
 };
-use insight_engine::response::adapter::{
-    durable_response_snapshot_new, response_terminal_kind_parse, response_usage_status_parse,
+use insight_engine::run_stream::adapter::{
+    durable_run_stream_snapshot_new, run_terminal_kind_parse,
 };
+use insight_engine::run_stream::RUN_STREAM_PROTOCOL_VERSION;
 
 use insight_engine::{
     ContentHash, DefinitionRevisionId, DeploymentRevisionId, ExecutionEventContext,
@@ -48,7 +49,7 @@ use super::postgres_projection::{
 };
 use super::schema_contract::{validate_contract_row, POSTGRES_SCHEMA_BACKEND};
 use super::{
-    CommitReceipt, CreateRunCommand, DurableRepository, DurableResponseSnapshot,
+    CommitReceipt, CreateRunCommand, DurableRepository, DurableRunStreamSnapshot,
     FullConversationRunAdmission, PlanInstallOutcome, PlanPublicationOutcome, PublicationHead,
     PublicationOrigin, PublishVersionedPlanCommand, RepositoryError, RunProjection,
     RunTransitionCommand, VersionedPlan, VersionedPlanCatalog, REPOSITORY_CONSTRAINT_CONFLICT,
@@ -454,7 +455,7 @@ impl PostgresDurableRepository {
     }
 
     /// Shares the configured PostgreSQL endpoint with infrastructure that is
-    /// explicitly non-durable (for example LISTEN/NOTIFY live responses).
+    /// explicitly non-durable (for example LISTEN/NOTIFY live Run streams).
     /// Cloning a `PgPool` does not duplicate credentials into application
     /// payloads and preserves one startup/readiness authority.
     pub fn connection_pool(&self) -> PgPool {
@@ -1116,7 +1117,7 @@ impl DurableRepository for PostgresDurableRepository {
                 command.run_id(),
             )
             .await?;
-            persist_terminal_response_snapshot_postgres(
+            persist_terminal_run_stream_snapshot_postgres(
                 &mut transaction,
                 command.run_id(),
                 command.next_lifecycle(),
@@ -1181,11 +1182,11 @@ impl DurableRepository for PostgresDurableRepository {
         row.map(|row| projection_from_row(run_id, &row)).transpose()
     }
 
-    async fn load_response_snapshot(
+    async fn load_run_stream_snapshot(
         &self,
         run_id: &RunId,
-    ) -> Result<Option<DurableResponseSnapshot>, RepositoryError> {
-        load_response_snapshot_postgres(&self.pool, run_id).await
+    ) -> Result<Option<DurableRunStreamSnapshot>, RepositoryError> {
+        load_run_stream_snapshot_postgres(&self.pool, run_id).await
     }
 }
 
@@ -1267,7 +1268,7 @@ pub(crate) async fn register_terminal_artifact_retention_postgres(
     Ok(())
 }
 
-pub(crate) async fn persist_terminal_response_snapshot_postgres(
+pub(crate) async fn persist_terminal_run_stream_snapshot_postgres(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
     lifecycle: RunLifecycle,
@@ -1366,7 +1367,7 @@ pub(crate) async fn persist_terminal_response_snapshot_postgres(
     )
     .await?;
     validate_terminal_retrieval_artifacts_postgres(transaction, run_id, &retrievals).await?;
-    let snapshot = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+    let snapshot = build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
         run_id,
         lifecycle,
         output,
@@ -1377,20 +1378,16 @@ pub(crate) async fn persist_terminal_response_snapshot_postgres(
         retrievals,
     })?;
     sqlx::query(
-        "INSERT INTO response_snapshots (
-            run_id,response_id,terminal_kind,response_status,response_payload,
-            workflow_payload,public_item_manifest,usage,usage_status,snapshot_hash,created_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,clock_timestamp())",
+        "INSERT INTO run_stream_snapshots (
+            run_id,protocol,terminal_kind,run_payload,
+            public_item_manifest,snapshot_hash,created_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp())",
     )
     .bind(run_id.as_str())
-    .bind(&snapshot.response_id)
+    .bind(RUN_STREAM_PROTOCOL_VERSION)
     .bind(snapshot.terminal_kind.as_str())
-    .bind(snapshot.response_status)
-    .bind(snapshot.response)
-    .bind(snapshot.workflow)
+    .bind(snapshot.run)
     .bind(snapshot.manifest)
-    .bind(snapshot.usage)
-    .bind(snapshot.usage_status.as_str())
     .bind(snapshot.snapshot_hash.as_str())
     .execute(&mut **transaction)
     .await
@@ -1401,7 +1398,7 @@ pub(crate) async fn persist_terminal_response_snapshot_postgres(
 async fn load_terminal_tool_results_postgres(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
-) -> Result<Vec<insight_engine::response::WorkflowToolResult>, RepositoryError> {
+) -> Result<Vec<insight_engine::run_stream::RunToolResult>, RepositoryError> {
     let rows = sqlx::query(
         "SELECT activation_id,attempt_no,model_call_no,call_index,call_id,tool_name,
                 effective_public_policy,result_json
@@ -1456,12 +1453,12 @@ async fn load_terminal_tool_results_postgres(
 async fn validate_terminal_tool_result_artifacts_postgres(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
-    tool_results: &[insight_engine::response::WorkflowToolResult],
+    tool_results: &[insight_engine::run_stream::RunToolResult],
 ) -> Result<(), RepositoryError> {
     for artifact in tool_results
         .iter()
         .flat_map(|result| result.content())
-        .filter_map(insight_engine::response::WorkflowToolContent::artifact)
+        .filter_map(insight_engine::run_stream::RunToolContent::artifact)
     {
         let row = sqlx::query(
             "SELECT content_hash,size_bytes,media_type,artifact_state
@@ -1500,12 +1497,12 @@ async fn validate_terminal_tool_result_artifacts_postgres(
 async fn validate_terminal_retrieval_artifacts_postgres(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
-    retrievals: &[insight_engine::response::WorkflowRetrieval],
+    retrievals: &[insight_engine::run_stream::RunRetrieval],
 ) -> Result<(), RepositoryError> {
     for artifact in retrievals
         .iter()
         .flat_map(|retrieval| retrieval.results())
-        .filter_map(insight_engine::response::WorkflowRetrievalResult::artifact)
+        .filter_map(insight_engine::run_stream::RunRetrievalResult::artifact)
     {
         let row = sqlx::query(
             "SELECT content_hash,size_bytes,media_type,artifact_state
@@ -1541,39 +1538,37 @@ async fn validate_terminal_retrieval_artifacts_postgres(
     Ok(())
 }
 
-async fn load_response_snapshot_postgres(
+async fn load_run_stream_snapshot_postgres(
     pool: &PgPool,
     run_id: &RunId,
-) -> Result<Option<DurableResponseSnapshot>, RepositoryError> {
+) -> Result<Option<DurableRunStreamSnapshot>, RepositoryError> {
     let row = sqlx::query(
-        "SELECT response_id,terminal_kind,response_payload,workflow_payload,
-                public_item_manifest,usage,usage_status,snapshot_hash
-         FROM response_snapshots WHERE run_id=$1",
+        "SELECT protocol,terminal_kind,run_payload,
+                public_item_manifest,snapshot_hash
+         FROM run_stream_snapshots WHERE run_id=$1",
     )
     .bind(run_id.as_str())
     .fetch_optional(pool)
     .await
     .map_err(RepositoryError::storage)?;
     row.map(|row| {
-        durable_response_snapshot_new(
-            row.try_get("response_id")
-                .map_err(|_| RepositoryError::invalid_data())?,
-            response_terminal_kind_parse(
+        if row
+            .try_get::<String, _>("protocol")
+            .map_err(|_| RepositoryError::invalid_data())?
+            != RUN_STREAM_PROTOCOL_VERSION
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+        durable_run_stream_snapshot_new(
+            run_id.as_str().to_owned(),
+            run_terminal_kind_parse(
                 &row.try_get::<String, _>("terminal_kind")
                     .map_err(|_| RepositoryError::invalid_data())?,
             )?,
-            row.try_get("response_payload")
-                .map_err(|_| RepositoryError::invalid_data())?,
-            row.try_get("workflow_payload")
+            row.try_get("run_payload")
                 .map_err(|_| RepositoryError::invalid_data())?,
             row.try_get("public_item_manifest")
                 .map_err(|_| RepositoryError::invalid_data())?,
-            row.try_get("usage")
-                .map_err(|_| RepositoryError::invalid_data())?,
-            response_usage_status_parse(
-                &row.try_get::<String, _>("usage_status")
-                    .map_err(|_| RepositoryError::invalid_data())?,
-            )?,
             ContentHash::parse(
                 row.try_get::<String, _>("snapshot_hash")
                     .map_err(|_| RepositoryError::invalid_data())?,

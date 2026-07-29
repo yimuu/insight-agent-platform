@@ -301,7 +301,7 @@ token 不应进入配置明文、Debug、错误或日志。
   lock waiter、top SQL 的 temp/WAL blocks 和一致性抽样；cgroup page cache 上升不能单独等价为
   进程 RSS 泄漏；
 - `runtime.public_event_retention` 只清理已发布的非终态 Public Event；
-- terminal Public Event 和 durable response snapshot 不受该策略影响；
+- terminal Public Event 和 durable Run snapshot 不受该策略影响；
 - `shutdown_grace_period` 与 `shutdown_hard_deadline` 控制停止 admission、drain 与最终退出边界。
 
 Conversation 只保存不可变 user/assistant 最终消息与低频 summary；SSE delta、token 和 provider chunk

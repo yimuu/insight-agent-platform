@@ -41,10 +41,10 @@ pub use insight_durable::{
     SettleScopeCommand, TokenConsumerKind,
 };
 pub use insight_durable::{
-    CommitReceipt, CreateRunCommand, DurableResponseSnapshot, PlanInstallOutcome,
+    CommitReceipt, CreateRunCommand, DurableRunStreamSnapshot, PlanInstallOutcome,
     PlanPublicationOutcome, PublicEventIntent, PublicRunAttachment, PublicationHead,
-    PublicationOrigin, PublishVersionedPlanCommand, ResponseTerminalKind, ResponseUsageStatus,
-    RunProjection, RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
+    PublicationOrigin, PublishVersionedPlanCommand, RunProjection, RunTerminalKind,
+    RunTransitionCommand, RunUsageStatus, VersionedPlan, VersionedPlanCatalog,
 };
 pub use insight_durable::{
     DueTimer, ExistingSignalSubmission, PendingSignalResolution, RuntimeIngressDurableRepository,

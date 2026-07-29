@@ -253,21 +253,21 @@ impl std::fmt::Display for AgentInputError {
 
 impl std::error::Error for AgentInputError {}
 
-/// Closed public protocol identifier for an Agent response stream.
+/// Closed public protocol identifier for an Agent Run stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentStreamingProtocol {
-    #[serde(rename = "response-stream/v1")]
-    ResponseStreamV1,
+    #[serde(rename = "run-stream/v1")]
+    RunStreamV1,
 }
 
-/// Closed transport vocabulary for public response streaming.
+/// Closed transport vocabulary for public Run streaming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStreamingTransport {
     Sse,
 }
 
-/// Closed source kind vocabulary for `response-stream/v1`.
+/// Closed source kind vocabulary for `run-stream/v1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStreamingSourceKind {
@@ -284,7 +284,7 @@ pub enum AgentStreamingSourceMode {
     Buffered,
 }
 
-/// Closed public content vocabulary for response-stream/v1 sources.
+/// Closed public content vocabulary for run-stream/v1 sources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStreamingSourceFormat {
@@ -321,7 +321,7 @@ impl AgentStreamingSource {
     }
 }
 
-/// Public response streaming discovery. This contains only protocol facts and
+/// Public Run streaming discovery. This contains only protocol facts and
 /// author-stable source identities; prompts, model bindings and runtime
 /// occurrence identities remain private.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,7 +412,7 @@ impl PublishedAgent {
             .expect("a verified Plan output type always has a JSON Schema projection")
     }
 
-    /// Derives response-stream discovery exclusively from normalized Plan
+    /// Derives run-stream discovery exclusively from normalized Plan
     /// descriptors. Source order is author-order independent and therefore
     /// stable across storage and Graph round-trips.
     pub fn public_streaming_contract(&self) -> AgentStreamingContract {
@@ -465,7 +465,7 @@ impl PublishedAgent {
             .collect::<Vec<_>>();
         sources.sort_by(|left, right| left.id.cmp(&right.id));
         AgentStreamingContract {
-            protocol: AgentStreamingProtocol::ResponseStreamV1,
+            protocol: AgentStreamingProtocol::RunStreamV1,
             transport: AgentStreamingTransport::Sse,
             live_only: true,
             sources,

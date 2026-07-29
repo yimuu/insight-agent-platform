@@ -15,8 +15,8 @@ use insight_dsl::CompileError;
 use insight_engine::{
     execution::{stop_pair, ExecutionControl, RunError, RunErrorKind, StopReason},
     plan::{DescriptorValue, VersionTag},
-    response::LiveResponseBroker,
     retrieval::{deterministic_retrieval_id, FrozenRetrievalTarget, RetrievalCompletion},
+    run_stream::LiveRunStreamBroker,
     worker::{
         LeafTaskExecutor, TaskExecutionRequest, TaskExecutionResult, WorkerExecutionContext,
         WorkerExecutorRegistry, WorkerFailure, WorkerFailureClass,
@@ -31,7 +31,7 @@ use insight_resources::{
 };
 
 use crate::leaf_adapters::{
-    production_worker_registry, production_worker_registry_with_live_response,
+    production_worker_registry, production_worker_registry_with_live_run_stream,
 };
 
 const RETRIEVAL_DESCRIPTOR_VERSION: &str = "1";
@@ -165,14 +165,14 @@ pub fn production_worker_registry_with_retrievals(
     Ok(registry)
 }
 
-pub fn production_worker_registry_with_live_response_and_retrievals(
+pub fn production_worker_registry_with_live_run_stream_and_retrievals(
     models: &ModelRegistry,
     actions: &ActionRegistry,
     retrievals: &RetrievalRegistry,
-    live_response_broker: Arc<dyn LiveResponseBroker>,
+    live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
 ) -> Result<WorkerExecutorRegistry, CompileError> {
     let mut registry =
-        production_worker_registry_with_live_response(models, actions, live_response_broker)?;
+        production_worker_registry_with_live_run_stream(models, actions, live_run_stream_broker)?;
     install_retrieval_workers(&mut registry, retrievals)?;
     Ok(registry)
 }

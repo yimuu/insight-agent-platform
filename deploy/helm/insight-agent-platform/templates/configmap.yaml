@@ -142,7 +142,7 @@ data:
         notification_reconnect_interval: {{ .Values.runtime.scheduler.notificationReconnectInterval }}
       max_llm_tool_rounds: 16
       max_llm_tool_calls: 64
-      response_stream:
+      run_stream:
         broker: postgres_notify
         body_queue_capacity: 128
         control_queue_capacity: 32

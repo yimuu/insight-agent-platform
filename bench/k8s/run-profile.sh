@@ -514,9 +514,8 @@ kubectl -n "$namespace" exec "$postgresql_pod" -- \
       count(*) FILTER (
         WHERE NOT EXISTS (
           SELECT 1
-          FROM response_snapshots snapshot
+          FROM run_stream_snapshots snapshot
           WHERE snapshot.run_id=sampled.run_id
-            AND snapshot.response_id=sampled.response_id
         )
       ) AS terminal_snapshot_violations
     FROM sampled;

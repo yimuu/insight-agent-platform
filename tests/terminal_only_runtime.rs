@@ -16,10 +16,10 @@ use insight_engine::{
     history::types::RunLifecycle,
     plan::{LeafTaskDescriptor, LeafTaskKind, SubflowContractRegistry},
     repository::{RepositoryError, StorageLocator},
-    response::{
-        LiveResponseBrokerCapability, LiveResponseBrokerError, LiveResponseCloseOutcome,
-        LiveResponsePublication, LiveResponsePublishOutcome, LiveResponseSeal,
-        LiveResponseSubscriber,
+    run_stream::{
+        LiveRunStreamBrokerCapability, LiveRunStreamBrokerError, LiveRunStreamCloseOutcome,
+        LiveRunStreamPublication, LiveRunStreamPublishOutcome, LiveRunStreamSeal,
+        LiveRunStreamSubscriber,
     },
     worker::WorkerExecutorRegistry,
     ArtifactId, ArtifactRef, ContentHash, DefinitionRevisionId, RunId,
@@ -29,7 +29,7 @@ use insight_runtime::{
         DeployedAgent, DeploymentPersistencePolicy, LeafDeploymentResolver, PublishedAgent,
         ResolvedLeafDeployment,
     },
-    DeployedAgentCatalog, InMemoryLiveResponseBroker, LiveResponseBroker, TerminalOnlyRunConfig,
+    DeployedAgentCatalog, InMemoryLiveRunStreamBroker, LiveRunStreamBroker, TerminalOnlyRunConfig,
     TerminalOnlyRunEngine, TerminalOnlyStore,
 };
 use insight_storage::{artifact_store::LocalContentAddressedArtifactStore, *};
@@ -78,7 +78,7 @@ impl Fixture {
         Self::new_with(
             source,
             allow_volatile_waits,
-            Arc::new(InMemoryLiveResponseBroker::new(32, 8).unwrap()),
+            Arc::new(InMemoryLiveRunStreamBroker::new(32, 8).unwrap()),
             terminal_config(),
         )
         .await
@@ -87,7 +87,7 @@ impl Fixture {
     async fn new_with(
         source: &str,
         allow_volatile_waits: bool,
-        broker: Arc<dyn LiveResponseBroker>,
+        broker: Arc<dyn LiveRunStreamBroker>,
         config: TerminalOnlyRunConfig,
     ) -> Self {
         Self::new_with_store_wrapper(source, allow_volatile_waits, broker, config, |store| store)
@@ -97,7 +97,7 @@ impl Fixture {
     async fn new_with_store_wrapper<F>(
         source: &str,
         allow_volatile_waits: bool,
-        broker: Arc<dyn LiveResponseBroker>,
+        broker: Arc<dyn LiveRunStreamBroker>,
         config: TerminalOnlyRunConfig,
         wrap_store: F,
     ) -> Self
@@ -118,7 +118,7 @@ impl Fixture {
     async fn new_with_terminal_store_wrapper<F>(
         source: &str,
         allow_volatile_waits: bool,
-        broker: Arc<dyn LiveResponseBroker>,
+        broker: Arc<dyn LiveRunStreamBroker>,
         config: TerminalOnlyRunConfig,
         wrap_store: F,
     ) -> Self
@@ -139,7 +139,7 @@ impl Fixture {
     async fn new_with_wrappers<FS, FA>(
         source: &str,
         allow_volatile_waits: bool,
-        broker: Arc<dyn LiveResponseBroker>,
+        broker: Arc<dyn LiveRunStreamBroker>,
         config: TerminalOnlyRunConfig,
         wrap_store: FS,
         wrap_artifact_store: FA,
@@ -637,31 +637,31 @@ fn terminal_config() -> TerminalOnlyRunConfig {
 struct FailingSubscribeBroker;
 
 #[async_trait]
-impl LiveResponseBroker for FailingSubscribeBroker {
-    fn deployment_capability(&self) -> LiveResponseBrokerCapability {
-        LiveResponseBrokerCapability::SingleProcess
+impl LiveRunStreamBroker for FailingSubscribeBroker {
+    fn deployment_capability(&self) -> LiveRunStreamBrokerCapability {
+        LiveRunStreamBrokerCapability::SingleProcess
     }
 
     async fn subscribe(
         &self,
         _run_id: RunId,
-    ) -> Result<Box<dyn LiveResponseSubscriber>, LiveResponseBrokerError> {
-        Err(LiveResponseBrokerError::new(
+    ) -> Result<Box<dyn LiveRunStreamSubscriber>, LiveRunStreamBrokerError> {
+        Err(LiveRunStreamBrokerError::new(
             "TEST_SUBSCRIBE_FAILED",
             "test subscriber failed",
         ))
     }
 
-    fn publish(&self, _publication: LiveResponsePublication) -> LiveResponsePublishOutcome {
-        LiveResponsePublishOutcome::NoSubscriber
+    fn publish(&self, _publication: LiveRunStreamPublication) -> LiveRunStreamPublishOutcome {
+        LiveRunStreamPublishOutcome::NoSubscriber
     }
 
-    fn seal(&self, _seal: LiveResponseSeal) -> LiveResponsePublishOutcome {
-        LiveResponsePublishOutcome::NoSubscriber
+    fn seal(&self, _seal: LiveRunStreamSeal) -> LiveRunStreamPublishOutcome {
+        LiveRunStreamPublishOutcome::NoSubscriber
     }
 
-    fn close_run(&self, _run_id: &RunId) -> LiveResponseCloseOutcome {
-        LiveResponseCloseOutcome::default()
+    fn close_run(&self, _run_id: &RunId) -> LiveRunStreamCloseOutcome {
+        LiveRunStreamCloseOutcome::default()
     }
 }
 
@@ -914,7 +914,7 @@ workflow:
     let fixture = Fixture::new_with(
         source,
         true,
-        Arc::new(InMemoryLiveResponseBroker::new(32, 8).unwrap()),
+        Arc::new(InMemoryLiveRunStreamBroker::new(32, 8).unwrap()),
         config,
     )
     .await;
@@ -958,7 +958,7 @@ workflow:
     let fixture = Fixture::new_with_terminal_store_wrapper(
         source,
         false,
-        Arc::new(InMemoryLiveResponseBroker::new(32, 8).unwrap()),
+        Arc::new(InMemoryLiveRunStreamBroker::new(32, 8).unwrap()),
         terminal_config(),
         {
             let state = Arc::clone(&state);
@@ -1020,7 +1020,7 @@ workflow:
     let fixture = Fixture::new_with_terminal_store_wrapper(
         source,
         false,
-        Arc::new(InMemoryLiveResponseBroker::new(32, 8).unwrap()),
+        Arc::new(InMemoryLiveRunStreamBroker::new(32, 8).unwrap()),
         terminal_config(),
         {
             let state = Arc::clone(&state);
@@ -1098,7 +1098,7 @@ workflow:
     let fixture = Fixture::new_with_terminal_store_wrapper(
         source,
         true,
-        Arc::new(InMemoryLiveResponseBroker::new(32, 8).unwrap()),
+        Arc::new(InMemoryLiveRunStreamBroker::new(32, 8).unwrap()),
         config,
         {
             let state = Arc::clone(&state);
@@ -1245,7 +1245,7 @@ workflow:
         .await
         .unwrap();
     let snapshot = replay.subscription.recv_terminal().await.unwrap();
-    assert!(snapshot.workflow().to_string().contains("RUN_INTERRUPTED"));
+    assert!(snapshot.run().to_string().contains("RUN_INTERRUPTED"));
 
     let fresh = fixture
         .engine
@@ -1507,7 +1507,7 @@ async fn rolling_summary_is_flat_bounded_and_missing_summary_falls_back_to_recen
     let fixture = Fixture::new_with(
         CONTEXT_AGENT,
         false,
-        Arc::new(InMemoryLiveResponseBroker::new(32, 8).unwrap()),
+        Arc::new(InMemoryLiveRunStreamBroker::new(32, 8).unwrap()),
         config,
     )
     .await;
@@ -1740,7 +1740,7 @@ async fn context_token_budget_selects_a_contiguous_recent_message_suffix() {
     let fixture = Fixture::new_with(
         CONTEXT_AGENT,
         false,
-        Arc::new(InMemoryLiveResponseBroker::new(32, 8).unwrap()),
+        Arc::new(InMemoryLiveRunStreamBroker::new(32, 8).unwrap()),
         config,
     )
     .await;
@@ -1876,7 +1876,7 @@ async fn crash_after_object_put_before_metadata_commit_is_durably_collected() {
     let fixture = Fixture::new_with_store_wrapper(
         PASSTHROUGH_AGENT,
         false,
-        Arc::new(InMemoryLiveResponseBroker::new(32, 8).unwrap()),
+        Arc::new(InMemoryLiveRunStreamBroker::new(32, 8).unwrap()),
         terminal_config(),
         move |inner| {
             Arc::new(PanicAfterSuccessfulPutStore {

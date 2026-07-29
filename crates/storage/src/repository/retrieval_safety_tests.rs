@@ -904,18 +904,15 @@ async fn sqlite_terminal_failure_preserves_an_earlier_committed_retrieval() {
     ));
 
     let snapshot = repository
-        .load_response_snapshot(&run_id)
+        .load_run_stream_snapshot(&run_id)
         .await
         .unwrap()
-        .expect("failed Run must have a terminal response snapshot");
-    assert_eq!(snapshot.workflow()["error"]["code"], "DOWNSTREAM_FAILURE");
+        .expect("failed Run must have a terminal Run snapshot");
+    assert_eq!(snapshot.run()["error"]["code"], "DOWNSTREAM_FAILURE");
+    assert_eq!(snapshot.run()["retrievals"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot.run()["retrievals"][0]["query"], "WBC");
     assert_eq!(
-        snapshot.workflow()["retrievals"].as_array().unwrap().len(),
-        1
-    );
-    assert_eq!(snapshot.workflow()["retrievals"][0]["query"], "WBC");
-    assert_eq!(
-        snapshot.workflow()["retrievals"][0]["results"][0]["title"],
+        snapshot.run()["retrievals"][0]["results"][0]["title"],
         "durably retained"
     );
 }
@@ -1043,12 +1040,12 @@ async fn sqlite_retrieval_artifact_is_exact_run_scoped_and_retained_atomically_a
     ));
 
     let snapshot = repository
-        .load_response_snapshot(&run_id)
+        .load_run_stream_snapshot(&run_id)
         .await
         .unwrap()
-        .expect("successful Run must have a terminal response snapshot");
+        .expect("successful Run must have a terminal Run snapshot");
     assert_eq!(
-        snapshot.workflow()["retrievals"][0]["results"][0]["artifact"]["artifact_id"],
+        snapshot.run()["retrievals"][0]["results"][0]["artifact"]["artifact_id"],
         valid.artifact_id().as_str()
     );
     let retention = sqlx::query(
@@ -1130,17 +1127,14 @@ async fn postgres_retrieval_success_race_replay_and_deadline_match_sqlite() {
         SchedulerRecoveryOutcome::Quiescent(SchedulerQuiescence::RunSucceeded)
     ));
     let snapshot = repository
-        .load_response_snapshot(&run_id)
+        .load_run_stream_snapshot(&run_id)
         .await
         .unwrap()
-        .expect("PostgreSQL successful Run must expose its durable response snapshot");
+        .expect("PostgreSQL successful Run must expose its durable Run snapshot");
+    assert_eq!(snapshot.run()["retrievals"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot.run()["retrievals"][0]["query"], "WBC");
     assert_eq!(
-        snapshot.workflow()["retrievals"].as_array().unwrap().len(),
-        1
-    );
-    assert_eq!(snapshot.workflow()["retrievals"][0]["query"], "WBC");
-    assert_eq!(
-        snapshot.workflow()["retrievals"][0]["results"][0]["title"],
+        snapshot.run()["retrievals"][0]["results"][0]["title"],
         "PostgreSQL source"
     );
     assert_eq!(

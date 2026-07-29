@@ -115,10 +115,10 @@ pub use insight_engine::repository::{
     REPOSITORY_SCHEDULER_CRASH_INJECTED, REPOSITORY_STORAGE_FAILURE,
 };
 pub use model::{
-    CommitReceipt, CreateRunCommand, DurableResponseSnapshot, FullConversationRunAdmission,
+    CommitReceipt, CreateRunCommand, DurableRunStreamSnapshot, FullConversationRunAdmission,
     PlanInstallOutcome, PlanPublicationOutcome, PublicEventIntent, PublicRunAttachment,
-    PublicationHead, PublicationOrigin, PublishVersionedPlanCommand, ResponseTerminalKind,
-    ResponseUsageStatus, RunProjection, RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
+    PublicationHead, PublicationOrigin, PublishVersionedPlanCommand, RunProjection,
+    RunTerminalKind, RunTransitionCommand, RunUsageStatus, VersionedPlan, VersionedPlanCatalog,
 };
 pub use model_tool_parent_resume::ModelToolParentResume;
 pub use model_tool_queue::{
@@ -203,10 +203,10 @@ pub trait DurableRepository: Send + Sync {
         run_id: &insight_engine::RunId,
     ) -> Result<Option<RunProjection>, RepositoryError>;
 
-    async fn load_response_snapshot(
+    async fn load_run_stream_snapshot(
         &self,
         _run_id: &insight_engine::RunId,
-    ) -> Result<Option<DurableResponseSnapshot>, RepositoryError> {
+    ) -> Result<Option<DurableRunStreamSnapshot>, RepositoryError> {
         Ok(None)
     }
 }

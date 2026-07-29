@@ -48,8 +48,8 @@ use super::{
     },
     response::{ApiError, ApiResponse},
     sse::{
-        full_conversation_response_stream, response_stream, terminal_conversation_response_stream,
-        terminal_response_stream,
+        full_conversation_run_stream, run_stream, terminal_conversation_run_stream,
+        terminal_run_stream,
     },
 };
 
@@ -57,7 +57,6 @@ const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 const X_TENANT_ID: HeaderName = HeaderName::from_static("x-tenant-id");
 const X_USER_ID: HeaderName = HeaderName::from_static("x-user-id");
 const X_RUN_ID: HeaderName = HeaderName::from_static("x-run-id");
-const X_RESPONSE_ID: HeaderName = HeaderName::from_static("x-response-id");
 const X_MESSAGE_ID: HeaderName = HeaderName::from_static("x-message-id");
 const X_ACCEL_BUFFERING: HeaderName = HeaderName::from_static("x-accel-buffering");
 const X_CONTENT_TYPE_OPTIONS: HeaderName = HeaderName::from_static("x-content-type-options");
@@ -571,22 +570,19 @@ async fn create_attached_run(
         )
         .await
         .map_err(ApiError::from)?;
-    let (run_id, response_id, request_id, mut response) = match attached {
+    let (run_id, request_id, mut response) = match attached {
         AnyAttachedRun::Full(attached) => (
             attached.run_id.clone(),
-            attached.response_id.clone(),
             attached.request_id.clone(),
-            response_stream(attached, state.sse_keep_alive_interval).into_response(),
+            run_stream(attached, state.sse_keep_alive_interval).into_response(),
         ),
         AnyAttachedRun::TerminalOnly(attached) => (
             attached.run_id.clone(),
-            attached.response_id.clone(),
             attached.request_id.clone(),
-            terminal_response_stream(attached, state.sse_keep_alive_interval).into_response(),
+            terminal_run_stream(attached, state.sse_keep_alive_interval).into_response(),
         ),
     };
     insert_header(&mut response, X_RUN_ID, &run_id)?;
-    insert_header(&mut response, X_RESPONSE_ID, &response_id)?;
     insert_header(&mut response, X_REQUEST_ID, &request_id)?;
     insert_header(
         &mut response,
@@ -1144,12 +1140,11 @@ async fn create_conversation_attached_turn(
         .await
         .map_err(ApiError::from)?;
     let message_id = turn.user_message.message_id;
-    let (run_id, response_id, admitted_request_id, mut response) = match turn.attached {
+    let (run_id, admitted_request_id, mut response) = match turn.attached {
         AnyAttachedRun::Full(attached) => (
             attached.run_id.clone(),
-            attached.response_id.clone(),
             attached.request_id.clone(),
-            full_conversation_response_stream(
+            full_conversation_run_stream(
                 attached,
                 state.sse_keep_alive_interval,
                 state.service.clone(),
@@ -1161,9 +1156,8 @@ async fn create_conversation_attached_turn(
         ),
         AnyAttachedRun::TerminalOnly(attached) => (
             attached.run_id.clone(),
-            attached.response_id.clone(),
             attached.request_id.clone(),
-            terminal_conversation_response_stream(
+            terminal_conversation_run_stream(
                 attached,
                 state.sse_keep_alive_interval,
                 state.service.clone(),
@@ -1174,7 +1168,6 @@ async fn create_conversation_attached_turn(
         ),
     };
     insert_header(&mut response, X_RUN_ID, &run_id)?;
-    insert_header(&mut response, X_RESPONSE_ID, &response_id)?;
     insert_header(&mut response, X_REQUEST_ID, &admitted_request_id)?;
     insert_header(&mut response, X_MESSAGE_ID, &message_id)?;
     insert_header(

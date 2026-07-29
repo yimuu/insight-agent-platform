@@ -292,7 +292,7 @@ workflow:
     assert_eq!(
         wire,
         json!({
-            "protocol": "response-stream/v1",
+            "protocol": "run-stream/v1",
             "transport": "sse",
             "live_only": true,
             "sources": [

@@ -22,9 +22,9 @@ use insight_agent_platform::{
     },
     dsl::CompileError,
     engine::{
-        plan::LeafTaskDescriptor, production_worker_registry_with_live_response, EffectIdempotency,
-        LeafTaskKind, LocalContentAddressedArtifactStore, SubflowContractRegistry,
-        WorkerCancellation, WorkerEffectClass, WorkerEffectPolicy,
+        plan::LeafTaskDescriptor, production_worker_registry_with_live_run_stream,
+        EffectIdempotency, LeafTaskKind, LocalContentAddressedArtifactStore,
+        SubflowContractRegistry, WorkerCancellation, WorkerEffectClass, WorkerEffectPolicy,
     },
     resources::{
         actions::{
@@ -39,8 +39,8 @@ use insight_agent_platform::{
         },
     },
     runtime::{
-        DeployedAgentCatalog, InMemoryLiveResponseBroker, LiveResponseBroker,
-        ProductionRunRepository, ResponseStreamEvent, RunError, RunService, RunServiceConfig,
+        DeployedAgentCatalog, InMemoryLiveRunStreamBroker, LiveRunStreamBroker,
+        ProductionRunRepository, RunError, RunService, RunServiceConfig, RunStreamEvent,
     },
 };
 use insight_api::v1::{build_router, ApiAuth, ApiState};
@@ -310,11 +310,11 @@ workflow:
         let deployed = Arc::new(
             DeployedAgent::publish(published, &resolver, SubflowContractRegistry::new()).unwrap(),
         );
-        let broker = Arc::new(InMemoryLiveResponseBroker::new(64, 16).unwrap());
-        let workers = production_worker_registry_with_live_response(
+        let broker = Arc::new(InMemoryLiveRunStreamBroker::new(64, 16).unwrap());
+        let workers = production_worker_registry_with_live_run_stream(
             &models,
             &actions,
-            Arc::clone(&broker) as Arc<dyn LiveResponseBroker>,
+            Arc::clone(&broker) as Arc<dyn LiveRunStreamBroker>,
         )
         .unwrap();
         let database = root.join("durable.sqlite");
@@ -338,11 +338,11 @@ workflow:
         config.outbound_write_timeout = Duration::from_secs(2);
         config.artifact_gc_interval = Duration::from_secs(60);
         config.public_event_prune_interval = Duration::from_secs(60);
-        let service = RunService::start_with_artifact_store_graph_publication_and_live_response(
+        let service = RunService::start_with_artifact_store_graph_publication_and_live_run_stream(
             DeployedAgentCatalog::new(vec![deployed]).unwrap(),
             repository as Arc<dyn ProductionRunRepository>,
             workers,
-            broker as Arc<dyn LiveResponseBroker>,
+            broker as Arc<dyn LiveRunStreamBroker>,
             artifact_store,
             Arc::new(resolver),
             config,
@@ -377,7 +377,7 @@ fn decode_sse(raw: &str) -> Vec<Value> {
                 .expect("every named SSE frame has data");
             let value: Value = serde_json::from_str(data).unwrap();
             assert_eq!(value["type"], event_name);
-            serde_json::from_value::<ResponseStreamEvent>(value.clone()).unwrap();
+            serde_json::from_value::<RunStreamEvent>(value.clone()).unwrap();
             Some(value)
         })
         .collect()
@@ -392,18 +392,16 @@ async fn terminal_manifest(database: &PathBuf, run_id: &str) -> Value {
     .await
     .unwrap();
     let row = sqlx::query(
-        "SELECT public_item_manifest,response_payload,workflow_payload \
-         FROM response_snapshots WHERE run_id=?",
+        "SELECT public_item_manifest,run_payload \
+         FROM run_stream_snapshots WHERE run_id=?",
     )
     .bind(run_id)
     .fetch_one(&pool)
     .await
     .unwrap();
     let manifest = serde_json::from_str(&row.get::<String, _>("public_item_manifest")).unwrap();
-    let response = row.get::<String, _>("response_payload");
-    let workflow = row.get::<String, _>("workflow_payload");
-    assert!(!response.contains(FIRST_ATTEMPT_TEXT));
-    assert!(!workflow.contains(FIRST_ATTEMPT_TEXT));
+    let run = row.get::<String, _>("run_payload");
+    assert!(!run.contains(FIRST_ATTEMPT_TEXT));
     let attempts = sqlx::query(
         "SELECT attempt_no,lifecycle,failure_code FROM node_attempts \
          WHERE run_id=? ORDER BY attempt_no",
@@ -462,21 +460,21 @@ async fn attached_public_llm_retry_closes_old_items_and_appends_a_new_terminal_i
     for (sequence, event) in events.iter().enumerate() {
         assert_eq!(event["sequence_number"], sequence as u64);
     }
-    assert_eq!(events[0]["type"], "response.created");
-    assert_eq!(events[1]["type"], "response.in_progress");
+    assert_eq!(events[0]["type"], "run.lifecycle.created");
+    assert_eq!(events[1]["type"], "run.lifecycle.running");
     let terminal = events.last().unwrap();
-    assert_eq!(terminal["type"], "response.completed");
+    assert_eq!(terminal["type"], "run.lifecycle.completed");
     assert_eq!(
         events
             .iter()
             .filter(|event| {
                 matches!(
                     event["type"].as_str(),
-                    Some("response.completed")
-                        | Some("response.failed")
-                        | Some("workflow.response.timed_out")
-                        | Some("workflow.response.cancelled")
-                        | Some("workflow.response.interrupted")
+                    Some("run.lifecycle.completed")
+                        | Some("run.lifecycle.failed")
+                        | Some("run.lifecycle.timed_out")
+                        | Some("run.lifecycle.cancelled")
+                        | Some("run.lifecycle.interrupted")
                 )
             })
             .count(),
@@ -486,7 +484,7 @@ async fn attached_public_llm_retry_closes_old_items_and_appends_a_new_terminal_i
 
     let added = events
         .iter()
-        .filter(|event| event["type"] == "response.output_item.added")
+        .filter(|event| event["type"] == "run.output.item.added")
         .collect::<Vec<_>>();
     assert_eq!(
         added.len(),
@@ -508,7 +506,7 @@ async fn attached_public_llm_retry_closes_old_items_and_appends_a_new_terminal_i
     let first_text_delta_index = events
         .iter()
         .position(|event| {
-            event["type"] == "response.output_text.delta"
+            event["type"] == "run.output.text.delta"
                 && event["item_id"] == first_message_id
                 && event["delta"] == FIRST_ATTEMPT_TEXT
         })
@@ -516,7 +514,7 @@ async fn attached_public_llm_retry_closes_old_items_and_appends_a_new_terminal_i
     let provisional_arguments_index = events
         .iter()
         .position(|event| {
-            event["type"] == "response.function_call_arguments.delta"
+            event["type"] == "run.output.function_call.arguments.delta"
                 && event["item_id"] == failed_function_id
                 && event["delta"] == TOOL_ARGUMENT_FRAGMENT
         })
@@ -525,8 +523,7 @@ async fn attached_public_llm_retry_closes_old_items_and_appends_a_new_terminal_i
     let failed_function_done_index = events
         .iter()
         .position(|event| {
-            event["type"] == "response.output_item.done"
-                && event["item"]["id"] == failed_function_id
+            event["type"] == "run.output.item.done" && event["item"]["id"] == failed_function_id
         })
         .expect("failed function item must close online");
     let failed_function_done = &events[failed_function_done_index];
@@ -535,13 +532,13 @@ async fn attached_public_llm_retry_closes_old_items_and_appends_a_new_terminal_i
     assert_eq!(failed_function_done["item"]["arguments"], "");
     assert!(provisional_arguments_index < failed_function_done_index);
     assert!(events.iter().all(|event| {
-        !(event["type"] == "response.function_call_arguments.done"
+        !(event["type"] == "run.output.function_call.arguments.done"
             && event["item_id"] == failed_function_id)
     }));
     let first_message_done_index = events
         .iter()
         .position(|event| {
-            event["type"] == "response.output_item.done" && event["item"]["id"] == first_message_id
+            event["type"] == "run.output.item.done" && event["item"]["id"] == first_message_id
         })
         .expect("failed message item must close online");
     let first_message_done = &events[first_message_done_index];
@@ -555,7 +552,7 @@ async fn attached_public_llm_retry_closes_old_items_and_appends_a_new_terminal_i
     let retry_added_index = events
         .iter()
         .position(|event| {
-            event["type"] == "response.output_item.added" && event["item"]["id"] == retry_message_id
+            event["type"] == "run.output.item.added" && event["item"]["id"] == retry_message_id
         })
         .unwrap();
     assert!(failed_function_done_index < retry_added_index);
@@ -563,14 +560,14 @@ async fn attached_public_llm_retry_closes_old_items_and_appends_a_new_terminal_i
     let retry_done = events
         .iter()
         .find(|event| {
-            event["type"] == "response.output_item.done" && event["item"]["id"] == retry_message_id
+            event["type"] == "run.output.item.done" && event["item"]["id"] == retry_message_id
         })
         .expect("the retry item must complete online");
     assert_eq!(retry_done["output_index"], 2);
     assert_eq!(retry_done["item"]["status"], "completed");
     assert_eq!(retry_done["item"]["content"][0]["text"], FINAL_TEXT);
 
-    let output = terminal["response"]["output"].as_array().unwrap();
+    let output = terminal["run"]["output"].as_array().unwrap();
     assert_eq!(output.len(), 3);
     assert_eq!(output[0]["id"], first_message_id);
     assert_eq!(output[0]["status"], "incomplete");
@@ -581,7 +578,7 @@ async fn attached_public_llm_retry_closes_old_items_and_appends_a_new_terminal_i
     assert_eq!(output[2]["id"], retry_message_id);
     assert_eq!(output[2]["status"], "completed");
     assert_eq!(output[2]["content"][0]["text"], FINAL_TEXT);
-    assert_eq!(terminal["workflow"]["result"], FINAL_TEXT);
+    assert_eq!(terminal["run"]["result"], FINAL_TEXT);
     assert!(!serde_json::to_string(terminal)
         .unwrap()
         .contains(FIRST_ATTEMPT_TEXT));

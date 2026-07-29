@@ -29,7 +29,7 @@ use insight_durable::recovery_repository::adapter as recovery_contract_adapter;
 use insight_durable::{
     AcknowledgeArtifactDeletionCommand, BeginMigrationCommand, BindArtifactStoreAuthorityCommand,
     ClaimHumanWorkItemCommand, ClaimSchedulerRunCommand, CompleteHumanWorkItemCommand,
-    ContinueAsNewCommand, CreateRunCommand, DurableResponseSnapshot, FencedSchedulerRunCommand,
+    ContinueAsNewCommand, CreateRunCommand, DurableRunStreamSnapshot, FencedSchedulerRunCommand,
     FinalizeMigrationCommand, FireTimerCommand, ForkRunCommand, FullConversationRunAdmission,
     HumanTaskPrincipal, HumanWorkItem, HumanWorkItemId, MigrationMappingCompatibility,
     ModelToolBatchActivation, ModelToolTaskClaim, NoSchedulerCrash, OrderedPublicEventRead,
@@ -47,7 +47,7 @@ use insight_engine::{
     history::types::{summarize_input, RunAttachment, RunLifecycle, RunRecord, StopError},
     outcome::{FailureKind, RunFailure, RunOutput},
     plan::{DataPort, DataPortId, NodeKind, PlanIndex, PortDirection},
-    response::public_failure_message,
+    run_stream::public_failure_message,
     worker::WorkerExecutorRegistry,
     AdmissionState, ArtifactId, ArtifactRef, ContentHash, DefinitionRevisionId,
     ExecutionEventContext, ExecutionEventPayload, ExecutionRevisionPin, MigrationNodeMapping,
@@ -89,9 +89,9 @@ use crate::{
 };
 
 use super::{
-    CompletedFunctionCallTailPublication, InMemoryLiveResponseBroker, LiveResponseBroker,
-    LiveResponseBrokerCapability, LiveResponseBrokerError, LiveResponseByteLimits,
-    LiveResponseDelivery, LiveResponseItemIdentity, LiveResponseSubscriber,
+    CompletedFunctionCallTailPublication, InMemoryLiveRunStreamBroker, LiveRunStreamBroker,
+    LiveRunStreamBrokerCapability, LiveRunStreamBrokerError, LiveRunStreamByteLimits,
+    LiveRunStreamDelivery, LiveRunStreamItemIdentity, LiveRunStreamSubscriber,
 };
 
 const PRODUCTION_TRANSITION_DOMAIN: &str = "production.run-service";
@@ -130,8 +130,8 @@ const PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE: &str =
     "PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE";
 const PLATFORM_ARTIFACT_STORE_AUTHORITY_CONFLICT: &str =
     "PLATFORM_ARTIFACT_STORE_AUTHORITY_CONFLICT";
-const PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER: &str =
-    "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER";
+const PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER: &str =
+    "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER";
 const WORK_SCHEDULER_TASK: u8 = 1 << 0;
 const WORK_MODEL_TOOL_TASK: u8 = 1 << 1;
 const WORK_RUNTIME_INGRESS: u8 = 1 << 2;
@@ -684,11 +684,11 @@ pub struct RunServiceConfig {
     pub artifact_read_max_bytes: usize,
     pub public_event_nonterminal_retention: Duration,
     pub public_event_prune_interval: Duration,
-    pub live_response_body_queue_capacity: usize,
-    pub live_response_control_queue_capacity: usize,
-    pub live_response_max_frame_bytes: usize,
-    pub live_response_max_item_bytes: usize,
-    pub live_response_max_run_bytes: usize,
+    pub live_run_stream_body_queue_capacity: usize,
+    pub live_run_stream_control_queue_capacity: usize,
+    pub live_run_stream_max_frame_bytes: usize,
+    pub live_run_stream_max_item_bytes: usize,
+    pub live_run_stream_max_run_bytes: usize,
     pub terminal_barrier_timeout: Duration,
     pub outbound_write_timeout: Duration,
     pub graph_persistence_policy: DeploymentPersistencePolicy,
@@ -720,11 +720,11 @@ impl RunServiceConfig {
             artifact_read_max_bytes: 64 * 1024 * 1024,
             public_event_nonterminal_retention: Duration::from_secs(24 * 60 * 60),
             public_event_prune_interval: Duration::from_secs(60),
-            live_response_body_queue_capacity: 256,
-            live_response_control_queue_capacity: 32,
-            live_response_max_frame_bytes: 4 * 1_024,
-            live_response_max_item_bytes: 4 * 1_024 * 1_024,
-            live_response_max_run_bytes: 16 * 1_024 * 1_024,
+            live_run_stream_body_queue_capacity: 256,
+            live_run_stream_control_queue_capacity: 32,
+            live_run_stream_max_frame_bytes: 4 * 1_024,
+            live_run_stream_max_item_bytes: 4 * 1_024 * 1_024,
+            live_run_stream_max_run_bytes: 16 * 1_024 * 1_024,
             terminal_barrier_timeout: Duration::from_secs(2),
             outbound_write_timeout: Duration::from_secs(10),
             graph_persistence_policy: DeploymentPersistencePolicy::full(),
@@ -812,29 +812,29 @@ impl RunServiceConfig {
         self
     }
 
-    pub fn with_live_response_limits(
+    pub fn with_live_run_stream_limits(
         mut self,
         body_queue_capacity: usize,
         control_queue_capacity: usize,
         terminal_barrier_timeout: Duration,
         outbound_write_timeout: Duration,
     ) -> Self {
-        self.live_response_body_queue_capacity = body_queue_capacity;
-        self.live_response_control_queue_capacity = control_queue_capacity;
+        self.live_run_stream_body_queue_capacity = body_queue_capacity;
+        self.live_run_stream_control_queue_capacity = control_queue_capacity;
         self.terminal_barrier_timeout = terminal_barrier_timeout;
         self.outbound_write_timeout = outbound_write_timeout;
         self
     }
 
-    pub fn with_live_response_byte_limits(
+    pub fn with_live_run_stream_byte_limits(
         mut self,
         max_frame_bytes: usize,
         max_item_bytes: usize,
         max_run_bytes: usize,
     ) -> Self {
-        self.live_response_max_frame_bytes = max_frame_bytes;
-        self.live_response_max_item_bytes = max_item_bytes;
-        self.live_response_max_run_bytes = max_run_bytes;
+        self.live_run_stream_max_frame_bytes = max_frame_bytes;
+        self.live_run_stream_max_item_bytes = max_item_bytes;
+        self.live_run_stream_max_run_bytes = max_run_bytes;
         self
     }
 
@@ -880,11 +880,11 @@ impl RunServiceConfig {
             || self.public_event_nonterminal_retention < Duration::from_secs(1)
             || self.public_event_nonterminal_retention > MAX_PUBLIC_EVENT_RETENTION
             || self.public_event_prune_interval.is_zero()
-            || self.live_response_body_queue_capacity == 0
-            || self.live_response_control_queue_capacity == 0
-            || self.live_response_max_frame_bytes == 0
-            || self.live_response_max_item_bytes < self.live_response_max_frame_bytes
-            || self.live_response_max_run_bytes < self.live_response_max_item_bytes
+            || self.live_run_stream_body_queue_capacity == 0
+            || self.live_run_stream_control_queue_capacity == 0
+            || self.live_run_stream_max_frame_bytes == 0
+            || self.live_run_stream_max_item_bytes < self.live_run_stream_max_frame_bytes
+            || self.live_run_stream_max_run_bytes < self.live_run_stream_max_item_bytes
             || self.terminal_barrier_timeout.is_zero()
             || self.outbound_write_timeout.is_zero()
         {
@@ -964,33 +964,32 @@ impl fmt::Debug for PublicArtifact {
 }
 
 fn public_artifact_reference(
-    snapshot: &DurableResponseSnapshot,
+    snapshot: &DurableRunStreamSnapshot,
     run_id: &RunId,
     artifact_id: &ArtifactId,
 ) -> Result<Option<ArtifactRef>, ServiceError> {
-    if snapshot.workflow().get("run_id").and_then(Value::as_str) != Some(run_id.as_str()) {
+    if snapshot.run_id() != run_id.as_str()
+        || snapshot.run().get("id").and_then(Value::as_str) != Some(run_id.as_str())
+    {
         return Err(ServiceError::new(
             "RUN_SERVICE_UNAVAILABLE",
-            "durable response snapshot is invalid",
+            "durable run snapshot is invalid",
         ));
     }
 
-    let mut pending = vec![(snapshot.response(), 0usize), (snapshot.workflow(), 0usize)];
+    let mut pending = vec![(snapshot.run(), 0usize)];
     let mut visited = 0usize;
     let mut found: Option<ArtifactRef> = None;
     while let Some((value, depth)) = pending.pop() {
         visited = visited.checked_add(1).ok_or_else(|| {
-            ServiceError::new(
-                "RUN_SERVICE_UNAVAILABLE",
-                "durable response snapshot is invalid",
-            )
+            ServiceError::new("RUN_SERVICE_UNAVAILABLE", "durable Run snapshot is invalid")
         })?;
         if visited > MAX_PUBLIC_ARTIFACT_SNAPSHOT_VALUES
             || depth > MAX_PUBLIC_ARTIFACT_SNAPSHOT_DEPTH
         {
             return Err(ServiceError::new(
                 "RUN_SERVICE_UNAVAILABLE",
-                "durable response snapshot exceeds Artifact authorization bounds",
+                "durable Run snapshot exceeds Artifact authorization bounds",
             ));
         }
         match value {
@@ -1012,7 +1011,7 @@ fn public_artifact_reference(
                             {
                                 return Err(ServiceError::new(
                                     "RUN_SERVICE_UNAVAILABLE",
-                                    "durable response snapshot has conflicting Artifact references",
+                                    "durable Run snapshot has conflicting Artifact references",
                                 ));
                             }
                             found = Some(reference);
@@ -1253,8 +1252,8 @@ pub struct AttachedRun {
     pub response_id: String,
     pub request_id: String,
     pub subscription: RunSubscription,
-    pub live_response: Box<dyn LiveResponseSubscriber>,
-    pub live_response_broker: Arc<dyn LiveResponseBroker>,
+    pub live_run_stream: Box<dyn LiveRunStreamSubscriber>,
+    pub live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
     pub terminal_barrier_timeout: Duration,
     pub outbound_write_timeout: Duration,
     pub conversation_privacy: Option<ConversationStreamPrivacy>,
@@ -1441,7 +1440,7 @@ struct FullConversationAdmissionResult {
     user_message: ConversationMessageView,
     projection: RunProjection,
     receiver: Option<broadcast::Receiver<()>>,
-    live_response: Option<Box<dyn LiveResponseSubscriber>>,
+    live_run_stream: Option<Box<dyn LiveRunStreamSubscriber>>,
     conversation_privacy: Option<ConversationStreamPrivacy>,
     replayed: bool,
 }
@@ -1451,15 +1450,15 @@ struct ReplayWithoutLiveTail {
 }
 
 #[async_trait]
-impl LiveResponseSubscriber for ReplayWithoutLiveTail {
+impl LiveRunStreamSubscriber for ReplayWithoutLiveTail {
     fn run_id(&self) -> &RunId {
         &self.run_id
     }
 
-    async fn recv(&mut self) -> Result<LiveResponseDelivery, LiveResponseBrokerError> {
-        Err(LiveResponseBrokerError::new(
-            "LIVE_RESPONSE_REPLAY",
-            "replayed attached Run has no second live response tail",
+    async fn recv(&mut self) -> Result<LiveRunStreamDelivery, LiveRunStreamBrokerError> {
+        Err(LiveRunStreamBrokerError::new(
+            "LIVE_RUN_STREAM_REPLAY",
+            "replayed attached Run has no second live Run stream tail",
         ))
     }
 }
@@ -1490,21 +1489,21 @@ impl RunSubscription {
         self.last_seq
     }
 
-    pub async fn load_response_snapshot(
+    pub async fn load_run_stream_snapshot(
         &self,
-    ) -> Result<DurableResponseSnapshot, SubscriptionError> {
+    ) -> Result<DurableRunStreamSnapshot, SubscriptionError> {
         let owner = self.owner.upgrade().ok_or(SubscriptionError {
             code: "RUN_SERVICE_UNAVAILABLE",
         })?;
         owner
             .repository
-            .load_response_snapshot(&self.run_id_model)
+            .load_run_stream_snapshot(&self.run_id_model)
             .await
             .map_err(|_| SubscriptionError {
                 code: "RUN_SERVICE_UNAVAILABLE",
             })?
             .ok_or(SubscriptionError {
-                code: "RESPONSE_SNAPSHOT_UNAVAILABLE",
+                code: "RUN_STREAM_SNAPSHOT_UNAVAILABLE",
             })
     }
 
@@ -1614,7 +1613,7 @@ struct RunServiceInner {
     agents: DeployedAgentCatalog,
     repository: Arc<dyn ProductionRunRepository>,
     workers: Arc<WorkerExecutorRegistry>,
-    live_response_broker: Arc<dyn LiveResponseBroker>,
+    live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
     artifact_store: Option<Arc<dyn WorkerArtifactStore>>,
     graph_publication_resolver: Option<Arc<dyn LeafDeploymentResolver>>,
     config: RunServiceConfig,
@@ -1713,11 +1712,11 @@ impl RunService {
         .await
     }
 
-    pub async fn start_with_artifact_store_graph_publication_and_live_response(
+    pub async fn start_with_artifact_store_graph_publication_and_live_run_stream(
         agents: DeployedAgentCatalog,
         repository: Arc<dyn ProductionRunRepository>,
         workers: WorkerExecutorRegistry,
-        live_response_broker: Arc<dyn LiveResponseBroker>,
+        live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
         artifact_store: Arc<dyn WorkerArtifactStore>,
         graph_publication_resolver: Arc<dyn LeafDeploymentResolver>,
         config: RunServiceConfig,
@@ -1726,7 +1725,7 @@ impl RunService {
             agents,
             repository,
             workers,
-            Some(live_response_broker),
+            Some(live_run_stream_broker),
             Some(artifact_store),
             Some(graph_publication_resolver),
             config,
@@ -1738,37 +1737,37 @@ impl RunService {
         agents: DeployedAgentCatalog,
         repository: Arc<dyn ProductionRunRepository>,
         workers: WorkerExecutorRegistry,
-        live_response_broker: Option<Arc<dyn LiveResponseBroker>>,
+        live_run_stream_broker: Option<Arc<dyn LiveRunStreamBroker>>,
         artifact_store: Option<Arc<dyn WorkerArtifactStore>>,
         graph_publication_resolver: Option<Arc<dyn LeafDeploymentResolver>>,
         config: RunServiceConfig,
     ) -> Result<Self, ServiceError> {
         let config = config.validate()?;
-        let live_response_broker = match live_response_broker {
+        let live_run_stream_broker = match live_run_stream_broker {
             Some(broker) => broker,
             None => Arc::new(
-                InMemoryLiveResponseBroker::new_with_limits(
-                    config.live_response_body_queue_capacity,
-                    config.live_response_control_queue_capacity,
-                    LiveResponseByteLimits::new(
-                        config.live_response_max_frame_bytes,
-                        config.live_response_max_item_bytes,
-                        config.live_response_max_run_bytes,
+                InMemoryLiveRunStreamBroker::new_with_limits(
+                    config.live_run_stream_body_queue_capacity,
+                    config.live_run_stream_control_queue_capacity,
+                    LiveRunStreamByteLimits::new(
+                        config.live_run_stream_max_frame_bytes,
+                        config.live_run_stream_max_item_bytes,
+                        config.live_run_stream_max_run_bytes,
                     )
                     .map_err(|_| {
                         ServiceError::new(
                             "RUN_SERVICE_CONFIG_INVALID",
-                            "live response broker byte limits are invalid",
+                            "live Run stream broker byte limits are invalid",
                         )
                     })?,
                 )
                 .map_err(|_| {
                     ServiceError::new(
                         "RUN_SERVICE_CONFIG_INVALID",
-                        "live response broker configuration is invalid",
+                        "live Run stream broker configuration is invalid",
                     )
                 })?,
-            ) as Arc<dyn LiveResponseBroker>,
+            ) as Arc<dyn LiveRunStreamBroker>,
         };
         if config.deployment_mode == RunServiceDeploymentMode::Production
             && repository.run_repository_capability() != RunRepositoryCapability::Production
@@ -1785,18 +1784,19 @@ impl RunService {
         {
             return Err(ServiceError::new(
                 "RUN_DEPLOYMENT_UNAVAILABLE",
-                "public streaming Agents require an LLM worker bound to the live response broker",
+                "public streaming Agents require an LLM worker bound to the live Run stream broker",
             ));
         }
         if config.deployment_mode == RunServiceDeploymentMode::Production
-            && live_response_broker.deployment_capability() != LiveResponseBrokerCapability::Shared
+            && live_run_stream_broker.deployment_capability()
+                != LiveRunStreamBrokerCapability::Shared
             && agents
                 .list()
                 .any(|agent| has_public_streaming_source(agent.published()))
         {
             return Err(ServiceError::new(
-                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER,
-                "production Agents with public streaming sources require a shared live response broker",
+                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER,
+                "production Agents with public streaming sources require a shared live Run stream broker",
             ));
         }
         if config.deployment_mode == RunServiceDeploymentMode::Production {
@@ -1884,7 +1884,7 @@ impl RunService {
                 agents,
                 repository,
                 workers: Arc::new(workers),
-                live_response_broker,
+                live_run_stream_broker,
                 artifact_store,
                 graph_publication_resolver,
                 config,
@@ -1955,7 +1955,7 @@ impl RunService {
             self.inner.agents.clone(),
             Arc::clone(&self.inner.workers),
             artifact_store,
-            Arc::clone(&self.inner.live_response_broker),
+            Arc::clone(&self.inner.live_run_stream_broker),
             endpoint,
             config,
         )
@@ -2483,13 +2483,13 @@ impl RunService {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             self.inner
-                .live_response_broker
+                .live_run_stream_broker
                 .shutdown(grace)
                 .await
                 .map_err(|_| {
                     ServiceError::new(
                         "RUN_SERVICE_UNAVAILABLE",
-                        "live response broker shutdown failed",
+                        "live Run stream broker shutdown failed",
                     )
                 })?;
             Ok(())
@@ -2511,13 +2511,13 @@ impl RunService {
                 ServiceError::new("RUN_SERVICE_UNAVAILABLE", "repository probe timed out")
             })??;
         self.inner
-            .live_response_broker
+            .live_run_stream_broker
             .check_readiness(timeout)
             .await
             .map_err(|_| {
                 ServiceError::new(
                     "RUN_SERVICE_UNAVAILABLE",
-                    "live response broker readiness probe failed",
+                    "live Run stream broker readiness probe failed",
                 )
             })?;
         if !self.inner.accepting.load(Ordering::Acquire) {
@@ -2689,13 +2689,13 @@ impl RunService {
             })?,
         );
         if self.inner.config.deployment_mode == RunServiceDeploymentMode::Production
-            && self.inner.live_response_broker.deployment_capability()
-                != LiveResponseBrokerCapability::Shared
+            && self.inner.live_run_stream_broker.deployment_capability()
+                != LiveRunStreamBrokerCapability::Shared
             && has_public_streaming_source(deployed.published())
         {
             return Err(ServiceError::new(
-                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER,
-                "production Graph publication with public streaming sources requires a shared live response broker",
+                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER,
+                "production Graph publication with public streaming sources requires a shared live Run stream broker",
             ));
         }
         if has_public_llm_streaming_source(deployed.published())
@@ -3050,7 +3050,7 @@ impl RunService {
         input: Value,
         request: RequestMetadata,
     ) -> Result<AttachedRun, ServiceError> {
-        let (projection, receiver, live_response) = self
+        let (projection, receiver, live_run_stream) = self
             .create_run(
                 agent_id,
                 input,
@@ -3060,8 +3060,8 @@ impl RunService {
             )
             .await?;
         let receiver = receiver.expect("attached creation opens a live receiver");
-        let live_response =
-            live_response.expect("attached creation opens a live response receiver");
+        let live_run_stream =
+            live_run_stream.expect("attached creation opens a live Run stream receiver");
         Ok(AttachedRun {
             run_id: projection.run_id().as_str().to_owned(),
             response_id: projection.response_id().to_owned(),
@@ -3075,8 +3075,8 @@ impl RunService {
                 last_seq: 0,
                 terminal: false,
             },
-            live_response,
-            live_response_broker: Arc::clone(&self.inner.live_response_broker),
+            live_run_stream,
+            live_run_stream_broker: Arc::clone(&self.inner.live_run_stream_broker),
             terminal_barrier_timeout: self.inner.config.terminal_barrier_timeout,
             outbound_write_timeout: self.inner.config.outbound_write_timeout,
             conversation_privacy: None,
@@ -3129,7 +3129,7 @@ impl RunService {
         (
             RunProjection,
             Option<broadcast::Receiver<()>>,
-            Option<Box<dyn LiveResponseSubscriber>>,
+            Option<Box<dyn LiveRunStreamSubscriber>>,
         ),
         ServiceError,
     > {
@@ -3199,18 +3199,18 @@ impl RunService {
         (
             RunProjection,
             Option<broadcast::Receiver<()>>,
-            Option<Box<dyn LiveResponseSubscriber>>,
+            Option<Box<dyn LiveRunStreamSubscriber>>,
         ),
         ServiceError,
     > {
         if self.inner.config.deployment_mode == RunServiceDeploymentMode::Production
-            && self.inner.live_response_broker.deployment_capability()
-                != LiveResponseBrokerCapability::Shared
+            && self.inner.live_run_stream_broker.deployment_capability()
+                != LiveRunStreamBrokerCapability::Shared
             && has_public_streaming_source(agent.published())
         {
             return Err(ServiceError::new(
-                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER,
-                "public streaming admission requires a shared live response broker",
+                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER,
+                "public streaming admission requires a shared live Run stream broker",
             ));
         }
         if has_public_llm_streaming_source(agent.published())
@@ -3258,16 +3258,16 @@ impl RunService {
             })
             .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple()));
         let receiver = subscribe.then(|| self.inner.open_subscription(&run_id));
-        let live_response = if subscribe {
+        let live_run_stream = if subscribe {
             Some(
                 self.inner
-                    .live_response_broker
+                    .live_run_stream_broker
                     .subscribe(run_id.clone())
                     .await
                     .map_err(|_| {
                         ServiceError::new(
-                            "LIVE_RESPONSE_UNAVAILABLE",
-                            "live response broker subscription is unavailable",
+                            "LIVE_RUN_STREAM_UNAVAILABLE",
+                            "live Run stream broker subscription is unavailable",
                         )
                     })?,
             )
@@ -3342,7 +3342,7 @@ impl RunService {
             if let Some(live_run) = &mut live_run {
                 live_run.retain();
             }
-            return Ok((projection, receiver, live_response));
+            return Ok((projection, receiver, live_run_stream));
         }
         // Attached SSE is live-only: publish the durable admission event while
         // its receiver is already open, before Run start can produce a later
@@ -3363,7 +3363,7 @@ impl RunService {
         if let Some(live_run) = &mut live_run {
             live_run.retain();
         }
-        Ok((projection, receiver, live_response))
+        Ok((projection, receiver, live_run_stream))
     }
 
     /// Create a new Run pinned to the source's exact immutable revision. When
@@ -4432,10 +4432,10 @@ impl RunService {
                     "conversation Run does not match its bound agent",
                 ));
             }
-            let (receiver, live_response) = if subscribe {
-                let live_response = self
+            let (receiver, live_run_stream) = if subscribe {
+                let live_run_stream = self
                     .inner
-                    .live_response_broker
+                    .live_run_stream_broker
                     .subscribe(replayed.run_id.clone())
                     .await
                     .unwrap_or_else(|_| {
@@ -4445,7 +4445,7 @@ impl RunService {
                     });
                 (
                     Some(self.inner.open_subscription(&replayed.run_id)),
-                    Some(live_response),
+                    Some(live_run_stream),
                 )
             } else {
                 (None, None)
@@ -4456,7 +4456,7 @@ impl RunService {
                     .await?,
                 projection,
                 receiver,
-                live_response,
+                live_run_stream,
                 conversation_privacy: subscribe
                     .then(|| self.register_full_conversation_stream(&conversation.conversation_id)),
                 replayed: true,
@@ -4639,10 +4639,10 @@ impl RunService {
                                 "full Conversation Run was not found",
                             )
                         })?;
-                    let (receiver, live_response) = if subscribe {
-                        let live_response = self
+                    let (receiver, live_run_stream) = if subscribe {
+                        let live_run_stream = self
                             .inner
-                            .live_response_broker
+                            .live_run_stream_broker
                             .subscribe(replayed.run_id.clone())
                             .await
                             .unwrap_or_else(|_| {
@@ -4652,7 +4652,7 @@ impl RunService {
                             });
                         (
                             Some(self.inner.open_subscription(&replayed.run_id)),
-                            Some(live_response),
+                            Some(live_run_stream),
                         )
                     } else {
                         (None, None)
@@ -4663,7 +4663,7 @@ impl RunService {
                             .await?,
                         projection,
                         receiver,
-                        live_response,
+                        live_run_stream,
                         conversation_privacy: subscribe.then(|| {
                             self.register_full_conversation_stream(&conversation.conversation_id)
                         }),
@@ -4671,7 +4671,7 @@ impl RunService {
                     });
                 }
                 Err(error) => return Err(error),
-                Ok((projection, receiver, live_response)) => {
+                Ok((projection, receiver, live_run_stream)) => {
                     let stored = store
                         .get_full_conversation_turn(turn_query.clone())
                         .await
@@ -4698,7 +4698,7 @@ impl RunService {
                             .await?,
                         projection,
                         receiver,
-                        live_response,
+                        live_run_stream,
                         conversation_privacy: subscribe.then(|| {
                             self.register_full_conversation_stream(&conversation.conversation_id)
                         }),
@@ -4721,10 +4721,10 @@ impl RunService {
             .receiver
             .take()
             .ok_or_else(|| ServiceError::new("RUN_CONFLICT", "attached subscription missing"))?;
-        let live_response = admitted.live_response.take().ok_or_else(|| {
+        let live_run_stream = admitted.live_run_stream.take().ok_or_else(|| {
             ServiceError::new(
                 "RUN_CONFLICT",
-                "attached live response subscription missing",
+                "attached live Run stream subscription missing",
             )
         })?;
         let conversation_privacy = admitted.conversation_privacy.take().ok_or_else(|| {
@@ -4746,8 +4746,8 @@ impl RunService {
                 last_seq: 0,
                 terminal: false,
             },
-            live_response,
-            live_response_broker: Arc::clone(&self.inner.live_response_broker),
+            live_run_stream,
+            live_run_stream_broker: Arc::clone(&self.inner.live_run_stream_broker),
             terminal_barrier_timeout: self.inner.config.terminal_barrier_timeout,
             outbound_write_timeout: self.inner.config.outbound_write_timeout,
             conversation_privacy: Some(conversation_privacy),
@@ -5627,7 +5627,7 @@ impl RunService {
         let snapshot = self
             .inner
             .repository
-            .load_response_snapshot(&run_id)
+            .load_run_stream_snapshot(&run_id)
             .await?
             .ok_or_else(not_found)?;
         let published =
@@ -7196,7 +7196,7 @@ impl RunServiceInner {
             ) else {
                 continue;
             };
-            let Ok(identity) = LiveResponseItemIdentity::new(
+            let Ok(identity) = LiveRunStreamItemIdentity::new(
                 activation.run_id().clone(),
                 activation.activation_id().clone(),
                 activation.parent_attempt_no(),
@@ -7217,9 +7217,9 @@ impl RunServiceInner {
             };
             let (frames, seal) = publication.into_parts();
             for frame in frames {
-                let _ = self.live_response_broker.publish(frame);
+                let _ = self.live_run_stream_broker.publish(frame);
             }
-            let _ = self.live_response_broker.seal(seal);
+            let _ = self.live_run_stream_broker.seal(seal);
         }
     }
 
@@ -7726,7 +7726,7 @@ impl RunServiceInner {
                         self.config.task_claim_seconds,
                         self.shutdown.child_token(),
                         self.artifact_store.as_deref(),
-                        self.live_response_broker.as_ref(),
+                        self.live_run_stream_broker.as_ref(),
                         &NoSchedulerCrash,
                         *claim,
                     )
@@ -7741,7 +7741,7 @@ impl RunServiceInner {
                     self.workers.as_ref(),
                     self.config.task_claim_seconds,
                     self.shutdown.child_token(),
-                    self.live_response_broker.as_ref(),
+                    self.live_run_stream_broker.as_ref(),
                     &NoSchedulerCrash,
                     *claim,
                 )
@@ -9102,40 +9102,36 @@ mod conversation_stream_privacy_tests {
 mod public_artifact_authorization_tests {
     use serde_json::json;
 
-    use insight_engine::response::adapter::durable_response_snapshot_new;
+    use insight_engine::run_stream::{
+        adapter::durable_run_stream_snapshot_new, RUN_STREAM_PROTOCOL_VERSION,
+    };
 
     use super::*;
-    use insight_durable::{ResponseTerminalKind, ResponseUsageStatus};
+    use insight_durable::RunTerminalKind;
 
-    fn snapshot(run_id: &RunId, workflow: Value) -> DurableResponseSnapshot {
-        let response_id = format!("resp_{}", run_id.as_str());
-        let response = json!({
-            "id": response_id,
-            "object": "response",
-            "status": "completed",
-            "output": [],
-            "usage": null,
-            "error": null
-        });
+    fn snapshot(run_id: &RunId, terminal_fields: Value) -> DurableRunStreamSnapshot {
+        let mut run = terminal_fields.as_object().cloned().unwrap();
+        run.remove("run_id");
+        run.insert("id".to_owned(), json!(run_id.as_str()));
+        run.insert("object".to_owned(), json!("run"));
+        run.insert("status".to_owned(), json!("completed"));
+        run.insert("output".to_owned(), json!([]));
+        run.insert("usage".to_owned(), Value::Null);
+        let run = Value::Object(run);
         let manifest = json!([]);
         let projection = json!({
-            "response_id": response_id,
-            "terminal_kind": "response.completed",
-            "response": response,
-            "workflow": workflow,
+            "protocol": RUN_STREAM_PROTOCOL_VERSION,
+            "run_id": run_id.as_str(),
+            "terminal_kind": "run.lifecycle.completed",
+            "run": run,
             "public_item_manifest": manifest,
-            "usage": Value::Null,
-            "usage_status": "unavailable",
         });
         let hash = ContentHash::from_bytes(&serde_jcs::to_vec(&projection).unwrap());
-        durable_response_snapshot_new(
-            response_id,
-            ResponseTerminalKind::Completed,
-            response,
-            workflow,
+        durable_run_stream_snapshot_new(
+            run_id.as_str().to_owned(),
+            RunTerminalKind::Completed,
+            run,
             manifest,
-            None,
-            ResponseUsageStatus::Unavailable,
             hash,
         )
         .unwrap()
@@ -9158,6 +9154,8 @@ mod public_artifact_authorization_tests {
                 "run_id": run_id.as_str(),
                 "result": {"answer": "done"},
                 "tool_results": [{
+                    "call_id": "call_public_image",
+                    "tool_name": "render_image",
                     "content": [{"type": "output_image", "artifact": reference}]
                 }],
                 "retrievals": [],

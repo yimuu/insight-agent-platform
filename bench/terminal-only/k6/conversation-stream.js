@@ -108,7 +108,7 @@ export default function () {
   const body = String(stream.body || "");
   const parsed = parseSse(body);
   const deltaEvents = parsed.frames.filter(
-    (frame) => frame.event === "response.output_text.delta",
+    (frame) => frame.event === "run.output.text.delta",
   );
   const completedEvents = parsed.frames.filter(
     (frame) => frame.event === "response.completed",

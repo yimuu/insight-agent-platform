@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     resource_policy::RetrievalPublicPolicy,
-    response::{WorkflowRetrieval, WorkflowRetrievalPublicProjection},
+    run_stream::{RunRetrieval, RunRetrievalPublicProjection},
     ActivationId, EffectIdempotency, RunId, WorkerCancellation, WorkerEffectClass,
     WorkerEffectPolicy,
 };
@@ -54,7 +54,7 @@ pub trait RegisteredRetrievalView {
 #[serde(deny_unknown_fields)]
 pub struct RetrievalCompletion {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    public: Option<WorkflowRetrieval>,
+    public: Option<RunRetrieval>,
 }
 
 impl fmt::Debug for RetrievalCompletion {
@@ -74,11 +74,11 @@ impl fmt::Debug for RetrievalCompletion {
 #[serde(deny_unknown_fields)]
 struct RetrievalCompletionWire {
     #[serde(default)]
-    public: Option<WorkflowRetrieval>,
+    public: Option<RunRetrieval>,
 }
 
 impl RetrievalCompletion {
-    pub fn new(public: Option<WorkflowRetrieval>) -> Result<Self, &'static str> {
+    pub fn new(public: Option<RunRetrieval>) -> Result<Self, &'static str> {
         if public
             .as_ref()
             .is_some_and(|retrieval| match serde_jcs::to_vec(retrieval) {
@@ -95,7 +95,7 @@ impl RetrievalCompletion {
         Self { public: None }
     }
 
-    pub fn public(&self) -> Option<&WorkflowRetrieval> {
+    pub fn public(&self) -> Option<&RunRetrieval> {
         self.public.as_ref()
     }
 }
@@ -228,7 +228,7 @@ impl FrozenRetrievalTarget {
             &private_policy
         };
         if &effective_public_policy != expected_effective
-            || WorkflowRetrievalPublicProjection::from_frozen_effective_policy(
+            || RunRetrievalPublicProjection::from_frozen_effective_policy(
                 &effective_public_policy,
                 &query_field,
             )
@@ -324,8 +324,8 @@ impl FrozenRetrievalTarget {
         }
     }
 
-    pub fn public_projection(&self) -> Result<WorkflowRetrievalPublicProjection, &'static str> {
-        WorkflowRetrievalPublicProjection::from_frozen_effective_policy(
+    pub fn public_projection(&self) -> Result<RunRetrievalPublicProjection, &'static str> {
+        RunRetrievalPublicProjection::from_frozen_effective_policy(
             &self.effective_public_policy,
             &self.query_field,
         )

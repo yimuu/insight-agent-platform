@@ -189,7 +189,7 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .collect::<BTreeSet<_>>();
     assert_eq!(
         indexes.len(),
-        197,
+        196,
         "all explicit and constraint-backed indexes must be installed"
     );
     for (index, table) in [
@@ -679,14 +679,17 @@ async fn postgres_repository_rejects_missing_wrong_contract_and_wrong_backend() 
     assert_eq!(error.code(), DATABASE_SCHEMA_NOT_INITIALIZED);
 
     support::provision_postgres_schema(&schema.control).await;
-    sqlx::query("UPDATE durable_schema_contract SET contract_id='wrong-contract'")
-        .execute(&schema.control)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE durable_schema_contract
+         SET contract_id='durable-schema-d98dcd93-4911-426d-a826-9d8a5b04b461'",
+    )
+    .execute(&schema.control)
+    .await
+    .unwrap();
     let error = PostgresDurableRepository::connect(&schema.scoped_url)
         .await
         .err()
-        .expect("a wrong contract ID must be rejected");
+        .expect("the pre-run-stream/v1 contract ID must be rejected");
     assert_eq!(error.code(), DATABASE_SCHEMA_CONTRACT_MISMATCH);
 
     sqlx::query(

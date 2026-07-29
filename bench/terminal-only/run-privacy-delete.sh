@@ -721,10 +721,10 @@ jq -e '
   .delete_http_status == 200 and
   .stream_closed == true and
   .frames_after_delete == 0 and
-  (.frame_counts["response.output_text.delta"] // 0) > 0
+  (.frame_counts["run.output.text.delta"] // 0) > 0
 ' "$result_dir/stream-probe-report.json" >/dev/null
 stream_deltas_before_delete=$(jq -er \
-  '.frame_counts["response.output_text.delta"]' \
+  '.frame_counts["run.output.text.delta"]' \
   "$result_dir/stream-probe-report.json")
 stream_frames_before_delete=$(jq -er '.frames_before_or_at_delete' \
   "$result_dir/stream-probe-report.json")

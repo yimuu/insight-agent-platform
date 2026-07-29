@@ -5,7 +5,7 @@
 //! arguments and a completed executor result. Consequently there is no API
 //! which could attempt string-level redaction of a partial JSON argument
 //! delta. A producer may forward raw Provider deltas only when
-//! [`WorkflowToolPublicProjection::raw_argument_deltas_authorized`] returns
+//! [`RunToolPublicProjection::raw_argument_deltas_authorized`] returns
 //! `true`.
 
 use std::collections::BTreeSet;
@@ -19,9 +19,8 @@ use crate::{
 };
 
 use super::{
-    validate_bounded_public_json, WorkflowPublicResultError, WorkflowToolContent,
-    WorkflowToolProgressContent, WorkflowToolResult, MAX_PUBLIC_LABEL_BYTES,
-    MAX_WORKFLOW_PUBLIC_JSON_BYTES, MAX_WORKFLOW_TOOL_CONTENT_PARTS,
+    validate_bounded_public_json, RunPublicResultError, RunToolContent, RunToolProgressContent,
+    RunToolResult, MAX_PUBLIC_LABEL_BYTES, MAX_RUN_PUBLIC_JSON_BYTES, MAX_RUN_TOOL_CONTENT_PARTS,
 };
 
 const MAX_FROZEN_TOOL_PUBLIC_POLICY_BYTES: usize = 256 * 1_024;
@@ -29,16 +28,16 @@ const MAX_FROZEN_TOOL_PUBLIC_POLICY_BYTES: usize = 256 * 1_024;
 /// Completed public argument projections for both protocol branches.
 ///
 /// `workflow_started_arguments` is the optional object carried by
-/// `workflow.tool.started`. `standard_function_call_arguments` is a canonical
+/// `run.tool.started`. `standard_function_call_arguments` is a canonical
 /// JSON string and is present only for the `arguments: all` branch which may
 /// produce standard Responses function-call items and `arguments.done`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct WorkflowToolCompletedArgumentsProjection {
+pub struct RunToolCompletedArgumentsProjection {
     workflow_started_arguments: Option<Value>,
     standard_function_call_arguments: Option<String>,
 }
 
-impl WorkflowToolCompletedArgumentsProjection {
+impl RunToolCompletedArgumentsProjection {
     pub fn workflow_started_arguments(&self) -> Option<&Value> {
         self.workflow_started_arguments.as_ref()
     }
@@ -54,20 +53,20 @@ impl WorkflowToolCompletedArgumentsProjection {
 /// cross-field invariant, and compiles the frozen public result schema. The
 /// original descriptor or current registry is never consulted at runtime.
 #[derive(Debug, Clone)]
-pub struct WorkflowToolPublicProjection {
+pub struct RunToolPublicProjection {
     call: bool,
     arguments: ToolPublicArguments,
     progress_validator: Option<JsonSchemaValidator>,
     result_validator: Option<JsonSchemaValidator>,
 }
 
-impl WorkflowToolPublicProjection {
+impl RunToolPublicProjection {
     /// Decodes exactly the normalized `effective_public_policy` stored in a
     /// Deployment Revision. Missing defaults, duplicate fields, unknown
     /// members, invalid schemas, and contradictory authorization fail closed.
     pub fn from_frozen_effective_policy(
         frozen_policy: &Value,
-    ) -> Result<Self, WorkflowPublicResultError> {
+    ) -> Result<Self, RunPublicResultError> {
         let encoded = serde_jcs::to_vec(frozen_policy).map_err(|_| invalid_policy())?;
         if encoded.len() > MAX_FROZEN_TOOL_PUBLIC_POLICY_BYTES {
             return Err(invalid_policy());
@@ -145,9 +144,9 @@ impl WorkflowToolPublicProjection {
     pub fn project_validated_completed_arguments(
         &self,
         validated_arguments: &Value,
-    ) -> Result<WorkflowToolCompletedArgumentsProjection, WorkflowPublicResultError> {
+    ) -> Result<RunToolCompletedArgumentsProjection, RunPublicResultError> {
         if matches!(self.arguments, ToolPublicArguments::Private) {
-            return Ok(WorkflowToolCompletedArgumentsProjection {
+            return Ok(RunToolCompletedArgumentsProjection {
                 workflow_started_arguments: None,
                 standard_function_call_arguments: None,
             });
@@ -173,7 +172,7 @@ impl WorkflowToolPublicProjection {
         };
 
         if let Some(arguments) = &workflow_started_arguments {
-            validate_bounded_public_json(arguments, MAX_WORKFLOW_PUBLIC_JSON_BYTES)?;
+            validate_bounded_public_json(arguments, MAX_RUN_PUBLIC_JSON_BYTES)?;
         }
 
         let standard_function_call_arguments = if self.standard_function_call_events_authorized() {
@@ -189,7 +188,7 @@ impl WorkflowToolPublicProjection {
             None
         };
 
-        Ok(WorkflowToolCompletedArgumentsProjection {
+        Ok(RunToolCompletedArgumentsProjection {
             workflow_started_arguments,
             standard_function_call_arguments,
         })
@@ -201,7 +200,7 @@ impl WorkflowToolPublicProjection {
     /// value. A public result is revalidated against the exact frozen schema.
     /// Plain public objects become `output_json`; an explicitly tagged content
     /// object (or exact `{ "content": [...] }` envelope) is decoded through
-    /// the closed [`WorkflowToolContent`] union. Thus image, file, and audio
+    /// the closed [`RunToolContent`] union. Thus image, file, and audio
     /// content can only carry an integrity-checked `ArtifactRef` and never
     /// inline bytes.
     pub fn project_validated_completed_result(
@@ -209,17 +208,17 @@ impl WorkflowToolPublicProjection {
         call_id: impl Into<String>,
         tool_name: impl Into<String>,
         validated_public_result: &Value,
-    ) -> Result<Option<WorkflowToolResult>, WorkflowPublicResultError> {
+    ) -> Result<Option<RunToolResult>, RunPublicResultError> {
         let Some(validator) = &self.result_validator else {
             return Ok(None);
         };
         if !self.call || !validator.is_valid(validated_public_result) {
             return Err(invalid_result());
         }
-        validate_bounded_public_json(validated_public_result, MAX_WORKFLOW_PUBLIC_JSON_BYTES)?;
+        validate_bounded_public_json(validated_public_result, MAX_RUN_PUBLIC_JSON_BYTES)?;
 
         let content = decode_public_result_content(validated_public_result)?;
-        WorkflowToolResult::new(call_id, tool_name, content)
+        RunToolResult::new(call_id, tool_name, content)
             .map(Some)
             .map_err(|_| invalid_result())
     }
@@ -230,19 +229,19 @@ impl WorkflowToolPublicProjection {
     pub fn project_validated_progress(
         &self,
         value: &Value,
-    ) -> Result<Option<Vec<WorkflowToolProgressContent>>, WorkflowPublicResultError> {
+    ) -> Result<Option<Vec<RunToolProgressContent>>, RunPublicResultError> {
         let Some(validator) = &self.progress_validator else {
             return Ok(None);
         };
         if !self.call || !validator.is_valid(value) {
             return Err(invalid_progress());
         }
-        validate_bounded_public_json(value, MAX_WORKFLOW_PUBLIC_JSON_BYTES)?;
+        validate_bounded_public_json(value, MAX_RUN_PUBLIC_JSON_BYTES)?;
         decode_public_progress_content(value).map(Some)
     }
 }
 
-fn validate_policy_invariants(policy: &ToolPublicPolicy) -> Result<(), WorkflowPublicResultError> {
+fn validate_policy_invariants(policy: &ToolPublicPolicy) -> Result<(), RunPublicResultError> {
     if !policy.call
         && (!matches!(policy.arguments, ToolPublicArguments::Private)
             || policy.progress_schema.is_some()
@@ -310,13 +309,13 @@ fn safe_public_value_schema(
     }
 
     if let Some(value) = object.get("const") {
-        return validate_bounded_public_json(value, MAX_WORKFLOW_PUBLIC_JSON_BYTES).is_ok();
+        return validate_bounded_public_json(value, MAX_RUN_PUBLIC_JSON_BYTES).is_ok();
     }
     if let Some(values) = object.get("enum") {
         return values.as_array().is_some_and(|values| {
             !values.is_empty()
                 && values.iter().all(|value| {
-                    validate_bounded_public_json(value, MAX_WORKFLOW_PUBLIC_JSON_BYTES).is_ok()
+                    validate_bounded_public_json(value, MAX_RUN_PUBLIC_JSON_BYTES).is_ok()
                 })
         });
     }
@@ -440,18 +439,18 @@ fn contains_unsafe_schema_reference(value: &Value) -> bool {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExplicitContentEnvelope {
-    content: Vec<WorkflowToolContent>,
+    content: Vec<RunToolContent>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExplicitProgressContentEnvelope {
-    content: Vec<WorkflowToolProgressContent>,
+    content: Vec<RunToolProgressContent>,
 }
 
 fn decode_public_result_content(
     validated_public_result: &Value,
-) -> Result<Vec<WorkflowToolContent>, WorkflowPublicResultError> {
+) -> Result<Vec<RunToolContent>, RunPublicResultError> {
     let object = validated_public_result
         .as_object()
         .ok_or_else(invalid_result)?;
@@ -467,12 +466,12 @@ fn decode_public_result_content(
         .and_then(Value::as_str)
         .is_some_and(is_explicit_content_type)
     {
-        return serde_json::from_value::<WorkflowToolContent>(validated_public_result.clone())
+        return serde_json::from_value::<RunToolContent>(validated_public_result.clone())
             .map(|content| vec![content])
             .map_err(|_| invalid_result());
     }
 
-    WorkflowToolContent::output_json(validated_public_result.clone())
+    RunToolContent::output_json(validated_public_result.clone())
         .map(|content| vec![content])
         .map_err(|_| invalid_result())
 }
@@ -486,7 +485,7 @@ fn is_explicit_content_type(value: &str) -> bool {
 
 fn decode_public_progress_content(
     validated_progress: &Value,
-) -> Result<Vec<WorkflowToolProgressContent>, WorkflowPublicResultError> {
+) -> Result<Vec<RunToolProgressContent>, RunPublicResultError> {
     let object = validated_progress
         .as_object()
         .ok_or_else(invalid_progress)?;
@@ -501,35 +500,35 @@ fn decode_public_progress_content(
         .is_some_and(|value| matches!(value, "output_text" | "output_json"))
     {
         vec![
-            serde_json::from_value::<WorkflowToolProgressContent>(validated_progress.clone())
+            serde_json::from_value::<RunToolProgressContent>(validated_progress.clone())
                 .map_err(|_| invalid_progress())?,
         ]
     } else {
         vec![
-            WorkflowToolProgressContent::output_json(validated_progress.clone())
+            RunToolProgressContent::output_json(validated_progress.clone())
                 .map_err(|_| invalid_progress())?,
         ]
     };
-    if content.is_empty() || content.len() > MAX_WORKFLOW_TOOL_CONTENT_PARTS {
+    if content.is_empty() || content.len() > MAX_RUN_TOOL_CONTENT_PARTS {
         return Err(invalid_progress());
     }
     Ok(content)
 }
 
-fn invalid_policy() -> WorkflowPublicResultError {
-    WorkflowPublicResultError::new("frozen workflow tool public policy is invalid")
+fn invalid_policy() -> RunPublicResultError {
+    RunPublicResultError::new("frozen run tool public policy is invalid")
 }
 
-fn invalid_arguments() -> WorkflowPublicResultError {
-    WorkflowPublicResultError::new("completed workflow tool public arguments are invalid")
+fn invalid_arguments() -> RunPublicResultError {
+    RunPublicResultError::new("completed run tool public arguments are invalid")
 }
 
-fn invalid_result() -> WorkflowPublicResultError {
-    WorkflowPublicResultError::new("completed workflow tool public result is invalid")
+fn invalid_result() -> RunPublicResultError {
+    RunPublicResultError::new("completed run tool public result is invalid")
 }
 
-fn invalid_progress() -> WorkflowPublicResultError {
-    WorkflowPublicResultError::new("workflow tool public progress is invalid")
+fn invalid_progress() -> RunPublicResultError {
+    RunPublicResultError::new("run tool public progress is invalid")
 }
 
 #[cfg(test)]
@@ -540,7 +539,7 @@ mod tests {
 
     use crate::resource_policy::{ToolPublicArguments, ToolPublicPolicy};
 
-    use super::WorkflowToolPublicProjection;
+    use super::RunToolPublicProjection;
 
     fn normalized_schema(properties: Value, required: &[&str]) -> Value {
         json!({
@@ -579,7 +578,7 @@ mod tests {
 
     #[test]
     fn policy_matrix_keeps_private_fields_and_all_on_distinct_protocol_branches() {
-        let private = WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen(
+        let private = RunToolPublicProjection::from_frozen_effective_policy(&frozen(
             false,
             ToolPublicArguments::Private,
             None,
@@ -595,7 +594,7 @@ mod tests {
         assert_eq!(projection.workflow_started_arguments(), None);
         assert_eq!(projection.standard_function_call_arguments(), None);
 
-        let metadata_only = WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen(
+        let metadata_only = RunToolPublicProjection::from_frozen_effective_policy(&frozen(
             true,
             ToolPublicArguments::Private,
             None,
@@ -605,7 +604,7 @@ mod tests {
         assert!(!metadata_only.standard_function_call_events_authorized());
         assert!(!metadata_only.raw_argument_deltas_authorized());
 
-        let fields = WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen(
+        let fields = RunToolPublicProjection::from_frozen_effective_policy(&frozen(
             true,
             ToolPublicArguments::Fields(BTreeSet::from(["query".to_owned()])),
             None,
@@ -626,7 +625,7 @@ mod tests {
         );
         assert_eq!(projection.standard_function_call_arguments(), None);
 
-        let all = WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen(
+        let all = RunToolPublicProjection::from_frozen_effective_policy(&frozen(
             true,
             ToolPublicArguments::All,
             None,
@@ -718,15 +717,14 @@ mod tests {
                 )),
             ),
         ] {
-            let error =
-                WorkflowToolPublicProjection::from_frozen_effective_policy(&policy).unwrap_err();
-            assert_eq!(error.code(), "WORKFLOW_PUBLIC_RESULT_INVALID");
+            let error = RunToolPublicProjection::from_frozen_effective_policy(&policy).unwrap_err();
+            assert_eq!(error.code(), "RUN_PUBLIC_RESULT_INVALID");
         }
     }
 
     #[test]
     fn field_projection_only_exposes_complete_selected_values_and_enforces_bounds() {
-        let projection = WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen(
+        let projection = RunToolPublicProjection::from_frozen_effective_policy(&frozen(
             true,
             ToolPublicArguments::Fields(BTreeSet::from(["items".to_owned()])),
             None,
@@ -746,7 +744,7 @@ mod tests {
 
     #[test]
     fn private_results_are_not_inspected_and_public_json_is_schema_checked() {
-        let private = WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen(
+        let private = RunToolPublicProjection::from_frozen_effective_policy(&frozen(
             true,
             ToolPublicArguments::Private,
             None,
@@ -761,7 +759,7 @@ mod tests {
             .unwrap()
             .is_none());
 
-        let public = WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen(
+        let public = RunToolPublicProjection::from_frozen_effective_policy(&frozen(
             true,
             ToolPublicArguments::Private,
             Some(normalized_schema(
@@ -789,7 +787,7 @@ mod tests {
 
     #[test]
     fn progress_is_independently_authorized_schema_checked_and_artifact_free() {
-        let private = WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen(
+        let private = RunToolPublicProjection::from_frozen_effective_policy(&frozen(
             true,
             ToolPublicArguments::Private,
             None,
@@ -809,9 +807,11 @@ mod tests {
             }),
             &["stage", "completed", "total"],
         );
-        let public = WorkflowToolPublicProjection::from_frozen_effective_policy(
-            &frozen_with_progress(true, Some(schema.clone()), None),
-        )
+        let public = RunToolPublicProjection::from_frozen_effective_policy(&frozen_with_progress(
+            true,
+            Some(schema.clone()),
+            None,
+        ))
         .unwrap();
         assert!(public.progress_authorized());
         assert!(!public.result_authorized());
@@ -837,7 +837,7 @@ mod tests {
         );
 
         assert!(
-            WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen_with_progress(
+            RunToolPublicProjection::from_frozen_effective_policy(&frozen_with_progress(
                 false,
                 Some(schema),
                 None
@@ -848,7 +848,7 @@ mod tests {
 
     #[test]
     fn explicit_typed_content_is_closed_bounded_and_binary_requires_artifact_ref() {
-        let text_policy = WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen(
+        let text_policy = RunToolPublicProjection::from_frozen_effective_policy(&frozen(
             true,
             ToolPublicArguments::Private,
             Some(normalized_schema(
@@ -870,7 +870,7 @@ mod tests {
             .unwrap();
         assert_eq!(text.content()[0].text(), Some("safe"));
 
-        let image_policy = WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen(
+        let image_policy = RunToolPublicProjection::from_frozen_effective_policy(&frozen(
             true,
             ToolPublicArguments::Private,
             Some(normalized_schema(
@@ -925,7 +925,7 @@ mod tests {
 
     #[test]
     fn explicit_content_envelope_enforces_part_and_inline_limits() {
-        let policy = WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen(
+        let policy = RunToolPublicProjection::from_frozen_effective_policy(&frozen(
             true,
             ToolPublicArguments::Private,
             Some(normalized_schema(

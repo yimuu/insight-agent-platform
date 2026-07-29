@@ -48,7 +48,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "recovery_revision_roots",
     "recovery_transition_results",
     "response_public_items",
-    "response_snapshots",
+    "run_stream_snapshots",
     "run_migration_intents",
     "run_recovery_lineage",
     "run_reuse_candidates",
@@ -225,7 +225,7 @@ fn durable_safety_authorities_remain_present_in_both_final_schemas() {
             "workflow_retrieval_publications",
             "artifact_store_authority",
             "model_tool_call_batches",
-            "response_snapshots",
+            "run_stream_snapshots",
             "artifact_retention_releases",
             "recovery_transition_results",
         ] {

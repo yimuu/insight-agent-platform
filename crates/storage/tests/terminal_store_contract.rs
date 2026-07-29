@@ -139,7 +139,7 @@ fn result(
         )),
         error_code: None,
         usage_json: Some(json!({"input_tokens": 2, "output_tokens": 3})),
-        tool_results: vec![insight_engine::response::WorkflowToolResult::new(
+        tool_results: vec![insight_engine::run_stream::RunToolResult::new(
             format!("call_{label}"),
             "status_only",
             Vec::new(),

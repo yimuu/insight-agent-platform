@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 use insight_agent_platform::{
     config::{
         ArtifactStoreProvider, AuthConfig, DeploymentMode, HistoryConfig,
-        LiveResponseBrokerProvider, PlatformConfig, PlatformConfigError,
+        LiveRunStreamBrokerProvider, PlatformConfig, PlatformConfigError,
     },
     engine::PersistenceMode,
     resources::config::load_model_registry_with_env,
@@ -169,26 +169,20 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
         Duration::from_secs(60)
     );
     assert_eq!(
-        config.runtime.response_stream.broker,
-        LiveResponseBrokerProvider::InProcess
+        config.runtime.run_stream.broker,
+        LiveRunStreamBrokerProvider::InProcess
     );
-    assert_eq!(config.runtime.response_stream.body_queue_capacity, 256);
-    assert_eq!(config.runtime.response_stream.control_queue_capacity, 32);
-    assert_eq!(config.runtime.response_stream.max_frame_bytes, 4 * 1024);
+    assert_eq!(config.runtime.run_stream.body_queue_capacity, 256);
+    assert_eq!(config.runtime.run_stream.control_queue_capacity, 32);
+    assert_eq!(config.runtime.run_stream.max_frame_bytes, 4 * 1024);
+    assert_eq!(config.runtime.run_stream.max_item_bytes, 4 * 1024 * 1024);
+    assert_eq!(config.runtime.run_stream.max_run_bytes, 16 * 1024 * 1024);
     assert_eq!(
-        config.runtime.response_stream.max_item_bytes,
-        4 * 1024 * 1024
-    );
-    assert_eq!(
-        config.runtime.response_stream.max_run_bytes,
-        16 * 1024 * 1024
-    );
-    assert_eq!(
-        config.runtime.response_stream.terminal_barrier_timeout,
+        config.runtime.run_stream.terminal_barrier_timeout,
         Duration::from_secs(2)
     );
     assert_eq!(
-        config.runtime.response_stream.outbound_write_timeout,
+        config.runtime.run_stream.outbound_write_timeout,
         Duration::from_secs(10)
     );
     assert_eq!(config.runtime.max_llm_tool_rounds, 16);
@@ -786,20 +780,20 @@ fn lifecycle_durations_are_configurable_and_hard_deadline_exceeds_grace_period()
 }
 
 #[test]
-fn response_stream_transport_and_bounds_are_closed_and_validated() {
-    let response_stream = "  subscriber_capacity: 64\n  max_llm_tool_rounds: 8\n  max_llm_tool_calls: 32\n  response_stream:\n    broker: in_process\n    body_queue_capacity: 17\n    control_queue_capacity: 5\n    max_frame_bytes: 8192\n    max_item_bytes: 65536\n    max_run_bytes: 262144\n    terminal_barrier_timeout: 750ms\n    outbound_write_timeout: 3s";
-    let yaml = base_yaml("  mode: disabled").replace("  subscriber_capacity: 64", response_stream);
+fn run_stream_transport_and_bounds_are_closed_and_validated() {
+    let run_stream = "  subscriber_capacity: 64\n  max_llm_tool_rounds: 8\n  max_llm_tool_calls: 32\n  run_stream:\n    broker: in_process\n    body_queue_capacity: 17\n    control_queue_capacity: 5\n    max_frame_bytes: 8192\n    max_item_bytes: 65536\n    max_run_bytes: 262144\n    terminal_barrier_timeout: 750ms\n    outbound_write_timeout: 3s";
+    let yaml = base_yaml("  mode: disabled").replace("  subscriber_capacity: 64", run_stream);
     let (_directory, path) = write_config(&yaml);
     let config = load(&path, BTreeMap::new()).unwrap();
     assert_eq!(
-        config.runtime.response_stream.broker,
-        LiveResponseBrokerProvider::InProcess
+        config.runtime.run_stream.broker,
+        LiveRunStreamBrokerProvider::InProcess
     );
-    assert_eq!(config.runtime.response_stream.body_queue_capacity, 17);
-    assert_eq!(config.runtime.response_stream.control_queue_capacity, 5);
-    assert_eq!(config.runtime.response_stream.max_frame_bytes, 8192);
+    assert_eq!(config.runtime.run_stream.body_queue_capacity, 17);
+    assert_eq!(config.runtime.run_stream.control_queue_capacity, 5);
+    assert_eq!(config.runtime.run_stream.max_frame_bytes, 8192);
     assert_eq!(
-        config.runtime.response_stream.terminal_barrier_timeout,
+        config.runtime.run_stream.terminal_barrier_timeout,
         Duration::from_millis(750)
     );
     assert_eq!(config.runtime.max_llm_tool_rounds, 8);
@@ -838,6 +832,13 @@ fn response_stream_transport_and_bounds_are_closed_and_validated() {
     assert_eq!(
         load(&path, BTreeMap::new()).unwrap_err().code(),
         "PLATFORM_RUNTIME_INVALID"
+    );
+
+    let legacy = yaml.replace("  run_stream:", "  response_stream:");
+    let (_directory, path) = write_config(&legacy);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_CONFIG_INVALID"
     );
 }
 

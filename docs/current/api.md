@@ -113,35 +113,45 @@ Agent discovery 额外返回 immutable Deployment Revision 的
 
 ## Attached SSE
 
-`/runs/stream` 使用 `response-stream/v1` 用户响应协议：
+`/runs/stream` 使用 `run-stream/v1` 用户响应协议：
 
-1. 发送 `response.created` 和 `response.in_progress`；
+1. 发送 `run.lifecycle.created` 和 `run.lifecycle.running`；
 2. 发送作者通过 LLM `publish: true` 授权的实时内容；
 3. 发送唯一的 durable terminal snapshot；
 4. terminal 后立即 EOF。
 
+Attached 创建成功时，HTTP 响应携带 `X-Run-ID` 和回显的 `X-Request-ID`，不再返回
+`X-Response-ID`。`run_id` 是 admission、查询、取消、Artifact、trace、Conversation ownership
+与 SSE 校准共享的唯一公开执行身份。
+
 该协议 live-only：不发送 SSE `id`，不接受 `Last-Event-ID`，也不提供历史 replay。临时 delta 有界且
-best-effort；发生丢失时客户端通过 `workflow.stream.gap` 和最终快照校准。Run 非终态时 Attached
+best-effort；发生丢失时客户端通过 `run.stream.gap` 和最终快照校准。Run 非终态时 Attached
 连接断开会提交取消意图；需要脱离连接继续执行时，应使用 Detached Run。
+`run.lifecycle.running` 只由执行 authority 的真实 started 信号产生；幂等请求若已存在 terminal
+snapshot，可以直接发送 `created → terminal`。致命传输/投影故障使用 `run.stream.error`，其
+`code` 固定以 `RUN_STREAM_` 开头；该事件结束当前流但不是 Run 终态，客户端应使用 `X-Run-ID`
+查询权威状态。
 
 `stream` 只控制 Provider 请求模式，`publish` 只控制 provisional 内容可见性。无论组合如何，最终
-快照都包含强类型 workflow result、持久化 response identity 和 OpenAI 命名的 token usage。
+快照都是单一、按终态闭合的 `run` 对象，包含强类型 `result`、公开输出、工具结果、检索结果以及
+OpenAI 命名的 token usage。完整闭合定义见
+[`schemas/run-stream-v1.json`](../../schemas/run-stream-v1.json)。
 模型工具意图和真实执行是两个公开面：
 
-- `response.output_item.*` 与 `response.function_call_arguments.*` 表示模型正在形成或已经形成调用
+- `run.output.item.*` 与 `run.output.function_call.arguments.*` 表示模型正在形成或已经形成调用
   意图，不证明 Action 已执行；
-- `workflow.tool.started/progress/completed/failed` 表示 runtime 中的真实 Action 生命周期；
+- `run.tool.started/progress/completed/failed` 表示 runtime 中的真实 Action 生命周期；
 - 两组事件都使用模型生成并经 runtime 验证的 `call_id` 关联，不能按工具名、数组位置或事件相邻性
   关联。
 
 工具名、参数、进度和结果分别受冻结的 Action `public_policy` 与 LLM `publish` 双重授权。
 `progress` 还必须通过独立的闭合 JSON Schema，只允许 `output_text` 或 `output_json` content。
-`workflow.tool.completed` 与 `workflow.tool.failed` 的 `duration_ms` 从 logical tool call 第一次进入
+`run.tool.completed` 与 `run.tool.failed` 的 `duration_ms` 从 logical tool call 第一次进入
 Action execution boundary 开始计算，并覆盖 retry/backoff。可重试 Attempt 的失败不会产生
-`workflow.tool.failed`。
+`run.tool.failed`。
 
 成功且允许公开调用元数据的工具总会产生 `completed`。`content: []` 表示“执行成功，但结果正文
-未获授权公开”，不表示 Action 返回了 `null` 或空值。最终 `workflow.tool_results` 同样保留这类
+未获授权公开”，不表示 Action 返回了 `null` 或空值。最终 `run.tool_results` 同样保留这类
 status-only 成功项，用于校准 live 事件丢失后的 UI。
 
 只有 `arguments: all` 才会发送标准 function-call item/argument 事件。进度是 live-only、
@@ -166,32 +176,32 @@ curl -N \
 对象；服务端不会保证示例中的具体 ID 或序号：
 
 ```text
-event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"type":"function_call","id":"item_fc_1","status":"in_progress","call_id":"call_1","name":"progress_counter","arguments":""}}
+event: run.output.item.added
+data: {"type":"run.output.item.added","sequence_number":2,"output_index":0,"item":{"type":"function_call","id":"item_fc_1","status":"in_progress","call_id":"call_1","name":"progress_counter","arguments":""}}
 
-event: response.function_call_arguments.delta
-data: {"type":"response.function_call_arguments.delta","sequence_number":3,"item_id":"item_fc_1","output_index":0,"delta":"{\"total\":10}"}
+event: run.output.function_call.arguments.delta
+data: {"type":"run.output.function_call.arguments.delta","sequence_number":3,"item_id":"item_fc_1","output_index":0,"delta":"{\"total\":10}"}
 
-event: response.function_call_arguments.done
-data: {"type":"response.function_call_arguments.done","sequence_number":4,"item_id":"item_fc_1","output_index":0,"name":"progress_counter","arguments":"{\"total\":10}"}
+event: run.output.function_call.arguments.done
+data: {"type":"run.output.function_call.arguments.done","sequence_number":4,"item_id":"item_fc_1","output_index":0,"name":"progress_counter","arguments":"{\"total\":10}"}
 
-event: workflow.tool.started
-data: {"type":"workflow.tool.started","sequence_number":6,"call_id":"call_1","tool_name":"progress_counter","arguments":{"total":10}}
+event: run.tool.started
+data: {"type":"run.tool.started","sequence_number":6,"call_id":"call_1","tool_name":"progress_counter","arguments":{"total":10}}
 
-event: workflow.tool.progress
-data: {"type":"workflow.tool.progress","sequence_number":7,"call_id":"call_1","tool_name":"progress_counter","content":[{"type":"output_json","json":{"completed":5,"total":10}}]}
+event: run.tool.progress
+data: {"type":"run.tool.progress","sequence_number":7,"call_id":"call_1","tool_name":"progress_counter","content":[{"type":"output_json","json":{"completed":5,"total":10}}]}
 
-event: workflow.tool.progress
-data: {"type":"workflow.tool.progress","sequence_number":8,"call_id":"call_1","tool_name":"progress_counter","content":[{"type":"output_json","json":{"completed":10,"total":10}}]}
+event: run.tool.progress
+data: {"type":"run.tool.progress","sequence_number":8,"call_id":"call_1","tool_name":"progress_counter","content":[{"type":"output_json","json":{"completed":10,"total":10}}]}
 
-event: workflow.tool.completed
-data: {"type":"workflow.tool.completed","sequence_number":9,"call_id":"call_1","tool_name":"progress_counter","duration_ms":12,"content":[{"type":"output_json","json":{"completed":10,"total":10}}]}
+event: run.tool.completed
+data: {"type":"run.tool.completed","sequence_number":9,"call_id":"call_1","tool_name":"progress_counter","duration_ms":12,"content":[{"type":"output_json","json":{"completed":10,"total":10}}]}
 
-event: response.output_text.delta
-data: {"type":"response.output_text.delta","sequence_number":12,"item_id":"item_msg_1","output_index":1,"content_index":0,"delta":"工具进度已完成：10/10。"}
+event: run.output.text.delta
+data: {"type":"run.output.text.delta","sequence_number":12,"item_id":"item_msg_1","output_index":1,"content_index":0,"delta":"工具进度已完成：10/10。"}
 
-event: response.completed
-data: {"type":"response.completed","sequence_number":16,"response":{"id":"resp_run_1","object":"response","status":"completed","output":[{"type":"function_call","id":"item_fc_1","status":"completed","call_id":"call_1","name":"progress_counter","arguments":"{\"total\":10}"},{"type":"message","id":"item_msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"工具进度已完成：10/10。","annotations":[]}]}],"usage":null,"error":null},"workflow":{"run_id":"run_1","result":"工具进度已完成：10/10。","tool_results":[{"call_id":"call_1","tool_name":"progress_counter","content":[{"type":"output_json","json":{"completed":10,"total":10}}]}],"retrievals":[],"usage_status":"partial"}}
+event: run.lifecycle.completed
+data: {"type":"run.lifecycle.completed","sequence_number":16,"run":{"id":"run_1","object":"run","status":"completed","output":[{"type":"function_call","id":"item_fc_1","status":"completed","call_id":"call_1","name":"progress_counter","arguments":"{\"total\":10}"},{"type":"message","id":"item_msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"工具进度已完成：10/10。","annotations":[]}]}],"result":"工具进度已完成：10/10。","tool_results":[{"call_id":"call_1","tool_name":"progress_counter","content":[{"type":"output_json","json":{"completed":10,"total":10}}]}],"retrievals":[],"usage":null,"usage_status":"partial"}}
 ```
 
 客户端 reducer 应按以下规则处理：
@@ -200,7 +210,7 @@ data: {"type":"response.completed","sequence_number":16,"response":{"id":"resp_r
 2. 同一 `call_id` 的重复 `started` 表示 retry，更新原卡片而不是新增卡片；
 3. 不同 `call_id` 可以交错，只按 SSE `sequence_number` 消费；
 4. 收到 `completed/failed` 后忽略该调用的 late provisional 事件；
-5. `response.completed` 用 `workflow.tool_results` 把仍为 running 的成功项校准为 completed；
+5. `run.lifecycle.completed` 用 `run.tool_results` 把仍为 running 的成功项校准为 completed；
 6. Run failed/cancelled/timed_out/interrupted 时只关闭残留 running 卡片，不伪造具体工具错误。
 
 内置 `tool_assistant` 中 `current_time`、`text_metrics` 和 `integer_calculator` 公开闭合的安全结果；

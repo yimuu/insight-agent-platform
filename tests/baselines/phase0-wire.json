@@ -502,60 +502,58 @@
       }
     }
   ],
-  "response_stream_event_types": [
-    "response.created",
-    "response.in_progress",
-    "response.output_item.added",
-    "response.content_part.added",
-    "response.output_text.delta",
-    "response.output_text.done",
-    "response.content_part.done",
-    "response.function_call_arguments.delta",
-    "response.function_call_arguments.done",
-    "response.output_item.done",
-    "response.file_search_call.in_progress",
-    "response.file_search_call.searching",
-    "response.file_search_call.completed",
-    "response.completed",
-    "response.failed",
-    "error",
-    "workflow.tool.started",
-    "workflow.tool.progress",
-    "workflow.tool.completed",
-    "workflow.tool.failed",
-    "workflow.retrieval.completed",
-    "workflow.stream.gap",
-    "workflow.response.timed_out",
-    "workflow.response.cancelled",
-    "workflow.response.interrupted"
+  "run_stream_event_types": [
+    "run.lifecycle.created",
+    "run.lifecycle.running",
+    "run.output.item.added",
+    "run.output.content_part.added",
+    "run.output.text.delta",
+    "run.output.text.done",
+    "run.output.content_part.done",
+    "run.output.function_call.arguments.delta",
+    "run.output.function_call.arguments.done",
+    "run.output.item.done",
+    "run.output.file_search_call.in_progress",
+    "run.output.file_search_call.searching",
+    "run.output.file_search_call.completed",
+    "run.lifecycle.completed",
+    "run.lifecycle.failed",
+    "run.stream.error",
+    "run.tool.started",
+    "run.tool.progress",
+    "run.tool.completed",
+    "run.tool.failed",
+    "run.retrieval.completed",
+    "run.stream.gap",
+    "run.lifecycle.timed_out",
+    "run.lifecycle.cancelled",
+    "run.lifecycle.interrupted"
   ],
-  "response_stream_events": [
+  "run_stream_events": [
     {
-      "type": "response.created",
+      "type": "run.lifecycle.created",
       "sequence_number": 0,
-      "response": {
-        "id": "response_phase0",
-        "object": "response",
-        "status": "in_progress",
+      "run": {
+        "id": "run_phase0_wire",
+        "object": "run",
+        "status": "created",
         "output": [],
-        "usage": null,
-        "error": null
+        "usage": null
       }
     },
     {
-      "type": "response.in_progress",
+      "type": "run.lifecycle.running",
       "sequence_number": 1,
-      "response": {
-        "id": "response_phase0",
-        "object": "response",
-        "status": "in_progress",
+      "run": {
+        "id": "run_phase0_wire",
+        "object": "run",
+        "status": "running",
         "output": [],
-        "usage": null,
-        "error": null
+        "usage": null
       }
     },
     {
-      "type": "response.output_item.added",
+      "type": "run.output.item.added",
       "sequence_number": 2,
       "output_index": 0,
       "item": {
@@ -567,7 +565,7 @@
       }
     },
     {
-      "type": "response.content_part.added",
+      "type": "run.output.content_part.added",
       "sequence_number": 3,
       "item_id": "message_phase0",
       "output_index": 0,
@@ -579,7 +577,7 @@
       }
     },
     {
-      "type": "response.output_text.delta",
+      "type": "run.output.text.delta",
       "sequence_number": 4,
       "item_id": "message_phase0",
       "output_index": 0,
@@ -587,7 +585,7 @@
       "delta": "frozen delta"
     },
     {
-      "type": "response.output_text.done",
+      "type": "run.output.text.done",
       "sequence_number": 5,
       "item_id": "message_phase0",
       "output_index": 0,
@@ -595,7 +593,7 @@
       "text": "complete"
     },
     {
-      "type": "response.content_part.done",
+      "type": "run.output.content_part.done",
       "sequence_number": 6,
       "item_id": "message_phase0",
       "output_index": 0,
@@ -611,14 +609,14 @@
       }
     },
     {
-      "type": "response.function_call_arguments.delta",
+      "type": "run.output.function_call.arguments.delta",
       "sequence_number": 7,
       "item_id": "function_phase0",
       "output_index": 1,
       "delta": "{\"query\":"
     },
     {
-      "type": "response.function_call_arguments.done",
+      "type": "run.output.function_call.arguments.done",
       "sequence_number": 8,
       "item_id": "function_phase0",
       "output_index": 1,
@@ -626,7 +624,7 @@
       "arguments": "{\"query\":\"phase0\"}"
     },
     {
-      "type": "response.output_item.done",
+      "type": "run.output.item.done",
       "sequence_number": 9,
       "output_index": 1,
       "item": {
@@ -639,79 +637,66 @@
       }
     },
     {
-      "type": "response.file_search_call.in_progress",
+      "type": "run.output.file_search_call.in_progress",
       "sequence_number": 10,
       "item_id": "search_phase0",
       "output_index": 2
     },
     {
-      "type": "response.file_search_call.searching",
+      "type": "run.output.file_search_call.searching",
       "sequence_number": 11,
       "item_id": "search_phase0",
       "output_index": 2
     },
     {
-      "type": "response.file_search_call.completed",
+      "type": "run.output.file_search_call.completed",
       "sequence_number": 12,
       "item_id": "search_phase0",
       "output_index": 2
     },
     {
-      "type": "response.completed",
+      "type": "run.lifecycle.completed",
       "sequence_number": 13,
-      "response": {
-        "id": "response_phase0",
-        "object": "response",
+      "run": {
+        "id": "run_phase0_wire",
+        "object": "run",
         "status": "completed",
         "output": [],
-        "usage": null,
-        "error": null
-      },
-      "workflow": {
-        "run_id": "run_phase0_wire",
         "result": {
           "answer": "complete"
         },
         "tool_results": [],
         "retrievals": [],
-        "usage_status": "complete"
+        "usage": null,
+        "usage_status": "unavailable"
       }
     },
     {
-      "type": "response.failed",
+      "type": "run.lifecycle.failed",
       "sequence_number": 14,
-      "response": {
-        "id": "response_phase0",
-        "object": "response",
+      "run": {
+        "id": "run_phase0_wire",
+        "object": "run",
         "status": "failed",
         "output": [],
-        "usage": null,
-        "error": {
-          "code": "MODEL_FAILED",
-          "message": "model failed",
-          "param": null
-        }
-      },
-      "workflow": {
-        "run_id": "run_phase0_wire",
         "error": {
           "code": "WORKFLOW_FAILED",
           "message": "workflow failed"
         },
         "tool_results": [],
         "retrievals": [],
+        "usage": null,
         "usage_status": "partial"
       }
     },
     {
-      "type": "error",
+      "type": "run.stream.error",
       "sequence_number": 15,
-      "code": "STREAM_ERROR",
-      "message": "stream failed",
-      "param": "response"
+      "code": "RUN_STREAM_ERROR",
+      "message": "stream failed"
     },
     {
-      "type": "workflow.tool.started",
+      "type": "run.tool.started",
       "sequence_number": 16,
       "call_id": "call_phase0",
       "tool_name": "lookup",
@@ -720,7 +705,7 @@
       }
     },
     {
-      "type": "workflow.tool.progress",
+      "type": "run.tool.progress",
       "sequence_number": 17,
       "call_id": "call_phase0",
       "tool_name": "lookup",
@@ -735,7 +720,7 @@
       ]
     },
     {
-      "type": "workflow.tool.completed",
+      "type": "run.tool.completed",
       "sequence_number": 18,
       "call_id": "call_phase0",
       "tool_name": "lookup",
@@ -748,7 +733,7 @@
       ]
     },
     {
-      "type": "workflow.tool.failed",
+      "type": "run.tool.failed",
       "sequence_number": 19,
       "call_id": "call_phase0",
       "tool_name": "lookup",
@@ -759,7 +744,7 @@
       }
     },
     {
-      "type": "workflow.retrieval.completed",
+      "type": "run.retrieval.completed",
       "sequence_number": 20,
       "retrieval_id": "retrieval_phase0",
       "query": "phase0",
@@ -777,7 +762,7 @@
       ]
     },
     {
-      "type": "workflow.stream.gap",
+      "type": "run.stream.gap",
       "sequence_number": 21,
       "item_id": "message_phase0",
       "attempt_no": 2,
@@ -787,66 +772,48 @@
       "action": "discard_provisional_item"
     },
     {
-      "type": "workflow.response.timed_out",
+      "type": "run.lifecycle.timed_out",
       "sequence_number": 22,
-      "response": {
-        "id": "response_phase0",
-        "object": "response",
-        "status": "failed",
+      "run": {
+        "id": "run_phase0_wire",
+        "object": "run",
+        "status": "timed_out",
         "output": [],
-        "usage": null,
         "error": {
-          "code": "MODEL_FAILED",
-          "message": "model failed",
-          "param": null
-        }
-      },
-      "workflow": {
-        "run_id": "run_phase0_wire",
-        "error": {
-          "code": "WORKFLOW_FAILED",
-          "message": "workflow failed"
+          "code": "RUN_TIMEOUT",
+          "message": "run timed out"
         },
         "tool_results": [],
         "retrievals": [],
+        "usage": null,
         "usage_status": "partial"
       }
     },
     {
-      "type": "workflow.response.cancelled",
+      "type": "run.lifecycle.cancelled",
       "sequence_number": 23,
-      "response": {
-        "id": "response_phase0",
-        "object": "response",
+      "run": {
+        "id": "run_phase0_wire",
+        "object": "run",
         "status": "cancelled",
         "output": [],
-        "usage": null,
-        "error": null
-      },
-      "workflow": {
-        "run_id": "run_phase0_wire",
-        "reason": "cancelled",
         "tool_results": [],
         "retrievals": [],
+        "usage": null,
         "usage_status": "partial"
       }
     },
     {
-      "type": "workflow.response.interrupted",
+      "type": "run.lifecycle.interrupted",
       "sequence_number": 24,
-      "response": {
-        "id": "response_phase0",
-        "object": "response",
-        "status": "incomplete",
+      "run": {
+        "id": "run_phase0_wire",
+        "object": "run",
+        "status": "interrupted",
         "output": [],
-        "usage": null,
-        "error": null
-      },
-      "workflow": {
-        "run_id": "run_phase0_wire",
-        "reason": "interrupted",
         "tool_results": [],
         "retrievals": [],
+        "usage": null,
         "usage_status": "unavailable"
       }
     }

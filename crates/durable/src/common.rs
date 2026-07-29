@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
-use insight_engine::response::{
-    public_failure_message, WorkflowToolPublicProjection, WorkflowToolResult,
+use insight_engine::run_stream::{
+    public_failure_message, RunToolPublicProjection, RunToolResult, RUN_STREAM_PROTOCOL_VERSION,
 };
 use insight_engine::worker::{ModelCallCompletion, ModelFinishReason};
 use insight_engine::{
@@ -16,13 +16,13 @@ use insight_engine::{
 };
 
 use super::{RepositoryError, REPOSITORY_DATA_INVALID};
-use super::{ResponseTerminalKind, ResponseUsageStatus};
+use super::{RunTerminalKind, RunUsageStatus};
 
 #[allow(unused_imports)]
 pub(crate) use adapter::{
-    PendingResponseSnapshot, PreparedModelCallCompletion, PreparedResponseFunctionPublication,
+    PendingRunStreamSnapshot, PreparedModelCallCompletion, PreparedResponseFunctionPublication,
     StoredExecutionEventRow, StoredModelCallUsage, StoredPublicProjectionDecision,
-    StoredResponseItem, StoredSucceededModelToolCall, TerminalResponseSnapshotInput,
+    StoredResponseItem, StoredSucceededModelToolCall, TerminalRunStreamSnapshotInput,
     ValidatedInlinePayload,
 };
 
@@ -35,7 +35,7 @@ pub(crate) use adapter::{
 /// an invalid public policy or public result fails closed.
 pub(crate) fn project_terminal_tool_results(
     calls: Vec<StoredSucceededModelToolCall>,
-) -> Result<Vec<WorkflowToolResult>, RepositoryError> {
+) -> Result<Vec<RunToolResult>, RepositoryError> {
     let mut previous: Option<(&str, u32, u32, u32)> = None;
     let mut results = Vec::with_capacity(calls.len());
     for call in &calls {
@@ -45,10 +45,9 @@ pub(crate) fn project_terminal_tool_results(
         }
         previous = Some(current);
 
-        let projection = WorkflowToolPublicProjection::from_frozen_effective_policy(
-            &call.effective_public_policy,
-        )
-        .map_err(|_| RepositoryError::invalid_data())?;
+        let projection =
+            RunToolPublicProjection::from_frozen_effective_policy(&call.effective_public_policy)
+                .map_err(|_| RepositoryError::invalid_data())?;
         if let Some(result) = projection
             .project_validated_completed_result(
                 call.call_id.clone(),
@@ -60,7 +59,7 @@ pub(crate) fn project_terminal_tool_results(
             results.push(result);
         } else if projection.call_authorized() {
             results.push(
-                WorkflowToolResult::new(call.call_id.clone(), call.tool_name.clone(), Vec::new())
+                RunToolResult::new(call.call_id.clone(), call.tool_name.clone(), Vec::new())
                     .map_err(|_| RepositoryError::invalid_data())?,
             );
         }
@@ -259,10 +258,10 @@ fn validate_completed_message_item(
     Ok(())
 }
 
-pub(crate) fn build_terminal_response_snapshot(
-    input: TerminalResponseSnapshotInput<'_>,
-) -> Result<PendingResponseSnapshot, RepositoryError> {
-    let TerminalResponseSnapshotInput {
+pub(crate) fn build_terminal_run_stream_snapshot(
+    input: TerminalRunStreamSnapshotInput<'_>,
+) -> Result<PendingRunStreamSnapshot, RepositoryError> {
+    let TerminalRunStreamSnapshotInput {
         run_id,
         lifecycle,
         output,
@@ -272,13 +271,12 @@ pub(crate) fn build_terminal_response_snapshot(
         tool_results,
         retrievals,
     } = input;
-    let response_id = format!("resp_{}", run_id.as_str());
-    let (terminal_kind, response_status) = match lifecycle {
-        RunLifecycle::Succeeded => (ResponseTerminalKind::Completed, "completed"),
-        RunLifecycle::Failed => (ResponseTerminalKind::Failed, "failed"),
-        RunLifecycle::TimedOut => (ResponseTerminalKind::TimedOut, "failed"),
-        RunLifecycle::Cancelled => (ResponseTerminalKind::Cancelled, "cancelled"),
-        RunLifecycle::Interrupted => (ResponseTerminalKind::Interrupted, "incomplete"),
+    let (terminal_kind, run_status) = match lifecycle {
+        RunLifecycle::Succeeded => (RunTerminalKind::Completed, "completed"),
+        RunLifecycle::Failed => (RunTerminalKind::Failed, "failed"),
+        RunLifecycle::TimedOut => (RunTerminalKind::TimedOut, "timed_out"),
+        RunLifecycle::Cancelled => (RunTerminalKind::Cancelled, "cancelled"),
+        RunLifecycle::Interrupted => (RunTerminalKind::Interrupted, "interrupted"),
         RunLifecycle::Created
         | RunLifecycle::Active
         | RunLifecycle::Waiting
@@ -331,40 +329,23 @@ pub(crate) fn build_terminal_response_snapshot(
     }
 
     let (usage, usage_status) = aggregate_model_usage(&model_calls)?;
-    let public_error = match lifecycle {
-        RunLifecycle::Failed => Some(serde_json::json!({
-            "code": error_code.unwrap_or("RUN_FAILED"),
-            "message": public_failure_message(error_code.unwrap_or("RUN_FAILED")),
-            "param": Value::Null,
-        })),
-        RunLifecycle::TimedOut => Some(serde_json::json!({
-            "code": "RUN_TIMEOUT",
-            "message": "run timed out",
-            "param": Value::Null,
-        })),
-        _ => None,
-    };
-    let response = serde_json::json!({
-        "id": response_id,
-        "object": "response",
-        "status": response_status,
-        "output": public_output,
-        "usage": usage,
-        "error": public_error,
-    });
     let shared = serde_json::json!({
-        "run_id": run_id.as_str(),
+        "id": run_id.as_str(),
+        "object": "run",
+        "status": run_status,
+        "output": public_output,
         "tool_results": tool_results,
         "retrievals": retrievals,
+        "usage": usage,
         "usage_status": usage_status.as_str(),
     });
-    let mut workflow = shared
+    let mut run = shared
         .as_object()
         .cloned()
         .ok_or_else(RepositoryError::canonicalization)?;
     match lifecycle {
         RunLifecycle::Succeeded => {
-            workflow.insert(
+            run.insert(
                 "result".to_owned(),
                 output
                     .cloned()
@@ -372,7 +353,7 @@ pub(crate) fn build_terminal_response_snapshot(
             );
         }
         RunLifecycle::Failed => {
-            workflow.insert(
+            run.insert(
                 "error".to_owned(),
                 serde_json::json!({
                     "code": error_code.unwrap_or("RUN_FAILED"),
@@ -381,40 +362,29 @@ pub(crate) fn build_terminal_response_snapshot(
             );
         }
         RunLifecycle::TimedOut => {
-            workflow.insert(
+            run.insert(
                 "error".to_owned(),
                 serde_json::json!({"code":"RUN_TIMEOUT", "message":"run timed out"}),
             );
         }
-        RunLifecycle::Cancelled => {
-            workflow.insert("reason".to_owned(), Value::String("cancelled".to_owned()));
-        }
-        RunLifecycle::Interrupted => {
-            workflow.insert("reason".to_owned(), Value::String("interrupted".to_owned()));
-        }
+        RunLifecycle::Cancelled | RunLifecycle::Interrupted => {}
         _ => unreachable!("nonterminal lifecycles were rejected above"),
     }
-    let workflow = Value::Object(workflow);
+    let run = Value::Object(run);
     let manifest = Value::Array(manifest);
     let hash_projection = serde_json::json!({
-        "response_id": response_id,
+        "protocol": RUN_STREAM_PROTOCOL_VERSION,
+        "run_id": run_id.as_str(),
         "terminal_kind": terminal_kind.as_str(),
-        "response": response,
-        "workflow": workflow,
+        "run": run,
         "public_item_manifest": manifest,
-        "usage": usage,
-        "usage_status": usage_status.as_str(),
     });
     let (_, snapshot_hash) = canonical_value(&hash_projection)?;
-    Ok(PendingResponseSnapshot {
-        response_id,
+    Ok(PendingRunStreamSnapshot {
+        run_id: run_id.as_str().to_owned(),
         terminal_kind,
-        response_status,
-        response,
-        workflow,
+        run,
         manifest,
-        usage,
-        usage_status,
         snapshot_hash,
     })
 }
@@ -519,15 +489,15 @@ fn valid_terminal_label(value: &str, max_bytes: usize) -> bool {
 
 fn aggregate_model_usage(
     calls: &[StoredModelCallUsage],
-) -> Result<(Option<Value>, ResponseUsageStatus), RepositoryError> {
+) -> Result<(Option<Value>, RunUsageStatus), RepositoryError> {
     if calls.is_empty() {
-        return Ok((None, ResponseUsageStatus::Unavailable));
+        return Ok((None, RunUsageStatus::Unavailable));
     }
     if calls
         .iter()
         .any(|call| !call.usage_complete || call.usage.is_none())
     {
-        return Ok((None, ResponseUsageStatus::Partial));
+        return Ok((None, RunUsageStatus::Partial));
     }
     let mut input_tokens = 0_u64;
     let mut cached_tokens = 0_u64;
@@ -560,7 +530,7 @@ fn aggregate_model_usage(
             "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
             "total_tokens": total_tokens,
         })),
-        ResponseUsageStatus::Complete,
+        RunUsageStatus::Complete,
     ))
 }
 
@@ -830,7 +800,7 @@ pub mod adapter {
     use serde::Serialize;
     use serde_json::Value;
 
-    use insight_engine::response::{WorkflowRetrieval, WorkflowToolResult};
+    use insight_engine::run_stream::{RunRetrieval, RunToolResult};
     use insight_engine::worker::{ModelCallCompletion, ResponseItemAuthority};
     use insight_engine::{
         ActivationId, AdmissionState, AttemptNo, ContentHash, ExecutionEventEnvelope, IntentHash,
@@ -838,7 +808,7 @@ pub mod adapter {
         RunLifecycle, TransitionKey,
     };
 
-    use crate::{RepositoryError, ResponseTerminalKind, ResponseUsageStatus};
+    use crate::{RepositoryError, RunTerminalKind};
 
     pub struct StoredResponseItem {
         pub activation_id: String,
@@ -910,27 +880,23 @@ pub mod adapter {
         pub terminal_safe_item: Value,
     }
 
-    pub struct PendingResponseSnapshot {
-        pub response_id: String,
-        pub terminal_kind: ResponseTerminalKind,
-        pub response_status: &'static str,
-        pub response: Value,
-        pub workflow: Value,
+    pub struct PendingRunStreamSnapshot {
+        pub run_id: String,
+        pub terminal_kind: RunTerminalKind,
+        pub run: Value,
         pub manifest: Value,
-        pub usage: Option<Value>,
-        pub usage_status: ResponseUsageStatus,
         pub snapshot_hash: ContentHash,
     }
 
-    pub struct TerminalResponseSnapshotInput<'a> {
+    pub struct TerminalRunStreamSnapshotInput<'a> {
         pub run_id: &'a RunId,
         pub lifecycle: RunLifecycle,
         pub output: Option<&'a Value>,
         pub error_code: Option<&'a str>,
         pub items: Vec<StoredResponseItem>,
         pub model_calls: Vec<StoredModelCallUsage>,
-        pub tool_results: Vec<WorkflowToolResult>,
-        pub retrievals: Vec<WorkflowRetrieval>,
+        pub tool_results: Vec<RunToolResult>,
+        pub retrievals: Vec<RunRetrieval>,
     }
 
     /// Backend-neutral persisted row used by the one closed execution-event
@@ -1010,7 +976,7 @@ pub mod adapter {
 
     pub fn project_terminal_tool_results(
         calls: Vec<StoredSucceededModelToolCall>,
-    ) -> Result<Vec<WorkflowToolResult>, RepositoryError> {
+    ) -> Result<Vec<RunToolResult>, RepositoryError> {
         super::project_terminal_tool_results(calls)
     }
 
@@ -1059,10 +1025,10 @@ pub mod adapter {
         )
     }
 
-    pub fn build_terminal_response_snapshot(
-        input: TerminalResponseSnapshotInput<'_>,
-    ) -> Result<PendingResponseSnapshot, RepositoryError> {
-        super::build_terminal_response_snapshot(input)
+    pub fn build_terminal_run_stream_snapshot(
+        input: TerminalRunStreamSnapshotInput<'_>,
+    ) -> Result<PendingRunStreamSnapshot, RepositoryError> {
+        super::build_terminal_run_stream_snapshot(input)
     }
 
     pub fn validate_incomplete_function_call_item(
@@ -1494,9 +1460,9 @@ mod tests {
     use insight_engine::{PublicEventId, PublicEventKind, RunId, RunLifecycle, TransitionKey};
 
     use super::{
-        build_terminal_response_snapshot, project_terminal_tool_results, public_event_id,
+        build_terminal_run_stream_snapshot, project_terminal_tool_results, public_event_id,
         public_event_ordinal, validate_completed_function_call_item, StoredModelCallUsage,
-        StoredResponseItem, StoredSucceededModelToolCall, TerminalResponseSnapshotInput,
+        StoredResponseItem, StoredSucceededModelToolCall, TerminalRunStreamSnapshotInput,
     };
 
     fn normalized_public_result_schema() -> Value {
@@ -1650,7 +1616,7 @@ mod tests {
     }
 
     #[test]
-    fn every_terminal_workflow_snapshot_carries_the_same_stable_tool_results() {
+    fn every_terminal_run_snapshot_carries_the_same_stable_tool_results() {
         let run_id = RunId::new("run_terminal_tool_results").unwrap();
         let terminal_cases = [
             RunLifecycle::Succeeded,
@@ -1668,7 +1634,7 @@ mod tests {
                 json!({"indicator": "WBC"}),
             )])
             .unwrap();
-            let snapshot = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+            let snapshot = build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
                 run_id: &run_id,
                 lifecycle,
                 output: (lifecycle == RunLifecycle::Succeeded)
@@ -1680,14 +1646,14 @@ mod tests {
                 retrievals: Vec::new(),
             })
             .unwrap();
-            observed.push(snapshot.workflow["tool_results"].clone());
+            observed.push(snapshot.run["tool_results"].clone());
         }
         assert!(observed.windows(2).all(|pair| pair[0] == pair[1]));
         assert_eq!(observed[0][0]["content"][0]["type"], "output_json");
         assert_eq!(observed[0][0]["content"][0]["json"]["indicator"], "WBC");
 
         let build_replay = || {
-            build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+            build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
                 run_id: &run_id,
                 lifecycle: RunLifecycle::Cancelled,
                 output: None,
@@ -1707,14 +1673,14 @@ mod tests {
         };
         let first = build_replay();
         let replay = build_replay();
-        assert_eq!(first.workflow, replay.workflow);
+        assert_eq!(first.run, replay.run);
         assert_eq!(first.snapshot_hash, replay.snapshot_hash);
     }
 
     #[test]
     fn terminal_provider_failures_publish_specific_body_free_messages() {
         let run_id = RunId::new("run_terminal_provider_failure").unwrap();
-        let snapshot = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+        let snapshot = build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
             run_id: &run_id,
             lifecycle: RunLifecycle::Failed,
             output: None,
@@ -1727,15 +1693,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            snapshot.response["error"],
-            json!({
-                "code": "LLM_PROVIDER_CONNECTION_FAILED",
-                "message": "failed to connect to model provider",
-                "param": Value::Null,
-            })
-        );
-        assert_eq!(
-            snapshot.workflow["error"],
+            snapshot.run["error"],
             json!({
                 "code": "LLM_PROVIDER_CONNECTION_FAILED",
                 "message": "failed to connect to model provider",
@@ -1779,7 +1737,7 @@ mod tests {
         });
 
         for lifecycle in [RunLifecycle::Failed, RunLifecycle::Cancelled] {
-            let snapshot = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+            let snapshot = build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
                 run_id: &run_id,
                 lifecycle,
                 output: None,
@@ -1790,16 +1748,15 @@ mod tests {
                 retrievals: Vec::new(),
             })
             .unwrap();
-            assert_eq!(snapshot.response["usage"], expected);
-            assert_eq!(snapshot.workflow["usage_status"], "complete");
-            assert_eq!(snapshot.usage.as_ref(), Some(&expected));
+            assert_eq!(snapshot.run["usage"], expected);
+            assert_eq!(snapshot.run["usage_status"], "complete");
         }
     }
 
     #[test]
     fn terminal_usage_marks_provider_omission_without_fabricating_zeroes() {
         let run_id = RunId::new("run_terminal_usage_missing").unwrap();
-        let unavailable = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+        let unavailable = build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
             run_id: &run_id,
             lifecycle: RunLifecycle::Cancelled,
             output: None,
@@ -1810,11 +1767,10 @@ mod tests {
             retrievals: Vec::new(),
         })
         .unwrap();
-        assert_eq!(unavailable.response["usage"], Value::Null);
-        assert_eq!(unavailable.workflow["usage_status"], "unavailable");
-        assert_eq!(unavailable.usage, None);
+        assert_eq!(unavailable.run["usage"], Value::Null);
+        assert_eq!(unavailable.run["usage_status"], "unavailable");
 
-        let partial = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+        let partial = build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
             run_id: &run_id,
             lifecycle: RunLifecycle::Failed,
             output: None,
@@ -1840,9 +1796,8 @@ mod tests {
             retrievals: Vec::new(),
         })
         .unwrap();
-        assert_eq!(partial.response["usage"], Value::Null);
-        assert_eq!(partial.workflow["usage_status"], "partial");
-        assert_eq!(partial.usage, None);
+        assert_eq!(partial.run["usage"], Value::Null);
+        assert_eq!(partial.run["usage_status"], "partial");
     }
 
     #[test]
@@ -1867,7 +1822,7 @@ mod tests {
                 "arguments": arguments,
             })),
         };
-        let snapshot = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+        let snapshot = build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
             run_id: &run_id,
             lifecycle: RunLifecycle::Cancelled,
             output: None,
@@ -1878,12 +1833,12 @@ mod tests {
             retrievals: Vec::new(),
         })
         .unwrap();
-        assert_eq!(snapshot.response["output"][0]["status"], "incomplete");
-        assert_eq!(snapshot.response["output"][0]["arguments"], "");
+        assert_eq!(snapshot.run["output"][0]["status"], "incomplete");
+        assert_eq!(snapshot.run["output"][0]["arguments"], "");
         assert_eq!(snapshot.manifest[0]["status"], "incomplete_unsealed");
 
         assert!(
-            build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+            build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
                 run_id: &run_id,
                 lifecycle: RunLifecycle::Cancelled,
                 output: None,

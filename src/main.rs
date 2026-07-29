@@ -7,11 +7,11 @@ use insight_agent_platform::{
         TerminalOnlyDeploymentConfig,
     },
     config::{
-        ArtifactStoreProvider, DeploymentMode, HistoryConfig, LiveResponseBrokerProvider,
-        PlatformConfig, ResponseStreamConfig,
+        ArtifactStoreProvider, DeploymentMode, HistoryConfig, LiveRunStreamBrokerProvider,
+        PlatformConfig, RunStreamConfig,
     },
     engine::{
-        production_worker_registry_with_live_response_and_retrievals,
+        production_worker_registry_with_live_run_stream_and_retrievals,
         repository::{PostgresDurableRepository, SqliteDurableRepository},
         LocalContentAddressedArtifactStore, TenantArtifactEncryptionKeyring, WorkerArtifactStore,
     },
@@ -21,8 +21,8 @@ use insight_agent_platform::{
         retrievals::RetrievalRegistry,
     },
     runtime::{
-        DeployedAgentCatalog, InMemoryLiveResponseBroker, LiveResponseBroker,
-        LiveResponseByteLimits, PostgresLiveResponseBroker, PostgresLiveResponseBrokerOptions,
+        DeployedAgentCatalog, InMemoryLiveRunStreamBroker, LiveRunStreamBroker,
+        LiveRunStreamByteLimits, PostgresLiveRunStreamBroker, PostgresLiveRunStreamBrokerOptions,
         ProductionRunRepository, RunService, RunServiceConfig, TerminalOnlyRunConfig,
         TerminalOnlyStore, WorkCoordinatorConfig,
     },
@@ -105,14 +105,14 @@ async fn main() -> MainResult<()> {
         terminal_only_deployment,
     )?;
     let agents = DeployedAgentCatalog::new(deployed)?;
-    let (repository, terminal_store, live_response_broker) =
-        initialize_repository_and_live_response(&config.history, config.runtime.response_stream)
+    let (repository, terminal_store, live_run_stream_broker) =
+        initialize_repository_and_live_run_stream(&config.history, config.runtime.run_stream)
             .await?;
-    let workers = production_worker_registry_with_live_response_and_retrievals(
+    let workers = production_worker_registry_with_live_run_stream_and_retrievals(
         &models,
         &actions,
         &retrievals,
-        Arc::clone(&live_response_broker),
+        Arc::clone(&live_run_stream_broker),
     )?;
     let tenant_encryption = config
         .artifacts
@@ -204,23 +204,23 @@ async fn main() -> MainResult<()> {
         config.artifacts.deletion_claim_seconds,
     )
     .with_artifact_read_limit(config.artifacts.max_read_bytes)
-    .with_live_response_limits(
-        config.runtime.response_stream.body_queue_capacity,
-        config.runtime.response_stream.control_queue_capacity,
-        config.runtime.response_stream.terminal_barrier_timeout,
-        config.runtime.response_stream.outbound_write_timeout,
+    .with_live_run_stream_limits(
+        config.runtime.run_stream.body_queue_capacity,
+        config.runtime.run_stream.control_queue_capacity,
+        config.runtime.run_stream.terminal_barrier_timeout,
+        config.runtime.run_stream.outbound_write_timeout,
     )
-    .with_live_response_byte_limits(
-        config.runtime.response_stream.max_frame_bytes,
-        config.runtime.response_stream.max_item_bytes,
-        config.runtime.response_stream.max_run_bytes,
+    .with_live_run_stream_byte_limits(
+        config.runtime.run_stream.max_frame_bytes,
+        config.runtime.run_stream.max_item_bytes,
+        config.runtime.run_stream.max_run_bytes,
     )
     .with_graph_persistence_policy(graph_persistence_policy);
-    let service = RunService::start_with_artifact_store_graph_publication_and_live_response(
+    let service = RunService::start_with_artifact_store_graph_publication_and_live_run_stream(
         agents,
         repository,
         workers,
-        live_response_broker,
+        live_run_stream_broker,
         Arc::clone(&artifact_store),
         graph_publication_resolver,
         service_config,
@@ -245,8 +245,8 @@ async fn main() -> MainResult<()> {
         conversation_retention: std::time::Duration::from_secs(
             u64::from(config.conversations.retention_days) * 24 * 60 * 60,
         ),
-        terminal_barrier_timeout: config.runtime.response_stream.terminal_barrier_timeout,
-        outbound_write_timeout: config.runtime.response_stream.outbound_write_timeout,
+        terminal_barrier_timeout: config.runtime.run_stream.terminal_barrier_timeout,
+        outbound_write_timeout: config.runtime.run_stream.outbound_write_timeout,
     };
     if config.runtime.terminal_only.enabled {
         service
@@ -414,35 +414,35 @@ fn build_api_auth(config: &PlatformConfig) -> MainResult<ApiAuth> {
     Ok(base.with_human_principal_resolver(Arc::new(resolver)))
 }
 
-async fn initialize_repository_and_live_response(
+async fn initialize_repository_and_live_run_stream(
     config: &HistoryConfig,
-    response_stream: ResponseStreamConfig,
+    run_stream: RunStreamConfig,
 ) -> MainResult<(
     Arc<dyn ProductionRunRepository>,
     Arc<dyn TerminalOnlyStore>,
-    Arc<dyn LiveResponseBroker>,
+    Arc<dyn LiveRunStreamBroker>,
 )> {
     match config {
         HistoryConfig::Sqlite { path } => {
-            if response_stream.broker != LiveResponseBrokerProvider::InProcess {
+            if run_stream.broker != LiveRunStreamBrokerProvider::InProcess {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "SQLite history supports only the in-process live response broker",
+                    "SQLite history supports only the in-process live Run stream broker",
                 )
                 .into());
             }
             let concrete = Arc::new(SqliteDurableRepository::connect_path(path).await?);
             let repository: Arc<dyn ProductionRunRepository> = concrete.clone();
             let terminal_store: Arc<dyn TerminalOnlyStore> = concrete;
-            let broker = Arc::new(InMemoryLiveResponseBroker::new_with_limits(
-                response_stream.body_queue_capacity,
-                response_stream.control_queue_capacity,
-                LiveResponseByteLimits::new(
-                    response_stream.max_frame_bytes,
-                    response_stream.max_item_bytes,
-                    response_stream.max_run_bytes,
+            let broker = Arc::new(InMemoryLiveRunStreamBroker::new_with_limits(
+                run_stream.body_queue_capacity,
+                run_stream.control_queue_capacity,
+                LiveRunStreamByteLimits::new(
+                    run_stream.max_frame_bytes,
+                    run_stream.max_item_bytes,
+                    run_stream.max_run_bytes,
                 )?,
-            )?) as Arc<dyn LiveResponseBroker>;
+            )?) as Arc<dyn LiveRunStreamBroker>;
             Ok((repository, terminal_store, broker))
         }
         HistoryConfig::Postgres {
@@ -455,29 +455,29 @@ async fn initialize_repository_and_live_response(
                 *max_connections,
             )
             .await?;
-            let broker: Arc<dyn LiveResponseBroker> = match response_stream.broker {
-                LiveResponseBrokerProvider::InProcess => {
-                    Arc::new(InMemoryLiveResponseBroker::new_with_limits(
-                        response_stream.body_queue_capacity,
-                        response_stream.control_queue_capacity,
-                        LiveResponseByteLimits::new(
-                            response_stream.max_frame_bytes,
-                            response_stream.max_item_bytes,
-                            response_stream.max_run_bytes,
+            let broker: Arc<dyn LiveRunStreamBroker> = match run_stream.broker {
+                LiveRunStreamBrokerProvider::InProcess => {
+                    Arc::new(InMemoryLiveRunStreamBroker::new_with_limits(
+                        run_stream.body_queue_capacity,
+                        run_stream.control_queue_capacity,
+                        LiveRunStreamByteLimits::new(
+                            run_stream.max_frame_bytes,
+                            run_stream.max_item_bytes,
+                            run_stream.max_run_bytes,
                         )?,
                     )?)
                 }
-                LiveResponseBrokerProvider::PostgresNotify => Arc::new(
-                    PostgresLiveResponseBroker::start(
+                LiveRunStreamBrokerProvider::PostgresNotify => Arc::new(
+                    PostgresLiveRunStreamBroker::start(
                         repository.connection_pool(),
-                        PostgresLiveResponseBrokerOptions::new(
-                            response_stream.body_queue_capacity,
-                            response_stream.control_queue_capacity,
-                            response_stream.max_frame_bytes,
+                        PostgresLiveRunStreamBrokerOptions::new(
+                            run_stream.body_queue_capacity,
+                            run_stream.control_queue_capacity,
+                            run_stream.max_frame_bytes,
                         )?
                         .with_publication_limits(
-                            response_stream.max_item_bytes,
-                            response_stream.max_run_bytes,
+                            run_stream.max_item_bytes,
+                            run_stream.max_run_bytes,
                         )?,
                     )
                     .await?,

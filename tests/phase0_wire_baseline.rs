@@ -16,7 +16,7 @@ use insight_agent_platform::{
         StopError,
     },
     outcome::{FailureKind, RunFailure, RunOutput, TerminalOutcome, WorkflowError},
-    runtime::{ResponseStreamEvent, ResponseStreamEventType},
+    runtime::{RunStreamEvent, RunStreamEventType},
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -264,45 +264,57 @@ fn assert_public_event_kind_is_known(kind: PublicEventKind) {
     }
 }
 
-fn public_response(status: &str) -> Value {
+fn initial_run(status: &str) -> Value {
     json!({
-        "id": "response_phase0",
-        "object": "response",
+        "id": "run_phase0_wire",
+        "object": "run",
         "status": status,
         "output": [],
-        "usage": null,
-        "error": if status == "failed" {
-            json!({ "code": "MODEL_FAILED", "message": "model failed", "param": null })
-        } else {
-            Value::Null
-        }
+        "usage": null
     })
 }
 
-fn workflow_failure() -> Value {
+fn failed_run(status: &str, code: &str, message: &str) -> Value {
     json!({
-        "run_id": "run_phase0_wire",
-        "error": { "code": "WORKFLOW_FAILED", "message": "workflow failed" },
+        "id": "run_phase0_wire",
+        "object": "run",
+        "status": status,
+        "output": [],
+        "error": { "code": code, "message": message },
         "tool_results": [],
         "retrievals": [],
+        "usage": null,
         "usage_status": "partial"
     })
 }
 
-fn response_stream_events() -> Vec<ResponseStreamEvent> {
+fn stopped_run(status: &str, usage_status: &str) -> Value {
+    json!({
+        "id": "run_phase0_wire",
+        "object": "run",
+        "status": status,
+        "output": [],
+        "tool_results": [],
+        "retrievals": [],
+        "usage": null,
+        "usage_status": usage_status
+    })
+}
+
+fn run_stream_events() -> Vec<RunStreamEvent> {
     deserialize_values(vec![
         json!({
-            "type": "response.created",
+            "type": "run.lifecycle.created",
             "sequence_number": 0,
-            "response": public_response("in_progress")
+            "run": initial_run("created")
         }),
         json!({
-            "type": "response.in_progress",
+            "type": "run.lifecycle.running",
             "sequence_number": 1,
-            "response": public_response("in_progress")
+            "run": initial_run("running")
         }),
         json!({
-            "type": "response.output_item.added",
+            "type": "run.output.item.added",
             "sequence_number": 2,
             "output_index": 0,
             "item": {
@@ -314,7 +326,7 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
             }
         }),
         json!({
-            "type": "response.content_part.added",
+            "type": "run.output.content_part.added",
             "sequence_number": 3,
             "item_id": "message_phase0",
             "output_index": 0,
@@ -322,7 +334,7 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
             "part": { "type": "output_text", "text": "", "annotations": [] }
         }),
         json!({
-            "type": "response.output_text.delta",
+            "type": "run.output.text.delta",
             "sequence_number": 4,
             "item_id": "message_phase0",
             "output_index": 0,
@@ -330,7 +342,7 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
             "delta": "frozen delta"
         }),
         json!({
-            "type": "response.output_text.done",
+            "type": "run.output.text.done",
             "sequence_number": 5,
             "item_id": "message_phase0",
             "output_index": 0,
@@ -338,7 +350,7 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
             "text": "complete"
         }),
         json!({
-            "type": "response.content_part.done",
+            "type": "run.output.content_part.done",
             "sequence_number": 6,
             "item_id": "message_phase0",
             "output_index": 0,
@@ -350,14 +362,14 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
             }
         }),
         json!({
-            "type": "response.function_call_arguments.delta",
+            "type": "run.output.function_call.arguments.delta",
             "sequence_number": 7,
             "item_id": "function_phase0",
             "output_index": 1,
             "delta": "{\"query\":"
         }),
         json!({
-            "type": "response.function_call_arguments.done",
+            "type": "run.output.function_call.arguments.done",
             "sequence_number": 8,
             "item_id": "function_phase0",
             "output_index": 1,
@@ -365,7 +377,7 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
             "arguments": "{\"query\":\"phase0\"}"
         }),
         json!({
-            "type": "response.output_item.done",
+            "type": "run.output.item.done",
             "sequence_number": 9,
             "output_index": 1,
             "item": {
@@ -378,64 +390,65 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
             }
         }),
         json!({
-            "type": "response.file_search_call.in_progress",
+            "type": "run.output.file_search_call.in_progress",
             "sequence_number": 10,
             "item_id": "search_phase0",
             "output_index": 2
         }),
         json!({
-            "type": "response.file_search_call.searching",
+            "type": "run.output.file_search_call.searching",
             "sequence_number": 11,
             "item_id": "search_phase0",
             "output_index": 2
         }),
         json!({
-            "type": "response.file_search_call.completed",
+            "type": "run.output.file_search_call.completed",
             "sequence_number": 12,
             "item_id": "search_phase0",
             "output_index": 2
         }),
         json!({
-            "type": "response.completed",
+            "type": "run.lifecycle.completed",
             "sequence_number": 13,
-            "response": public_response("completed"),
-            "workflow": {
-                "run_id": "run_phase0_wire",
+            "run": {
+                "id": "run_phase0_wire",
+                "object": "run",
+                "status": "completed",
+                "output": [],
                 "result": { "answer": "complete" },
                 "tool_results": [],
                 "retrievals": [],
-                "usage_status": "complete"
+                "usage": null,
+                "usage_status": "unavailable"
             }
         }),
         json!({
-            "type": "response.failed",
+            "type": "run.lifecycle.failed",
             "sequence_number": 14,
-            "response": public_response("failed"),
-            "workflow": workflow_failure()
+            "run": failed_run("failed", "WORKFLOW_FAILED", "workflow failed")
         }),
         json!({
-            "type": "error",
+            "type": "run.stream.error",
             "sequence_number": 15,
-            "code": "STREAM_ERROR",
-            "message": "stream failed",
-            "param": "response"
+            "code": "RUN_STREAM_ERROR",
+            "message": "stream failed"
         }),
         json!({
-            "type": "workflow.tool.started",
+            "type": "run.tool.started",
             "sequence_number": 16,
             "call_id": "call_phase0",
             "tool_name": "lookup",
             "arguments": { "query": "phase0" }
         }),
         json!({
-            "type": "workflow.tool.progress",
+            "type": "run.tool.progress",
             "sequence_number": 17,
             "call_id": "call_phase0",
             "tool_name": "lookup",
             "content": [{ "type": "output_json", "json": {"completed": 1, "total": 2} }]
         }),
         json!({
-            "type": "workflow.tool.completed",
+            "type": "run.tool.completed",
             "sequence_number": 18,
             "call_id": "call_phase0",
             "tool_name": "lookup",
@@ -443,7 +456,7 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
             "content": [{ "type": "output_text", "text": "tool result" }]
         }),
         json!({
-            "type": "workflow.tool.failed",
+            "type": "run.tool.failed",
             "sequence_number": 19,
             "call_id": "call_phase0",
             "tool_name": "lookup",
@@ -451,7 +464,7 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
             "error": { "code": "TOOL_FAILED", "message": "tool failed" }
         }),
         json!({
-            "type": "workflow.retrieval.completed",
+            "type": "run.retrieval.completed",
             "sequence_number": 20,
             "retrieval_id": "retrieval_phase0",
             "query": "phase0",
@@ -465,7 +478,7 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
             }]
         }),
         json!({
-            "type": "workflow.stream.gap",
+            "type": "run.stream.gap",
             "sequence_number": 21,
             "item_id": "message_phase0",
             "attempt_no": 2,
@@ -475,65 +488,50 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
             "action": "discard_provisional_item"
         }),
         json!({
-            "type": "workflow.response.timed_out",
+            "type": "run.lifecycle.timed_out",
             "sequence_number": 22,
-            "response": public_response("failed"),
-            "workflow": workflow_failure()
+            "run": failed_run("timed_out", "RUN_TIMEOUT", "run timed out")
         }),
         json!({
-            "type": "workflow.response.cancelled",
+            "type": "run.lifecycle.cancelled",
             "sequence_number": 23,
-            "response": public_response("cancelled"),
-            "workflow": {
-                "run_id": "run_phase0_wire",
-                "reason": "cancelled",
-                "tool_results": [],
-                "retrievals": [],
-                "usage_status": "partial"
-            }
+            "run": stopped_run("cancelled", "partial")
         }),
         json!({
-            "type": "workflow.response.interrupted",
+            "type": "run.lifecycle.interrupted",
             "sequence_number": 24,
-            "response": public_response("incomplete"),
-            "workflow": {
-                "run_id": "run_phase0_wire",
-                "reason": "interrupted",
-                "tool_results": [],
-                "retrievals": [],
-                "usage_status": "unavailable"
-            }
+            "run": stopped_run("interrupted", "unavailable")
         }),
     ])
 }
 
-fn assert_response_stream_event_type_is_known(event_type: ResponseStreamEventType) {
+fn assert_run_stream_event_type_is_known(event_type: RunStreamEventType) {
     match event_type {
-        ResponseStreamEventType::ResponseCreated
-        | ResponseStreamEventType::ResponseInProgress
-        | ResponseStreamEventType::ResponseOutputItemAdded
-        | ResponseStreamEventType::ResponseContentPartAdded
-        | ResponseStreamEventType::ResponseOutputTextDelta
-        | ResponseStreamEventType::ResponseOutputTextDone
-        | ResponseStreamEventType::ResponseContentPartDone
-        | ResponseStreamEventType::ResponseFunctionCallArgumentsDelta
-        | ResponseStreamEventType::ResponseFunctionCallArgumentsDone
-        | ResponseStreamEventType::ResponseOutputItemDone
-        | ResponseStreamEventType::ResponseFileSearchCallInProgress
-        | ResponseStreamEventType::ResponseFileSearchCallSearching
-        | ResponseStreamEventType::ResponseFileSearchCallCompleted
-        | ResponseStreamEventType::ResponseCompleted
-        | ResponseStreamEventType::ResponseFailed
-        | ResponseStreamEventType::Error
-        | ResponseStreamEventType::WorkflowToolStarted
-        | ResponseStreamEventType::WorkflowToolProgress
-        | ResponseStreamEventType::WorkflowToolCompleted
-        | ResponseStreamEventType::WorkflowToolFailed
-        | ResponseStreamEventType::WorkflowRetrievalCompleted
-        | ResponseStreamEventType::WorkflowStreamGap
-        | ResponseStreamEventType::WorkflowResponseTimedOut
-        | ResponseStreamEventType::WorkflowResponseCancelled
-        | ResponseStreamEventType::WorkflowResponseInterrupted => {}
+        RunStreamEventType::RunLifecycleCreated
+        | RunStreamEventType::RunLifecycleRunning
+        | RunStreamEventType::RunOutputItemAdded
+        | RunStreamEventType::RunOutputContentPartAdded
+        | RunStreamEventType::RunOutputTextDelta
+        | RunStreamEventType::RunOutputTextDone
+        | RunStreamEventType::RunOutputContentPartDone
+        | RunStreamEventType::RunOutputFunctionCallArgumentsDelta
+        | RunStreamEventType::RunOutputFunctionCallArgumentsDone
+        | RunStreamEventType::RunOutputItemDone
+        | RunStreamEventType::RunOutputFileSearchCallInProgress
+        | RunStreamEventType::RunOutputFileSearchCallSearching
+        | RunStreamEventType::RunOutputFileSearchCallCompleted
+        | RunStreamEventType::RunLifecycleCompleted
+        | RunStreamEventType::RunLifecycleFailed
+        | RunStreamEventType::RunStreamError
+        | RunStreamEventType::RunToolStarted
+        | RunStreamEventType::RunToolProgress
+        | RunStreamEventType::RunToolCompleted
+        | RunStreamEventType::RunToolFailed
+        | RunStreamEventType::RunRetrievalCompleted
+        | RunStreamEventType::RunStreamGap
+        | RunStreamEventType::RunLifecycleTimedOut
+        | RunStreamEventType::RunLifecycleCancelled
+        | RunStreamEventType::RunLifecycleInterrupted => {}
     }
 }
 
@@ -806,18 +804,18 @@ fn actual_baseline() -> Value {
         PublicEventKind::ALL.to_vec()
     );
 
-    let response_events = response_stream_events();
-    assert_eq!(ResponseStreamEventType::ALL.len(), 25);
-    assert_eq!(response_events.len(), 25);
-    ResponseStreamEventType::ALL
+    let run_events = run_stream_events();
+    assert_eq!(RunStreamEventType::ALL.len(), 25);
+    assert_eq!(run_events.len(), 25);
+    RunStreamEventType::ALL
         .into_iter()
-        .for_each(assert_response_stream_event_type_is_known);
+        .for_each(assert_run_stream_event_type_is_known);
     assert_eq!(
-        response_events
+        run_events
             .iter()
-            .map(ResponseStreamEvent::event_type)
+            .map(RunStreamEvent::event_type)
             .collect::<Vec<_>>(),
-        ResponseStreamEventType::ALL.to_vec()
+        RunStreamEventType::ALL.to_vec()
     );
 
     let legacy_events = legacy_run_events();
@@ -881,8 +879,8 @@ fn actual_baseline() -> Value {
         "public_event": public_event,
         "legacy_run_event_types": legacy_run_event_types(),
         "legacy_run_events": legacy_events,
-        "response_stream_event_types": ResponseStreamEventType::ALL,
-        "response_stream_events": response_events,
+        "run_stream_event_types": RunStreamEventType::ALL,
+        "run_stream_events": run_events,
         "api": api_baseline(),
         "history": history_baseline(),
         "outcome": outcome_baseline(),

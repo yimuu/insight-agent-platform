@@ -19,10 +19,10 @@ use insight_dsl::{template::compile_template, CompileError};
 use insight_engine::{
     execution::{stop_pair, ExecutionControl, RunError, RunErrorKind, StopReason},
     plan::{DescriptorValue, PlanType, VersionTag},
-    response::{
-        LiveResponseBroker, LiveResponseItemIdentity, LiveResponsePayload, LiveResponsePublication,
-        LiveResponseSeal, LiveResponseSealStatus, ResponseContentPart, ResponseItemStatus,
-        ResponseOutputItem, ResponseRole, WorkflowToolPublicProjection,
+    run_stream::{
+        LiveRunStreamBroker, LiveRunStreamItemIdentity, LiveRunStreamPayload,
+        LiveRunStreamPublication, LiveRunStreamSeal, LiveRunStreamSealStatus, RunOutputContentPart,
+        RunOutputItem, RunOutputItemStatus, RunOutputRole, RunToolPublicProjection,
     },
     worker::{
         adapter::{
@@ -95,7 +95,7 @@ const WORKER_DEADLINE_EXCEEDED: &str = "WORKER_DEADLINE_EXCEEDED";
 pub struct LlmTaskExecutor {
     models: ModelRegistry,
     token_observer: Option<broadcast::Sender<LlmTokenObservation>>,
-    live_response_broker: Option<Arc<dyn LiveResponseBroker>>,
+    live_run_stream_broker: Option<Arc<dyn LiveRunStreamBroker>>,
 }
 
 impl LlmTaskExecutor {
@@ -103,15 +103,15 @@ impl LlmTaskExecutor {
         Self {
             models,
             token_observer: None,
-            live_response_broker: None,
+            live_run_stream_broker: None,
         }
     }
 
-    pub fn with_live_response_broker(
+    pub fn with_live_run_stream_broker(
         mut self,
-        live_response_broker: Arc<dyn LiveResponseBroker>,
+        live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
     ) -> Self {
-        self.live_response_broker = Some(live_response_broker);
+        self.live_run_stream_broker = Some(live_run_stream_broker);
         self
     }
 
@@ -335,10 +335,9 @@ fn frozen_llm_tool_contract(
         {
             return Err(invariant(LLM_BINDING_INVALID));
         }
-        let public_projection = WorkflowToolPublicProjection::from_frozen_effective_policy(
-            &linked.effective_public_policy,
-        )
-        .map_err(|_| invariant(LLM_BINDING_INVALID))?;
+        let public_projection =
+            RunToolPublicProjection::from_frozen_effective_policy(&linked.effective_public_policy)
+                .map_err(|_| invariant(LLM_BINDING_INVALID))?;
         let validator = insight_engine::schema::compile_schema_2020(&linked.input_schema)
             .map_err(|_| invariant(LLM_BINDING_INVALID))?;
         insight_engine::schema::compile_schema_2020(&linked.output_schema)
@@ -581,8 +580,8 @@ fn normalize_model_tool_calls(
 
 #[async_trait]
 impl LeafTaskExecutor for LlmTaskExecutor {
-    fn live_response_capable(&self) -> bool {
-        self.live_response_broker.is_some()
+    fn live_run_stream_capable(&self) -> bool {
+        self.live_run_stream_broker.is_some()
     }
 
     async fn execute(
@@ -697,7 +696,7 @@ impl LeafTaskExecutor for LlmTaskExecutor {
 
         require_live(context, &cancellation)?;
         let mut publication = LlmPublication::start(
-            self.live_response_broker.as_ref(),
+            self.live_run_stream_broker.as_ref(),
             context,
             request,
             publish,
@@ -1160,18 +1159,18 @@ struct LlmPublicationSeed {
 }
 
 struct LlmPublication {
-    broker: Option<Arc<dyn LiveResponseBroker>>,
+    broker: Option<Arc<dyn LiveRunStreamBroker>>,
     allocator: Option<ModelCallPublicItemAllocator>,
     seed: Option<LlmPublicationSeed>,
     reserved_item: Option<ResponseItemAuthority>,
-    identity: Option<LiveResponseItemIdentity>,
+    identity: Option<LiveRunStreamItemIdentity>,
     next_local_sequence: u64,
     function_calls: BTreeMap<u32, FunctionCallPublication>,
 }
 
 struct FunctionCallPublication {
     authority: ResponseItemAuthority,
-    identity: LiveResponseItemIdentity,
+    identity: LiveRunStreamItemIdentity,
     call_id: String,
     tool_name: String,
     next_local_sequence: u64,
@@ -1185,7 +1184,7 @@ struct FailedLlmPublication {
 
 impl LlmPublication {
     fn start(
-        broker: Option<&Arc<dyn LiveResponseBroker>>,
+        broker: Option<&Arc<dyn LiveRunStreamBroker>>,
         context: &WorkerExecutionContext,
         request: &TaskExecutionRequest,
         publish: bool,
@@ -1250,7 +1249,7 @@ impl LlmPublication {
         )
         .await
         .map_err(public_item_reservation_failure)?;
-        let identity = LiveResponseItemIdentity::new(
+        let identity = LiveRunStreamItemIdentity::new(
             seed.run_id,
             seed.activation_id,
             seed.attempt_no,
@@ -1259,17 +1258,17 @@ impl LlmPublication {
             authority.output_index(),
         )
         .map_err(|_| invariant(LLM_DESCRIPTOR_INVALID))?;
-        let added = ResponseOutputItem::FunctionCall {
+        let added = RunOutputItem::FunctionCall {
             id: authority.item_id().to_owned(),
-            status: ResponseItemStatus::InProgress,
+            status: RunOutputItemStatus::InProgress,
             call_id: call_id.to_owned(),
             name: tool_name.to_owned(),
             arguments: String::new(),
         };
-        if let Ok(frame) = LiveResponsePublication::new(
+        if let Ok(frame) = LiveRunStreamPublication::new(
             identity.clone(),
             0,
-            LiveResponsePayload::OutputItemAdded { item: added },
+            LiveRunStreamPayload::OutputItemAdded { item: added },
         ) {
             let _ = broker.publish(frame);
         }
@@ -1296,10 +1295,10 @@ impl LlmPublication {
             .get_mut(&call_index)
             .ok_or_else(|| invariant(LLM_DESCRIPTOR_INVALID))?;
         if let Some(broker) = &self.broker {
-            if let Ok(frame) = LiveResponsePublication::new(
+            if let Ok(frame) = LiveRunStreamPublication::new(
                 call.identity.clone(),
                 call.next_local_sequence,
-                LiveResponsePayload::FunctionCallArgumentsDelta { delta },
+                LiveRunStreamPayload::FunctionCallArgumentsDelta { delta },
             ) {
                 call.next_local_sequence = call.next_local_sequence.saturating_add(1);
                 let _ = broker.publish(frame);
@@ -1379,7 +1378,7 @@ impl LlmPublication {
             .seed
             .as_ref()
             .ok_or_else(|| invariant(LLM_DESCRIPTOR_INVALID))?;
-        let identity = LiveResponseItemIdentity::new(
+        let identity = LiveRunStreamItemIdentity::new(
             seed.run_id.clone(),
             seed.activation_id.clone(),
             seed.attempt_no,
@@ -1389,10 +1388,10 @@ impl LlmPublication {
         )
         .map_err(|_| invariant(LLM_DESCRIPTOR_INVALID))?;
         self.identity = Some(identity);
-        self.emit(LiveResponsePayload::OutputItemAdded {
-            item: message_item(item.item_id(), ResponseItemStatus::InProgress, None),
+        self.emit(LiveRunStreamPayload::OutputItemAdded {
+            item: message_item(item.item_id(), RunOutputItemStatus::InProgress, None),
         });
-        self.emit(LiveResponsePayload::ContentPartAdded {
+        self.emit(LiveRunStreamPayload::ContentPartAdded {
             content_index: 0,
             part: output_text_part(String::new()),
         });
@@ -1404,7 +1403,7 @@ impl LlmPublication {
             return Ok(());
         }
         self.ensure_started().await?;
-        self.emit(LiveResponsePayload::OutputTextDelta {
+        self.emit(LiveRunStreamPayload::OutputTextDelta {
             content_index: 0,
             delta,
         });
@@ -1423,24 +1422,24 @@ impl LlmPublication {
         };
         let item = message_item(
             identity.item_id(),
-            ResponseItemStatus::Completed,
+            RunOutputItemStatus::Completed,
             Some(text.clone()),
         );
-        self.emit(LiveResponsePayload::OutputTextDone {
+        self.emit(LiveRunStreamPayload::OutputTextDone {
             content_index: 0,
             text: text.clone(),
         });
-        self.emit(LiveResponsePayload::ContentPartDone {
+        self.emit(LiveRunStreamPayload::ContentPartDone {
             content_index: 0,
             part: output_text_part(text),
         });
-        self.emit(LiveResponsePayload::OutputItemDone { item: item.clone() });
+        self.emit(LiveRunStreamPayload::OutputItemDone { item: item.clone() });
         let last = self.next_local_sequence.checked_sub(1);
         if let Some(broker) = &self.broker {
-            let _ = broker.seal(LiveResponseSeal::new(
+            let _ = broker.seal(LiveRunStreamSeal::new(
                 identity,
                 last,
-                LiveResponseSealStatus::Completed,
+                LiveRunStreamSealStatus::Completed,
             ));
         }
         Ok((last, serde_json::to_value(item).ok()))
@@ -1448,15 +1447,15 @@ impl LlmPublication {
 
     fn finish_message_incomplete(&mut self) -> Option<u64> {
         let identity = self.identity.clone()?;
-        self.emit(LiveResponsePayload::OutputItemDone {
-            item: message_item(identity.item_id(), ResponseItemStatus::Incomplete, None),
+        self.emit(LiveRunStreamPayload::OutputItemDone {
+            item: message_item(identity.item_id(), RunOutputItemStatus::Incomplete, None),
         });
         let last = self.next_local_sequence.checked_sub(1);
         if let Some(broker) = &self.broker {
-            let _ = broker.seal(LiveResponseSeal::new(
+            let _ = broker.seal(LiveRunStreamSeal::new(
                 identity,
                 last,
-                LiveResponseSealStatus::Incomplete,
+                LiveRunStreamSealStatus::Incomplete,
             ));
         }
         last
@@ -1473,28 +1472,28 @@ impl LlmPublication {
         };
         for (call_index, call) in &mut self.function_calls {
             let seal_index = call.next_local_sequence;
-            let item = ResponseOutputItem::FunctionCall {
+            let item = RunOutputItem::FunctionCall {
                 id: call.authority.item_id().to_owned(),
-                status: ResponseItemStatus::Incomplete,
+                status: RunOutputItemStatus::Incomplete,
                 call_id: call.call_id.clone(),
                 name: call.tool_name.clone(),
                 // Provider fragments remain provisional. A failed durable
                 // item retains only stable call metadata, never partial JSON.
                 arguments: String::new(),
             };
-            let Ok(frame) = LiveResponsePublication::new(
+            let Ok(frame) = LiveRunStreamPublication::new(
                 call.identity.clone(),
                 seal_index,
-                LiveResponsePayload::OutputItemDone { item },
+                LiveRunStreamPayload::OutputItemDone { item },
             ) else {
                 continue;
             };
             call.next_local_sequence = call.next_local_sequence.saturating_add(1);
             let _ = broker.publish(frame);
-            let _ = broker.seal(LiveResponseSeal::new(
+            let _ = broker.seal(LiveRunStreamSeal::new(
                 call.identity.clone(),
                 Some(seal_index),
-                LiveResponseSealStatus::Incomplete,
+                LiveRunStreamSealStatus::Incomplete,
             ));
             if let Ok(publication) = ModelIncompleteFunctionCallPublication::new(
                 *call_index,
@@ -1512,12 +1511,12 @@ impl LlmPublication {
         }
     }
 
-    fn emit(&mut self, payload: LiveResponsePayload) {
+    fn emit(&mut self, payload: LiveRunStreamPayload) {
         let (Some(broker), Some(identity)) = (&self.broker, &self.identity) else {
             return;
         };
         if let Ok(publication) =
-            LiveResponsePublication::new(identity.clone(), self.next_local_sequence, payload)
+            LiveRunStreamPublication::new(identity.clone(), self.next_local_sequence, payload)
         {
             self.next_local_sequence = self.next_local_sequence.saturating_add(1);
             // Live publication is observational. Queue loss, subscriber loss,
@@ -1542,19 +1541,19 @@ fn public_item_reservation_failure(error: ModelCallPublicItemReservationError) -
 
 fn message_item(
     item_id: impl Into<String>,
-    status: ResponseItemStatus,
+    status: RunOutputItemStatus,
     text: Option<String>,
-) -> ResponseOutputItem {
-    ResponseOutputItem::Message {
+) -> RunOutputItem {
+    RunOutputItem::Message {
         id: item_id.into(),
         status,
-        role: ResponseRole::Assistant,
+        role: RunOutputRole::Assistant,
         content: text.map(output_text_part).into_iter().collect::<Vec<_>>(),
     }
 }
 
-fn output_text_part(text: String) -> ResponseContentPart {
-    ResponseContentPart::OutputText {
+fn output_text_part(text: String) -> RunOutputContentPart {
+    RunOutputContentPart::OutputText {
         text,
         annotations: Vec::new(),
     }
@@ -1776,12 +1775,12 @@ pub fn production_worker_registry(
     production_worker_registry_inner(models, actions, None, None)
 }
 
-pub fn production_worker_registry_with_live_response(
+pub fn production_worker_registry_with_live_run_stream(
     models: &ModelRegistry,
     actions: &ActionRegistry,
-    live_response_broker: Arc<dyn LiveResponseBroker>,
+    live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
 ) -> Result<WorkerExecutorRegistry, CompileError> {
-    production_worker_registry_inner(models, actions, None, Some(live_response_broker))
+    production_worker_registry_inner(models, actions, None, Some(live_run_stream_broker))
 }
 
 /// Registers built-in model/Action workers plus every exact versioned HTTP or
@@ -1798,7 +1797,7 @@ fn production_worker_registry_inner(
     models: &ModelRegistry,
     actions: &ActionRegistry,
     external_leaf_adapters: Option<&VersionedLeafAdapterRegistry>,
-    live_response_broker: Option<Arc<dyn LiveResponseBroker>>,
+    live_run_stream_broker: Option<Arc<dyn LiveRunStreamBroker>>,
 ) -> Result<WorkerExecutorRegistry, CompileError> {
     let llm_descriptor_version = VersionTag::new(LLM_DESCRIPTOR_VERSION)
         .map_err(|error| CompileError::new("WORKER_REGISTRY_INVALID", error.to_string()))?;
@@ -1810,8 +1809,8 @@ fn production_worker_registry_inner(
         let identity = models.deployment_identity(alias)?;
         if llm_versions.insert(identity.worker_version().to_owned()) {
             let executor = LlmTaskExecutor::new(models.clone());
-            let executor = match &live_response_broker {
-                Some(broker) => executor.with_live_response_broker(Arc::clone(broker)),
+            let executor = match &live_run_stream_broker {
+                Some(broker) => executor.with_live_run_stream_broker(Arc::clone(broker)),
                 None => executor,
             };
             registry
@@ -2359,7 +2358,7 @@ mod tests {
     };
     use insight_engine::{
         plan::{DataPortId, LeafTaskDescriptor, PlanProperty, PortName},
-        response::{LiveResponseDelivery, LiveResponseSubscriber, ResponseStreamEventType},
+        run_stream::{LiveRunStreamDelivery, LiveRunStreamSubscriber, RunStreamEventType},
         scheduler::{BoundTaskInput, SchedulerAction, SchedulerCheckpointId, SchedulerTaskId},
         worker::{
             ModelCallAuthority, ModelContinuationTurn, ModelToolResult, ResponseItemAuthority,
@@ -2379,7 +2378,7 @@ mod tests {
     use super::*;
     use crate::{
         catalog::{LeafDeploymentResolver, ProductionLeafDeploymentResolver},
-        response_stream::InMemoryLiveResponseBroker,
+        run_stream::InMemoryLiveRunStreamBroker,
     };
 
     #[test]
@@ -3084,8 +3083,8 @@ mod tests {
     }
 
     async fn collect_publication_types(
-        subscriber: &mut Box<dyn LiveResponseSubscriber>,
-    ) -> (Vec<ResponseStreamEventType>, LiveResponseSealStatus) {
+        subscriber: &mut Box<dyn LiveRunStreamSubscriber>,
+    ) -> (Vec<RunStreamEventType>, LiveRunStreamSealStatus) {
         let mut event_types = Vec::new();
         loop {
             let delivery = tokio::time::timeout(Duration::from_secs(1), subscriber.recv())
@@ -3093,11 +3092,13 @@ mod tests {
                 .expect("finish-reason publication did not seal")
                 .expect("finish-reason publication broker failed");
             match delivery {
-                LiveResponseDelivery::Publication(publication) => {
+                LiveRunStreamDelivery::Publication(publication) => {
                     event_types.push(publication.payload_type());
                 }
-                LiveResponseDelivery::Seal(seal) => return (event_types, seal.status()),
-                LiveResponseDelivery::Gap(_) => panic!("finish-reason matrix must not lose events"),
+                LiveRunStreamDelivery::Seal(seal) => return (event_types, seal.status()),
+                LiveRunStreamDelivery::Gap(_) => {
+                    panic!("finish-reason matrix must not lose events")
+                }
             }
         }
     }
@@ -3596,7 +3597,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_model_request_publishes_one_full_function_argument_delta() {
-        let broker = Arc::new(InMemoryLiveResponseBroker::new(8, 4).unwrap());
+        let broker = Arc::new(InMemoryLiveRunStreamBroker::new(8, 4).unwrap());
         let mut subscriber = broker
             .subscribe(RunId::new("run_leaf").unwrap())
             .await
@@ -3614,7 +3615,7 @@ mod tests {
             WorkerRuntimeServices::default(),
             allocator,
         );
-        let publication_broker = broker.clone() as Arc<dyn LiveResponseBroker>;
+        let publication_broker = broker.clone() as Arc<dyn LiveRunStreamBroker>;
         let context = worker_context(1).with_model_call(
             ModelCallAuthority::new_with_publication("response_complete_function", 1, true, None)
                 .unwrap(),
@@ -3652,14 +3653,17 @@ mod tests {
 
         let mut events = Vec::new();
         for sequence in 0..2 {
-            let LiveResponseDelivery::Publication(frame) = subscriber.recv().await.unwrap() else {
+            let LiveRunStreamDelivery::Publication(frame) = subscriber.recv().await.unwrap() else {
                 panic!("complete function request must publish exactly two provisional frames");
             };
             events.push(serde_json::to_value(frame.into_public_event(sequence)).unwrap());
         }
-        assert_eq!(events[0]["type"], "response.output_item.added");
+        assert_eq!(events[0]["type"], "run.output.item.added");
         assert_eq!(events[0]["item"]["status"], "in_progress");
-        assert_eq!(events[1]["type"], "response.function_call_arguments.delta");
+        assert_eq!(
+            events[1]["type"],
+            "run.output.function_call.arguments.delta"
+        );
         assert_eq!(events[1]["delta"], arguments);
         assert!(
             tokio::time::timeout(Duration::from_millis(20), subscriber.recv())
@@ -3679,7 +3683,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_model_request_closes_function_item_without_persisting_provisional_arguments() {
-        let broker = Arc::new(InMemoryLiveResponseBroker::new(8, 4).unwrap());
+        let broker = Arc::new(InMemoryLiveRunStreamBroker::new(8, 4).unwrap());
         let mut subscriber = broker
             .subscribe(RunId::new("run_leaf").unwrap())
             .await
@@ -3697,7 +3701,7 @@ mod tests {
             WorkerRuntimeServices::default(),
             allocator,
         );
-        let publication_broker = broker.clone() as Arc<dyn LiveResponseBroker>;
+        let publication_broker = broker.clone() as Arc<dyn LiveRunStreamBroker>;
         let context = worker_context(1).with_model_call(
             ModelCallAuthority::new_with_publication("response_failed_function", 1, true, None)
                 .unwrap(),
@@ -3736,28 +3740,31 @@ mod tests {
         let mut events = Vec::new();
         loop {
             match subscriber.recv().await.unwrap() {
-                LiveResponseDelivery::Publication(frame) => {
+                LiveRunStreamDelivery::Publication(frame) => {
                     let sequence = u64::try_from(events.len()).unwrap();
                     events.push(serde_json::to_value(frame.into_public_event(sequence)).unwrap());
                 }
-                LiveResponseDelivery::Seal(seal) => {
+                LiveRunStreamDelivery::Seal(seal) => {
                     assert_eq!(seal.identity().item_id(), "fc_failed_request");
                     assert_eq!(seal.last_local_sequence(), Some(2));
-                    assert_eq!(seal.status(), LiveResponseSealStatus::Incomplete);
+                    assert_eq!(seal.status(), LiveRunStreamSealStatus::Incomplete);
                     break;
                 }
-                LiveResponseDelivery::Gap(_) => panic!("failure close must not lose events"),
+                LiveRunStreamDelivery::Gap(_) => panic!("failure close must not lose events"),
             }
         }
         assert_eq!(events.len(), 3);
-        assert_eq!(events[0]["type"], "response.output_item.added");
-        assert_eq!(events[1]["type"], "response.function_call_arguments.delta");
-        assert_eq!(events[2]["type"], "response.output_item.done");
+        assert_eq!(events[0]["type"], "run.output.item.added");
+        assert_eq!(
+            events[1]["type"],
+            "run.output.function_call.arguments.delta"
+        );
+        assert_eq!(events[2]["type"], "run.output.item.done");
         assert_eq!(events[2]["item"]["status"], "incomplete");
         assert_eq!(events[2]["item"]["arguments"], "");
         assert!(events
             .iter()
-            .all(|event| { event["type"] != "response.function_call_arguments.done" }));
+            .all(|event| { event["type"] != "run.output.function_call.arguments.done" }));
     }
 
     #[tokio::test]
@@ -3824,13 +3831,13 @@ mod tests {
                         },
                     )
                     .unwrap();
-                let broker = Arc::new(InMemoryLiveResponseBroker::new(32, 8).unwrap());
+                let broker = Arc::new(InMemoryLiveRunStreamBroker::new(32, 8).unwrap());
                 let mut subscriber = broker
                     .subscribe(RunId::new("run_leaf").unwrap())
                     .await
                     .unwrap();
                 let executor = LlmTaskExecutor::new(models)
-                    .with_live_response_broker(broker as Arc<dyn LiveResponseBroker>);
+                    .with_live_run_stream_broker(broker as Arc<dyn LiveRunStreamBroker>);
                 let request = dispatch_request(
                     SchedulerTaskKind::Llm,
                     "core.llm",
@@ -3869,17 +3876,17 @@ mod tests {
                     );
                     assert_eq!(
                         seal_status,
-                        LiveResponseSealStatus::Incomplete,
+                        LiveRunStreamSealStatus::Incomplete,
                         "{} {mode}",
                         case.label
                     );
                     assert!(
-                        !event_types.contains(&ResponseStreamEventType::ResponseOutputTextDone),
+                        !event_types.contains(&RunStreamEventType::RunOutputTextDone),
                         "{} {mode} emitted output_text.done for incomplete text",
                         case.label
                     );
                     assert!(
-                        !event_types.contains(&ResponseStreamEventType::ResponseContentPartDone),
+                        !event_types.contains(&RunStreamEventType::RunOutputContentPartDone),
                         "{} {mode} emitted a completed content part",
                         case.label
                     );
@@ -3896,13 +3903,13 @@ mod tests {
                         .expect("successful provider call must retain finish telemetry");
                     assert_eq!(completion.finish_reason(), case.expected_finish);
                     assert!(completion.safe_public_item().is_some());
-                    assert_eq!(seal_status, LiveResponseSealStatus::Completed);
-                    assert!(event_types.contains(&ResponseStreamEventType::ResponseOutputTextDone));
-                    assert!(event_types.contains(&ResponseStreamEventType::ResponseContentPartDone));
+                    assert_eq!(seal_status, LiveRunStreamSealStatus::Completed);
+                    assert!(event_types.contains(&RunStreamEventType::RunOutputTextDone));
+                    assert!(event_types.contains(&RunStreamEventType::RunOutputContentPartDone));
                 }
 
                 assert!(
-                    !event_types.contains(&ResponseStreamEventType::ResponseCompleted),
+                    !event_types.contains(&RunStreamEventType::RunLifecycleCompleted),
                     "leaf execution must not fabricate workflow completion"
                 );
             }

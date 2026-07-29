@@ -22,8 +22,8 @@ use crate::{
         },
     },
     runtime::{
-        InMemoryLiveResponseBroker, LiveResponseBroker, LiveResponseDelivery, ResponseStreamEvent,
-        ResponseStreamEventType, RunError,
+        InMemoryLiveRunStreamBroker, LiveRunStreamBroker, LiveRunStreamDelivery, RunError,
+        RunStreamEvent, RunStreamEventType,
     },
 };
 
@@ -241,7 +241,7 @@ async fn sqlite_live_retrieval_is_post_commit_best_effort_and_never_a_standard_t
     let deployment = deployed("sqlite_live");
     let run_id = RunId::new("run_retrieval_sqlite_live").unwrap();
     let _fence = prepare_sqlite_waiting(&repository, &control, &deployment, &run_id).await;
-    let broker = InMemoryLiveResponseBroker::new(16, 4).unwrap();
+    let broker = InMemoryLiveRunStreamBroker::new(16, 4).unwrap();
     let mut subscriber = broker.subscribe(run_id.clone()).await.unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(10), subscriber.recv())
@@ -278,7 +278,7 @@ async fn sqlite_live_retrieval_is_post_commit_best_effort_and_never_a_standard_t
         .unwrap(),
         1
     );
-    let LiveResponseDelivery::Publication(publication) =
+    let LiveRunStreamDelivery::Publication(publication) =
         tokio::time::timeout(Duration::from_secs(1), subscriber.recv())
             .await
             .unwrap()
@@ -288,9 +288,9 @@ async fn sqlite_live_retrieval_is_post_commit_best_effort_and_never_a_standard_t
     };
     assert_eq!(
         publication.payload_type(),
-        ResponseStreamEventType::WorkflowRetrievalCompleted
+        RunStreamEventType::RunRetrievalCompleted
     );
-    let ResponseStreamEvent::WorkflowRetrievalCompleted { query, results, .. } =
+    let RunStreamEvent::RunRetrievalCompleted { query, results, .. } =
         publication.into_public_event(1)
     else {
         panic!("Retrieval must not masquerade as a function, tool, or file-search event")
@@ -318,7 +318,7 @@ async fn sqlite_live_retrieval_is_post_commit_best_effort_and_never_a_standard_t
         &crashed_run,
     )
     .await;
-    let crashed_broker = InMemoryLiveResponseBroker::new(16, 4).unwrap();
+    let crashed_broker = InMemoryLiveRunStreamBroker::new(16, 4).unwrap();
     let mut crashed_subscriber = crashed_broker.subscribe(crashed_run.clone()).await.unwrap();
     let crash = FailOnceSchedulerCrash::new(SchedulerCrashPoint::AfterResultCommit);
     let error = consume_scheduler_task_once_with_retrieval_observer(

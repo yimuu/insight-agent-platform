@@ -15,6 +15,9 @@
 
 最近完成的规范：
 
+- [Run Stream v1 统一事件模型优化](../archive/specs/2026-07-29-run-stream-v1-unified-event-model.md)：
+  已将 `/runs/stream` clean-cut 为闭合的 `run.*` 事件，并以单一 canonical durable Run snapshot
+  统一 terminal authority；
 - [Response Stream v1 工具活动可视化优化](../archive/specs/2026-07-29-response-stream-v1-tool-activity-visibility-optimization.md)：
   原地增强 `response-stream/v1`，增加安全工具进度、耗时、结果展示和 terminal 校准合同；
 - [Durable Runtime 50 活跃 Run 并发优化](../archive/specs/2026-07-26-durable-runtime-50-active-runs-optimization.md)；

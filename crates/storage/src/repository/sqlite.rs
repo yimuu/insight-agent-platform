@@ -13,13 +13,13 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use insight_durable::common::adapter::{
-    self as common_contract_adapter, build_terminal_response_snapshot, canonical_intent_hash,
+    self as common_contract_adapter, build_terminal_run_stream_snapshot, canonical_intent_hash,
     canonical_json, canonical_value, decode_public_projection_decision,
     decode_stored_execution_event, durable_public_event_envelope, event_id, i64_from_u64,
     parse_admission_state, parse_run_lifecycle, payload_id, project_terminal_tool_results,
     public_event_id, public_event_ordinal, u64_from_i64, validate_inline_payload,
     StoredExecutionEventRow, StoredModelCallUsage, StoredPublicProjectionDecision,
-    StoredResponseItem, StoredSucceededModelToolCall, TerminalResponseSnapshotInput,
+    StoredResponseItem, StoredSucceededModelToolCall, TerminalRunStreamSnapshotInput,
 };
 use insight_durable::model::adapter as model_adapter;
 use insight_durable::production::adapter as production_contract_adapter;
@@ -27,9 +27,10 @@ use insight_durable::{
     ClaimSchedulerRunCommand, FencedSchedulerRunCommand, PendingMigrationWait,
     ProductionRunRepository, RunRepositoryCapability, WorkNotificationStream, WorkWakeupRepository,
 };
-use insight_engine::response::adapter::{
-    durable_response_snapshot_new, response_terminal_kind_parse, response_usage_status_parse,
+use insight_engine::run_stream::adapter::{
+    durable_run_stream_snapshot_new, run_terminal_kind_parse,
 };
+use insight_engine::run_stream::RUN_STREAM_PROTOCOL_VERSION;
 
 use insight_engine::{
     ContentHash, DefinitionRevisionId, DeploymentRevisionId, ExecutionEventContext,
@@ -48,7 +49,7 @@ use super::sqlite_projection::{
     finalize_projection_checkpoints, verify_projection_checkpoint_batch,
 };
 use super::{
-    CommitReceipt, CreateRunCommand, DurableRepository, DurableResponseSnapshot,
+    CommitReceipt, CreateRunCommand, DurableRepository, DurableRunStreamSnapshot,
     FullConversationRunAdmission, PlanInstallOutcome, PlanPublicationOutcome, PublicationHead,
     PublicationOrigin, PublishVersionedPlanCommand, RepositoryError, RunProjection,
     RunTransitionCommand, VersionedPlan, VersionedPlanCatalog, REPOSITORY_CONSTRAINT_CONFLICT,
@@ -870,7 +871,7 @@ impl DurableRepository for SqliteDurableRepository {
                 command.run_id(),
             )
             .await?;
-            persist_terminal_response_snapshot_sqlite(
+            persist_terminal_run_stream_snapshot_sqlite(
                 &mut transaction,
                 command.run_id(),
                 command.next_lifecycle(),
@@ -937,11 +938,11 @@ impl DurableRepository for SqliteDurableRepository {
         row.map(|row| projection_from_row(run_id, &row)).transpose()
     }
 
-    async fn load_response_snapshot(
+    async fn load_run_stream_snapshot(
         &self,
         run_id: &RunId,
-    ) -> Result<Option<DurableResponseSnapshot>, RepositoryError> {
-        load_response_snapshot_sqlite(&self.pool, run_id).await
+    ) -> Result<Option<DurableRunStreamSnapshot>, RepositoryError> {
+        load_run_stream_snapshot_sqlite(&self.pool, run_id).await
     }
 }
 
@@ -1024,7 +1025,7 @@ pub(crate) async fn register_terminal_artifact_retention_sqlite(
     Ok(())
 }
 
-pub(crate) async fn persist_terminal_response_snapshot_sqlite(
+pub(crate) async fn persist_terminal_run_stream_snapshot_sqlite(
     transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
     lifecycle: RunLifecycle,
@@ -1132,7 +1133,7 @@ pub(crate) async fn persist_terminal_response_snapshot_sqlite(
         super::sqlite_retrieval_publication::load_terminal_retrievals_sqlite(transaction, run_id)
             .await?;
     validate_terminal_retrieval_artifacts_sqlite(transaction, run_id, &retrievals).await?;
-    let snapshot = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
+    let snapshot = build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
         run_id,
         lifecycle,
         output,
@@ -1143,20 +1144,16 @@ pub(crate) async fn persist_terminal_response_snapshot_sqlite(
         retrievals,
     })?;
     sqlx::query(
-        "INSERT INTO response_snapshots (
-            run_id,response_id,terminal_kind,response_status,response_payload,
-            workflow_payload,public_item_manifest,usage,usage_status,snapshot_hash,created_at
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+        "INSERT INTO run_stream_snapshots (
+            run_id,protocol,terminal_kind,run_payload,
+            public_item_manifest,snapshot_hash,created_at
+         ) VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)",
     )
     .bind(run_id.as_str())
-    .bind(&snapshot.response_id)
+    .bind(RUN_STREAM_PROTOCOL_VERSION)
     .bind(snapshot.terminal_kind.as_str())
-    .bind(snapshot.response_status)
-    .bind(canonical_json(&snapshot.response)?)
-    .bind(canonical_json(&snapshot.workflow)?)
+    .bind(canonical_json(&snapshot.run)?)
     .bind(canonical_json(&snapshot.manifest)?)
-    .bind(snapshot.usage.as_ref().map(canonical_json).transpose()?)
-    .bind(snapshot.usage_status.as_str())
     .bind(snapshot.snapshot_hash.as_str())
     .execute(&mut **transaction)
     .await
@@ -1167,7 +1164,7 @@ pub(crate) async fn persist_terminal_response_snapshot_sqlite(
 async fn load_terminal_tool_results_sqlite(
     transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
-) -> Result<Vec<insight_engine::response::WorkflowToolResult>, RepositoryError> {
+) -> Result<Vec<insight_engine::run_stream::RunToolResult>, RepositoryError> {
     let rows = sqlx::query(
         "SELECT activation_id,attempt_no,model_call_no,call_index,call_id,tool_name,
                 effective_public_policy,result_json
@@ -1229,12 +1226,12 @@ async fn load_terminal_tool_results_sqlite(
 async fn validate_terminal_tool_result_artifacts_sqlite(
     transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
-    tool_results: &[insight_engine::response::WorkflowToolResult],
+    tool_results: &[insight_engine::run_stream::RunToolResult],
 ) -> Result<(), RepositoryError> {
     for artifact in tool_results
         .iter()
         .flat_map(|result| result.content())
-        .filter_map(insight_engine::response::WorkflowToolContent::artifact)
+        .filter_map(insight_engine::run_stream::RunToolContent::artifact)
     {
         let row = sqlx::query(
             "SELECT content_hash,size_bytes,media_type,artifact_state
@@ -1273,12 +1270,12 @@ async fn validate_terminal_tool_result_artifacts_sqlite(
 async fn validate_terminal_retrieval_artifacts_sqlite(
     transaction: &mut Transaction<'_, Sqlite>,
     run_id: &RunId,
-    retrievals: &[insight_engine::response::WorkflowRetrieval],
+    retrievals: &[insight_engine::run_stream::RunRetrieval],
 ) -> Result<(), RepositoryError> {
     for artifact in retrievals
         .iter()
         .flat_map(|retrieval| retrieval.results())
-        .filter_map(insight_engine::response::WorkflowRetrievalResult::artifact)
+        .filter_map(insight_engine::run_stream::RunRetrievalResult::artifact)
     {
         let row = sqlx::query(
             "SELECT content_hash,size_bytes,media_type,artifact_state
@@ -1314,14 +1311,14 @@ async fn validate_terminal_retrieval_artifacts_sqlite(
     Ok(())
 }
 
-async fn load_response_snapshot_sqlite(
+async fn load_run_stream_snapshot_sqlite(
     pool: &SqlitePool,
     run_id: &RunId,
-) -> Result<Option<DurableResponseSnapshot>, RepositoryError> {
+) -> Result<Option<DurableRunStreamSnapshot>, RepositoryError> {
     let row = sqlx::query(
-        "SELECT response_id,terminal_kind,response_payload,workflow_payload,
-                public_item_manifest,usage,usage_status,snapshot_hash
-         FROM response_snapshots WHERE run_id=?",
+        "SELECT protocol,terminal_kind,run_payload,
+                public_item_manifest,snapshot_hash
+         FROM run_stream_snapshots WHERE run_id=?",
     )
     .bind(run_id.as_str())
     .fetch_optional(pool)
@@ -1335,26 +1332,21 @@ async fn load_response_snapshot_sqlite(
             )
             .map_err(|_| RepositoryError::invalid_data())
         };
-        let usage = row
-            .try_get::<Option<String>, _>("usage")
+        if row
+            .try_get::<String, _>("protocol")
             .map_err(|_| RepositoryError::invalid_data())?
-            .map(|value| serde_json::from_str(&value).map_err(|_| RepositoryError::invalid_data()))
-            .transpose()?;
-        durable_response_snapshot_new(
-            row.try_get("response_id")
-                .map_err(|_| RepositoryError::invalid_data())?,
-            response_terminal_kind_parse(
+            != RUN_STREAM_PROTOCOL_VERSION
+        {
+            return Err(RepositoryError::invalid_data());
+        }
+        durable_run_stream_snapshot_new(
+            run_id.as_str().to_owned(),
+            run_terminal_kind_parse(
                 &row.try_get::<String, _>("terminal_kind")
                     .map_err(|_| RepositoryError::invalid_data())?,
             )?,
-            decode("response_payload")?,
-            decode("workflow_payload")?,
+            decode("run_payload")?,
             decode("public_item_manifest")?,
-            usage,
-            response_usage_status_parse(
-                &row.try_get::<String, _>("usage_status")
-                    .map_err(|_| RepositoryError::invalid_data())?,
-            )?,
             ContentHash::parse(
                 row.try_get::<String, _>("snapshot_hash")
                     .map_err(|_| RepositoryError::invalid_data())?,
@@ -2616,7 +2608,7 @@ mod terminal_tool_result_tests {
 
     async fn terminal_attempt(pool: &SqlitePool, run_id: &RunId) -> Result<(), RepositoryError> {
         let mut transaction = pool.begin().await.map_err(RepositoryError::storage)?;
-        let result = persist_terminal_response_snapshot_sqlite(
+        let result = persist_terminal_run_stream_snapshot_sqlite(
             &mut transaction,
             run_id,
             RunLifecycle::Cancelled,
@@ -2670,11 +2662,10 @@ mod terminal_tool_result_tests {
             "CREATE TABLE artifacts (
                 run_id TEXT,artifact_id TEXT,content_hash TEXT,size_bytes INTEGER,
                 media_type TEXT,artifact_state TEXT
-             )",
-            "CREATE TABLE response_snapshots (
-                run_id TEXT PRIMARY KEY,response_id TEXT,terminal_kind TEXT,response_status TEXT,
-                response_payload TEXT,workflow_payload TEXT,public_item_manifest TEXT,
-                usage TEXT,usage_status TEXT,snapshot_hash TEXT,created_at TEXT
+            )",
+            "CREATE TABLE run_stream_snapshots (
+                run_id TEXT PRIMARY KEY,protocol TEXT,terminal_kind TEXT,run_payload TEXT,
+                public_item_manifest TEXT,snapshot_hash TEXT,created_at TEXT
              )",
         ] {
             sqlx::query(statement).execute(&pool).await.unwrap();
@@ -2756,11 +2747,11 @@ mod terminal_tool_result_tests {
             .unwrap();
         terminal_attempt(&pool, &run_id).await.unwrap();
 
-        let snapshot = load_response_snapshot_sqlite(&pool, &run_id)
+        let snapshot = load_run_stream_snapshot_sqlite(&pool, &run_id)
             .await
             .unwrap()
             .unwrap();
-        let tool_results = snapshot.workflow()["tool_results"].as_array().unwrap();
+        let tool_results = snapshot.run()["tool_results"].as_array().unwrap();
         assert_eq!(tool_results.len(), 1, "the private result must be omitted");
         assert_eq!(tool_results[0]["call_id"], "call_public");
         assert_eq!(tool_results[0]["content"][0]["type"], "output_file");
@@ -2768,9 +2759,9 @@ mod terminal_tool_result_tests {
             tool_results[0]["content"][0]["artifact"]["content_hash"],
             CONTENT_HASH
         );
-        assert_eq!(snapshot.workflow()["retrievals"], json!([]));
+        assert_eq!(snapshot.run()["retrievals"], json!([]));
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM response_snapshots")
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM run_stream_snapshots")
                 .fetch_one(&pool)
                 .await
                 .unwrap(),

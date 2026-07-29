@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use insight_engine::response::WorkflowToolPublicProjection;
+use insight_engine::run_stream::RunToolPublicProjection;
 use insight_engine::schema::compile_schema_2020;
 use insight_engine::worker::{ModelToolCallBatch, ResponseItemAuthority};
 use insight_engine::{
@@ -47,10 +47,9 @@ pub(crate) fn prepare_model_function_call_publications(
             .get(call.name())
             .ok_or_else(RepositoryError::invalid_data)?;
         validate_tool_arguments(action, call.arguments())?;
-        let projection = WorkflowToolPublicProjection::from_frozen_effective_policy(
-            action.effective_public_policy(),
-        )
-        .map_err(|_| RepositoryError::invalid_data())?;
+        let projection =
+            RunToolPublicProjection::from_frozen_effective_policy(action.effective_public_policy())
+                .map_err(|_| RepositoryError::invalid_data())?;
         let authorized = publish && projection.raw_argument_deltas_authorized();
         let publication = supplied.remove(&call.index());
         if !authorized {

@@ -44,10 +44,10 @@ use insight_engine::{
     artifact_store::WorkerArtifactStore,
     plan::{DescriptorValue, LinkedPlan},
     repository::{adapter as repository_adapter, RepositoryError, REPOSITORY_DATA_INVALID},
-    response::{
-        LiveResponseBroker, LiveResponsePayload, LiveResponsePublication,
-        LiveResponsePublishOutcome, LiveWorkflowObservationIdentity, WorkflowPublicError,
-        WorkflowToolPublicProjection,
+    run_stream::{
+        LiveRunObservationIdentity, LiveRunStreamBroker, LiveRunStreamPayload,
+        LiveRunStreamPublication, LiveRunStreamPublishOutcome, RunPublicError,
+        RunToolPublicProjection,
     },
     worker::{
         TaskExecutionRequest, WorkerExecutionContext, WorkerExecutorRegistry, WorkerFailure,
@@ -355,8 +355,8 @@ where
 pub trait ModelToolLiveObserver: Send + Sync {
     fn publish_model_tool_observation(
         &self,
-        publication: LiveResponsePublication,
-    ) -> LiveResponsePublishOutcome;
+        publication: LiveRunStreamPublication,
+    ) -> LiveRunStreamPublishOutcome;
 }
 
 /// Observer used by the compatibility pump API. It deliberately produces no
@@ -367,9 +367,9 @@ pub struct NoopModelToolLiveObserver;
 impl ModelToolLiveObserver for NoopModelToolLiveObserver {
     fn publish_model_tool_observation(
         &self,
-        _publication: LiveResponsePublication,
-    ) -> LiveResponsePublishOutcome {
-        LiveResponsePublishOutcome::NoSubscriber
+        _publication: LiveRunStreamPublication,
+    ) -> LiveRunStreamPublishOutcome {
+        LiveRunStreamPublishOutcome::NoSubscriber
     }
 }
 
@@ -378,8 +378,8 @@ impl ModelToolLiveObserver for NoopModelToolLiveObserver {
 pub trait SchedulerRetrievalLiveObserver: Send + Sync {
     fn publish_retrieval_observation(
         &self,
-        publication: LiveResponsePublication,
-    ) -> LiveResponsePublishOutcome;
+        publication: LiveRunStreamPublication,
+    ) -> LiveRunStreamPublishOutcome;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -388,32 +388,32 @@ pub struct NoopSchedulerRetrievalLiveObserver;
 impl SchedulerRetrievalLiveObserver for NoopSchedulerRetrievalLiveObserver {
     fn publish_retrieval_observation(
         &self,
-        _publication: LiveResponsePublication,
-    ) -> LiveResponsePublishOutcome {
-        LiveResponsePublishOutcome::NoSubscriber
+        _publication: LiveRunStreamPublication,
+    ) -> LiveRunStreamPublishOutcome {
+        LiveRunStreamPublishOutcome::NoSubscriber
     }
 }
 
 impl<T> SchedulerRetrievalLiveObserver for T
 where
-    T: LiveResponseBroker + ?Sized,
+    T: LiveRunStreamBroker + ?Sized,
 {
     fn publish_retrieval_observation(
         &self,
-        publication: LiveResponsePublication,
-    ) -> LiveResponsePublishOutcome {
+        publication: LiveRunStreamPublication,
+    ) -> LiveRunStreamPublishOutcome {
         self.publish(publication)
     }
 }
 
 impl<T> ModelToolLiveObserver for T
 where
-    T: LiveResponseBroker + ?Sized,
+    T: LiveRunStreamBroker + ?Sized,
 {
     fn publish_model_tool_observation(
         &self,
-        publication: LiveResponsePublication,
-    ) -> LiveResponsePublishOutcome {
+        publication: LiveRunStreamPublication,
+    ) -> LiveRunStreamPublishOutcome {
         self.publish(publication)
     }
 }
@@ -1858,8 +1858,8 @@ struct ModelToolLivePublication<'a, O: ?Sized> {
 }
 
 struct ModelToolLivePublicationState {
-    projection: WorkflowToolPublicProjection,
-    identity: LiveWorkflowObservationIdentity,
+    projection: RunToolPublicProjection,
+    identity: LiveRunObservationIdentity,
     call_id: String,
     tool_name: String,
     started_arguments: Option<serde_json::Value>,
@@ -1878,7 +1878,7 @@ where
     /// Any projection corruption disables observation without affecting work.
     fn from_validated_claim(observer: &'a O, claim: &ModelToolTaskClaim) -> Self {
         let state = (|| {
-            let projection = WorkflowToolPublicProjection::from_frozen_effective_policy(
+            let projection = RunToolPublicProjection::from_frozen_effective_policy(
                 claim.identity().action().effective_public_policy(),
             )
             .ok()?;
@@ -1889,7 +1889,7 @@ where
                 .project_validated_completed_arguments(claim.arguments())
                 .ok()?;
             let started_arguments = completed_arguments.workflow_started_arguments().cloned();
-            let identity = LiveWorkflowObservationIdentity::new(
+            let identity = LiveRunObservationIdentity::new(
                 claim.run_id().clone(),
                 claim.parent_activation_id().clone(),
                 claim.tool_attempt_no(),
@@ -1915,7 +1915,7 @@ where
         let Some(state) = &self.state else {
             return;
         };
-        let payload = LiveResponsePayload::ToolStarted {
+        let payload = LiveRunStreamPayload::ToolStarted {
             call_id: state.call_id.clone(),
             tool_name: state.tool_name.clone(),
             arguments: state.started_arguments.clone(),
@@ -1972,12 +1972,12 @@ where
         }
         state.progress_total = state.progress_total.saturating_add(1);
         state.progress_in_window = state.progress_in_window.saturating_add(1);
-        let payload = LiveResponsePayload::ToolProgress {
+        let payload = LiveRunStreamPayload::ToolProgress {
             call_id: state.call_id.clone(),
             tool_name: state.tool_name.clone(),
             content,
         };
-        let Ok(publication) = LiveResponsePublication::new_workflow_observation(
+        let Ok(publication) = LiveRunStreamPublication::new_run_observation(
             state.identity.clone(),
             state.next_local_sequence,
             payload,
@@ -1989,9 +1989,9 @@ where
         Ok(
             if matches!(
                 outcome,
-                LiveResponsePublishOutcome::Enqueued
-                    | LiveResponsePublishOutcome::EnqueuedAfterGap
-                    | LiveResponsePublishOutcome::EnqueuedAfterBestEffortLoss
+                LiveRunStreamPublishOutcome::Enqueued
+                    | LiveRunStreamPublishOutcome::EnqueuedAfterGap
+                    | LiveRunStreamPublishOutcome::EnqueuedAfterBestEffortLoss
             ) {
                 worker_adapter::ModelToolProgressDisposition::Published
             } else {
@@ -2036,7 +2036,7 @@ where
             Ok(None) => Vec::new(),
             Err(_) => return,
         };
-        let payload = LiveResponsePayload::ToolCompleted {
+        let payload = LiveRunStreamPayload::ToolCompleted {
             call_id: state.call_id.clone(),
             tool_name: state.tool_name.clone(),
             content,
@@ -2052,7 +2052,7 @@ where
         let Some(error) = model_tool_public_error(intent) else {
             return;
         };
-        let payload = LiveResponsePayload::ToolFailed {
+        let payload = LiveRunStreamPayload::ToolFailed {
             call_id: state.call_id.clone(),
             tool_name: state.tool_name.clone(),
             error,
@@ -2061,11 +2061,11 @@ where
         self.emit(payload);
     }
 
-    fn emit(&mut self, payload: LiveResponsePayload) {
+    fn emit(&mut self, payload: LiveRunStreamPayload) {
         let Some(state) = &mut self.state else {
             return;
         };
-        let Ok(publication) = LiveResponsePublication::new_workflow_observation(
+        let Ok(publication) = LiveRunStreamPublication::new_run_observation(
             state.identity.clone(),
             state.next_local_sequence,
             payload,
@@ -2088,7 +2088,7 @@ async fn receive_model_tool_progress(
     }
 }
 
-fn model_tool_public_error(intent: &ModelToolTaskOutcome) -> Option<WorkflowPublicError> {
+fn model_tool_public_error(intent: &ModelToolTaskOutcome) -> Option<RunPublicError> {
     let (code, message) = match intent {
         ModelToolTaskOutcome::Failed {
             class: ModelToolFailureClass::Safe,
@@ -2111,7 +2111,7 @@ fn model_tool_public_error(intent: &ModelToolTaskOutcome) -> Option<WorkflowPubl
         ModelToolTaskOutcome::Cancelled { code, .. } => (code, "The tool execution was cancelled."),
         ModelToolTaskOutcome::Succeeded { .. } => return None,
     };
-    Some(WorkflowPublicError {
+    Some(RunPublicError {
         code: code.clone(),
         message: message.to_owned(),
     })
@@ -2141,7 +2141,7 @@ fn model_tool_outcome_from_worker_success(
             EffectEvidence::Started,
         );
     }
-    let public_projection = match WorkflowToolPublicProjection::from_frozen_effective_policy(
+    let public_projection = match RunToolPublicProjection::from_frozen_effective_policy(
         claim.identity().action().effective_public_policy(),
     ) {
         Ok(projection) => projection,
@@ -2763,7 +2763,7 @@ fn publish_committed_retrieval_observation(
     else {
         return;
     };
-    let Ok(identity) = LiveWorkflowObservationIdentity::new(
+    let Ok(identity) = LiveRunObservationIdentity::new(
         claim.run_id().clone(),
         claim.activation_id().clone(),
         claim.envelope().attempt_no(),
@@ -2771,12 +2771,12 @@ fn publish_committed_retrieval_observation(
     ) else {
         return;
     };
-    let payload = LiveResponsePayload::RetrievalCompleted {
+    let payload = LiveRunStreamPayload::RetrievalCompleted {
         retrieval_id: retrieval.retrieval_id().to_owned(),
         query: retrieval.query().map(ToOwned::to_owned),
         results: retrieval.results().to_vec(),
     };
-    let Ok(publication) = LiveResponsePublication::new_workflow_observation(identity, 0, payload)
+    let Ok(publication) = LiveRunStreamPublication::new_run_observation(identity, 0, payload)
     else {
         return;
     };
@@ -2812,7 +2812,7 @@ mod tests {
         SchedulerStoredValue, StageArtifactCommand, StoredInlinePayload, VerifyArtifactCommand,
         VersionedPlan, VersionedPlanCatalog,
     };
-    use insight_engine::response::ResponseStreamEvent;
+    use insight_engine::run_stream::RunStreamEvent;
     use insight_engine::{
         plan::{DataPortId, VersionTag},
         worker::{
@@ -3233,19 +3233,19 @@ mod tests {
     }
 
     struct RecordingModelToolObserver {
-        publications: StdMutex<Vec<LiveResponsePublication>>,
-        outcome: LiveResponsePublishOutcome,
+        publications: StdMutex<Vec<LiveRunStreamPublication>>,
+        outcome: LiveRunStreamPublishOutcome,
     }
 
     impl RecordingModelToolObserver {
-        fn returning(outcome: LiveResponsePublishOutcome) -> Self {
+        fn returning(outcome: LiveRunStreamPublishOutcome) -> Self {
             Self {
                 publications: StdMutex::new(Vec::new()),
                 outcome,
             }
         }
 
-        fn publications(&self) -> Vec<LiveResponsePublication> {
+        fn publications(&self) -> Vec<LiveRunStreamPublication> {
             self.publications.lock().unwrap().clone()
         }
     }
@@ -3253,8 +3253,8 @@ mod tests {
     impl ModelToolLiveObserver for RecordingModelToolObserver {
         fn publish_model_tool_observation(
             &self,
-            publication: LiveResponsePublication,
-        ) -> LiveResponsePublishOutcome {
+            publication: LiveRunStreamPublication,
+        ) -> LiveRunStreamPublishOutcome {
             self.publications.lock().unwrap().push(publication);
             self.outcome
         }
@@ -3539,7 +3539,7 @@ mod tests {
             let observer = Arc::new(RecordingModelToolObserver::returning(
                 // A closed broker is observational only. Keeping this outcome
                 // in the happy-path test proves it cannot change execution.
-                LiveResponsePublishOutcome::RunClosed,
+                LiveRunStreamPublishOutcome::RunClosed,
             ));
             let calls = Arc::new(AtomicUsize::new(0));
             let registry = model_tool_registry(
@@ -3577,7 +3577,7 @@ mod tests {
             let publications = observer.publications();
             assert_eq!(publications.len(), 2);
             for (expected_sequence, publication) in publications.iter().enumerate() {
-                let identity = publication.workflow_observation_identity().unwrap();
+                let identity = publication.run_observation_identity().unwrap();
                 assert_eq!(identity.run_id(), &expected_run_id);
                 assert_eq!(identity.activation_id(), &expected_activation_id);
                 assert_eq!(identity.attempt_no(), AttemptNo::FIRST);
@@ -3586,7 +3586,7 @@ mod tests {
             }
             assert!(matches!(
                 publications[0].clone().into_public_event(11),
-                ResponseStreamEvent::WorkflowToolStarted {
+                RunStreamEvent::RunToolStarted {
                     sequence_number: 11,
                     call_id,
                     tool_name,
@@ -3596,7 +3596,7 @@ mod tests {
                     && arguments == expected_arguments
             ));
             match publications[1].clone().into_public_event(12) {
-                ResponseStreamEvent::WorkflowToolCompleted {
+                RunStreamEvent::RunToolCompleted {
                     sequence_number: 12,
                     call_id,
                     tool_name,
@@ -3640,7 +3640,7 @@ mod tests {
                 MockModelToolHeartbeat::Renewed,
             ],
         );
-        let observer = RecordingModelToolObserver::returning(LiveResponsePublishOutcome::Enqueued);
+        let observer = RecordingModelToolObserver::returning(LiveRunStreamPublishOutcome::Enqueued);
         let outcomes = Arc::new(StdMutex::new(Vec::new()));
         let calls = Arc::new(AtomicUsize::new(0));
         let registry = model_tool_registry(
@@ -3705,28 +3705,25 @@ mod tests {
             .map(|(sequence, publication)| publication.into_public_event(sequence as u64))
             .collect::<Vec<_>>();
         assert_eq!(events.len(), 10);
-        assert!(matches!(
-            events[0],
-            ResponseStreamEvent::WorkflowToolStarted { .. }
-        ));
+        assert!(matches!(events[0], RunStreamEvent::RunToolStarted { .. }));
         assert!(matches!(
             events[1],
-            ResponseStreamEvent::WorkflowToolProgress { ref content, .. }
+            RunStreamEvent::RunToolProgress { ref content, .. }
                 if content[0].json() == Some(&json!({"completed": 1, "total": 10}))
         ));
         assert!(matches!(
             events[2],
-            ResponseStreamEvent::WorkflowToolProgress { ref content, .. }
+            RunStreamEvent::RunToolProgress { ref content, .. }
                 if content[0].json() == Some(&json!({"completed": 2, "total": 10}))
         ));
         assert!(matches!(
             events[8],
-            ResponseStreamEvent::WorkflowToolProgress { ref content, .. }
+            RunStreamEvent::RunToolProgress { ref content, .. }
                 if content[0].json() == Some(&json!({"completed": 8, "total": 10}))
         ));
         assert!(matches!(
             events[9],
-            ResponseStreamEvent::WorkflowToolCompleted {
+            RunStreamEvent::RunToolCompleted {
                 duration_ms: 1,
                 ref content,
                 ..
@@ -3759,7 +3756,7 @@ mod tests {
                 MockModelToolHeartbeat::Renewed,
             ],
         );
-        let observer = RecordingModelToolObserver::returning(LiveResponsePublishOutcome::Enqueued);
+        let observer = RecordingModelToolObserver::returning(LiveRunStreamPublishOutcome::Enqueued);
         let registry = model_tool_registry(
             ModelToolExecutorBehavior::Fixed(Ok(model_tool_result(json!({
                 "raw_secret": "must never publish"
@@ -3802,7 +3799,7 @@ mod tests {
                 MockModelToolHeartbeat::Renewed,
             ],
         );
-        let observer = RecordingModelToolObserver::returning(LiveResponsePublishOutcome::Enqueued);
+        let observer = RecordingModelToolObserver::returning(LiveRunStreamPublishOutcome::Enqueued);
         let registry = model_tool_registry(
             ModelToolExecutorBehavior::Fixed(Ok(model_tool_result(json!({
                 "raw_secret": "must never publish"
@@ -3830,14 +3827,14 @@ mod tests {
         assert_eq!(publications.len(), 2);
         assert!(matches!(
             publications[0].clone().into_public_event(0),
-            ResponseStreamEvent::WorkflowToolStarted {
+            RunStreamEvent::RunToolStarted {
                 arguments: None,
                 ..
             }
         ));
         assert!(matches!(
             publications[1].clone().into_public_event(1),
-            ResponseStreamEvent::WorkflowToolCompleted { ref content, .. }
+            RunStreamEvent::RunToolCompleted { ref content, .. }
                 if content.is_empty()
         ));
         let wire = serde_json::to_string(
@@ -3877,7 +3874,7 @@ mod tests {
                 MockModelToolHeartbeat::Renewed,
             ],
         );
-        let observer = RecordingModelToolObserver::returning(LiveResponsePublishOutcome::Enqueued);
+        let observer = RecordingModelToolObserver::returning(LiveRunStreamPublishOutcome::Enqueued);
         let registry = model_tool_registry(
             ModelToolExecutorBehavior::Fixed(Ok(model_tool_result(json!({
                 "raw_secret": "fails only the public projection"
@@ -3918,11 +3915,11 @@ mod tests {
         assert_eq!(publications.len(), 2);
         assert!(matches!(
             publications[0].clone().into_public_event(0),
-            ResponseStreamEvent::WorkflowToolStarted { .. }
+            RunStreamEvent::RunToolStarted { .. }
         ));
         assert!(matches!(
             publications[1].clone().into_public_event(1),
-            ResponseStreamEvent::WorkflowToolFailed { ref error, .. }
+            RunStreamEvent::RunToolFailed { ref error, .. }
                 if error.code == MODEL_TOOL_PUBLIC_RESULT_INVALID
                     && error.message == "The tool could not be completed."
         ));
@@ -3949,7 +3946,7 @@ mod tests {
         )
         .scheduling_retry();
         let retry_observer =
-            RecordingModelToolObserver::returning(LiveResponsePublishOutcome::Enqueued);
+            RecordingModelToolObserver::returning(LiveRunStreamPublishOutcome::Enqueued);
         let retry_registry = model_tool_registry(
             ModelToolExecutorBehavior::Fixed(Err(WorkerFailure::new(
                 WorkerFailureClass::InfrastructureFailure,
@@ -3981,7 +3978,7 @@ mod tests {
         assert_eq!(retry_publications[0].local_sequence(), 0);
         assert!(matches!(
             retry_publications[0].clone().into_public_event(0),
-            ResponseStreamEvent::WorkflowToolStarted { .. }
+            RunStreamEvent::RunToolStarted { .. }
         ));
 
         let final_claim = model_tool_worker_claim_with_public_policy(
@@ -3997,7 +3994,7 @@ mod tests {
             ],
         );
         let final_observer =
-            RecordingModelToolObserver::returning(LiveResponsePublishOutcome::Enqueued);
+            RecordingModelToolObserver::returning(LiveRunStreamPublishOutcome::Enqueued);
         let safe_failure = WorkerFailure::safe_business(
             "TOOL_REJECTED",
             false,
@@ -4034,7 +4031,7 @@ mod tests {
         assert_eq!(final_publications.len(), 2);
         assert_eq!(final_publications[1].local_sequence(), 1);
         match final_publications[1].clone().into_public_event(1) {
-            ResponseStreamEvent::WorkflowToolFailed { error, .. } => {
+            RunStreamEvent::RunToolFailed { error, .. } => {
                 assert_eq!(error.code, "TOOL_REJECTED");
                 assert_eq!(error.message, "The tool request was rejected.");
             }
@@ -4065,7 +4062,7 @@ mod tests {
             let repository =
                 MockModelToolRepository::new(claim, [MockModelToolHeartbeat::Renewed, heartbeat]);
             let observer =
-                RecordingModelToolObserver::returning(LiveResponsePublishOutcome::Enqueued);
+                RecordingModelToolObserver::returning(LiveRunStreamPublishOutcome::Enqueued);
             let registry = model_tool_registry(
                 ModelToolExecutorBehavior::Fixed(Ok(model_tool_result(json!({
                     "private": "result"
@@ -4102,7 +4099,7 @@ mod tests {
             assert_eq!(publications.len(), 1);
             assert!(matches!(
                 publications[0].clone().into_public_event(0),
-                ResponseStreamEvent::WorkflowToolStarted { .. }
+                RunStreamEvent::RunToolStarted { .. }
             ));
         }
     }
@@ -4283,7 +4280,7 @@ mod tests {
             }),
         );
         let repository = MockModelToolRepository::new(claim, [MockModelToolHeartbeat::Renewed]);
-        let observer = RecordingModelToolObserver::returning(LiveResponsePublishOutcome::Enqueued);
+        let observer = RecordingModelToolObserver::returning(LiveRunStreamPublishOutcome::Enqueued);
         let calls = Arc::new(AtomicUsize::new(0));
         let entered = Arc::new(Notify::new());
         let registry = model_tool_registry(
@@ -4327,7 +4324,7 @@ mod tests {
         assert_eq!(publications.len(), 1);
         assert!(matches!(
             publications[0].clone().into_public_event(0),
-            ResponseStreamEvent::WorkflowToolStarted { .. }
+            RunStreamEvent::RunToolStarted { .. }
         ));
     }
 

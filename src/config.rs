@@ -118,14 +118,14 @@ pub enum DeploymentMode {
 /// deltas are bounded observations and never become recovery authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LiveResponseBrokerProvider {
+pub enum LiveRunStreamBrokerProvider {
     InProcess,
     PostgresNotify,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResponseStreamConfig {
-    pub broker: LiveResponseBrokerProvider,
+pub struct RunStreamConfig {
+    pub broker: LiveRunStreamBrokerProvider,
     pub body_queue_capacity: usize,
     pub control_queue_capacity: usize,
     pub max_frame_bytes: usize,
@@ -212,7 +212,7 @@ pub struct RuntimeConfig {
     pub sse_keep_alive_interval: Duration,
     pub subscriber_capacity: usize,
     pub scheduler: SchedulerConfig,
-    pub response_stream: ResponseStreamConfig,
+    pub run_stream: RunStreamConfig,
     /// Platform hard bounds. Author-level LLM tool budgets must not exceed
     /// these values when a Deployment Revision is linked.
     pub max_llm_tool_rounds: u32,
@@ -522,7 +522,7 @@ struct RuntimeYaml {
     #[serde(default)]
     scheduler: Option<SchedulerYaml>,
     #[serde(default)]
-    response_stream: Option<ResponseStreamYaml>,
+    run_stream: Option<RunStreamYaml>,
     #[serde(default)]
     max_llm_tool_rounds: Option<u32>,
     #[serde(default)]
@@ -838,8 +838,8 @@ struct SchedulerYaml {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ResponseStreamYaml {
-    broker: LiveResponseBrokerProvider,
+struct RunStreamYaml {
+    broker: LiveRunStreamBrokerProvider,
     body_queue_capacity: usize,
     control_queue_capacity: usize,
     max_frame_bytes: usize,
@@ -1191,7 +1191,7 @@ fn resolve_runtime(
             "runtime.shutdown_hard_deadline must be greater than runtime.shutdown_grace_period",
         ));
     }
-    let response_stream = resolve_response_stream(raw.response_stream, deployment_mode)?;
+    let run_stream = resolve_run_stream(raw.run_stream, deployment_mode)?;
     let scheduler = resolve_scheduler(raw.scheduler)?;
     let max_llm_tool_rounds = raw.max_llm_tool_rounds.unwrap_or(16);
     let max_llm_tool_calls = raw.max_llm_tool_calls.unwrap_or(64);
@@ -1217,7 +1217,7 @@ fn resolve_runtime(
         )?,
         subscriber_capacity: raw.subscriber_capacity,
         scheduler,
-        response_stream,
+        run_stream,
         max_llm_tool_rounds,
         max_llm_tool_calls,
         public_event_retention,
@@ -1366,15 +1366,15 @@ fn resolve_scheduler(raw: Option<SchedulerYaml>) -> Result<SchedulerConfig, Plat
     Ok(scheduler)
 }
 
-fn resolve_response_stream(
-    raw: Option<ResponseStreamYaml>,
+fn resolve_run_stream(
+    raw: Option<RunStreamYaml>,
     deployment_mode: DeploymentMode,
-) -> Result<ResponseStreamConfig, PlatformConfigError> {
+) -> Result<RunStreamConfig, PlatformConfigError> {
     let Some(raw) = raw else {
-        return Ok(ResponseStreamConfig {
+        return Ok(RunStreamConfig {
             broker: match deployment_mode {
-                DeploymentMode::Production => LiveResponseBrokerProvider::PostgresNotify,
-                DeploymentMode::SingleProcessDevelopment => LiveResponseBrokerProvider::InProcess,
+                DeploymentMode::Production => LiveRunStreamBrokerProvider::PostgresNotify,
+                DeploymentMode::SingleProcessDevelopment => LiveRunStreamBrokerProvider::InProcess,
             },
             body_queue_capacity: 256,
             control_queue_capacity: 32,
@@ -1394,12 +1394,12 @@ fn resolve_response_stream(
         || raw.max_item_bytes < raw.max_frame_bytes
         || raw.max_run_bytes < raw.max_item_bytes
         || raw.max_run_bytes > 256 * 1_024 * 1_024
-        || (raw.broker == LiveResponseBrokerProvider::PostgresNotify
+        || (raw.broker == LiveRunStreamBrokerProvider::PostgresNotify
             && raw.max_frame_bytes > 4 * 1_024)
     {
-        return Err(runtime_error("runtime.response_stream bounds are invalid"));
+        return Err(runtime_error("runtime.run_stream bounds are invalid"));
     }
-    Ok(ResponseStreamConfig {
+    Ok(RunStreamConfig {
         broker: raw.broker,
         body_queue_capacity: raw.body_queue_capacity,
         control_queue_capacity: raw.control_queue_capacity,
@@ -1408,11 +1408,11 @@ fn resolve_response_stream(
         max_run_bytes: raw.max_run_bytes,
         terminal_barrier_timeout: positive_duration(
             &raw.terminal_barrier_timeout,
-            "runtime.response_stream.terminal_barrier_timeout",
+            "runtime.run_stream.terminal_barrier_timeout",
         )?,
         outbound_write_timeout: positive_duration(
             &raw.outbound_write_timeout,
-            "runtime.response_stream.outbound_write_timeout",
+            "runtime.run_stream.outbound_write_timeout",
         )?,
     })
 }

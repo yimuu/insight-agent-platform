@@ -24,7 +24,7 @@ Schema 文件，也不能创建、修改、修复或升级任何数据库对象�
 当前使用的不透明契约 ID 为：
 
 ```text
-durable-schema-d98dcd93-4911-426d-a826-9d8a5b04b461
+durable-schema-ed759e21-5c5d-42e9-90d3-744029ea19b2
 ```
 
 两个后端共享同一个契约 ID。元数据记录通过 `postgres` 或 `sqlite` 单独标识实际
@@ -72,3 +72,11 @@ WHERE singleton = 1;
 只有在查询结果恰好包含一条记录，并且其中声明的契约 ID 与仓储使用的后端标识都
 符合预期时，服务才会继续启动。元数据缺失、契约 ID 不匹配或后端不匹配均属于
 部署错误，服务必须在进入就绪状态之前失败。
+
+## run-stream/v1 clean-cut 边界
+
+`run-stream/v1` 将 terminal snapshot 固定为 `run_stream_snapshots.run_payload`，并把协议版本纳入
+snapshot hash 域。旧 `response_snapshots` 的 split `response/workflow` 结构不支持在线或原地升级；
+部署新版本前必须停止旧写入，并在全新空目标安装当前 Schema。确需保留历史数据时，应通过单独、
+离线且经过校验的导出/导入流程迁移，而不是让服务在启动时猜测或修复旧结构。契约 ID 或对象布局
+不匹配时，启动校验必须 fail closed。

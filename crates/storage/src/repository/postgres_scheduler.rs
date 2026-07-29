@@ -78,7 +78,7 @@ use super::{
     ModelToolTaskCommitReceipt, ModelToolTaskHeartbeatOutcome, ModelToolTaskOutcome,
     ModelToolTaskTransitionOutcome,
 };
-use insight_engine::response::WorkflowToolPublicProjection;
+use insight_engine::run_stream::RunToolPublicProjection;
 
 const MAX_CLAIM_SECONDS: u32 = 3_600;
 const MAX_CLAIM_LIMIT: u32 = 1_000;
@@ -4617,7 +4617,7 @@ async fn apply_scheduler_action(
             tx, run_id,
         )
         .await?;
-        super::postgres::persist_terminal_response_snapshot_postgres(
+        super::postgres::persist_terminal_run_stream_snapshot_postgres(
             tx, run_id, lifecycle, output, error_code,
         )
         .await?;
@@ -10853,10 +10853,9 @@ async fn reserve_model_call_public_function_item_postgres(
     let action = tools
         .get(tool_name)
         .ok_or_else(RepositoryError::invalid_data)?;
-    let projection = WorkflowToolPublicProjection::from_frozen_effective_policy(
-        action.effective_public_policy(),
-    )
-    .map_err(|_| RepositoryError::invalid_data())?;
+    let projection =
+        RunToolPublicProjection::from_frozen_effective_policy(action.effective_public_policy())
+            .map_err(|_| RepositoryError::invalid_data())?;
     if call_index >= max_calls || !projection.raw_argument_deltas_authorized() {
         return Err(RepositoryError::invalid_configuration());
     }

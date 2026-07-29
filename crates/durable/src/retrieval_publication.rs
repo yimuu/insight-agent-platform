@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 
 use insight_engine::{
     plan::DescriptorValue,
-    response::{WorkflowRetrieval, WorkflowRetrievalPublicProjection},
     retrieval::{deterministic_retrieval_id, FrozenRetrievalTarget},
+    run_stream::{RunRetrieval, RunRetrievalPublicProjection},
     worker::TaskExecutionOrigin,
     ActivationId, AttemptNo, RunId, SchedulerTaskKind,
 };
@@ -91,7 +91,7 @@ impl PreparedRetrievalPublication {
     pub(crate) fn public_projection(&self) -> Option<&Value> {
         self.public_projection.as_ref()
     }
-    pub(crate) fn public_retrieval(&self) -> Result<Option<WorkflowRetrieval>, RepositoryError> {
+    pub(crate) fn public_retrieval(&self) -> Result<Option<RunRetrieval>, RepositoryError> {
         self.public_projection
             .as_ref()
             .map(|value| {
@@ -222,9 +222,7 @@ pub(crate) struct StoredRetrievalPublication {
 }
 
 impl StoredRetrievalPublication {
-    pub(crate) fn validate_and_project(
-        &self,
-    ) -> Result<Option<WorkflowRetrieval>, RepositoryError> {
+    pub(crate) fn validate_and_project(&self) -> Result<Option<RunRetrieval>, RepositoryError> {
         if self.retrieval_id != deterministic_retrieval_id(&self.run_id, &self.activation_id)
             || self.attempt_no.get() == 0
             || self.completion_event_seq == 0
@@ -238,7 +236,7 @@ impl StoredRetrievalPublication {
             (Some(value), Some(expected)) if hash_value(value)? == *expected => {}
             _ => return Err(RepositoryError::invalid_data()),
         }
-        let policy = WorkflowRetrievalPublicProjection::from_frozen_effective_policy(
+        let policy = RunRetrievalPublicProjection::from_frozen_effective_policy(
             &self.effective_public_policy,
             &self.query_field,
         )
@@ -247,7 +245,7 @@ impl StoredRetrievalPublication {
         match (authorized, self.public_projection.as_ref()) {
             (false, None) => Ok(None),
             (true, Some(value)) => {
-                let retrieval = serde_json::from_value::<WorkflowRetrieval>(value.clone())
+                let retrieval = serde_json::from_value::<RunRetrieval>(value.clone())
                     .map_err(|_| RepositoryError::invalid_data())?;
                 policy
                     .validate_frozen_completed(&self.retrieval_id, &retrieval)
@@ -596,7 +594,7 @@ pub mod adapter {
 
     pub fn prepared_retrieval_public(
         value: &Value,
-    ) -> Result<Option<WorkflowRetrieval>, RepositoryError> {
+    ) -> Result<Option<RunRetrieval>, RepositoryError> {
         decode_prepared(value)?.public_retrieval()
     }
 
@@ -649,7 +647,7 @@ pub mod adapter {
 
     pub fn stored_retrieval_validate_and_project(
         stored: &Value,
-    ) -> Result<Option<WorkflowRetrieval>, RepositoryError> {
+    ) -> Result<Option<RunRetrieval>, RepositoryError> {
         decode_stored(stored)?.validate_and_project()
     }
 

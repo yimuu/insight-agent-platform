@@ -13,10 +13,7 @@ use crate::{
     schema::{compile_schema_2020, JsonSchemaValidator},
 };
 
-use super::{
-    WorkflowPublicResultError, WorkflowRetrieval, WorkflowRetrievalResult,
-    MAX_WORKFLOW_RETRIEVAL_RESULTS,
-};
+use super::{RunPublicResultError, RunRetrieval, RunRetrievalResult, MAX_RUN_RETRIEVAL_RESULTS};
 
 const MAX_FROZEN_RETRIEVAL_PUBLIC_POLICY_BYTES: usize = 256 * 1024;
 const MAX_PUBLIC_RETRIEVAL_AGGREGATE_BYTES: usize = 1024 * 1024;
@@ -31,13 +28,13 @@ const MAX_FROZEN_QUERY_FIELD_BYTES: usize = 128;
 /// `frozen_query_field` comes from the same frozen descriptor binding as the
 /// effective policy; it is not rediscovered from a current registry entry.
 #[derive(Debug, Clone)]
-pub struct WorkflowRetrievalPublicProjection {
+pub struct RunRetrievalPublicProjection {
     query: bool,
     query_field: String,
     result_validator: Option<JsonSchemaValidator>,
 }
 
-impl WorkflowRetrievalPublicProjection {
+impl RunRetrievalPublicProjection {
     /// Re-decodes and proves exact canonical linker evidence.
     ///
     /// Missing defaults, unknown members, non-normalized schemas, unsafe
@@ -45,7 +42,7 @@ impl WorkflowRetrievalPublicProjection {
     pub fn from_frozen_effective_policy(
         frozen_policy: &Value,
         frozen_query_field: &str,
-    ) -> Result<Self, WorkflowPublicResultError> {
+    ) -> Result<Self, RunPublicResultError> {
         if !valid_query_field(frozen_query_field) {
             return Err(invalid_policy());
         }
@@ -93,13 +90,13 @@ impl WorkflowRetrievalPublicProjection {
     /// any server-only context is added. `public_candidate` is an explicit
     /// array whose entries are checked independently against the exact frozen
     /// public result schema and then decoded through the closed
-    /// [`WorkflowRetrievalResult`] wire type.
+    /// [`RunRetrievalResult`] wire type.
     pub fn project_validated_completed(
         &self,
         retrieval_id: impl Into<String>,
         validated_model_input: &Value,
         public_candidate: Option<&Value>,
-    ) -> Result<Option<WorkflowRetrieval>, WorkflowPublicResultError> {
+    ) -> Result<Option<RunRetrieval>, RunPublicResultError> {
         // This branch must precede all access to input/candidate. It is the
         // non-interference guarantee for a fully private descriptor policy.
         if !self.query && self.result_validator.is_none() {
@@ -124,7 +121,7 @@ impl WorkflowRetrievalPublicProjection {
             Some(validator) => {
                 let candidate = public_candidate.ok_or_else(invalid_result)?;
                 let values = candidate.as_array().ok_or_else(invalid_result)?;
-                if values.len() > MAX_WORKFLOW_RETRIEVAL_RESULTS {
+                if values.len() > MAX_RUN_RETRIEVAL_RESULTS {
                     return Err(invalid_result());
                 }
                 validate_public_json_bounds(
@@ -146,7 +143,7 @@ impl WorkflowRetrievalPublicProjection {
                         MAX_PUBLIC_RETRIEVAL_DEPTH,
                         MAX_PUBLIC_RETRIEVAL_ITEM_VALUES,
                     )?;
-                    let result = serde_json::from_value::<WorkflowRetrievalResult>(value.clone())
+                    let result = serde_json::from_value::<RunRetrievalResult>(value.clone())
                         .map_err(|_| invalid_result())?;
                     if !observed_ids.insert(result.id().to_owned()) {
                         return Err(invalid_result());
@@ -158,7 +155,7 @@ impl WorkflowRetrievalPublicProjection {
         };
 
         let retrieval =
-            WorkflowRetrieval::new(retrieval_id, query, results).map_err(|_| invalid_result())?;
+            RunRetrieval::new(retrieval_id, query, results).map_err(|_| invalid_result())?;
         let wire = serde_json::to_value(&retrieval).map_err(|_| invalid_result())?;
         validate_public_json_bounds(
             &wire,
@@ -180,8 +177,8 @@ impl WorkflowRetrievalPublicProjection {
     pub fn validate_frozen_completed(
         &self,
         expected_retrieval_id: &str,
-        retrieval: &WorkflowRetrieval,
-    ) -> Result<(), WorkflowPublicResultError> {
+        retrieval: &RunRetrieval,
+    ) -> Result<(), RunPublicResultError> {
         if self.query || self.result_validator.is_some() {
             if retrieval.retrieval_id() != expected_retrieval_id
                 || retrieval.query().is_some() != self.query
@@ -235,7 +232,7 @@ fn validate_public_json_bounds(
     max_bytes: usize,
     max_depth: usize,
     max_values: usize,
-) -> Result<(), WorkflowPublicResultError> {
+) -> Result<(), RunPublicResultError> {
     let encoded = serde_jcs::to_vec(value).map_err(|_| invalid_result())?;
     if encoded.len() > max_bytes {
         return Err(invalid_result());
@@ -414,16 +411,16 @@ fn contains_unsafe_schema_reference(value: &Value) -> bool {
     }
 }
 
-fn invalid_policy() -> WorkflowPublicResultError {
-    WorkflowPublicResultError::new("frozen workflow retrieval public policy is invalid")
+fn invalid_policy() -> RunPublicResultError {
+    RunPublicResultError::new("frozen run retrieval public policy is invalid")
 }
 
-fn invalid_input() -> WorkflowPublicResultError {
-    WorkflowPublicResultError::new("completed workflow retrieval public input is invalid")
+fn invalid_input() -> RunPublicResultError {
+    RunPublicResultError::new("completed run retrieval public input is invalid")
 }
 
-fn invalid_result() -> WorkflowPublicResultError {
-    WorkflowPublicResultError::new("completed workflow retrieval public result is invalid")
+fn invalid_result() -> RunPublicResultError {
+    RunPublicResultError::new("completed run retrieval public result is invalid")
 }
 
 #[cfg(test)]
@@ -432,7 +429,7 @@ mod tests {
 
     use crate::resource_policy::RetrievalPublicPolicy;
 
-    use super::{WorkflowRetrievalPublicProjection, MAX_WORKFLOW_RETRIEVAL_RESULTS};
+    use super::{RunRetrievalPublicProjection, MAX_RUN_RETRIEVAL_RESULTS};
 
     fn normalized_schema(properties: Value, required: &[&str]) -> Value {
         json!({
@@ -473,7 +470,7 @@ mod tests {
 
     #[test]
     fn fully_private_policy_does_not_inspect_input_or_candidate() {
-        let projection = WorkflowRetrievalPublicProjection::from_frozen_effective_policy(
+        let projection = RunRetrievalPublicProjection::from_frozen_effective_policy(
             &frozen(false, None),
             "query",
         )
@@ -489,7 +486,7 @@ mod tests {
 
     #[test]
     fn query_and_result_authorization_are_independent() {
-        let query_only = WorkflowRetrievalPublicProjection::from_frozen_effective_policy(
+        let query_only = RunRetrievalPublicProjection::from_frozen_effective_policy(
             &frozen(true, None),
             "query",
         )
@@ -505,7 +502,7 @@ mod tests {
         assert_eq!(retrieval.query(), Some("WBC"));
         assert!(retrieval.results().is_empty());
 
-        let result_only = WorkflowRetrievalPublicProjection::from_frozen_effective_policy(
+        let result_only = RunRetrievalPublicProjection::from_frozen_effective_policy(
             &frozen(false, Some(basic_result_schema())),
             "query",
         )
@@ -524,7 +521,7 @@ mod tests {
 
     #[test]
     fn both_authorizations_project_only_explicit_candidate() {
-        let projection = WorkflowRetrievalPublicProjection::from_frozen_effective_policy(
+        let projection = RunRetrievalPublicProjection::from_frozen_effective_policy(
             &frozen(true, Some(basic_result_schema())),
             "question",
         )
@@ -576,22 +573,20 @@ mod tests {
             ),
         ] {
             let error =
-                WorkflowRetrievalPublicProjection::from_frozen_effective_policy(&policy, "query")
+                RunRetrievalPublicProjection::from_frozen_effective_policy(&policy, "query")
                     .unwrap_err();
-            assert_eq!(error.code(), "WORKFLOW_PUBLIC_RESULT_INVALID");
+            assert_eq!(error.code(), "RUN_PUBLIC_RESULT_INVALID");
         }
-        assert!(
-            WorkflowRetrievalPublicProjection::from_frozen_effective_policy(
-                &frozen(false, None),
-                "not a field",
-            )
-            .is_err()
-        );
+        assert!(RunRetrievalPublicProjection::from_frozen_effective_policy(
+            &frozen(false, None),
+            "not a field",
+        )
+        .is_err());
     }
 
     #[test]
     fn schema_and_closed_wire_reject_missing_candidate_wrong_types_and_unknown_fields() {
-        let projection = WorkflowRetrievalPublicProjection::from_frozen_effective_policy(
+        let projection = RunRetrievalPublicProjection::from_frozen_effective_policy(
             &frozen(false, Some(basic_result_schema())),
             "query",
         )
@@ -613,21 +608,21 @@ mod tests {
 
     #[test]
     fn exact_result_limit_is_accepted_and_n_plus_one_is_rejected() {
-        let projection = WorkflowRetrievalPublicProjection::from_frozen_effective_policy(
+        let projection = RunRetrievalPublicProjection::from_frozen_effective_policy(
             &frozen(false, Some(basic_result_schema())),
             "query",
         )
         .unwrap();
-        let exact = (0..MAX_WORKFLOW_RETRIEVAL_RESULTS)
+        let exact = (0..MAX_RUN_RETRIEVAL_RESULTS)
             .map(|index| json!({"id": format!("doc_{index}")}))
             .collect::<Vec<_>>();
         let retrieval = projection
             .project_validated_completed("ret_n", &json!({}), Some(&json!(exact)))
             .unwrap()
             .unwrap();
-        assert_eq!(retrieval.results().len(), MAX_WORKFLOW_RETRIEVAL_RESULTS);
+        assert_eq!(retrieval.results().len(), MAX_RUN_RETRIEVAL_RESULTS);
 
-        let too_many = (0..=MAX_WORKFLOW_RETRIEVAL_RESULTS)
+        let too_many = (0..=MAX_RUN_RETRIEVAL_RESULTS)
             .map(|index| json!({"id": format!("doc_{index}")}))
             .collect::<Vec<_>>();
         assert!(projection
@@ -637,7 +632,7 @@ mod tests {
 
     #[test]
     fn duplicate_result_identity_and_per_field_bounds_fail_closed() {
-        let projection = WorkflowRetrievalPublicProjection::from_frozen_effective_policy(
+        let projection = RunRetrievalPublicProjection::from_frozen_effective_policy(
             &frozen(true, Some(basic_result_schema())),
             "query",
         )
@@ -667,7 +662,7 @@ mod tests {
 
     #[test]
     fn aggregate_jcs_is_bounded_to_one_mibibyte() {
-        let projection = WorkflowRetrievalPublicProjection::from_frozen_effective_policy(
+        let projection = RunRetrievalPublicProjection::from_frozen_effective_policy(
             &frozen(false, Some(basic_result_schema())),
             "query",
         )
@@ -709,8 +704,7 @@ mod tests {
             )),
         );
         let projection =
-            WorkflowRetrievalPublicProjection::from_frozen_effective_policy(&policy, "query")
-                .unwrap();
+            RunRetrievalPublicProjection::from_frozen_effective_policy(&policy, "query").unwrap();
         let candidate = json!([{"id": "doc_deep", "metadata": nested_value}]);
         assert!(projection
             .project_validated_completed("ret_deep", &json!({}), Some(&candidate))
@@ -736,7 +730,7 @@ mod tests {
             }),
             &["id", "artifact"],
         );
-        let projection = WorkflowRetrievalPublicProjection::from_frozen_effective_policy(
+        let projection = RunRetrievalPublicProjection::from_frozen_effective_policy(
             &frozen(false, Some(artifact_schema)),
             "query",
         )

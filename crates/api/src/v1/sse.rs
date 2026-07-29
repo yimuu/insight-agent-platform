@@ -14,11 +14,10 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::Stream;
 use insight_engine::{
     events::protocol::RunEventType,
-    response::{
-        DurableResponseSnapshot, LiveResponseBroker, LiveResponseDelivery, LiveResponseSubscriber,
-        PublicResponse, ResponseObjectKind, ResponseStatus, ResponseStreamEvent,
-        ResponseTerminalKind, WorkflowCompleted, WorkflowFailure, WorkflowStopReason,
-        WorkflowStopped, WorkflowStreamGapAction,
+    run_stream::{
+        DurableRunStreamSnapshot, LiveRunStreamBroker, LiveRunStreamDelivery,
+        LiveRunStreamSubscriber, RunCompletedSnapshot, RunFailedSnapshot, RunInitialSnapshot,
+        RunStatus, RunStoppedSnapshot, RunStreamEvent, RunStreamGapAction, RunTerminalKind,
     },
     RunId,
 };
@@ -37,14 +36,14 @@ struct OutboundEvent {
     terminal_barrier: Option<Arc<dyn TerminalFrameBarrier>>,
 }
 
-struct ResponseOutboundStream {
+struct RunOutboundStream {
     inner: mpsc::Receiver<OutboundEvent>,
     conversation_privacy: Option<ConversationStreamPrivacy>,
     delivered_conversation_privacy: Option<ConversationStreamDelivery>,
     delivered_terminal_barrier: Option<Arc<dyn TerminalFrameBarrier>>,
 }
 
-impl ResponseOutboundStream {
+impl RunOutboundStream {
     fn new(
         receiver: mpsc::Receiver<OutboundEvent>,
         conversation_privacy: Option<ConversationStreamPrivacy>,
@@ -58,7 +57,7 @@ impl ResponseOutboundStream {
     }
 }
 
-impl Stream for ResponseOutboundStream {
+impl Stream for RunOutboundStream {
     type Item = Result<Event, Infallible>;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -107,11 +106,7 @@ impl Stream for ResponseOutboundStream {
 /// carry terminal content in the barrier itself.
 #[async_trait]
 pub trait TerminalFrameBarrier: Send + Sync {
-    async fn wait_until_committed(
-        &self,
-        run_id: &str,
-        response_id: &str,
-    ) -> Result<(), TerminalFrameBarrierError>;
+    async fn wait_until_committed(&self, run_id: &str) -> Result<(), TerminalFrameBarrierError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,12 +133,8 @@ struct SnapshotCommitBarrier;
 
 #[async_trait]
 impl TerminalFrameBarrier for SnapshotCommitBarrier {
-    async fn wait_until_committed(
-        &self,
-        _run_id: &str,
-        _response_id: &str,
-    ) -> Result<(), TerminalFrameBarrierError> {
-        // For ordinary Runs the response snapshot itself is the commit
+    async fn wait_until_committed(&self, _run_id: &str) -> Result<(), TerminalFrameBarrierError> {
+        // For ordinary Runs the run snapshot itself is the commit
         // authority loaded immediately before this hook.
         Ok(())
     }
@@ -166,19 +157,15 @@ struct TerminalConversationSnapshotCommitBarrier {
 
 #[async_trait]
 impl TerminalFrameBarrier for TerminalConversationSnapshotCommitBarrier {
-    async fn wait_until_committed(
-        &self,
-        run_id: &str,
-        _response_id: &str,
-    ) -> Result<(), TerminalFrameBarrierError> {
+    async fn wait_until_committed(&self, run_id: &str) -> Result<(), TerminalFrameBarrierError> {
         let guard = self
             .service
             .acquire_visible_terminal_conversation_run(&self.tenant_id, &self.user_id, run_id)
             .await
             .map_err(|_| {
                 TerminalFrameBarrierError::new(
-                    "RUN_NOT_FOUND",
-                    "Conversation Run is no longer available",
+                    "RUN_STREAM_TERMINAL_UNAVAILABLE",
+                    "Run stream terminal snapshot is no longer available",
                 )
             })?;
         *self.visibility_guard.lock().await = Some(guard);
@@ -188,11 +175,7 @@ impl TerminalFrameBarrier for TerminalConversationSnapshotCommitBarrier {
 
 #[async_trait]
 impl TerminalFrameBarrier for FullConversationSnapshotCommitBarrier {
-    async fn wait_until_committed(
-        &self,
-        run_id: &str,
-        _response_id: &str,
-    ) -> Result<(), TerminalFrameBarrierError> {
+    async fn wait_until_committed(&self, run_id: &str) -> Result<(), TerminalFrameBarrierError> {
         let guard = self
             .service
             .acquire_visible_full_conversation_run(
@@ -204,8 +187,8 @@ impl TerminalFrameBarrier for FullConversationSnapshotCommitBarrier {
             .await
             .map_err(|_| {
                 TerminalFrameBarrierError::new(
-                    "RUN_NOT_FOUND",
-                    "Conversation Run is no longer available",
+                    "RUN_STREAM_TERMINAL_UNAVAILABLE",
+                    "Run stream terminal snapshot is no longer available",
                 )
             })?;
         *self.visibility_guard.lock().await = Some(guard);
@@ -213,18 +196,18 @@ impl TerminalFrameBarrier for FullConversationSnapshotCommitBarrier {
     }
 }
 
-pub(crate) fn response_stream(
+pub(crate) fn run_stream(
     attached: AttachedRun,
     keep_alive_interval: Duration,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    response_stream_with_terminal_barrier(
+    run_stream_with_terminal_barrier(
         attached,
         keep_alive_interval,
         Arc::new(SnapshotCommitBarrier),
     )
 }
 
-pub(crate) fn full_conversation_response_stream(
+pub(crate) fn full_conversation_run_stream(
     attached: AttachedRun,
     keep_alive_interval: Duration,
     service: RunService,
@@ -232,7 +215,7 @@ pub(crate) fn full_conversation_response_stream(
     tenant_id: String,
     user_id: String,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    response_stream_with_terminal_barrier(
+    run_stream_with_terminal_barrier(
         attached,
         keep_alive_interval,
         Arc::new(FullConversationSnapshotCommitBarrier {
@@ -245,25 +228,25 @@ pub(crate) fn full_conversation_response_stream(
     )
 }
 
-pub(crate) fn terminal_response_stream(
+pub(crate) fn terminal_run_stream(
     attached: TerminalAttachedRun,
     keep_alive_interval: Duration,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    terminal_response_stream_with_terminal_barrier(
+    terminal_run_stream_with_terminal_barrier(
         attached,
         keep_alive_interval,
         Arc::new(SnapshotCommitBarrier),
     )
 }
 
-pub(crate) fn terminal_conversation_response_stream(
+pub(crate) fn terminal_conversation_run_stream(
     attached: TerminalAttachedRun,
     keep_alive_interval: Duration,
     service: RunService,
     tenant_id: String,
     user_id: String,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    terminal_response_stream_with_terminal_barrier(
+    terminal_run_stream_with_terminal_barrier(
         attached,
         keep_alive_interval,
         Arc::new(TerminalConversationSnapshotCommitBarrier {
@@ -275,32 +258,32 @@ pub(crate) fn terminal_conversation_response_stream(
     )
 }
 
-pub(crate) fn response_stream_with_terminal_barrier(
+pub(crate) fn run_stream_with_terminal_barrier(
     attached: AttachedRun,
     keep_alive_interval: Duration,
     terminal_frame_barrier: Arc<dyn TerminalFrameBarrier>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    response_stream_from_attached(
-        ResponseAttachedRun::from_durable(attached),
+    run_stream_from_attached(
+        RunAttachedStream::from_durable(attached),
         keep_alive_interval,
         terminal_frame_barrier,
     )
 }
 
-pub(crate) fn terminal_response_stream_with_terminal_barrier(
+pub(crate) fn terminal_run_stream_with_terminal_barrier(
     attached: TerminalAttachedRun,
     keep_alive_interval: Duration,
     terminal_frame_barrier: Arc<dyn TerminalFrameBarrier>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    response_stream_from_attached(
-        ResponseAttachedRun::from_terminal(attached),
+    run_stream_from_attached(
+        RunAttachedStream::from_terminal(attached),
         keep_alive_interval,
         terminal_frame_barrier,
     )
 }
 
-fn response_stream_from_attached(
-    attached: ResponseAttachedRun,
+fn run_stream_from_attached(
+    attached: RunAttachedStream,
     keep_alive_interval: Duration,
     terminal_frame_barrier: Arc<dyn TerminalFrameBarrier>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -308,14 +291,14 @@ fn response_stream_from_attached(
     let conversation_privacy = attached.conversation_privacy.clone();
     let (sender, receiver) = mpsc::channel(OUTBOUND_EVENT_CAPACITY);
     tokio::spawn(async move {
-        let mut dispatcher = ResponseDispatcher::new(attached, terminal_frame_barrier);
+        let mut dispatcher = RunStreamDispatcher::new(attached, terminal_frame_barrier);
         loop {
             let public_event = tokio::select! {
                 _ = sender.closed() => {
                     tracing::debug!(
                         run_id = dispatcher.run_id(),
                         code = "SSE_OUTBOUND_CLOSED",
-                        "response-stream client closed the bounded output"
+                        "run-stream client closed the bounded output"
                     );
                     break;
                 }
@@ -323,7 +306,7 @@ fn response_stream_from_attached(
                     tracing::debug!(
                         run_id = dispatcher.run_id(),
                         code = "SSE_CONVERSATION_PRIVACY_DELETED",
-                        "response stream stopped before publishing more Conversation content"
+                        "Run stream stopped before publishing more Conversation content"
                     );
                     break;
                 }
@@ -339,7 +322,8 @@ fn response_stream_from_attached(
             {
                 break;
             }
-            let terminal = public_event.is_terminal();
+            let run_terminal = public_event.is_run_terminal();
+            let ends_stream = public_event.ends_stream();
             let encoded = match encode_event(&public_event) {
                 Ok(encoded) => encoded,
                 Err(error) => {
@@ -347,12 +331,13 @@ fn response_stream_from_attached(
                         run_id = dispatcher.run_id(),
                         code = "SSE_ENCODE_FAILED",
                         error = %error,
-                        "response-stream event encoding failed"
+                        "run-stream event encoding failed"
                     );
                     break;
                 }
             };
-            let terminal_barrier = terminal.then(|| Arc::clone(&dispatcher.terminal_frame_barrier));
+            let terminal_barrier =
+                run_terminal.then(|| Arc::clone(&dispatcher.terminal_frame_barrier));
             match tokio::time::timeout(
                 outbound_write_timeout,
                 sender.send(OutboundEvent {
@@ -367,18 +352,18 @@ fn response_stream_from_attached(
                     tracing::debug!(
                         run_id = dispatcher.run_id(),
                         code = "SSE_OUTBOUND_UNWRITABLE",
-                        "response-stream client stopped accepting bounded output"
+                        "run-stream client stopped accepting bounded output"
                     );
                     break;
                 }
             }
-            if terminal {
+            if ends_stream {
                 break;
             }
         }
     });
 
-    Sse::new(ResponseOutboundStream::new(receiver, conversation_privacy)).keep_alive(
+    Sse::new(RunOutboundStream::new(receiver, conversation_privacy)).keep_alive(
         KeepAlive::new()
             .interval(keep_alive_interval)
             .text("keep-alive"),
@@ -392,16 +377,32 @@ async fn conversation_privacy_cancelled(privacy: Option<ConversationStreamPrivac
     }
 }
 
-#[async_trait]
-trait TerminalSnapshotSource: Send {
-    async fn recv_terminal_snapshot(&mut self) -> Result<DurableResponseSnapshot, &'static str>;
+enum RunLifecycleSourceEvent {
+    Running,
+    Terminal(DurableRunStreamSnapshot),
 }
 
 #[async_trait]
-impl TerminalSnapshotSource for RunSubscription {
-    async fn recv_terminal_snapshot(&mut self) -> Result<DurableResponseSnapshot, &'static str> {
+trait RunLifecycleSource: Send {
+    async fn recv_lifecycle(&mut self) -> Result<RunLifecycleSourceEvent, &'static str>;
+}
+
+#[async_trait]
+impl RunLifecycleSource for DurableLifecycleSource {
+    async fn recv_lifecycle(&mut self) -> Result<RunLifecycleSourceEvent, &'static str> {
+        if !self.initial_snapshot_checked {
+            self.initial_snapshot_checked = true;
+            match self.subscription.load_run_stream_snapshot().await {
+                Ok(snapshot) => return Ok(RunLifecycleSourceEvent::Terminal(snapshot)),
+                Err(error) if error.code() == "RUN_STREAM_SNAPSHOT_UNAVAILABLE" => {}
+                Err(error) => return Err(error.code()),
+            }
+        }
         loop {
-            match self.recv().await {
+            match self.subscription.recv().await {
+                Ok(event) if event.event_type == RunEventType::RunStarted => {
+                    return Ok(RunLifecycleSourceEvent::Running);
+                }
                 Ok(event)
                     if matches!(
                         event.event_type,
@@ -412,8 +413,10 @@ impl TerminalSnapshotSource for RunSubscription {
                     ) =>
                 {
                     return self
-                        .load_response_snapshot()
+                        .subscription
+                        .load_run_stream_snapshot()
                         .await
+                        .map(RunLifecycleSourceEvent::Terminal)
                         .map_err(|error| error.code());
                 }
                 Ok(_) => {}
@@ -423,32 +426,51 @@ impl TerminalSnapshotSource for RunSubscription {
     }
 }
 
+struct DurableLifecycleSource {
+    subscription: RunSubscription,
+    initial_snapshot_checked: bool,
+}
+
+struct TerminalLifecycleSource {
+    subscription: TerminalRunSubscription,
+    running_pending: bool,
+}
+
 #[async_trait]
-impl TerminalSnapshotSource for TerminalRunSubscription {
-    async fn recv_terminal_snapshot(&mut self) -> Result<DurableResponseSnapshot, &'static str> {
-        self.recv_terminal().await.map_err(|error| error.code())
+impl RunLifecycleSource for TerminalLifecycleSource {
+    async fn recv_lifecycle(&mut self) -> Result<RunLifecycleSourceEvent, &'static str> {
+        if self.running_pending {
+            self.running_pending = false;
+            return Ok(RunLifecycleSourceEvent::Running);
+        }
+        self.subscription
+            .recv_terminal()
+            .await
+            .map(RunLifecycleSourceEvent::Terminal)
+            .map_err(|error| error.code())
     }
 }
 
-struct ResponseAttachedRun {
+struct RunAttachedStream {
     run_id: String,
-    response_id: String,
-    subscription: Box<dyn TerminalSnapshotSource>,
-    live_response: Box<dyn LiveResponseSubscriber>,
-    live_response_broker: Arc<dyn LiveResponseBroker>,
+    subscription: Box<dyn RunLifecycleSource>,
+    live_run_stream: Box<dyn LiveRunStreamSubscriber>,
+    live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
     terminal_barrier_timeout: Duration,
     outbound_write_timeout: Duration,
     conversation_privacy: Option<ConversationStreamPrivacy>,
 }
 
-impl ResponseAttachedRun {
+impl RunAttachedStream {
     fn from_durable(attached: AttachedRun) -> Self {
         Self {
             run_id: attached.run_id,
-            response_id: attached.response_id,
-            subscription: Box::new(attached.subscription),
-            live_response: attached.live_response,
-            live_response_broker: attached.live_response_broker,
+            subscription: Box::new(DurableLifecycleSource {
+                subscription: attached.subscription,
+                initial_snapshot_checked: false,
+            }),
+            live_run_stream: attached.live_run_stream,
+            live_run_stream_broker: attached.live_run_stream_broker,
             terminal_barrier_timeout: attached.terminal_barrier_timeout,
             outbound_write_timeout: attached.outbound_write_timeout,
             conversation_privacy: attached.conversation_privacy,
@@ -456,12 +478,15 @@ impl ResponseAttachedRun {
     }
 
     fn from_terminal(attached: TerminalAttachedRun) -> Self {
+        let running_pending = attached.subscription.load_run_stream_snapshot().is_none();
         Self {
             run_id: attached.run_id,
-            response_id: attached.response_id,
-            subscription: Box::new(attached.subscription),
-            live_response: attached.live_response,
-            live_response_broker: attached.live_response_broker,
+            subscription: Box::new(TerminalLifecycleSource {
+                subscription: attached.subscription,
+                running_pending,
+            }),
+            live_run_stream: attached.live_run_stream,
+            live_run_stream_broker: attached.live_run_stream_broker,
             terminal_barrier_timeout: attached.terminal_barrier_timeout,
             outbound_write_timeout: attached.outbound_write_timeout,
             conversation_privacy: attached.conversation_privacy,
@@ -469,53 +494,43 @@ impl ResponseAttachedRun {
     }
 }
 
-struct ResponseDispatcher {
-    attached: ResponseAttachedRun,
+struct RunStreamDispatcher {
+    attached: RunAttachedStream,
     terminal_frame_barrier: Arc<dyn TerminalFrameBarrier>,
-    pending: VecDeque<ResponseStreamEvent>,
+    pending: VecDeque<RunStreamEvent>,
     next_sequence: u64,
-    terminal_snapshot: Option<DurableResponseSnapshot>,
+    terminal_snapshot: Option<DurableRunStreamSnapshot>,
     terminal_barrier_deadline: Option<Instant>,
     live_open: bool,
     seen_sealed_items: BTreeSet<String>,
     seen_unknown_tail_items: BTreeSet<String>,
     seen_item_watermarks: BTreeMap<String, u64>,
+    running: bool,
     done: bool,
 }
 
-impl ResponseDispatcher {
+impl RunStreamDispatcher {
     fn new(
-        attached: ResponseAttachedRun,
+        attached: RunAttachedStream,
         terminal_frame_barrier: Arc<dyn TerminalFrameBarrier>,
     ) -> Self {
-        let response = PublicResponse {
-            id: attached.response_id.clone(),
-            object: ResponseObjectKind::Response,
-            status: ResponseStatus::InProgress,
-            output: Vec::new(),
-            usage: None,
-            error: None,
-        };
+        let run = RunInitialSnapshot::new(attached.run_id.clone(), RunStatus::Created)
+            .expect("attached Run IDs are valid public labels");
         Self {
             attached,
             terminal_frame_barrier,
-            pending: VecDeque::from([
-                ResponseStreamEvent::ResponseCreated {
-                    sequence_number: 0,
-                    response: response.clone(),
-                },
-                ResponseStreamEvent::ResponseInProgress {
-                    sequence_number: 1,
-                    response,
-                },
-            ]),
-            next_sequence: 2,
+            pending: VecDeque::from([RunStreamEvent::RunLifecycleCreated {
+                sequence_number: 0,
+                run,
+            }]),
+            next_sequence: 1,
             terminal_snapshot: None,
             terminal_barrier_deadline: None,
             live_open: true,
             seen_sealed_items: BTreeSet::new(),
             seen_unknown_tail_items: BTreeSet::new(),
             seen_item_watermarks: BTreeMap::new(),
+            running: false,
             done: false,
         }
     }
@@ -534,7 +549,7 @@ impl ResponseDispatcher {
         sequence
     }
 
-    async fn next_event(&mut self) -> Option<ResponseStreamEvent> {
+    async fn next_event(&mut self) -> Option<RunStreamEvent> {
         loop {
             if let Some(event) = self.pending.pop_front() {
                 return Some(event);
@@ -547,7 +562,7 @@ impl ResponseDispatcher {
                     let deadline = self
                         .terminal_barrier_deadline
                         .expect("terminal barrier has a deadline");
-                    match tokio::time::timeout_at(deadline, self.attached.live_response.recv())
+                    match tokio::time::timeout_at(deadline, self.attached.live_run_stream.recv())
                         .await
                     {
                         Ok(Ok(delivery)) => {
@@ -573,30 +588,44 @@ impl ResponseDispatcher {
                     Ok(event) => event,
                     Err(()) => protocol_error(
                         sequence,
-                        "RESPONSE_SNAPSHOT_INVALID",
-                        "terminal response snapshot is invalid",
+                        "RUN_STREAM_SNAPSHOT_INVALID",
+                        "terminal Run snapshot is invalid",
                     ),
                 });
             }
 
-            if self.live_open {
+            if self.live_open && self.running {
                 let terminal = &mut self.attached.subscription;
-                let live = &mut self.attached.live_response;
+                let live = &mut self.attached.live_run_stream;
                 tokio::select! {
-                    terminal_snapshot = terminal.recv_terminal_snapshot() => {
-                        match terminal_snapshot {
-                            Ok(snapshot) => {
+                    lifecycle = terminal.recv_lifecycle() => {
+                        match lifecycle {
+                            Ok(RunLifecycleSourceEvent::Running) => {
+                                if self.running {
+                                    continue;
+                                }
+                                self.running = true;
+                                let sequence_number = self.allocate_sequence();
+                                return Some(RunStreamEvent::RunLifecycleRunning {
+                                    sequence_number,
+                                    run: RunInitialSnapshot::new(
+                                        self.attached.run_id.clone(),
+                                        RunStatus::Running,
+                                    ).expect("attached Run IDs are valid public labels"),
+                                });
+                            }
+                            Ok(RunLifecycleSourceEvent::Terminal(snapshot)) => {
                                 if let Err(error) = self.begin_terminal_barrier(snapshot).await {
                                     return Some(self.terminal_barrier_error(error));
                                 }
                             }
-                            Err(code) => {
+                            Err(_) => {
                                 let sequence = self.allocate_sequence();
                                 self.done = true;
                                 return Some(protocol_error(
                                     sequence,
-                                    code,
-                                    "response stream closed before terminal calibration",
+                                    "RUN_STREAM_SOURCE_CLOSED",
+                                    "Run stream closed before terminal calibration",
                                 ));
                             }
                         }
@@ -613,19 +642,34 @@ impl ResponseDispatcher {
                     }
                 }
             } else {
-                match self.attached.subscription.recv_terminal_snapshot().await {
-                    Ok(snapshot) => {
+                match self.attached.subscription.recv_lifecycle().await {
+                    Ok(RunLifecycleSourceEvent::Running) => {
+                        if self.running {
+                            continue;
+                        }
+                        self.running = true;
+                        let sequence_number = self.allocate_sequence();
+                        return Some(RunStreamEvent::RunLifecycleRunning {
+                            sequence_number,
+                            run: RunInitialSnapshot::new(
+                                self.attached.run_id.clone(),
+                                RunStatus::Running,
+                            )
+                            .expect("attached Run IDs are valid public labels"),
+                        });
+                    }
+                    Ok(RunLifecycleSourceEvent::Terminal(snapshot)) => {
                         if let Err(error) = self.begin_terminal_barrier(snapshot).await {
                             return Some(self.terminal_barrier_error(error));
                         }
                     }
-                    Err(code) => {
+                    Err(_) => {
                         let sequence = self.allocate_sequence();
                         self.done = true;
                         return Some(protocol_error(
                             sequence,
-                            code,
-                            "response stream closed before terminal calibration",
+                            "RUN_STREAM_SOURCE_CLOSED",
+                            "Run stream closed before terminal calibration",
                         ));
                     }
                 }
@@ -635,13 +679,13 @@ impl ResponseDispatcher {
 
     async fn begin_terminal_barrier(
         &mut self,
-        snapshot: DurableResponseSnapshot,
+        snapshot: DurableRunStreamSnapshot,
     ) -> Result<(), TerminalFrameBarrierError> {
         self.terminal_frame_barrier
-            .wait_until_committed(&self.attached.run_id, &self.attached.response_id)
+            .wait_until_committed(&self.attached.run_id)
             .await?;
         if let Ok(run_id) = RunId::new(self.attached.run_id.clone()) {
-            let _ = self.attached.live_response_broker.close_run(&run_id);
+            let _ = self.attached.live_run_stream_broker.close_run(&run_id);
         }
         self.terminal_snapshot = Some(snapshot);
         self.terminal_barrier_deadline =
@@ -649,18 +693,15 @@ impl ResponseDispatcher {
         Ok(())
     }
 
-    fn terminal_barrier_error(&mut self, error: TerminalFrameBarrierError) -> ResponseStreamEvent {
+    fn terminal_barrier_error(&mut self, error: TerminalFrameBarrierError) -> RunStreamEvent {
         let sequence = self.allocate_sequence();
         self.done = true;
         protocol_error(sequence, error.code(), error.message())
     }
 
-    fn project_live_delivery(
-        &mut self,
-        delivery: LiveResponseDelivery,
-    ) -> Option<ResponseStreamEvent> {
+    fn project_live_delivery(&mut self, delivery: LiveRunStreamDelivery) -> Option<RunStreamEvent> {
         match delivery {
-            LiveResponseDelivery::Publication(publication) => {
+            LiveRunStreamDelivery::Publication(publication) => {
                 if let Some(identity) = publication.output_item_identity() {
                     self.seen_item_watermarks
                         .entry(identity.item_id().to_owned())
@@ -672,7 +713,7 @@ impl ResponseDispatcher {
                 let sequence = self.allocate_sequence();
                 Some(publication.into_public_event(sequence))
             }
-            LiveResponseDelivery::Gap(gap) => {
+            LiveRunStreamDelivery::Gap(gap) => {
                 if gap.has_unknown_tail() {
                     self.seen_unknown_tail_items
                         .insert(gap.identity().item_id().to_owned());
@@ -685,7 +726,7 @@ impl ResponseDispatcher {
                 let sequence = self.allocate_sequence();
                 Some(gap.into_public_event(sequence))
             }
-            LiveResponseDelivery::Seal(seal) => {
+            LiveRunStreamDelivery::Seal(seal) => {
                 self.seen_sealed_items
                     .insert(seal.identity().item_id().to_owned());
                 None
@@ -709,16 +750,15 @@ impl ResponseDispatcher {
         for (item_id, attempt_no, missing_from) in pending {
             self.seen_unknown_tail_items.insert(item_id.clone());
             let sequence_number = self.allocate_sequence();
-            self.pending
-                .push_back(ResponseStreamEvent::WorkflowStreamGap {
-                    sequence_number,
-                    item_id,
-                    attempt_no,
-                    missing_from,
-                    missing_to: None,
-                    unknown_tail: true,
-                    action: WorkflowStreamGapAction::DiscardProvisionalItem,
-                });
+            self.pending.push_back(RunStreamEvent::RunStreamGap {
+                sequence_number,
+                item_id,
+                attempt_no,
+                missing_from,
+                missing_to: None,
+                unknown_tail: true,
+                action: RunStreamGapAction::DiscardProvisionalItem,
+            });
         }
     }
 }
@@ -751,65 +791,70 @@ fn manifest_items_without_terminal_evidence(
 }
 
 fn terminal_event(
-    snapshot: DurableResponseSnapshot,
+    snapshot: DurableRunStreamSnapshot,
     sequence_number: u64,
-) -> Result<ResponseStreamEvent, ()> {
-    let response: PublicResponse = decode(snapshot.response())?;
-    Ok(match snapshot.terminal_kind() {
-        ResponseTerminalKind::Completed => ResponseStreamEvent::ResponseCompleted {
+) -> Result<RunStreamEvent, ()> {
+    let event = match snapshot.terminal_kind() {
+        RunTerminalKind::Completed => RunStreamEvent::RunLifecycleCompleted {
             sequence_number,
-            response,
-            workflow: decode::<WorkflowCompleted>(snapshot.workflow())?,
+            run: decode::<RunCompletedSnapshot>(snapshot.run())?,
         },
-        ResponseTerminalKind::Failed => ResponseStreamEvent::ResponseFailed {
+        RunTerminalKind::Failed => RunStreamEvent::RunLifecycleFailed {
             sequence_number,
-            response,
-            workflow: decode::<WorkflowFailure>(snapshot.workflow())?,
+            run: decode::<RunFailedSnapshot>(snapshot.run())?,
         },
-        ResponseTerminalKind::TimedOut => ResponseStreamEvent::WorkflowResponseTimedOut {
+        RunTerminalKind::TimedOut => RunStreamEvent::RunLifecycleTimedOut {
             sequence_number,
-            response,
-            workflow: decode::<WorkflowFailure>(snapshot.workflow())?,
+            run: decode::<RunFailedSnapshot>(snapshot.run())?,
         },
-        ResponseTerminalKind::Cancelled => ResponseStreamEvent::WorkflowResponseCancelled {
+        RunTerminalKind::Cancelled => RunStreamEvent::RunLifecycleCancelled {
             sequence_number,
-            response,
-            workflow: decode_stopped(snapshot.workflow(), WorkflowStopReason::Cancelled)?,
+            run: decode::<RunStoppedSnapshot>(snapshot.run())?,
         },
-        ResponseTerminalKind::Interrupted => ResponseStreamEvent::WorkflowResponseInterrupted {
+        RunTerminalKind::Interrupted => RunStreamEvent::RunLifecycleInterrupted {
             sequence_number,
-            response,
-            workflow: decode_stopped(snapshot.workflow(), WorkflowStopReason::Interrupted)?,
+            run: decode::<RunStoppedSnapshot>(snapshot.run())?,
         },
-    })
+    };
+    serde_json::to_value(&event).map_err(|_| ())?;
+    Ok(event)
 }
 
 fn decode<T: DeserializeOwned>(value: &serde_json::Value) -> Result<T, ()> {
     serde_json::from_value(value.clone()).map_err(|_| ())
 }
 
-fn decode_stopped(
-    value: &serde_json::Value,
-    expected: WorkflowStopReason,
-) -> Result<WorkflowStopped, ()> {
-    let stopped: WorkflowStopped = decode(value)?;
-    (stopped.reason == expected).then_some(stopped).ok_or(())
-}
-
 fn protocol_error(
     sequence_number: u64,
     code: impl Into<String>,
     message: impl Into<String>,
-) -> ResponseStreamEvent {
-    ResponseStreamEvent::Error {
+) -> RunStreamEvent {
+    let code = code.into();
+    let code = if code.starts_with("RUN_STREAM_")
+        && code.len() <= 128
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        code
+    } else {
+        "RUN_STREAM_FAILED".to_owned()
+    };
+    let message = message.into();
+    let message =
+        if !message.is_empty() && message.len() <= 512 && !message.chars().any(char::is_control) {
+            message
+        } else {
+            "Run stream failed".to_owned()
+        };
+    RunStreamEvent::RunStreamError {
         sequence_number,
-        code: code.into(),
-        message: message.into(),
-        param: None,
+        code,
+        message,
     }
 }
 
-fn encode_event(event: &ResponseStreamEvent) -> Result<Event, axum::Error> {
+fn encode_event(event: &RunStreamEvent) -> Result<Event, axum::Error> {
     Event::default()
         .event(event.event_type().as_str())
         .json_data(event)
@@ -829,29 +874,27 @@ mod tests {
     use async_trait::async_trait;
     use futures::StreamExt;
     use insight_engine::{
-        response::{
-            adapter::durable_response_snapshot_new, DurableResponseSnapshot, ResponseTerminalKind,
-            ResponseUsageStatus,
+        run_stream::{
+            adapter::durable_run_stream_snapshot_new, DurableRunStreamSnapshot, RunTerminalKind,
+            RUN_STREAM_PROTOCOL_VERSION,
         },
         ContentHash, RunId,
     };
-    use insight_runtime::{InMemoryLiveResponseBroker, LiveResponseBroker};
+    use insight_runtime::{InMemoryLiveRunStreamBroker, LiveRunStreamBroker};
     use serde_json::json;
     use tokio::sync::Notify;
 
     use super::{
-        manifest_items_without_terminal_evidence, protocol_error, ResponseAttachedRun,
-        ResponseDispatcher, ResponseOutboundStream, SnapshotCommitBarrier, TerminalFrameBarrier,
-        TerminalFrameBarrierError, TerminalSnapshotSource,
+        manifest_items_without_terminal_evidence, protocol_error, RunAttachedStream,
+        RunLifecycleSource, RunLifecycleSourceEvent, RunOutboundStream, RunStreamDispatcher,
+        SnapshotCommitBarrier, TerminalFrameBarrier, TerminalFrameBarrierError,
     };
 
     struct UnusedTerminalSource;
 
     #[async_trait]
-    impl TerminalSnapshotSource for UnusedTerminalSource {
-        async fn recv_terminal_snapshot(
-            &mut self,
-        ) -> Result<DurableResponseSnapshot, &'static str> {
+    impl RunLifecycleSource for UnusedTerminalSource {
+        async fn recv_lifecycle(&mut self) -> Result<RunLifecycleSourceEvent, &'static str> {
             panic!("terminal snapshot was installed directly by the test")
         }
     }
@@ -867,14 +910,13 @@ mod tests {
         async fn wait_until_committed(
             &self,
             _run_id: &str,
-            _response_id: &str,
         ) -> Result<(), TerminalFrameBarrierError> {
             self.entered.notify_one();
             self.release.notified().await;
             if self.deleted.load(Ordering::Acquire) {
                 Err(TerminalFrameBarrierError::new(
-                    "RUN_NOT_FOUND",
-                    "Conversation Run is no longer available",
+                    "RUN_STREAM_TERMINAL_UNAVAILABLE",
+                    "Run stream terminal snapshot is no longer available",
                 ))
             } else {
                 Ok(())
@@ -882,47 +924,39 @@ mod tests {
         }
     }
 
-    fn terminal_snapshot_with_marker(marker: &str) -> DurableResponseSnapshot {
-        let response_id = "resp_privacy_race".to_owned();
-        let response = json!({
-            "id": response_id,
-            "object": "response",
+    fn terminal_snapshot_with_marker(marker: &str) -> DurableRunStreamSnapshot {
+        let run_id = "run_privacy_race".to_owned();
+        let run = json!({
+            "id": run_id,
+            "object": "run",
             "status": "completed",
-            "output": [{"marker": marker}],
+            "output": [],
+            "result": {"marker": marker},
+            "tool_results": [],
+            "retrievals": [],
             "usage": null,
-            "error": null
+            "usage_status": "unavailable"
         });
-        let workflow = json!({"output": {"marker": marker}});
         let manifest = json!([]);
         let projection = json!({
-            "response_id": response_id,
-            "terminal_kind": "response.completed",
-            "response": response,
-            "workflow": workflow,
+            "protocol": RUN_STREAM_PROTOCOL_VERSION,
+            "run_id": run_id,
+            "terminal_kind": "run.lifecycle.completed",
+            "run": run,
             "public_item_manifest": manifest,
-            "usage": serde_json::Value::Null,
-            "usage_status": "unavailable",
         });
         let hash = ContentHash::from_bytes(&serde_jcs::to_vec(&projection).unwrap());
-        durable_response_snapshot_new(
-            response_id,
-            ResponseTerminalKind::Completed,
-            response,
-            workflow,
-            manifest,
-            None,
-            ResponseUsageStatus::Unavailable,
-            hash,
-        )
-        .unwrap()
+        durable_run_stream_snapshot_new(run_id, RunTerminalKind::Completed, run, manifest, hash)
+            .unwrap()
     }
 
     #[test]
-    fn response_stream_envelope_has_no_replay_id() {
+    fn run_stream_envelope_has_no_replay_id() {
         let event = protocol_error(7, "BROKER_LOST", "stream observation was lost");
         let encoded = serde_json::to_value(event).unwrap();
-        assert_eq!(encoded["type"], "error");
+        assert_eq!(encoded["type"], "run.stream.error");
         assert_eq!(encoded["sequence_number"], 7);
+        assert_eq!(encoded["code"], "RUN_STREAM_FAILED");
         assert!(!encoded.to_string().contains("output_bytes"));
     }
 
@@ -955,24 +989,23 @@ mod tests {
     async fn privacy_delete_after_commit_before_terminal_frame_cannot_leak_snapshot() {
         const PRIVATE_MARKER: &str = "private-terminal-marker";
         let run_id = RunId::new("run_privacy_race").unwrap();
-        let broker = Arc::new(InMemoryLiveResponseBroker::new(4, 4).unwrap());
-        let live_response = broker.subscribe(run_id.clone()).await.unwrap();
+        let broker = Arc::new(InMemoryLiveRunStreamBroker::new(4, 4).unwrap());
+        let live_run_stream = broker.subscribe(run_id.clone()).await.unwrap();
         let barrier = Arc::new(DeleteRaceBarrier {
             entered: Notify::new(),
             release: Notify::new(),
             deleted: AtomicBool::new(false),
         });
-        let attached = ResponseAttachedRun {
+        let attached = RunAttachedStream {
             run_id: run_id.to_string(),
-            response_id: "resp_privacy_race".to_owned(),
             subscription: Box::new(UnusedTerminalSource),
-            live_response,
-            live_response_broker: broker,
+            live_run_stream,
+            live_run_stream_broker: broker,
             terminal_barrier_timeout: Duration::from_secs(1),
             outbound_write_timeout: Duration::from_secs(1),
             conversation_privacy: None,
         };
-        let mut dispatcher = ResponseDispatcher::new(attached, barrier.clone());
+        let mut dispatcher = RunStreamDispatcher::new(attached, barrier.clone());
         dispatcher.pending.clear();
         dispatcher.live_open = false;
 
@@ -991,9 +1024,9 @@ mod tests {
 
         let event = next.await.unwrap();
         let encoded = serde_json::to_string(&event).unwrap();
-        assert_eq!(event.event_type().as_str(), "error");
+        assert_eq!(event.event_type().as_str(), "run.stream.error");
         assert!(!encoded.contains(PRIVATE_MARKER));
-        assert!(encoded.contains("RUN_NOT_FOUND"));
+        assert!(encoded.contains("RUN_STREAM_TERMINAL_UNAVAILABLE"));
     }
 
     #[tokio::test]
@@ -1002,13 +1035,13 @@ mod tests {
         let barrier: Arc<dyn TerminalFrameBarrier> = Arc::new(SnapshotCommitBarrier);
         sender
             .send(super::OutboundEvent {
-                event: Ok(axum::response::sse::Event::default().event("response.completed")),
+                event: Ok(axum::response::sse::Event::default().event("run.lifecycle.completed")),
                 terminal_barrier: Some(Arc::clone(&barrier)),
             })
             .await
             .unwrap();
         drop(sender);
-        let mut stream = ResponseOutboundStream::new(receiver, None);
+        let mut stream = RunOutboundStream::new(receiver, None);
 
         assert!(stream.next().await.is_some());
         assert_eq!(
@@ -1027,7 +1060,7 @@ mod tests {
         sender
             .send(super::OutboundEvent {
                 event: Ok(axum::response::sse::Event::default()
-                    .event("response.output_text.delta")
+                    .event("run.output.text.delta")
                     .data("private-buffered-delta")),
                 terminal_barrier: None,
             })
@@ -1035,7 +1068,7 @@ mod tests {
             .unwrap();
         privacy.cancel();
 
-        let mut stream = ResponseOutboundStream::new(receiver, Some(privacy));
+        let mut stream = RunOutboundStream::new(receiver, Some(privacy));
         assert!(
             stream.next().await.is_none(),
             "a buffered private delta must not be observable after privacy deletion starts"
@@ -1051,7 +1084,7 @@ mod tests {
             sender
                 .send(super::OutboundEvent {
                     event: Ok(axum::response::sse::Event::default()
-                        .event("response.output_text.delta")
+                        .event("run.output.text.delta")
                         .data(marker)),
                     terminal_barrier: None,
                 })
@@ -1059,7 +1092,7 @@ mod tests {
                 .unwrap();
         }
         drop(sender);
-        let mut stream = ResponseOutboundStream::new(receiver, Some(privacy.clone()));
+        let mut stream = RunOutboundStream::new(receiver, Some(privacy.clone()));
         assert!(stream.next().await.is_some());
 
         let mut deletion = tokio::spawn(async move { privacy.cancel_and_wait().await });

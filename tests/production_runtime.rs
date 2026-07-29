@@ -234,7 +234,7 @@ impl ChatModel for CleanCutoverCountingModel {
 
 #[async_trait]
 impl LeafTaskExecutor for LiveLlmFixtureExecutor {
-    fn live_response_capable(&self) -> bool {
+    fn live_run_stream_capable(&self) -> bool {
         true
     }
 
@@ -708,7 +708,7 @@ async fn retrieval_only_public_streaming_needs_no_llm_worker_at_start_or_admissi
         .collect::<Vec<_>>();
     let retrieval_index = events
         .iter()
-        .position(|(event_type, _)| event_type == "workflow.retrieval.completed")
+        .position(|(event_type, _)| event_type == "run.retrieval.completed")
         .unwrap_or_else(|| {
             panic!(
                 "public Retrieval must emit its dedicated live event; observed {:?}; terminal error {:?}",
@@ -718,20 +718,20 @@ async fn retrieval_only_public_streaming_needs_no_llm_worker_at_start_or_admissi
                     .collect::<Vec<_>>(),
                 events
                     .last()
-                    .map(|(_, event)| event["workflow"]["error"]["code"].clone())
+                    .map(|(_, event)| event["run"]["error"]["code"].clone())
             )
         });
     let terminal_index = events.len() - 1;
     assert!(retrieval_index < terminal_index);
     assert_eq!(events[retrieval_index].1["query"], "WBC");
     assert_eq!(events[retrieval_index].1["results"][0]["id"], "doc_1");
-    assert_eq!(events[terminal_index].0, "response.completed");
+    assert_eq!(events[terminal_index].0, "run.lifecycle.completed");
     assert_eq!(
-        events[terminal_index].1["workflow"]["retrievals"][0]["query"],
+        events[terminal_index].1["run"]["retrievals"][0]["query"],
         "WBC"
     );
     assert_eq!(
-        events[terminal_index].1["workflow"]["retrievals"][0]["results"][0]["id"],
+        events[terminal_index].1["run"]["retrievals"][0]["results"][0]["id"],
         "doc_1"
     );
     assert!(!raw.contains("response.file_search_call."));
@@ -825,7 +825,7 @@ async fn production_artifact_store_gate_precedes_publication_and_binds_shared_id
     .unwrap_err();
     assert_eq!(
         retrieval_broker_error.code(),
-        "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER",
+        "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER",
         "all public sources require a shared production broker, even without an LLM source"
     );
     let stored = repository.load_versioned_plan_catalog().await.unwrap();
@@ -843,7 +843,7 @@ async fn production_artifact_store_gate_precedes_publication_and_binds_shared_id
     .unwrap_err();
     assert_eq!(
         broker_error.code(),
-        "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER"
+        "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER"
     );
     let stored = repository.load_versioned_plan_catalog().await.unwrap();
     assert!(stored.plans().is_empty());
@@ -948,7 +948,7 @@ async fn production_artifact_store_gate_precedes_publication_and_binds_shared_id
         .unwrap_err();
     assert_eq!(
         admission_error.code(),
-        "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RESPONSE_BROKER"
+        "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER"
     );
     admission_service
         .shutdown(Duration::from_secs(1))
@@ -1057,7 +1057,7 @@ async fn executor_panic_is_durable_and_does_not_kill_the_only_worker_pump() {
     let terminal_authority = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
         "SELECT rr.registration_kind,rr.artifact_count,
                 CASE WHEN rr.event_id=r.terminal_event_id THEN 1 ELSE 0 END,
-                (SELECT COUNT(*) FROM response_snapshots s WHERE s.run_id=r.run_id),
+                (SELECT COUNT(*) FROM run_stream_snapshots s WHERE s.run_id=r.run_id),
                 (SELECT COUNT(*) FROM public_event_outbox o
                  WHERE o.run_id=r.run_id AND o.is_terminal=1)
          FROM workflow_runs r
@@ -1611,7 +1611,7 @@ async fn postgres_attached_public_lifecycle_is_ordered_private_and_replay_idempo
         "SELECT rr.registration_kind,rr.artifact_count,
                 r.artifact_reference_retention_seconds,
                 EXTRACT(EPOCH FROM (rr.retain_until-r.terminal_at))::double precision,
-                (SELECT COUNT(*) FROM response_snapshots s WHERE s.run_id=r.run_id),
+                (SELECT COUNT(*) FROM run_stream_snapshots s WHERE s.run_id=r.run_id),
                 (SELECT COUNT(*) FROM public_event_outbox o
                  WHERE o.run_id=r.run_id AND o.is_terminal),
                 (CASE WHEN rr.event_id=r.terminal_event_id THEN 1 ELSE 0 END)::bigint
@@ -1722,7 +1722,7 @@ async fn postgres_attached_public_lifecycle_is_ordered_private_and_replay_idempo
 
     let terminal_rows = sqlx::query_as::<_, (String, String, String, i64, i64, i64, i64)>(
         "SELECT r.run_id,r.lifecycle,rr.registration_kind,rr.artifact_count,
-                (SELECT COUNT(*) FROM response_snapshots s WHERE s.run_id=r.run_id),
+                (SELECT COUNT(*) FROM run_stream_snapshots s WHERE s.run_id=r.run_id),
                 (SELECT COUNT(*) FROM public_event_outbox o
                  WHERE o.run_id=r.run_id AND o.is_terminal),
                 (CASE WHEN rr.event_id=r.terminal_event_id THEN 1 ELSE 0 END)::bigint
@@ -1835,7 +1835,7 @@ async fn cancel_is_durable_and_idempotently_visible_through_get() {
     assert_eq!(
         sqlx::query_as::<_, (String, i64, i64, i64)>(
             "SELECT rr.registration_kind,rr.artifact_count,
-                    (SELECT COUNT(*) FROM response_snapshots s WHERE s.run_id=r.run_id),
+                    (SELECT COUNT(*) FROM run_stream_snapshots s WHERE s.run_id=r.run_id),
                     (SELECT COUNT(*) FROM public_event_outbox o
                      WHERE o.run_id=r.run_id AND o.is_terminal=1)
              FROM workflow_runs r
@@ -1924,7 +1924,7 @@ async fn terminal_artifact_retention_abort_rolls_back_and_replays_the_whole_term
     assert_eq!(
         sqlx::query_as::<_, (i64, i64, i64, i64)>(
             "SELECT CASE WHEN terminal_at IS NULL THEN 0 ELSE 1 END,
-                    (SELECT COUNT(*) FROM response_snapshots s WHERE s.run_id=r.run_id),
+                    (SELECT COUNT(*) FROM run_stream_snapshots s WHERE s.run_id=r.run_id),
                     (SELECT COUNT(*) FROM public_event_outbox o
                      WHERE o.run_id=r.run_id AND o.is_terminal=1),
                     (SELECT COUNT(*) FROM artifact_retention_releases rr
@@ -1947,7 +1947,7 @@ async fn terminal_artifact_retention_abort_rolls_back_and_replays_the_whole_term
     assert_eq!(
         sqlx::query_as::<_, (i64, i64, i64, i64, String, i64)>(
             "SELECT CASE WHEN r.terminal_at IS NULL THEN 0 ELSE 1 END,
-                    (SELECT COUNT(*) FROM response_snapshots s WHERE s.run_id=r.run_id),
+                    (SELECT COUNT(*) FROM run_stream_snapshots s WHERE s.run_id=r.run_id),
                     (SELECT COUNT(*) FROM public_event_outbox o
                      WHERE o.run_id=r.run_id AND o.is_terminal=1),
                     (SELECT COUNT(*) FROM artifact_retention_releases rr2

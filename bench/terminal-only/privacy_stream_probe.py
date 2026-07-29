@@ -89,7 +89,7 @@ def evaluate_timeline(
         for frame in frames
         if int(frame["observed_at_ns"]) > delete_completed_at_ns
     ]
-    if not any(frame["event"] == "response.output_text.delta" for frame in before):
+    if not any(frame["event"] == "run.output.text.delta" for frame in before):
         failures.append("stream produced no provisional output delta before DELETE")
     terminal_before = [
         frame["event"] for frame in before if frame["event"] in TERMINAL_EVENTS
@@ -175,7 +175,7 @@ def run_probe(args: argparse.Namespace) -> int:
                     frame = parse_frame(current_lines, time.monotonic_ns())
                     if frame is not None:
                         frames.append(frame)
-                        if frame["event"] == "response.output_text.delta":
+                        if frame["event"] == "run.output.text.delta":
                             first_delta.set()
                 current_lines = []
         except Exception as error:  # noqa: BLE001 - evidence must record any I/O failure.

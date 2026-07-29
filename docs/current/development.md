@@ -46,7 +46,7 @@ fail-closed evaluator；已完成的复现命令及正式证据路径保存在
 | `crates/durable/src/` | 后端中立的 repository ports、commands、claims、receipts 与 projection models |
 | `crates/resources/src/` | Model/Action/Retrieval SPI、registry、builtin 与 OpenAI provider |
 | `crates/storage/src/` | SQLite/PostgreSQL、Graph SQL、Artifact store 与 PostgreSQL live broker adapter |
-| `crates/runtime/src/` | catalog/deployment、leaf adapter、scheduler/worker pump、RunService 与 live response |
+| `crates/runtime/src/` | catalog/deployment、leaf adapter、scheduler/worker pump、RunService 与 live Run stream |
 | `crates/api/src/v1/` | `/v1` Axum HTTP、认证、错误映射与 SSE transport |
 | `src/` | 根兼容 facade、平台配置、严格 YAML 解码和 binary composition |
 | `database/durable/` | SQLite/PostgreSQL 完整 Schema、安装与权限合同 |

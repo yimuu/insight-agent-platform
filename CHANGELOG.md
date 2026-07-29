@@ -9,7 +9,7 @@
 
 ### Added
 
-- `response-stream/v1` 新增 `workflow.tool.progress`，Action 可通过独立闭合 Schema 和 scoped
+- `run-stream/v1` 新增 `run.tool.progress`，Action 可通过独立闭合 Schema 和 scoped
   best-effort publisher 公开有界的 `output_text/output_json` 执行进度。
 - `progress_tool_assistant` 与 `progress_counter` 示例，用于演示模型工具参数、两次进度、公开结果
   和 assistant continuation 的完整 Attached SSE 生命周期。
@@ -22,12 +22,20 @@
 
 ### Changed
 
-- `workflow.tool.completed/failed` 现在包含 logical tool call 的 `duration_ms`；full runtime 使用
+- Attached SSE 已 clean-cut 到统一的 `run-stream/v1`：25 个闭合事件全部以 `run.*` 命名，
+  lifecycle terminal 只携带一个按状态闭合的 `run` 快照；Full 与 Terminal-only 共享同一
+  wire shape。
+- durable terminal snapshot 改为 canonical `run_payload`，协议哈希域显式包含
+  `run-stream/v1`；旧 `response_snapshots` 结构不支持原地升级。
+- Attached HTTP 不再返回 `X-Response-ID`，`run_id` 成为公开执行身份；`running` 只在执行
+  authority 确认后发出，terminal replay 可直接从 `created` 进入 terminal。
+- 运行时配置键从 `response_stream` clean-cut 为 `run_stream`，不提供旧键别名。
+- `run.tool.completed/failed` 现在包含 logical tool call 的 `duration_ms`；full runtime 使用
   durable 首次执行时间并覆盖 retry/backoff，terminal-only 使用同边界的进程内计时。
-- terminal `workflow.tool_results` 现在保留公开 status-only 成功调用并使用空 `content` 校准；
+- terminal `run.tool_results` 现在保留公开 status-only 成功调用并使用空 `content` 校准；
   `current_time`、`text_metrics`、`integer_calculator` 公开安全结果，`text_replace` 结果继续私有。
-- `response-stream/v1` 闭合事件集合由 24 个原地切换为 25 个；这是 `0.1.x` 受控客户端同步升级，
-  不提供旧/新 v1 混合部署兼容层。
+- 新 `run-stream/v1` 的闭合事件集合固定为 25 个；这是 `0.1.x` 受控客户端同步升级，不提供
+  旧 `response-stream/v1` 与目标协议的混合部署兼容层。
 - Deployment Revision identity 冻结 `full|terminal_only` persistence policy；Run DTO 显式返回
   recovery、event replay 与 wait capability。
 - Quickstart、Helm chart 和未声明 Deployment Revision 的默认 persistence mode 继续为 `full`；

@@ -1853,7 +1853,7 @@ impl TaskExecutionResult {
 
 #[async_trait]
 pub trait LeafTaskExecutor: Send + Sync {
-    fn live_response_capable(&self) -> bool {
+    fn live_run_stream_capable(&self) -> bool {
         false
     }
 
@@ -1891,7 +1891,7 @@ impl WorkerExecutorRegistry {
         for (key, executor) in &self.executors {
             if key.task_kind == SchedulerTaskKind::Llm && key.implementation == "core.llm" {
                 found = true;
-                if !executor.live_response_capable() {
+                if !executor.live_run_stream_capable() {
                     return false;
                 }
             }

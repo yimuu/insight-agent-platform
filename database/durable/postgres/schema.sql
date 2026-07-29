@@ -1629,22 +1629,17 @@ CREATE TABLE response_public_items (
     CONSTRAINT response_public_items_seal_index_check CHECK (((seal_index IS NULL) OR (seal_index >= 0)))
 );
 
-CREATE TABLE response_snapshots (
+CREATE TABLE run_stream_snapshots (
     run_id text NOT NULL,
-    response_id text NOT NULL,
+    protocol text NOT NULL,
     terminal_kind text NOT NULL,
-    response_status text NOT NULL,
-    response_payload jsonb NOT NULL,
-    workflow_payload jsonb NOT NULL,
+    run_payload jsonb NOT NULL,
     public_item_manifest jsonb NOT NULL,
-    usage jsonb,
-    usage_status text NOT NULL,
     snapshot_hash text NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT response_snapshots_response_status_check CHECK ((response_status = ANY (ARRAY['completed'::text, 'failed'::text, 'cancelled'::text, 'incomplete'::text]))),
-    CONSTRAINT response_snapshots_snapshot_hash_check CHECK (((length(snapshot_hash) = 71) AND (snapshot_hash ~~ 'sha256:%'::text))),
-    CONSTRAINT response_snapshots_terminal_kind_check CHECK ((terminal_kind = ANY (ARRAY['response.completed'::text, 'response.failed'::text, 'workflow.response.timed_out'::text, 'workflow.response.cancelled'::text, 'workflow.response.interrupted'::text]))),
-    CONSTRAINT response_snapshots_usage_status_check CHECK ((usage_status = ANY (ARRAY['complete'::text, 'partial'::text, 'unavailable'::text])))
+    CONSTRAINT run_stream_snapshots_protocol_check CHECK ((protocol = 'run-stream/v1'::text)),
+    CONSTRAINT run_stream_snapshots_snapshot_hash_check CHECK (((length(snapshot_hash) = 71) AND (snapshot_hash ~~ 'sha256:%'::text))),
+    CONSTRAINT run_stream_snapshots_terminal_kind_check CHECK ((terminal_kind = ANY (ARRAY['run.lifecycle.completed'::text, 'run.lifecycle.failed'::text, 'run.lifecycle.timed_out'::text, 'run.lifecycle.cancelled'::text, 'run.lifecycle.interrupted'::text])))
 );
 
 CREATE TABLE run_migration_intents (
@@ -2695,11 +2690,8 @@ ALTER TABLE ONLY response_public_items
 ALTER TABLE ONLY response_public_items
     ADD CONSTRAINT response_public_items_run_id_output_index_key UNIQUE (run_id, output_index);
 
-ALTER TABLE ONLY response_snapshots
-    ADD CONSTRAINT response_snapshots_pkey PRIMARY KEY (run_id);
-
-ALTER TABLE ONLY response_snapshots
-    ADD CONSTRAINT response_snapshots_response_id_key UNIQUE (response_id);
+ALTER TABLE ONLY run_stream_snapshots
+    ADD CONSTRAINT run_stream_snapshots_pkey PRIMARY KEY (run_id);
 
 ALTER TABLE ONLY run_migration_intents
     ADD CONSTRAINT run_migration_intents_final_transition_key_key UNIQUE (final_transition_key);
@@ -3223,11 +3215,8 @@ ALTER TABLE ONLY recovery_transition_results
 ALTER TABLE ONLY response_public_items
     ADD CONSTRAINT response_public_items_run_id_fkey FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY response_snapshots
-    ADD CONSTRAINT response_snapshots_response_id_fkey FOREIGN KEY (response_id) REFERENCES workflow_runs(response_id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY response_snapshots
-    ADD CONSTRAINT response_snapshots_run_id_fkey FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY run_stream_snapshots
+    ADD CONSTRAINT run_stream_snapshots_run_id_fkey FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY run_migration_intents
     ADD CONSTRAINT run_migration_intents_run_id_fkey FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id) ON DELETE RESTRICT;
@@ -3383,7 +3372,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-d98dcd93-4911-426d-a826-9d8a5b04b461',
+    'durable-schema-ed759e21-5c5d-42e9-90d3-744029ea19b2',
     'postgres'
 );
 

@@ -1,9 +1,9 @@
-//! Public `response-stream/v1` protocol and its transient delivery contracts.
+//! Public `run-stream/v1` protocol and its transient delivery contracts.
 //!
 //! The types in this module deliberately separate two representations:
 //!
-//! - [`ResponseStreamEvent`] is the closed, serializable caller contract;
-//! - [`LiveResponsePublication`] is an internal, non-serializable envelope
+//! - [`RunStreamEvent`] is the closed, serializable caller contract;
+//! - [`LiveRunStreamPublication`] is an internal, non-serializable envelope
 //!   carrying Attempt and item-local ordering authority.
 //!
 //! Concrete in-memory and shared broker adapters live above this crate. The
@@ -28,123 +28,122 @@ mod durable;
 mod retrieval_public_projection;
 mod tool_public_projection;
 
-pub use durable::{DurableResponseSnapshot, ResponseTerminalKind, ResponseUsageStatus};
-pub use retrieval_public_projection::WorkflowRetrievalPublicProjection;
-pub use tool_public_projection::{
-    WorkflowToolCompletedArgumentsProjection, WorkflowToolPublicProjection,
-};
+pub use durable::{DurableRunStreamSnapshot, RunTerminalKind, RunUsageStatus};
+pub use retrieval_public_projection::RunRetrievalPublicProjection;
+pub use tool_public_projection::{RunToolCompletedArgumentsProjection, RunToolPublicProjection};
 
-pub const RESPONSE_STREAM_PROTOCOL_VERSION: &str = "response-stream/v1";
+pub const RUN_STREAM_PROTOCOL_VERSION: &str = "run-stream/v1";
 
-const LIVE_RESPONSE_CONFIG_INVALID: &str = "LIVE_RESPONSE_CONFIG_INVALID";
-const LIVE_RESPONSE_STREAM_CLOSED: &str = "LIVE_RESPONSE_STREAM_CLOSED";
-const LIVE_RESPONSE_IDENTITY_INVALID: &str = "LIVE_RESPONSE_IDENTITY_INVALID";
-const LIVE_RESPONSE_FUNCTION_CALL_INVALID: &str = "LIVE_RESPONSE_FUNCTION_CALL_INVALID";
+const LIVE_RUN_STREAM_CONFIG_INVALID: &str = "LIVE_RUN_STREAM_CONFIG_INVALID";
+const LIVE_RUN_STREAM_STREAM_CLOSED: &str = "LIVE_RUN_STREAM_STREAM_CLOSED";
+const LIVE_RUN_STREAM_IDENTITY_INVALID: &str = "LIVE_RUN_STREAM_IDENTITY_INVALID";
+const LIVE_RUN_STREAM_FUNCTION_CALL_INVALID: &str = "LIVE_RUN_STREAM_FUNCTION_CALL_INVALID";
 const MAX_PUBLIC_LABEL_BYTES: usize = 256;
+const MAX_PUBLIC_MESSAGE_BYTES: usize = 512;
 pub const MAX_FUNCTION_CALL_ARGUMENT_BYTES: usize = 256 * 1_024;
 const MAX_FUNCTION_CALL_ARGUMENT_DEPTH: usize = 64;
 const MAX_FUNCTION_CALL_ARGUMENT_VALUES: usize = 16_384;
-const WORKFLOW_PUBLIC_RESULT_INVALID: &str = "WORKFLOW_PUBLIC_RESULT_INVALID";
-const MAX_WORKFLOW_PUBLIC_TEXT_BYTES: usize = 64 * 1_024;
-const MAX_WORKFLOW_PUBLIC_JSON_BYTES: usize = 64 * 1_024;
-const MAX_WORKFLOW_PUBLIC_JSON_DEPTH: usize = 32;
-const MAX_WORKFLOW_PUBLIC_JSON_VALUES: usize = 4_096;
-const MAX_WORKFLOW_PUBLIC_JSON_STRING_BYTES: usize = 16 * 1_024;
-const MAX_WORKFLOW_TOOL_CONTENT_PARTS: usize = 128;
-const MAX_WORKFLOW_RETRIEVAL_RESULTS: usize = 256;
-const MAX_WORKFLOW_RETRIEVAL_QUERY_BYTES: usize = 16 * 1_024;
-const MAX_WORKFLOW_RETRIEVAL_TITLE_BYTES: usize = 4 * 1_024;
-const MAX_WORKFLOW_RETRIEVAL_URI_BYTES: usize = 8 * 1_024;
-const MAX_WORKFLOW_RETRIEVAL_SNIPPET_BYTES: usize = 64 * 1_024;
-const MAX_WORKFLOW_RETRIEVAL_METADATA_BYTES: usize = 16 * 1_024;
-const MAX_WORKFLOW_RETRIEVAL_METADATA_ENTRIES: usize = 128;
+const RUN_PUBLIC_RESULT_INVALID: &str = "RUN_PUBLIC_RESULT_INVALID";
+const MAX_RUN_PUBLIC_TEXT_BYTES: usize = 64 * 1_024;
+const MAX_RUN_PUBLIC_JSON_BYTES: usize = 64 * 1_024;
+const MAX_RUN_PUBLIC_JSON_DEPTH: usize = 32;
+const MAX_RUN_PUBLIC_JSON_VALUES: usize = 4_096;
+const MAX_RUN_PUBLIC_JSON_STRING_BYTES: usize = 16 * 1_024;
+const MAX_RUN_TOOL_CONTENT_PARTS: usize = 128;
+const MAX_RUN_RETRIEVAL_RESULTS: usize = 256;
+const MAX_RUN_RETRIEVAL_QUERY_BYTES: usize = 16 * 1_024;
+const MAX_RUN_RETRIEVAL_TITLE_BYTES: usize = 4 * 1_024;
+const MAX_RUN_RETRIEVAL_URI_BYTES: usize = 8 * 1_024;
+const MAX_RUN_RETRIEVAL_SNIPPET_BYTES: usize = 64 * 1_024;
+const MAX_RUN_RETRIEVAL_METADATA_BYTES: usize = 16 * 1_024;
+const MAX_RUN_RETRIEVAL_METADATA_ENTRIES: usize = 128;
 
-/// Exact public event set frozen by `response-stream/v1`.
+/// Exact public event set frozen by `run-stream/v1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ResponseStreamEventType {
-    ResponseCreated,
-    ResponseInProgress,
-    ResponseOutputItemAdded,
-    ResponseContentPartAdded,
-    ResponseOutputTextDelta,
-    ResponseOutputTextDone,
-    ResponseContentPartDone,
-    ResponseFunctionCallArgumentsDelta,
-    ResponseFunctionCallArgumentsDone,
-    ResponseOutputItemDone,
-    ResponseFileSearchCallInProgress,
-    ResponseFileSearchCallSearching,
-    ResponseFileSearchCallCompleted,
-    ResponseCompleted,
-    ResponseFailed,
-    Error,
-    WorkflowToolStarted,
-    WorkflowToolProgress,
-    WorkflowToolCompleted,
-    WorkflowToolFailed,
-    WorkflowRetrievalCompleted,
-    WorkflowStreamGap,
-    WorkflowResponseTimedOut,
-    WorkflowResponseCancelled,
-    WorkflowResponseInterrupted,
+pub enum RunStreamEventType {
+    RunLifecycleCreated,
+    RunLifecycleRunning,
+    RunOutputItemAdded,
+    RunOutputContentPartAdded,
+    RunOutputTextDelta,
+    RunOutputTextDone,
+    RunOutputContentPartDone,
+    RunOutputFunctionCallArgumentsDelta,
+    RunOutputFunctionCallArgumentsDone,
+    RunOutputItemDone,
+    RunOutputFileSearchCallInProgress,
+    RunOutputFileSearchCallSearching,
+    RunOutputFileSearchCallCompleted,
+    RunLifecycleCompleted,
+    RunLifecycleFailed,
+    RunStreamError,
+    RunToolStarted,
+    RunToolProgress,
+    RunToolCompleted,
+    RunToolFailed,
+    RunRetrievalCompleted,
+    RunStreamGap,
+    RunLifecycleTimedOut,
+    RunLifecycleCancelled,
+    RunLifecycleInterrupted,
 }
 
-impl ResponseStreamEventType {
+impl RunStreamEventType {
     pub const ALL: [Self; 25] = [
-        Self::ResponseCreated,
-        Self::ResponseInProgress,
-        Self::ResponseOutputItemAdded,
-        Self::ResponseContentPartAdded,
-        Self::ResponseOutputTextDelta,
-        Self::ResponseOutputTextDone,
-        Self::ResponseContentPartDone,
-        Self::ResponseFunctionCallArgumentsDelta,
-        Self::ResponseFunctionCallArgumentsDone,
-        Self::ResponseOutputItemDone,
-        Self::ResponseFileSearchCallInProgress,
-        Self::ResponseFileSearchCallSearching,
-        Self::ResponseFileSearchCallCompleted,
-        Self::ResponseCompleted,
-        Self::ResponseFailed,
-        Self::Error,
-        Self::WorkflowToolStarted,
-        Self::WorkflowToolProgress,
-        Self::WorkflowToolCompleted,
-        Self::WorkflowToolFailed,
-        Self::WorkflowRetrievalCompleted,
-        Self::WorkflowStreamGap,
-        Self::WorkflowResponseTimedOut,
-        Self::WorkflowResponseCancelled,
-        Self::WorkflowResponseInterrupted,
+        Self::RunLifecycleCreated,
+        Self::RunLifecycleRunning,
+        Self::RunOutputItemAdded,
+        Self::RunOutputContentPartAdded,
+        Self::RunOutputTextDelta,
+        Self::RunOutputTextDone,
+        Self::RunOutputContentPartDone,
+        Self::RunOutputFunctionCallArgumentsDelta,
+        Self::RunOutputFunctionCallArgumentsDone,
+        Self::RunOutputItemDone,
+        Self::RunOutputFileSearchCallInProgress,
+        Self::RunOutputFileSearchCallSearching,
+        Self::RunOutputFileSearchCallCompleted,
+        Self::RunLifecycleCompleted,
+        Self::RunLifecycleFailed,
+        Self::RunStreamError,
+        Self::RunToolStarted,
+        Self::RunToolProgress,
+        Self::RunToolCompleted,
+        Self::RunToolFailed,
+        Self::RunRetrievalCompleted,
+        Self::RunStreamGap,
+        Self::RunLifecycleTimedOut,
+        Self::RunLifecycleCancelled,
+        Self::RunLifecycleInterrupted,
     ];
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::ResponseCreated => "response.created",
-            Self::ResponseInProgress => "response.in_progress",
-            Self::ResponseOutputItemAdded => "response.output_item.added",
-            Self::ResponseContentPartAdded => "response.content_part.added",
-            Self::ResponseOutputTextDelta => "response.output_text.delta",
-            Self::ResponseOutputTextDone => "response.output_text.done",
-            Self::ResponseContentPartDone => "response.content_part.done",
-            Self::ResponseFunctionCallArgumentsDelta => "response.function_call_arguments.delta",
-            Self::ResponseFunctionCallArgumentsDone => "response.function_call_arguments.done",
-            Self::ResponseOutputItemDone => "response.output_item.done",
-            Self::ResponseFileSearchCallInProgress => "response.file_search_call.in_progress",
-            Self::ResponseFileSearchCallSearching => "response.file_search_call.searching",
-            Self::ResponseFileSearchCallCompleted => "response.file_search_call.completed",
-            Self::ResponseCompleted => "response.completed",
-            Self::ResponseFailed => "response.failed",
-            Self::Error => "error",
-            Self::WorkflowToolStarted => "workflow.tool.started",
-            Self::WorkflowToolProgress => "workflow.tool.progress",
-            Self::WorkflowToolCompleted => "workflow.tool.completed",
-            Self::WorkflowToolFailed => "workflow.tool.failed",
-            Self::WorkflowRetrievalCompleted => "workflow.retrieval.completed",
-            Self::WorkflowStreamGap => "workflow.stream.gap",
-            Self::WorkflowResponseTimedOut => "workflow.response.timed_out",
-            Self::WorkflowResponseCancelled => "workflow.response.cancelled",
-            Self::WorkflowResponseInterrupted => "workflow.response.interrupted",
+            Self::RunLifecycleCreated => "run.lifecycle.created",
+            Self::RunLifecycleRunning => "run.lifecycle.running",
+            Self::RunOutputItemAdded => "run.output.item.added",
+            Self::RunOutputContentPartAdded => "run.output.content_part.added",
+            Self::RunOutputTextDelta => "run.output.text.delta",
+            Self::RunOutputTextDone => "run.output.text.done",
+            Self::RunOutputContentPartDone => "run.output.content_part.done",
+            Self::RunOutputFunctionCallArgumentsDelta => "run.output.function_call.arguments.delta",
+            Self::RunOutputFunctionCallArgumentsDone => "run.output.function_call.arguments.done",
+            Self::RunOutputItemDone => "run.output.item.done",
+            Self::RunOutputFileSearchCallInProgress => "run.output.file_search_call.in_progress",
+            Self::RunOutputFileSearchCallSearching => "run.output.file_search_call.searching",
+            Self::RunOutputFileSearchCallCompleted => "run.output.file_search_call.completed",
+            Self::RunLifecycleCompleted => "run.lifecycle.completed",
+            Self::RunLifecycleFailed => "run.lifecycle.failed",
+            Self::RunStreamError => "run.stream.error",
+            Self::RunToolStarted => "run.tool.started",
+            Self::RunToolProgress => "run.tool.progress",
+            Self::RunToolCompleted => "run.tool.completed",
+            Self::RunToolFailed => "run.tool.failed",
+            Self::RunRetrievalCompleted => "run.retrieval.completed",
+            Self::RunStreamGap => "run.stream.gap",
+            Self::RunLifecycleTimedOut => "run.lifecycle.timed_out",
+            Self::RunLifecycleCancelled => "run.lifecycle.cancelled",
+            Self::RunLifecycleInterrupted => "run.lifecycle.interrupted",
         }
     }
 
@@ -154,19 +153,23 @@ impl ResponseStreamEventType {
             .find(|event_type| event_type.as_str() == value)
     }
 
-    pub const fn is_terminal(self) -> bool {
+    pub const fn is_run_terminal(self) -> bool {
         matches!(
             self,
-            Self::ResponseCompleted
-                | Self::ResponseFailed
-                | Self::WorkflowResponseTimedOut
-                | Self::WorkflowResponseCancelled
-                | Self::WorkflowResponseInterrupted
+            Self::RunLifecycleCompleted
+                | Self::RunLifecycleFailed
+                | Self::RunLifecycleTimedOut
+                | Self::RunLifecycleCancelled
+                | Self::RunLifecycleInterrupted
         )
+    }
+
+    pub const fn ends_stream(self) -> bool {
+        self.is_run_terminal() || matches!(self, Self::RunStreamError)
     }
 }
 
-impl Serialize for ResponseStreamEventType {
+impl Serialize for RunStreamEventType {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -175,35 +178,37 @@ impl Serialize for ResponseStreamEventType {
     }
 }
 
-impl<'de> Deserialize<'de> for ResponseStreamEventType {
+impl<'de> Deserialize<'de> for RunStreamEventType {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        Self::parse(&value).ok_or_else(|| D::Error::custom("unknown response-stream/v1 event type"))
+        Self::parse(&value).ok_or_else(|| D::Error::custom("unknown run-stream/v1 event type"))
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ResponseObjectKind {
-    Response,
+pub enum RunObjectKind {
+    Run,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ResponseStatus {
-    InProgress,
+pub enum RunStatus {
+    Created,
+    Running,
     Completed,
     Failed,
     Cancelled,
-    Incomplete,
+    TimedOut,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ResponseItemStatus {
+pub enum RunOutputItemStatus {
     InProgress,
     Completed,
     Failed,
@@ -212,13 +217,13 @@ pub enum ResponseItemStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ResponseRole {
+pub enum RunOutputRole {
     Assistant,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ResponseContentPart {
+pub enum RunOutputContentPart {
     OutputText {
         text: String,
         #[serde(default)]
@@ -228,23 +233,23 @@ pub enum ResponseContentPart {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ResponseOutputItem {
+pub enum RunOutputItem {
     Message {
         id: String,
-        status: ResponseItemStatus,
-        role: ResponseRole,
-        content: Vec<ResponseContentPart>,
+        status: RunOutputItemStatus,
+        role: RunOutputRole,
+        content: Vec<RunOutputContentPart>,
     },
     FunctionCall {
         id: String,
-        status: ResponseItemStatus,
+        status: RunOutputItemStatus,
         call_id: String,
         name: String,
         arguments: String,
     },
     FileSearchCall {
         id: String,
-        status: ResponseItemStatus,
+        status: RunOutputItemStatus,
         #[serde(default)]
         queries: Vec<String>,
         #[serde(default)]
@@ -252,7 +257,7 @@ pub enum ResponseOutputItem {
     },
 }
 
-impl ResponseOutputItem {
+impl RunOutputItem {
     pub fn id(&self) -> &str {
         match self {
             Self::Message { id, .. }
@@ -264,59 +269,94 @@ impl ResponseOutputItem {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PublicResponseError {
-    pub code: String,
-    pub message: String,
-    pub param: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResponseUsageInputDetails {
+pub struct RunUsageInputDetails {
     pub cached_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ResponseUsageOutputDetails {
+pub struct RunUsageOutputDetails {
     pub reasoning_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ResponseUsage {
+pub struct RunUsage {
     pub input_tokens: u64,
-    pub input_tokens_details: ResponseUsageInputDetails,
+    pub input_tokens_details: RunUsageInputDetails,
     pub output_tokens: u64,
-    pub output_tokens_details: ResponseUsageOutputDetails,
+    pub output_tokens_details: RunUsageOutputDetails,
     pub total_tokens: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PublicResponse {
-    pub id: String,
-    pub object: ResponseObjectKind,
-    pub status: ResponseStatus,
-    #[serde(default)]
-    pub output: Vec<ResponseOutputItem>,
-    pub usage: Option<ResponseUsage>,
-    pub error: Option<PublicResponseError>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowUsageStatus {
-    Complete,
-    Partial,
-    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowPublicError {
+pub struct RunPublicError {
     pub code: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunInitialSnapshot {
+    pub id: String,
+    pub object: RunObjectKind,
+    pub status: RunStatus,
+    pub output: Vec<RunOutputItem>,
+    pub usage: Option<RunUsage>,
+}
+
+impl RunInitialSnapshot {
+    pub fn new(run_id: impl Into<String>, status: RunStatus) -> Result<Self, &'static str> {
+        if !matches!(status, RunStatus::Created | RunStatus::Running) {
+            return Err("initial run snapshot status must be created or running");
+        }
+        let id = run_id.into();
+        if !valid_public_label(&id) {
+            return Err("run snapshot ID must be a stable public label");
+        }
+        Ok(Self {
+            id,
+            object: RunObjectKind::Run,
+            status,
+            output: Vec::new(),
+            usage: None,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunInitialSnapshotWire {
+    id: String,
+    object: RunObjectKind,
+    status: RunStatus,
+    output: Vec<RunOutputItem>,
+    usage: Option<RunUsage>,
+}
+
+impl<'de> Deserialize<'de> for RunInitialSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RunInitialSnapshotWire::deserialize(deserializer)?;
+        if wire.object != RunObjectKind::Run
+            || !matches!(wire.status, RunStatus::Created | RunStatus::Running)
+            || !wire.output.is_empty()
+            || wire.usage.is_some()
+            || !valid_public_label(&wire.id)
+        {
+            return Err(D::Error::custom("invalid initial run snapshot"));
+        }
+        Ok(Self {
+            id: wire.id,
+            object: wire.object,
+            status: wire.status,
+            output: wire.output,
+            usage: wire.usage,
+        })
+    }
 }
 
 /// Returns one bounded, body-free explanation for stable infrastructure
@@ -338,66 +378,200 @@ pub fn public_failure_message(code: &str) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowStopReason {
-    Cancelled,
-    Interrupted,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowCompleted {
-    pub run_id: String,
+pub struct RunCompletedSnapshot {
+    pub id: String,
+    pub object: RunObjectKind,
+    pub status: RunStatus,
+    #[serde(default)]
+    pub output: Vec<RunOutputItem>,
     pub result: Value,
     #[serde(default)]
-    pub tool_results: Vec<WorkflowToolResult>,
+    pub tool_results: Vec<RunToolResult>,
     #[serde(default)]
-    pub retrievals: Vec<WorkflowRetrieval>,
-    pub usage_status: WorkflowUsageStatus,
+    pub retrievals: Vec<RunRetrieval>,
+    pub usage: Option<RunUsage>,
+    pub usage_status: RunUsageStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowFailure {
-    pub run_id: String,
-    pub error: WorkflowPublicError,
+struct RunCompletedSnapshotWire {
+    id: String,
+    object: RunObjectKind,
+    status: RunStatus,
     #[serde(default)]
-    pub tool_results: Vec<WorkflowToolResult>,
+    output: Vec<RunOutputItem>,
+    result: Value,
     #[serde(default)]
-    pub retrievals: Vec<WorkflowRetrieval>,
-    pub usage_status: WorkflowUsageStatus,
+    tool_results: Vec<RunToolResult>,
+    #[serde(default)]
+    retrievals: Vec<RunRetrieval>,
+    usage: Option<RunUsage>,
+    usage_status: RunUsageStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for RunCompletedSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RunCompletedSnapshotWire::deserialize(deserializer)?;
+        let run = Self {
+            id: wire.id,
+            object: wire.object,
+            status: wire.status,
+            output: wire.output,
+            result: wire.result,
+            tool_results: wire.tool_results,
+            retrievals: wire.retrievals,
+            usage: wire.usage,
+            usage_status: wire.usage_status,
+        };
+        validate_completed_run(&run).map_err(D::Error::custom)?;
+        Ok(run)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowStopped {
-    pub run_id: String,
-    pub reason: WorkflowStopReason,
+pub struct RunFailedSnapshot {
+    pub id: String,
+    pub object: RunObjectKind,
+    pub status: RunStatus,
     #[serde(default)]
-    pub tool_results: Vec<WorkflowToolResult>,
+    pub output: Vec<RunOutputItem>,
+    pub error: RunPublicError,
     #[serde(default)]
-    pub retrievals: Vec<WorkflowRetrieval>,
-    pub usage_status: WorkflowUsageStatus,
+    pub tool_results: Vec<RunToolResult>,
+    #[serde(default)]
+    pub retrievals: Vec<RunRetrieval>,
+    pub usage: Option<RunUsage>,
+    pub usage_status: RunUsageStatus,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunFailedSnapshotWire {
+    id: String,
+    object: RunObjectKind,
+    status: RunStatus,
+    #[serde(default)]
+    output: Vec<RunOutputItem>,
+    error: RunPublicError,
+    #[serde(default)]
+    tool_results: Vec<RunToolResult>,
+    #[serde(default)]
+    retrievals: Vec<RunRetrieval>,
+    usage: Option<RunUsage>,
+    usage_status: RunUsageStatus,
+}
+
+impl<'de> Deserialize<'de> for RunFailedSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RunFailedSnapshotWire::deserialize(deserializer)?;
+        if !matches!(wire.status, RunStatus::Failed | RunStatus::TimedOut) {
+            return Err(D::Error::custom(
+                "failed run snapshot status must be failed or timed_out",
+            ));
+        }
+        let expected_status = wire.status;
+        let run = Self {
+            id: wire.id,
+            object: wire.object,
+            status: wire.status,
+            output: wire.output,
+            error: wire.error,
+            tool_results: wire.tool_results,
+            retrievals: wire.retrievals,
+            usage: wire.usage,
+            usage_status: wire.usage_status,
+        };
+        validate_failed_run(&run, expected_status).map_err(D::Error::custom)?;
+        Ok(run)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunStoppedSnapshot {
+    pub id: String,
+    pub object: RunObjectKind,
+    pub status: RunStatus,
+    #[serde(default)]
+    pub output: Vec<RunOutputItem>,
+    #[serde(default)]
+    pub tool_results: Vec<RunToolResult>,
+    #[serde(default)]
+    pub retrievals: Vec<RunRetrieval>,
+    pub usage: Option<RunUsage>,
+    pub usage_status: RunUsageStatus,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunStoppedSnapshotWire {
+    id: String,
+    object: RunObjectKind,
+    status: RunStatus,
+    #[serde(default)]
+    output: Vec<RunOutputItem>,
+    #[serde(default)]
+    tool_results: Vec<RunToolResult>,
+    #[serde(default)]
+    retrievals: Vec<RunRetrieval>,
+    usage: Option<RunUsage>,
+    usage_status: RunUsageStatus,
+}
+
+impl<'de> Deserialize<'de> for RunStoppedSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RunStoppedSnapshotWire::deserialize(deserializer)?;
+        if !matches!(wire.status, RunStatus::Cancelled | RunStatus::Interrupted) {
+            return Err(D::Error::custom(
+                "stopped run snapshot status must be cancelled or interrupted",
+            ));
+        }
+        let expected_status = wire.status;
+        let run = Self {
+            id: wire.id,
+            object: wire.object,
+            status: wire.status,
+            output: wire.output,
+            tool_results: wire.tool_results,
+            retrievals: wire.retrievals,
+            usage: wire.usage,
+            usage_status: wire.usage_status,
+        };
+        validate_stopped_run(&run, expected_status).map_err(D::Error::custom)?;
+        Ok(run)
+    }
 }
 
 /// Validation failure for a caller-visible tool or retrieval result.
 ///
 /// The error deliberately has one stable public code and a body-free message:
 /// rejected provider or executor values must not be reflected into logs or a
-/// response stream while the safe public projection is being built.
+/// Run stream while the safe public projection is being built.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkflowPublicResultError {
+pub struct RunPublicResultError {
     message: &'static str,
 }
 
-impl WorkflowPublicResultError {
+impl RunPublicResultError {
     const fn new(message: &'static str) -> Self {
         Self { message }
     }
 
     pub const fn code(&self) -> &'static str {
-        WORKFLOW_PUBLIC_RESULT_INVALID
+        RUN_PUBLIC_RESULT_INVALID
     }
 
     pub const fn message(&self) -> &'static str {
@@ -405,17 +579,17 @@ impl WorkflowPublicResultError {
     }
 }
 
-impl fmt::Display for WorkflowPublicResultError {
+impl fmt::Display for RunPublicResultError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.message)
     }
 }
 
-impl Error for WorkflowPublicResultError {}
+impl Error for RunPublicResultError {}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum WorkflowToolContentWire {
+enum RunToolContentWire {
     #[serde(rename = "output_text")]
     Text { text: String },
     #[serde(rename = "output_json")]
@@ -430,58 +604,58 @@ enum WorkflowToolContentWire {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum WorkflowToolProgressContentWire {
+enum RunToolProgressContentWire {
     #[serde(rename = "output_text")]
     Text { text: String },
     #[serde(rename = "output_json")]
     Json { json: Value },
 }
 
-/// Closed public content union for one live-only workflow tool progress update.
+/// Closed public content union for one live-only run tool progress update.
 ///
 /// Progress deliberately excludes artifact-bearing variants because a
 /// best-effort observation cannot establish durable artifact authority.
 #[derive(Debug, Clone, PartialEq)]
-pub struct WorkflowToolProgressContent {
-    wire: WorkflowToolProgressContentWire,
+pub struct RunToolProgressContent {
+    wire: RunToolProgressContentWire,
 }
 
-impl WorkflowToolProgressContent {
-    pub fn output_text(text: impl Into<String>) -> Result<Self, WorkflowPublicResultError> {
+impl RunToolProgressContent {
+    pub fn output_text(text: impl Into<String>) -> Result<Self, RunPublicResultError> {
         let text = text.into();
         validate_bounded_public_string(
             &text,
-            MAX_WORKFLOW_PUBLIC_TEXT_BYTES,
-            "workflow tool progress text must be non-empty and bounded",
+            MAX_RUN_PUBLIC_TEXT_BYTES,
+            "run tool progress text must be non-empty and bounded",
         )?;
         Ok(Self {
-            wire: WorkflowToolProgressContentWire::Text { text },
+            wire: RunToolProgressContentWire::Text { text },
         })
     }
 
-    pub fn output_json(json: Value) -> Result<Self, WorkflowPublicResultError> {
-        validate_bounded_public_json(&json, MAX_WORKFLOW_PUBLIC_JSON_BYTES)?;
+    pub fn output_json(json: Value) -> Result<Self, RunPublicResultError> {
+        validate_bounded_public_json(&json, MAX_RUN_PUBLIC_JSON_BYTES)?;
         Ok(Self {
-            wire: WorkflowToolProgressContentWire::Json { json },
+            wire: RunToolProgressContentWire::Json { json },
         })
     }
 
     pub fn text(&self) -> Option<&str> {
         match &self.wire {
-            WorkflowToolProgressContentWire::Text { text } => Some(text),
-            WorkflowToolProgressContentWire::Json { .. } => None,
+            RunToolProgressContentWire::Text { text } => Some(text),
+            RunToolProgressContentWire::Json { .. } => None,
         }
     }
 
     pub fn json(&self) -> Option<&Value> {
         match &self.wire {
-            WorkflowToolProgressContentWire::Json { json } => Some(json),
-            WorkflowToolProgressContentWire::Text { .. } => None,
+            RunToolProgressContentWire::Json { json } => Some(json),
+            RunToolProgressContentWire::Text { .. } => None,
         }
     }
 }
 
-impl Serialize for WorkflowToolProgressContent {
+impl Serialize for RunToolProgressContent {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -490,100 +664,100 @@ impl Serialize for WorkflowToolProgressContent {
     }
 }
 
-impl<'de> Deserialize<'de> for WorkflowToolProgressContent {
+impl<'de> Deserialize<'de> for RunToolProgressContent {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        match WorkflowToolProgressContentWire::deserialize(deserializer)? {
-            WorkflowToolProgressContentWire::Text { text } => {
+        match RunToolProgressContentWire::deserialize(deserializer)? {
+            RunToolProgressContentWire::Text { text } => {
                 Self::output_text(text).map_err(D::Error::custom)
             }
-            WorkflowToolProgressContentWire::Json { json } => {
+            RunToolProgressContentWire::Json { json } => {
                 Self::output_json(json).map_err(D::Error::custom)
             }
         }
     }
 }
 
-/// Closed public content union for a completed workflow tool call.
+/// Closed public content union for a completed run tool call.
 ///
 /// The inner representation is private so in-process producers cannot bypass
 /// the same limits enforced when a durable terminal snapshot is decoded.
 #[derive(Debug, Clone, PartialEq)]
-pub struct WorkflowToolContent {
-    wire: WorkflowToolContentWire,
+pub struct RunToolContent {
+    wire: RunToolContentWire,
 }
 
-impl WorkflowToolContent {
-    pub fn output_text(text: impl Into<String>) -> Result<Self, WorkflowPublicResultError> {
+impl RunToolContent {
+    pub fn output_text(text: impl Into<String>) -> Result<Self, RunPublicResultError> {
         let text = text.into();
         validate_bounded_public_string(
             &text,
-            MAX_WORKFLOW_PUBLIC_TEXT_BYTES,
-            "workflow tool text must be non-empty and bounded",
+            MAX_RUN_PUBLIC_TEXT_BYTES,
+            "run tool text must be non-empty and bounded",
         )?;
         Ok(Self {
-            wire: WorkflowToolContentWire::Text { text },
+            wire: RunToolContentWire::Text { text },
         })
     }
 
-    pub fn output_json(json: Value) -> Result<Self, WorkflowPublicResultError> {
-        validate_bounded_public_json(&json, MAX_WORKFLOW_PUBLIC_JSON_BYTES)?;
+    pub fn output_json(json: Value) -> Result<Self, RunPublicResultError> {
+        validate_bounded_public_json(&json, MAX_RUN_PUBLIC_JSON_BYTES)?;
         Ok(Self {
-            wire: WorkflowToolContentWire::Json { json },
+            wire: RunToolContentWire::Json { json },
         })
     }
 
     pub fn output_image(artifact: ArtifactRef) -> Self {
         Self {
-            wire: WorkflowToolContentWire::Image { artifact },
+            wire: RunToolContentWire::Image { artifact },
         }
     }
 
     pub fn output_file(artifact: ArtifactRef) -> Self {
         Self {
-            wire: WorkflowToolContentWire::File { artifact },
+            wire: RunToolContentWire::File { artifact },
         }
     }
 
     pub fn output_audio(artifact: ArtifactRef) -> Self {
         Self {
-            wire: WorkflowToolContentWire::Audio { artifact },
+            wire: RunToolContentWire::Audio { artifact },
         }
     }
 
     pub fn text(&self) -> Option<&str> {
         match &self.wire {
-            WorkflowToolContentWire::Text { text } => Some(text),
-            WorkflowToolContentWire::Json { .. }
-            | WorkflowToolContentWire::Image { .. }
-            | WorkflowToolContentWire::File { .. }
-            | WorkflowToolContentWire::Audio { .. } => None,
+            RunToolContentWire::Text { text } => Some(text),
+            RunToolContentWire::Json { .. }
+            | RunToolContentWire::Image { .. }
+            | RunToolContentWire::File { .. }
+            | RunToolContentWire::Audio { .. } => None,
         }
     }
 
     pub fn json(&self) -> Option<&Value> {
         match &self.wire {
-            WorkflowToolContentWire::Json { json } => Some(json),
-            WorkflowToolContentWire::Text { .. }
-            | WorkflowToolContentWire::Image { .. }
-            | WorkflowToolContentWire::File { .. }
-            | WorkflowToolContentWire::Audio { .. } => None,
+            RunToolContentWire::Json { json } => Some(json),
+            RunToolContentWire::Text { .. }
+            | RunToolContentWire::Image { .. }
+            | RunToolContentWire::File { .. }
+            | RunToolContentWire::Audio { .. } => None,
         }
     }
 
     pub fn artifact(&self) -> Option<&ArtifactRef> {
         match &self.wire {
-            WorkflowToolContentWire::Image { artifact }
-            | WorkflowToolContentWire::File { artifact }
-            | WorkflowToolContentWire::Audio { artifact } => Some(artifact),
-            WorkflowToolContentWire::Text { .. } | WorkflowToolContentWire::Json { .. } => None,
+            RunToolContentWire::Image { artifact }
+            | RunToolContentWire::File { artifact }
+            | RunToolContentWire::Audio { artifact } => Some(artifact),
+            RunToolContentWire::Text { .. } | RunToolContentWire::Json { .. } => None,
         }
     }
 }
 
-impl Serialize for WorkflowToolContent {
+impl Serialize for RunToolContent {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -592,48 +766,44 @@ impl Serialize for WorkflowToolContent {
     }
 }
 
-impl<'de> Deserialize<'de> for WorkflowToolContent {
+impl<'de> Deserialize<'de> for RunToolContent {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        match WorkflowToolContentWire::deserialize(deserializer)? {
-            WorkflowToolContentWire::Text { text } => {
-                Self::output_text(text).map_err(D::Error::custom)
-            }
-            WorkflowToolContentWire::Json { json } => {
-                Self::output_json(json).map_err(D::Error::custom)
-            }
-            WorkflowToolContentWire::Image { artifact } => Ok(Self::output_image(artifact)),
-            WorkflowToolContentWire::File { artifact } => Ok(Self::output_file(artifact)),
-            WorkflowToolContentWire::Audio { artifact } => Ok(Self::output_audio(artifact)),
+        match RunToolContentWire::deserialize(deserializer)? {
+            RunToolContentWire::Text { text } => Self::output_text(text).map_err(D::Error::custom),
+            RunToolContentWire::Json { json } => Self::output_json(json).map_err(D::Error::custom),
+            RunToolContentWire::Image { artifact } => Ok(Self::output_image(artifact)),
+            RunToolContentWire::File { artifact } => Ok(Self::output_file(artifact)),
+            RunToolContentWire::Audio { artifact } => Ok(Self::output_audio(artifact)),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct WorkflowToolResult {
+pub struct RunToolResult {
     call_id: String,
     tool_name: String,
-    content: Vec<WorkflowToolContent>,
+    content: Vec<RunToolContent>,
 }
 
-impl WorkflowToolResult {
+impl RunToolResult {
     pub fn new(
         call_id: impl Into<String>,
         tool_name: impl Into<String>,
-        content: Vec<WorkflowToolContent>,
-    ) -> Result<Self, WorkflowPublicResultError> {
+        content: Vec<RunToolContent>,
+    ) -> Result<Self, RunPublicResultError> {
         let call_id = call_id.into();
         let tool_name = tool_name.into();
         if !valid_public_label(&call_id) || !valid_public_label(&tool_name) {
-            return Err(WorkflowPublicResultError::new(
-                "workflow tool identities must be stable public labels",
+            return Err(RunPublicResultError::new(
+                "run tool identities must be stable public labels",
             ));
         }
-        if content.len() > MAX_WORKFLOW_TOOL_CONTENT_PARTS {
-            return Err(WorkflowPublicResultError::new(
-                "workflow tool content exceeds the public part limit",
+        if content.len() > MAX_RUN_TOOL_CONTENT_PARTS {
+            return Err(RunPublicResultError::new(
+                "run tool content exceeds the public part limit",
             ));
         }
         Ok(Self {
@@ -651,25 +821,25 @@ impl WorkflowToolResult {
         &self.tool_name
     }
 
-    pub fn content(&self) -> &[WorkflowToolContent] {
+    pub fn content(&self) -> &[RunToolContent] {
         &self.content
     }
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WorkflowToolResultWire {
+struct RunToolResultWire {
     call_id: String,
     tool_name: String,
-    content: Vec<WorkflowToolContent>,
+    content: Vec<RunToolContent>,
 }
 
-impl<'de> Deserialize<'de> for WorkflowToolResult {
+impl<'de> Deserialize<'de> for RunToolResult {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let wire = WorkflowToolResultWire::deserialize(deserializer)?;
+        let wire = RunToolResultWire::deserialize(deserializer)?;
         Self::new(wire.call_id, wire.tool_name, wire.content).map_err(D::Error::custom)
     }
 }
@@ -677,25 +847,25 @@ impl<'de> Deserialize<'de> for WorkflowToolResult {
 /// Bounded object-valued metadata already projected by a retrieval policy.
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 #[serde(transparent)]
-pub struct WorkflowRetrievalMetadata {
+pub struct RunRetrievalMetadata {
     entries: BTreeMap<String, Value>,
 }
 
-impl WorkflowRetrievalMetadata {
-    pub fn new(entries: BTreeMap<String, Value>) -> Result<Self, WorkflowPublicResultError> {
-        if entries.len() > MAX_WORKFLOW_RETRIEVAL_METADATA_ENTRIES
+impl RunRetrievalMetadata {
+    pub fn new(entries: BTreeMap<String, Value>) -> Result<Self, RunPublicResultError> {
+        if entries.len() > MAX_RUN_RETRIEVAL_METADATA_ENTRIES
             || entries.keys().any(|key| {
                 key.is_empty()
                     || key.len() > MAX_PUBLIC_LABEL_BYTES
                     || key.chars().any(char::is_control)
             })
         {
-            return Err(WorkflowPublicResultError::new(
-                "workflow retrieval metadata keys must be non-empty and bounded",
+            return Err(RunPublicResultError::new(
+                "run retrieval metadata keys must be non-empty and bounded",
             ));
         }
         let value = Value::Object(entries.clone().into_iter().collect());
-        validate_bounded_public_json(&value, MAX_WORKFLOW_RETRIEVAL_METADATA_BYTES)?;
+        validate_bounded_public_json(&value, MAX_RUN_RETRIEVAL_METADATA_BYTES)?;
         Ok(Self { entries })
     }
 
@@ -704,7 +874,7 @@ impl WorkflowRetrievalMetadata {
     }
 }
 
-impl<'de> Deserialize<'de> for WorkflowRetrievalMetadata {
+impl<'de> Deserialize<'de> for RunRetrievalMetadata {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -716,7 +886,7 @@ impl<'de> Deserialize<'de> for WorkflowRetrievalMetadata {
 
 /// One closed, caller-visible retrieval result.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct WorkflowRetrievalResult {
+pub struct RunRetrievalResult {
     id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
@@ -726,12 +896,12 @@ pub struct WorkflowRetrievalResult {
     score: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     snippet: Option<String>,
-    metadata: WorkflowRetrievalMetadata,
+    metadata: RunRetrievalMetadata,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact: Option<ArtifactRef>,
 }
 
-impl WorkflowRetrievalResult {
+impl RunRetrievalResult {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: impl Into<String>,
@@ -739,39 +909,39 @@ impl WorkflowRetrievalResult {
         uri: Option<String>,
         score: Option<f64>,
         snippet: Option<String>,
-        metadata: WorkflowRetrievalMetadata,
+        metadata: RunRetrievalMetadata,
         artifact: Option<ArtifactRef>,
-    ) -> Result<Self, WorkflowPublicResultError> {
+    ) -> Result<Self, RunPublicResultError> {
         let id = id.into();
         if !valid_public_label(&id) {
-            return Err(WorkflowPublicResultError::new(
-                "workflow retrieval result ID must be a stable public label",
+            return Err(RunPublicResultError::new(
+                "run retrieval result ID must be a stable public label",
             ));
         }
         validate_optional_public_string(
             title.as_deref(),
-            MAX_WORKFLOW_RETRIEVAL_TITLE_BYTES,
-            "workflow retrieval title must be non-empty and bounded",
+            MAX_RUN_RETRIEVAL_TITLE_BYTES,
+            "run retrieval title must be non-empty and bounded",
         )?;
         validate_optional_public_string(
             snippet.as_deref(),
-            MAX_WORKFLOW_RETRIEVAL_SNIPPET_BYTES,
-            "workflow retrieval snippet must be non-empty and bounded",
+            MAX_RUN_RETRIEVAL_SNIPPET_BYTES,
+            "run retrieval snippet must be non-empty and bounded",
         )?;
         if uri.as_deref().is_some_and(|uri| {
             uri.is_empty()
-                || uri.len() > MAX_WORKFLOW_RETRIEVAL_URI_BYTES
+                || uri.len() > MAX_RUN_RETRIEVAL_URI_BYTES
                 || uri
                     .chars()
                     .any(|character| character.is_control() || character.is_whitespace())
         }) {
-            return Err(WorkflowPublicResultError::new(
-                "workflow retrieval URI must be non-empty, bounded, and whitespace-free",
+            return Err(RunPublicResultError::new(
+                "run retrieval URI must be non-empty, bounded, and whitespace-free",
             ));
         }
         if score.is_some_and(|score| !score.is_finite()) {
-            return Err(WorkflowPublicResultError::new(
-                "workflow retrieval score must be finite",
+            return Err(RunPublicResultError::new(
+                "run retrieval score must be finite",
             ));
         }
         Ok(Self {
@@ -805,7 +975,7 @@ impl WorkflowRetrievalResult {
         self.snippet.as_deref()
     }
 
-    pub fn metadata(&self) -> &WorkflowRetrievalMetadata {
+    pub fn metadata(&self) -> &RunRetrievalMetadata {
         &self.metadata
     }
 
@@ -816,7 +986,7 @@ impl WorkflowRetrievalResult {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WorkflowRetrievalResultWire {
+struct RunRetrievalResultWire {
     id: String,
     #[serde(default)]
     title: Option<String>,
@@ -827,17 +997,17 @@ struct WorkflowRetrievalResultWire {
     #[serde(default)]
     snippet: Option<String>,
     #[serde(default)]
-    metadata: WorkflowRetrievalMetadata,
+    metadata: RunRetrievalMetadata,
     #[serde(default)]
     artifact: Option<ArtifactRef>,
 }
 
-impl<'de> Deserialize<'de> for WorkflowRetrievalResult {
+impl<'de> Deserialize<'de> for RunRetrievalResult {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let wire = WorkflowRetrievalResultWire::deserialize(deserializer)?;
+        let wire = RunRetrievalResultWire::deserialize(deserializer)?;
         Self::new(
             wire.id,
             wire.title,
@@ -852,33 +1022,33 @@ impl<'de> Deserialize<'de> for WorkflowRetrievalResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct WorkflowRetrieval {
+pub struct RunRetrieval {
     retrieval_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     query: Option<String>,
-    results: Vec<WorkflowRetrievalResult>,
+    results: Vec<RunRetrievalResult>,
 }
 
-impl WorkflowRetrieval {
+impl RunRetrieval {
     pub fn new(
         retrieval_id: impl Into<String>,
         query: Option<String>,
-        results: Vec<WorkflowRetrievalResult>,
-    ) -> Result<Self, WorkflowPublicResultError> {
+        results: Vec<RunRetrievalResult>,
+    ) -> Result<Self, RunPublicResultError> {
         let retrieval_id = retrieval_id.into();
         if !valid_public_label(&retrieval_id) {
-            return Err(WorkflowPublicResultError::new(
-                "workflow retrieval ID must be a stable public label",
+            return Err(RunPublicResultError::new(
+                "run retrieval ID must be a stable public label",
             ));
         }
         validate_optional_public_string(
             query.as_deref(),
-            MAX_WORKFLOW_RETRIEVAL_QUERY_BYTES,
-            "workflow retrieval query must be non-empty and bounded",
+            MAX_RUN_RETRIEVAL_QUERY_BYTES,
+            "run retrieval query must be non-empty and bounded",
         )?;
-        if results.len() > MAX_WORKFLOW_RETRIEVAL_RESULTS {
-            return Err(WorkflowPublicResultError::new(
-                "workflow retrieval exceeds the public result limit",
+        if results.len() > MAX_RUN_RETRIEVAL_RESULTS {
+            return Err(RunPublicResultError::new(
+                "run retrieval exceeds the public result limit",
             ));
         }
         Ok(Self {
@@ -896,33 +1066,33 @@ impl WorkflowRetrieval {
         self.query.as_deref()
     }
 
-    pub fn results(&self) -> &[WorkflowRetrievalResult] {
+    pub fn results(&self) -> &[RunRetrievalResult] {
         &self.results
     }
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WorkflowRetrievalWire {
+struct RunRetrievalWire {
     retrieval_id: String,
     #[serde(default)]
     query: Option<String>,
-    results: Vec<WorkflowRetrievalResult>,
+    results: Vec<RunRetrievalResult>,
 }
 
-impl<'de> Deserialize<'de> for WorkflowRetrieval {
+impl<'de> Deserialize<'de> for RunRetrieval {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let wire = WorkflowRetrievalWire::deserialize(deserializer)?;
+        let wire = RunRetrievalWire::deserialize(deserializer)?;
         Self::new(wire.retrieval_id, wire.query, wire.results).map_err(D::Error::custom)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkflowStreamGapAction {
+pub enum RunStreamGapAction {
     DiscardProvisionalItem,
 }
 
@@ -930,363 +1100,631 @@ pub enum WorkflowStreamGapAction {
 /// item-local sequence fields have no representation in this enum.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
-pub enum ResponseStreamEvent {
-    #[serde(rename = "response.created")]
-    ResponseCreated {
+pub enum RunStreamEvent {
+    #[serde(rename = "run.lifecycle.created")]
+    RunLifecycleCreated {
         sequence_number: u64,
-        response: PublicResponse,
+        #[serde(
+            serialize_with = "serialize_created_run",
+            deserialize_with = "deserialize_created_run"
+        )]
+        run: RunInitialSnapshot,
     },
-    #[serde(rename = "response.in_progress")]
-    ResponseInProgress {
+    #[serde(rename = "run.lifecycle.running")]
+    RunLifecycleRunning {
         sequence_number: u64,
-        response: PublicResponse,
+        #[serde(
+            serialize_with = "serialize_running_run",
+            deserialize_with = "deserialize_running_run"
+        )]
+        run: RunInitialSnapshot,
     },
-    #[serde(rename = "response.output_item.added")]
-    ResponseOutputItemAdded {
+    #[serde(rename = "run.output.item.added")]
+    RunOutputItemAdded {
         sequence_number: u64,
         output_index: u32,
-        item: ResponseOutputItem,
+        item: RunOutputItem,
     },
-    #[serde(rename = "response.content_part.added")]
-    ResponseContentPartAdded {
+    #[serde(rename = "run.output.content_part.added")]
+    RunOutputContentPartAdded {
         sequence_number: u64,
         item_id: String,
         output_index: u32,
         content_index: u32,
-        part: ResponseContentPart,
+        part: RunOutputContentPart,
     },
-    #[serde(rename = "response.output_text.delta")]
-    ResponseOutputTextDelta {
+    #[serde(rename = "run.output.text.delta")]
+    RunOutputTextDelta {
         sequence_number: u64,
         item_id: String,
         output_index: u32,
         content_index: u32,
         delta: String,
     },
-    #[serde(rename = "response.output_text.done")]
-    ResponseOutputTextDone {
+    #[serde(rename = "run.output.text.done")]
+    RunOutputTextDone {
         sequence_number: u64,
         item_id: String,
         output_index: u32,
         content_index: u32,
         text: String,
     },
-    #[serde(rename = "response.content_part.done")]
-    ResponseContentPartDone {
+    #[serde(rename = "run.output.content_part.done")]
+    RunOutputContentPartDone {
         sequence_number: u64,
         item_id: String,
         output_index: u32,
         content_index: u32,
-        part: ResponseContentPart,
+        part: RunOutputContentPart,
     },
-    #[serde(rename = "response.function_call_arguments.delta")]
-    ResponseFunctionCallArgumentsDelta {
+    #[serde(rename = "run.output.function_call.arguments.delta")]
+    RunOutputFunctionCallArgumentsDelta {
         sequence_number: u64,
         item_id: String,
         output_index: u32,
         delta: String,
     },
-    #[serde(rename = "response.function_call_arguments.done")]
-    ResponseFunctionCallArgumentsDone {
+    #[serde(rename = "run.output.function_call.arguments.done")]
+    RunOutputFunctionCallArgumentsDone {
         sequence_number: u64,
         item_id: String,
         output_index: u32,
         name: String,
         arguments: String,
     },
-    #[serde(rename = "response.output_item.done")]
-    ResponseOutputItemDone {
+    #[serde(rename = "run.output.item.done")]
+    RunOutputItemDone {
         sequence_number: u64,
         output_index: u32,
-        item: ResponseOutputItem,
+        item: RunOutputItem,
     },
-    #[serde(rename = "response.file_search_call.in_progress")]
-    ResponseFileSearchCallInProgress {
+    #[serde(rename = "run.output.file_search_call.in_progress")]
+    RunOutputFileSearchCallInProgress {
         sequence_number: u64,
         item_id: String,
         output_index: u32,
     },
-    #[serde(rename = "response.file_search_call.searching")]
-    ResponseFileSearchCallSearching {
+    #[serde(rename = "run.output.file_search_call.searching")]
+    RunOutputFileSearchCallSearching {
         sequence_number: u64,
         item_id: String,
         output_index: u32,
     },
-    #[serde(rename = "response.file_search_call.completed")]
-    ResponseFileSearchCallCompleted {
+    #[serde(rename = "run.output.file_search_call.completed")]
+    RunOutputFileSearchCallCompleted {
         sequence_number: u64,
         item_id: String,
         output_index: u32,
     },
-    #[serde(rename = "response.completed")]
-    ResponseCompleted {
+    #[serde(rename = "run.lifecycle.completed")]
+    RunLifecycleCompleted {
         sequence_number: u64,
-        response: PublicResponse,
-        workflow: WorkflowCompleted,
+        #[serde(
+            serialize_with = "serialize_completed_run",
+            deserialize_with = "deserialize_completed_run"
+        )]
+        run: RunCompletedSnapshot,
     },
-    #[serde(rename = "response.failed")]
-    ResponseFailed {
+    #[serde(rename = "run.lifecycle.failed")]
+    RunLifecycleFailed {
         sequence_number: u64,
-        response: PublicResponse,
-        workflow: WorkflowFailure,
+        #[serde(
+            serialize_with = "serialize_failed_run",
+            deserialize_with = "deserialize_failed_run"
+        )]
+        run: RunFailedSnapshot,
     },
-    #[serde(rename = "error")]
-    Error {
+    #[serde(rename = "run.stream.error")]
+    RunStreamError {
         sequence_number: u64,
+        #[serde(
+            serialize_with = "serialize_run_stream_error_code",
+            deserialize_with = "deserialize_run_stream_error_code"
+        )]
         code: String,
+        #[serde(
+            serialize_with = "serialize_run_stream_error_message",
+            deserialize_with = "deserialize_run_stream_error_message"
+        )]
         message: String,
-        param: Option<String>,
     },
-    #[serde(rename = "workflow.tool.started")]
-    WorkflowToolStarted {
+    #[serde(rename = "run.tool.started")]
+    RunToolStarted {
         sequence_number: u64,
         call_id: String,
         tool_name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arguments: Option<Value>,
     },
-    #[serde(rename = "workflow.tool.progress")]
-    WorkflowToolProgress {
+    #[serde(rename = "run.tool.progress")]
+    RunToolProgress {
         sequence_number: u64,
         call_id: String,
         tool_name: String,
         #[serde(
-            serialize_with = "serialize_workflow_tool_progress_content",
-            deserialize_with = "deserialize_workflow_tool_progress_content"
+            serialize_with = "serialize_run_tool_progress_content",
+            deserialize_with = "deserialize_run_tool_progress_content"
         )]
-        content: Vec<WorkflowToolProgressContent>,
+        content: Vec<RunToolProgressContent>,
     },
-    #[serde(rename = "workflow.tool.completed")]
-    WorkflowToolCompleted {
+    #[serde(rename = "run.tool.completed")]
+    RunToolCompleted {
         sequence_number: u64,
         call_id: String,
         tool_name: String,
         duration_ms: u64,
-        content: Vec<WorkflowToolContent>,
+        content: Vec<RunToolContent>,
     },
-    #[serde(rename = "workflow.tool.failed")]
-    WorkflowToolFailed {
+    #[serde(rename = "run.tool.failed")]
+    RunToolFailed {
         sequence_number: u64,
         call_id: String,
         tool_name: String,
         duration_ms: u64,
-        error: WorkflowPublicError,
+        error: RunPublicError,
     },
-    #[serde(rename = "workflow.retrieval.completed")]
-    WorkflowRetrievalCompleted {
+    #[serde(rename = "run.retrieval.completed")]
+    RunRetrievalCompleted {
         sequence_number: u64,
         retrieval_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         query: Option<String>,
-        results: Vec<WorkflowRetrievalResult>,
+        results: Vec<RunRetrievalResult>,
     },
-    #[serde(rename = "workflow.stream.gap")]
-    WorkflowStreamGap {
+    #[serde(rename = "run.stream.gap")]
+    RunStreamGap {
         sequence_number: u64,
         item_id: String,
         attempt_no: u32,
         missing_from: u64,
         missing_to: Option<u64>,
         unknown_tail: bool,
-        action: WorkflowStreamGapAction,
+        action: RunStreamGapAction,
     },
-    #[serde(rename = "workflow.response.timed_out")]
-    WorkflowResponseTimedOut {
+    #[serde(rename = "run.lifecycle.timed_out")]
+    RunLifecycleTimedOut {
         sequence_number: u64,
-        response: PublicResponse,
-        workflow: WorkflowFailure,
+        #[serde(
+            serialize_with = "serialize_timed_out_run",
+            deserialize_with = "deserialize_timed_out_run"
+        )]
+        run: RunFailedSnapshot,
     },
-    #[serde(rename = "workflow.response.cancelled")]
-    WorkflowResponseCancelled {
+    #[serde(rename = "run.lifecycle.cancelled")]
+    RunLifecycleCancelled {
         sequence_number: u64,
-        response: PublicResponse,
-        workflow: WorkflowStopped,
+        #[serde(
+            serialize_with = "serialize_cancelled_run",
+            deserialize_with = "deserialize_cancelled_run"
+        )]
+        run: RunStoppedSnapshot,
     },
-    #[serde(rename = "workflow.response.interrupted")]
-    WorkflowResponseInterrupted {
+    #[serde(rename = "run.lifecycle.interrupted")]
+    RunLifecycleInterrupted {
         sequence_number: u64,
-        response: PublicResponse,
-        workflow: WorkflowStopped,
+        #[serde(
+            serialize_with = "serialize_interrupted_run",
+            deserialize_with = "deserialize_interrupted_run"
+        )]
+        run: RunStoppedSnapshot,
     },
 }
 
-fn serialize_workflow_tool_progress_content<S>(
-    content: &[WorkflowToolProgressContent],
+fn validate_initial_run(
+    run: &RunInitialSnapshot,
+    expected_status: RunStatus,
+) -> Result<(), &'static str> {
+    if run.object != RunObjectKind::Run
+        || run.status != expected_status
+        || !valid_public_label(&run.id)
+        || !run.output.is_empty()
+        || run.usage.is_some()
+    {
+        return Err("initial run snapshot does not match its lifecycle event");
+    }
+    Ok(())
+}
+
+fn validate_terminal_run_common(
+    id: &str,
+    object: RunObjectKind,
+    status: RunStatus,
+    expected_status: RunStatus,
+    usage: Option<&RunUsage>,
+    usage_status: RunUsageStatus,
+) -> Result<(), &'static str> {
+    if object != RunObjectKind::Run
+        || status != expected_status
+        || !valid_public_label(id)
+        || (usage_status == RunUsageStatus::Complete) != usage.is_some()
+    {
+        return Err("terminal run snapshot does not match its lifecycle event");
+    }
+    Ok(())
+}
+
+macro_rules! initial_run_serde {
+    ($serialize:ident, $deserialize:ident, $status:expr) => {
+        fn $serialize<S>(run: &RunInitialSnapshot, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            validate_initial_run(run, $status).map_err(S::Error::custom)?;
+            run.serialize(serializer)
+        }
+
+        fn $deserialize<'de, D>(deserializer: D) -> Result<RunInitialSnapshot, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let run = RunInitialSnapshot::deserialize(deserializer)?;
+            validate_initial_run(&run, $status).map_err(D::Error::custom)?;
+            Ok(run)
+        }
+    };
+}
+
+initial_run_serde!(
+    serialize_created_run,
+    deserialize_created_run,
+    RunStatus::Created
+);
+initial_run_serde!(
+    serialize_running_run,
+    deserialize_running_run,
+    RunStatus::Running
+);
+
+fn valid_run_stream_error_code(code: &str) -> bool {
+    code.len() > "RUN_STREAM_".len()
+        && code.len() <= 128
+        && code.starts_with("RUN_STREAM_")
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn serialize_run_stream_error_code<S>(code: &String, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if !valid_run_stream_error_code(code) {
+        return Err(S::Error::custom("invalid Run stream error code"));
+    }
+    code.serialize(serializer)
+}
+
+fn deserialize_run_stream_error_code<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let code = String::deserialize(deserializer)?;
+    if !valid_run_stream_error_code(&code) {
+        return Err(D::Error::custom("invalid Run stream error code"));
+    }
+    Ok(code)
+}
+
+fn valid_run_stream_error_message(message: &str) -> bool {
+    !message.is_empty()
+        && message.len() <= MAX_PUBLIC_MESSAGE_BYTES
+        && !message.chars().any(char::is_control)
+}
+
+fn serialize_run_stream_error_message<S>(message: &String, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if !valid_run_stream_error_message(message) {
+        return Err(S::Error::custom("invalid Run stream error message"));
+    }
+    message.serialize(serializer)
+}
+
+fn deserialize_run_stream_error_message<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let message = String::deserialize(deserializer)?;
+    if !valid_run_stream_error_message(&message) {
+        return Err(D::Error::custom("invalid Run stream error message"));
+    }
+    Ok(message)
+}
+
+fn validate_completed_run(run: &RunCompletedSnapshot) -> Result<(), &'static str> {
+    validate_terminal_run_common(
+        &run.id,
+        run.object,
+        run.status,
+        RunStatus::Completed,
+        run.usage.as_ref(),
+        run.usage_status,
+    )
+}
+
+fn serialize_completed_run<S>(run: &RunCompletedSnapshot, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    validate_completed_run(run).map_err(S::Error::custom)?;
+    run.serialize(serializer)
+}
+
+fn deserialize_completed_run<'de, D>(deserializer: D) -> Result<RunCompletedSnapshot, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let run = RunCompletedSnapshot::deserialize(deserializer)?;
+    validate_completed_run(&run).map_err(D::Error::custom)?;
+    Ok(run)
+}
+
+fn validate_failed_run(
+    run: &RunFailedSnapshot,
+    expected_status: RunStatus,
+) -> Result<(), &'static str> {
+    validate_terminal_run_common(
+        &run.id,
+        run.object,
+        run.status,
+        expected_status,
+        run.usage.as_ref(),
+        run.usage_status,
+    )?;
+    if !valid_public_label(&run.error.code)
+        || run.error.message.is_empty()
+        || run.error.message.len() > MAX_PUBLIC_LABEL_BYTES
+        || run.error.message.chars().any(char::is_control)
+    {
+        return Err("terminal run error is not a safe public error");
+    }
+    Ok(())
+}
+
+macro_rules! failed_run_serde {
+    ($serialize:ident, $deserialize:ident, $status:expr) => {
+        fn $serialize<S>(run: &RunFailedSnapshot, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            validate_failed_run(run, $status).map_err(S::Error::custom)?;
+            run.serialize(serializer)
+        }
+
+        fn $deserialize<'de, D>(deserializer: D) -> Result<RunFailedSnapshot, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let run = RunFailedSnapshot::deserialize(deserializer)?;
+            validate_failed_run(&run, $status).map_err(D::Error::custom)?;
+            Ok(run)
+        }
+    };
+}
+
+failed_run_serde!(
+    serialize_failed_run,
+    deserialize_failed_run,
+    RunStatus::Failed
+);
+failed_run_serde!(
+    serialize_timed_out_run,
+    deserialize_timed_out_run,
+    RunStatus::TimedOut
+);
+
+fn validate_stopped_run(
+    run: &RunStoppedSnapshot,
+    expected_status: RunStatus,
+) -> Result<(), &'static str> {
+    validate_terminal_run_common(
+        &run.id,
+        run.object,
+        run.status,
+        expected_status,
+        run.usage.as_ref(),
+        run.usage_status,
+    )
+}
+
+macro_rules! stopped_run_serde {
+    ($serialize:ident, $deserialize:ident, $status:expr) => {
+        fn $serialize<S>(run: &RunStoppedSnapshot, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            validate_stopped_run(run, $status).map_err(S::Error::custom)?;
+            run.serialize(serializer)
+        }
+
+        fn $deserialize<'de, D>(deserializer: D) -> Result<RunStoppedSnapshot, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let run = RunStoppedSnapshot::deserialize(deserializer)?;
+            validate_stopped_run(&run, $status).map_err(D::Error::custom)?;
+            Ok(run)
+        }
+    };
+}
+
+stopped_run_serde!(
+    serialize_cancelled_run,
+    deserialize_cancelled_run,
+    RunStatus::Cancelled
+);
+stopped_run_serde!(
+    serialize_interrupted_run,
+    deserialize_interrupted_run,
+    RunStatus::Interrupted
+);
+
+fn serialize_run_tool_progress_content<S>(
+    content: &[RunToolProgressContent],
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    if content.is_empty() || content.len() > MAX_WORKFLOW_TOOL_CONTENT_PARTS {
+    if content.is_empty() || content.len() > MAX_RUN_TOOL_CONTENT_PARTS {
         return Err(S::Error::custom(
-            "workflow tool progress content must be non-empty and bounded",
+            "run tool progress content must be non-empty and bounded",
         ));
     }
     content.serialize(serializer)
 }
 
-fn deserialize_workflow_tool_progress_content<'de, D>(
+fn deserialize_run_tool_progress_content<'de, D>(
     deserializer: D,
-) -> Result<Vec<WorkflowToolProgressContent>, D::Error>
+) -> Result<Vec<RunToolProgressContent>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let content = Vec::<WorkflowToolProgressContent>::deserialize(deserializer)?;
-    if content.is_empty() || content.len() > MAX_WORKFLOW_TOOL_CONTENT_PARTS {
+    let content = Vec::<RunToolProgressContent>::deserialize(deserializer)?;
+    if content.is_empty() || content.len() > MAX_RUN_TOOL_CONTENT_PARTS {
         return Err(D::Error::custom(
-            "workflow tool progress content must be non-empty and bounded",
+            "run tool progress content must be non-empty and bounded",
         ));
     }
     Ok(content)
 }
 
-impl ResponseStreamEvent {
-    pub const fn event_type(&self) -> ResponseStreamEventType {
+impl RunStreamEvent {
+    pub const fn event_type(&self) -> RunStreamEventType {
         match self {
-            Self::ResponseCreated { .. } => ResponseStreamEventType::ResponseCreated,
-            Self::ResponseInProgress { .. } => ResponseStreamEventType::ResponseInProgress,
-            Self::ResponseOutputItemAdded { .. } => {
-                ResponseStreamEventType::ResponseOutputItemAdded
+            Self::RunLifecycleCreated { .. } => RunStreamEventType::RunLifecycleCreated,
+            Self::RunLifecycleRunning { .. } => RunStreamEventType::RunLifecycleRunning,
+            Self::RunOutputItemAdded { .. } => RunStreamEventType::RunOutputItemAdded,
+            Self::RunOutputContentPartAdded { .. } => RunStreamEventType::RunOutputContentPartAdded,
+            Self::RunOutputTextDelta { .. } => RunStreamEventType::RunOutputTextDelta,
+            Self::RunOutputTextDone { .. } => RunStreamEventType::RunOutputTextDone,
+            Self::RunOutputContentPartDone { .. } => RunStreamEventType::RunOutputContentPartDone,
+            Self::RunOutputFunctionCallArgumentsDelta { .. } => {
+                RunStreamEventType::RunOutputFunctionCallArgumentsDelta
             }
-            Self::ResponseContentPartAdded { .. } => {
-                ResponseStreamEventType::ResponseContentPartAdded
+            Self::RunOutputFunctionCallArgumentsDone { .. } => {
+                RunStreamEventType::RunOutputFunctionCallArgumentsDone
             }
-            Self::ResponseOutputTextDelta { .. } => {
-                ResponseStreamEventType::ResponseOutputTextDelta
+            Self::RunOutputItemDone { .. } => RunStreamEventType::RunOutputItemDone,
+            Self::RunOutputFileSearchCallInProgress { .. } => {
+                RunStreamEventType::RunOutputFileSearchCallInProgress
             }
-            Self::ResponseOutputTextDone { .. } => ResponseStreamEventType::ResponseOutputTextDone,
-            Self::ResponseContentPartDone { .. } => {
-                ResponseStreamEventType::ResponseContentPartDone
+            Self::RunOutputFileSearchCallSearching { .. } => {
+                RunStreamEventType::RunOutputFileSearchCallSearching
             }
-            Self::ResponseFunctionCallArgumentsDelta { .. } => {
-                ResponseStreamEventType::ResponseFunctionCallArgumentsDelta
+            Self::RunOutputFileSearchCallCompleted { .. } => {
+                RunStreamEventType::RunOutputFileSearchCallCompleted
             }
-            Self::ResponseFunctionCallArgumentsDone { .. } => {
-                ResponseStreamEventType::ResponseFunctionCallArgumentsDone
-            }
-            Self::ResponseOutputItemDone { .. } => ResponseStreamEventType::ResponseOutputItemDone,
-            Self::ResponseFileSearchCallInProgress { .. } => {
-                ResponseStreamEventType::ResponseFileSearchCallInProgress
-            }
-            Self::ResponseFileSearchCallSearching { .. } => {
-                ResponseStreamEventType::ResponseFileSearchCallSearching
-            }
-            Self::ResponseFileSearchCallCompleted { .. } => {
-                ResponseStreamEventType::ResponseFileSearchCallCompleted
-            }
-            Self::ResponseCompleted { .. } => ResponseStreamEventType::ResponseCompleted,
-            Self::ResponseFailed { .. } => ResponseStreamEventType::ResponseFailed,
-            Self::Error { .. } => ResponseStreamEventType::Error,
-            Self::WorkflowToolStarted { .. } => ResponseStreamEventType::WorkflowToolStarted,
-            Self::WorkflowToolProgress { .. } => ResponseStreamEventType::WorkflowToolProgress,
-            Self::WorkflowToolCompleted { .. } => ResponseStreamEventType::WorkflowToolCompleted,
-            Self::WorkflowToolFailed { .. } => ResponseStreamEventType::WorkflowToolFailed,
-            Self::WorkflowRetrievalCompleted { .. } => {
-                ResponseStreamEventType::WorkflowRetrievalCompleted
-            }
-            Self::WorkflowStreamGap { .. } => ResponseStreamEventType::WorkflowStreamGap,
-            Self::WorkflowResponseTimedOut { .. } => {
-                ResponseStreamEventType::WorkflowResponseTimedOut
-            }
-            Self::WorkflowResponseCancelled { .. } => {
-                ResponseStreamEventType::WorkflowResponseCancelled
-            }
-            Self::WorkflowResponseInterrupted { .. } => {
-                ResponseStreamEventType::WorkflowResponseInterrupted
-            }
+            Self::RunLifecycleCompleted { .. } => RunStreamEventType::RunLifecycleCompleted,
+            Self::RunLifecycleFailed { .. } => RunStreamEventType::RunLifecycleFailed,
+            Self::RunStreamError { .. } => RunStreamEventType::RunStreamError,
+            Self::RunToolStarted { .. } => RunStreamEventType::RunToolStarted,
+            Self::RunToolProgress { .. } => RunStreamEventType::RunToolProgress,
+            Self::RunToolCompleted { .. } => RunStreamEventType::RunToolCompleted,
+            Self::RunToolFailed { .. } => RunStreamEventType::RunToolFailed,
+            Self::RunRetrievalCompleted { .. } => RunStreamEventType::RunRetrievalCompleted,
+            Self::RunStreamGap { .. } => RunStreamEventType::RunStreamGap,
+            Self::RunLifecycleTimedOut { .. } => RunStreamEventType::RunLifecycleTimedOut,
+            Self::RunLifecycleCancelled { .. } => RunStreamEventType::RunLifecycleCancelled,
+            Self::RunLifecycleInterrupted { .. } => RunStreamEventType::RunLifecycleInterrupted,
         }
     }
 
     pub const fn sequence_number(&self) -> u64 {
         match self {
-            Self::ResponseCreated {
+            Self::RunLifecycleCreated {
                 sequence_number, ..
             }
-            | Self::ResponseInProgress {
+            | Self::RunLifecycleRunning {
                 sequence_number, ..
             }
-            | Self::ResponseOutputItemAdded {
+            | Self::RunOutputItemAdded {
                 sequence_number, ..
             }
-            | Self::ResponseContentPartAdded {
+            | Self::RunOutputContentPartAdded {
                 sequence_number, ..
             }
-            | Self::ResponseOutputTextDelta {
+            | Self::RunOutputTextDelta {
                 sequence_number, ..
             }
-            | Self::ResponseOutputTextDone {
+            | Self::RunOutputTextDone {
                 sequence_number, ..
             }
-            | Self::ResponseContentPartDone {
+            | Self::RunOutputContentPartDone {
                 sequence_number, ..
             }
-            | Self::ResponseFunctionCallArgumentsDelta {
+            | Self::RunOutputFunctionCallArgumentsDelta {
                 sequence_number, ..
             }
-            | Self::ResponseFunctionCallArgumentsDone {
+            | Self::RunOutputFunctionCallArgumentsDone {
                 sequence_number, ..
             }
-            | Self::ResponseOutputItemDone {
+            | Self::RunOutputItemDone {
                 sequence_number, ..
             }
-            | Self::ResponseFileSearchCallInProgress {
+            | Self::RunOutputFileSearchCallInProgress {
                 sequence_number, ..
             }
-            | Self::ResponseFileSearchCallSearching {
+            | Self::RunOutputFileSearchCallSearching {
                 sequence_number, ..
             }
-            | Self::ResponseFileSearchCallCompleted {
+            | Self::RunOutputFileSearchCallCompleted {
                 sequence_number, ..
             }
-            | Self::ResponseCompleted {
+            | Self::RunLifecycleCompleted {
                 sequence_number, ..
             }
-            | Self::ResponseFailed {
+            | Self::RunLifecycleFailed {
                 sequence_number, ..
             }
-            | Self::Error {
+            | Self::RunStreamError {
                 sequence_number, ..
             }
-            | Self::WorkflowToolStarted {
+            | Self::RunToolStarted {
                 sequence_number, ..
             }
-            | Self::WorkflowToolProgress {
+            | Self::RunToolProgress {
                 sequence_number, ..
             }
-            | Self::WorkflowToolCompleted {
+            | Self::RunToolCompleted {
                 sequence_number, ..
             }
-            | Self::WorkflowToolFailed {
+            | Self::RunToolFailed {
                 sequence_number, ..
             }
-            | Self::WorkflowRetrievalCompleted {
+            | Self::RunRetrievalCompleted {
                 sequence_number, ..
             }
-            | Self::WorkflowStreamGap {
+            | Self::RunStreamGap {
                 sequence_number, ..
             }
-            | Self::WorkflowResponseTimedOut {
+            | Self::RunLifecycleTimedOut {
                 sequence_number, ..
             }
-            | Self::WorkflowResponseCancelled {
+            | Self::RunLifecycleCancelled {
                 sequence_number, ..
             }
-            | Self::WorkflowResponseInterrupted {
+            | Self::RunLifecycleInterrupted {
                 sequence_number, ..
             } => *sequence_number,
         }
     }
 
-    pub const fn is_terminal(&self) -> bool {
-        self.event_type().is_terminal()
+    pub const fn is_run_terminal(&self) -> bool {
+        self.event_type().is_run_terminal()
+    }
+
+    pub const fn ends_stream(&self) -> bool {
+        self.event_type().ends_stream()
     }
 }
 
 /// Internal identity of one durable model output item. It is intentionally not
 /// serializable; only `item_id`, `output_index`, and selected safe fields are
-/// projected into public `response.*` events by the dispatcher.
+/// projected into public `run.output.*` events by the dispatcher.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LiveResponseItemIdentity {
+pub struct LiveRunStreamItemIdentity {
     run_id: RunId,
     activation_id: ActivationId,
     attempt_no: AttemptNo,
@@ -1295,7 +1733,7 @@ pub struct LiveResponseItemIdentity {
     output_index: u32,
 }
 
-impl LiveResponseItemIdentity {
+impl LiveRunStreamItemIdentity {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         run_id: RunId,
@@ -1304,12 +1742,12 @@ impl LiveResponseItemIdentity {
         model_call_no: u32,
         item_id: impl Into<String>,
         output_index: u32,
-    ) -> Result<Self, LiveResponseBrokerError> {
+    ) -> Result<Self, LiveRunStreamBrokerError> {
         let item_id = item_id.into();
         if model_call_no == 0 || !valid_public_label(&item_id) {
-            return Err(LiveResponseBrokerError::new(
-                LIVE_RESPONSE_IDENTITY_INVALID,
-                "live response item identity is invalid",
+            return Err(LiveRunStreamBrokerError::new(
+                LIVE_RUN_STREAM_IDENTITY_INVALID,
+                "live Run stream item identity is invalid",
             ));
         }
         Ok(Self {
@@ -1347,10 +1785,10 @@ impl LiveResponseItemIdentity {
     }
 }
 
-impl fmt::Debug for LiveResponseItemIdentity {
+impl fmt::Debug for LiveRunStreamItemIdentity {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("LiveResponseItemIdentity")
+            .debug_struct("LiveRunStreamItemIdentity")
             .field("run_id", &self.run_id)
             .field("activation_id", &self.activation_id)
             .field("attempt_no", &self.attempt_no)
@@ -1361,32 +1799,32 @@ impl fmt::Debug for LiveResponseItemIdentity {
     }
 }
 
-/// Internal identity of one best-effort workflow observation source.
+/// Internal identity of one best-effort run observation source.
 ///
-/// Unlike [`LiveResponseItemIdentity`], this identity deliberately has no
+/// Unlike [`LiveRunStreamItemIdentity`], this identity deliberately has no
 /// model-call, item, or output-index fields. Workflow tool and retrieval
 /// observations are not durable Response output items and therefore cannot
 /// participate in item seals, gaps, or the terminal manifest barrier.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LiveWorkflowObservationIdentity {
+pub struct LiveRunObservationIdentity {
     run_id: RunId,
     activation_id: ActivationId,
     attempt_no: AttemptNo,
     source_id: String,
 }
 
-impl LiveWorkflowObservationIdentity {
+impl LiveRunObservationIdentity {
     pub fn new(
         run_id: RunId,
         activation_id: ActivationId,
         attempt_no: AttemptNo,
         source_id: impl Into<String>,
-    ) -> Result<Self, LiveResponseBrokerError> {
+    ) -> Result<Self, LiveRunStreamBrokerError> {
         let source_id = source_id.into();
         if !valid_public_label(&source_id) {
-            return Err(LiveResponseBrokerError::new(
-                LIVE_RESPONSE_IDENTITY_INVALID,
-                "live workflow observation identity is invalid",
+            return Err(LiveRunStreamBrokerError::new(
+                LIVE_RUN_STREAM_IDENTITY_INVALID,
+                "live run observation identity is invalid",
             ));
         }
         Ok(Self {
@@ -1416,10 +1854,10 @@ impl LiveWorkflowObservationIdentity {
     }
 }
 
-impl fmt::Debug for LiveWorkflowObservationIdentity {
+impl fmt::Debug for LiveRunObservationIdentity {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("LiveWorkflowObservationIdentity")
+            .debug_struct("LiveRunObservationIdentity")
             .field("run_id", &self.run_id)
             .field("activation_id", &self.activation_id)
             .field("attempt_no", &self.attempt_no)
@@ -1428,61 +1866,61 @@ impl fmt::Debug for LiveWorkflowObservationIdentity {
     }
 }
 
-/// Closed internal source identity for live response publication.
+/// Closed internal source identity for live Run stream publication.
 ///
 /// The variants are intentionally not interchangeable: `response.*` payloads
-/// require [`Self::OutputItem`], while public workflow observations require
-/// [`Self::WorkflowObservation`]. [`LiveResponsePublication`] enforces that
+/// require [`Self::OutputItem`], while public run observations require
+/// [`Self::RunObservation`]. [`LiveRunStreamPublication`] enforces that
 /// contract at construction and PostgreSQL decode boundaries.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum LiveResponseSourceIdentity {
-    OutputItem(LiveResponseItemIdentity),
-    WorkflowObservation(LiveWorkflowObservationIdentity),
+pub enum LiveRunStreamSourceIdentity {
+    OutputItem(LiveRunStreamItemIdentity),
+    RunObservation(LiveRunObservationIdentity),
 }
 
-impl LiveResponseSourceIdentity {
+impl LiveRunStreamSourceIdentity {
     pub fn run_id(&self) -> &RunId {
         match self {
             Self::OutputItem(identity) => identity.run_id(),
-            Self::WorkflowObservation(identity) => identity.run_id(),
+            Self::RunObservation(identity) => identity.run_id(),
         }
     }
 
-    pub fn output_item(&self) -> Option<&LiveResponseItemIdentity> {
+    pub fn output_item(&self) -> Option<&LiveRunStreamItemIdentity> {
         match self {
             Self::OutputItem(identity) => Some(identity),
-            Self::WorkflowObservation(_) => None,
+            Self::RunObservation(_) => None,
         }
     }
 
-    pub fn workflow_observation(&self) -> Option<&LiveWorkflowObservationIdentity> {
+    pub fn run_observation(&self) -> Option<&LiveRunObservationIdentity> {
         match self {
             Self::OutputItem(_) => None,
-            Self::WorkflowObservation(identity) => Some(identity),
+            Self::RunObservation(identity) => Some(identity),
         }
     }
 }
 
-impl From<LiveResponseItemIdentity> for LiveResponseSourceIdentity {
-    fn from(identity: LiveResponseItemIdentity) -> Self {
+impl From<LiveRunStreamItemIdentity> for LiveRunStreamSourceIdentity {
+    fn from(identity: LiveRunStreamItemIdentity) -> Self {
         Self::OutputItem(identity)
     }
 }
 
-impl From<LiveWorkflowObservationIdentity> for LiveResponseSourceIdentity {
-    fn from(identity: LiveWorkflowObservationIdentity) -> Self {
-        Self::WorkflowObservation(identity)
+impl From<LiveRunObservationIdentity> for LiveRunStreamSourceIdentity {
+    fn from(identity: LiveRunObservationIdentity) -> Self {
+        Self::RunObservation(identity)
     }
 }
 
-impl fmt::Debug for LiveResponseSourceIdentity {
+impl fmt::Debug for LiveRunStreamSourceIdentity {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::OutputItem(identity) => {
                 formatter.debug_tuple("OutputItem").field(identity).finish()
             }
-            Self::WorkflowObservation(identity) => formatter
-                .debug_tuple("WorkflowObservation")
+            Self::RunObservation(identity) => formatter
+                .debug_tuple("RunObservation")
                 .field(identity)
                 .finish(),
         }
@@ -1493,13 +1931,13 @@ impl fmt::Debug for LiveResponseSourceIdentity {
 /// This type has a body-free custom `Debug` implementation and intentionally
 /// has no `Serialize` implementation.
 #[derive(Clone, PartialEq)]
-pub enum LiveResponsePayload {
+pub enum LiveRunStreamPayload {
     OutputItemAdded {
-        item: ResponseOutputItem,
+        item: RunOutputItem,
     },
     ContentPartAdded {
         content_index: u32,
-        part: ResponseContentPart,
+        part: RunOutputContentPart,
     },
     OutputTextDelta {
         content_index: u32,
@@ -1511,7 +1949,7 @@ pub enum LiveResponsePayload {
     },
     ContentPartDone {
         content_index: u32,
-        part: ResponseContentPart,
+        part: RunOutputContentPart,
     },
     FunctionCallArgumentsDelta {
         delta: String,
@@ -1521,7 +1959,7 @@ pub enum LiveResponsePayload {
         arguments: String,
     },
     OutputItemDone {
-        item: ResponseOutputItem,
+        item: RunOutputItem,
     },
     FileSearchCallInProgress,
     FileSearchCallSearching,
@@ -1534,56 +1972,50 @@ pub enum LiveResponsePayload {
     ToolProgress {
         call_id: String,
         tool_name: String,
-        content: Vec<WorkflowToolProgressContent>,
+        content: Vec<RunToolProgressContent>,
     },
     ToolCompleted {
         call_id: String,
         tool_name: String,
         duration_ms: u64,
-        content: Vec<WorkflowToolContent>,
+        content: Vec<RunToolContent>,
     },
     ToolFailed {
         call_id: String,
         tool_name: String,
         duration_ms: u64,
-        error: WorkflowPublicError,
+        error: RunPublicError,
     },
     RetrievalCompleted {
         retrieval_id: String,
         query: Option<String>,
-        results: Vec<WorkflowRetrievalResult>,
+        results: Vec<RunRetrievalResult>,
     },
 }
 
-impl LiveResponsePayload {
-    pub const fn event_type(&self) -> ResponseStreamEventType {
+impl LiveRunStreamPayload {
+    pub const fn event_type(&self) -> RunStreamEventType {
         match self {
-            Self::OutputItemAdded { .. } => ResponseStreamEventType::ResponseOutputItemAdded,
-            Self::ContentPartAdded { .. } => ResponseStreamEventType::ResponseContentPartAdded,
-            Self::OutputTextDelta { .. } => ResponseStreamEventType::ResponseOutputTextDelta,
-            Self::OutputTextDone { .. } => ResponseStreamEventType::ResponseOutputTextDone,
-            Self::ContentPartDone { .. } => ResponseStreamEventType::ResponseContentPartDone,
+            Self::OutputItemAdded { .. } => RunStreamEventType::RunOutputItemAdded,
+            Self::ContentPartAdded { .. } => RunStreamEventType::RunOutputContentPartAdded,
+            Self::OutputTextDelta { .. } => RunStreamEventType::RunOutputTextDelta,
+            Self::OutputTextDone { .. } => RunStreamEventType::RunOutputTextDone,
+            Self::ContentPartDone { .. } => RunStreamEventType::RunOutputContentPartDone,
             Self::FunctionCallArgumentsDelta { .. } => {
-                ResponseStreamEventType::ResponseFunctionCallArgumentsDelta
+                RunStreamEventType::RunOutputFunctionCallArgumentsDelta
             }
             Self::FunctionCallArgumentsDone { .. } => {
-                ResponseStreamEventType::ResponseFunctionCallArgumentsDone
+                RunStreamEventType::RunOutputFunctionCallArgumentsDone
             }
-            Self::OutputItemDone { .. } => ResponseStreamEventType::ResponseOutputItemDone,
-            Self::FileSearchCallInProgress => {
-                ResponseStreamEventType::ResponseFileSearchCallInProgress
-            }
-            Self::FileSearchCallSearching => {
-                ResponseStreamEventType::ResponseFileSearchCallSearching
-            }
-            Self::FileSearchCallCompleted => {
-                ResponseStreamEventType::ResponseFileSearchCallCompleted
-            }
-            Self::ToolStarted { .. } => ResponseStreamEventType::WorkflowToolStarted,
-            Self::ToolProgress { .. } => ResponseStreamEventType::WorkflowToolProgress,
-            Self::ToolCompleted { .. } => ResponseStreamEventType::WorkflowToolCompleted,
-            Self::ToolFailed { .. } => ResponseStreamEventType::WorkflowToolFailed,
-            Self::RetrievalCompleted { .. } => ResponseStreamEventType::WorkflowRetrievalCompleted,
+            Self::OutputItemDone { .. } => RunStreamEventType::RunOutputItemDone,
+            Self::FileSearchCallInProgress => RunStreamEventType::RunOutputFileSearchCallInProgress,
+            Self::FileSearchCallSearching => RunStreamEventType::RunOutputFileSearchCallSearching,
+            Self::FileSearchCallCompleted => RunStreamEventType::RunOutputFileSearchCallCompleted,
+            Self::ToolStarted { .. } => RunStreamEventType::RunToolStarted,
+            Self::ToolProgress { .. } => RunStreamEventType::RunToolProgress,
+            Self::ToolCompleted { .. } => RunStreamEventType::RunToolCompleted,
+            Self::ToolFailed { .. } => RunStreamEventType::RunToolFailed,
+            Self::RetrievalCompleted { .. } => RunStreamEventType::RunRetrievalCompleted,
         }
     }
 
@@ -1604,7 +2036,7 @@ impl LiveResponsePayload {
         )
     }
 
-    const fn requires_workflow_observation_source(&self) -> bool {
+    const fn requires_run_observation_source(&self) -> bool {
         matches!(
             self,
             Self::ToolStarted { .. }
@@ -1616,69 +2048,69 @@ impl LiveResponsePayload {
     }
 }
 
-impl fmt::Debug for LiveResponsePayload {
+impl fmt::Debug for LiveRunStreamPayload {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("LiveResponsePayload")
+            .debug_struct("LiveRunStreamPayload")
             .field("event_type", &self.event_type())
             .finish_non_exhaustive()
     }
 }
 
 #[derive(Clone, PartialEq)]
-pub struct LiveResponsePublication {
-    source: LiveResponseSourceIdentity,
+pub struct LiveRunStreamPublication {
+    source: LiveRunStreamSourceIdentity,
     local_sequence: u64,
-    payload: LiveResponsePayload,
+    payload: LiveRunStreamPayload,
 }
 
-impl LiveResponsePublication {
+impl LiveRunStreamPublication {
     /// Constructs one durable Response output-item publication.
     ///
     /// Workflow tool and retrieval payloads are rejected; use
-    /// [`Self::new_workflow_observation`] for those observations.
+    /// [`Self::new_run_observation`] for those observations.
     pub fn new(
-        identity: LiveResponseItemIdentity,
+        identity: LiveRunStreamItemIdentity,
         local_sequence: u64,
-        payload: LiveResponsePayload,
-    ) -> Result<Self, LiveResponseBrokerError> {
+        payload: LiveRunStreamPayload,
+    ) -> Result<Self, LiveRunStreamBrokerError> {
         Self::from_source(identity.into(), local_sequence, payload)
     }
 
-    /// Constructs one best-effort workflow tool or retrieval observation.
+    /// Constructs one best-effort run tool or retrieval observation.
     /// Response output-item payloads are rejected.
-    pub fn new_workflow_observation(
-        identity: LiveWorkflowObservationIdentity,
+    pub fn new_run_observation(
+        identity: LiveRunObservationIdentity,
         local_sequence: u64,
-        payload: LiveResponsePayload,
-    ) -> Result<Self, LiveResponseBrokerError> {
+        payload: LiveRunStreamPayload,
+    ) -> Result<Self, LiveRunStreamBrokerError> {
         Self::from_source(identity.into(), local_sequence, payload)
     }
 
     pub(crate) fn from_source(
-        source: LiveResponseSourceIdentity,
+        source: LiveRunStreamSourceIdentity,
         local_sequence: u64,
-        payload: LiveResponsePayload,
-    ) -> Result<Self, LiveResponseBrokerError> {
+        payload: LiveRunStreamPayload,
+    ) -> Result<Self, LiveRunStreamBrokerError> {
         let source_matches = match &source {
-            LiveResponseSourceIdentity::OutputItem(identity) => {
+            LiveRunStreamSourceIdentity::OutputItem(identity) => {
                 payload.requires_output_item_source()
                     && match &payload {
-                        LiveResponsePayload::OutputItemAdded { item }
-                        | LiveResponsePayload::OutputItemDone { item } => {
+                        LiveRunStreamPayload::OutputItemAdded { item }
+                        | LiveRunStreamPayload::OutputItemDone { item } => {
                             item.id() == identity.item_id()
                         }
                         _ => true,
                     }
             }
-            LiveResponseSourceIdentity::WorkflowObservation(_) => {
-                payload.requires_workflow_observation_source()
+            LiveRunStreamSourceIdentity::RunObservation(_) => {
+                payload.requires_run_observation_source()
             }
         };
         if !source_matches {
-            return Err(LiveResponseBrokerError::new(
-                LIVE_RESPONSE_IDENTITY_INVALID,
-                "live response payload does not match its source identity",
+            return Err(LiveRunStreamBrokerError::new(
+                LIVE_RUN_STREAM_IDENTITY_INVALID,
+                "live Run stream payload does not match its source identity",
             ));
         }
         Ok(Self {
@@ -1688,16 +2120,16 @@ impl LiveResponsePublication {
         })
     }
 
-    pub fn source(&self) -> &LiveResponseSourceIdentity {
+    pub fn source(&self) -> &LiveRunStreamSourceIdentity {
         &self.source
     }
 
-    pub fn output_item_identity(&self) -> Option<&LiveResponseItemIdentity> {
+    pub fn output_item_identity(&self) -> Option<&LiveRunStreamItemIdentity> {
         self.source.output_item()
     }
 
-    pub fn workflow_observation_identity(&self) -> Option<&LiveWorkflowObservationIdentity> {
-        self.source.workflow_observation()
+    pub fn run_observation_identity(&self) -> Option<&LiveRunObservationIdentity> {
+        self.source.run_observation()
     }
 
     pub fn run_id(&self) -> &RunId {
@@ -1708,11 +2140,11 @@ impl LiveResponsePublication {
         self.local_sequence
     }
 
-    pub fn payload_type(&self) -> ResponseStreamEventType {
+    pub fn payload_type(&self) -> RunStreamEventType {
         self.payload.event_type()
     }
 
-    pub(crate) fn payload(&self) -> &LiveResponsePayload {
+    pub(crate) fn payload(&self) -> &LiveRunStreamPayload {
         &self.payload
     }
 
@@ -1724,26 +2156,26 @@ impl LiveResponsePublication {
 
     /// Applies the connection-local sequence and drops all internal ordering
     /// and execution identity fields from the public wire value.
-    pub fn into_public_event(self, sequence_number: u64) -> ResponseStreamEvent {
-        let LiveResponsePublication {
+    pub fn into_public_event(self, sequence_number: u64) -> RunStreamEvent {
+        let LiveRunStreamPublication {
             source, payload, ..
         } = self;
         match (source, payload) {
             (
-                LiveResponseSourceIdentity::OutputItem(identity),
-                LiveResponsePayload::OutputItemAdded { item },
-            ) => ResponseStreamEvent::ResponseOutputItemAdded {
+                LiveRunStreamSourceIdentity::OutputItem(identity),
+                LiveRunStreamPayload::OutputItemAdded { item },
+            ) => RunStreamEvent::RunOutputItemAdded {
                 sequence_number,
                 output_index: identity.output_index,
                 item,
             },
             (
-                LiveResponseSourceIdentity::OutputItem(identity),
-                LiveResponsePayload::ContentPartAdded {
+                LiveRunStreamSourceIdentity::OutputItem(identity),
+                LiveRunStreamPayload::ContentPartAdded {
                     content_index,
                     part,
                 },
-            ) => ResponseStreamEvent::ResponseContentPartAdded {
+            ) => RunStreamEvent::RunOutputContentPartAdded {
                 sequence_number,
                 item_id: identity.item_id,
                 output_index: identity.output_index,
@@ -1751,12 +2183,12 @@ impl LiveResponsePublication {
                 part,
             },
             (
-                LiveResponseSourceIdentity::OutputItem(identity),
-                LiveResponsePayload::OutputTextDelta {
+                LiveRunStreamSourceIdentity::OutputItem(identity),
+                LiveRunStreamPayload::OutputTextDelta {
                     content_index,
                     delta,
                 },
-            ) => ResponseStreamEvent::ResponseOutputTextDelta {
+            ) => RunStreamEvent::RunOutputTextDelta {
                 sequence_number,
                 item_id: identity.item_id,
                 output_index: identity.output_index,
@@ -1764,12 +2196,12 @@ impl LiveResponsePublication {
                 delta,
             },
             (
-                LiveResponseSourceIdentity::OutputItem(identity),
-                LiveResponsePayload::OutputTextDone {
+                LiveRunStreamSourceIdentity::OutputItem(identity),
+                LiveRunStreamPayload::OutputTextDone {
                     content_index,
                     text,
                 },
-            ) => ResponseStreamEvent::ResponseOutputTextDone {
+            ) => RunStreamEvent::RunOutputTextDone {
                 sequence_number,
                 item_id: identity.item_id,
                 output_index: identity.output_index,
@@ -1777,12 +2209,12 @@ impl LiveResponsePublication {
                 text,
             },
             (
-                LiveResponseSourceIdentity::OutputItem(identity),
-                LiveResponsePayload::ContentPartDone {
+                LiveRunStreamSourceIdentity::OutputItem(identity),
+                LiveRunStreamPayload::ContentPartDone {
                     content_index,
                     part,
                 },
-            ) => ResponseStreamEvent::ResponseContentPartDone {
+            ) => RunStreamEvent::RunOutputContentPartDone {
                 sequence_number,
                 item_id: identity.item_id,
                 output_index: identity.output_index,
@@ -1790,18 +2222,18 @@ impl LiveResponsePublication {
                 part,
             },
             (
-                LiveResponseSourceIdentity::OutputItem(identity),
-                LiveResponsePayload::FunctionCallArgumentsDelta { delta },
-            ) => ResponseStreamEvent::ResponseFunctionCallArgumentsDelta {
+                LiveRunStreamSourceIdentity::OutputItem(identity),
+                LiveRunStreamPayload::FunctionCallArgumentsDelta { delta },
+            ) => RunStreamEvent::RunOutputFunctionCallArgumentsDelta {
                 sequence_number,
                 item_id: identity.item_id,
                 output_index: identity.output_index,
                 delta,
             },
             (
-                LiveResponseSourceIdentity::OutputItem(identity),
-                LiveResponsePayload::FunctionCallArgumentsDone { name, arguments },
-            ) => ResponseStreamEvent::ResponseFunctionCallArgumentsDone {
+                LiveRunStreamSourceIdentity::OutputItem(identity),
+                LiveRunStreamPayload::FunctionCallArgumentsDone { name, arguments },
+            ) => RunStreamEvent::RunOutputFunctionCallArgumentsDone {
                 sequence_number,
                 item_id: identity.item_id,
                 output_index: identity.output_index,
@@ -1809,72 +2241,72 @@ impl LiveResponsePublication {
                 arguments,
             },
             (
-                LiveResponseSourceIdentity::OutputItem(identity),
-                LiveResponsePayload::OutputItemDone { item },
-            ) => ResponseStreamEvent::ResponseOutputItemDone {
+                LiveRunStreamSourceIdentity::OutputItem(identity),
+                LiveRunStreamPayload::OutputItemDone { item },
+            ) => RunStreamEvent::RunOutputItemDone {
                 sequence_number,
                 output_index: identity.output_index,
                 item,
             },
             (
-                LiveResponseSourceIdentity::OutputItem(identity),
-                LiveResponsePayload::FileSearchCallInProgress,
-            ) => ResponseStreamEvent::ResponseFileSearchCallInProgress {
+                LiveRunStreamSourceIdentity::OutputItem(identity),
+                LiveRunStreamPayload::FileSearchCallInProgress,
+            ) => RunStreamEvent::RunOutputFileSearchCallInProgress {
                 sequence_number,
                 item_id: identity.item_id,
                 output_index: identity.output_index,
             },
             (
-                LiveResponseSourceIdentity::OutputItem(identity),
-                LiveResponsePayload::FileSearchCallSearching,
-            ) => ResponseStreamEvent::ResponseFileSearchCallSearching {
+                LiveRunStreamSourceIdentity::OutputItem(identity),
+                LiveRunStreamPayload::FileSearchCallSearching,
+            ) => RunStreamEvent::RunOutputFileSearchCallSearching {
                 sequence_number,
                 item_id: identity.item_id,
                 output_index: identity.output_index,
             },
             (
-                LiveResponseSourceIdentity::OutputItem(identity),
-                LiveResponsePayload::FileSearchCallCompleted,
-            ) => ResponseStreamEvent::ResponseFileSearchCallCompleted {
+                LiveRunStreamSourceIdentity::OutputItem(identity),
+                LiveRunStreamPayload::FileSearchCallCompleted,
+            ) => RunStreamEvent::RunOutputFileSearchCallCompleted {
                 sequence_number,
                 item_id: identity.item_id,
                 output_index: identity.output_index,
             },
             (
-                LiveResponseSourceIdentity::WorkflowObservation(_),
-                LiveResponsePayload::ToolStarted {
+                LiveRunStreamSourceIdentity::RunObservation(_),
+                LiveRunStreamPayload::ToolStarted {
                     call_id,
                     tool_name,
                     arguments,
                 },
-            ) => ResponseStreamEvent::WorkflowToolStarted {
+            ) => RunStreamEvent::RunToolStarted {
                 sequence_number,
                 call_id,
                 tool_name,
                 arguments,
             },
             (
-                LiveResponseSourceIdentity::WorkflowObservation(_),
-                LiveResponsePayload::ToolProgress {
+                LiveRunStreamSourceIdentity::RunObservation(_),
+                LiveRunStreamPayload::ToolProgress {
                     call_id,
                     tool_name,
                     content,
                 },
-            ) => ResponseStreamEvent::WorkflowToolProgress {
+            ) => RunStreamEvent::RunToolProgress {
                 sequence_number,
                 call_id,
                 tool_name,
                 content,
             },
             (
-                LiveResponseSourceIdentity::WorkflowObservation(_),
-                LiveResponsePayload::ToolCompleted {
+                LiveRunStreamSourceIdentity::RunObservation(_),
+                LiveRunStreamPayload::ToolCompleted {
                     call_id,
                     tool_name,
                     duration_ms,
                     content,
                 },
-            ) => ResponseStreamEvent::WorkflowToolCompleted {
+            ) => RunStreamEvent::RunToolCompleted {
                 sequence_number,
                 call_id,
                 tool_name,
@@ -1882,14 +2314,14 @@ impl LiveResponsePublication {
                 content,
             },
             (
-                LiveResponseSourceIdentity::WorkflowObservation(_),
-                LiveResponsePayload::ToolFailed {
+                LiveRunStreamSourceIdentity::RunObservation(_),
+                LiveRunStreamPayload::ToolFailed {
                     call_id,
                     tool_name,
                     duration_ms,
                     error,
                 },
-            ) => ResponseStreamEvent::WorkflowToolFailed {
+            ) => RunStreamEvent::RunToolFailed {
                 sequence_number,
                 call_id,
                 tool_name,
@@ -1897,27 +2329,27 @@ impl LiveResponsePublication {
                 error,
             },
             (
-                LiveResponseSourceIdentity::WorkflowObservation(_),
-                LiveResponsePayload::RetrievalCompleted {
+                LiveRunStreamSourceIdentity::RunObservation(_),
+                LiveRunStreamPayload::RetrievalCompleted {
                     retrieval_id,
                     query,
                     results,
                 },
-            ) => ResponseStreamEvent::WorkflowRetrievalCompleted {
+            ) => RunStreamEvent::RunRetrievalCompleted {
                 sequence_number,
                 retrieval_id,
                 query,
                 results,
             },
-            _ => unreachable!("LiveResponsePublication validates source and payload pairing"),
+            _ => unreachable!("LiveRunStreamPublication validates source and payload pairing"),
         }
     }
 }
 
-impl fmt::Debug for LiveResponsePublication {
+impl fmt::Debug for LiveRunStreamPublication {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("LiveResponsePublication")
+            .debug_struct("LiveRunStreamPublication")
             .field("source", &self.source)
             .field("local_sequence", &self.local_sequence)
             .field("event_type", &self.payload.event_type())
@@ -1926,23 +2358,23 @@ impl fmt::Debug for LiveResponsePublication {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LiveResponseSealStatus {
+pub enum LiveRunStreamSealStatus {
     Completed,
     Incomplete,
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub struct LiveResponseSeal {
-    identity: LiveResponseItemIdentity,
+pub struct LiveRunStreamSeal {
+    identity: LiveRunStreamItemIdentity,
     last_local_sequence: Option<u64>,
-    status: LiveResponseSealStatus,
+    status: LiveRunStreamSealStatus,
 }
 
-impl LiveResponseSeal {
+impl LiveRunStreamSeal {
     pub fn new(
-        identity: LiveResponseItemIdentity,
+        identity: LiveRunStreamItemIdentity,
         last_local_sequence: Option<u64>,
-        status: LiveResponseSealStatus,
+        status: LiveRunStreamSealStatus,
     ) -> Self {
         Self {
             identity,
@@ -1951,7 +2383,7 @@ impl LiveResponseSeal {
         }
     }
 
-    pub fn identity(&self) -> &LiveResponseItemIdentity {
+    pub fn identity(&self) -> &LiveRunStreamItemIdentity {
         &self.identity
     }
 
@@ -1959,15 +2391,15 @@ impl LiveResponseSeal {
         self.last_local_sequence
     }
 
-    pub fn status(&self) -> LiveResponseSealStatus {
+    pub fn status(&self) -> LiveRunStreamSealStatus {
         self.status
     }
 }
 
-impl fmt::Debug for LiveResponseSeal {
+impl fmt::Debug for LiveRunStreamSeal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("LiveResponseSeal")
+            .debug_struct("LiveRunStreamSeal")
             .field("identity", &self.identity)
             .field("last_local_sequence", &self.last_local_sequence)
             .field("status", &self.status)
@@ -1983,19 +2415,19 @@ impl fmt::Debug for LiveResponseSeal {
 /// local sequence numbers, and the matching completed seal as one contract.
 #[derive(Clone, PartialEq)]
 pub struct CompletedFunctionCallPublication {
-    publications: [LiveResponsePublication; 4],
-    seal: LiveResponseSeal,
+    publications: [LiveRunStreamPublication; 4],
+    seal: LiveRunStreamSeal,
 }
 
 impl CompletedFunctionCallPublication {
     pub const LAST_LOCAL_SEQUENCE: u64 = 3;
 
     pub fn build(
-        identity: LiveResponseItemIdentity,
+        identity: LiveRunStreamItemIdentity,
         call_id: impl Into<String>,
         tool_name: impl Into<String>,
         arguments_jcs: impl Into<String>,
-    ) -> Result<Self, LiveResponseBrokerError> {
+    ) -> Result<Self, LiveRunStreamBrokerError> {
         let call_id = call_id.into();
         let tool_name = tool_name.into();
         let arguments_jcs = arguments_jcs.into();
@@ -2005,66 +2437,66 @@ impl CompletedFunctionCallPublication {
         validate_function_call_arguments(&arguments_jcs)?;
 
         let item_id = identity.item_id().to_owned();
-        let added_item = ResponseOutputItem::FunctionCall {
+        let added_item = RunOutputItem::FunctionCall {
             id: item_id.clone(),
-            status: ResponseItemStatus::InProgress,
+            status: RunOutputItemStatus::InProgress,
             call_id: call_id.clone(),
             name: tool_name.clone(),
             arguments: String::new(),
         };
-        let completed_item = ResponseOutputItem::FunctionCall {
+        let completed_item = RunOutputItem::FunctionCall {
             id: item_id,
-            status: ResponseItemStatus::Completed,
+            status: RunOutputItemStatus::Completed,
             call_id,
             name: tool_name.clone(),
             arguments: arguments_jcs.clone(),
         };
         let publications = [
-            LiveResponsePublication::new(
+            LiveRunStreamPublication::new(
                 identity.clone(),
                 0,
-                LiveResponsePayload::OutputItemAdded { item: added_item },
+                LiveRunStreamPayload::OutputItemAdded { item: added_item },
             )?,
-            LiveResponsePublication::new(
+            LiveRunStreamPublication::new(
                 identity.clone(),
                 1,
-                LiveResponsePayload::FunctionCallArgumentsDelta {
+                LiveRunStreamPayload::FunctionCallArgumentsDelta {
                     delta: arguments_jcs.clone(),
                 },
             )?,
-            LiveResponsePublication::new(
+            LiveRunStreamPublication::new(
                 identity.clone(),
                 2,
-                LiveResponsePayload::FunctionCallArgumentsDone {
+                LiveRunStreamPayload::FunctionCallArgumentsDone {
                     name: tool_name,
                     arguments: arguments_jcs,
                 },
             )?,
-            LiveResponsePublication::new(
+            LiveRunStreamPublication::new(
                 identity.clone(),
                 Self::LAST_LOCAL_SEQUENCE,
-                LiveResponsePayload::OutputItemDone {
+                LiveRunStreamPayload::OutputItemDone {
                     item: completed_item,
                 },
             )?,
         ];
-        let seal = LiveResponseSeal::new(
+        let seal = LiveRunStreamSeal::new(
             identity,
             Some(Self::LAST_LOCAL_SEQUENCE),
-            LiveResponseSealStatus::Completed,
+            LiveRunStreamSealStatus::Completed,
         );
         Ok(Self { publications, seal })
     }
 
-    pub fn publications(&self) -> &[LiveResponsePublication; 4] {
+    pub fn publications(&self) -> &[LiveRunStreamPublication; 4] {
         &self.publications
     }
 
-    pub fn seal(&self) -> &LiveResponseSeal {
+    pub fn seal(&self) -> &LiveRunStreamSeal {
         &self.seal
     }
 
-    pub fn into_parts(self) -> ([LiveResponsePublication; 4], LiveResponseSeal) {
+    pub fn into_parts(self) -> ([LiveRunStreamPublication; 4], LiveRunStreamSeal) {
         (self.publications, self.seal)
     }
 }
@@ -2087,18 +2519,18 @@ impl fmt::Debug for CompletedFunctionCallPublication {
 /// be replayed by another runtime without retaining any transient fragment.
 #[derive(Clone, PartialEq)]
 pub struct CompletedFunctionCallTailPublication {
-    publications: [LiveResponsePublication; 2],
-    seal: LiveResponseSeal,
+    publications: [LiveRunStreamPublication; 2],
+    seal: LiveRunStreamSeal,
 }
 
 impl CompletedFunctionCallTailPublication {
     pub fn build(
-        identity: LiveResponseItemIdentity,
+        identity: LiveRunStreamItemIdentity,
         call_id: impl Into<String>,
         tool_name: impl Into<String>,
         arguments_jcs: impl Into<String>,
         seal_index: u64,
-    ) -> Result<Self, LiveResponseBrokerError> {
+    ) -> Result<Self, LiveRunStreamBrokerError> {
         let call_id = call_id.into();
         let tool_name = tool_name.into();
         let arguments_jcs = arguments_jcs.into();
@@ -2109,39 +2541,39 @@ impl CompletedFunctionCallTailPublication {
         let done_sequence = seal_index
             .checked_sub(1)
             .ok_or_else(invalid_completed_function_call)?;
-        let completed_item = ResponseOutputItem::FunctionCall {
+        let completed_item = RunOutputItem::FunctionCall {
             id: identity.item_id().to_owned(),
-            status: ResponseItemStatus::Completed,
+            status: RunOutputItemStatus::Completed,
             call_id,
             name: tool_name.clone(),
             arguments: arguments_jcs.clone(),
         };
         let publications = [
-            LiveResponsePublication::new(
+            LiveRunStreamPublication::new(
                 identity.clone(),
                 done_sequence,
-                LiveResponsePayload::FunctionCallArgumentsDone {
+                LiveRunStreamPayload::FunctionCallArgumentsDone {
                     name: tool_name,
                     arguments: arguments_jcs,
                 },
             )?,
-            LiveResponsePublication::new(
+            LiveRunStreamPublication::new(
                 identity.clone(),
                 seal_index,
-                LiveResponsePayload::OutputItemDone {
+                LiveRunStreamPayload::OutputItemDone {
                     item: completed_item,
                 },
             )?,
         ];
-        let seal = LiveResponseSeal::new(
+        let seal = LiveRunStreamSeal::new(
             identity,
             Some(seal_index),
-            LiveResponseSealStatus::Completed,
+            LiveRunStreamSealStatus::Completed,
         );
         Ok(Self { publications, seal })
     }
 
-    pub fn into_parts(self) -> ([LiveResponsePublication; 2], LiveResponseSeal) {
+    pub fn into_parts(self) -> ([LiveRunStreamPublication; 2], LiveRunStreamSeal) {
         (self.publications, self.seal)
     }
 }
@@ -2158,23 +2590,23 @@ impl fmt::Debug for CompletedFunctionCallTailPublication {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub struct LiveResponseGap {
-    identity: LiveResponseItemIdentity,
+pub struct LiveRunStreamGap {
+    identity: LiveRunStreamItemIdentity,
     missing_from: u64,
     missing_to: Option<u64>,
     unknown_tail: bool,
 }
 
-impl LiveResponseGap {
+impl LiveRunStreamGap {
     pub fn known(
-        identity: LiveResponseItemIdentity,
+        identity: LiveRunStreamItemIdentity,
         missing_from: u64,
         missing_to: u64,
-    ) -> Result<Self, LiveResponseBrokerError> {
+    ) -> Result<Self, LiveRunStreamBrokerError> {
         if missing_from > missing_to {
-            return Err(LiveResponseBrokerError::new(
-                LIVE_RESPONSE_IDENTITY_INVALID,
-                "live response gap range is invalid",
+            return Err(LiveRunStreamBrokerError::new(
+                LIVE_RUN_STREAM_IDENTITY_INVALID,
+                "live Run stream gap range is invalid",
             ));
         }
         Ok(Self {
@@ -2185,7 +2617,7 @@ impl LiveResponseGap {
         })
     }
 
-    pub fn unknown_tail(identity: LiveResponseItemIdentity, missing_from: u64) -> Self {
+    pub fn unknown_tail(identity: LiveRunStreamItemIdentity, missing_from: u64) -> Self {
         Self {
             identity,
             missing_from,
@@ -2194,7 +2626,7 @@ impl LiveResponseGap {
         }
     }
 
-    pub fn identity(&self) -> &LiveResponseItemIdentity {
+    pub fn identity(&self) -> &LiveRunStreamItemIdentity {
         &self.identity
     }
 
@@ -2210,15 +2642,15 @@ impl LiveResponseGap {
         self.unknown_tail
     }
 
-    pub fn into_public_event(self, sequence_number: u64) -> ResponseStreamEvent {
-        ResponseStreamEvent::WorkflowStreamGap {
+    pub fn into_public_event(self, sequence_number: u64) -> RunStreamEvent {
+        RunStreamEvent::RunStreamGap {
             sequence_number,
             item_id: self.identity.item_id,
             attempt_no: self.identity.attempt_no.get(),
             missing_from: self.missing_from,
             missing_to: self.missing_to,
             unknown_tail: self.unknown_tail,
-            action: WorkflowStreamGapAction::DiscardProvisionalItem,
+            action: RunStreamGapAction::DiscardProvisionalItem,
         }
     }
 
@@ -2250,10 +2682,10 @@ impl LiveResponseGap {
     }
 }
 
-impl fmt::Debug for LiveResponseGap {
+impl fmt::Debug for LiveRunStreamGap {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("LiveResponseGap")
+            .debug_struct("LiveRunStreamGap")
             .field("identity", &self.identity)
             .field("missing_from", &self.missing_from)
             .field("missing_to", &self.missing_to)
@@ -2262,13 +2694,13 @@ impl fmt::Debug for LiveResponseGap {
     }
 }
 
-pub enum LiveResponseDelivery {
-    Publication(LiveResponsePublication),
-    Gap(LiveResponseGap),
-    Seal(LiveResponseSeal),
+pub enum LiveRunStreamDelivery {
+    Publication(LiveRunStreamPublication),
+    Gap(LiveRunStreamGap),
+    Seal(LiveRunStreamSeal),
 }
 
-impl fmt::Debug for LiveResponseDelivery {
+impl fmt::Debug for LiveRunStreamDelivery {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Publication(publication) => publication.fmt(formatter),
@@ -2279,15 +2711,15 @@ impl fmt::Debug for LiveResponseDelivery {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LiveResponsePublishOutcome {
+pub enum LiveRunStreamPublishOutcome {
     Enqueued,
     EnqueuedAfterGap,
-    /// A workflow observation was retained after one or more producer-local
+    /// A run observation was retained after one or more producer-local
     /// indices were skipped. No output-item gap is synthesized.
     EnqueuedAfterBestEffortLoss,
     DroppedWithGap,
     DroppedOversizeWithGap,
-    /// A workflow observation was dropped by a bounded live-only queue. It is
+    /// A run observation was dropped by a bounded live-only queue. It is
     /// not terminal authority and therefore creates no output-item gap.
     DroppedBestEffort,
     SealEnqueued,
@@ -2301,12 +2733,12 @@ pub enum LiveResponsePublishOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct LiveResponseCloseOutcome {
+pub struct LiveRunStreamCloseOutcome {
     unknown_tail_gaps: usize,
     omitted_unknown_tail_gaps: usize,
 }
 
-impl LiveResponseCloseOutcome {
+impl LiveRunStreamCloseOutcome {
     pub fn unknown_tail_gaps(self) -> usize {
         self.unknown_tail_gaps
     }
@@ -2317,12 +2749,12 @@ impl LiveResponseCloseOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveResponseBrokerError {
+pub struct LiveRunStreamBrokerError {
     code: &'static str,
     message: &'static str,
 }
 
-impl LiveResponseBrokerError {
+impl LiveRunStreamBrokerError {
     pub const fn new(code: &'static str, message: &'static str) -> Self {
         Self { code, message }
     }
@@ -2336,47 +2768,47 @@ impl LiveResponseBrokerError {
     }
 }
 
-impl fmt::Display for LiveResponseBrokerError {
+impl fmt::Display for LiveRunStreamBrokerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.message)
     }
 }
 
-impl Error for LiveResponseBrokerError {}
+impl Error for LiveRunStreamBrokerError {}
 
 #[async_trait]
-pub trait LiveResponseSubscriber: Send {
+pub trait LiveRunStreamSubscriber: Send {
     fn run_id(&self) -> &RunId;
 
-    async fn recv(&mut self) -> Result<LiveResponseDelivery, LiveResponseBrokerError>;
+    async fn recv(&mut self) -> Result<LiveRunStreamDelivery, LiveRunStreamBrokerError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LiveResponseBrokerCapability {
+pub enum LiveRunStreamBrokerCapability {
     SingleProcess,
     Shared,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LiveResponseByteLimits {
+pub struct LiveRunStreamByteLimits {
     pub max_frame_bytes: usize,
     pub max_item_bytes: usize,
     pub max_run_bytes: usize,
 }
 
-impl LiveResponseByteLimits {
+impl LiveRunStreamByteLimits {
     pub fn new(
         max_frame_bytes: usize,
         max_item_bytes: usize,
         max_run_bytes: usize,
-    ) -> Result<Self, LiveResponseBrokerError> {
+    ) -> Result<Self, LiveRunStreamBrokerError> {
         if max_frame_bytes == 0
             || max_item_bytes < max_frame_bytes
             || max_run_bytes < max_item_bytes
         {
-            return Err(LiveResponseBrokerError::new(
-                LIVE_RESPONSE_CONFIG_INVALID,
-                "live response byte limits are invalid",
+            return Err(LiveRunStreamBrokerError::new(
+                LIVE_RUN_STREAM_CONFIG_INVALID,
+                "live Run stream byte limits are invalid",
             ));
         }
         Ok(Self {
@@ -2387,7 +2819,7 @@ impl LiveResponseByteLimits {
     }
 }
 
-impl Default for LiveResponseByteLimits {
+impl Default for LiveRunStreamByteLimits {
     fn default() -> Self {
         Self {
             max_frame_bytes: 4 * 1_024,
@@ -2401,30 +2833,30 @@ impl Default for LiveResponseByteLimits {
 /// deliberately non-blocking: observation backpressure must never block or
 /// fail the durable worker effect.
 #[async_trait]
-pub trait LiveResponseBroker: Send + Sync {
-    fn deployment_capability(&self) -> LiveResponseBrokerCapability;
+pub trait LiveRunStreamBroker: Send + Sync {
+    fn deployment_capability(&self) -> LiveRunStreamBrokerCapability;
 
     async fn check_readiness(
         &self,
         _readiness_timeout: std::time::Duration,
-    ) -> Result<(), LiveResponseBrokerError> {
+    ) -> Result<(), LiveRunStreamBrokerError> {
         Ok(())
     }
 
-    async fn shutdown(&self, _grace: std::time::Duration) -> Result<(), LiveResponseBrokerError> {
+    async fn shutdown(&self, _grace: std::time::Duration) -> Result<(), LiveRunStreamBrokerError> {
         Ok(())
     }
 
     async fn subscribe(
         &self,
         run_id: RunId,
-    ) -> Result<Box<dyn LiveResponseSubscriber>, LiveResponseBrokerError>;
+    ) -> Result<Box<dyn LiveRunStreamSubscriber>, LiveRunStreamBrokerError>;
 
-    fn publish(&self, publication: LiveResponsePublication) -> LiveResponsePublishOutcome;
+    fn publish(&self, publication: LiveRunStreamPublication) -> LiveRunStreamPublishOutcome;
 
-    fn seal(&self, seal: LiveResponseSeal) -> LiveResponsePublishOutcome;
+    fn seal(&self, seal: LiveRunStreamSeal) -> LiveRunStreamPublishOutcome;
 
-    fn close_run(&self, run_id: &RunId) -> LiveResponseCloseOutcome;
+    fn close_run(&self, run_id: &RunId) -> LiveRunStreamCloseOutcome;
 }
 
 /// Workspace-internal hooks shared by concrete live-response adapters.
@@ -2438,71 +2870,64 @@ pub mod adapter {
 
     /// Reconstructs one validated private publication from a transport wire.
     pub fn publication_from_source(
-        source: LiveResponseSourceIdentity,
+        source: LiveRunStreamSourceIdentity,
         local_sequence: u64,
-        payload: LiveResponsePayload,
-    ) -> Result<LiveResponsePublication, LiveResponseBrokerError> {
-        LiveResponsePublication::from_source(source, local_sequence, payload)
+        payload: LiveRunStreamPayload,
+    ) -> Result<LiveRunStreamPublication, LiveRunStreamBrokerError> {
+        LiveRunStreamPublication::from_source(source, local_sequence, payload)
     }
 
     /// Borrows the already-authorized payload for a concrete transport codec.
-    pub fn publication_payload(publication: &LiveResponsePublication) -> &LiveResponsePayload {
+    pub fn publication_payload(publication: &LiveRunStreamPublication) -> &LiveRunStreamPayload {
         publication.payload()
     }
 
-    /// Reconstructs and validates one durable terminal response snapshot.
-    #[allow(clippy::too_many_arguments)]
-    pub fn durable_response_snapshot_new(
-        response_id: String,
-        terminal_kind: ResponseTerminalKind,
-        response: Value,
-        workflow: Value,
+    /// Reconstructs and validates one durable terminal run snapshot.
+    pub fn durable_run_stream_snapshot_new(
+        run_id: String,
+        terminal_kind: RunTerminalKind,
+        run: Value,
         public_item_manifest: Value,
-        usage: Option<Value>,
-        usage_status: ResponseUsageStatus,
         snapshot_hash: crate::ContentHash,
-    ) -> Result<DurableResponseSnapshot, crate::repository::RepositoryError> {
-        DurableResponseSnapshot::new(
-            response_id,
+    ) -> Result<DurableRunStreamSnapshot, crate::repository::RepositoryError> {
+        DurableRunStreamSnapshot::new(
+            run_id,
             terminal_kind,
-            response,
-            workflow,
+            run,
             public_item_manifest,
-            usage,
-            usage_status,
             snapshot_hash,
         )
     }
 
-    /// Parses one closed durable response terminal discriminator.
-    pub fn response_terminal_kind_parse(
+    /// Parses one closed durable run terminal discriminator.
+    pub fn run_terminal_kind_parse(
         value: &str,
-    ) -> Result<ResponseTerminalKind, crate::repository::RepositoryError> {
-        ResponseTerminalKind::parse(value)
+    ) -> Result<RunTerminalKind, crate::repository::RepositoryError> {
+        RunTerminalKind::parse(value)
     }
 
-    /// Parses one closed durable response usage discriminator.
-    pub fn response_usage_status_parse(
+    /// Parses one closed durable run usage discriminator.
+    pub fn run_usage_status_parse(
         value: &str,
-    ) -> Result<ResponseUsageStatus, crate::repository::RepositoryError> {
-        ResponseUsageStatus::parse(value)
+    ) -> Result<RunUsageStatus, crate::repository::RepositoryError> {
+        RunUsageStatus::parse(value)
     }
 
     pub struct RunQueue {
         run_id: RunId,
         body_capacity: usize,
         control_capacity: usize,
-        byte_limits: LiveResponseByteLimits,
+        byte_limits: LiveRunStreamByteLimits,
         state: Mutex<RunQueueState>,
         notify: Notify,
     }
 
     #[derive(Default)]
     struct RunQueueState {
-        body: VecDeque<LiveResponsePublication>,
+        body: VecDeque<LiveRunStreamPublication>,
         controls: VecDeque<QueueControl>,
-        item_cursors: BTreeMap<LiveResponseItemIdentity, ItemCursor>,
-        observation_cursors: BTreeMap<LiveWorkflowObservationIdentity, ObservationCursor>,
+        item_cursors: BTreeMap<LiveRunStreamItemIdentity, ItemCursor>,
+        observation_cursors: BTreeMap<LiveRunObservationIdentity, ObservationCursor>,
         observed_bytes: usize,
         size_exhausted: bool,
         closed: bool,
@@ -2510,8 +2935,8 @@ pub mod adapter {
 
     #[derive(Clone)]
     enum QueueControl {
-        Gap(LiveResponseGap),
-        Seal(LiveResponseSeal),
+        Gap(LiveRunStreamGap),
+        Seal(LiveRunStreamSeal),
     }
 
     #[derive(Clone, Default)]
@@ -2520,7 +2945,7 @@ pub mod adapter {
         sequence_exhausted: bool,
         observed_bytes: usize,
         size_exhausted: bool,
-        seal: Option<LiveResponseSeal>,
+        seal: Option<LiveRunStreamSeal>,
     }
 
     #[derive(Clone, Default)]
@@ -2570,7 +2995,7 @@ pub mod adapter {
             run_id: RunId,
             body_capacity: usize,
             control_capacity: usize,
-            byte_limits: LiveResponseByteLimits,
+            byte_limits: LiveRunStreamByteLimits,
         ) -> Self {
             Self {
                 run_id,
@@ -2582,50 +3007,49 @@ pub mod adapter {
             }
         }
 
-        pub fn publish(&self, publication: LiveResponsePublication) -> LiveResponsePublishOutcome {
+        pub fn publish(
+            &self,
+            publication: LiveRunStreamPublication,
+        ) -> LiveRunStreamPublishOutcome {
             if publication.run_id() != &self.run_id {
-                return LiveResponsePublishOutcome::NoSubscriber;
+                return LiveRunStreamPublishOutcome::NoSubscriber;
             }
             let source = publication.source().clone();
             let local_sequence = publication.local_sequence();
             let mut state = lock(&self.state);
             if state.closed {
-                return LiveResponsePublishOutcome::RunClosed;
+                return LiveRunStreamPublishOutcome::RunClosed;
             }
             match source {
-                LiveResponseSourceIdentity::OutputItem(identity) => {
+                LiveRunStreamSourceIdentity::OutputItem(identity) => {
                     self.publish_output_item(&mut state, publication, identity, local_sequence)
                 }
-                LiveResponseSourceIdentity::WorkflowObservation(identity) => self
-                    .publish_workflow_observation(
-                        &mut state,
-                        publication,
-                        identity,
-                        local_sequence,
-                    ),
+                LiveRunStreamSourceIdentity::RunObservation(identity) => {
+                    self.publish_run_observation(&mut state, publication, identity, local_sequence)
+                }
             }
         }
 
         fn publish_output_item(
             &self,
             state: &mut RunQueueState,
-            publication: LiveResponsePublication,
-            identity: LiveResponseItemIdentity,
+            publication: LiveRunStreamPublication,
+            identity: LiveRunStreamItemIdentity,
             local_sequence: u64,
-        ) -> LiveResponsePublishOutcome {
+        ) -> LiveRunStreamPublishOutcome {
             let cursor = state
                 .item_cursors
                 .get(&identity)
                 .cloned()
                 .unwrap_or_default();
             if cursor.seal.is_some() {
-                return LiveResponsePublishOutcome::RejectedAfterSeal;
+                return LiveRunStreamPublishOutcome::RejectedAfterSeal;
             }
             let Some(expected) = cursor.expected() else {
-                return LiveResponsePublishOutcome::RejectedOutOfOrder;
+                return LiveRunStreamPublishOutcome::RejectedOutOfOrder;
             };
             if local_sequence < expected {
-                return LiveResponsePublishOutcome::RejectedOutOfOrder;
+                return LiveRunStreamPublishOutcome::RejectedOutOfOrder;
             }
 
             let frame_bytes = publication.public_wire_bytes();
@@ -2640,12 +3064,12 @@ pub mod adapter {
             let must_drop = body_full || item_size_exhausted || run_size_exhausted;
             let gap = if must_drop {
                 Some(
-                    LiveResponseGap::known(identity.clone(), expected, local_sequence)
+                    LiveRunStreamGap::known(identity.clone(), expected, local_sequence)
                         .expect("the observed sequence is never below the expected sequence"),
                 )
             } else if local_sequence > expected {
                 Some(
-                    LiveResponseGap::known(identity.clone(), expected, local_sequence - 1)
+                    LiveRunStreamGap::known(identity.clone(), expected, local_sequence - 1)
                         .expect("a skipped sequence always forms a non-empty range"),
                 )
             } else {
@@ -2657,7 +3081,7 @@ pub mod adapter {
                 .as_ref()
                 .is_some_and(|gap| !enqueue_gap(&mut controls, self.control_capacity, gap.clone()))
             {
-                return LiveResponsePublishOutcome::ControlQueueFull;
+                return LiveRunStreamPublishOutcome::ControlQueueFull;
             }
 
             let mut next_cursor = cursor;
@@ -2669,36 +3093,36 @@ pub mod adapter {
             state.controls = controls;
             state.item_cursors.insert(identity, next_cursor);
             let outcome = if must_drop {
-                LiveResponsePublishOutcome::DroppedWithGap
+                LiveRunStreamPublishOutcome::DroppedWithGap
             } else {
                 state.body.push_back(publication);
                 if gap.is_some() {
-                    LiveResponsePublishOutcome::EnqueuedAfterGap
+                    LiveRunStreamPublishOutcome::EnqueuedAfterGap
                 } else {
-                    LiveResponsePublishOutcome::Enqueued
+                    LiveRunStreamPublishOutcome::Enqueued
                 }
             };
             self.notify.notify_one();
             outcome
         }
 
-        fn publish_workflow_observation(
+        fn publish_run_observation(
             &self,
             state: &mut RunQueueState,
-            publication: LiveResponsePublication,
-            identity: LiveWorkflowObservationIdentity,
+            publication: LiveRunStreamPublication,
+            identity: LiveRunObservationIdentity,
             local_sequence: u64,
-        ) -> LiveResponsePublishOutcome {
+        ) -> LiveRunStreamPublishOutcome {
             let cursor = state
                 .observation_cursors
                 .get(&identity)
                 .cloned()
                 .unwrap_or_default();
             let Some(expected) = cursor.expected() else {
-                return LiveResponsePublishOutcome::RejectedOutOfOrder;
+                return LiveRunStreamPublishOutcome::RejectedOutOfOrder;
             };
             if local_sequence < expected {
-                return LiveResponsePublishOutcome::RejectedOutOfOrder;
+                return LiveRunStreamPublishOutcome::RejectedOutOfOrder;
             }
 
             let frame_bytes = publication.public_wire_bytes();
@@ -2722,30 +3146,30 @@ pub mod adapter {
             state.observation_cursors.insert(identity, next_cursor);
 
             if must_drop {
-                return LiveResponsePublishOutcome::DroppedBestEffort;
+                return LiveRunStreamPublishOutcome::DroppedBestEffort;
             }
             state.body.push_back(publication);
             self.notify.notify_one();
             if local_sequence > expected {
-                LiveResponsePublishOutcome::EnqueuedAfterBestEffortLoss
+                LiveRunStreamPublishOutcome::EnqueuedAfterBestEffortLoss
             } else {
-                LiveResponsePublishOutcome::Enqueued
+                LiveRunStreamPublishOutcome::Enqueued
             }
         }
 
         /// Records producer-side loss for an observation that cannot fit another
         /// transient transport envelope. No public output-item gap is created.
-        pub fn discard_workflow_observation(
+        pub fn discard_run_observation(
             &self,
-            identity: LiveWorkflowObservationIdentity,
+            identity: LiveRunObservationIdentity,
             local_sequence: u64,
-        ) -> LiveResponsePublishOutcome {
+        ) -> LiveRunStreamPublishOutcome {
             if identity.run_id() != &self.run_id {
-                return LiveResponsePublishOutcome::NoSubscriber;
+                return LiveRunStreamPublishOutcome::NoSubscriber;
             }
             let mut state = lock(&self.state);
             if state.closed {
-                return LiveResponsePublishOutcome::RunClosed;
+                return LiveRunStreamPublishOutcome::RunClosed;
             }
             let cursor = state
                 .observation_cursors
@@ -2753,25 +3177,25 @@ pub mod adapter {
                 .cloned()
                 .unwrap_or_default();
             let Some(expected) = cursor.expected() else {
-                return LiveResponsePublishOutcome::RejectedOutOfOrder;
+                return LiveRunStreamPublishOutcome::RejectedOutOfOrder;
             };
             if local_sequence < expected {
-                return LiveResponsePublishOutcome::RejectedOutOfOrder;
+                return LiveRunStreamPublishOutcome::RejectedOutOfOrder;
             }
             let mut next_cursor = cursor;
             next_cursor.observe(local_sequence);
             state.observation_cursors.insert(identity, next_cursor);
-            LiveResponsePublishOutcome::DroppedBestEffort
+            LiveRunStreamPublishOutcome::DroppedBestEffort
         }
 
-        pub fn seal(&self, seal: LiveResponseSeal) -> LiveResponsePublishOutcome {
+        pub fn seal(&self, seal: LiveRunStreamSeal) -> LiveRunStreamPublishOutcome {
             if seal.identity().run_id() != &self.run_id {
-                return LiveResponsePublishOutcome::NoSubscriber;
+                return LiveRunStreamPublishOutcome::NoSubscriber;
             }
             let identity = seal.identity().clone();
             let mut state = lock(&self.state);
             if state.closed {
-                return LiveResponsePublishOutcome::RunClosed;
+                return LiveRunStreamPublishOutcome::RunClosed;
             }
             let cursor = state
                 .item_cursors
@@ -2780,29 +3204,29 @@ pub mod adapter {
                 .unwrap_or_default();
             if let Some(existing) = &cursor.seal {
                 return if existing == &seal {
-                    LiveResponsePublishOutcome::SealExactReplay
+                    LiveRunStreamPublishOutcome::SealExactReplay
                 } else {
-                    LiveResponsePublishOutcome::SealConflict
+                    LiveRunStreamPublishOutcome::SealConflict
                 };
             }
             let observed_last = cursor.observed_last();
             if seal.last_local_sequence < observed_last {
-                return LiveResponsePublishOutcome::SealConflict;
+                return LiveRunStreamPublishOutcome::SealConflict;
             }
 
             let mut controls = state.controls.clone();
             if let Some(last) = seal.last_local_sequence {
                 let missing_from = observed_last.map_or(0, |observed| observed.saturating_add(1));
                 if observed_last.is_none_or(|observed| last > observed) {
-                    let gap = LiveResponseGap::known(identity.clone(), missing_from, last)
+                    let gap = LiveRunStreamGap::known(identity.clone(), missing_from, last)
                         .expect("a seal beyond observed data always forms a valid gap");
                     if !enqueue_gap(&mut controls, self.control_capacity, gap) {
-                        return LiveResponsePublishOutcome::ControlQueueFull;
+                        return LiveRunStreamPublishOutcome::ControlQueueFull;
                     }
                 }
             }
             if controls.len() >= self.control_capacity {
-                return LiveResponsePublishOutcome::ControlQueueFull;
+                return LiveRunStreamPublishOutcome::ControlQueueFull;
             }
             controls.push_back(QueueControl::Seal(seal.clone()));
             let mut next_cursor = cursor;
@@ -2811,20 +3235,20 @@ pub mod adapter {
             state.item_cursors.insert(identity, next_cursor);
             drop(state);
             self.notify.notify_one();
-            LiveResponsePublishOutcome::SealEnqueued
+            LiveRunStreamPublishOutcome::SealEnqueued
         }
 
         pub fn discard_with_gap(
             &self,
-            identity: LiveResponseItemIdentity,
+            identity: LiveRunStreamItemIdentity,
             local_sequence: u64,
-        ) -> LiveResponsePublishOutcome {
+        ) -> LiveRunStreamPublishOutcome {
             if identity.run_id() != &self.run_id {
-                return LiveResponsePublishOutcome::NoSubscriber;
+                return LiveRunStreamPublishOutcome::NoSubscriber;
             }
             let mut state = lock(&self.state);
             if state.closed {
-                return LiveResponsePublishOutcome::RunClosed;
+                return LiveRunStreamPublishOutcome::RunClosed;
             }
             let cursor = state
                 .item_cursors
@@ -2832,19 +3256,19 @@ pub mod adapter {
                 .cloned()
                 .unwrap_or_default();
             if cursor.seal.is_some() {
-                return LiveResponsePublishOutcome::RejectedAfterSeal;
+                return LiveRunStreamPublishOutcome::RejectedAfterSeal;
             }
             let Some(expected) = cursor.expected() else {
-                return LiveResponsePublishOutcome::RejectedOutOfOrder;
+                return LiveRunStreamPublishOutcome::RejectedOutOfOrder;
             };
             if local_sequence < expected {
-                return LiveResponsePublishOutcome::RejectedOutOfOrder;
+                return LiveRunStreamPublishOutcome::RejectedOutOfOrder;
             }
-            let gap = LiveResponseGap::known(identity.clone(), expected, local_sequence)
+            let gap = LiveRunStreamGap::known(identity.clone(), expected, local_sequence)
                 .expect("the discarded sequence is never below the expected sequence");
             let mut controls = state.controls.clone();
             if !enqueue_gap(&mut controls, self.control_capacity, gap) {
-                return LiveResponsePublishOutcome::ControlQueueFull;
+                return LiveRunStreamPublishOutcome::ControlQueueFull;
             }
             let mut next_cursor = cursor;
             next_cursor.observe(local_sequence);
@@ -2852,19 +3276,19 @@ pub mod adapter {
             state.item_cursors.insert(identity, next_cursor);
             drop(state);
             self.notify.notify_one();
-            LiveResponsePublishOutcome::DroppedWithGap
+            LiveRunStreamPublishOutcome::DroppedWithGap
         }
 
         pub fn discard_seal_with_gap(
             &self,
-            identity: LiveResponseItemIdentity,
-        ) -> LiveResponsePublishOutcome {
+            identity: LiveRunStreamItemIdentity,
+        ) -> LiveRunStreamPublishOutcome {
             if identity.run_id() != &self.run_id {
-                return LiveResponsePublishOutcome::NoSubscriber;
+                return LiveRunStreamPublishOutcome::NoSubscriber;
             }
             let mut state = lock(&self.state);
             if state.closed {
-                return LiveResponsePublishOutcome::RunClosed;
+                return LiveRunStreamPublishOutcome::RunClosed;
             }
             let cursor = state
                 .item_cursors
@@ -2872,28 +3296,28 @@ pub mod adapter {
                 .cloned()
                 .unwrap_or_default();
             if cursor.seal.is_some() {
-                return LiveResponsePublishOutcome::RejectedAfterSeal;
+                return LiveRunStreamPublishOutcome::RejectedAfterSeal;
             }
             let missing_from = cursor.expected().unwrap_or(u64::MAX);
-            let gap = LiveResponseGap::unknown_tail(identity, missing_from);
+            let gap = LiveRunStreamGap::unknown_tail(identity, missing_from);
             let mut controls = state.controls.clone();
             if !enqueue_gap(&mut controls, self.control_capacity, gap) {
-                return LiveResponsePublishOutcome::ControlQueueFull;
+                return LiveRunStreamPublishOutcome::ControlQueueFull;
             }
             state.controls = controls;
             drop(state);
             self.notify.notify_one();
-            LiveResponsePublishOutcome::DroppedWithGap
+            LiveRunStreamPublishOutcome::DroppedWithGap
         }
 
-        pub fn accept_gap(&self, gap: LiveResponseGap) -> LiveResponsePublishOutcome {
+        pub fn accept_gap(&self, gap: LiveRunStreamGap) -> LiveRunStreamPublishOutcome {
             if gap.identity().run_id() != &self.run_id {
-                return LiveResponsePublishOutcome::NoSubscriber;
+                return LiveRunStreamPublishOutcome::NoSubscriber;
             }
             let identity = gap.identity().clone();
             let mut state = lock(&self.state);
             if state.closed {
-                return LiveResponsePublishOutcome::RunClosed;
+                return LiveRunStreamPublishOutcome::RunClosed;
             }
             let cursor = state
                 .item_cursors
@@ -2901,11 +3325,11 @@ pub mod adapter {
                 .cloned()
                 .unwrap_or_default();
             if cursor.seal.is_some() {
-                return LiveResponsePublishOutcome::RejectedAfterSeal;
+                return LiveRunStreamPublishOutcome::RejectedAfterSeal;
             }
             let mut controls = state.controls.clone();
             if !enqueue_gap(&mut controls, self.control_capacity, gap.clone()) {
-                return LiveResponsePublishOutcome::ControlQueueFull;
+                return LiveRunStreamPublishOutcome::ControlQueueFull;
             }
             let mut next_cursor = cursor;
             if let Some(missing_to) = gap.missing_to() {
@@ -2920,10 +3344,10 @@ pub mod adapter {
             state.item_cursors.insert(identity, next_cursor);
             drop(state);
             self.notify.notify_one();
-            LiveResponsePublishOutcome::EnqueuedAfterGap
+            LiveRunStreamPublishOutcome::EnqueuedAfterGap
         }
 
-        pub async fn recv(&self) -> Result<LiveResponseDelivery, LiveResponseBrokerError> {
+        pub async fn recv(&self) -> Result<LiveRunStreamDelivery, LiveRunStreamBrokerError> {
             loop {
                 let notified = self.notify.notified();
                 {
@@ -2932,9 +3356,9 @@ pub mod adapter {
                         return Ok(delivery);
                     }
                     if state.closed {
-                        return Err(LiveResponseBrokerError::new(
-                            LIVE_RESPONSE_STREAM_CLOSED,
-                            "live response stream is closed",
+                        return Err(LiveRunStreamBrokerError::new(
+                            LIVE_RUN_STREAM_STREAM_CLOSED,
+                            "live Run stream is closed",
                         ));
                     }
                 }
@@ -2942,19 +3366,19 @@ pub mod adapter {
             }
         }
 
-        pub fn close(&self) -> LiveResponseCloseOutcome {
+        pub fn close(&self) -> LiveRunStreamCloseOutcome {
             let mut state = lock(&self.state);
             if state.closed {
-                return LiveResponseCloseOutcome::default();
+                return LiveRunStreamCloseOutcome::default();
             }
             let mut controls = state.controls.clone();
-            let mut outcome = LiveResponseCloseOutcome::default();
+            let mut outcome = LiveRunStreamCloseOutcome::default();
             for (identity, cursor) in &state.item_cursors {
                 if cursor.seal.is_some() {
                     continue;
                 }
                 let missing_from = cursor.expected().unwrap_or(u64::MAX);
-                let gap = LiveResponseGap::unknown_tail(identity.clone(), missing_from);
+                let gap = LiveRunStreamGap::unknown_tail(identity.clone(), missing_from);
                 if enqueue_gap(&mut controls, self.control_capacity, gap) {
                     outcome.unknown_tail_gaps += 1;
                 } else {
@@ -2972,7 +3396,7 @@ pub mod adapter {
     fn enqueue_gap(
         controls: &mut VecDeque<QueueControl>,
         capacity: usize,
-        gap: LiveResponseGap,
+        gap: LiveRunStreamGap,
     ) -> bool {
         if let Some(existing) = controls.iter_mut().find_map(|control| match control {
             QueueControl::Gap(existing) if existing.can_merge(&gap) => Some(existing),
@@ -3000,7 +3424,7 @@ pub mod adapter {
         false
     }
 
-    fn next_delivery(state: &mut RunQueueState) -> Option<LiveResponseDelivery> {
+    fn next_delivery(state: &mut RunQueueState) -> Option<LiveRunStreamDelivery> {
         if let Some(position) = state
             .controls
             .iter()
@@ -3009,7 +3433,7 @@ pub mod adapter {
             let QueueControl::Gap(gap) = state.controls.remove(position)? else {
                 unreachable!("the selected control is a gap")
             };
-            return Some(LiveResponseDelivery::Gap(gap));
+            return Some(LiveRunStreamDelivery::Gap(gap));
         }
 
         if let Some(position) = state.controls.iter().position(|control| {
@@ -3024,17 +3448,17 @@ pub mod adapter {
             let QueueControl::Seal(seal) = state.controls.remove(position)? else {
                 unreachable!("the selected control is a seal")
             };
-            return Some(LiveResponseDelivery::Seal(seal));
+            return Some(LiveRunStreamDelivery::Seal(seal));
         }
 
         state
             .body
             .pop_front()
-            .map(LiveResponseDelivery::Publication)
+            .map(LiveRunStreamDelivery::Publication)
     }
 }
 
-fn validate_function_call_arguments(arguments_jcs: &str) -> Result<(), LiveResponseBrokerError> {
+fn validate_function_call_arguments(arguments_jcs: &str) -> Result<(), LiveRunStreamBrokerError> {
     if arguments_jcs.is_empty() || arguments_jcs.len() > MAX_FUNCTION_CALL_ARGUMENT_BYTES {
         return Err(invalid_completed_function_call());
     }
@@ -3074,9 +3498,9 @@ fn validate_function_call_arguments(arguments_jcs: &str) -> Result<(), LiveRespo
     Ok(())
 }
 
-fn invalid_completed_function_call() -> LiveResponseBrokerError {
-    LiveResponseBrokerError::new(
-        LIVE_RESPONSE_FUNCTION_CALL_INVALID,
+fn invalid_completed_function_call() -> LiveRunStreamBrokerError {
+    LiveRunStreamBrokerError::new(
+        LIVE_RUN_STREAM_FUNCTION_CALL_INVALID,
         "completed function-call publication is invalid",
     )
 }
@@ -3085,7 +3509,7 @@ fn validate_optional_public_string(
     value: Option<&str>,
     max_bytes: usize,
     message: &'static str,
-) -> Result<(), WorkflowPublicResultError> {
+) -> Result<(), RunPublicResultError> {
     match value {
         Some(value) => validate_bounded_public_string(value, max_bytes, message),
         None => Ok(()),
@@ -3096,9 +3520,9 @@ fn validate_bounded_public_string(
     value: &str,
     max_bytes: usize,
     message: &'static str,
-) -> Result<(), WorkflowPublicResultError> {
+) -> Result<(), RunPublicResultError> {
     if value.is_empty() || value.len() > max_bytes {
-        return Err(WorkflowPublicResultError::new(message));
+        return Err(RunPublicResultError::new(message));
     }
     Ok(())
 }
@@ -3106,12 +3530,11 @@ fn validate_bounded_public_string(
 fn validate_bounded_public_json(
     value: &Value,
     max_bytes: usize,
-) -> Result<(), WorkflowPublicResultError> {
-    let encoded = serde_jcs::to_vec(value).map_err(|_| {
-        WorkflowPublicResultError::new("workflow public JSON must be canonicalizable")
-    })?;
+) -> Result<(), RunPublicResultError> {
+    let encoded = serde_jcs::to_vec(value)
+        .map_err(|_| RunPublicResultError::new("workflow public JSON must be canonicalizable"))?;
     if encoded.len() > max_bytes {
-        return Err(WorkflowPublicResultError::new(
+        return Err(RunPublicResultError::new(
             "workflow public JSON exceeds the inline byte limit",
         ));
     }
@@ -3120,16 +3543,14 @@ fn validate_bounded_public_json(
     let mut observed_values = 0_usize;
     while let Some((current, depth)) = stack.pop() {
         observed_values = observed_values.saturating_add(1);
-        if observed_values > MAX_WORKFLOW_PUBLIC_JSON_VALUES
-            || depth > MAX_WORKFLOW_PUBLIC_JSON_DEPTH
-        {
-            return Err(WorkflowPublicResultError::new(
+        if observed_values > MAX_RUN_PUBLIC_JSON_VALUES || depth > MAX_RUN_PUBLIC_JSON_DEPTH {
+            return Err(RunPublicResultError::new(
                 "workflow public JSON exceeds the structural limit",
             ));
         }
         match current {
-            Value::String(string) if string.len() > MAX_WORKFLOW_PUBLIC_JSON_STRING_BYTES => {
-                return Err(WorkflowPublicResultError::new(
+            Value::String(string) if string.len() > MAX_RUN_PUBLIC_JSON_STRING_BYTES => {
+                return Err(RunPublicResultError::new(
                     "workflow public JSON contains an oversized string",
                 ));
             }
@@ -3142,7 +3563,7 @@ fn validate_bounded_public_json(
                         || key.len() > MAX_PUBLIC_LABEL_BYTES
                         || key.chars().any(char::is_control)
                 }) {
-                    return Err(WorkflowPublicResultError::new(
+                    return Err(RunPublicResultError::new(
                         "workflow public JSON contains an invalid object key",
                     ));
                 }
@@ -3182,8 +3603,8 @@ mod tests {
         RunId::new(value).unwrap()
     }
 
-    fn identity(run_id: &str) -> LiveResponseItemIdentity {
-        LiveResponseItemIdentity::new(
+    fn identity(run_id: &str) -> LiveRunStreamItemIdentity {
+        LiveRunStreamItemIdentity::new(
             run(run_id),
             ActivationId::new("activation_answer").unwrap(),
             AttemptNo::FIRST,
@@ -3194,10 +3615,10 @@ mod tests {
         .unwrap()
     }
 
-    fn workflow_identity(run_id: &str, source_id: &str) -> LiveWorkflowObservationIdentity {
-        LiveWorkflowObservationIdentity::new(
+    fn workflow_identity(run_id: &str, source_id: &str) -> LiveRunObservationIdentity {
+        LiveRunObservationIdentity::new(
             run(run_id),
-            ActivationId::new("activation_workflow_observation").unwrap(),
+            ActivationId::new("activation_run_observation").unwrap(),
             AttemptNo::FIRST,
             source_id,
         )
@@ -3205,14 +3626,14 @@ mod tests {
     }
 
     fn delta(
-        identity: LiveResponseItemIdentity,
+        identity: LiveRunStreamItemIdentity,
         sequence: u64,
         text: &str,
-    ) -> LiveResponsePublication {
-        LiveResponsePublication::new(
+    ) -> LiveRunStreamPublication {
+        LiveRunStreamPublication::new(
             identity,
             sequence,
-            LiveResponsePayload::OutputTextDelta {
+            LiveRunStreamPayload::OutputTextDelta {
                 content_index: 0,
                 delta: text.to_owned(),
             },
@@ -3221,14 +3642,14 @@ mod tests {
     }
 
     fn tool_started(
-        identity: LiveWorkflowObservationIdentity,
+        identity: LiveRunObservationIdentity,
         sequence: u64,
         call_id: &str,
-    ) -> LiveResponsePublication {
-        LiveResponsePublication::new_workflow_observation(
+    ) -> LiveRunStreamPublication {
+        LiveRunStreamPublication::new_run_observation(
             identity,
             sequence,
-            LiveResponsePayload::ToolStarted {
+            LiveRunStreamPayload::ToolStarted {
                 call_id: call_id.to_owned(),
                 tool_name: "lookup".to_owned(),
                 arguments: Some(json!({"published": true})),
@@ -3247,261 +3668,314 @@ mod tests {
         .unwrap()
     }
 
-    fn sample_response(status: ResponseStatus) -> PublicResponse {
-        PublicResponse {
-            id: "resp_schema".to_owned(),
-            object: ResponseObjectKind::Response,
-            status,
-            output: vec![
-                ResponseOutputItem::Message {
-                    id: "msg_schema".to_owned(),
-                    status: ResponseItemStatus::Completed,
-                    role: ResponseRole::Assistant,
-                    content: vec![ResponseContentPart::OutputText {
-                        text: "complete".to_owned(),
-                        annotations: vec![json!({"kind": "citation"})],
-                    }],
-                },
-                ResponseOutputItem::FunctionCall {
-                    id: "fn_schema".to_owned(),
-                    status: ResponseItemStatus::Completed,
-                    call_id: "call_schema".to_owned(),
-                    name: "lookup".to_owned(),
-                    arguments: r#"{"indicator":"WBC"}"#.to_owned(),
-                },
-                ResponseOutputItem::FileSearchCall {
-                    id: "search_schema".to_owned(),
-                    status: ResponseItemStatus::Completed,
-                    queries: vec!["WBC".to_owned()],
-                    results: vec![json!({"document_id": "doc_schema"})],
-                },
-            ],
-            usage: Some(ResponseUsage {
-                input_tokens: 11,
-                input_tokens_details: ResponseUsageInputDetails { cached_tokens: 3 },
-                output_tokens: 7,
-                output_tokens_details: ResponseUsageOutputDetails {
-                    reasoning_tokens: 2,
-                },
-                total_tokens: 18,
-            }),
-            error: (status == ResponseStatus::Failed).then(|| PublicResponseError {
-                code: "MODEL_FAILED".to_owned(),
-                message: "model request failed".to_owned(),
-                param: None,
-            }),
+    fn sample_output() -> Vec<RunOutputItem> {
+        vec![
+            RunOutputItem::Message {
+                id: "msg_schema".to_owned(),
+                status: RunOutputItemStatus::Completed,
+                role: RunOutputRole::Assistant,
+                content: vec![RunOutputContentPart::OutputText {
+                    text: "complete".to_owned(),
+                    annotations: vec![json!({"kind": "citation"})],
+                }],
+            },
+            RunOutputItem::FunctionCall {
+                id: "fn_schema".to_owned(),
+                status: RunOutputItemStatus::Completed,
+                call_id: "call_schema".to_owned(),
+                name: "lookup".to_owned(),
+                arguments: r#"{"indicator":"WBC"}"#.to_owned(),
+            },
+            RunOutputItem::FileSearchCall {
+                id: "search_schema".to_owned(),
+                status: RunOutputItemStatus::Completed,
+                queries: vec!["WBC".to_owned()],
+                results: vec![json!({"document_id": "doc_schema"})],
+            },
+        ]
+    }
+
+    fn sample_usage() -> RunUsage {
+        RunUsage {
+            input_tokens: 11,
+            input_tokens_details: RunUsageInputDetails { cached_tokens: 3 },
+            output_tokens: 7,
+            output_tokens_details: RunUsageOutputDetails {
+                reasoning_tokens: 2,
+            },
+            total_tokens: 18,
         }
     }
 
-    fn sample_workflow_completed() -> WorkflowCompleted {
+    fn sample_completed_run() -> RunCompletedSnapshot {
         let artifact = artifact("artifact_schema", "image/png");
-        let tool_result = WorkflowToolResult::new(
+        let tool_result = RunToolResult::new(
             "call_schema",
             "lookup",
             vec![
-                WorkflowToolContent::output_text("tool text").unwrap(),
-                WorkflowToolContent::output_json(json!({"ok": true})).unwrap(),
-                WorkflowToolContent::output_image(artifact.clone()),
-                WorkflowToolContent::output_file(artifact.clone()),
-                WorkflowToolContent::output_audio(artifact.clone()),
+                RunToolContent::output_text("tool text").unwrap(),
+                RunToolContent::output_json(json!({"ok": true})).unwrap(),
+                RunToolContent::output_image(artifact.clone()),
+                RunToolContent::output_file(artifact.clone()),
+                RunToolContent::output_audio(artifact.clone()),
             ],
         )
         .unwrap();
-        let retrieval_result = WorkflowRetrievalResult::new(
+        let retrieval_result = RunRetrievalResult::new(
             "result_schema",
             Some("Lab handbook".to_owned()),
             Some("https://example.test/lab".to_owned()),
             Some(0.95),
             Some("Reference range".to_owned()),
-            WorkflowRetrievalMetadata::new(BTreeMap::from([(
-                "source".to_owned(),
-                json!("handbook"),
-            )]))
-            .unwrap(),
+            RunRetrievalMetadata::new(BTreeMap::from([("source".to_owned(), json!("handbook"))]))
+                .unwrap(),
             Some(artifact),
         )
         .unwrap();
         let retrieval =
-            WorkflowRetrieval::new("ret_schema", Some("WBC".to_owned()), vec![retrieval_result])
+            RunRetrieval::new("ret_schema", Some("WBC".to_owned()), vec![retrieval_result])
                 .unwrap();
-        WorkflowCompleted {
-            run_id: "run_schema".to_owned(),
+        RunCompletedSnapshot {
+            id: "run_schema".to_owned(),
+            object: RunObjectKind::Run,
+            status: RunStatus::Completed,
+            output: sample_output(),
             result: json!({"answer": "complete"}),
             tool_results: vec![tool_result],
             retrievals: vec![retrieval],
-            usage_status: WorkflowUsageStatus::Complete,
+            usage: Some(sample_usage()),
+            usage_status: RunUsageStatus::Complete,
         }
     }
 
-    fn vendored_standard_event_samples() -> Vec<ResponseStreamEvent> {
-        let empty_response = PublicResponse {
-            id: "resp_schema".to_owned(),
-            object: ResponseObjectKind::Response,
-            status: ResponseStatus::InProgress,
-            output: Vec::new(),
-            usage: None,
-            error: None,
-        };
-        let empty_part = ResponseContentPart::OutputText {
+    fn run_stream_event_samples() -> Vec<RunStreamEvent> {
+        let empty_part = RunOutputContentPart::OutputText {
             text: String::new(),
             annotations: Vec::new(),
         };
         vec![
-            ResponseStreamEvent::ResponseCreated {
+            RunStreamEvent::RunLifecycleCreated {
                 sequence_number: 0,
-                response: empty_response.clone(),
+                run: RunInitialSnapshot::new("run_schema", RunStatus::Created).unwrap(),
             },
-            ResponseStreamEvent::ResponseInProgress {
+            RunStreamEvent::RunLifecycleRunning {
                 sequence_number: 1,
-                response: empty_response,
+                run: RunInitialSnapshot::new("run_schema", RunStatus::Running).unwrap(),
             },
-            ResponseStreamEvent::ResponseOutputItemAdded {
+            RunStreamEvent::RunOutputItemAdded {
                 sequence_number: 2,
                 output_index: 0,
-                item: ResponseOutputItem::Message {
+                item: RunOutputItem::Message {
                     id: "msg_schema".to_owned(),
-                    status: ResponseItemStatus::InProgress,
-                    role: ResponseRole::Assistant,
+                    status: RunOutputItemStatus::InProgress,
+                    role: RunOutputRole::Assistant,
                     content: Vec::new(),
                 },
             },
-            ResponseStreamEvent::ResponseContentPartAdded {
+            RunStreamEvent::RunOutputContentPartAdded {
                 sequence_number: 3,
                 item_id: "msg_schema".to_owned(),
                 output_index: 0,
                 content_index: 0,
                 part: empty_part,
             },
-            ResponseStreamEvent::ResponseOutputTextDelta {
+            RunStreamEvent::RunOutputTextDelta {
                 sequence_number: 4,
                 item_id: "msg_schema".to_owned(),
                 output_index: 0,
                 content_index: 0,
                 delta: "partial".to_owned(),
             },
-            ResponseStreamEvent::ResponseOutputTextDone {
+            RunStreamEvent::RunOutputTextDone {
                 sequence_number: 5,
                 item_id: "msg_schema".to_owned(),
                 output_index: 0,
                 content_index: 0,
                 text: "complete".to_owned(),
             },
-            ResponseStreamEvent::ResponseContentPartDone {
+            RunStreamEvent::RunOutputContentPartDone {
                 sequence_number: 6,
                 item_id: "msg_schema".to_owned(),
                 output_index: 0,
                 content_index: 0,
-                part: ResponseContentPart::OutputText {
+                part: RunOutputContentPart::OutputText {
                     text: "complete".to_owned(),
                     annotations: Vec::new(),
                 },
             },
-            ResponseStreamEvent::ResponseFunctionCallArgumentsDelta {
+            RunStreamEvent::RunOutputFunctionCallArgumentsDelta {
                 sequence_number: 7,
                 item_id: "fn_schema".to_owned(),
                 output_index: 1,
                 delta: r#"{"indicator":"#.to_owned(),
             },
-            ResponseStreamEvent::ResponseFunctionCallArgumentsDone {
+            RunStreamEvent::RunOutputFunctionCallArgumentsDone {
                 sequence_number: 8,
                 item_id: "fn_schema".to_owned(),
                 output_index: 1,
                 name: "lookup".to_owned(),
                 arguments: r#"{"indicator":"WBC"}"#.to_owned(),
             },
-            ResponseStreamEvent::ResponseOutputItemDone {
+            RunStreamEvent::RunOutputItemDone {
                 sequence_number: 9,
                 output_index: 1,
-                item: ResponseOutputItem::FunctionCall {
+                item: RunOutputItem::FunctionCall {
                     id: "fn_schema".to_owned(),
-                    status: ResponseItemStatus::Completed,
+                    status: RunOutputItemStatus::Completed,
                     call_id: "call_schema".to_owned(),
                     name: "lookup".to_owned(),
                     arguments: r#"{"indicator":"WBC"}"#.to_owned(),
                 },
             },
-            ResponseStreamEvent::ResponseFileSearchCallInProgress {
+            RunStreamEvent::RunOutputFileSearchCallInProgress {
                 sequence_number: 10,
                 item_id: "search_schema".to_owned(),
                 output_index: 2,
             },
-            ResponseStreamEvent::ResponseFileSearchCallSearching {
+            RunStreamEvent::RunOutputFileSearchCallSearching {
                 sequence_number: 11,
                 item_id: "search_schema".to_owned(),
                 output_index: 2,
             },
-            ResponseStreamEvent::ResponseFileSearchCallCompleted {
+            RunStreamEvent::RunOutputFileSearchCallCompleted {
                 sequence_number: 12,
                 item_id: "search_schema".to_owned(),
                 output_index: 2,
             },
-            ResponseStreamEvent::ResponseCompleted {
+            RunStreamEvent::RunLifecycleCompleted {
                 sequence_number: 13,
-                response: sample_response(ResponseStatus::Completed),
-                workflow: sample_workflow_completed(),
+                run: sample_completed_run(),
             },
-            ResponseStreamEvent::ResponseFailed {
+            RunStreamEvent::RunLifecycleFailed {
                 sequence_number: 14,
-                response: sample_response(ResponseStatus::Failed),
-                workflow: WorkflowFailure {
-                    run_id: "run_schema".to_owned(),
-                    error: WorkflowPublicError {
-                        code: "WORKFLOW_FAILED".to_owned(),
-                        message: "workflow failed".to_owned(),
+                run: RunFailedSnapshot {
+                    id: "run_schema".to_owned(),
+                    object: RunObjectKind::Run,
+                    status: RunStatus::Failed,
+                    output: Vec::new(),
+                    error: RunPublicError {
+                        code: "RUN_FAILED".to_owned(),
+                        message: "run failed".to_owned(),
                     },
                     tool_results: Vec::new(),
                     retrievals: Vec::new(),
-                    usage_status: WorkflowUsageStatus::Partial,
+                    usage: None,
+                    usage_status: RunUsageStatus::Partial,
                 },
             },
-            ResponseStreamEvent::Error {
+            RunStreamEvent::RunStreamError {
                 sequence_number: 15,
-                code: "STREAM_ERROR".to_owned(),
+                code: "RUN_STREAM_ERROR".to_owned(),
                 message: "stream failed".to_owned(),
-                param: None,
+            },
+            RunStreamEvent::RunToolStarted {
+                sequence_number: 16,
+                call_id: "call_schema".to_owned(),
+                tool_name: "lookup".to_owned(),
+                arguments: Some(json!({"indicator": "WBC"})),
+            },
+            RunStreamEvent::RunToolProgress {
+                sequence_number: 17,
+                call_id: "call_schema".to_owned(),
+                tool_name: "lookup".to_owned(),
+                content: vec![RunToolProgressContent::output_json(json!({"completed": 1})).unwrap()],
+            },
+            RunStreamEvent::RunToolCompleted {
+                sequence_number: 18,
+                call_id: "call_schema".to_owned(),
+                tool_name: "lookup".to_owned(),
+                duration_ms: 12,
+                content: vec![RunToolContent::output_text("complete").unwrap()],
+            },
+            RunStreamEvent::RunToolFailed {
+                sequence_number: 19,
+                call_id: "call_failed".to_owned(),
+                tool_name: "lookup".to_owned(),
+                duration_ms: 7,
+                error: RunPublicError {
+                    code: "TOOL_FAILED".to_owned(),
+                    message: "tool failed".to_owned(),
+                },
+            },
+            RunStreamEvent::RunRetrievalCompleted {
+                sequence_number: 20,
+                retrieval_id: "retrieval_schema".to_owned(),
+                query: Some("WBC".to_owned()),
+                results: Vec::new(),
+            },
+            RunStreamEvent::RunStreamGap {
+                sequence_number: 21,
+                item_id: "msg_schema".to_owned(),
+                attempt_no: 1,
+                missing_from: 3,
+                missing_to: None,
+                unknown_tail: true,
+                action: RunStreamGapAction::DiscardProvisionalItem,
+            },
+            RunStreamEvent::RunLifecycleTimedOut {
+                sequence_number: 22,
+                run: RunFailedSnapshot {
+                    id: "run_schema".to_owned(),
+                    object: RunObjectKind::Run,
+                    status: RunStatus::TimedOut,
+                    output: Vec::new(),
+                    error: RunPublicError {
+                        code: "RUN_TIMEOUT".to_owned(),
+                        message: "run timed out".to_owned(),
+                    },
+                    tool_results: Vec::new(),
+                    retrievals: Vec::new(),
+                    usage: None,
+                    usage_status: RunUsageStatus::Partial,
+                },
+            },
+            RunStreamEvent::RunLifecycleCancelled {
+                sequence_number: 23,
+                run: RunStoppedSnapshot {
+                    id: "run_schema".to_owned(),
+                    object: RunObjectKind::Run,
+                    status: RunStatus::Cancelled,
+                    output: Vec::new(),
+                    tool_results: Vec::new(),
+                    retrievals: Vec::new(),
+                    usage: None,
+                    usage_status: RunUsageStatus::Partial,
+                },
+            },
+            RunStreamEvent::RunLifecycleInterrupted {
+                sequence_number: 24,
+                run: RunStoppedSnapshot {
+                    id: "run_schema".to_owned(),
+                    object: RunObjectKind::Run,
+                    status: RunStatus::Interrupted,
+                    output: Vec::new(),
+                    tool_results: Vec::new(),
+                    retrievals: Vec::new(),
+                    usage: None,
+                    usage_status: RunUsageStatus::Partial,
+                },
             },
         ]
     }
 
     #[test]
-    fn vendored_openai_streaming_snapshot_is_pinned_to_the_v1_standard_event_contract() {
-        let snapshot: Value = serde_json::from_str(workspace_asset_str!(
-            "schemas/vendor/openai-responses-streaming-2026-07-19.snapshot.json"
-        ))
-        .unwrap();
-        assert_eq!(
-            snapshot["protocol_binding"],
-            RESPONSE_STREAM_PROTOCOL_VERSION
-        );
-        assert_eq!(snapshot["captured_at"], "2026-07-19");
-        assert_eq!(
-            snapshot["source"],
-            "https://developers.openai.com/api/docs/guides/streaming-responses"
-        );
-
-        let snapshot_types = snapshot["standard_events"]
-            .as_array()
-            .unwrap()
+    fn run_stream_schema_is_pinned_to_the_complete_v1_event_contract() {
+        let schema: Value =
+            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v1.json")).unwrap();
+        assert_eq!(schema["$id"], "urn:insight-agent-platform:run-stream:v1");
+        let validator =
+            crate::schema::compile_schema_2020(&schema).expect("run-stream/v1 schema must compile");
+        let samples = run_stream_event_samples();
+        assert_eq!(samples.len(), RunStreamEventType::ALL.len());
+        for (sample, expected_type) in samples
             .iter()
-            .map(|event_type| event_type.as_str().unwrap())
-            .collect::<Vec<_>>();
-        let protocol_standard_types = ResponseStreamEventType::ALL
-            .into_iter()
-            .map(ResponseStreamEventType::as_str)
-            .filter(|event_type| !event_type.starts_with("workflow."))
-            .collect::<Vec<_>>();
-        assert_eq!(snapshot_types, protocol_standard_types);
-
-        let validator = crate::schema::compile_schema_2020(&snapshot)
-            .expect("vendored Draft 2020-12 schema must compile");
-        let samples = vendored_standard_event_samples();
-        assert_eq!(samples.len(), protocol_standard_types.len());
-        for (sample, expected_type) in samples.iter().zip(protocol_standard_types) {
+            .zip(RunStreamEventType::ALL.map(RunStreamEventType::as_str))
+        {
             assert_eq!(sample.event_type().as_str(), expected_type);
             let encoded = serde_json::to_value(sample).unwrap();
             assert!(
                 validator.is_valid(&encoded),
-                "real {expected_type} serialization must match the vendored schema"
+                "real {expected_type} serialization must match run-stream/v1"
             );
 
             let mut missing_required = encoded.clone();
@@ -3528,95 +4002,152 @@ mod tests {
                 "{expected_type} must reject unknown fields"
             );
         }
-
-        let platform_extension = ResponseStreamEvent::WorkflowToolStarted {
-            sequence_number: 16,
-            call_id: "call_schema".to_owned(),
-            tool_name: "lookup".to_owned(),
-            arguments: None,
-        };
-        assert!(!validator.is_valid(&serde_json::to_value(platform_extension).unwrap()));
-
-        let snapshot_extension_types = snapshot["platform_extensions"]["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|event_type| event_type.as_str().unwrap())
-            .collect::<Vec<_>>();
-        let protocol_extension_types = ResponseStreamEventType::ALL
-            .into_iter()
-            .map(ResponseStreamEventType::as_str)
-            .filter(|event_type| event_type.starts_with("workflow."))
-            .collect::<Vec<_>>();
-        assert_eq!(snapshot_extension_types, protocol_extension_types);
-        assert_eq!(
-            snapshot["platform_extensions"]["tool_activity"],
-            json!({
-                "progress_content_types": ["output_text", "output_json"],
-                "terminal_required_fields": ["duration_ms"],
-                "progress_persistence": "live_only"
-            })
-        );
-
-        let terminal_extensions = &snapshot["platform_extensions"]["terminal_fields"];
-        assert_eq!(
-            terminal_extensions["response.completed"],
-            json!(["workflow"])
-        );
-        assert_eq!(terminal_extensions["response.failed"], json!(["workflow"]));
     }
 
     #[test]
     fn event_type_set_is_exact_and_rejects_unknown_names() {
-        let names = ResponseStreamEventType::ALL
+        let names = RunStreamEventType::ALL
             .into_iter()
-            .map(ResponseStreamEventType::as_str)
+            .map(RunStreamEventType::as_str)
             .collect::<Vec<_>>();
         assert_eq!(
             names,
             vec![
-                "response.created",
-                "response.in_progress",
-                "response.output_item.added",
-                "response.content_part.added",
-                "response.output_text.delta",
-                "response.output_text.done",
-                "response.content_part.done",
-                "response.function_call_arguments.delta",
-                "response.function_call_arguments.done",
-                "response.output_item.done",
-                "response.file_search_call.in_progress",
-                "response.file_search_call.searching",
-                "response.file_search_call.completed",
-                "response.completed",
-                "response.failed",
-                "error",
-                "workflow.tool.started",
-                "workflow.tool.progress",
-                "workflow.tool.completed",
-                "workflow.tool.failed",
-                "workflow.retrieval.completed",
-                "workflow.stream.gap",
-                "workflow.response.timed_out",
-                "workflow.response.cancelled",
-                "workflow.response.interrupted",
+                "run.lifecycle.created",
+                "run.lifecycle.running",
+                "run.output.item.added",
+                "run.output.content_part.added",
+                "run.output.text.delta",
+                "run.output.text.done",
+                "run.output.content_part.done",
+                "run.output.function_call.arguments.delta",
+                "run.output.function_call.arguments.done",
+                "run.output.item.done",
+                "run.output.file_search_call.in_progress",
+                "run.output.file_search_call.searching",
+                "run.output.file_search_call.completed",
+                "run.lifecycle.completed",
+                "run.lifecycle.failed",
+                "run.stream.error",
+                "run.tool.started",
+                "run.tool.progress",
+                "run.tool.completed",
+                "run.tool.failed",
+                "run.retrieval.completed",
+                "run.stream.gap",
+                "run.lifecycle.timed_out",
+                "run.lifecycle.cancelled",
+                "run.lifecycle.interrupted",
             ]
         );
-        for event_type in ResponseStreamEventType::ALL {
+        for event_type in RunStreamEventType::ALL {
             let encoded = serde_json::to_value(event_type).unwrap();
             assert_eq!(encoded, json!(event_type.as_str()));
             assert_eq!(
-                serde_json::from_value::<ResponseStreamEventType>(encoded).unwrap(),
+                serde_json::from_value::<RunStreamEventType>(encoded).unwrap(),
                 event_type
             );
         }
-        assert!(serde_json::from_value::<ResponseStreamEventType>(json!("run.completed")).is_err());
-        assert!(serde_json::from_value::<ResponseStreamEventType>(json!(
-            "workflow.tool_result.done"
-        ))
+        assert!(serde_json::from_value::<RunStreamEventType>(json!("run.completed")).is_err());
+        assert!(
+            serde_json::from_value::<RunStreamEventType>(json!("workflow.tool_result.done"))
+                .is_err()
+        );
+        for legacy_type in [
+            "response.created",
+            "response.in_progress",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+            "response.file_search_call.in_progress",
+            "response.file_search_call.searching",
+            "response.file_search_call.completed",
+            "response.completed",
+            "response.failed",
+            "error",
+            "workflow.tool.started",
+            "workflow.tool.progress",
+            "workflow.tool.completed",
+            "workflow.tool.failed",
+            "workflow.retrieval.completed",
+            "workflow.stream.gap",
+            "workflow.response.timed_out",
+            "workflow.response.cancelled",
+            "workflow.response.interrupted",
+        ] {
+            assert!(
+                serde_json::from_value::<RunStreamEventType>(json!(legacy_type)).is_err(),
+                "legacy event type {legacy_type} must be rejected"
+            );
+            assert!(
+                serde_json::from_value::<RunStreamEvent>(json!({
+                    "type": legacy_type,
+                    "sequence_number": 0
+                }))
+                .is_err(),
+                "legacy event {legacy_type} must be rejected"
+            );
+        }
+        assert!(!RunStreamEventType::RunStreamError.is_run_terminal());
+        assert!(RunStreamEventType::RunStreamError.ends_stream());
+        assert!(RunStreamEventType::RunLifecycleCompleted.is_run_terminal());
+    }
+
+    #[test]
+    fn lifecycle_envelopes_reject_run_status_mismatches() {
+        for (event_type, wrong_status) in [
+            ("run.lifecycle.created", "running"),
+            ("run.lifecycle.running", "created"),
+            ("run.lifecycle.completed", "failed"),
+            ("run.lifecycle.failed", "timed_out"),
+            ("run.lifecycle.timed_out", "failed"),
+            ("run.lifecycle.cancelled", "interrupted"),
+            ("run.lifecycle.interrupted", "cancelled"),
+        ] {
+            let mut encoded = run_stream_event_samples()
+                .into_iter()
+                .find_map(|event| {
+                    (event.event_type().as_str() == event_type)
+                        .then(|| serde_json::to_value(event).unwrap())
+                })
+                .unwrap();
+            encoded["run"]["status"] = json!(wrong_status);
+            assert!(
+                serde_json::from_value::<RunStreamEvent>(encoded).is_err(),
+                "{event_type} must reject run.status={wrong_status}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_error_rejects_unscoped_codes_and_unsafe_messages() {
+        for invalid in [
+            json!({
+                "type": "run.stream.error",
+                "sequence_number": 1,
+                "code": "BROKER_LOST",
+                "message": "stream failed"
+            }),
+            json!({
+                "type": "run.stream.error",
+                "sequence_number": 1,
+                "code": "RUN_STREAM_LOST",
+                "message": "unsafe\nmessage"
+            }),
+        ] {
+            assert!(serde_json::from_value::<RunStreamEvent>(invalid).is_err());
+        }
+        assert!(serde_json::to_value(RunStreamEvent::RunStreamError {
+            sequence_number: 1,
+            code: "BROKER_LOST".to_owned(),
+            message: "stream failed".to_owned(),
+        })
         .is_err());
-        assert!(!ResponseStreamEventType::Error.is_terminal());
-        assert!(ResponseStreamEventType::ResponseCompleted.is_terminal());
     }
 
     #[test]
@@ -3629,7 +4160,7 @@ mod tests {
         assert_eq!(
             encoded,
             json!({
-                "type": "response.output_text.delta",
+                "type": "run.output.text.delta",
                 "sequence_number": 7,
                 "item_id": "msg_answer",
                 "output_index": 0,
@@ -3650,16 +4181,16 @@ mod tests {
         }
         let mut unknown = encoded;
         unknown["node_id"] = json!("answer");
-        assert!(serde_json::from_value::<ResponseStreamEvent>(unknown).is_err());
+        assert!(serde_json::from_value::<RunStreamEvent>(unknown).is_err());
     }
 
     #[test]
     fn publication_source_union_rejects_mismatches_and_hides_workflow_identity() {
         let item = identity("run_source_contract");
-        assert!(LiveResponsePublication::new(
+        assert!(LiveRunStreamPublication::new(
             item,
             0,
-            LiveResponsePayload::ToolStarted {
+            LiveRunStreamPayload::ToolStarted {
                 call_id: "call_wrong_source".to_owned(),
                 tool_name: "lookup".to_owned(),
                 arguments: None,
@@ -3668,10 +4199,10 @@ mod tests {
         .is_err());
 
         let observation = workflow_identity("run_source_contract", "tool_call_source");
-        assert!(LiveResponsePublication::new_workflow_observation(
+        assert!(LiveRunStreamPublication::new_run_observation(
             observation.clone(),
             0,
-            LiveResponsePayload::OutputTextDelta {
+            LiveRunStreamPayload::OutputTextDelta {
                 content_index: 0,
                 delta: "wrong source".to_owned(),
             },
@@ -3685,7 +4216,7 @@ mod tests {
         assert_eq!(
             encoded,
             json!({
-                "type": "workflow.tool.started",
+                "type": "run.tool.started",
                 "sequence_number": 9,
                 "call_id": "call_public",
                 "tool_name": "lookup",
@@ -3721,12 +4252,12 @@ mod tests {
         assert_eq!(
             plan.publications()
                 .iter()
-                .map(LiveResponsePublication::local_sequence)
+                .map(LiveRunStreamPublication::local_sequence)
                 .collect::<Vec<_>>(),
             vec![0, 1, 2, 3]
         );
         assert_eq!(plan.seal().last_local_sequence(), Some(3));
-        assert_eq!(plan.seal().status(), LiveResponseSealStatus::Completed);
+        assert_eq!(plan.seal().status(), LiveRunStreamSealStatus::Completed);
         assert_eq!(plan.seal().identity().item_id(), "msg_answer");
         assert!(!format!("{plan:?}").contains("shanghai"));
 
@@ -3743,7 +4274,7 @@ mod tests {
             events,
             vec![
                 json!({
-                    "type": "response.output_item.added",
+                    "type": "run.output.item.added",
                     "sequence_number": 10,
                     "output_index": 0,
                     "item": {
@@ -3756,14 +4287,14 @@ mod tests {
                     }
                 }),
                 json!({
-                    "type": "response.function_call_arguments.delta",
+                    "type": "run.output.function_call.arguments.delta",
                     "sequence_number": 11,
                     "item_id": "msg_answer",
                     "output_index": 0,
                     "delta": arguments
                 }),
                 json!({
-                    "type": "response.function_call_arguments.done",
+                    "type": "run.output.function_call.arguments.done",
                     "sequence_number": 12,
                     "item_id": "msg_answer",
                     "output_index": 0,
@@ -3771,7 +4302,7 @@ mod tests {
                     "arguments": arguments
                 }),
                 json!({
-                    "type": "response.output_item.done",
+                    "type": "run.output.item.done",
                     "sequence_number": 13,
                     "output_index": 0,
                     "item": {
@@ -3803,22 +4334,22 @@ mod tests {
         assert_eq!(
             frames
                 .iter()
-                .map(LiveResponsePublication::local_sequence)
+                .map(LiveRunStreamPublication::local_sequence)
                 .collect::<Vec<_>>(),
             vec![4, 5],
         );
         assert_eq!(
             frames
                 .iter()
-                .map(LiveResponsePublication::payload_type)
+                .map(LiveRunStreamPublication::payload_type)
                 .collect::<Vec<_>>(),
             vec![
-                ResponseStreamEventType::ResponseFunctionCallArgumentsDone,
-                ResponseStreamEventType::ResponseOutputItemDone,
+                RunStreamEventType::RunOutputFunctionCallArgumentsDone,
+                RunStreamEventType::RunOutputItemDone,
             ],
         );
         assert_eq!(seal.last_local_sequence(), Some(5));
-        assert_eq!(seal.status(), LiveResponseSealStatus::Completed);
+        assert_eq!(seal.status(), LiveRunStreamSealStatus::Completed);
         assert!(CompletedFunctionCallTailPublication::build(
             identity("run_invalid_function_call_tail"),
             "call_weather",
@@ -3839,7 +4370,7 @@ mod tests {
                 invalid,
             )
             .unwrap_err();
-            assert_eq!(error.code(), LIVE_RESPONSE_FUNCTION_CALL_INVALID);
+            assert_eq!(error.code(), LIVE_RUN_STREAM_FUNCTION_CALL_INVALID);
             assert!(!format!("{error:?}").contains(invalid));
         }
 
@@ -3863,7 +4394,7 @@ mod tests {
             oversized,
         )
         .unwrap_err();
-        assert_eq!(error.code(), LIVE_RESPONSE_FUNCTION_CALL_INVALID);
+        assert_eq!(error.code(), LIVE_RUN_STREAM_FUNCTION_CALL_INVALID);
     }
 
     #[test]
@@ -3871,8 +4402,11 @@ mod tests {
         let image = serde_json::to_value(artifact("art_image", "image/png")).unwrap();
         let file = serde_json::to_value(artifact("art_file", "application/pdf")).unwrap();
         let audio = serde_json::to_value(artifact("art_audio", "audio/mpeg")).unwrap();
-        let workflow: WorkflowCompleted = serde_json::from_value(json!({
-            "run_id": "run_typed_terminal",
+        let run: RunCompletedSnapshot = serde_json::from_value(json!({
+            "id": "run_typed_terminal",
+            "object": "run",
+            "status": "completed",
+            "output": [],
             "result": {"answer": "ok"},
             "tool_results": [{
                 "call_id": "call_lookup",
@@ -3898,28 +4432,32 @@ mod tests {
                     "artifact": serde_json::to_value(artifact("art_source", "text/plain")).unwrap()
                 }]
             }],
-            "usage_status": "complete"
+            "usage": null,
+            "usage_status": "unavailable"
         }))
         .unwrap();
-        assert_eq!(workflow.tool_results[0].call_id(), "call_lookup");
+        assert_eq!(run.tool_results[0].call_id(), "call_lookup");
         assert_eq!(
-            workflow.tool_results[0].content()[1].json(),
+            run.tool_results[0].content()[1].json(),
             Some(&json!({"score": 0.9}))
         );
-        assert_eq!(workflow.retrievals[0].retrieval_id(), "ret_lookup");
-        assert_eq!(workflow.retrievals[0].results()[0].id(), "doc_1");
-        assert_eq!(workflow.retrievals[0].results()[0].score(), Some(0.92));
-        assert_eq!(workflow.tool_results[0].content().len(), 5);
+        assert_eq!(run.retrievals[0].retrieval_id(), "ret_lookup");
+        assert_eq!(run.retrievals[0].results()[0].id(), "doc_1");
+        assert_eq!(run.retrievals[0].results()[0].score(), Some(0.92));
+        assert_eq!(run.tool_results[0].content().len(), 5);
 
-        let mut encoded = serde_json::to_value(workflow).unwrap();
+        let mut encoded = serde_json::to_value(run).unwrap();
         encoded["tool_results"][0]["raw_provider_payload"] = json!("private");
-        assert!(serde_json::from_value::<WorkflowCompleted>(encoded).is_err());
+        assert!(serde_json::from_value::<RunCompletedSnapshot>(encoded).is_err());
     }
 
     #[test]
     fn terminal_public_results_reject_unknown_and_wrong_variants() {
         let base = json!({
-            "run_id": "run_invalid_terminal",
+            "id": "run_invalid_terminal",
+            "object": "run",
+            "status": "completed",
+            "output": [],
             "result": {"answer": "ok"},
             "tool_results": [{
                 "call_id": "call_lookup",
@@ -3930,96 +4468,80 @@ mod tests {
                 "retrieval_id": "ret_lookup",
                 "results": [{"id": "doc_1", "metadata": {}}]
             }],
-            "usage_status": "complete"
+            "usage": null,
+            "usage_status": "unavailable"
         });
 
         let mut unknown_variant = base.clone();
         unknown_variant["tool_results"][0]["content"][0]["type"] = json!("output_video");
-        assert!(serde_json::from_value::<WorkflowCompleted>(unknown_variant).is_err());
+        assert!(serde_json::from_value::<RunCompletedSnapshot>(unknown_variant).is_err());
 
         let mut inline_binary = base.clone();
         inline_binary["tool_results"][0]["content"][0] = json!({
             "type": "output_image",
             "base64": "aGVsbG8="
         });
-        assert!(serde_json::from_value::<WorkflowCompleted>(inline_binary).is_err());
+        assert!(serde_json::from_value::<RunCompletedSnapshot>(inline_binary).is_err());
 
         let mut unknown_retrieval_field = base.clone();
         unknown_retrieval_field["retrievals"][0]["results"][0]["raw_document"] = json!("private");
-        assert!(serde_json::from_value::<WorkflowCompleted>(unknown_retrieval_field).is_err());
+        assert!(serde_json::from_value::<RunCompletedSnapshot>(unknown_retrieval_field).is_err());
 
         let mut wrong_retrieval_shape = base;
         wrong_retrieval_shape["retrievals"][0]["results"][0] = json!("doc_1");
-        assert!(serde_json::from_value::<WorkflowCompleted>(wrong_retrieval_shape).is_err());
+        assert!(serde_json::from_value::<RunCompletedSnapshot>(wrong_retrieval_shape).is_err());
     }
 
     #[test]
     fn public_result_constructors_enforce_identity_score_and_inline_bounds() {
-        assert!(WorkflowToolResult::new("not stable", "lookup", Vec::new()).is_err());
-        assert!(
-            WorkflowToolContent::output_text("x".repeat(MAX_WORKFLOW_PUBLIC_TEXT_BYTES + 1))
-                .is_err()
-        );
-        assert!(WorkflowToolContent::output_json(json!({
-            "payload": "x".repeat(MAX_WORKFLOW_PUBLIC_JSON_BYTES)
+        assert!(RunToolResult::new("not stable", "lookup", Vec::new()).is_err());
+        assert!(RunToolContent::output_text("x".repeat(MAX_RUN_PUBLIC_TEXT_BYTES + 1)).is_err());
+        assert!(RunToolContent::output_json(json!({
+            "payload": "x".repeat(MAX_RUN_PUBLIC_JSON_BYTES)
         }))
         .is_err());
 
-        let metadata = WorkflowRetrievalMetadata::default();
-        assert!(WorkflowRetrievalResult::new(
-            "doc_1",
-            None,
-            None,
-            Some(f64::NAN),
-            None,
-            metadata,
-            None,
-        )
-        .is_err());
-        assert!(WorkflowRetrieval::new(
+        let metadata = RunRetrievalMetadata::default();
+        assert!(
+            RunRetrievalResult::new("doc_1", None, None, Some(f64::NAN), None, metadata, None,)
+                .is_err()
+        );
+        assert!(RunRetrieval::new(
             "ret_1",
-            Some("x".repeat(MAX_WORKFLOW_RETRIEVAL_QUERY_BYTES + 1)),
+            Some("x".repeat(MAX_RUN_RETRIEVAL_QUERY_BYTES + 1)),
             Vec::new(),
         )
         .is_err());
 
         let oversized_metadata = BTreeMap::from([(
             "public".to_owned(),
-            json!("x".repeat(MAX_WORKFLOW_RETRIEVAL_METADATA_BYTES)),
+            json!("x".repeat(MAX_RUN_RETRIEVAL_METADATA_BYTES)),
         )]);
-        assert!(WorkflowRetrievalMetadata::new(oversized_metadata).is_err());
+        assert!(RunRetrievalMetadata::new(oversized_metadata).is_err());
     }
 
     #[test]
     fn closed_event_envelopes_reject_unknown_fields() {
-        let response = PublicResponse {
-            id: "resp_1".to_owned(),
-            object: ResponseObjectKind::Response,
-            status: ResponseStatus::InProgress,
-            output: Vec::new(),
-            usage: None,
-            error: None,
-        };
-        let event = ResponseStreamEvent::ResponseCreated {
+        let event = RunStreamEvent::RunLifecycleCreated {
             sequence_number: 0,
-            response,
+            run: RunInitialSnapshot::new("run_1", RunStatus::Created).unwrap(),
         };
         let mut encoded = serde_json::to_value(event).unwrap();
         encoded["unexpected"] = json!(true);
-        assert!(serde_json::from_value::<ResponseStreamEvent>(encoded).is_err());
+        assert!(serde_json::from_value::<RunStreamEvent>(encoded).is_err());
 
         let tool = json!({
-            "type": "workflow.tool.failed",
+            "type": "run.tool.failed",
             "sequence_number": 3,
             "call_id": "call_1",
             "tool_name": "lookup",
             "duration_ms": 5,
             "error": {"code": "LOOKUP_FAILED", "message": "lookup failed", "raw": "secret"}
         });
-        assert!(serde_json::from_value::<ResponseStreamEvent>(tool).is_err());
+        assert!(serde_json::from_value::<RunStreamEvent>(tool).is_err());
 
-        for terminal_type in ["workflow.tool.completed", "workflow.tool.failed"] {
-            let missing_duration = if terminal_type == "workflow.tool.completed" {
+        for terminal_type in ["run.tool.completed", "run.tool.failed"] {
+            let missing_duration = if terminal_type == "run.tool.completed" {
                 json!({
                     "type": terminal_type,
                     "sequence_number": 3,
@@ -4037,7 +4559,7 @@ mod tests {
                 })
             };
             assert!(
-                serde_json::from_value::<ResponseStreamEvent>(missing_duration).is_err(),
+                serde_json::from_value::<RunStreamEvent>(missing_duration).is_err(),
                 "{terminal_type} must require duration_ms"
             );
         }
@@ -4046,7 +4568,7 @@ mod tests {
     #[test]
     fn workflow_tool_progress_wire_is_closed_nonempty_and_excludes_artifacts() {
         let valid = json!({
-            "type": "workflow.tool.progress",
+            "type": "run.tool.progress",
             "sequence_number": 4,
             "call_id": "call_progress",
             "tool_name": "example.progress",
@@ -4055,19 +4577,19 @@ mod tests {
                 {"type": "output_json", "json": {"completed": 1, "total": 2}}
             ]
         });
-        let decoded = serde_json::from_value::<ResponseStreamEvent>(valid.clone()).unwrap();
+        let decoded = serde_json::from_value::<RunStreamEvent>(valid.clone()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), valid);
 
         for invalid in [
             json!({
-                "type": "workflow.tool.progress",
+                "type": "run.tool.progress",
                 "sequence_number": 4,
                 "call_id": "call_progress",
                 "tool_name": "example.progress",
                 "content": []
             }),
             json!({
-                "type": "workflow.tool.progress",
+                "type": "run.tool.progress",
                 "sequence_number": 4,
                 "call_id": "call_progress",
                 "tool_name": "example.progress",
@@ -4082,22 +4604,22 @@ mod tests {
                 }}]
             }),
             json!({
-                "type": "workflow.tool.progress",
+                "type": "run.tool.progress",
                 "sequence_number": 4,
                 "call_id": "call_progress",
                 "tool_name": "example.progress",
                 "content": [{"type": "output_text", "text": "safe", "raw": "secret"}]
             }),
         ] {
-            assert!(serde_json::from_value::<ResponseStreamEvent>(invalid).is_err());
+            assert!(serde_json::from_value::<RunStreamEvent>(invalid).is_err());
         }
 
-        let too_many = ResponseStreamEvent::WorkflowToolProgress {
+        let too_many = RunStreamEvent::RunToolProgress {
             sequence_number: 4,
             call_id: "call_progress".to_owned(),
             tool_name: "example.progress".to_owned(),
-            content: (0..=MAX_WORKFLOW_TOOL_CONTENT_PARTS)
-                .map(|_| WorkflowToolProgressContent::output_text("safe").unwrap())
+            content: (0..=MAX_RUN_TOOL_CONTENT_PARTS)
+                .map(|_| RunToolProgressContent::output_text("safe").unwrap())
                 .collect(),
         };
         assert!(serde_json::to_value(too_many).is_err());
