@@ -776,11 +776,12 @@ async fn postgres_work_notifications_are_commit_scoped_and_payload_free() {
     );
 
     let listener_pid = sqlx::query_scalar::<_, i32>(
-        "SELECT pid
-         FROM pg_stat_activity
-         WHERE datname=current_database()
-           AND query LIKE 'LISTEN \"iap_work_%'
-         ORDER BY backend_start DESC
+        "SELECT activity.pid
+         FROM pg_stat_activity activity
+         JOIN pg_namespace namespace
+           ON namespace.nspname=current_schema()
+         WHERE activity.datname=current_database()
+           AND activity.query=format('LISTEN \"iap_work_%s\"', namespace.oid)
          LIMIT 1",
     )
     .fetch_one(&schema.control)
