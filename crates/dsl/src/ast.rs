@@ -10,6 +10,97 @@ use super::{
     INVALID_STEP, INVALID_TYPE,
 };
 
+// Closed DSL object vocabularies are protocol contracts. Keeping them named
+// here prevents equivalent parser branches from drifting as the author
+// surface evolves.
+const INLINE_PROMPT_FIELDS: &[&str] = &["inline"];
+const FILE_PROMPT_FIELDS: &[&str] = &["file"];
+const ERROR_DECLARATION_FIELDS: &[&str] = &["category", "code", "public_message"];
+const INPUT_DECLARATION_FIELDS: &[&str] = &[
+    "type",
+    "optional",
+    "default",
+    "min_items",
+    "max_items",
+    "min_length",
+    "max_length",
+    "pattern",
+    "enum",
+];
+const TYPE_DECLARATION_FIELDS: &[&str] = &[
+    "type",
+    "min_items",
+    "max_items",
+    "min_length",
+    "max_length",
+    "pattern",
+    "enum",
+];
+const NAMED_OBJECT_TYPE_FIELDS: &[&str] = &["fields"];
+
+const LLM_LEAF_FIELDS: &[&str] = &[
+    "id",
+    "type",
+    "model",
+    "messages",
+    "stream",
+    "publish",
+    "tools",
+    "tool_choice",
+    "tool_limits",
+    "parameters",
+    "response",
+];
+const ACTION_LEAF_FIELDS: &[&str] = &["id", "type", "call", "inputs", "response"];
+const RETRIEVAL_LEAF_FIELDS: &[&str] =
+    &["id", "type", "retrieval", "inputs", "publish", "response"];
+const HTTP_LEAF_FIELDS: &[&str] = &["id", "type", "method", "url", "headers", "body", "response"];
+const TOOL_LEAF_FIELDS: &[&str] = &["id", "type", "tool", "arguments", "response"];
+
+const IF_STEP_FIELDS: &[&str] = &["id", "if", "then", "elif", "else"];
+const ELIF_ARM_FIELDS: &[&str] = &["id", "when", "then"];
+const PARALLEL_STEP_FIELDS: &[&str] = &["id", "settle", "parallel"];
+const MAP_STEP_FIELDS: &[&str] = &["id", "map"];
+const MAP_DECLARATION_FIELDS: &[&str] = &["items", "key", "as", "max_concurrency", "steps"];
+const WORKFLOW_LOOP_STEP_FIELDS: &[&str] = &["id", "loop"];
+const AGENT_LOOP_STEP_FIELDS: &[&str] = &["id", "agent_loop"];
+const LOOP_DECLARATION_FIELDS: &[&str] = &[
+    "initial",
+    "as",
+    "until",
+    "max_iterations",
+    "deadline_ms",
+    "steps",
+];
+const CALL_STEP_FIELDS: &[&str] = &[
+    "id",
+    "type",
+    "definition_revision",
+    "interface_version",
+    "input",
+    "response",
+    "request",
+    "timeout_ms",
+];
+const TRY_STEP_FIELDS: &[&str] = &["id", "try", "catch", "finally"];
+const CATCH_DECLARATION_FIELDS: &[&str] = &["safe_business_failure"];
+const SAFE_BUSINESS_FAILURE_FIELDS: &[&str] = &["as", "steps"];
+const HUMAN_TASK_STEP_FIELDS: &[&str] = &["id", "human_task"];
+const HUMAN_TASK_DECLARATION_FIELDS: &[&str] = &[
+    "signal",
+    "request",
+    "response",
+    "assignees",
+    "candidate_groups",
+    "claim_lease_ms",
+];
+const WAIT_STEP_FIELDS: &[&str] = &["id", "wait"];
+const SIGNAL_WAIT_FIELDS: &[&str] = &["signal", "response"];
+const TIMER_WAIT_FIELDS: &[&str] = &["duration_ms"];
+const MATCH_EXPRESSION_FIELDS: &[&str] = &["match", "cases", "default"];
+const LLM_TOOL_LIMIT_FIELDS: &[&str] = &["max_rounds", "max_calls"];
+const MESSAGE_FIELDS: &[&str] = &["role", "content"];
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructuredAuthorDocument {
     pub metadata: Option<Metadata>,
@@ -376,10 +467,10 @@ pub fn validate(raw: RawDocument) -> Result<StructuredAuthorDocument, CompileErr
             validate_identifier(id, "prompt id")?;
             let declaration = as_object(value, "prompt must declare inline or file")?;
             let prompt = if let Some(value) = declaration.get("inline") {
-                exact_keys(declaration, &["inline"])?;
+                exact_keys(declaration, INLINE_PROMPT_FIELDS)?;
                 PromptDeclaration::Inline(string(value, "inline prompt")?.to_owned())
             } else if let Some(value) = declaration.get("file") {
-                exact_keys(declaration, &["file"])?;
+                exact_keys(declaration, FILE_PROMPT_FIELDS)?;
                 let path = string(value, "prompt file")?;
                 if path.starts_with('/') || path.split('/').any(|part| part == "..") {
                     return Err(CompileError::new(
@@ -403,7 +494,7 @@ pub fn validate(raw: RawDocument) -> Result<StructuredAuthorDocument, CompileErr
         .map(|(id, value)| {
             validate_identifier(id, "error id")?;
             let declaration = as_object(value, "error declaration must be an object")?;
-            exact_keys(declaration, &["category", "code", "public_message"])?;
+            exact_keys(declaration, ERROR_DECLARATION_FIELDS)?;
             if string(required(declaration, "category")?, "error category")? != "workflow" {
                 return Err(CompileError::new(
                     INVALID_DOCUMENT,
@@ -524,20 +615,7 @@ fn parse_input(
         });
     }
     let object = as_object(value, "input declaration must be a type string or object")?;
-    exact_keys(
-        object,
-        &[
-            "type",
-            "optional",
-            "default",
-            "min_items",
-            "max_items",
-            "min_length",
-            "max_length",
-            "pattern",
-            "enum",
-        ],
-    )?;
+    exact_keys(object, INPUT_DECLARATION_FIELDS)?;
     let mut value_type = resolver.resolve_type_value(required(object, "type")?)?;
     let optional = object.get("optional").map_or(Ok(false), |value| {
         value
@@ -651,43 +729,19 @@ fn parse_leaf(
     let kind = string(required(object, "type")?, "leaf type")?;
     let id = identifier(required(object, "id")?, "leaf id")?;
     let (kind, implementation, allowed) = match kind {
-        "llm" => (
-            LeafKind::Llm,
-            "core.llm".to_owned(),
-            &[
-                "id",
-                "type",
-                "model",
-                "messages",
-                "stream",
-                "publish",
-                "tools",
-                "tool_choice",
-                "tool_limits",
-                "parameters",
-                "response",
-            ][..],
-        ),
+        "llm" => (LeafKind::Llm, "core.llm".to_owned(), LLM_LEAF_FIELDS),
         "action" => (
             LeafKind::Action,
             string(required(object, "call")?, "action call")?.to_owned(),
-            &["id", "type", "call", "inputs", "response"][..],
+            ACTION_LEAF_FIELDS,
         ),
         "retrieval" => (
             LeafKind::Retrieval,
             string(required(object, "retrieval")?, "retrieval resource")?.to_owned(),
-            &["id", "type", "retrieval", "inputs", "publish", "response"][..],
+            RETRIEVAL_LEAF_FIELDS,
         ),
-        "http" => (
-            LeafKind::Http,
-            "core.http".to_owned(),
-            &["id", "type", "method", "url", "headers", "body", "response"][..],
-        ),
-        "tool" => (
-            LeafKind::Tool,
-            "core.tool".to_owned(),
-            &["id", "type", "tool", "arguments", "response"][..],
-        ),
+        "http" => (LeafKind::Http, "core.http".to_owned(), HTTP_LEAF_FIELDS),
+        "tool" => (LeafKind::Tool, "core.tool".to_owned(), TOOL_LEAF_FIELDS),
         value if value.starts_with("core.") => {
             return Err(CompileError::new(
                 INVALID_STEP,
@@ -764,7 +818,7 @@ fn parse_if(
     resolver: &TypeResolver<'_>,
     prompts: &BTreeMap<String, PromptDeclaration>,
 ) -> Result<IfStep, CompileError> {
-    exact_keys(object, &["id", "if", "then", "elif", "else"])?;
+    exact_keys(object, IF_STEP_FIELDS)?;
     let id = identifier(required(object, "id")?, "if id")?;
     let condition = string(required(object, "if")?, "if condition")?.to_owned();
     let then_steps = parse_steps(required(object, "then")?, resolver, prompts)?;
@@ -775,7 +829,7 @@ fn parse_if(
             .ok_or_else(|| CompileError::new(INVALID_STEP, "elif must be an ordered list"))?;
         for value in values {
             let arm = as_object(value, "elif arm must be an object")?;
-            exact_keys(arm, &["id", "when", "then"])?;
+            exact_keys(arm, ELIF_ARM_FIELDS)?;
             elif.push(ElifArm {
                 id: identifier(required(arm, "id")?, "elif id")?,
                 condition: string(required(arm, "when")?, "elif condition")?.to_owned(),
@@ -801,7 +855,7 @@ fn parse_parallel(
     resolver: &TypeResolver<'_>,
     prompts: &BTreeMap<String, PromptDeclaration>,
 ) -> Result<ParallelStep, CompileError> {
-    exact_keys(object, &["id", "settle", "parallel"])?;
+    exact_keys(object, PARALLEL_STEP_FIELDS)?;
     let id = identifier(required(object, "id")?, "parallel id")?;
     let settle = match object.get("settle").and_then(Value::as_str) {
         None | Some("all_success") => ParallelSettle::AllSuccess,
@@ -836,10 +890,10 @@ fn parse_map(
     resolver: &TypeResolver<'_>,
     prompts: &BTreeMap<String, PromptDeclaration>,
 ) -> Result<MapStep, CompileError> {
-    exact_keys(object, &["id", "map"])?;
+    exact_keys(object, MAP_STEP_FIELDS)?;
     let id = identifier(required(object, "id")?, "map id")?;
     let map = object_value(required(object, "map")?, "map declaration")?;
-    exact_keys(map, &["items", "key", "as", "max_concurrency", "steps"])?;
+    exact_keys(map, MAP_DECLARATION_FIELDS)?;
     let key_field = map
         .get("key")
         .map(|value| identifier(value, "map key field"))
@@ -869,24 +923,14 @@ fn parse_loop(
     prompts: &BTreeMap<String, PromptDeclaration>,
     flavor: LoopFlavor,
 ) -> Result<LoopStep, CompileError> {
-    let field = match flavor {
-        LoopFlavor::Workflow => "loop",
-        LoopFlavor::Agent => "agent_loop",
+    let (field, step_fields) = match flavor {
+        LoopFlavor::Workflow => ("loop", WORKFLOW_LOOP_STEP_FIELDS),
+        LoopFlavor::Agent => ("agent_loop", AGENT_LOOP_STEP_FIELDS),
     };
-    exact_keys(object, &["id", field])?;
+    exact_keys(object, step_fields)?;
     let id = identifier(required(object, "id")?, "loop id")?;
     let declaration = object_value(required(object, field)?, "loop declaration")?;
-    exact_keys(
-        declaration,
-        &[
-            "initial",
-            "as",
-            "until",
-            "max_iterations",
-            "deadline_ms",
-            "steps",
-        ],
-    )?;
+    exact_keys(declaration, LOOP_DECLARATION_FIELDS)?;
     let max_iterations = declaration
         .get("max_iterations")
         .map(|value| positive_u32(value, "loop max_iterations"))
@@ -931,19 +975,7 @@ fn parse_call(
     object: &Map<String, Value>,
     resolver: &TypeResolver<'_>,
 ) -> Result<CallStep, CompileError> {
-    exact_keys(
-        object,
-        &[
-            "id",
-            "type",
-            "definition_revision",
-            "interface_version",
-            "input",
-            "response",
-            "request",
-            "timeout_ms",
-        ],
-    )?;
+    exact_keys(object, CALL_STEP_FIELDS)?;
     let input = parse_value_expr(required(object, "input")?)?;
     let ValueExpr::Object(input) = input else {
         return Err(CompileError::new(
@@ -981,14 +1013,14 @@ fn parse_try(
     resolver: &TypeResolver<'_>,
     prompts: &BTreeMap<String, PromptDeclaration>,
 ) -> Result<TryStep, CompileError> {
-    exact_keys(object, &["id", "try", "catch", "finally"])?;
+    exact_keys(object, TRY_STEP_FIELDS)?;
     let catch = object_value(required(object, "catch")?, "catch declaration")?;
-    exact_keys(catch, &["safe_business_failure"])?;
+    exact_keys(catch, CATCH_DECLARATION_FIELDS)?;
     let safe = object_value(
         required(catch, "safe_business_failure")?,
         "safe_business_failure handler",
     )?;
-    exact_keys(safe, &["as", "steps"])?;
+    exact_keys(safe, SAFE_BUSINESS_FAILURE_FIELDS)?;
     let protected_steps = parse_steps(required(object, "try")?, resolver, prompts)?;
     let handler_steps = parse_steps(required(safe, "steps")?, resolver, prompts)?;
     if protected_steps.is_empty() || handler_steps.is_empty() {
@@ -1018,19 +1050,9 @@ fn parse_human_task(
     object: &Map<String, Value>,
     resolver: &TypeResolver<'_>,
 ) -> Result<HumanTaskStep, CompileError> {
-    exact_keys(object, &["id", "human_task"])?;
+    exact_keys(object, HUMAN_TASK_STEP_FIELDS)?;
     let task = object_value(required(object, "human_task")?, "human_task declaration")?;
-    exact_keys(
-        task,
-        &[
-            "signal",
-            "request",
-            "response",
-            "assignees",
-            "candidate_groups",
-            "claim_lease_ms",
-        ],
-    )?;
+    exact_keys(task, HUMAN_TASK_DECLARATION_FIELDS)?;
     Ok(HumanTaskStep {
         id: identifier(required(object, "id")?, "human_task id")?,
         signal_name: string(required(task, "signal")?, "human_task signal")?.to_owned(),
@@ -1076,17 +1098,17 @@ fn parse_wait(
     object: &Map<String, Value>,
     resolver: &TypeResolver<'_>,
 ) -> Result<WaitStep, CompileError> {
-    exact_keys(object, &["id", "wait"])?;
+    exact_keys(object, WAIT_STEP_FIELDS)?;
     let id = identifier(required(object, "id")?, "wait id")?;
     let wait = object_value(required(object, "wait")?, "wait declaration")?;
     let kind = if wait.contains_key("signal") {
-        exact_keys(wait, &["signal", "response"])?;
+        exact_keys(wait, SIGNAL_WAIT_FIELDS)?;
         WaitKind::Signal {
             name: string(required(wait, "signal")?, "signal name")?.to_owned(),
             payload_type: resolver.resolve_type_value(required(wait, "response")?)?,
         }
     } else if wait.contains_key("duration_ms") {
-        exact_keys(wait, &["duration_ms"])?;
+        exact_keys(wait, TIMER_WAIT_FIELDS)?;
         WaitKind::Timer {
             duration_ms: parse_value_expr(required(wait, "duration_ms")?)?,
         }
@@ -1157,7 +1179,7 @@ pub fn parse_value_expr(value: &Value) -> Result<ValueExpr, CompileError> {
             ));
         }
         if object.contains_key("match") {
-            exact_keys(object, &["match", "cases", "default"])?;
+            exact_keys(object, MATCH_EXPRESSION_FIELDS)?;
             let cases = object_value(required(object, "cases")?, "match cases")?;
             if cases.is_empty() {
                 return Err(CompileError::new(
@@ -1494,7 +1516,7 @@ fn parse_llm_contract(
         .get("tool_limits")
         .map(|value| -> Result<LlmToolLimits, CompileError> {
             let limits = object_value(value, "llm tool_limits")?;
-            exact_keys(limits, &["max_rounds", "max_calls"])?;
+            exact_keys(limits, LLM_TOOL_LIMIT_FIELDS)?;
             Ok(LlmToolLimits {
                 max_rounds: limits
                     .get("max_rounds")
@@ -1538,7 +1560,7 @@ fn parse_messages(
             continue;
         }
         let message = object_value(message, "message must be {role, content} or $MessageList")?;
-        exact_keys(message, &["role", "content"])?;
+        exact_keys(message, MESSAGE_FIELDS)?;
         let role = match string(required(message, "role")?, "message role")? {
             "system" => MessageRole::System,
             "user" => MessageRole::User,
@@ -1811,7 +1833,7 @@ impl<'a> TypeResolver<'a> {
         } else {
             let object = as_object(declaration, "named type must be an alias or object")?;
             if object.contains_key("fields") {
-                exact_keys(object, &["fields"])?;
+                exact_keys(object, NAMED_OBJECT_TYPE_FIELDS)?;
                 let fields = object_value(required(object, "fields")?, "type fields")?;
                 let mut properties = BTreeMap::new();
                 let mut constraints = BTreeMap::new();
@@ -1825,18 +1847,7 @@ impl<'a> TypeResolver<'a> {
                             )
                         } else {
                             let declaration = as_object(declaration, "field declaration")?;
-                            exact_keys(
-                                declaration,
-                                &[
-                                    "type",
-                                    "min_items",
-                                    "max_items",
-                                    "min_length",
-                                    "max_length",
-                                    "pattern",
-                                    "enum",
-                                ],
-                            )?;
+                            exact_keys(declaration, TYPE_DECLARATION_FIELDS)?;
                             let value_type = declaration
                                 .get("type")
                                 .and_then(Value::as_str)
@@ -1873,18 +1884,7 @@ impl<'a> TypeResolver<'a> {
                     nominal: Some(name.to_owned()),
                 })
             } else {
-                exact_keys(
-                    object,
-                    &[
-                        "type",
-                        "min_items",
-                        "max_items",
-                        "min_length",
-                        "max_length",
-                        "pattern",
-                        "enum",
-                    ],
-                )?;
+                exact_keys(object, TYPE_DECLARATION_FIELDS)?;
                 let source = string(required(object, "type")?, "type alias")?;
                 let mut value = self.resolve_source(source, stack)?;
                 let constraints = parse_constraints(object)?;
