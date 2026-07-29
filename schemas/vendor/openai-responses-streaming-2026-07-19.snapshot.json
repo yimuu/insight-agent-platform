@@ -28,6 +28,22 @@
   "platform_extensions": {
     "event_namespace": "workflow.*",
     "included_in_standard_event_schema": false,
+    "events": [
+      "workflow.tool.started",
+      "workflow.tool.progress",
+      "workflow.tool.completed",
+      "workflow.tool.failed",
+      "workflow.retrieval.completed",
+      "workflow.stream.gap",
+      "workflow.response.timed_out",
+      "workflow.response.cancelled",
+      "workflow.response.interrupted"
+    ],
+    "tool_activity": {
+      "progress_content_types": ["output_text", "output_json"],
+      "terminal_required_fields": ["duration_ms"],
+      "progress_persistence": "live_only"
+    },
     "terminal_fields": {
       "response.completed": ["workflow"],
       "response.failed": ["workflow"]

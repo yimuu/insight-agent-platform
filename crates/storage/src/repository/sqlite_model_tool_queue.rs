@@ -898,7 +898,7 @@ pub(crate) async fn close_model_tool_work_for_terminal_run_sqlite(
             available_at=NULL,claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL,
             lease_epoch=lease_epoch+1,
             fencing_token=fencing_token || ':run-terminal:' || CAST(projection_version+1 AS TEXT),
-            completed_at=CURRENT_TIMESTAMP,projection_version=projection_version+1,
+            completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),projection_version=projection_version+1,
             updated_at=CURRENT_TIMESTAMP
          WHERE run_id=? AND call_status='running'
            AND EXISTS (
@@ -924,7 +924,7 @@ pub(crate) async fn close_model_tool_work_for_terminal_run_sqlite(
             available_at=NULL,claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL,
             lease_epoch=lease_epoch+1,
             fencing_token=fencing_token || ':run-terminal:' || CAST(projection_version+1 AS TEXT),
-            completed_at=CURRENT_TIMESTAMP,projection_version=projection_version+1,
+            completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),projection_version=projection_version+1,
             updated_at=CURRENT_TIMESTAMP
          WHERE run_id=? AND call_status IN ('pending','claimed')
            AND EXISTS (
@@ -962,7 +962,7 @@ pub(crate) async fn close_model_tool_work_for_terminal_run_sqlite(
                    AND c.model_call_no=model_tool_call_batches.model_call_no
                    AND c.call_status='failed'
              ) THEN 'ready_failed' ELSE 'ready_cancelled' END,
-             completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+             completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=CURRENT_TIMESTAMP
          WHERE run_id=? AND execution_status='active'
            AND continuation_status='waiting_tools'",
     )
@@ -1044,7 +1044,7 @@ async fn finalize_batch_barrier_sqlite(
                 failure_code='MODEL_TOOL_SIBLING_EFFECT_UNKNOWN',failure_retryable=0,
                 lease_epoch=lease_epoch+1,
                 fencing_token=fencing_token || ':batch-abort:' || CAST(projection_version+1 AS TEXT),
-                completed_at=CURRENT_TIMESTAMP,projection_version=projection_version+1,
+                completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),projection_version=projection_version+1,
                 updated_at=CURRENT_TIMESTAMP
              WHERE run_id=? AND activation_id=? AND attempt_no=? AND model_call_no=?
                AND call_status='running'",
@@ -1062,7 +1062,7 @@ async fn finalize_batch_barrier_sqlite(
                 failure_code='MODEL_TOOL_SIBLING_ABORTED',failure_retryable=0,
                 lease_epoch=lease_epoch+1,
                 fencing_token=fencing_token || ':batch-abort:' || CAST(projection_version+1 AS TEXT),
-                completed_at=CURRENT_TIMESTAMP,projection_version=projection_version+1,
+                completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),projection_version=projection_version+1,
                 updated_at=CURRENT_TIMESTAMP
              WHERE run_id=? AND activation_id=? AND attempt_no=? AND model_call_no=?
                AND call_status IN ('pending','claimed')",
@@ -1128,7 +1128,7 @@ async fn finalize_batch_barrier_sqlite(
     };
     let transitioned = sqlx::query(
         "UPDATE model_tool_call_batches SET execution_status=?,continuation_status=?,
-                completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=CURRENT_TIMESTAMP
          WHERE run_id=? AND activation_id=? AND attempt_no=? AND model_call_no=?
            AND execution_status='active' AND continuation_status='waiting_tools'",
     )
@@ -1247,7 +1247,7 @@ async fn expire_parent_operation_deadline_batch_sqlite(
             available_at=NULL,claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL,
             lease_epoch=lease_epoch+1,
             fencing_token=fencing_token || ':parent-deadline:' || CAST(projection_version+1 AS TEXT),
-            completed_at=CURRENT_TIMESTAMP,projection_version=projection_version+1,
+            completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),projection_version=projection_version+1,
             updated_at=CURRENT_TIMESTAMP
          WHERE run_id=? AND activation_id=? AND attempt_no=? AND model_call_no=?
            AND call_status='running'",
@@ -1266,7 +1266,7 @@ async fn expire_parent_operation_deadline_batch_sqlite(
             claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL,
             lease_epoch=lease_epoch+1,
             fencing_token=fencing_token || ':parent-deadline:' || CAST(projection_version+1 AS TEXT),
-            completed_at=CURRENT_TIMESTAMP,projection_version=projection_version+1,
+            completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),projection_version=projection_version+1,
             updated_at=CURRENT_TIMESTAMP
          WHERE run_id=? AND activation_id=? AND attempt_no=? AND model_call_no=?
            AND call_status IN ('pending','claimed')",
@@ -1470,7 +1470,7 @@ async fn recover_expired_model_tool_calls_sqlite(
             let rows_updated = sqlx::query(
                 "UPDATE model_tool_calls SET call_status='pending',tool_attempt_no=?,lease_epoch=?,
                     fencing_token=?,effect_evidence='not_started',available_at=?,
-                    claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL,started_at=NULL,
+                    claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL,
                     projection_version=projection_version+1,lease_loss_count=lease_loss_count+1,
                     last_lease_loss_at=CURRENT_TIMESTAMP,last_lease_loss_evidence=?,
                     updated_at=CURRENT_TIMESTAMP
@@ -1500,7 +1500,7 @@ async fn recover_expired_model_tool_calls_sqlite(
             let rows_updated = sqlx::query(
                 "UPDATE model_tool_calls SET call_status='failed',effect_evidence='unknown',
                     failure_class='effect_outcome_unknown',failure_code='TOOL_EFFECT_OUTCOME_UNKNOWN',
-                    failure_retryable=0,completed_at=CURRENT_TIMESTAMP,
+                    failure_retryable=0,completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
                     projection_version=projection_version+1,lease_loss_count=lease_loss_count+1,
                     last_lease_loss_at=CURRENT_TIMESTAMP,last_lease_loss_evidence='unknown',
                     updated_at=CURRENT_TIMESTAMP
@@ -1800,7 +1800,8 @@ pub(crate) async fn mark_model_tool_call_started_sqlite(
     }
     let rows = sqlx::query(
         "UPDATE model_tool_calls SET call_status='running',effect_evidence='started',
-                started_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                started_at=COALESCE(started_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at=CURRENT_TIMESTAMP
          WHERE run_id=? AND tool_task_id=? AND call_status='claimed'
            AND tool_attempt_no=? AND lease_epoch=? AND fencing_token=?
            AND claim_owner=? AND claim_token=? AND projection_version=?
@@ -1964,6 +1965,29 @@ fn retry_delay_ms(policy: &WorkerEffectPolicy, attempt_no: AttemptNo) -> u64 {
         .min(policy.max_backoff_ms())
 }
 
+fn model_tool_duration_ms(row: &sqlx::sqlite::SqliteRow) -> Result<Option<u64>, RepositoryError> {
+    let started_at = row
+        .try_get::<Option<String>, _>("started_at")
+        .map_err(|_| RepositoryError::invalid_data())?
+        .map(|value| parse_run_timestamp(&value))
+        .transpose()?;
+    let completed_at = row
+        .try_get::<Option<String>, _>("completed_at")
+        .map_err(|_| RepositoryError::invalid_data())?
+        .map(|value| parse_run_timestamp(&value))
+        .transpose()?;
+    match (started_at, completed_at) {
+        (Some(started_at), Some(completed_at)) => u64::try_from(
+            completed_at
+                .signed_duration_since(started_at)
+                .num_milliseconds(),
+        )
+        .map(Some)
+        .map_err(|_| RepositoryError::invalid_data()),
+        _ => Ok(None),
+    }
+}
+
 fn decode_last_receipt(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<ModelToolTaskCommitReceipt, RepositoryError> {
@@ -2008,6 +2032,11 @@ fn decode_last_receipt(
         lease_epoch,
         available,
         continuation,
+        if disposition == ModelToolTaskDisposition::RetryScheduled {
+            None
+        } else {
+            model_tool_duration_ms(row)?
+        },
     )
 }
 
@@ -2153,7 +2182,8 @@ pub(crate) async fn commit_model_tool_call_outcome_sqlite(
             let result_json = canonical_json(result)?;
             let updated = sqlx::query(
                 "UPDATE model_tool_calls SET call_status='succeeded',effect_evidence='committed',
-                    result_json=?,completed_at=CURRENT_TIMESTAMP,projection_version=projection_version+1,
+                    result_json=?,completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                    projection_version=projection_version+1,
                     last_commit_claim_token=?,last_outcome_hash=?,last_outcome_disposition='succeeded',
                     last_outcome_attempt_no=?,last_outcome_lease_epoch=?,
                     last_outcome_fencing_token=?,last_outcome_available_at=NULL,
@@ -2233,7 +2263,7 @@ pub(crate) async fn commit_model_tool_call_outcome_sqlite(
                 let updated = sqlx::query(
                     "UPDATE model_tool_calls SET call_status='pending',tool_attempt_no=?,lease_epoch=?,
                         fencing_token=?,effect_evidence='not_started',available_at=?,
-                        claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL,started_at=NULL,
+                        claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL,
                         projection_version=projection_version+1,last_commit_claim_token=?,
                         last_outcome_hash=?,last_outcome_disposition='retry_scheduled',
                         last_outcome_attempt_no=?,last_outcome_lease_epoch=?,
@@ -2292,7 +2322,8 @@ pub(crate) async fn commit_model_tool_call_outcome_sqlite(
                 let updated = sqlx::query(
                     "UPDATE model_tool_calls SET call_status='failed',effect_evidence=?,
                         failure_class=?,failure_code=?,failure_retryable=?,
-                        completed_at=CURRENT_TIMESTAMP,projection_version=projection_version+1,
+                        completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                        projection_version=projection_version+1,
                         last_commit_claim_token=?,last_outcome_hash=?,
                         last_outcome_disposition='failed',last_outcome_attempt_no=?,
                         last_outcome_lease_epoch=?,last_outcome_fencing_token=?,
@@ -2374,7 +2405,8 @@ pub(crate) async fn commit_model_tool_call_outcome_sqlite(
             let updated = sqlx::query(
                 "UPDATE model_tool_calls SET call_status='cancelled',effect_evidence=?,
                     failure_class=?,failure_code=?,failure_retryable=0,
-                    completed_at=CURRENT_TIMESTAMP,projection_version=projection_version+1,
+                    completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                    projection_version=projection_version+1,
                     last_commit_claim_token=?,last_outcome_hash=?,
                     last_outcome_disposition='cancelled',last_outcome_attempt_no=?,
                     last_outcome_lease_epoch=?,last_outcome_fencing_token=?,
@@ -2446,6 +2478,20 @@ pub(crate) async fn commit_model_tool_call_outcome_sqlite(
         )
         .await?
     };
+    let duration_ms = if disposition == ModelToolTaskDisposition::RetryScheduled {
+        None
+    } else {
+        let row = sqlx::query(
+            "SELECT started_at,completed_at FROM model_tool_calls
+             WHERE run_id=? AND tool_task_id=?",
+        )
+        .bind(claim.run_id().as_str())
+        .bind(claim.identity().tool_task_id().as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        model_tool_duration_ms(&row)?
+    };
     let receipt = model_tool_task_commit_receipt_new(
         claim.identity().tool_task_id().clone(),
         disposition,
@@ -2453,6 +2499,7 @@ pub(crate) async fn commit_model_tool_call_outcome_sqlite(
         claim.lease_epoch(),
         next_available_at,
         continuation,
+        duration_ms,
     )?;
     tx.commit().await.map_err(RepositoryError::storage)?;
     Ok(ModelToolTaskTransitionOutcome::Committed(receipt))

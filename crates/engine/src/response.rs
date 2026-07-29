@@ -18,7 +18,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{de::Error as _, ser::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use tokio::sync::Notify;
 
@@ -79,6 +79,7 @@ pub enum ResponseStreamEventType {
     ResponseFailed,
     Error,
     WorkflowToolStarted,
+    WorkflowToolProgress,
     WorkflowToolCompleted,
     WorkflowToolFailed,
     WorkflowRetrievalCompleted,
@@ -89,7 +90,7 @@ pub enum ResponseStreamEventType {
 }
 
 impl ResponseStreamEventType {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::ResponseCreated,
         Self::ResponseInProgress,
         Self::ResponseOutputItemAdded,
@@ -107,6 +108,7 @@ impl ResponseStreamEventType {
         Self::ResponseFailed,
         Self::Error,
         Self::WorkflowToolStarted,
+        Self::WorkflowToolProgress,
         Self::WorkflowToolCompleted,
         Self::WorkflowToolFailed,
         Self::WorkflowRetrievalCompleted,
@@ -135,6 +137,7 @@ impl ResponseStreamEventType {
             Self::ResponseFailed => "response.failed",
             Self::Error => "error",
             Self::WorkflowToolStarted => "workflow.tool.started",
+            Self::WorkflowToolProgress => "workflow.tool.progress",
             Self::WorkflowToolCompleted => "workflow.tool.completed",
             Self::WorkflowToolFailed => "workflow.tool.failed",
             Self::WorkflowRetrievalCompleted => "workflow.retrieval.completed",
@@ -423,6 +426,84 @@ enum WorkflowToolContentWire {
     File { artifact: ArtifactRef },
     #[serde(rename = "output_audio")]
     Audio { artifact: ArtifactRef },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum WorkflowToolProgressContentWire {
+    #[serde(rename = "output_text")]
+    Text { text: String },
+    #[serde(rename = "output_json")]
+    Json { json: Value },
+}
+
+/// Closed public content union for one live-only workflow tool progress update.
+///
+/// Progress deliberately excludes artifact-bearing variants because a
+/// best-effort observation cannot establish durable artifact authority.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowToolProgressContent {
+    wire: WorkflowToolProgressContentWire,
+}
+
+impl WorkflowToolProgressContent {
+    pub fn output_text(text: impl Into<String>) -> Result<Self, WorkflowPublicResultError> {
+        let text = text.into();
+        validate_bounded_public_string(
+            &text,
+            MAX_WORKFLOW_PUBLIC_TEXT_BYTES,
+            "workflow tool progress text must be non-empty and bounded",
+        )?;
+        Ok(Self {
+            wire: WorkflowToolProgressContentWire::Text { text },
+        })
+    }
+
+    pub fn output_json(json: Value) -> Result<Self, WorkflowPublicResultError> {
+        validate_bounded_public_json(&json, MAX_WORKFLOW_PUBLIC_JSON_BYTES)?;
+        Ok(Self {
+            wire: WorkflowToolProgressContentWire::Json { json },
+        })
+    }
+
+    pub fn text(&self) -> Option<&str> {
+        match &self.wire {
+            WorkflowToolProgressContentWire::Text { text } => Some(text),
+            WorkflowToolProgressContentWire::Json { .. } => None,
+        }
+    }
+
+    pub fn json(&self) -> Option<&Value> {
+        match &self.wire {
+            WorkflowToolProgressContentWire::Json { json } => Some(json),
+            WorkflowToolProgressContentWire::Text { .. } => None,
+        }
+    }
+}
+
+impl Serialize for WorkflowToolProgressContent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkflowToolProgressContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match WorkflowToolProgressContentWire::deserialize(deserializer)? {
+            WorkflowToolProgressContentWire::Text { text } => {
+                Self::output_text(text).map_err(D::Error::custom)
+            }
+            WorkflowToolProgressContentWire::Json { json } => {
+                Self::output_json(json).map_err(D::Error::custom)
+            }
+        }
+    }
 }
 
 /// Closed public content union for a completed workflow tool call.
@@ -964,11 +1045,23 @@ pub enum ResponseStreamEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arguments: Option<Value>,
     },
+    #[serde(rename = "workflow.tool.progress")]
+    WorkflowToolProgress {
+        sequence_number: u64,
+        call_id: String,
+        tool_name: String,
+        #[serde(
+            serialize_with = "serialize_workflow_tool_progress_content",
+            deserialize_with = "deserialize_workflow_tool_progress_content"
+        )]
+        content: Vec<WorkflowToolProgressContent>,
+    },
     #[serde(rename = "workflow.tool.completed")]
     WorkflowToolCompleted {
         sequence_number: u64,
         call_id: String,
         tool_name: String,
+        duration_ms: u64,
         content: Vec<WorkflowToolContent>,
     },
     #[serde(rename = "workflow.tool.failed")]
@@ -976,6 +1069,7 @@ pub enum ResponseStreamEvent {
         sequence_number: u64,
         call_id: String,
         tool_name: String,
+        duration_ms: u64,
         error: WorkflowPublicError,
     },
     #[serde(rename = "workflow.retrieval.completed")]
@@ -1016,6 +1110,36 @@ pub enum ResponseStreamEvent {
     },
 }
 
+fn serialize_workflow_tool_progress_content<S>(
+    content: &[WorkflowToolProgressContent],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if content.is_empty() || content.len() > MAX_WORKFLOW_TOOL_CONTENT_PARTS {
+        return Err(S::Error::custom(
+            "workflow tool progress content must be non-empty and bounded",
+        ));
+    }
+    content.serialize(serializer)
+}
+
+fn deserialize_workflow_tool_progress_content<'de, D>(
+    deserializer: D,
+) -> Result<Vec<WorkflowToolProgressContent>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let content = Vec::<WorkflowToolProgressContent>::deserialize(deserializer)?;
+    if content.is_empty() || content.len() > MAX_WORKFLOW_TOOL_CONTENT_PARTS {
+        return Err(D::Error::custom(
+            "workflow tool progress content must be non-empty and bounded",
+        ));
+    }
+    Ok(content)
+}
+
 impl ResponseStreamEvent {
     pub const fn event_type(&self) -> ResponseStreamEventType {
         match self {
@@ -1054,6 +1178,7 @@ impl ResponseStreamEvent {
             Self::ResponseFailed { .. } => ResponseStreamEventType::ResponseFailed,
             Self::Error { .. } => ResponseStreamEventType::Error,
             Self::WorkflowToolStarted { .. } => ResponseStreamEventType::WorkflowToolStarted,
+            Self::WorkflowToolProgress { .. } => ResponseStreamEventType::WorkflowToolProgress,
             Self::WorkflowToolCompleted { .. } => ResponseStreamEventType::WorkflowToolCompleted,
             Self::WorkflowToolFailed { .. } => ResponseStreamEventType::WorkflowToolFailed,
             Self::WorkflowRetrievalCompleted { .. } => {
@@ -1123,6 +1248,9 @@ impl ResponseStreamEvent {
                 sequence_number, ..
             }
             | Self::WorkflowToolStarted {
+                sequence_number, ..
+            }
+            | Self::WorkflowToolProgress {
                 sequence_number, ..
             }
             | Self::WorkflowToolCompleted {
@@ -1403,14 +1531,21 @@ pub enum LiveResponsePayload {
         tool_name: String,
         arguments: Option<Value>,
     },
+    ToolProgress {
+        call_id: String,
+        tool_name: String,
+        content: Vec<WorkflowToolProgressContent>,
+    },
     ToolCompleted {
         call_id: String,
         tool_name: String,
+        duration_ms: u64,
         content: Vec<WorkflowToolContent>,
     },
     ToolFailed {
         call_id: String,
         tool_name: String,
+        duration_ms: u64,
         error: WorkflowPublicError,
     },
     RetrievalCompleted {
@@ -1445,6 +1580,7 @@ impl LiveResponsePayload {
                 ResponseStreamEventType::ResponseFileSearchCallCompleted
             }
             Self::ToolStarted { .. } => ResponseStreamEventType::WorkflowToolStarted,
+            Self::ToolProgress { .. } => ResponseStreamEventType::WorkflowToolProgress,
             Self::ToolCompleted { .. } => ResponseStreamEventType::WorkflowToolCompleted,
             Self::ToolFailed { .. } => ResponseStreamEventType::WorkflowToolFailed,
             Self::RetrievalCompleted { .. } => ResponseStreamEventType::WorkflowRetrievalCompleted,
@@ -1472,6 +1608,7 @@ impl LiveResponsePayload {
         matches!(
             self,
             Self::ToolStarted { .. }
+                | Self::ToolProgress { .. }
                 | Self::ToolCompleted { .. }
                 | Self::ToolFailed { .. }
                 | Self::RetrievalCompleted { .. }
@@ -1718,12 +1855,12 @@ impl LiveResponsePublication {
             },
             (
                 LiveResponseSourceIdentity::WorkflowObservation(_),
-                LiveResponsePayload::ToolCompleted {
+                LiveResponsePayload::ToolProgress {
                     call_id,
                     tool_name,
                     content,
                 },
-            ) => ResponseStreamEvent::WorkflowToolCompleted {
+            ) => ResponseStreamEvent::WorkflowToolProgress {
                 sequence_number,
                 call_id,
                 tool_name,
@@ -1731,15 +1868,32 @@ impl LiveResponsePublication {
             },
             (
                 LiveResponseSourceIdentity::WorkflowObservation(_),
+                LiveResponsePayload::ToolCompleted {
+                    call_id,
+                    tool_name,
+                    duration_ms,
+                    content,
+                },
+            ) => ResponseStreamEvent::WorkflowToolCompleted {
+                sequence_number,
+                call_id,
+                tool_name,
+                duration_ms,
+                content,
+            },
+            (
+                LiveResponseSourceIdentity::WorkflowObservation(_),
                 LiveResponsePayload::ToolFailed {
                     call_id,
                     tool_name,
+                    duration_ms,
                     error,
                 },
             ) => ResponseStreamEvent::WorkflowToolFailed {
                 sequence_number,
                 call_id,
                 tool_name,
+                duration_ms,
                 error,
             },
             (
@@ -3383,6 +3537,27 @@ mod tests {
         };
         assert!(!validator.is_valid(&serde_json::to_value(platform_extension).unwrap()));
 
+        let snapshot_extension_types = snapshot["platform_extensions"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event_type| event_type.as_str().unwrap())
+            .collect::<Vec<_>>();
+        let protocol_extension_types = ResponseStreamEventType::ALL
+            .into_iter()
+            .map(ResponseStreamEventType::as_str)
+            .filter(|event_type| event_type.starts_with("workflow."))
+            .collect::<Vec<_>>();
+        assert_eq!(snapshot_extension_types, protocol_extension_types);
+        assert_eq!(
+            snapshot["platform_extensions"]["tool_activity"],
+            json!({
+                "progress_content_types": ["output_text", "output_json"],
+                "terminal_required_fields": ["duration_ms"],
+                "progress_persistence": "live_only"
+            })
+        );
+
         let terminal_extensions = &snapshot["platform_extensions"]["terminal_fields"];
         assert_eq!(
             terminal_extensions["response.completed"],
@@ -3417,6 +3592,7 @@ mod tests {
                 "response.failed",
                 "error",
                 "workflow.tool.started",
+                "workflow.tool.progress",
                 "workflow.tool.completed",
                 "workflow.tool.failed",
                 "workflow.retrieval.completed",
@@ -3837,8 +4013,93 @@ mod tests {
             "sequence_number": 3,
             "call_id": "call_1",
             "tool_name": "lookup",
+            "duration_ms": 5,
             "error": {"code": "LOOKUP_FAILED", "message": "lookup failed", "raw": "secret"}
         });
         assert!(serde_json::from_value::<ResponseStreamEvent>(tool).is_err());
+
+        for terminal_type in ["workflow.tool.completed", "workflow.tool.failed"] {
+            let missing_duration = if terminal_type == "workflow.tool.completed" {
+                json!({
+                    "type": terminal_type,
+                    "sequence_number": 3,
+                    "call_id": "call_1",
+                    "tool_name": "lookup",
+                    "content": []
+                })
+            } else {
+                json!({
+                    "type": terminal_type,
+                    "sequence_number": 3,
+                    "call_id": "call_1",
+                    "tool_name": "lookup",
+                    "error": {"code": "LOOKUP_FAILED", "message": "lookup failed"}
+                })
+            };
+            assert!(
+                serde_json::from_value::<ResponseStreamEvent>(missing_duration).is_err(),
+                "{terminal_type} must require duration_ms"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_tool_progress_wire_is_closed_nonempty_and_excludes_artifacts() {
+        let valid = json!({
+            "type": "workflow.tool.progress",
+            "sequence_number": 4,
+            "call_id": "call_progress",
+            "tool_name": "example.progress",
+            "content": [
+                {"type": "output_text", "text": "halfway"},
+                {"type": "output_json", "json": {"completed": 1, "total": 2}}
+            ]
+        });
+        let decoded = serde_json::from_value::<ResponseStreamEvent>(valid.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), valid);
+
+        for invalid in [
+            json!({
+                "type": "workflow.tool.progress",
+                "sequence_number": 4,
+                "call_id": "call_progress",
+                "tool_name": "example.progress",
+                "content": []
+            }),
+            json!({
+                "type": "workflow.tool.progress",
+                "sequence_number": 4,
+                "call_id": "call_progress",
+                "tool_name": "example.progress",
+                "content": [{"type": "output_file", "artifact": {
+                    "artifact_id": "artifact_1",
+                    "content_hash": concat!(
+                        "sha256:",
+                        "0000000000000000000000000000000000000000000000000000000000000000"
+                    ),
+                    "size_bytes": 1,
+                    "media_type": "text/plain"
+                }}]
+            }),
+            json!({
+                "type": "workflow.tool.progress",
+                "sequence_number": 4,
+                "call_id": "call_progress",
+                "tool_name": "example.progress",
+                "content": [{"type": "output_text", "text": "safe", "raw": "secret"}]
+            }),
+        ] {
+            assert!(serde_json::from_value::<ResponseStreamEvent>(invalid).is_err());
+        }
+
+        let too_many = ResponseStreamEvent::WorkflowToolProgress {
+            sequence_number: 4,
+            call_id: "call_progress".to_owned(),
+            tool_name: "example.progress".to_owned(),
+            content: (0..=MAX_WORKFLOW_TOOL_CONTENT_PARTS)
+                .map(|_| WorkflowToolProgressContent::output_text("safe").unwrap())
+                .collect(),
+        };
+        assert!(serde_json::to_value(too_many).is_err());
     }
 }

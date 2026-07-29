@@ -58,6 +58,11 @@ pub(crate) fn project_terminal_tool_results(
             .map_err(|_| RepositoryError::invalid_data())?
         {
             results.push(result);
+        } else if projection.call_authorized() {
+            results.push(
+                WorkflowToolResult::new(call.call_id.clone(), call.tool_name.clone(), Vec::new())
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            );
         }
     }
     Ok(results)
@@ -1509,6 +1514,7 @@ mod tests {
         serde_json::to_value(ToolPublicPolicy {
             call,
             arguments: ToolPublicArguments::Private,
+            progress_schema: None,
             result_schema: result,
         })
         .unwrap()
@@ -1613,14 +1619,21 @@ mod tests {
                 frozen_policy(true, Some(normalized_public_result_schema())),
                 json!({"indicator": "WBC"}),
             ),
+            stored_tool_call(
+                "activation_c",
+                0,
+                frozen_policy(true, None),
+                json!({"executor_secret": "not inspected for status-only publication"}),
+            ),
         ])
         .unwrap();
-        assert_eq!(projected.len(), 1);
+        assert_eq!(projected.len(), 2);
         assert_eq!(projected[0].call_id(), "call_0");
         assert_eq!(
             projected[0].content()[0].json(),
             Some(&json!({"indicator": "WBC"}))
         );
+        assert!(projected[1].content().is_empty());
 
         assert!(project_terminal_tool_results(vec![
             stored_tool_call("activation_b", 0, frozen_policy(false, None), Value::Null,),

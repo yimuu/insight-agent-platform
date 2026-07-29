@@ -15,6 +15,7 @@ use insight_engine::{
     author::CompileError,
     execution::{ExecutionControl, RunError, RunErrorKind},
     schema::{compile_schema_2020, JsonSchemaValidator},
+    worker::adapter::{ModelToolProgressDisposition, ModelToolProgressPublisher},
 };
 
 /// A platform capability which must be granted before an action may run.
@@ -100,7 +101,39 @@ pub struct ActionContext {
     /// Stable across retry attempts for the same logical operation.
     pub idempotency_key: String,
     pub control: ExecutionControl,
+    progress_publisher: Option<ModelToolProgressPublisher>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionProgressDisposition {
+    Published,
+    Suppressed,
+    Dropped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActionProgressError {
+    code: &'static str,
+    message: &'static str,
+}
+
+impl ActionProgressError {
+    pub const fn code(self) -> &'static str {
+        self.code
+    }
+
+    pub const fn message(self) -> &'static str {
+        self.message
+    }
+}
+
+impl std::fmt::Display for ActionProgressError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl std::error::Error for ActionProgressError {}
 
 impl ActionContext {
     pub fn for_operation(
@@ -118,6 +151,7 @@ impl ActionContext {
             operation_id,
             attempt,
             control,
+            progress_publisher: None,
         }
     }
 
@@ -140,7 +174,42 @@ impl ActionContext {
             operation_id,
             attempt,
             control,
+            progress_publisher: None,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn with_model_tool_progress_publisher(
+        mut self,
+        publisher: ModelToolProgressPublisher,
+    ) -> Self {
+        self.progress_publisher = Some(publisher);
+        self
+    }
+
+    /// Publishes one schema-validated, live-only model-tool progress update.
+    ///
+    /// A missing or saturated observation path never changes Action execution
+    /// semantics. Invalid public progress is returned as a body-free error and
+    /// is never queued, logged, or persisted.
+    pub async fn publish_progress(
+        &self,
+        value: Value,
+    ) -> Result<ActionProgressDisposition, ActionProgressError> {
+        let Some(publisher) = &self.progress_publisher else {
+            return Ok(ActionProgressDisposition::Suppressed);
+        };
+        publisher
+            .publish(value)
+            .await
+            .map(|disposition| match disposition {
+                ModelToolProgressDisposition::Published => ActionProgressDisposition::Published,
+                ModelToolProgressDisposition::Dropped => ActionProgressDisposition::Dropped,
+            })
+            .map_err(|error| ActionProgressError {
+                code: error.code(),
+                message: error.message(),
+            })
     }
 }
 
@@ -183,6 +252,7 @@ pub struct RegisteredAction {
     input_validator: JsonSchemaValidator,
     output_validator: JsonSchemaValidator,
     public_policy: ToolPublicPolicy,
+    public_progress_validator: Option<JsonSchemaValidator>,
     public_result_validator: Option<JsonSchemaValidator>,
 }
 
@@ -205,17 +275,33 @@ impl RegisteredAction {
     pub fn validate_public_policy_for_link(&self) -> Result<(), CompileError> {
         if !self.public_policy.call
             && (!matches!(self.public_policy.arguments, ToolPublicArguments::Private)
+                || self.public_policy.progress_schema.is_some()
                 || self.public_policy.result_schema.is_some())
         {
             return Err(CompileError::new(
                 "ACTION_PUBLIC_POLICY_INVALID",
                 format!(
-                    "action '{}' cannot publish arguments or result while public.call is false",
+                    "action '{}' cannot publish arguments, progress, or result while public.call is false",
                     self.descriptor.id
                 ),
             ));
         }
         Ok(())
+    }
+
+    pub fn validate_public_progress(&self, value: &Value) -> Result<(), RunError> {
+        let Some(validator) = &self.public_progress_validator else {
+            return Err(RunError::operation(
+                "ACTION_PUBLIC_PROGRESS_PRIVATE",
+                "action progress has no public projection contract",
+            ));
+        };
+        validate_json(
+            validator,
+            value,
+            "ACTION_PUBLIC_PROGRESS_INVALID",
+            "action public progress validation failed",
+        )
     }
 
     pub fn validate_public_result(&self, value: &Value) -> Result<(), RunError> {
@@ -380,6 +466,27 @@ impl ActionRegistry {
                 )
             })?;
         validate_public_argument_policy(id, &public_policy.arguments, &input_schema)?;
+        let public_progress_validator = match public_policy.progress_schema.take() {
+            Some(schema) => {
+                let (schema, validator) = normalize_action_schema(&schema).map_err(|error| {
+                    CompileError::new(
+                        "ACTION_PUBLIC_PROGRESS_SCHEMA_INVALID",
+                        format!("action '{id}' public progress schema is invalid: {error}"),
+                    )
+                })?;
+                if !is_closed_object_schema(&schema) {
+                    return Err(CompileError::new(
+                        "ACTION_PUBLIC_PROGRESS_SCHEMA_NOT_CLOSED",
+                        format!(
+                            "action '{id}' public progress schema must describe a closed object"
+                        ),
+                    ));
+                }
+                public_policy.progress_schema = Some(schema);
+                Some(validator)
+            }
+            None => None,
+        };
         let public_result_validator = match public_policy.result_schema.take() {
             Some(schema) => {
                 let (schema, validator) = normalize_action_schema(&schema).map_err(|error| {
@@ -415,6 +522,7 @@ impl ActionRegistry {
                 input_validator,
                 output_validator,
                 public_policy,
+                public_progress_validator,
                 public_result_validator,
             }),
         );
@@ -658,8 +766,8 @@ mod tests {
 
     use super::{
         descriptor_hash, normalize_action_schema, Action, ActionCapability, ActionContext,
-        ActionDescriptor, ActionRegistry, CancellationClass, EffectClass, IdempotencyClass,
-        ToolPublicArguments, ToolPublicPolicy,
+        ActionDescriptor, ActionProgressDisposition, ActionRegistry, CancellationClass,
+        EffectClass, IdempotencyClass, ToolPublicArguments, ToolPublicPolicy,
     };
     use insight_engine::execution::{stop_pair, ExecutionControl, RunError};
 
@@ -1220,6 +1328,7 @@ mod tests {
         let public = ToolPublicPolicy {
             call: true,
             arguments: ToolPublicArguments::Fields(BTreeSet::from(["value".to_owned()])),
+            progress_schema: None,
             result_schema: Some(json!({
                 "type": "object",
                 "properties": {"value": {"type": "string"}},
@@ -1286,6 +1395,7 @@ mod tests {
                     public: ToolPublicPolicy {
                         call: true,
                         arguments,
+                        progress_schema: None,
                         result_schema: None,
                     },
                 })
@@ -1300,6 +1410,7 @@ mod tests {
                 public: ToolPublicPolicy {
                     call: false,
                     arguments: ToolPublicArguments::All,
+                    progress_schema: None,
                     result_schema: None,
                 },
             })
@@ -1312,6 +1423,127 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "ACTION_PUBLIC_POLICY_INVALID"
+        );
+    }
+
+    #[test]
+    fn public_progress_schema_is_normalized_validated_and_independently_hashed() {
+        let progress_schema = json!({
+            "type": "object",
+            "properties": {
+                "completed": {"type": "integer", "minimum": 0},
+                "total": {"type": "integer", "minimum": 1}
+            },
+            "required": ["completed", "total"],
+            "additionalProperties": false
+        });
+        let mut registry = ActionRegistry::default();
+        registry
+            .register(PublicStaticAction {
+                descriptor: descriptor("example.public_progress", "1.0.0", closed_input_schema()),
+                public: ToolPublicPolicy {
+                    call: true,
+                    arguments: ToolPublicArguments::Private,
+                    progress_schema: Some(progress_schema),
+                    result_schema: None,
+                },
+            })
+            .unwrap();
+        let action = registry.resolve("example.public_progress").unwrap();
+        action.validate_public_policy_for_link().unwrap();
+        action
+            .validate_public_progress(&json!({"completed": 1, "total": 2}))
+            .unwrap();
+        assert_eq!(
+            action
+                .validate_public_progress(&json!({"completed": "one", "total": 2}))
+                .unwrap_err()
+                .code(),
+            "ACTION_PUBLIC_PROGRESS_INVALID"
+        );
+        assert_eq!(
+            action.public_policy().progress_schema.as_ref().unwrap()["$defs"],
+            json!({})
+        );
+
+        let mut open_registry = ActionRegistry::default();
+        let error = open_registry
+            .register(PublicStaticAction {
+                descriptor: descriptor("example.open_progress", "1.0.0", closed_input_schema()),
+                public: ToolPublicPolicy {
+                    call: true,
+                    arguments: ToolPublicArguments::Private,
+                    progress_schema: Some(json!({"type": "object"})),
+                    result_schema: None,
+                },
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "ACTION_PUBLIC_PROGRESS_SCHEMA_NOT_CLOSED");
+
+        let mut gated_registry = ActionRegistry::default();
+        gated_registry
+            .register(PublicStaticAction {
+                descriptor: descriptor("example.gated_progress", "1.0.0", closed_input_schema()),
+                public: ToolPublicPolicy {
+                    call: false,
+                    arguments: ToolPublicArguments::Private,
+                    progress_schema: Some(json!({
+                        "type": "object",
+                        "additionalProperties": false
+                    })),
+                    result_schema: None,
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            gated_registry
+                .resolve("example.gated_progress")
+                .unwrap()
+                .validate_public_policy_for_link()
+                .unwrap_err()
+                .code(),
+            "ACTION_PUBLIC_POLICY_INVALID"
+        );
+    }
+
+    #[tokio::test]
+    async fn action_progress_publisher_is_scoped_and_suppressed_or_best_effort() {
+        let (_stop, signal) = stop_pair();
+        let context = ActionContext::for_operation(
+            "run_progress",
+            "operation_progress",
+            1,
+            ExecutionControl::new(signal, Duration::from_secs(1)),
+        );
+        assert_eq!(
+            context
+                .publish_progress(json!({"completed": 1}))
+                .await
+                .unwrap(),
+            ActionProgressDisposition::Suppressed
+        );
+
+        let (publisher, mut requests) =
+            insight_engine::worker::adapter::model_tool_progress_channel(1);
+        let context = context.with_model_tool_progress_publisher(publisher);
+        let publish = context.publish_progress(json!({"completed": 1}));
+        tokio::pin!(publish);
+        tokio::select! {
+            request = requests.recv() => {
+                request.unwrap().respond(Ok(
+                    insight_engine::worker::adapter::ModelToolProgressDisposition::Published
+                ));
+            }
+            _ = &mut publish => panic!("publish must wait for the scoped runtime validator"),
+        }
+        assert_eq!(publish.await.unwrap(), ActionProgressDisposition::Published);
+        drop(requests);
+        assert_eq!(
+            context
+                .publish_progress(json!({"completed": 2}))
+                .await
+                .unwrap(),
+            ActionProgressDisposition::Dropped
         );
     }
 }

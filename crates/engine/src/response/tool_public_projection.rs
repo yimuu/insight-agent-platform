@@ -20,7 +20,8 @@ use crate::{
 
 use super::{
     validate_bounded_public_json, WorkflowPublicResultError, WorkflowToolContent,
-    WorkflowToolResult, MAX_PUBLIC_LABEL_BYTES, MAX_WORKFLOW_PUBLIC_JSON_BYTES,
+    WorkflowToolProgressContent, WorkflowToolResult, MAX_PUBLIC_LABEL_BYTES,
+    MAX_WORKFLOW_PUBLIC_JSON_BYTES, MAX_WORKFLOW_TOOL_CONTENT_PARTS,
 };
 
 const MAX_FROZEN_TOOL_PUBLIC_POLICY_BYTES: usize = 256 * 1_024;
@@ -56,6 +57,7 @@ impl WorkflowToolCompletedArgumentsProjection {
 pub struct WorkflowToolPublicProjection {
     call: bool,
     arguments: ToolPublicArguments,
+    progress_validator: Option<JsonSchemaValidator>,
     result_validator: Option<JsonSchemaValidator>,
 }
 
@@ -79,21 +81,29 @@ impl WorkflowToolPublicProjection {
         }
         validate_policy_invariants(&policy)?;
 
+        let compile_public_schema = |schema: &Value| {
+            if !normalized_closed_public_schema(schema) {
+                return Err("frozen public schema is not closed".to_owned());
+            }
+            compile_schema_2020(schema)
+        };
+        let progress_validator = policy
+            .progress_schema
+            .as_ref()
+            .map(compile_public_schema)
+            .transpose()
+            .map_err(|_| invalid_policy())?;
         let result_validator = policy
             .result_schema
             .as_ref()
-            .map(|schema| {
-                if !normalized_closed_result_schema(schema) {
-                    return Err("frozen public result schema is not closed".to_owned());
-                }
-                compile_schema_2020(schema)
-            })
+            .map(compile_public_schema)
             .transpose()
             .map_err(|_| invalid_policy())?;
 
         Ok(Self {
             call: policy.call,
             arguments: policy.arguments,
+            progress_validator,
             result_validator,
         })
     }
@@ -106,6 +116,11 @@ impl WorkflowToolPublicProjection {
     /// Whether a completed result has a frozen caller-visible schema.
     pub const fn result_authorized(&self) -> bool {
         self.result_validator.is_some()
+    }
+
+    /// Whether a live progress payload has a frozen caller-visible schema.
+    pub const fn progress_authorized(&self) -> bool {
+        self.progress_validator.is_some()
     }
 
     /// Whether standard Responses function-call item, delta, and done events
@@ -208,11 +223,29 @@ impl WorkflowToolPublicProjection {
             .map(Some)
             .map_err(|_| invalid_result())
     }
+
+    /// Projects one Action-authored progress value into the live-only closed
+    /// progress content union. Private progress returns `None` without
+    /// inspecting the value.
+    pub fn project_validated_progress(
+        &self,
+        value: &Value,
+    ) -> Result<Option<Vec<WorkflowToolProgressContent>>, WorkflowPublicResultError> {
+        let Some(validator) = &self.progress_validator else {
+            return Ok(None);
+        };
+        if !self.call || !validator.is_valid(value) {
+            return Err(invalid_progress());
+        }
+        validate_bounded_public_json(value, MAX_WORKFLOW_PUBLIC_JSON_BYTES)?;
+        decode_public_progress_content(value).map(Some)
+    }
 }
 
 fn validate_policy_invariants(policy: &ToolPublicPolicy) -> Result<(), WorkflowPublicResultError> {
     if !policy.call
         && (!matches!(policy.arguments, ToolPublicArguments::Private)
+            || policy.progress_schema.is_some()
             || policy.result_schema.is_some())
     {
         return Err(invalid_policy());
@@ -231,7 +264,7 @@ fn valid_public_field(field: &str) -> bool {
         && !field.chars().any(char::is_control)
 }
 
-fn normalized_closed_result_schema(schema: &Value) -> bool {
+fn normalized_closed_public_schema(schema: &Value) -> bool {
     let Some(document) = schema.as_object() else {
         return false;
     };
@@ -410,6 +443,12 @@ struct ExplicitContentEnvelope {
     content: Vec<WorkflowToolContent>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExplicitProgressContentEnvelope {
+    content: Vec<WorkflowToolProgressContent>,
+}
+
 fn decode_public_result_content(
     validated_public_result: &Value,
 ) -> Result<Vec<WorkflowToolContent>, WorkflowPublicResultError> {
@@ -445,6 +484,38 @@ fn is_explicit_content_type(value: &str) -> bool {
     )
 }
 
+fn decode_public_progress_content(
+    validated_progress: &Value,
+) -> Result<Vec<WorkflowToolProgressContent>, WorkflowPublicResultError> {
+    let object = validated_progress
+        .as_object()
+        .ok_or_else(invalid_progress)?;
+
+    let content = if object.len() == 1 && object.contains_key("content") {
+        serde_json::from_value::<ExplicitProgressContentEnvelope>(validated_progress.clone())
+            .map(|envelope| envelope.content)
+            .map_err(|_| invalid_progress())?
+    } else if object
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|value| matches!(value, "output_text" | "output_json"))
+    {
+        vec![
+            serde_json::from_value::<WorkflowToolProgressContent>(validated_progress.clone())
+                .map_err(|_| invalid_progress())?,
+        ]
+    } else {
+        vec![
+            WorkflowToolProgressContent::output_json(validated_progress.clone())
+                .map_err(|_| invalid_progress())?,
+        ]
+    };
+    if content.is_empty() || content.len() > MAX_WORKFLOW_TOOL_CONTENT_PARTS {
+        return Err(invalid_progress());
+    }
+    Ok(content)
+}
+
 fn invalid_policy() -> WorkflowPublicResultError {
     WorkflowPublicResultError::new("frozen workflow tool public policy is invalid")
 }
@@ -455,6 +526,10 @@ fn invalid_arguments() -> WorkflowPublicResultError {
 
 fn invalid_result() -> WorkflowPublicResultError {
     WorkflowPublicResultError::new("completed workflow tool public result is invalid")
+}
+
+fn invalid_progress() -> WorkflowPublicResultError {
+    WorkflowPublicResultError::new("workflow tool public progress is invalid")
 }
 
 #[cfg(test)]
@@ -482,6 +557,21 @@ mod tests {
         serde_json::to_value(ToolPublicPolicy {
             call,
             arguments,
+            progress_schema: None,
+            result_schema,
+        })
+        .unwrap()
+    }
+
+    fn frozen_with_progress(
+        call: bool,
+        progress_schema: Option<Value>,
+        result_schema: Option<Value>,
+    ) -> Value {
+        serde_json::to_value(ToolPublicPolicy {
+            call,
+            arguments: ToolPublicArguments::Private,
+            progress_schema,
             result_schema,
         })
         .unwrap()
@@ -694,6 +784,65 @@ mod tests {
         assert_eq!(
             result.content()[0].json(),
             Some(&json!({"indicator": "WBC"}))
+        );
+    }
+
+    #[test]
+    fn progress_is_independently_authorized_schema_checked_and_artifact_free() {
+        let private = WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen(
+            true,
+            ToolPublicArguments::Private,
+            None,
+        ))
+        .unwrap();
+        assert!(!private.progress_authorized());
+        assert!(private
+            .project_validated_progress(&json!({"private": ["not", "inspected"]}))
+            .unwrap()
+            .is_none());
+
+        let schema = normalized_schema(
+            json!({
+                "stage": {"type": "string"},
+                "completed": {"type": "integer", "minimum": 0},
+                "total": {"type": "integer", "minimum": 1}
+            }),
+            &["stage", "completed", "total"],
+        );
+        let public = WorkflowToolPublicProjection::from_frozen_effective_policy(
+            &frozen_with_progress(true, Some(schema.clone()), None),
+        )
+        .unwrap();
+        assert!(public.progress_authorized());
+        assert!(!public.result_authorized());
+        assert!(public
+            .project_validated_progress(&json!({
+                "stage": "running",
+                "completed": "not-an-integer",
+                "total": 2
+            }))
+            .is_err());
+        let progress = public
+            .project_validated_progress(&json!({
+                "stage": "running",
+                "completed": 1,
+                "total": 2
+            }))
+            .unwrap()
+            .unwrap();
+        assert_eq!(progress.len(), 1);
+        assert_eq!(
+            progress[0].json(),
+            Some(&json!({"stage": "running", "completed": 1, "total": 2}))
+        );
+
+        assert!(
+            WorkflowToolPublicProjection::from_frozen_effective_policy(&frozen_with_progress(
+                false,
+                Some(schema),
+                None
+            ))
+            .is_err()
         );
     }
 

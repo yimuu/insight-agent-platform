@@ -111,6 +111,13 @@ fn validate_result(command: &NewTerminalRunResult) -> Result<(), RepositoryError
     if command.terminal_at < command.started_at {
         return Err(invalid_data());
     }
+    if serde_json::to_vec(&command.tool_results)
+        .map_err(|_| invalid_data())?
+        .len()
+        > 1_048_576
+    {
+        return Err(invalid_data());
+    }
     Ok(())
 }
 
@@ -209,6 +216,11 @@ fn decode_result(row: &sqlx::sqlite::SqliteRow) -> Result<TerminalRunResult, Rep
         .map(|value| serde_json::from_str(&value))
         .transpose()
         .map_err(|_| invalid_data())?;
+    let tool_results = serde_json::from_str(
+        &row.try_get::<String, _>("tool_results_json")
+            .map_err(|_| invalid_data())?,
+    )
+    .map_err(|_| invalid_data())?;
     Ok(TerminalRunResult {
         run_id: RunId::new(
             row.try_get::<String, _>("run_id")
@@ -229,6 +241,7 @@ fn decode_result(row: &sqlx::sqlite::SqliteRow) -> Result<TerminalRunResult, Rep
             .map_err(|_| invalid_data())?,
         error_code: row.try_get("error_code").map_err(|_| invalid_data())?,
         usage_json,
+        tool_results,
         started_at: row.try_get("started_at").map_err(|_| invalid_data())?,
         terminal_at: row.try_get("terminal_at").map_err(|_| invalid_data())?,
     })
@@ -387,6 +400,7 @@ fn result_matches(stored: &TerminalRunResult, command: &NewTerminalRunResult) ->
         && stored.output_hash == command.output_hash
         && stored.error_code == command.error_code
         && stored.usage_json == command.usage_json
+        && stored.tool_results == command.tool_results
         && stored.started_at == database_time(command.started_at)
         && stored.terminal_at == database_time(command.terminal_at)
 }
@@ -482,7 +496,7 @@ async fn load_result(
 ) -> Result<Option<TerminalRunResult>, RepositoryError> {
     sqlx::query(
         "SELECT run_id,terminal_state,response_id,output_ref,output_hash,error_code,
-                usage_json,started_at,terminal_at
+                usage_json,tool_results_json,started_at,terminal_at
          FROM terminal_run_results WHERE run_id=?",
     )
     .bind(run_id.as_str())
@@ -573,11 +587,13 @@ async fn insert_result(
         .map(serde_json::to_string)
         .transpose()
         .map_err(|_| invalid_data())?;
+    let tool_results_json =
+        serde_json::to_string(&command.tool_results).map_err(|_| invalid_data())?;
     let inserted = sqlx::query(
         "INSERT INTO terminal_run_results (
              run_id,terminal_state,response_id,output_ref,output_hash,error_code,
-             usage_json,started_at,terminal_at
-         ) VALUES (?,?,?,?,?,?,?,?,?)
+             usage_json,tool_results_json,started_at,terminal_at
+         ) VALUES (?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT DO NOTHING",
     )
     .bind(command.run_id.as_str())
@@ -587,6 +603,7 @@ async fn insert_result(
     .bind(command.output_hash.as_ref().map(ContentHash::as_str))
     .bind(&command.error_code)
     .bind(usage_json)
+    .bind(tool_results_json)
     .bind(database_time(command.started_at))
     .bind(database_time(command.terminal_at))
     .execute(&mut **executor)
@@ -972,7 +989,8 @@ impl TerminalRunStore for SqliteDurableRepository {
                  a.input_hash,a.selected_context_hash,a.owner_instance_id,a.owner_epoch,
                  a.accepted_at,
                  r.run_id AS result_run_id,r.terminal_state,r.response_id,r.output_ref,
-                 r.output_hash,r.error_code,r.usage_json,r.started_at,r.terminal_at,
+                 r.output_hash,r.error_code,r.usage_json,r.tool_results_json,
+                 r.started_at,r.terminal_at,
                  i.lease_expires_at AS owner_lease_expires_at,
                  c.conversation_id AS live_conversation_id
              FROM terminal_run_admissions a

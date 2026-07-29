@@ -13,6 +13,7 @@ agents:
     - parallel_researcher
     - researcher
     - tool_assistant
+    - progress_tool_assistant
 
 models:
   config: models.yaml
@@ -24,6 +25,7 @@ actions:
     - text_metrics
     - integer_calculator
     - text_replace
+    - progress_counter
 
 history:
   provider: postgres

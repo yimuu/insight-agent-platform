@@ -428,22 +428,31 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
             "arguments": { "query": "phase0" }
         }),
         json!({
-            "type": "workflow.tool.completed",
+            "type": "workflow.tool.progress",
             "sequence_number": 17,
             "call_id": "call_phase0",
             "tool_name": "lookup",
+            "content": [{ "type": "output_json", "json": {"completed": 1, "total": 2} }]
+        }),
+        json!({
+            "type": "workflow.tool.completed",
+            "sequence_number": 18,
+            "call_id": "call_phase0",
+            "tool_name": "lookup",
+            "duration_ms": 12,
             "content": [{ "type": "output_text", "text": "tool result" }]
         }),
         json!({
             "type": "workflow.tool.failed",
-            "sequence_number": 18,
+            "sequence_number": 19,
             "call_id": "call_phase0",
             "tool_name": "lookup",
+            "duration_ms": 13,
             "error": { "code": "TOOL_FAILED", "message": "tool failed" }
         }),
         json!({
             "type": "workflow.retrieval.completed",
-            "sequence_number": 19,
+            "sequence_number": 20,
             "retrieval_id": "retrieval_phase0",
             "query": "phase0",
             "results": [{
@@ -457,7 +466,7 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
         }),
         json!({
             "type": "workflow.stream.gap",
-            "sequence_number": 20,
+            "sequence_number": 21,
             "item_id": "message_phase0",
             "attempt_no": 2,
             "missing_from": 8,
@@ -467,13 +476,13 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
         }),
         json!({
             "type": "workflow.response.timed_out",
-            "sequence_number": 21,
+            "sequence_number": 22,
             "response": public_response("failed"),
             "workflow": workflow_failure()
         }),
         json!({
             "type": "workflow.response.cancelled",
-            "sequence_number": 22,
+            "sequence_number": 23,
             "response": public_response("cancelled"),
             "workflow": {
                 "run_id": "run_phase0_wire",
@@ -485,7 +494,7 @@ fn response_stream_events() -> Vec<ResponseStreamEvent> {
         }),
         json!({
             "type": "workflow.response.interrupted",
-            "sequence_number": 23,
+            "sequence_number": 24,
             "response": public_response("incomplete"),
             "workflow": {
                 "run_id": "run_phase0_wire",
@@ -517,6 +526,7 @@ fn assert_response_stream_event_type_is_known(event_type: ResponseStreamEventTyp
         | ResponseStreamEventType::ResponseFailed
         | ResponseStreamEventType::Error
         | ResponseStreamEventType::WorkflowToolStarted
+        | ResponseStreamEventType::WorkflowToolProgress
         | ResponseStreamEventType::WorkflowToolCompleted
         | ResponseStreamEventType::WorkflowToolFailed
         | ResponseStreamEventType::WorkflowRetrievalCompleted
@@ -797,8 +807,8 @@ fn actual_baseline() -> Value {
     );
 
     let response_events = response_stream_events();
-    assert_eq!(ResponseStreamEventType::ALL.len(), 24);
-    assert_eq!(response_events.len(), 24);
+    assert_eq!(ResponseStreamEventType::ALL.len(), 25);
+    assert_eq!(response_events.len(), 25);
     ResponseStreamEventType::ALL
         .into_iter()
         .for_each(assert_response_stream_event_type_is_known);

@@ -126,12 +126,86 @@ best-effort；发生丢失时客户端通过 `workflow.stream.gap` 和最终快�
 
 `stream` 只控制 Provider 请求模式，`publish` 只控制 provisional 内容可见性。无论组合如何，最终
 快照都包含强类型 workflow result、持久化 response identity 和 OpenAI 命名的 token usage。
-模型工具的实时状态使用 `workflow.tool.started`、`workflow.tool.completed` 和
-`workflow.tool.failed`；客户端应以 `call_id` 关联同一次调用。工具名、参数和结果分别受冻结的
-Action `public_policy` 与 LLM `publish` 双重授权；内置 `tool_assistant` 示例仅公开工具名和状态，
-因此 `started.arguments` 缺省且 `completed.content` 为空。只有显式授权
-`arguments: all` 的工具才会另外发送标准 `response.output_item.*` function-call 与
-`response.function_call_arguments.*` 事件。
+模型工具意图和真实执行是两个公开面：
+
+- `response.output_item.*` 与 `response.function_call_arguments.*` 表示模型正在形成或已经形成调用
+  意图，不证明 Action 已执行；
+- `workflow.tool.started/progress/completed/failed` 表示 runtime 中的真实 Action 生命周期；
+- 两组事件都使用模型生成并经 runtime 验证的 `call_id` 关联，不能按工具名、数组位置或事件相邻性
+  关联。
+
+工具名、参数、进度和结果分别受冻结的 Action `public_policy` 与 LLM `publish` 双重授权。
+`progress` 还必须通过独立的闭合 JSON Schema，只允许 `output_text` 或 `output_json` content。
+`workflow.tool.completed` 与 `workflow.tool.failed` 的 `duration_ms` 从 logical tool call 第一次进入
+Action execution boundary 开始计算，并覆盖 retry/backoff。可重试 Attempt 的失败不会产生
+`workflow.tool.failed`。
+
+成功且允许公开调用元数据的工具总会产生 `completed`。`content: []` 表示“执行成功，但结果正文
+未获授权公开”，不表示 Action 返回了 `null` 或空值。最终 `workflow.tool_results` 同样保留这类
+status-only 成功项，用于校准 live 事件丢失后的 UI。
+
+只有 `arguments: all` 才会发送标准 function-call item/argument 事件。进度是 live-only、
+best-effort 观测：它不进入 durable execution history、Conversation message、GET Run 或 terminal
+snapshot；队列满、订阅者断开、超频或 late publisher 会丢弃进度，但不能改变 Action 结果。
+
+### 工具调用 SSE 示例
+
+默认配置中的 `progress_tool_assistant` 使用一个显式公开安全参数、进度和结果的
+`progress_counter` 示例 Action：
+
+```bash
+curl -N \
+  -X POST 'http://127.0.0.1:3000/v1/agents/progress_tool_assistant/runs/stream' \
+  -H 'accept: text/event-stream' \
+  -H 'content-type: application/json' \
+  -H 'x-request-id: progress-example-1' \
+  -d '{"request":"演示工具执行进度"}'
+```
+
+以下省略与重点无关的 content-part 帧和部分字段，但每个 `data` 都是实际 wire shape 的完整 JSON
+对象；服务端不会保证示例中的具体 ID 或序号：
+
+```text
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"type":"function_call","id":"item_fc_1","status":"in_progress","call_id":"call_1","name":"progress_counter","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":3,"item_id":"item_fc_1","output_index":0,"delta":"{\"total\":10}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":4,"item_id":"item_fc_1","output_index":0,"name":"progress_counter","arguments":"{\"total\":10}"}
+
+event: workflow.tool.started
+data: {"type":"workflow.tool.started","sequence_number":6,"call_id":"call_1","tool_name":"progress_counter","arguments":{"total":10}}
+
+event: workflow.tool.progress
+data: {"type":"workflow.tool.progress","sequence_number":7,"call_id":"call_1","tool_name":"progress_counter","content":[{"type":"output_json","json":{"completed":5,"total":10}}]}
+
+event: workflow.tool.progress
+data: {"type":"workflow.tool.progress","sequence_number":8,"call_id":"call_1","tool_name":"progress_counter","content":[{"type":"output_json","json":{"completed":10,"total":10}}]}
+
+event: workflow.tool.completed
+data: {"type":"workflow.tool.completed","sequence_number":9,"call_id":"call_1","tool_name":"progress_counter","duration_ms":12,"content":[{"type":"output_json","json":{"completed":10,"total":10}}]}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":12,"item_id":"item_msg_1","output_index":1,"content_index":0,"delta":"工具进度已完成：10/10。"}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":16,"response":{"id":"resp_run_1","object":"response","status":"completed","output":[{"type":"function_call","id":"item_fc_1","status":"completed","call_id":"call_1","name":"progress_counter","arguments":"{\"total\":10}"},{"type":"message","id":"item_msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"工具进度已完成：10/10。","annotations":[]}]}],"usage":null,"error":null},"workflow":{"run_id":"run_1","result":"工具进度已完成：10/10。","tool_results":[{"call_id":"call_1","tool_name":"progress_counter","content":[{"type":"output_json","json":{"completed":10,"total":10}}]}],"retrievals":[],"usage_status":"partial"}}
+```
+
+客户端 reducer 应按以下规则处理：
+
+1. 以 `call_id` 为 key；`progress` 先于 `started` 时惰性创建 running 卡片；
+2. 同一 `call_id` 的重复 `started` 表示 retry，更新原卡片而不是新增卡片；
+3. 不同 `call_id` 可以交错，只按 SSE `sequence_number` 消费；
+4. 收到 `completed/failed` 后忽略该调用的 late provisional 事件；
+5. `response.completed` 用 `workflow.tool_results` 把仍为 running 的成功项校准为 completed；
+6. Run failed/cancelled/timed_out/interrupted 时只关闭残留 running 卡片，不伪造具体工具错误。
+
+内置 `tool_assistant` 中 `current_time`、`text_metrics` 和 `integer_calculator` 公开闭合的安全结果；
+`text_replace` 只公开调用成功状态，结果正文继续保持私有。
+
 LLM 基础设施失败会使用脱敏且可操作的稳定分类，不会把 Provider 响应正文、请求正文或凭据放入
 终态：
 

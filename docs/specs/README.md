@@ -11,10 +11,12 @@
 
 ## 当前规范
 
-当前没有尚在设计或实施的活动规范。
+当前没有活动设计规范。
 
 最近完成的规范：
 
+- [Response Stream v1 工具活动可视化优化](../archive/specs/2026-07-29-response-stream-v1-tool-activity-visibility-optimization.md)：
+  原地增强 `response-stream/v1`，增加安全工具进度、耗时、结果展示和 terminal 校准合同；
 - [Durable Runtime 50 活跃 Run 并发优化](../archive/specs/2026-07-26-durable-runtime-50-active-runs-optimization.md)；
 - [Terminal-only Runtime 与 Conversation](../archive/specs/2026-07-27-terminal-only-runtime-and-conversations.md)。
 

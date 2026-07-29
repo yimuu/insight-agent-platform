@@ -31,7 +31,7 @@ use insight_engine::response::{
     LiveResponsePublishOutcome, LiveResponseSeal, LiveResponseSealStatus,
     LiveResponseSourceIdentity, LiveResponseSubscriber, LiveWorkflowObservationIdentity,
     ResponseContentPart, ResponseOutputItem, WorkflowPublicError, WorkflowRetrievalResult,
-    WorkflowToolContent,
+    WorkflowToolContent, WorkflowToolProgressContent,
 };
 use insight_engine::{ActivationId, AttemptNo, ContentHash, RunId};
 
@@ -41,7 +41,7 @@ const POSTGRES_LIVE_RESPONSE_NOT_READY: &str = "POSTGRES_LIVE_RESPONSE_NOT_READY
 const POSTGRES_LIVE_RESPONSE_SHUTDOWN_TIMEOUT: &str = "POSTGRES_LIVE_RESPONSE_SHUTDOWN_TIMEOUT";
 const POSTGRES_LIVE_RESPONSE_SUBSCRIBER_EXISTS: &str = "POSTGRES_LIVE_RESPONSE_SUBSCRIBER_EXISTS";
 
-const POSTGRES_LIVE_RESPONSE_WIRE_VERSION: u8 = 2;
+const POSTGRES_LIVE_RESPONSE_WIRE_VERSION: u8 = 3;
 const POSTGRES_LIVE_RESPONSE_CHANNEL_PREFIX: &str = "insight_live_response_";
 const POSTGRES_LIVE_RESPONSE_CHANNEL_HASH_BYTES: usize = 40;
 const POSTGRES_LIVE_RESPONSE_READINESS_CHANNEL: &str = "insight_live_response_readiness_v1";
@@ -1226,14 +1226,21 @@ enum WirePayloadRef<'a> {
         tool_name: &'a str,
         arguments: &'a Option<Value>,
     },
+    ToolProgress {
+        call_id: &'a str,
+        tool_name: &'a str,
+        content: &'a [WorkflowToolProgressContent],
+    },
     ToolCompleted {
         call_id: &'a str,
         tool_name: &'a str,
+        duration_ms: u64,
         content: &'a [WorkflowToolContent],
     },
     ToolFailed {
         call_id: &'a str,
         tool_name: &'a str,
+        duration_ms: u64,
         error: &'a WorkflowPublicError,
     },
     RetrievalCompleted {
@@ -1294,22 +1301,35 @@ impl<'a> WirePayloadRef<'a> {
                 tool_name,
                 arguments,
             },
+            LiveResponsePayload::ToolProgress {
+                call_id,
+                tool_name,
+                content,
+            } => Self::ToolProgress {
+                call_id,
+                tool_name,
+                content,
+            },
             LiveResponsePayload::ToolCompleted {
                 call_id,
                 tool_name,
+                duration_ms,
                 content,
             } => Self::ToolCompleted {
                 call_id,
                 tool_name,
+                duration_ms: *duration_ms,
                 content,
             },
             LiveResponsePayload::ToolFailed {
                 call_id,
                 tool_name,
+                duration_ms,
                 error,
             } => Self::ToolFailed {
                 call_id,
                 tool_name,
+                duration_ms: *duration_ms,
                 error,
             },
             LiveResponsePayload::RetrievalCompleted {
@@ -1365,14 +1385,21 @@ enum WirePayload {
         tool_name: String,
         arguments: Option<Value>,
     },
+    ToolProgress {
+        call_id: String,
+        tool_name: String,
+        content: Vec<WorkflowToolProgressContent>,
+    },
     ToolCompleted {
         call_id: String,
         tool_name: String,
+        duration_ms: u64,
         content: Vec<WorkflowToolContent>,
     },
     ToolFailed {
         call_id: String,
         tool_name: String,
+        duration_ms: u64,
         error: WorkflowPublicError,
     },
     RetrievalCompleted {
@@ -1433,22 +1460,35 @@ impl WirePayload {
                 tool_name,
                 arguments,
             },
+            Self::ToolProgress {
+                call_id,
+                tool_name,
+                content,
+            } => LiveResponsePayload::ToolProgress {
+                call_id,
+                tool_name,
+                content,
+            },
             Self::ToolCompleted {
                 call_id,
                 tool_name,
+                duration_ms,
                 content,
             } => LiveResponsePayload::ToolCompleted {
                 call_id,
                 tool_name,
+                duration_ms,
                 content,
             },
             Self::ToolFailed {
                 call_id,
                 tool_name,
+                duration_ms,
                 error,
             } => LiveResponsePayload::ToolFailed {
                 call_id,
                 tool_name,
+                duration_ms,
                 error,
             },
             Self::RetrievalCompleted {

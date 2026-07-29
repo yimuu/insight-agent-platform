@@ -188,6 +188,7 @@ impl Action for NeverCalledRetryProbe {
         ToolPublicPolicy {
             call: true,
             arguments: ToolPublicArguments::All,
+            progress_schema: None,
             result_schema: None,
         }
     }

@@ -1302,7 +1302,8 @@ CREATE TABLE model_tool_calls (
     CONSTRAINT model_tool_calls_check2 CHECK (((response_item_id IS NULL) = (response_output_index IS NULL))),
     CONSTRAINT model_tool_calls_check3 CHECK ((((lease_loss_count = 0) AND (last_lease_loss_at IS NULL) AND (last_lease_loss_evidence IS NULL)) OR ((lease_loss_count > 0) AND (last_lease_loss_at IS NOT NULL) AND (last_lease_loss_evidence IS NOT NULL)))),
     CONSTRAINT model_tool_calls_check4 CHECK ((((last_commit_claim_token IS NULL) AND (last_outcome_hash IS NULL) AND (last_outcome_disposition IS NULL) AND (last_outcome_attempt_no IS NULL) AND (last_outcome_lease_epoch IS NULL) AND (last_outcome_fencing_token IS NULL) AND (last_outcome_available_at IS NULL) AND (last_effect_evidence IS NULL) AND (last_failure_class IS NULL) AND (last_failure_code IS NULL) AND (last_failure_retryable IS NULL)) OR ((last_commit_claim_token IS NOT NULL) AND (last_outcome_hash IS NOT NULL) AND (last_outcome_disposition IS NOT NULL) AND (last_outcome_attempt_no IS NOT NULL) AND (last_outcome_lease_epoch IS NOT NULL) AND (last_outcome_fencing_token IS NOT NULL) AND (last_effect_evidence IS NOT NULL)))),
-    CONSTRAINT model_tool_calls_check5 CHECK ((((call_status = 'pending'::text) AND (claim_owner IS NULL) AND (result_json IS NULL) AND (failure_class IS NULL) AND (failure_code IS NULL) AND (failure_retryable IS NULL) AND (started_at IS NULL) AND (completed_at IS NULL) AND ((tool_task_id IS NULL) OR ((effect_evidence = 'not_started'::text) AND (available_at IS NOT NULL)))) OR ((call_status = 'claimed'::text) AND (claim_owner IS NOT NULL) AND (result_json IS NULL) AND (failure_code IS NULL) AND (effect_evidence = 'not_started'::text) AND (available_at IS NULL) AND (started_at IS NULL) AND (completed_at IS NULL)) OR ((call_status = 'running'::text) AND (claim_owner IS NOT NULL) AND (result_json IS NULL) AND (failure_code IS NULL) AND (effect_evidence = 'started'::text) AND (available_at IS NULL) AND (started_at IS NOT NULL) AND (completed_at IS NULL)) OR ((call_status = 'succeeded'::text) AND (claim_owner IS NOT NULL) AND (result_json IS NOT NULL) AND (failure_code IS NULL) AND (effect_evidence = 'committed'::text) AND (available_at IS NULL) AND (started_at IS NOT NULL) AND (completed_at IS NOT NULL)) OR ((call_status = ANY (ARRAY['failed'::text, 'cancelled'::text])) AND (result_json IS NULL) AND (failure_class IS NOT NULL) AND (failure_code IS NOT NULL) AND (failure_retryable IS NOT NULL) AND (effect_evidence = ANY (ARRAY['not_started'::text, 'started'::text, 'unknown'::text])) AND (available_at IS NULL) AND (completed_at IS NOT NULL)))),
+    CONSTRAINT model_tool_calls_check5 CHECK ((((call_status = 'pending'::text) AND (claim_owner IS NULL) AND (result_json IS NULL) AND (failure_class IS NULL) AND (failure_code IS NULL) AND (failure_retryable IS NULL) AND (completed_at IS NULL) AND ((tool_task_id IS NOT NULL) OR (started_at IS NULL)) AND ((tool_task_id IS NULL) OR ((effect_evidence = 'not_started'::text) AND (available_at IS NOT NULL)))) OR ((call_status = 'claimed'::text) AND (claim_owner IS NOT NULL) AND (result_json IS NULL) AND (failure_code IS NULL) AND (effect_evidence = 'not_started'::text) AND (available_at IS NULL) AND (completed_at IS NULL)) OR ((call_status = 'running'::text) AND (claim_owner IS NOT NULL) AND (result_json IS NULL) AND (failure_code IS NULL) AND (effect_evidence = 'started'::text) AND (available_at IS NULL) AND (started_at IS NOT NULL) AND (completed_at IS NULL)) OR ((call_status = 'succeeded'::text) AND (claim_owner IS NOT NULL) AND (result_json IS NOT NULL) AND (failure_code IS NULL) AND (effect_evidence = 'committed'::text) AND (available_at IS NULL) AND (started_at IS NOT NULL) AND (completed_at IS NOT NULL)) OR ((call_status = ANY (ARRAY['failed'::text, 'cancelled'::text])) AND (result_json IS NULL) AND (failure_class IS NOT NULL) AND (failure_code IS NOT NULL) AND (failure_retryable IS NOT NULL) AND (effect_evidence = ANY (ARRAY['not_started'::text, 'started'::text, 'unknown'::text])) AND (available_at IS NULL) AND (completed_at IS NOT NULL)))),
+    CONSTRAINT model_tool_calls_timing_check CHECK (((started_at IS NULL) OR (completed_at IS NULL) OR (completed_at >= started_at))),
     CONSTRAINT model_tool_calls_effect_evidence_check CHECK (((effect_evidence IS NULL) OR (effect_evidence = ANY (ARRAY['not_started'::text, 'started'::text, 'committed'::text, 'unknown'::text])))),
     CONSTRAINT model_tool_calls_effect_id_check CHECK (((effect_id IS NULL) OR (effect_id ~ '^effect_[0-9a-f]{64}$'::text))),
     CONSTRAINT model_tool_calls_effect_idempotency_check CHECK (((effect_idempotency IS NULL) OR (effect_idempotency = ANY (ARRAY['idempotent'::text, 'non_idempotent'::text])))),
@@ -2078,6 +2079,7 @@ CREATE TABLE terminal_run_results (
     output_hash text,
     error_code text,
     usage_json jsonb,
+    tool_results_json jsonb DEFAULT '[]'::jsonb NOT NULL,
     started_at timestamp with time zone NOT NULL,
     terminal_at timestamp with time zone NOT NULL,
     CONSTRAINT terminal_run_results_terminal_state_check
@@ -2091,6 +2093,9 @@ CREATE TABLE terminal_run_results (
                (output_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT terminal_run_results_output_pair_check
         CHECK ((output_ref IS NULL) = (output_hash IS NULL)),
+    CONSTRAINT terminal_run_results_tool_results_check
+        CHECK ((jsonb_typeof(tool_results_json) = 'array'::text)
+               AND (octet_length(tool_results_json::text) <= 1048576)),
     CONSTRAINT terminal_run_results_terminal_time_check CHECK (terminal_at >= started_at)
 );
 
@@ -3378,7 +3383,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-df877850-ed09-4f96-ac0f-e7f0576c1743',
+    'durable-schema-d98dcd93-4911-426d-a826-9d8a5b04b461',
     'postgres'
 );
 

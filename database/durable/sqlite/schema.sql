@@ -2550,11 +2550,12 @@ AND last_outcome_lease_epoch IS NOT NULL AND last_outcome_fencing_token IS NOT N
 AND last_effect_evidence IS NOT NULL)),
   CHECK((call_status = 'pending' AND claim_owner IS NULL AND result_json IS NULL
 AND failure_class IS NULL AND failure_code IS NULL AND failure_retryable IS NULL
-AND started_at IS NULL AND completed_at IS NULL
+AND completed_at IS NULL
+AND(tool_task_id IS NOT NULL OR started_at IS NULL)
 AND(tool_task_id IS NULL OR(effect_evidence = 'not_started' AND available_at IS NOT NULL)))
 OR(call_status = 'claimed' AND claim_owner IS NOT NULL AND result_json IS NULL
 AND failure_code IS NULL AND effect_evidence = 'not_started'
-AND available_at IS NULL AND started_at IS NULL AND completed_at IS NULL)
+AND available_at IS NULL AND completed_at IS NULL)
 OR(call_status = 'running' AND claim_owner IS NOT NULL AND result_json IS NULL
 AND failure_code IS NULL AND effect_evidence = 'started'
 AND available_at IS NULL AND started_at IS NOT NULL AND completed_at IS NULL)
@@ -2564,7 +2565,9 @@ AND available_at IS NULL AND started_at IS NOT NULL AND completed_at IS NOT NULL
 OR(call_status IN('failed','cancelled')
 AND result_json IS NULL AND failure_class IS NOT NULL AND failure_code IS NOT NULL
 AND failure_retryable IS NOT NULL AND effect_evidence IN('not_started','started','unknown')
-AND available_at IS NULL AND completed_at IS NOT NULL))
+AND available_at IS NULL AND completed_at IS NOT NULL)),
+  CHECK(started_at IS NULL OR completed_at IS NULL
+        OR julianday(completed_at) >= julianday(started_at))
 );
 CREATE INDEX idx_model_tool_calls_claim
 ON model_tool_calls(
@@ -2718,6 +2721,10 @@ CREATE TABLE terminal_run_results(
      substr(output_hash, 8) NOT GLOB '*[^0-9a-f]*')),
   error_code TEXT,
   usage_json TEXT CHECK(usage_json IS NULL OR json_valid(usage_json)),
+  tool_results_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(tool_results_json)
+      AND json_type(tool_results_json) = 'array'
+      AND length(CAST(tool_results_json AS BLOB)) <= 1048576),
   started_at TEXT NOT NULL,
   terminal_at TEXT NOT NULL,
   CHECK((output_ref IS NULL) = (output_hash IS NULL)),
@@ -2935,7 +2942,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-df877850-ed09-4f96-ac0f-e7f0576c1743',
+    'durable-schema-d98dcd93-4911-426d-a826-9d8a5b04b461',
     'sqlite'
 );
 

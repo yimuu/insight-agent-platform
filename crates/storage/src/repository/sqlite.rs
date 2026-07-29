@@ -2570,6 +2570,7 @@ mod terminal_tool_result_tests {
             &serde_json::to_value(ToolPublicPolicy {
                 call,
                 arguments: ToolPublicArguments::Private,
+                progress_schema: None,
                 result_schema,
             })
             .unwrap(),

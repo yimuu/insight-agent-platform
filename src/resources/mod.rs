@@ -3,8 +3,8 @@ pub mod config;
 pub mod actions {
     pub use insight_resources::actions::{
         Action, ActionCapability, ActionContext, ActionDescriptor, ActionDescriptorIdentity,
-        ActionRegistry, CancellationClass, EffectClass, IdempotencyClass, RegisteredAction,
-        ToolPublicArguments, ToolPublicPolicy,
+        ActionProgressDisposition, ActionProgressError, ActionRegistry, CancellationClass,
+        EffectClass, IdempotencyClass, RegisteredAction, ToolPublicArguments, ToolPublicPolicy,
     };
 }
 

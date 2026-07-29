@@ -1434,7 +1434,7 @@ async fn recover_expired_model_tool_calls_postgres(
                 "UPDATE model_tool_calls SET call_status='pending',tool_attempt_no=$1,lease_epoch=$2,
                     fencing_token=$3,effect_evidence='not_started',
                     available_at=clock_timestamp()+$4*INTERVAL '1 millisecond',
-                    claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL,started_at=NULL,
+                    claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL,
                     projection_version=projection_version+1,lease_loss_count=lease_loss_count+1,
                     last_lease_loss_at=clock_timestamp(),last_lease_loss_evidence=$5,
                     updated_at=clock_timestamp()
@@ -1785,7 +1785,7 @@ pub(crate) async fn mark_model_tool_call_started_postgres(
     }
     let rows = sqlx::query(
         "UPDATE model_tool_calls SET call_status='running',effect_evidence='started',
-                started_at=clock_timestamp(),updated_at=clock_timestamp()
+                started_at=COALESCE(started_at,clock_timestamp()),updated_at=clock_timestamp()
          WHERE run_id=$1 AND tool_task_id=$2 AND call_status='claimed'
            AND tool_attempt_no=$3 AND lease_epoch=$4 AND fencing_token=$5
            AND claim_owner=$6 AND claim_token=$7 AND projection_version=$8
@@ -1962,6 +1962,25 @@ fn retry_delay_ms(policy: &WorkerEffectPolicy, attempt_no: AttemptNo) -> u64 {
         .min(policy.max_backoff_ms())
 }
 
+fn model_tool_duration_ms(row: &PgRow) -> Result<Option<u64>, RepositoryError> {
+    let started_at = row
+        .try_get::<Option<DateTime<Utc>>, _>("started_at")
+        .map_err(|_| RepositoryError::invalid_data())?;
+    let completed_at = row
+        .try_get::<Option<DateTime<Utc>>, _>("completed_at")
+        .map_err(|_| RepositoryError::invalid_data())?;
+    match (started_at, completed_at) {
+        (Some(started_at), Some(completed_at)) => u64::try_from(
+            completed_at
+                .signed_duration_since(started_at)
+                .num_milliseconds(),
+        )
+        .map(Some)
+        .map_err(|_| RepositoryError::invalid_data()),
+        _ => Ok(None),
+    }
+}
+
 fn decode_last_receipt(row: &PgRow) -> Result<ModelToolTaskCommitReceipt, RepositoryError> {
     let task_id = SchedulerTaskId::parse(
         row.try_get::<String, _>("tool_task_id")
@@ -1999,6 +2018,11 @@ fn decode_last_receipt(row: &PgRow) -> Result<ModelToolTaskCommitReceipt, Reposi
         lease_epoch,
         available,
         continuation,
+        if disposition == ModelToolTaskDisposition::RetryScheduled {
+            None
+        } else {
+            model_tool_duration_ms(row)?
+        },
     )
 }
 
@@ -2229,7 +2253,7 @@ pub(crate) async fn commit_model_tool_call_outcome_postgres(
                 let updated = sqlx::query(
                     "UPDATE model_tool_calls SET call_status='pending',tool_attempt_no=$1,lease_epoch=$2,
                         fencing_token=$3,effect_evidence='not_started',available_at=$4,
-                        claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL,started_at=NULL,
+                        claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL,
                         projection_version=projection_version+1,last_commit_claim_token=$5,
                         last_outcome_hash=$6,last_outcome_disposition='retry_scheduled',
                         last_outcome_attempt_no=$7,last_outcome_lease_epoch=$8,
@@ -2443,6 +2467,20 @@ pub(crate) async fn commit_model_tool_call_outcome_postgres(
         )
         .await?
     };
+    let duration_ms = if disposition == ModelToolTaskDisposition::RetryScheduled {
+        None
+    } else {
+        let row = sqlx::query(
+            "SELECT started_at,completed_at FROM model_tool_calls
+             WHERE run_id=$1 AND tool_task_id=$2",
+        )
+        .bind(claim.run_id().as_str())
+        .bind(claim.identity().tool_task_id().as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        model_tool_duration_ms(&row)?
+    };
     let receipt = model_tool_task_commit_receipt_new(
         claim.identity().tool_task_id().clone(),
         disposition,
@@ -2450,6 +2488,7 @@ pub(crate) async fn commit_model_tool_call_outcome_postgres(
         claim.lease_epoch(),
         next_available_at,
         continuation,
+        duration_ms,
     )?;
     tx.commit().await.map_err(RepositoryError::storage)?;
     Ok(ModelToolTaskTransitionOutcome::Committed(receipt))

@@ -20,6 +20,10 @@ use insight_runtime::catalog::{
 };
 use serde_json::{json, Value};
 
+#[allow(unused_macros)]
+#[path = "../../../tests/support/workspace_assets.rs"]
+mod workspace_assets;
+
 #[derive(Debug, Clone)]
 struct ModeModel {
     request_capabilities: BTreeSet<ModelRequestCapability>,
@@ -197,6 +201,7 @@ fn public_policy() -> ToolPublicPolicy {
     ToolPublicPolicy {
         call: true,
         arguments: ToolPublicArguments::Fields(BTreeSet::from(["query".to_owned()])),
+        progress_schema: None,
         result_schema: Some(json!({
             "type": "object",
             "properties": {"answer": {"type": "string"}},
@@ -312,8 +317,7 @@ fn checked_in_multi_tool_agent_links_four_provider_safe_actions() {
         None,
     )
     .unwrap();
-    let agent_root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../agents/tool_assistant");
+    let agent_root = workspace_assets::workspace_path("agents/tool_assistant");
     let published = Arc::new(compile_agent_dir(&agent_root).unwrap());
     let deployment = DeployedAgent::publish(
         published,
@@ -349,12 +353,26 @@ fn checked_in_multi_tool_agent_links_four_provider_safe_actions() {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     }));
     for tool in binding["tools"].as_array().unwrap() {
+        let name = tool["name"].as_str().unwrap();
+        let policy = tool["effective_public_policy"].as_object().unwrap();
+        assert_eq!(policy["call"], true, "{name} must publish status");
         assert_eq!(
-            tool["effective_public_policy"],
-            json!({"call": true, "arguments": "private", "result": null}),
-            "{} must publish status without exposing arguments or results",
-            tool["name"]
+            policy["arguments"], "private",
+            "{name} must keep arguments private"
         );
+        if name == "text_replace" {
+            assert_eq!(
+                policy["result"],
+                Value::Null,
+                "text_replace must remain status-only"
+            );
+        } else {
+            assert!(
+                policy["result"].is_object(),
+                "{name} must publish a closed safe result"
+            );
+            assert_eq!(policy["result"]["additionalProperties"], false);
+        }
     }
 }
 
@@ -375,6 +393,7 @@ fn linker_rejects_missing_tools_invalid_public_escalation_and_request_mode_misma
     let invalid_actions = action_registry(ToolPublicPolicy {
         call: false,
         arguments: ToolPublicArguments::All,
+        progress_schema: None,
         result_schema: None,
     });
     assert_eq!(

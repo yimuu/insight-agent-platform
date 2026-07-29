@@ -151,10 +151,51 @@ LLM 节点可以通过部署时冻结的白名单调用注册 Action：
 
 `tool_choice` 支持 `auto`、`required` 或白名单中的一个工具名。模型只能产生调用意图；运行时仍会
 校验工具名、参数 JSON Schema、调用轮数和总次数，再执行对应 Action 并把类型化结果续接给模型。
-工具事件采用 Agent `publish` 与 Action `public_policy` 双重授权。示例中的四个工具只公开
-`workflow.tool.started`、`workflow.tool.completed`、`workflow.tool.failed` 生命周期元数据，
-不会公开参数或结果，前端可以按 `call_id` 展示执行状态。完整示例见
-[`tool_assistant`](../../agents/tool_assistant/agent.yaml)。
+模型输出的 `response.function_call_arguments.*` 只表示调用意图；只有
+`workflow.tool.started/progress/completed/failed` 表示平台真实执行 Action。前端必须按
+`call_id` 合并两者，同名工具的并行调用不能按名称合并。
+
+工具活动采用 LLM `publish` 与 Action 冻结 `public_policy` 双重授权。第三方 Action 默认完全私有；
+Action 注册方可以独立授权调用元数据、参数、进度和最终结果：
+
+```rust
+ToolPublicPolicy {
+    call: true,
+    arguments: ToolPublicArguments::Private,
+    progress_schema: Some(json!({
+        "type": "object",
+        "required": ["completed", "total"],
+        "properties": {
+            "completed": {"type": "integer", "minimum": 0, "maximum": 1000},
+            "total": {"type": "integer", "minimum": 1, "maximum": 1000}
+        },
+        "additionalProperties": false
+    })),
+    result_schema: Some(/* 完整、闭合的公开结果 Schema */),
+}
+```
+
+这些授权互不推导：
+
+- `arguments: all` 才允许标准 function-call argument 帧，但不会自动公开进度或结果；
+- `progress_schema` 描述一次 Action 主动发布的安全进度值；值必须通过冻结 Schema，且只以
+  `output_text/output_json` 发送；
+- `result_schema` 描述完整公开结果，不是对私有结果任意裁剪；
+- `call: true, result: none` 的成功调用仍发送 `completed`，但 `content: []`，含义是“结果未
+  授权公开”；
+- LLM `publish: false` 时不发送 provisional 工具事件，但模型 continuation 和最终工作流结果不受
+  影响。
+
+Action 可以通过当前 `ActionContext::publish_progress` 发布进度。它是有界、非阻塞、best-effort 的
+live-only 观测：可能因频率限制、队列满、订阅者断开或调用已经结束而返回 `Dropped`，不会进入
+durable history、Conversation message、GET Run 或 terminal snapshot，也不能成为 Action 成败或
+retry 的依据。非法进度返回不包含 payload 的错误，原始值不会进入公共事件或默认日志。
+
+内置 [`tool_assistant`](../../agents/tool_assistant/agent.yaml) 的四个工具采用不同结果策略：
+`current_time`、`text_metrics`、`integer_calculator` 公开闭合的安全结果，`text_replace` 只公开
+成功状态并保持调用者文本私有。另一个
+[`progress_tool_assistant`](../../agents/progress_tool_assistant/agent.yaml) 使用
+`progress_counter` 演示两个 Schema-valid progress 事件和公开最终结果。
 
 ## 控制流
 

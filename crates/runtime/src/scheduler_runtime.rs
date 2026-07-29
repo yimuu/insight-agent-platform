@@ -2,8 +2,13 @@
 //! repository. Every crash hook is on the actual side-effect path.
 
 use std::{
-    cell::Cell, collections::BTreeMap, future::Future, panic::AssertUnwindSafe, pin::Pin,
+    cell::Cell,
+    collections::BTreeMap,
+    future::{pending, Future},
+    panic::AssertUnwindSafe,
+    pin::Pin,
     sync::Once,
+    time::{Duration as StdDuration, Instant},
 };
 
 use async_trait::async_trait;
@@ -70,6 +75,10 @@ const MODEL_TOOL_RESULT_SCHEMA_INVALID: &str = "MODEL_TOOL_RESULT_SCHEMA_INVALID
 const MODEL_TOOL_PUBLIC_RESULT_INVALID: &str = "MODEL_TOOL_PUBLIC_RESULT_INVALID";
 const MODEL_TOOL_DEADLINE_EXCEEDED: &str = "WORKER_DEADLINE_EXCEEDED";
 const ARTIFACT_STAGING_GRACE_SECONDS: i64 = 3_600;
+const MODEL_TOOL_PROGRESS_QUEUE_CAPACITY: usize = 16;
+const MODEL_TOOL_PROGRESS_BURST: u32 = 8;
+const MODEL_TOOL_PROGRESS_WINDOW: StdDuration = StdDuration::from_secs(1);
+const MODEL_TOOL_PROGRESS_TOTAL_LIMIT: u32 = 1_024;
 
 fn repository_canonicalization() -> RepositoryError {
     repository_adapter::canonicalization()
@@ -1724,17 +1733,22 @@ where
     // This is deliberately the last step before the registry Action boundary.
     // It cannot be delayed until the first heartbeat or terminal result.
     live_publication.started();
+    let (runtime_services, mut progress_requests) = live_publication.runtime_services();
     // Keep shutdown authority separate from the executor token. A child token
     // would auto-cancel before this select can classify the cause, allowing a
     // cooperative executor's ControlTermination to be mistaken for a durable
     // business cancellation. Only the winning runtime branch cancels it.
     let task_cancellation = CancellationToken::new();
     let mut worker = Box::pin(
-        AssertUnwindSafe(redact_executor_panic_payload(registry.execute(
-            &context,
-            &request,
-            task_cancellation.clone(),
-        )))
+        AssertUnwindSafe(redact_executor_panic_payload(
+            worker_adapter::execute_with_runtime_services(
+                registry,
+                &context,
+                &request,
+                &runtime_services,
+                task_cancellation.clone(),
+            ),
+        ))
         .catch_unwind(),
     );
     let execution = loop {
@@ -1758,6 +1772,12 @@ where
             _ = cancellation.cancelled() => {
                 task_cancellation.cancel();
                 break ModelToolExecutionExit::Shutdown;
+            }
+            progress = receive_model_tool_progress(&mut progress_requests) => {
+                if let Some(progress) = progress {
+                    let result = live_publication.progress(progress.value());
+                    progress.respond(result);
+                }
             }
             _ = heartbeat.tick() => {
                 match repository
@@ -1844,6 +1864,9 @@ struct ModelToolLivePublicationState {
     tool_name: String,
     started_arguments: Option<serde_json::Value>,
     next_local_sequence: u64,
+    progress_window_started_at: Instant,
+    progress_in_window: u32,
+    progress_total: u32,
 }
 
 impl<'a, O> ModelToolLivePublication<'a, O>
@@ -1880,6 +1903,9 @@ where
                 tool_name: claim.identity().action().name().to_owned(),
                 started_arguments,
                 next_local_sequence: 0,
+                progress_window_started_at: Instant::now(),
+                progress_in_window: 0,
+                progress_total: 0,
             })
         })();
         Self { observer, state }
@@ -1897,27 +1923,107 @@ where
         self.emit(payload);
     }
 
+    fn runtime_services(
+        &self,
+    ) -> (
+        WorkerRuntimeServices,
+        Option<worker_adapter::ModelToolProgressRequests>,
+    ) {
+        let Some(state) = &self.state else {
+            return (WorkerRuntimeServices::default(), None);
+        };
+        if !state.projection.progress_authorized() {
+            return (WorkerRuntimeServices::default(), None);
+        }
+        let (publisher, requests) =
+            worker_adapter::model_tool_progress_channel(MODEL_TOOL_PROGRESS_QUEUE_CAPACITY);
+        (
+            worker_adapter::services_with_model_tool_progress_publisher(
+                WorkerRuntimeServices::default(),
+                publisher,
+            ),
+            Some(requests),
+        )
+    }
+
+    fn progress(
+        &mut self,
+        value: &serde_json::Value,
+    ) -> Result<worker_adapter::ModelToolProgressDisposition, worker_adapter::ModelToolProgressError>
+    {
+        let Some(state) = &mut self.state else {
+            return Ok(worker_adapter::ModelToolProgressDisposition::Dropped);
+        };
+        let content = state
+            .projection
+            .project_validated_progress(value)
+            .map_err(|_| worker_adapter::invalid_model_tool_progress())?
+            .ok_or_else(worker_adapter::invalid_model_tool_progress)?;
+        let now = Instant::now();
+        if now.duration_since(state.progress_window_started_at) >= MODEL_TOOL_PROGRESS_WINDOW {
+            state.progress_window_started_at = now;
+            state.progress_in_window = 0;
+        }
+        if state.progress_total >= MODEL_TOOL_PROGRESS_TOTAL_LIMIT
+            || state.progress_in_window >= MODEL_TOOL_PROGRESS_BURST
+        {
+            state.next_local_sequence = state.next_local_sequence.saturating_add(1);
+            return Ok(worker_adapter::ModelToolProgressDisposition::Dropped);
+        }
+        state.progress_total = state.progress_total.saturating_add(1);
+        state.progress_in_window = state.progress_in_window.saturating_add(1);
+        let payload = LiveResponsePayload::ToolProgress {
+            call_id: state.call_id.clone(),
+            tool_name: state.tool_name.clone(),
+            content,
+        };
+        let Ok(publication) = LiveResponsePublication::new_workflow_observation(
+            state.identity.clone(),
+            state.next_local_sequence,
+            payload,
+        ) else {
+            return Ok(worker_adapter::ModelToolProgressDisposition::Dropped);
+        };
+        state.next_local_sequence = state.next_local_sequence.saturating_add(1);
+        let outcome = self.observer.publish_model_tool_observation(publication);
+        Ok(
+            if matches!(
+                outcome,
+                LiveResponsePublishOutcome::Enqueued
+                    | LiveResponsePublishOutcome::EnqueuedAfterGap
+                    | LiveResponsePublishOutcome::EnqueuedAfterBestEffortLoss
+            ) {
+                worker_adapter::ModelToolProgressDisposition::Published
+            } else {
+                worker_adapter::ModelToolProgressDisposition::Dropped
+            },
+        )
+    }
+
     fn finish(&mut self, completion: &ModelToolCommitCompletion) {
         let Some(intent) = completion.committed_intent.as_ref() else {
+            return;
+        };
+        let Some(duration_ms) = completion.duration_ms else {
             return;
         };
         match (&completion.pump_outcome, intent) {
             (
                 ModelToolWorkerPumpOutcome::Succeeded { .. },
                 ModelToolTaskOutcome::Succeeded { result },
-            ) => self.completed(result),
+            ) => self.completed(result, duration_ms),
             (ModelToolWorkerPumpOutcome::Failed { .. }, ModelToolTaskOutcome::Failed { .. })
             | (
                 ModelToolWorkerPumpOutcome::Cancelled { .. },
                 ModelToolTaskOutcome::Cancelled { .. },
-            ) => self.failed(intent),
+            ) => self.failed(intent, duration_ms),
             // A retry is not the terminal failure of this durable tool call.
             // The next Attempt receives its own observation identity and seq 0.
             _ => {}
         }
     }
 
-    fn completed(&mut self, result: &serde_json::Value) {
+    fn completed(&mut self, result: &serde_json::Value, duration_ms: u64) {
         let Some(state) = &self.state else {
             return;
         };
@@ -1934,11 +2040,12 @@ where
             call_id: state.call_id.clone(),
             tool_name: state.tool_name.clone(),
             content,
+            duration_ms,
         };
         self.emit(payload);
     }
 
-    fn failed(&mut self, intent: &ModelToolTaskOutcome) {
+    fn failed(&mut self, intent: &ModelToolTaskOutcome, duration_ms: u64) {
         let Some(state) = &self.state else {
             return;
         };
@@ -1949,6 +2056,7 @@ where
             call_id: state.call_id.clone(),
             tool_name: state.tool_name.clone(),
             error,
+            duration_ms,
         };
         self.emit(payload);
     }
@@ -1968,6 +2076,15 @@ where
         // Every broker outcome, including loss, closure, or ordering rejection,
         // is observational and therefore intentionally ignored.
         let _ = self.observer.publish_model_tool_observation(publication);
+    }
+}
+
+async fn receive_model_tool_progress(
+    requests: &mut Option<worker_adapter::ModelToolProgressRequests>,
+) -> Option<worker_adapter::ModelToolProgressRequest> {
+    match requests {
+        Some(requests) => requests.recv().await,
+        None => pending().await,
     }
 }
 
@@ -2133,6 +2250,7 @@ fn model_tool_deadline_outcome(
 struct ModelToolCommitCompletion {
     pump_outcome: ModelToolWorkerPumpOutcome,
     committed_intent: Option<ModelToolTaskOutcome>,
+    duration_ms: Option<u64>,
 }
 
 impl ModelToolCommitCompletion {
@@ -2170,6 +2288,7 @@ where
                     effect_evidence: authority_evidence,
                 },
                 committed_intent: None,
+                duration_ms: None,
             })
         }
         ModelToolTaskHeartbeatOutcome::StateConflict => {
@@ -2178,6 +2297,7 @@ where
                     effect_evidence: authority_evidence,
                 },
                 committed_intent: None,
+                duration_ms: None,
             })
         }
         ModelToolTaskHeartbeatOutcome::RunTerminal => {
@@ -2186,6 +2306,7 @@ where
                     effect_evidence: authority_evidence,
                 },
                 committed_intent: None,
+                duration_ms: None,
             })
         }
     }
@@ -2206,6 +2327,7 @@ where
                     effect_evidence: local_evidence,
                 },
                 committed_intent: None,
+                duration_ms: None,
             })
         }
         ModelToolTaskTransitionOutcome::StateConflict => {
@@ -2214,6 +2336,7 @@ where
                     effect_evidence: local_evidence,
                 },
                 committed_intent: None,
+                duration_ms: None,
             })
         }
         ModelToolTaskTransitionOutcome::RunTerminal => {
@@ -2222,10 +2345,12 @@ where
                     effect_evidence: local_evidence,
                 },
                 committed_intent: None,
+                duration_ms: None,
             })
         }
     };
     crash.hit(SchedulerCrashPoint::AfterResultCommit)?;
+    let duration_ms = receipt.duration_ms();
     let pump_outcome = match receipt.disposition() {
         ModelToolTaskDisposition::Succeeded => ModelToolWorkerPumpOutcome::Succeeded {
             receipt,
@@ -2247,6 +2372,7 @@ where
     Ok(ModelToolCommitCompletion {
         pump_outcome,
         committed_intent: Some(outcome),
+        duration_ms,
     })
 }
 
@@ -3089,6 +3215,11 @@ mod tests {
                 claim.lease_epoch(),
                 next_available_at,
                 continuation_status,
+                if disposition == ModelToolTaskDisposition::RetryScheduled {
+                    None
+                } else {
+                    Some(1)
+                },
             )?;
             Ok(match self.commit_mode {
                 MockModelToolCommit::Committed => {
@@ -3139,6 +3270,11 @@ mod tests {
         CancellationAware {
             entered: Arc<Notify>,
         },
+        PublishProgress {
+            values: Vec<Value>,
+            outcomes: Arc<StdMutex<Vec<String>>>,
+            result: Result<TaskExecutionResult, WorkerFailure>,
+        },
     }
 
     struct MockModelToolExecutor {
@@ -3172,7 +3308,41 @@ mod tests {
                     )
                     .unwrap())
                 }
+                ModelToolExecutorBehavior::PublishProgress { result, .. } => result.clone(),
             }
+        }
+
+        async fn execute_with_runtime_services(
+            &self,
+            context: &WorkerExecutionContext,
+            request: &TaskExecutionRequest,
+            services: &WorkerRuntimeServices,
+            cancellation: CancellationToken,
+        ) -> Result<TaskExecutionResult, WorkerFailure> {
+            let ModelToolExecutorBehavior::PublishProgress {
+                values,
+                outcomes,
+                result,
+            } = &self.behavior
+            else {
+                return self.execute(context, request, cancellation).await;
+            };
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let publisher = worker_adapter::services_model_tool_progress_publisher(services)
+                .expect("public progress policy installs one scoped publisher");
+            for value in values {
+                let outcome = publisher.publish(value.clone()).await;
+                outcomes.lock().unwrap().push(match outcome {
+                    Ok(worker_adapter::ModelToolProgressDisposition::Published) => {
+                        "published".to_owned()
+                    }
+                    Ok(worker_adapter::ModelToolProgressDisposition::Dropped) => {
+                        "dropped".to_owned()
+                    }
+                    Err(error) => error.code().to_owned(),
+                });
+            }
+            result.clone()
         }
     }
 
@@ -3430,16 +3600,138 @@ mod tests {
                     sequence_number: 12,
                     call_id,
                     tool_name,
+                    duration_ms,
                     content,
                 } => {
                     assert_eq!(call_id, "call_lookup");
                     assert_eq!(tool_name, "lookup");
+                    assert_eq!(duration_ms, 1);
                     assert_eq!(content.len(), 1);
                     assert_eq!(content[0].text(), Some("safe interpretation"));
                 }
                 event => panic!("expected typed tool completion, got {event:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn model_tool_progress_is_validated_best_effort_ordered_and_does_not_change_success() {
+        let progress_schema = model_tool_public_schema(
+            json!({
+                "completed": {"type": "integer", "minimum": 0},
+                "total": {"type": "integer", "minimum": 1}
+            }),
+            &["completed", "total"],
+        );
+        let claim = model_tool_worker_claim_with_public_policy(
+            30_000,
+            model_tool_public_schema(json!({"ok": {"type": "boolean"}}), &["ok"]),
+            json!({
+                "call": true,
+                "arguments": "private",
+                "progress": progress_schema,
+                "result": null
+            }),
+        );
+        let repository = MockModelToolRepository::new(
+            claim,
+            [
+                MockModelToolHeartbeat::Renewed,
+                MockModelToolHeartbeat::Renewed,
+            ],
+        );
+        let observer = RecordingModelToolObserver::returning(LiveResponsePublishOutcome::Enqueued);
+        let outcomes = Arc::new(StdMutex::new(Vec::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = model_tool_registry(
+            ModelToolExecutorBehavior::PublishProgress {
+                values: vec![
+                    json!({"completed": 1, "total": 10}),
+                    json!({"completed": "private invalid body", "total": 10}),
+                    json!({"completed": 2, "total": 10}),
+                    json!({"completed": 3, "total": 10}),
+                    json!({"completed": 4, "total": 10}),
+                    json!({"completed": 5, "total": 10}),
+                    json!({"completed": 6, "total": 10}),
+                    json!({"completed": 7, "total": 10}),
+                    json!({"completed": 8, "total": 10}),
+                    json!({"completed": 9, "total": 10}),
+                    json!({"completed": 10, "total": 10}),
+                ],
+                outcomes: Arc::clone(&outcomes),
+                result: Ok(model_tool_result(json!({"ok": true}))),
+            },
+            Arc::clone(&calls),
+        );
+
+        let outcome = consume_model_tool_task_once_with_observer(
+            &repository,
+            &registry,
+            "worker-model-tool",
+            30,
+            4,
+            CancellationToken::new(),
+            &observer,
+            &insight_durable::NoSchedulerCrash,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            ModelToolWorkerPumpOutcome::Succeeded { .. }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            vec![
+                "published",
+                "MODEL_TOOL_PUBLIC_PROGRESS_INVALID",
+                "published",
+                "published",
+                "published",
+                "published",
+                "published",
+                "published",
+                "published",
+                "dropped",
+                "dropped",
+            ]
+        );
+        let events = observer
+            .publications()
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, publication)| publication.into_public_event(sequence as u64))
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 10);
+        assert!(matches!(
+            events[0],
+            ResponseStreamEvent::WorkflowToolStarted { .. }
+        ));
+        assert!(matches!(
+            events[1],
+            ResponseStreamEvent::WorkflowToolProgress { ref content, .. }
+                if content[0].json() == Some(&json!({"completed": 1, "total": 10}))
+        ));
+        assert!(matches!(
+            events[2],
+            ResponseStreamEvent::WorkflowToolProgress { ref content, .. }
+                if content[0].json() == Some(&json!({"completed": 2, "total": 10}))
+        ));
+        assert!(matches!(
+            events[8],
+            ResponseStreamEvent::WorkflowToolProgress { ref content, .. }
+                if content[0].json() == Some(&json!({"completed": 8, "total": 10}))
+        ));
+        assert!(matches!(
+            events[9],
+            ResponseStreamEvent::WorkflowToolCompleted {
+                duration_ms: 1,
+                ref content,
+                ..
+            } if content.is_empty()
+        ));
     }
 
     #[tokio::test]

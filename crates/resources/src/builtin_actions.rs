@@ -26,7 +26,17 @@ fn public_tool_status_policy() -> ToolPublicPolicy {
     ToolPublicPolicy {
         call: true,
         arguments: ToolPublicArguments::Private,
+        progress_schema: None,
         result_schema: None,
+    }
+}
+
+fn public_tool_result_policy(result_schema: Value) -> ToolPublicPolicy {
+    ToolPublicPolicy {
+        call: true,
+        arguments: ToolPublicArguments::Private,
+        progress_schema: None,
+        result_schema: Some(result_schema),
     }
 }
 
@@ -61,7 +71,15 @@ impl Action for CurrentTimeAction {
     }
 
     fn public_policy(&self) -> ToolPublicPolicy {
-        public_tool_status_policy()
+        public_tool_result_policy(json!({
+            "type":"object",
+            "required":["timezone", "iso8601"],
+            "properties":{
+                "timezone":{"type":"string", "maxLength":64},
+                "iso8601":{"type":"string", "maxLength":64}
+            },
+            "additionalProperties":false
+        }))
     }
 
     async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
@@ -151,7 +169,16 @@ impl Action for TextMetricsToolAction {
     }
 
     fn public_policy(&self) -> ToolPublicPolicy {
-        public_tool_status_policy()
+        public_tool_result_policy(json!({
+            "type":"object",
+            "required":["characters", "words", "lines"],
+            "properties":{
+                "characters":{"type":"integer", "minimum":0},
+                "words":{"type":"integer", "minimum":0},
+                "lines":{"type":"integer", "minimum":0}
+            },
+            "additionalProperties":false
+        }))
     }
 
     async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
@@ -203,7 +230,12 @@ impl Action for IntegerCalculatorAction {
     }
 
     fn public_policy(&self) -> ToolPublicPolicy {
-        public_tool_status_policy()
+        public_tool_result_policy(json!({
+            "type":"object",
+            "required":["value"],
+            "properties":{"value":{"type":"integer"}},
+            "additionalProperties":false
+        }))
     }
 
     async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
@@ -312,6 +344,71 @@ impl Action for TextReplaceAction {
             "text": text.replace(find, replacement),
             "replacements": text.matches(find).count(),
         }))
+    }
+}
+
+/// Deterministic example used to demonstrate schema-validated live progress
+/// without timing-dependent sleeps.
+#[derive(Debug, Clone, Copy)]
+struct ProgressCounterAction;
+
+#[async_trait]
+impl Action for ProgressCounterAction {
+    fn descriptor(&self) -> ActionDescriptor {
+        ActionDescriptor {
+            id: "progress_counter",
+            version: "1.0.0",
+            input_schema: json!({
+                "type":"object",
+                "required":["total"],
+                "properties":{"total":{"type":"integer", "minimum":1, "maximum":1000}},
+                "additionalProperties":false
+            }),
+            output_schema: json!({
+                "type":"object",
+                "required":["completed", "total"],
+                "properties":{
+                    "completed":{"type":"integer", "minimum":0, "maximum":1000},
+                    "total":{"type":"integer", "minimum":1, "maximum":1000}
+                },
+                "additionalProperties":false
+            }),
+            effect: EffectClass::Pure,
+            idempotency: IdempotencyClass::Idempotent,
+            cancellation: CancellationClass::NotSupported,
+            required_capabilities: BTreeSet::new(),
+        }
+    }
+
+    fn public_policy(&self) -> ToolPublicPolicy {
+        let schema = json!({
+            "type":"object",
+            "required":["completed", "total"],
+            "properties":{
+                "completed":{"type":"integer", "minimum":0, "maximum":1000},
+                "total":{"type":"integer", "minimum":1, "maximum":1000}
+            },
+            "additionalProperties":false
+        });
+        ToolPublicPolicy {
+            call: true,
+            arguments: ToolPublicArguments::All,
+            progress_schema: Some(schema.clone()),
+            result_schema: Some(schema),
+        }
+    }
+
+    async fn call(&self, input: Value, context: ActionContext) -> Result<Value, RunError> {
+        let total = input.get("total").and_then(Value::as_u64).ok_or_else(|| {
+            RunError::operation("ACTION_INPUT_INVALID", "progress total is invalid")
+        })?;
+        let _ = context
+            .publish_progress(json!({"completed": total / 2, "total": total}))
+            .await;
+        let _ = context
+            .publish_progress(json!({"completed": total, "total": total}))
+            .await;
+        Ok(json!({"completed": total, "total": total}))
     }
 }
 
@@ -691,6 +788,7 @@ pub fn builtin_action_registry(
             "text_metrics" => registry.register(TextMetricsToolAction)?,
             "integer_calculator" => registry.register(IntegerCalculatorAction)?,
             "text_replace" => registry.register(TextReplaceAction)?,
+            "progress_counter" => registry.register(ProgressCounterAction)?,
             "qualification.effect_marker" => {
                 registry.register(QualificationEffectMarkerAction::from_environment()?)?
             }
@@ -724,4 +822,39 @@ fn sanitized_http_error(error: reqwest::Error) -> RunError {
         "transport"
     };
     RunError::operation("ACTION_HTTP_FAILED", format!("HTTP action failed ({kind})"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_tool_policies_publish_three_safe_results_and_one_status_only_result() {
+        let registry = builtin_action_registry(
+            &[
+                "current_time".to_owned(),
+                "text_metrics".to_owned(),
+                "integer_calculator".to_owned(),
+                "text_replace".to_owned(),
+                "progress_counter".to_owned(),
+            ],
+            None,
+        )
+        .unwrap();
+        for name in ["current_time", "text_metrics", "integer_calculator"] {
+            let action = registry.resolve(name).unwrap();
+            assert!(action.public_policy().call);
+            assert!(action.public_policy().result_schema.is_some());
+            assert!(action.public_policy().progress_schema.is_none());
+        }
+        let replacement = registry.resolve("text_replace").unwrap();
+        assert!(replacement.public_policy().call);
+        assert!(replacement.public_policy().result_schema.is_none());
+        assert!(replacement.public_policy().progress_schema.is_none());
+
+        let progress = registry.resolve("progress_counter").unwrap();
+        assert!(progress.public_policy().call);
+        assert!(progress.public_policy().progress_schema.is_some());
+        assert!(progress.public_policy().result_schema.is_some());
+    }
 }

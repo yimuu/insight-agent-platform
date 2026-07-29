@@ -16,11 +16,14 @@ use axum::{
 };
 use futures::{stream, StreamExt};
 use insight_agent_platform::{
-    catalog::{compile_agent_dir, DeployedAgent, OwnedProductionLeafDeploymentResolver},
+    catalog::{
+        compile_agent_dir, DeployedAgent, DeploymentPersistencePolicy, LeafDeploymentResolver,
+        OwnedProductionLeafDeploymentResolver, ResolvedLeafDeployment,
+    },
     dsl::CompileError,
     engine::{
-        production_worker_registry_with_live_response, LocalContentAddressedArtifactStore,
-        SubflowContractRegistry,
+        plan::LeafTaskDescriptor, production_worker_registry_with_live_response, LeafTaskKind,
+        LocalContentAddressedArtifactStore, SubflowContractRegistry, WorkerEffectPolicy,
     },
     resources::{
         actions::{
@@ -37,6 +40,7 @@ use insight_agent_platform::{
     runtime::{
         DeployedAgentCatalog, InMemoryLiveResponseBroker, LiveResponseBroker,
         ProductionRunRepository, ResponseStreamEvent, RunError, RunService, RunServiceConfig,
+        TerminalOnlyRunConfig, TerminalOnlyStore,
     },
 };
 use insight_api::v1::{build_router, ApiAuth, ApiState};
@@ -45,6 +49,7 @@ use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 use tower::ServiceExt;
 
 const AGENT_ID: &str = "durable_tool_continuation";
+const TERMINAL_AGENT_ID: &str = "terminal_tool_continuation";
 const MODEL_WORKER_VERSION: &str = "durable-tool-continuation-model-v1";
 const CALL_ID: &str = "call_lookup_1";
 const TOOL_ARGUMENTS: &str = r#"{"query":"durable"}"#;
@@ -254,6 +259,7 @@ struct ActionCall {
 struct ActionState {
     calls: Arc<AtomicUsize>,
     records: Arc<Mutex<Vec<ActionCall>>>,
+    retry_first: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -290,6 +296,15 @@ impl Action for RecordingLookupAction {
         ToolPublicPolicy {
             call: true,
             arguments: ToolPublicArguments::All,
+            progress_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "stage": {"type": "string", "maxLength": 32},
+                    "completed": {"type": "integer", "minimum": 0, "maximum": 2}
+                },
+                "required": ["stage", "completed"],
+                "additionalProperties": false
+            })),
             result_schema: Some(json!({
                 "type": "object",
                 "properties": {"answer": {"type": "string"}},
@@ -315,7 +330,21 @@ impl Action for RecordingLookupAction {
     }
 
     async fn call(&self, input: Value, context: ActionContext) -> Result<Value, RunError> {
-        self.state.calls.fetch_add(1, Ordering::SeqCst);
+        let attempt = self.state.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        assert_eq!(
+            context
+                .publish_progress(json!({"stage": "lookup", "completed": 1}))
+                .await
+                .unwrap(),
+            insight_agent_platform::resources::actions::ActionProgressDisposition::Published
+        );
+        assert_eq!(
+            context
+                .publish_progress(json!({"stage": "lookup", "completed": 2}))
+                .await
+                .unwrap(),
+            insight_agent_platform::resources::actions::ActionProgressDisposition::Published
+        );
         self.state.records.lock().unwrap().push(ActionCall {
             input,
             run_id: context.run_id,
@@ -323,7 +352,80 @@ impl Action for RecordingLookupAction {
             attempt: context.attempt,
             idempotency_key: context.idempotency_key,
         });
+        if attempt == 1 && self.state.retry_first.load(Ordering::SeqCst) {
+            return Err(RunError::infrastructure(
+                "FIXTURE_ACTION_RETRY",
+                "the fixture retries the first Action attempt",
+            ));
+        }
         Ok(json!({"answer": "42"}))
+    }
+}
+
+#[derive(Clone)]
+struct RetryingToolResolver {
+    inner: OwnedProductionLeafDeploymentResolver,
+}
+
+impl LeafDeploymentResolver for RetryingToolResolver {
+    fn resolve_leaf(
+        &self,
+        kind: LeafTaskKind,
+        descriptor: &LeafTaskDescriptor,
+    ) -> Result<ResolvedLeafDeployment, CompileError> {
+        let resolved = self.inner.resolve_leaf(kind, descriptor)?;
+        if kind != LeafTaskKind::Llm {
+            return Ok(resolved);
+        }
+        let mut binding = resolved.binding_evidence().clone();
+        for tool in binding
+            .get_mut("tools")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| {
+                CompileError::new(
+                    "FIXTURE_TOOL_BINDING_INVALID",
+                    "fixture LLM binding must contain tools",
+                )
+            })?
+        {
+            let policy = serde_json::from_value::<WorkerEffectPolicy>(
+                tool.get("effect_policy").cloned().ok_or_else(|| {
+                    CompileError::new(
+                        "FIXTURE_TOOL_BINDING_INVALID",
+                        "fixture tool binding must contain an effect policy",
+                    )
+                })?,
+            )
+            .map_err(|_| {
+                CompileError::new(
+                    "FIXTURE_TOOL_BINDING_INVALID",
+                    "fixture tool effect policy must be valid",
+                )
+            })?;
+            let retrying = WorkerEffectPolicy::frozen(
+                policy.effect_class(),
+                policy.effect_idempotency(),
+                2,
+                20,
+                20,
+                policy.timeout_ms(),
+                policy.cancellation(),
+            )
+            .map_err(|_| {
+                CompileError::new(
+                    "FIXTURE_TOOL_BINDING_INVALID",
+                    "fixture retry policy must be valid",
+                )
+            })?;
+            tool.as_object_mut()
+                .expect("tool binding is a closed object")
+                .insert(
+                    "effect_policy".to_owned(),
+                    serde_json::to_value(retrying).expect("effect policy serializes"),
+                );
+        }
+        ResolvedLeafDeployment::new(resolved.worker_version().clone(), binding)
+            .map(|rebuilt| rebuilt.with_effect_policy(resolved.effect_policy().clone()))
     }
 }
 
@@ -338,6 +440,10 @@ struct Fixture {
 
 impl Fixture {
     async fn start() -> Self {
+        Self::start_with_action_retry(true).await
+    }
+
+    async fn start_with_action_retry(retry_first: bool) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().to_path_buf();
         let agent_root = root.join(AGENT_ID);
@@ -351,6 +457,43 @@ metadata:
   id: {AGENT_ID}
   name: Durable tool continuation
   description: Exercises one complete model-tool-continuation chain.
+inputs: {{}}
+output: string
+workflow:
+  steps:
+    - id: answer
+      type: llm
+      model: fixture_model
+      stream: true
+      publish: true
+      messages:
+        - role: user
+          content:
+            - text: use the lookup tool
+      tools: [lookup]
+      tool_choice: lookup
+      tool_limits:
+        max_rounds: 2
+        max_calls: 2
+      response: string
+    - return: $answer
+"#
+            ),
+        )
+        .unwrap();
+        let terminal_agent_root = root.join(TERMINAL_AGENT_ID);
+        std::fs::create_dir_all(&terminal_agent_root).unwrap();
+        std::fs::write(
+            terminal_agent_root.join("agent.yaml"),
+            format!(
+                r#"api_version: insight.agent/v1
+kind: agent
+metadata:
+  id: {TERMINAL_AGENT_ID}
+  name: Terminal tool continuation
+  description: Exercises terminal-only model-tool progress over real HTTP SSE.
+execution:
+  persistence_mode: terminal_only
 inputs: {{}}
 output: string
 workflow:
@@ -392,6 +535,7 @@ workflow:
             )
             .unwrap();
         let action = ActionState::default();
+        action.retry_first.store(retry_first, Ordering::SeqCst);
         let mut actions = ActionRegistry::default();
         actions
             .register(RecordingLookupAction {
@@ -401,11 +545,26 @@ workflow:
 
         // The continuation capability is deliberately enabled only in this
         // fixture. Production publication remains fail-closed by default.
-        let resolver = OwnedProductionLeafDeploymentResolver::new(&models, &actions)
-            .with_llm_tool_continuation_capability();
+        let base_resolver = OwnedProductionLeafDeploymentResolver::new(&models, &actions)
+            .with_llm_tool_continuation_capability()
+            .with_operation_timeout(Duration::from_secs(2))
+            .unwrap();
+        let resolver = RetryingToolResolver {
+            inner: base_resolver.clone(),
+        };
         let published = Arc::new(compile_agent_dir(&agent_root).unwrap());
-        let deployed = Arc::new(
+        let full_deployed = Arc::new(
             DeployedAgent::publish(published, &resolver, SubflowContractRegistry::new()).unwrap(),
+        );
+        let terminal_published = Arc::new(compile_agent_dir(&terminal_agent_root).unwrap());
+        let terminal_deployed = Arc::new(
+            DeployedAgent::publish_with_persistence_policy(
+                terminal_published,
+                &base_resolver,
+                SubflowContractRegistry::new(),
+                DeploymentPersistencePolicy::terminal_only(false, Duration::from_secs(10)).unwrap(),
+            )
+            .unwrap(),
         );
 
         let broker = Arc::new(InMemoryLiveResponseBroker::new(64, 16).unwrap());
@@ -437,8 +596,8 @@ workflow:
         config.artifact_gc_interval = Duration::from_secs(60);
         config.public_event_prune_interval = Duration::from_secs(60);
         let service = RunService::start_with_artifact_store_graph_publication_and_live_response(
-            DeployedAgentCatalog::new(vec![deployed]).unwrap(),
-            repository as Arc<dyn ProductionRunRepository>,
+            DeployedAgentCatalog::new(vec![full_deployed, terminal_deployed]).unwrap(),
+            repository.clone() as Arc<dyn ProductionRunRepository>,
             workers,
             broker as Arc<dyn LiveResponseBroker>,
             artifact_store,
@@ -447,6 +606,31 @@ workflow:
         )
         .await
         .unwrap();
+        service
+            .enable_terminal_only(
+                repository as Arc<dyn TerminalOnlyStore>,
+                "http://terminal-tool.test".to_owned(),
+                TerminalOnlyRunConfig {
+                    owner_lease: Duration::from_secs(30),
+                    owner_heartbeat: Duration::from_secs(5),
+                    terminal_commit_retry: Duration::from_secs(1),
+                    run_timeout: Duration::from_secs(10),
+                    max_concurrent_runs: 4,
+                    conversations_enabled: false,
+                    inline_content_max_bytes: 4_096,
+                    message_page_size_default: 20,
+                    message_page_size_max: 100,
+                    recent_context_messages: 8,
+                    summary_trigger_messages: 100,
+                    summary_trigger_tokens: 100_000,
+                    run_retention: Duration::from_secs(24 * 60 * 60),
+                    conversation_retention: Duration::from_secs(24 * 60 * 60),
+                    terminal_barrier_timeout: Duration::from_secs(2),
+                    outbound_write_timeout: Duration::from_secs(2),
+                },
+            )
+            .await
+            .unwrap();
         let app = build_router(ApiState {
             service: service.clone(),
             auth: ApiAuth::disabled(),
@@ -484,13 +668,16 @@ impl Transcript {
     }
 }
 
-async fn attached_transcript(app: &Router, model: &ModelState) -> Transcript {
+async fn attached_transcript(app: &Router, model: &ModelState, agent_id: &str) -> Transcript {
     let response = app
         .clone()
         .oneshot(
-            Request::post(format!("/v1/agents/{AGENT_ID}/runs/stream"))
+            Request::post(format!("/v1/agents/{agent_id}/runs/stream"))
                 .header(header::CONTENT_TYPE, "application/json")
-                .header("x-request-id", "request-durable-tool-continuation")
+                .header(
+                    "x-request-id",
+                    format!("request-tool-continuation-{agent_id}"),
+                )
                 .body(Body::from("{}"))
                 .unwrap(),
         )
@@ -829,15 +1016,55 @@ fn assert_public_events(transcript: &Transcript) {
         .enumerate()
         .filter(|(_, event)| event["type"] == "workflow.tool.completed")
         .collect::<Vec<_>>();
-    assert_eq!(started.len(), 1);
+    let failed = transcript
+        .events
+        .iter()
+        .filter(|event| event["type"] == "workflow.tool.failed")
+        .collect::<Vec<_>>();
+    let progress = transcript
+        .events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event["type"] == "workflow.tool.progress")
+        .collect::<Vec<_>>();
+    assert_eq!(started.len(), 2);
+    assert_eq!(progress.len(), 4);
     assert_eq!(completed.len(), 1);
+    assert!(
+        failed.is_empty(),
+        "retryable attempts are not public terminals"
+    );
     assert!(function_start + 5 < started[0].0);
-    assert!(started[0].0 < completed[0].0);
-    assert_eq!(started[0].1["call_id"], CALL_ID);
-    assert_eq!(started[0].1["tool_name"], "lookup");
-    assert_eq!(started[0].1["arguments"], json!({"query": "durable"}));
+    assert!(started[0].0 < progress[0].0);
+    assert!(progress[0].0 < progress[1].0);
+    assert!(progress[1].0 < started[1].0);
+    assert!(started[1].0 < progress[2].0);
+    assert!(progress[2].0 < progress[3].0);
+    assert!(progress[3].0 < completed[0].0);
+    for (index, (_, event)) in started.iter().enumerate() {
+        assert_eq!(event["call_id"], CALL_ID, "started attempt {index}");
+        assert_eq!(event["tool_name"], "lookup", "started attempt {index}");
+        assert_eq!(
+            event["arguments"],
+            json!({"query": "durable"}),
+            "started attempt {index}"
+        );
+    }
+    for (index, (_, event)) in progress.iter().enumerate() {
+        assert_eq!(
+            event["content"],
+            json!([{
+                "type": "output_json",
+                "json": {"stage": "lookup", "completed": index % 2 + 1}
+            }])
+        );
+    }
     assert_eq!(completed[0].1["call_id"], CALL_ID);
     assert_eq!(completed[0].1["tool_name"], "lookup");
+    assert!(
+        completed[0].1["duration_ms"].as_u64().unwrap() >= 20,
+        "logical duration must include retry backoff"
+    );
     assert_eq!(
         completed[0].1["content"],
         json!([{"type": "output_json", "json": {"answer": "42"}}])
@@ -1106,7 +1333,8 @@ async fn assert_durable_authority(
     );
 
     let tool = sqlx::query(
-        "SELECT call_id,call_status,tool_attempt_no,tool_task_id,effect_id,result_json \
+        "SELECT call_id,call_status,tool_attempt_no,tool_task_id,effect_id,result_json,\
+                started_at,completed_at \
          FROM model_tool_calls WHERE run_id=?",
     )
     .bind(&transcript.run_id)
@@ -1115,7 +1343,7 @@ async fn assert_durable_authority(
     .unwrap();
     assert_eq!(tool.get::<String, _>("call_id"), CALL_ID);
     assert_eq!(tool.get::<String, _>("call_status"), "succeeded");
-    assert_eq!(tool.get::<i64, _>("tool_attempt_no"), 1);
+    assert_eq!(tool.get::<i64, _>("tool_attempt_no"), 2);
     assert_eq!(
         serde_json::from_str::<Value>(&tool.get::<String, _>("result_json")).unwrap(),
         json!({"answer": "42"})
@@ -1123,32 +1351,50 @@ async fn assert_durable_authority(
     let tool_task_id = tool.get::<String, _>("tool_task_id");
     let effect_id = tool.get::<String, _>("effect_id");
     assert!(effect_id.starts_with("effect_"));
+    let started_at =
+        chrono::DateTime::parse_from_rfc3339(&tool.get::<String, _>("started_at")).unwrap();
+    let completed_at =
+        chrono::DateTime::parse_from_rfc3339(&tool.get::<String, _>("completed_at")).unwrap();
+    let durable_duration_ms = completed_at
+        .signed_duration_since(started_at)
+        .num_milliseconds()
+        .max(0) as u64;
+    let public_duration_ms = transcript
+        .events
+        .iter()
+        .find(|event| event["type"] == "workflow.tool.completed")
+        .unwrap()["duration_ms"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(public_duration_ms, durable_duration_ms);
 
-    assert_eq!(action.calls.load(Ordering::SeqCst), 1);
-    let record = {
+    assert_eq!(action.calls.load(Ordering::SeqCst), 2);
+    let records = {
         let records = action.records.lock().unwrap();
-        assert_eq!(records.len(), 1);
-        records[0].clone()
+        assert_eq!(records.len(), 2);
+        records.clone()
     };
-    assert_eq!(
-        record.input,
-        json!({
-            "query": "durable",
-            "server_token": SERVER_ONLY_SECRET_SENTINEL
-        })
-    );
-    assert_eq!(record.run_id, transcript.run_id);
-    assert_eq!(
-        record.operation_id,
-        format!(
-            "model_tool_{}",
-            tool_task_id
-                .strip_prefix("task_")
-                .expect("durable tool task uses its closed task namespace")
-        )
-    );
-    assert_eq!(record.attempt, 1);
-    assert_eq!(record.idempotency_key, effect_id);
+    for (index, record) in records.iter().enumerate() {
+        assert_eq!(
+            record.input,
+            json!({
+                "query": "durable",
+                "server_token": SERVER_ONLY_SECRET_SENTINEL
+            })
+        );
+        assert_eq!(record.run_id, transcript.run_id);
+        assert_eq!(
+            record.operation_id,
+            format!(
+                "model_tool_{}",
+                tool_task_id
+                    .strip_prefix("task_")
+                    .expect("durable tool task uses its closed task namespace")
+            )
+        );
+        assert_eq!(record.attempt, index as u32 + 1);
+        assert_eq!(record.idempotency_key, effect_id);
+    }
 
     let function_item = sqlx::query(
         "SELECT item_id,item_status,seal_index,safe_item FROM response_public_items \
@@ -1197,7 +1443,7 @@ async fn assert_durable_authority(
 #[tokio::test]
 async fn attached_run_executes_one_durable_tool_round_and_publishes_the_sealed_contract() {
     let fixture = Fixture::start().await;
-    let transcript = attached_transcript(&fixture.app, &fixture.model).await;
+    let transcript = attached_transcript(&fixture.app, &fixture.model, AGENT_ID).await;
 
     let run = get_run(&fixture.app, &transcript.run_id).await;
     fixture
@@ -1218,6 +1464,112 @@ async fn attached_run_executes_one_durable_tool_round_and_publishes_the_sealed_c
         run["data"]["output"]["data"],
         transcript.terminal()["workflow"]["result"]
     );
+}
+
+#[tokio::test]
+async fn terminal_only_attached_run_uses_the_same_progress_wire_and_persists_calibration() {
+    let fixture = Fixture::start_with_action_retry(false).await;
+    let transcript = attached_transcript(&fixture.app, &fixture.model, TERMINAL_AGENT_ID).await;
+
+    let started = transcript
+        .events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event["type"] == "workflow.tool.started")
+        .collect::<Vec<_>>();
+    let progress = transcript
+        .events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event["type"] == "workflow.tool.progress")
+        .collect::<Vec<_>>();
+    let completed = transcript
+        .events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event["type"] == "workflow.tool.completed")
+        .collect::<Vec<_>>();
+    assert_eq!(started.len(), 1);
+    assert_eq!(progress.len(), 2);
+    assert_eq!(completed.len(), 1);
+    assert!(started[0].0 < progress[0].0);
+    assert!(progress[0].0 < progress[1].0);
+    assert!(progress[1].0 < completed[0].0);
+    assert!(completed[0].1["duration_ms"].as_u64().is_some());
+    assert_eq!(
+        completed[0].1["content"],
+        json!([{"type": "output_json", "json": {"answer": "42"}}])
+    );
+    assert_eq!(
+        progress
+            .iter()
+            .map(|(_, event)| event["content"][0]["json"]["completed"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert!(transcript
+        .events
+        .iter()
+        .any(|event| event["type"] == "response.function_call_arguments.done"));
+    assert!(transcript
+        .events
+        .iter()
+        .any(|event| event["type"] == "response.output_text.delta"));
+
+    let terminal = transcript.terminal();
+    assert_eq!(terminal["type"], "response.completed");
+    assert_eq!(terminal["workflow"]["result"], FINAL_TEXT);
+    assert_eq!(
+        terminal["workflow"]["tool_results"],
+        json!([{
+            "call_id": CALL_ID,
+            "tool_name": "lookup",
+            "content": [{"type": "output_json", "json": {"answer": "42"}}]
+        }])
+    );
+    assert_eq!(
+        terminal["workflow"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "retrievals",
+            "result",
+            "run_id",
+            "tool_results",
+            "usage_status"
+        ])
+    );
+    assert_eq!(fixture.action.calls.load(Ordering::SeqCst), 1);
+
+    fixture
+        .service
+        .shutdown(Duration::from_secs(2))
+        .await
+        .unwrap();
+    let pool = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&fixture.database)
+            .foreign_keys(true),
+    )
+    .await
+    .unwrap();
+    let stored = sqlx::query(
+        "SELECT terminal_state,tool_results_json
+         FROM terminal_run_results WHERE run_id=?",
+    )
+    .bind(&transcript.run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.get::<String, _>("terminal_state"), "succeeded");
+    assert_eq!(
+        serde_json::from_str::<Value>(&stored.get::<String, _>("tool_results_json")).unwrap(),
+        terminal["workflow"]["tool_results"]
+    );
+    pool.close().await;
 }
 #[path = "support/database.rs"]
 mod database;

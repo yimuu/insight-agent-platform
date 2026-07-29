@@ -520,6 +520,7 @@
     "response.failed",
     "error",
     "workflow.tool.started",
+    "workflow.tool.progress",
     "workflow.tool.completed",
     "workflow.tool.failed",
     "workflow.retrieval.completed",
@@ -719,10 +720,26 @@
       }
     },
     {
-      "type": "workflow.tool.completed",
+      "type": "workflow.tool.progress",
       "sequence_number": 17,
       "call_id": "call_phase0",
       "tool_name": "lookup",
+      "content": [
+        {
+          "type": "output_json",
+          "json": {
+            "completed": 1,
+            "total": 2
+          }
+        }
+      ]
+    },
+    {
+      "type": "workflow.tool.completed",
+      "sequence_number": 18,
+      "call_id": "call_phase0",
+      "tool_name": "lookup",
+      "duration_ms": 12,
       "content": [
         {
           "type": "output_text",
@@ -732,9 +749,10 @@
     },
     {
       "type": "workflow.tool.failed",
-      "sequence_number": 18,
+      "sequence_number": 19,
       "call_id": "call_phase0",
       "tool_name": "lookup",
+      "duration_ms": 13,
       "error": {
         "code": "TOOL_FAILED",
         "message": "tool failed"
@@ -742,7 +760,7 @@
     },
     {
       "type": "workflow.retrieval.completed",
-      "sequence_number": 19,
+      "sequence_number": 20,
       "retrieval_id": "retrieval_phase0",
       "query": "phase0",
       "results": [
@@ -760,7 +778,7 @@
     },
     {
       "type": "workflow.stream.gap",
-      "sequence_number": 20,
+      "sequence_number": 21,
       "item_id": "message_phase0",
       "attempt_no": 2,
       "missing_from": 8,
@@ -770,7 +788,7 @@
     },
     {
       "type": "workflow.response.timed_out",
-      "sequence_number": 21,
+      "sequence_number": 22,
       "response": {
         "id": "response_phase0",
         "object": "response",
@@ -796,7 +814,7 @@
     },
     {
       "type": "workflow.response.cancelled",
-      "sequence_number": 22,
+      "sequence_number": 23,
       "response": {
         "id": "response_phase0",
         "object": "response",
@@ -815,7 +833,7 @@
     },
     {
       "type": "workflow.response.interrupted",
-      "sequence_number": 23,
+      "sequence_number": 24,
       "response": {
         "id": "response_phase0",
         "object": "response",

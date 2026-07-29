@@ -1693,6 +1693,7 @@ impl TerminalOnlyRunEngine {
                 error_code: "RUN_INTERRUPTED".to_owned(),
                 safe_message: None,
                 usage: None,
+                tool_results: Vec::new(),
             },
             TerminalRunDerivedState::Succeeded => {
                 let result = view.result.as_ref().ok_or_else(terminal_unavailable)?;
@@ -1703,6 +1704,7 @@ impl TerminalOnlyRunEngine {
                 TerminalExecutionOutcome::Succeeded {
                     output,
                     usage: result.usage_json.clone(),
+                    tool_results: result.tool_results.clone(),
                 }
             }
             TerminalRunDerivedState::Failed => {
@@ -1715,10 +1717,25 @@ impl TerminalOnlyRunEngine {
                         .unwrap_or_else(|| "RUN_FAILED".to_owned()),
                     safe_message: None,
                     usage: result.usage_json.clone(),
+                    tool_results: result.tool_results.clone(),
                 }
             }
-            TerminalRunDerivedState::Cancelled => TerminalExecutionOutcome::Cancelled,
-            TerminalRunDerivedState::TimedOut => TerminalExecutionOutcome::TimedOut,
+            TerminalRunDerivedState::Cancelled => TerminalExecutionOutcome::Cancelled {
+                tool_results: view
+                    .result
+                    .as_ref()
+                    .ok_or_else(terminal_unavailable)?
+                    .tool_results
+                    .clone(),
+            },
+            TerminalRunDerivedState::TimedOut => TerminalExecutionOutcome::TimedOut {
+                tool_results: view
+                    .result
+                    .as_ref()
+                    .ok_or_else(terminal_unavailable)?
+                    .tool_results
+                    .clone(),
+            },
         };
         let snapshot = terminal_snapshot(&admission.run_id, &outcome)?;
         let (_terminal, receiver) = watch::channel(Some(snapshot));
@@ -1884,6 +1901,7 @@ impl TerminalOnlyRunEngine {
             normalized,
             cancellation.clone(),
             execution_config,
+            Arc::clone(&self.inner.live_response_broker),
         )
         .await
         {
@@ -1893,6 +1911,7 @@ impl TerminalOnlyRunEngine {
                 error_code: error.code().to_owned(),
                 safe_message: None,
                 usage: None,
+                tool_results: Vec::new(),
             },
         };
         let (output_ref, output_hash) = match outcome.output() {
@@ -1908,11 +1927,13 @@ impl TerminalOnlyRunEngine {
             {
                 Ok((reference, hash)) => (Some(reference), Some(hash)),
                 Err(_) => {
+                    let tool_results = outcome.tool_results().to_vec();
                     outcome = TerminalExecutionOutcome::Failed {
                         failure_kind: TerminalFailureKind::Infrastructure,
                         error_code: TERMINAL_OUTPUT_UNAVAILABLE.to_owned(),
                         safe_message: None,
                         usage: None,
+                        tool_results,
                     };
                     (None, None)
                 }
@@ -1929,6 +1950,7 @@ impl TerminalOnlyRunEngine {
             output_hash,
             error_code: outcome.error_code().map(str::to_owned),
             usage_json: outcome.usage().cloned(),
+            tool_results: outcome.tool_results().to_vec(),
             started_at,
             terminal_at,
         };
@@ -3366,8 +3388,8 @@ fn terminal_state(outcome: &TerminalExecutionOutcome) -> TerminalState {
     match outcome {
         TerminalExecutionOutcome::Succeeded { .. } => TerminalState::Succeeded,
         TerminalExecutionOutcome::Failed { .. } => TerminalState::Failed,
-        TerminalExecutionOutcome::Cancelled => TerminalState::Cancelled,
-        TerminalExecutionOutcome::TimedOut => TerminalState::TimedOut,
+        TerminalExecutionOutcome::Cancelled { .. } => TerminalState::Cancelled,
+        TerminalExecutionOutcome::TimedOut { .. } => TerminalState::TimedOut,
     }
 }
 
@@ -3387,10 +3409,12 @@ fn terminal_snapshot(
             None,
             Some(error_code.as_str()),
         ),
-        TerminalExecutionOutcome::Cancelled => {
+        TerminalExecutionOutcome::Cancelled { .. } => {
             (insight_engine::RunLifecycle::Cancelled, None, None)
         }
-        TerminalExecutionOutcome::TimedOut => (insight_engine::RunLifecycle::TimedOut, None, None),
+        TerminalExecutionOutcome::TimedOut { .. } => {
+            (insight_engine::RunLifecycle::TimedOut, None, None)
+        }
     };
     let pending = build_terminal_response_snapshot(TerminalResponseSnapshotInput {
         run_id,
@@ -3399,7 +3423,7 @@ fn terminal_snapshot(
         error_code: error,
         items: Vec::new(),
         model_calls: Vec::new(),
-        tool_results: Vec::new(),
+        tool_results: outcome.tool_results().to_vec(),
         retrievals: Vec::new(),
     })
     .map_err(|_| terminal_unavailable())?;

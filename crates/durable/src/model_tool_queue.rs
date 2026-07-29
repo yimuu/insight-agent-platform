@@ -610,6 +610,7 @@ pub struct ModelToolTaskCommitReceipt {
     committed_lease_epoch: LeaseEpoch,
     next_available_at: Option<DateTime<Utc>>,
     continuation_status: ModelToolContinuationStatus,
+    duration_ms: Option<u64>,
 }
 
 impl ModelToolTaskCommitReceipt {
@@ -620,8 +621,10 @@ impl ModelToolTaskCommitReceipt {
         committed_lease_epoch: LeaseEpoch,
         next_available_at: Option<DateTime<Utc>>,
         continuation_status: ModelToolContinuationStatus,
+        duration_ms: Option<u64>,
     ) -> Result<Self, RepositoryError> {
         if (disposition == ModelToolTaskDisposition::RetryScheduled) != next_available_at.is_some()
+            || (disposition == ModelToolTaskDisposition::RetryScheduled && duration_ms.is_some())
         {
             return Err(RepositoryError::invalid_data());
         }
@@ -632,6 +635,7 @@ impl ModelToolTaskCommitReceipt {
             committed_lease_epoch,
             next_available_at,
             continuation_status,
+            duration_ms,
         })
     }
 
@@ -652,6 +656,11 @@ impl ModelToolTaskCommitReceipt {
     }
     pub fn continuation_status(&self) -> ModelToolContinuationStatus {
         self.continuation_status
+    }
+    /// Elapsed wall-clock time from the logical call's first durable start to
+    /// its terminal commit. Retries intentionally do not reset this clock.
+    pub fn duration_ms(&self) -> Option<u64> {
+        self.duration_ms
     }
 }
 
@@ -1106,6 +1115,7 @@ pub mod adapter {
         committed_lease_epoch: LeaseEpoch,
         next_available_at: Option<DateTime<Utc>>,
         continuation_status: ModelToolContinuationStatus,
+        duration_ms: Option<u64>,
     ) -> Result<ModelToolTaskCommitReceipt, RepositoryError> {
         ModelToolTaskCommitReceipt::new(
             tool_task_id,
@@ -1114,6 +1124,7 @@ pub mod adapter {
             committed_lease_epoch,
             next_available_at,
             continuation_status,
+            duration_ms,
         )
     }
 

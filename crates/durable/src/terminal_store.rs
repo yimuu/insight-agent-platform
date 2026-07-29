@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_engine::{
-    repository::RepositoryError, ContentHash, DefinitionRevisionId, DeploymentRevisionId,
-    PersistenceMode, RunId,
+    repository::RepositoryError, response::WorkflowToolResult, ContentHash, DefinitionRevisionId,
+    DeploymentRevisionId, PersistenceMode, RunId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -158,6 +158,7 @@ pub struct NewTerminalRunResult {
     pub output_hash: Option<ContentHash>,
     pub error_code: Option<String>,
     pub usage_json: Option<Value>,
+    pub tool_results: Vec<WorkflowToolResult>,
     pub started_at: DateTime<Utc>,
     pub terminal_at: DateTime<Utc>,
 }
@@ -171,6 +172,7 @@ pub struct TerminalRunResult {
     pub output_hash: Option<ContentHash>,
     pub error_code: Option<String>,
     pub usage_json: Option<Value>,
+    pub tool_results: Vec<WorkflowToolResult>,
     pub started_at: DateTime<Utc>,
     pub terminal_at: DateTime<Utc>,
 }

@@ -9,6 +9,10 @@
 
 ### Added
 
+- `response-stream/v1` 新增 `workflow.tool.progress`，Action 可通过独立闭合 Schema 和 scoped
+  best-effort publisher 公开有界的 `output_text/output_json` 执行进度。
+- `progress_tool_assistant` 与 `progress_counter` 示例，用于演示模型工具参数、两次进度、公开结果
+  和 assistant continuation 的完整 Attached SSE 生命周期。
 - 显式 opt-in 的 `terminal_only` 执行路径，只持久化 admission 与 terminal result；进程失败时
   未完成 Run 明确进入 `interrupted`，不伪装成可恢复执行。
 - tenant/user 隔离的 Conversation、message、summary、cursor pagination、archive 与 privacy
@@ -18,6 +22,12 @@
 
 ### Changed
 
+- `workflow.tool.completed/failed` 现在包含 logical tool call 的 `duration_ms`；full runtime 使用
+  durable 首次执行时间并覆盖 retry/backoff，terminal-only 使用同边界的进程内计时。
+- terminal `workflow.tool_results` 现在保留公开 status-only 成功调用并使用空 `content` 校准；
+  `current_time`、`text_metrics`、`integer_calculator` 公开安全结果，`text_replace` 结果继续私有。
+- `response-stream/v1` 闭合事件集合由 24 个原地切换为 25 个；这是 `0.1.x` 受控客户端同步升级，
+  不提供旧/新 v1 混合部署兼容层。
 - Deployment Revision identity 冻结 `full|terminal_only` persistence policy；Run DTO 显式返回
   recovery、event replay 与 wait capability。
 - Quickstart、Helm chart 和未声明 Deployment Revision 的默认 persistence mode 继续为 `full`；
@@ -25,6 +35,8 @@
 
 ### Security
 
+- 工具参数、进度和结果继续独立双重授权；progress 在冻结 Schema、公共结构/大小限制和频率限制
+  后才进入 live broker，且不会进入 terminal result、Conversation 或默认正文日志。
 - Conversation principal、tombstone 后公共读取、跨 tenant object 删除和密文明文泄漏均由
   repository/API 合同与资格测试覆盖。
 

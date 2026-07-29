@@ -1667,6 +1667,18 @@ impl LeafTaskExecutor for ActionTaskExecutor {
         request: &TaskExecutionRequest,
         cancellation: CancellationToken,
     ) -> Result<TaskExecutionResult, WorkerFailure> {
+        let services = WorkerRuntimeServices::default();
+        self.execute_with_runtime_services(context, request, &services, cancellation)
+            .await
+    }
+
+    async fn execute_with_runtime_services(
+        &self,
+        context: &WorkerExecutionContext,
+        request: &TaskExecutionRequest,
+        services: &WorkerRuntimeServices,
+        cancellation: CancellationToken,
+    ) -> Result<TaskExecutionResult, WorkerFailure> {
         if request.task_kind() != SchedulerTaskKind::Action {
             return Err(invariant(ACTION_DESCRIPTOR_INVALID));
         }
@@ -1709,13 +1721,21 @@ impl LeafTaskExecutor for ActionTaskExecutor {
             cancellation_for_action.cancelled().await;
             stop_for_action.request(StopReason::Cancelled);
         });
-        let action_context = ActionContext::for_durable_effect(
+        let mut action_context = ActionContext::for_durable_effect(
             request.run_id().as_str(),
             request.node_id().as_str(),
             context.attempt_no().get(),
             request.effect_id().as_str(),
             control,
         );
+        if model_tool_request {
+            if let Some(publisher) =
+                worker_adapter::services_model_tool_progress_publisher(services)
+            {
+                action_context =
+                    action_context.with_model_tool_progress_publisher(publisher.clone());
+            }
+        }
         let call = async {
             if model_tool_request {
                 action.call_model_tool(input, action_context).await

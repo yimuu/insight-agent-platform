@@ -1226,6 +1226,7 @@ workflow:
             output_hash: None,
             error_code: None,
             usage_json: None,
+            tool_results: Vec::new(),
             started_at: chrono::Utc::now(),
             terminal_at: chrono::Utc::now(),
         })

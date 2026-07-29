@@ -1958,12 +1958,7 @@ async fn model_tool_demo_actions_return_schema_valid_outputs() {
     )
     .unwrap();
 
-    for action_name in [
-        "current_time",
-        "text_metrics",
-        "integer_calculator",
-        "text_replace",
-    ] {
+    for action_name in ["current_time", "text_metrics", "integer_calculator"] {
         let action = registry.resolve(action_name).unwrap();
         let policy = action.public_policy();
         assert!(policy.call, "{action_name} must publish lifecycle metadata");
@@ -1971,8 +1966,21 @@ async fn model_tool_demo_actions_return_schema_valid_outputs() {
             policy.arguments,
             insight_resources::actions::ToolPublicArguments::Private
         ));
-        assert!(policy.result_schema.is_none());
+        assert!(
+            policy.result_schema.is_some(),
+            "{action_name} must publish its bounded safe result"
+        );
+        assert!(policy.progress_schema.is_none());
     }
+    let replacement = registry.resolve("text_replace").unwrap();
+    let replacement_policy = replacement.public_policy();
+    assert!(replacement_policy.call);
+    assert!(matches!(
+        replacement_policy.arguments,
+        insight_resources::actions::ToolPublicArguments::Private
+    ));
+    assert!(replacement_policy.result_schema.is_none());
+    assert!(replacement_policy.progress_schema.is_none());
 
     let metrics = registry
         .resolve("text_metrics")

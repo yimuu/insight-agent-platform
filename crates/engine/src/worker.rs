@@ -148,6 +148,7 @@ impl ModelCallAuthority {
 /// the stable root facade.
 #[doc(hidden)]
 pub mod adapter {
+    use serde_json::Value;
     use tokio::sync::{mpsc, oneshot};
     use tokio_util::sync::CancellationToken;
 
@@ -155,6 +156,94 @@ pub mod adapter {
         ResponseItemAuthority, SafeError, TaskExecutionRequest, TaskExecutionResult,
         WorkerExecutionContext, WorkerExecutorRegistry, WorkerFailure, WorkerRuntimeServices,
     };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ModelToolProgressDisposition {
+        Published,
+        Dropped,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ModelToolProgressError {
+        code: &'static str,
+        message: &'static str,
+    }
+
+    impl ModelToolProgressError {
+        pub const fn code(self) -> &'static str {
+            self.code
+        }
+
+        pub const fn message(self) -> &'static str {
+            self.message
+        }
+    }
+
+    pub const fn invalid_model_tool_progress() -> ModelToolProgressError {
+        ModelToolProgressError {
+            code: "MODEL_TOOL_PUBLIC_PROGRESS_INVALID",
+            message: "model tool public progress is invalid",
+        }
+    }
+
+    pub struct ModelToolProgressRequest {
+        value: Value,
+        response: oneshot::Sender<Result<ModelToolProgressDisposition, ModelToolProgressError>>,
+    }
+
+    impl ModelToolProgressRequest {
+        pub fn value(&self) -> &Value {
+            &self.value
+        }
+
+        pub fn respond(self, result: Result<ModelToolProgressDisposition, ModelToolProgressError>) {
+            let _ = self.response.send(result);
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct ModelToolProgressPublisher {
+        requests: mpsc::Sender<ModelToolProgressRequest>,
+    }
+
+    impl ModelToolProgressPublisher {
+        pub async fn publish(
+            &self,
+            value: Value,
+        ) -> Result<ModelToolProgressDisposition, ModelToolProgressError> {
+            let (response, result) = oneshot::channel();
+            let request = ModelToolProgressRequest { value, response };
+            match self.requests.try_send(request) {
+                Ok(()) => result
+                    .await
+                    .unwrap_or(Ok(ModelToolProgressDisposition::Dropped)),
+                Err(mpsc::error::TrySendError::Full(_))
+                | Err(mpsc::error::TrySendError::Closed(_)) => {
+                    Ok(ModelToolProgressDisposition::Dropped)
+                }
+            }
+        }
+    }
+
+    pub struct ModelToolProgressRequests {
+        requests: mpsc::Receiver<ModelToolProgressRequest>,
+    }
+
+    impl ModelToolProgressRequests {
+        pub async fn recv(&mut self) -> Option<ModelToolProgressRequest> {
+            self.requests.recv().await
+        }
+    }
+
+    pub fn model_tool_progress_channel(
+        capacity: usize,
+    ) -> (ModelToolProgressPublisher, ModelToolProgressRequests) {
+        let (requests, receiver) = mpsc::channel(capacity.max(1));
+        (
+            ModelToolProgressPublisher { requests },
+            ModelToolProgressRequests { requests: receiver },
+        )
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ModelCallPublicItemReservationError {
@@ -262,6 +351,20 @@ pub mod adapter {
         services.model_call_public_item_allocator.as_ref()
     }
 
+    pub fn services_with_model_tool_progress_publisher(
+        mut services: WorkerRuntimeServices,
+        publisher: ModelToolProgressPublisher,
+    ) -> WorkerRuntimeServices {
+        services.model_tool_progress_publisher = Some(publisher);
+        services
+    }
+
+    pub fn services_model_tool_progress_publisher(
+        services: &WorkerRuntimeServices,
+    ) -> Option<&ModelToolProgressPublisher> {
+        services.model_tool_progress_publisher.as_ref()
+    }
+
     pub fn worker_failure_typed_safe_error(failure: &WorkerFailure) -> Option<&SafeError> {
         failure.typed_safe_error()
     }
@@ -286,6 +389,7 @@ pub mod adapter {
 #[derive(Clone, Default)]
 pub struct WorkerRuntimeServices {
     model_call_public_item_allocator: Option<adapter::ModelCallPublicItemAllocator>,
+    model_tool_progress_publisher: Option<adapter::ModelToolProgressPublisher>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
