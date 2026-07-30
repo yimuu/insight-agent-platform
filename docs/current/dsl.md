@@ -141,8 +141,8 @@ JSON Schema；compiler 会生成并执行输入、节点响应和最终输出校
 `stream`、`tools`、`tool_choice`、`temperature`、`enable_thinking` 和 token budget 都是本次调用
 的选择，属于 LLM 步骤并进入 Canonical Plan，不属于 Provider Catalog。`response` 是唯一的输出
 合同：非字符串响应始终附加平台管理的 JSON Schema 指令，并在本地完成 JSON 解析与类型校验。
-模型原生 `json_schema` 或 `json_object` 模式只作为内部传输优化；没有原生模式的模型仍可使用
-Prompt fallback，Agent 不声明结构化输出 capability。
+Provider Catalog 和 Agent 不声明结构化输出 capability，常规运行路径也不发送 Provider 原生
+`response_format`。
 
 LLM 节点可以通过部署时冻结的白名单调用注册 Action：
 

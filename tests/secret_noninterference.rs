@@ -114,7 +114,6 @@ async fn configured_secret_never_enters_plan_ledger_graph_trace_or_diagnostics()
                     "example-chat".to_owned(),
                     ProviderModelProfileConfig {
                         input: BTreeSet::from([ModelInputModality::Text]),
-                        native_structured_output: None,
                     },
                 )]),
                 connect_timeout: Duration::from_secs(2),
@@ -202,7 +201,7 @@ workflow:
             SchedulerTaskKind::Llm,
             leaf.descriptor().implementation.clone(),
             leaf.descriptor().descriptor_version.clone(),
-            VersionTag::new("openai-chat-adapter-2.0.0").unwrap(),
+            VersionTag::new("openai-chat-adapter-2.1.0").unwrap(),
             Arc::new(FixtureExecutor),
         )
         .unwrap();

@@ -5,9 +5,9 @@ use std::{
 
 use insight_agent_platform::{
     config::{
-        ModelInputModality, ModelPolicyConfig, ModelSelectorConfig, NativeStructuredOutput,
-        ProviderExtensionConfig, ProviderExtensionSource, ProviderModelProfileConfig,
-        ProviderTransportPolicy, ProvidersConfig,
+        ModelInputModality, ModelPolicyConfig, ModelSelectorConfig, ProviderExtensionConfig,
+        ProviderExtensionSource, ProviderModelProfileConfig, ProviderTransportPolicy,
+        ProvidersConfig,
     },
     resources::{
         config::load_model_registry_with_env,
@@ -39,9 +39,7 @@ fn builtin_catalog_resolves_provider_model_capabilities_and_official_secret() {
         .unwrap();
 
     assert!(!text.capabilities().contains(&ModelCapability::Vision));
-    assert!(text
-        .capabilities()
-        .contains(&ModelCapability::JsonObjectOutput));
+    assert_eq!(text.capabilities(), BTreeSet::new());
     assert!(vision.capabilities().contains(&ModelCapability::Vision));
     assert_eq!(
         text.request_capabilities(),
@@ -81,14 +79,15 @@ fn deployment_identity_pins_route_catalog_and_output_policy_but_not_secret_value
 
     assert_eq!(first.binding_hash(), second.binding_hash());
     assert_eq!(first.evidence(), second.evidence());
-    assert_eq!(first.worker_version(), "openai-chat-adapter-2.0.0");
+    assert_eq!(first.worker_version(), "openai-chat-adapter-2.1.0");
     assert_eq!(first.evidence()["provider_route"], "dashscope-cn");
     assert_eq!(first.evidence()["model_id"], "qwen3.6-flash");
     assert_eq!(first.evidence()["credential_env"], "DASHSCOPE_API_KEY");
     assert_eq!(
         first.evidence()["output_policy"],
-        "prompt-local-validation-with-optional-native-v1"
+        "prompt-local-validation-v1"
     );
+    assert!(first.evidence().get("native_structured_output").is_none());
     assert!(first.evidence()["catalog_digest"]
         .as_str()
         .unwrap()
@@ -130,7 +129,7 @@ fn catalog_is_fail_closed_for_unknown_provider_and_model() {
 }
 
 #[test]
-fn custom_provider_supports_opaque_model_ids_and_operator_assertions() {
+fn custom_provider_supports_opaque_model_ids_and_input_modalities() {
     let providers = ProvidersConfig {
         extensions: BTreeMap::from([(
             "company-llm".to_owned(),
@@ -145,7 +144,6 @@ fn custom_provider_supports_opaque_model_ids_and_operator_assertions() {
                             ModelInputModality::Text,
                             ModelInputModality::Image,
                         ]),
-                        native_structured_output: Some(NativeStructuredOutput::JsonSchema),
                     },
                 )]),
                 connect_timeout: Duration::from_secs(2),
@@ -163,9 +161,6 @@ fn custom_provider_supports_opaque_model_ids_and_operator_assertions() {
     let identity = registry.deployment_identity(&selector).unwrap();
 
     assert!(model.capabilities().contains(&ModelCapability::Vision));
-    assert!(model
-        .capabilities()
-        .contains(&ModelCapability::JsonSchemaOutput));
     assert!(identity.evidence()["provider_extension_digest"]
         .as_str()
         .unwrap()
@@ -177,6 +172,9 @@ fn custom_provider_supports_opaque_model_ids_and_operator_assertions() {
     assert!(!serde_json::to_string(identity.evidence())
         .unwrap()
         .contains("private-key"));
+    assert!(!serde_json::to_string(identity.evidence())
+        .unwrap()
+        .contains("native_structured_output"));
 
     let mut endpoint_with_query = providers.clone();
     endpoint_with_query
@@ -208,7 +206,6 @@ fn inherited_route_uses_a_distinct_identity_and_can_add_models() {
                     "qwen-new-model".to_owned(),
                     ProviderModelProfileConfig {
                         input: BTreeSet::from([ModelInputModality::Text]),
-                        native_structured_output: None,
                     },
                 )]),
                 connect_timeout: Duration::from_secs(5),
@@ -265,7 +262,6 @@ fn inherited_route_uses_a_distinct_identity_and_can_add_models() {
             "qwen3.6-flash".to_owned(),
             ProviderModelProfileConfig {
                 input: BTreeSet::from([ModelInputModality::Text]),
-                native_structured_output: None,
             },
         );
     assert_eq!(

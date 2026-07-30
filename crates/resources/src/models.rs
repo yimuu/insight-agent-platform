@@ -120,19 +120,6 @@ impl ModelRequestCapability {
     }
 }
 
-pub(crate) fn select_structured_output_capability(
-    capabilities: &BTreeSet<ModelCapability>,
-    json_object_compatible: bool,
-) -> Option<ModelCapability> {
-    if capabilities.contains(&ModelCapability::JsonSchemaOutput) {
-        Some(ModelCapability::JsonSchemaOutput)
-    } else if json_object_compatible && capabilities.contains(&ModelCapability::JsonObjectOutput) {
-        Some(ModelCapability::JsonObjectOutput)
-    } else {
-        None
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatRole {
@@ -1279,18 +1266,9 @@ impl ModelRegistry {
 /// they are not part of the platform's stable public resource surface.
 #[doc(hidden)]
 pub mod adapter {
-    use std::collections::BTreeSet;
-
     use insight_engine::execution::RunError;
 
-    use super::{ChatRequest, ModelCapability};
-
-    pub fn select_structured_output_capability(
-        capabilities: &BTreeSet<ModelCapability>,
-        json_object_compatible: bool,
-    ) -> Option<ModelCapability> {
-        super::select_structured_output_capability(capabilities, json_object_compatible)
-    }
+    use super::ChatRequest;
 
     pub fn validate_chat_request(request: &ChatRequest) -> Result<(), RunError> {
         super::validate_chat_request(request)

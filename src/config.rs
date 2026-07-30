@@ -79,16 +79,9 @@ pub enum ModelInputModality {
     Image,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NativeStructuredOutput {
-    JsonObject,
-    JsonSchema,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderModelProfileConfig {
     pub input: BTreeSet<ModelInputModality>,
-    pub native_structured_output: Option<NativeStructuredOutput>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,8 +536,6 @@ enum ProviderCredentialTypeYaml {
 struct ProviderModelProfileYaml {
     #[serde(default)]
     input: BTreeSet<ModelInputModalityYaml>,
-    #[serde(default)]
-    native_structured_output: Option<NativeStructuredOutputYaml>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -552,13 +543,6 @@ struct ProviderModelProfileYaml {
 enum ModelInputModalityYaml {
     Text,
     Image,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum NativeStructuredOutputYaml {
-    JsonObject,
-    JsonSchema,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1225,22 +1209,7 @@ fn resolve_providers(
                         ),
                     ));
                 }
-                let native_structured_output =
-                    profile.native_structured_output.map(|mode| match mode {
-                        NativeStructuredOutputYaml::JsonObject => {
-                            NativeStructuredOutput::JsonObject
-                        }
-                        NativeStructuredOutputYaml::JsonSchema => {
-                            NativeStructuredOutput::JsonSchema
-                        }
-                    });
-                Ok((
-                    model_id,
-                    ProviderModelProfileConfig {
-                        input,
-                        native_structured_output,
-                    },
-                ))
+                Ok((model_id, ProviderModelProfileConfig { input }))
             })
             .collect::<Result<BTreeMap<_, _>, PlatformConfigError>>()?;
         let transport = match extension.transport.unwrap_or_default().plaintext_http {

@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use insight_dsl::{template::compile_template, CompileError};
 use insight_engine::{
     execution::{stop_pair, ExecutionControl, RunError, RunErrorKind, StopReason},
-    plan::{DescriptorValue, PlanType, VersionTag},
+    plan::{DescriptorValue, VersionTag},
     run_stream::{
         LiveRunStreamBroker, LiveRunStreamItemIdentity, LiveRunStreamPayload,
         LiveRunStreamPublication, LiveRunStreamSeal, LiveRunStreamSealStatus, RunOutputContentPart,
@@ -42,11 +42,10 @@ use insight_engine::{
 use insight_resources::{
     actions::{ActionContext, ActionRegistry, EffectClass, IdempotencyClass, ToolPublicPolicy},
     models::{
-        adapter::{select_structured_output_capability, validate_chat_request},
-        model_response_too_large, ChatContent, ChatContentPart, ChatFinishReason, ChatMessage,
-        ChatRequest, ChatRequestMode, ChatResponseFormat, ChatRole, ChatToolCall,
-        ChatToolCallDelta, ChatToolChoice, ChatToolDefinition, ChatUsage, ModelCapability,
-        ModelRegistry, ModelRequestCapability, ModelSelector,
+        adapter::validate_chat_request, model_response_too_large, ChatContent, ChatContentPart,
+        ChatFinishReason, ChatMessage, ChatRequest, ChatRequestMode, ChatRole, ChatToolCall,
+        ChatToolCallDelta, ChatToolChoice, ChatToolDefinition, ChatUsage, ModelRegistry,
+        ModelRequestCapability, ModelSelector,
     },
 };
 
@@ -653,34 +652,17 @@ impl LeafTaskExecutor for LlmTaskExecutor {
         let mut messages = render_messages(configuration, &bindings)?;
         append_model_continuation(&mut messages, context)?;
         let output = only_output(request)?;
-        let response_format = if output.value_type().string_constraints().is_some() {
-            None
-        } else {
+        if output.value_type().string_constraints().is_none() {
             let schema = output
                 .value_type()
                 .json_schema_document()
                 .map_err(|_| invariant(LLM_DESCRIPTOR_INVALID))?;
             append_structured_output_instruction(&mut messages, &schema)?;
-            select_structured_output_capability(
-                &model.capabilities(),
-                matches!(output.value_type(), PlanType::Object { .. }),
-            )
-            .map(|capability| match capability {
-                ModelCapability::JsonObjectOutput => ChatResponseFormat::JsonObject {
-                    name: "response".to_owned(),
-                    schema: schema.clone(),
-                },
-                ModelCapability::JsonSchemaOutput => ChatResponseFormat::JsonSchema {
-                    name: "response".to_owned(),
-                    schema: schema.clone(),
-                },
-                ModelCapability::Vision => unreachable!("vision is not structured output"),
-            })
-        };
+        }
         let chat_request = ChatRequest {
             messages,
             parameters,
-            response_format,
+            response_format: None,
             tools: tool_contract.definitions(),
             tool_choice: tool_contract.choice.clone(),
         };
@@ -696,10 +678,8 @@ impl LeafTaskExecutor for LlmTaskExecutor {
                 ChatRequestMode::Complete => "complete",
                 ChatRequestMode::Streaming => "streaming",
             },
-            structured_output_mode = match &chat_request.response_format {
-                Some(ChatResponseFormat::JsonSchema { .. }) => "native_json_schema",
-                Some(ChatResponseFormat::JsonObject { .. }) => "native_json_object",
-                None if output.value_type().string_constraints().is_some() => "text",
+            structured_output_mode = match output.value_type().string_constraints() {
+                Some(_) => "text",
                 None => "prompt_only",
             },
             "LLM request prepared from frozen provider/model binding"
@@ -2432,7 +2412,7 @@ mod tests {
         deterministic_tool_identity, model_tool_task_claim_new, parse_action_from_stored_evidence,
     };
     use insight_engine::{
-        plan::{DataPortId, LeafTaskDescriptor, PlanProperty, PortName},
+        plan::{DataPortId, LeafTaskDescriptor, PlanProperty, PlanType, PortName},
         run_stream::{LiveRunStreamDelivery, LiveRunStreamSubscriber, RunStreamEventType},
         scheduler::{BoundTaskInput, SchedulerAction, SchedulerCheckpointId, SchedulerTaskId},
         worker::{
@@ -2445,7 +2425,7 @@ mod tests {
         actions::{Action, ActionDescriptor, CancellationClass, IdempotencyClass},
         models::{
             ChatChunk, ChatEvent, ChatEventStream, ChatModel, ChatResponse, ChatStream,
-            ModelDeploymentIdentity,
+            ModelCapability, ModelDeploymentIdentity,
         },
     };
     use serde_json::{json, Value};
@@ -4116,7 +4096,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn structured_outputs_use_prompt_and_local_validation_for_every_native_mode() {
+    async fn structured_outputs_always_use_prompt_and_local_validation_without_native_mode() {
         let output_type = PlanType::Object {
             properties: BTreeMap::from([(
                 "answer".to_owned(),
@@ -4198,18 +4178,10 @@ mod tests {
                 assert!(prompt.contains("Return only valid JSON"), "{mode}");
                 assert!(prompt.contains("JSON Schema"), "{mode}");
                 assert!(prompt.contains("\"answer\""), "{mode}");
-                match mode {
-                    "prompt_only" => assert!(captured.response_format.is_none()),
-                    "json_object" => assert!(matches!(
-                        &captured.response_format,
-                        Some(ChatResponseFormat::JsonObject { .. })
-                    )),
-                    "json_schema" => assert!(matches!(
-                        &captured.response_format,
-                        Some(ChatResponseFormat::JsonSchema { .. })
-                    )),
-                    _ => unreachable!(),
-                }
+                assert!(
+                    captured.response_format.is_none(),
+                    "{mode} must not activate provider-native response_format"
+                );
             }
         }
     }

@@ -27,7 +27,8 @@
 
 - Agent `llm.model` clean-cut 为严格的 `{provider, id}` selector；删除模型业务别名、必需的
   `models.yaml` / `models.config` 和公共 `json_object_output` 配置。结构化 `response` 现在始终
-  使用平台 Prompt 策略与本地 JSON/Schema 校验，Provider 原生 JSON mode 仅作为内部优化。
+  使用平台 Prompt 策略与本地 JSON/Schema 校验；Provider Catalog 和扩展不再声明或自动启用
+  原生 `response_format`，对应模型 worker 身份更新为 `openai-chat-adapter-2.1.0`。
 - Attached SSE 已 clean-cut 到统一的 `run-stream/v1`：25 个闭合事件全部以 `run.*` 命名，
   lifecycle terminal 只携带一个按状态闭合的 `run` 快照；Full 与 Terminal-only 共享同一
   wire shape。

@@ -41,8 +41,8 @@
 - 已启用 Agent 中出现的 `model` 引用就是部署实际使用的模型集合，不再维护第二份 `enabled` 或模型列表；
 - Provider Catalog 由平台维护，负责 Provider 身份、路由、适配器、凭据约定和客观模型元数据；
 - `stream`、工具、`temperature`、`enable_thinking` 等属于调用配置，不写入 Catalog；
-- `response` 是输出合同；结构化输出始终依赖 Prompt 约束和本地解析/Schema 校验，Provider 原生 JSON
-  模式只作为内部优化，不再要求用户声明 `json_object_output`；
+- `response` 是输出合同；结构化输出统一依赖 Prompt 约束和本地解析/Schema 校验，Provider
+  Catalog 和普通扩展不声明或自动启用原生 JSON mode；
 - 中国站与国际站等不同端点是不同的 Provider 路由，例如 `dashscope-cn` 和
   `dashscope-intl`。选择 `provider` 即选择端点，不做隐式跨区域故障转移。
 
@@ -135,16 +135,15 @@ OpenClaw 使用 Provider/模型组成的模型引用；官方 Provider 插件发
 本平台吸收“Provider 路由是一等身份”“已知兼容信息归 Provider Catalog”“自定义路由显式声明”
 三个边界。但公共 YAML 使用结构化的 `provider`/`id`，不使用容易与模型 ID 中 `/` 冲突的组合字符串。
 
-### 5.3 DashScope 凭据与结构化输出
+### 5.3 DashScope 凭据
 
-阿里云 Model Studio 官方文档使用 `DASHSCOPE_API_KEY`，并明确 endpoint 会因区域和协议而不同；
-DashScope OpenAI-compatible API 也支持 `response_format.type=json_object`。参考：
+阿里云 Model Studio 官方文档使用 `DASHSCOPE_API_KEY`，并明确 endpoint 会因区域和协议而不同。
+参考：
 
 - [获取和配置 DashScope API Key](https://www.alibabacloud.com/help/en/model-studio/get-api-key)
-- [Qwen 结构化输出](https://help.aliyun.com/en/model-studio/qwen-structured-output)
 
-因此内置 DashScope 路由的默认凭据名采用 `DASHSCOPE_API_KEY`。原生 `json_object` 支持只作为
-adapter 可选择的传输优化，不能成为 Agent 输出合同。
+因此内置 DashScope 路由的默认凭据名采用 `DASHSCOPE_API_KEY`。OpenAI-compatible 协议不代表
+每个模型都稳定支持同一种原生 `response_format`，平台不在 Catalog 中声明或自动发送该字段。
 
 ## 6. 配置分层
 
@@ -155,7 +154,7 @@ adapter 可选择的传输优化，不能成为 Agent 输出合同。
 | Provider 连接 | Provider Catalog / 运维扩展 | 路由 ID、adapter、endpoint、鉴权约定 | temperature、thinking 开关、业务别名 |
 | 模型 Profile | Provider Catalog / 运维扩展 | Provider 模型 ID、输入模态、硬限制、客观支持事实 | 本次调用是否启用 thinking/stream |
 | LLM 调用 | Agent `llm` 步骤 | model selector、messages、tools、stream、parameters | endpoint、API key、adapter |
-| 输出执行策略 | Runtime | Prompt 约束、原生输出模式选择、解析、Schema 校验 | 用户伪造的 Provider capability |
+| 输出执行策略 | Runtime | Prompt 约束、JSON 解析、Schema 校验 | 用户伪造的 Provider capability |
 
 ### 6.1 “支持”与“启用”
 
@@ -264,7 +263,8 @@ providers:
 - `enable_thinking.default`；
 - `streaming: true`、`tools: true` 等已由 adapter 普遍保证且不参与静态判定的重复事实；
 - `structured_output.prompt_fallback`；
-- 用户手写的 `json_object_output`。
+- 用户手写的 `json_object_output`；
+- `native_structured_output`。
 
 只有当某项差异确实参与 fail-closed 校验或 request shaping 时，才允许加入 Profile。例如模型明确
 不接受图片、thinking 使用特殊参数名，或上游存在硬 context/output limit。未知或未经验证的营销
@@ -432,14 +432,12 @@ response: Answer
 是唯一公共输出合同。若 `Answer` 是结构化类型，编译器生成 JSON Schema，运行时执行：
 
 1. 将返回 JSON 的要求和 Schema 约束加入 Prompt；
-2. 若 Catalog/adapter 已验证 Provider 原生 `json_schema`，优先使用该模式；
-3. 否则若已验证原生 `json_object`，可使用该模式；
-4. 否则只使用 Prompt 约束；
-5. 对最终文本执行本地 JSON 解析；
-6. 对解析结果执行本地 Schema 校验；
-7. 失败时按现有模型错误、重试和 terminal 语义处理。
+2. 不从 Catalog 或普通 Provider extension 生成原生 `response_format`；
+3. 对最终文本执行本地 JSON 解析；
+4. 对解析结果执行本地 Schema 校验；
+5. 失败时按现有模型错误、重试和 terminal 语义处理。
 
-无论是否使用原生模式，第 5、6 步都不能省略。Provider 成功响应不等于业务输出有效。
+Provider 成功响应不等于业务输出有效。
 
 ### 10.2 删除的公共能力
 
@@ -459,12 +457,12 @@ structured_output:
 原因是：
 
 - Prompt fallback 是平台正确性策略，不是部署者逐模型选择；
-- 原生 JSON mode 是 adapter 优化，不是业务输出类型；
+- 原生 JSON mode 是底层 adapter 能力，不是 Catalog 模型 Profile 或业务输出类型；
 - 用户不能仅凭写一个 capability 字符串改变 Provider 的真实能力；
 - 同一 `response` 合同应在支持不同原生模式的 Provider 上保持一致。
 
-内部实现可以保留比 `json_object_output` 更精确的 adapter capability/profile，但它不属于 Agent 或
-普通 Provider 配置，并且不能作为结构化 `response` 的唯一准入条件。
+底层 adapter 可以保留显式 `ChatResponseFormat` 协议能力，供未来经过验证的专用集成使用；它不属于
+Agent、Provider Catalog 或普通 Provider extension，也不参与常规 `llm` 运行路径。
 
 ## 11. 用户扩展与治理
 
@@ -709,7 +707,7 @@ DASHSCOPE_API_KEY
 - adapter ID；
 - Deployment Revision；
 - Catalog digest；
-- 是否使用 native structured-output mode；
+- structured-output mode（当前固定为 `prompt_only`）；
 - structured-output 失败阶段：provider、parse 或 schema validation。
 
 不得将 `provider/model` 拼接字符串作为内部唯一 identity；结构化字段必须保留，拼接形式只允许作为
@@ -764,14 +762,14 @@ UI/日志展示。
 - `enable_thinking`、temperature、stream 和 tools 从 Agent/Plan 进入请求；
 - 模型 Profile 只包含被 compiler/runtime 消费的客观字段；
 - 明确不支持图片的模型在包含图片的 Agent 上编译失败；
-- Provider extension 的 operator assertions 可追溯并进入 revision identity。
+- Provider extension 的输入模态声明可追溯并进入 revision identity。
 
 ### 16.4 结构化输出
 
 - 结构化 `response` 在没有公共 `json_object_output` capability 时可以编译；
-- native `json_schema`、native `json_object` 和 prompt-only 三条路径共享本地解析和 Schema 校验；
+- Catalog 与普通 Provider extension 中的 `native_structured_output` 被严格拒绝；
+- 结构化 `response` 始终使用 prompt-only 路径和本地 JSON/Schema 校验；
 - Provider 返回 HTTP success 但 JSON 无效或 Schema 不匹配时，Run 不得提交无效业务结果；
-- native mode 不可用时使用平台 Prompt 策略，而不是要求用户修改模型配置；
 - 日志能区分 provider failure、JSON parse failure 和 schema validation failure。
 
 ### 16.5 回归与文档
@@ -790,7 +788,7 @@ UI/日志展示。
 3. endpoint、adapter 和默认 credential reference 归 Provider route；
 4. 模型 Profile 只表达客观事实，不表达本次调用选择；
 5. thinking、stream、tools、temperature 和 token budget 归 `llm` 调用；
-6. `response` 归 Agent 输出合同，native JSON mode 只是内部优化；
+6. `response` 归 Agent 输出合同，常规运行路径不依赖或自动发送 native JSON mode；
 7. 没有 LLM 引用就没有模型配置和模型凭据要求；
 8. 多区域通过不同 Provider route 显式选择，不隐式切换；
 9. 用户可通过显式 Provider extension 注册自定义模型，但不能恢复 alias registry；
@@ -805,7 +803,9 @@ UI/日志展示。
 - 内置、版本化 Provider Catalog 与可选 `providers` / `model_policy` 已落地；
 - Agent、fixtures、Helm 与配置样例已迁移到严格的 `{provider, id}` selector；
 - 旧 `models.yaml`、`models.config`、模型别名和用户 `json_object_output` 配置已删除；
-- prompt-only、native `json_object`、native `json_schema` 共用本地 JSON 解析和 Schema 校验；
+- Catalog/Provider extension 的 `native_structured_output` 已删除并严格拒绝，结构化输出统一使用
+  prompt-only 与本地 JSON/Schema 校验；
+- 模型请求塑形变化通过 `openai-chat-adapter-2.1.0` worker 身份与旧 Revision 分离；
 - Provider route、模型 ID、adapter、endpoint identity、Catalog/extension digest 和非秘密策略已进入
   Deployment Revision，secret 值保持非干扰；
 - Action-only 启动、Provider 扩展、区域身份、图片能力、结构化输出、durable replay、Helm 和

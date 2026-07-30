@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 use insight_agent_platform::{
     config::{
         ArtifactStoreProvider, AuthConfig, DeploymentMode, HistoryConfig,
-        LiveRunStreamBrokerProvider, ModelInputModality, NativeStructuredOutput, PlatformConfig,
-        PlatformConfigError, ProviderExtensionSource, ProviderTransportPolicy,
+        LiveRunStreamBrokerProvider, ModelInputModality, PlatformConfig, PlatformConfigError,
+        ProviderExtensionSource, ProviderTransportPolicy,
     },
     engine::PersistenceMode,
     resources::config::load_model_registry_with_env,
@@ -1504,7 +1504,6 @@ fn provider_extensions_and_model_policy_are_strict_platform_configuration() {
     models:
       vendor/internal-chat/v1:
         input: [text, image]
-        native_structured_output: json_schema
     connect_timeout: 2s
     request_timeout: 45s
     transport:
@@ -1545,11 +1544,6 @@ actions:"#,
         model.input,
         std::collections::BTreeSet::from([ModelInputModality::Text, ModelInputModality::Image,])
     );
-    assert_eq!(
-        model.native_structured_output,
-        Some(NativeStructuredOutput::JsonSchema)
-    );
-
     let inherited = &config.providers.extensions["dashscope-cn-team-a"];
     assert_eq!(
         inherited.source,
@@ -1569,6 +1563,10 @@ fn legacy_model_registry_and_malformed_provider_extensions_fail_closed() {
         ),
         (
             "providers:\n  company-llm:\n    type: open_ai_compatible\n    endpoint: https://llm.example/v1\n    credential: {type: bearer, env: COMPANY_LLM_API_KEY}\n    models: {chat: {input: [text]}}\n    enabled: true\nactions:",
+            "PLATFORM_CONFIG_INVALID",
+        ),
+        (
+            "providers:\n  company-llm:\n    type: open_ai_compatible\n    endpoint: https://llm.example/v1\n    credential: {type: bearer, env: COMPANY_LLM_API_KEY}\n    models: {chat: {input: [text], native_structured_output: json_object}}\nactions:",
             "PLATFORM_CONFIG_INVALID",
         ),
         (

@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::{
-    ModelInputModality, ModelPolicyConfig, NativeStructuredOutput, ProviderExtensionSource,
-    ProviderModelProfileConfig, ProviderTransportPolicy, ProvidersConfig,
+    ModelInputModality, ModelPolicyConfig, ProviderExtensionSource, ProviderModelProfileConfig,
+    ProviderTransportPolicy, ProvidersConfig,
 };
 
 use super::{
@@ -21,8 +21,8 @@ use super::{
 };
 
 const BUILTIN_PROVIDER_CATALOG: &str = include_str!("../../catalog/provider-catalog.yaml");
-const OPENAI_CHAT_ADAPTER_VERSION: &str = "2.0.0";
-const OPENAI_CHAT_WORKER_VERSION: &str = "openai-chat-adapter-2.0.0";
+const OPENAI_CHAT_ADAPTER_VERSION: &str = "2.1.0";
+const OPENAI_CHAT_WORKER_VERSION: &str = "openai-chat-adapter-2.1.0";
 
 pub fn load_model_registry(
     providers: &ProvidersConfig,
@@ -122,11 +122,6 @@ pub fn load_model_registry_with_env(
                     ModelInputModality::Image => "image",
                 })
                 .collect::<Vec<_>>();
-            let native_structured_output =
-                profile.native_structured_output.map(|mode| match mode {
-                    NativeStructuredOutput::JsonObject => "json_object",
-                    NativeStructuredOutput::JsonSchema => "json_schema",
-                });
             let deployment = ModelDeploymentIdentity::new(
                 OPENAI_CHAT_WORKER_VERSION,
                 serde_json::json!({
@@ -141,7 +136,6 @@ pub fn load_model_registry_with_env(
                     "provider_source": route.source,
                     "provider_extension_digest": extension_digest,
                     "input": input,
-                    "native_structured_output": native_structured_output,
                     "capabilities": capability_names,
                     "request_capabilities": request_capability_names,
                     "connect_timeout_ms": route.connect_timeout.as_millis().to_string(),
@@ -155,7 +149,7 @@ pub fn load_model_registry_with_env(
                         "max_accumulated_text_bytes": limits.max_accumulated_text_bytes,
                     },
                     "transport": transport.as_str(),
-                    "output_policy": "prompt-local-validation-with-optional-native-v1",
+                    "output_policy": "prompt-local-validation-v1",
                 }),
             )
             .map_err(resource_compile_error)?;
@@ -266,13 +260,7 @@ fn resolve_builtin_profile(profile: &ProviderModelProfileYaml) -> ProviderModelP
             })
             .collect()
     };
-    ProviderModelProfileConfig {
-        input,
-        native_structured_output: profile.native_structured_output.map(|mode| match mode {
-            NativeStructuredOutputYaml::JsonObject => NativeStructuredOutput::JsonObject,
-            NativeStructuredOutputYaml::JsonSchema => NativeStructuredOutput::JsonSchema,
-        }),
-    }
+    ProviderModelProfileConfig { input }
 }
 
 fn apply_provider_extensions(
@@ -459,15 +447,6 @@ fn model_capabilities(profile: &ProviderModelProfileConfig) -> BTreeSet<ModelCap
     if profile.input.contains(&ModelInputModality::Image) {
         capabilities.insert(ModelCapability::Vision);
     }
-    match profile.native_structured_output {
-        Some(NativeStructuredOutput::JsonObject) => {
-            capabilities.insert(ModelCapability::JsonObjectOutput);
-        }
-        Some(NativeStructuredOutput::JsonSchema) => {
-            capabilities.insert(ModelCapability::JsonSchemaOutput);
-        }
-        None => {}
-    }
     capabilities
 }
 
@@ -495,14 +474,7 @@ fn provider_extension_evidence(
                     ModelInputModality::Image => "image",
                 })
                 .collect::<Vec<_>>();
-            let native = profile.native_structured_output.map(|mode| match mode {
-                NativeStructuredOutput::JsonObject => "json_object",
-                NativeStructuredOutput::JsonSchema => "json_schema",
-            });
-            (
-                id.clone(),
-                serde_json::json!({"input": input, "native_structured_output": native}),
-            )
+            (id.clone(), serde_json::json!({"input": input}))
         })
         .collect::<serde_json::Map<_, _>>();
     serde_json::json!({
@@ -618,8 +590,6 @@ enum ProviderCredentialTypeYaml {
 struct ProviderModelProfileYaml {
     #[serde(default)]
     input: BTreeSet<ModelInputModalityYaml>,
-    #[serde(default)]
-    native_structured_output: Option<NativeStructuredOutputYaml>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -627,13 +597,6 @@ struct ProviderModelProfileYaml {
 enum ModelInputModalityYaml {
     Text,
     Image,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum NativeStructuredOutputYaml {
-    JsonObject,
-    JsonSchema,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
