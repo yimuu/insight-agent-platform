@@ -1,0 +1,30 @@
+catalog_version: 1
+
+providers:
+  dashscope-cn:
+    adapter: open_ai_chat
+    endpoint: https://dashscope.aliyuncs.com/compatible-mode/v1
+    credential:
+      type: bearer
+      env: DASHSCOPE_API_KEY
+    models:
+      qwen3.6-flash:
+        input: [text]
+        native_structured_output: json_object
+      qwen-vl-plus:
+        input: [text, image]
+        native_structured_output: json_object
+
+  dashscope-intl:
+    adapter: open_ai_chat
+    endpoint: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+    credential:
+      type: bearer
+      env: DASHSCOPE_API_KEY
+    models:
+      qwen3.6-flash:
+        input: [text]
+        native_structured_output: json_object
+      qwen-vl-plus:
+        input: [text, image]
+        native_structured_output: json_object

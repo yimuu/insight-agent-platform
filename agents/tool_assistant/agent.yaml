@@ -28,7 +28,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: general_chat
+      model:
+        provider: dashscope-cn
+        id: qwen3.6-flash
       stream: true
       publish: true
       messages:

@@ -58,7 +58,9 @@ workflow:
       then:
         - type: llm
           id: answer
-          model: vision_chat
+          model:
+            provider: dashscope-cn
+            id: qwen-vl-plus
           stream: true
           publish: true
           messages:
@@ -83,7 +85,9 @@ workflow:
       else:
         - type: llm
           id: abnormal_indicators
-          model: vision_chat
+          model:
+            provider: dashscope-cn
+            id: qwen-vl-plus
           stream: true
           publish: true
           messages:
@@ -100,7 +104,9 @@ workflow:
 
         - type: llm
           id: comprehensive_interpretation
-          model: vision_chat
+          model:
+            provider: dashscope-cn
+            id: qwen-vl-plus
           stream: true
           publish: true
           messages:
@@ -117,7 +123,9 @@ workflow:
 
         - type: llm
           id: health_advice
-          model: vision_chat
+          model:
+            provider: dashscope-cn
+            id: qwen-vl-plus
           stream: true
           publish: true
           messages:

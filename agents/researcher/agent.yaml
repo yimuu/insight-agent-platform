@@ -41,7 +41,9 @@ workflow:
   steps:
     - type: llm
       id: plan
-      model: general_chat
+      model:
+        provider: dashscope-cn
+        id: qwen3.6-flash
       messages:
         - role: system
           content:
@@ -61,7 +63,9 @@ workflow:
 
     - type: llm
       id: answer
-      model: general_chat
+      model:
+        provider: dashscope-cn
+        id: qwen3.6-flash
       messages:
         - role: system
           content:

@@ -11,7 +11,10 @@ use insight_resources::{
         Action, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass, EffectClass,
         IdempotencyClass,
     },
-    models::{ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability, ModelRegistry},
+    models::{
+        ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability, ModelRegistry,
+        ModelSelector,
+    },
 };
 use serde_json::{json, Value};
 
@@ -145,12 +148,20 @@ fn test_action_context() -> ActionContext {
 }
 
 #[test]
-fn registries_reject_duplicate_aliases() {
+fn registries_reject_duplicate_model_selectors() {
     let mut models = ModelRegistry::default();
-    models.register("default_chat", FakeChatModel).unwrap();
+    models
+        .register(
+            ModelSelector::new("fixture", "default-chat").unwrap(),
+            FakeChatModel,
+        )
+        .unwrap();
     assert_eq!(
         models
-            .register("default_chat", FakeChatModel)
+            .register(
+                ModelSelector::new("fixture", "default-chat").unwrap(),
+                FakeChatModel,
+            )
             .unwrap_err()
             .code(),
         "DUPLICATE_MODEL"
@@ -229,9 +240,10 @@ fn action_validation_keyword_matrix_never_exposes_values() {
 #[test]
 fn model_registry_exposes_capabilities_and_validates_parameters() {
     let mut registry = ModelRegistry::default();
-    registry.register("default_chat", FakeChatModel).unwrap();
+    let selector = ModelSelector::new("fixture", "default-chat").unwrap();
+    registry.register(selector.clone(), FakeChatModel).unwrap();
 
-    let model = registry.resolve("default_chat").unwrap();
+    let model = registry.resolve(&selector).unwrap();
     assert!(model.capabilities().contains(&ModelCapability::Vision));
     assert!(model
         .validate_parameters(&json!({"temperature": 0.2}))
@@ -241,7 +253,10 @@ fn model_registry_exposes_capabilities_and_validates_parameters() {
         "MODEL_PARAMETERS_INVALID"
     );
     assert_eq!(
-        registry.resolve("missing").unwrap_err().code(),
+        registry
+            .resolve(&ModelSelector::new("fixture", "missing").unwrap())
+            .unwrap_err()
+            .code(),
         "MODEL_NOT_FOUND"
     );
 }

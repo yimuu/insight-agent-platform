@@ -85,8 +85,22 @@ data:
       enabled:
         {{- toYaml .Values.agents.enabled | nindent 8 }}
 
-    models:
-      config: /app/config-runtime/models.yaml
+    {{- if .Values.qualification.enabled }}
+    providers:
+      fixture:
+        type: open_ai_compatible
+        endpoint: {{ .Values.qualification.terminalStreamBaseUrl | quote }}
+        credential:
+          type: bearer
+          env: TERMINAL_STREAM_FIXTURE_API_KEY
+        models:
+          terminal-stream:
+            input: [text]
+        connect_timeout: 1s
+        request_timeout: 60s
+        transport:
+          plaintext_http: trusted_private
+    {{- end }}
 
     actions:
       enabled:
@@ -166,26 +180,3 @@ data:
       summary_trigger_tokens: {{ .Values.conversations.summaryTriggerTokens }}
       recent_context_messages: {{ .Values.conversations.recentContextMessages }}
       retention_days: {{ .Values.conversations.retentionDays }}
-
-  models.yaml: |
-    version: 1
-    models:
-      {{- if .Values.qualification.enabled }}
-      terminal_stream_fixture_model:
-        type: open_ai_chat
-        base_url: {{ .Values.models.terminalStreamBaseUrl | quote }}
-        model: terminal-stream-fixture
-        capabilities: []
-        transport:
-          plaintext_http: trusted_private
-        connect_timeout: 1s
-        request_timeout: 60s
-      {{- else }}
-      default_placeholder_model:
-        type: open_ai_chat
-        base_url: {{ .Values.models.defaultBaseUrl | quote }}
-        model: placeholder-chat-model
-        capabilities: []
-        connect_timeout: 1s
-        request_timeout: 60s
-      {{- end }}

@@ -21,7 +21,7 @@ pub mod models {
         ChatOutputTokensDetails, ChatRequest, ChatRequestMode, ChatResponse, ChatResponseFormat,
         ChatRole, ChatStream, ChatToolCall, ChatToolCallDelta, ChatToolChoice, ChatToolDefinition,
         ChatUsage, ModelCapability, ModelDeploymentIdentity, ModelRegistry, ModelRequestCapability,
-        DEFAULT_MAX_ACCUMULATED_TEXT_BYTES, MODEL_RESPONSE_TOO_LARGE_CODE,
+        ModelSelector, DEFAULT_MAX_ACCUMULATED_TEXT_BYTES, MODEL_RESPONSE_TOO_LARGE_CODE,
         MODEL_RESPONSE_TOO_LARGE_MESSAGE,
     };
 }

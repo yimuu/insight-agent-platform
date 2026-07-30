@@ -9,6 +9,10 @@ use async_trait::async_trait;
 use futures::stream;
 use insight_agent_platform::{
     catalog::{compile_agent_dir, DeployedAgent, ProductionLeafDeploymentResolver},
+    config::{
+        ModelInputModality, ProviderExtensionConfig, ProviderExtensionSource,
+        ProviderModelProfileConfig, ProviderTransportPolicy, ProvidersConfig,
+    },
     dsl::{GraphAuthorDocument, GraphDocumentId, TraceOverlay},
     engine::{
         plan::{PlanIndex, VersionTag},
@@ -23,7 +27,7 @@ use insight_agent_platform::{
         config::load_model_registry_with_env,
         models::{
             ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability,
-            ModelDeploymentIdentity, ModelRegistry,
+            ModelDeploymentIdentity, ModelRegistry, ModelSelector,
         },
     },
     runtime::{
@@ -99,23 +103,27 @@ impl LeafTaskExecutor for FixtureExecutor {
 #[tokio::test]
 async fn configured_secret_never_enters_plan_ledger_graph_trace_or_diagnostics() {
     let directory = tempfile::tempdir().unwrap();
-    let model_config = directory.path().join("models.yaml");
-    fs::write(
-        &model_config,
-        r#"version: 1
-models:
-  primary:
-    type: open_ai_chat
-    base_url: https://models.example.test/v1
-    model: example-chat
-    api_key_env: MODEL_API_KEY
-    capabilities: []
-    connect_timeout: 2s
-    request_timeout: 30s
-"#,
-    )
-    .unwrap();
-    let models = load_model_registry_with_env(&model_config, |name| {
+    let providers = ProvidersConfig {
+        extensions: BTreeMap::from([(
+            "secret-fixture".to_owned(),
+            ProviderExtensionConfig {
+                source: ProviderExtensionSource::OpenAiCompatible,
+                endpoint: Some("https://models.example.test/v1".to_owned()),
+                credential_env: Some("MODEL_API_KEY".to_owned()),
+                models: BTreeMap::from([(
+                    "example-chat".to_owned(),
+                    ProviderModelProfileConfig {
+                        input: BTreeSet::from([ModelInputModality::Text]),
+                        native_structured_output: None,
+                    },
+                )]),
+                connect_timeout: Duration::from_secs(2),
+                request_timeout: Duration::from_secs(30),
+                transport: ProviderTransportPolicy::HttpsOnly,
+            },
+        )]),
+    };
+    let models = load_model_registry_with_env(&providers, None, |name| {
         (name == "MODEL_API_KEY").then(|| SECRET_SENTINEL.to_owned())
     })
     .unwrap();
@@ -136,7 +144,9 @@ workflow:
   steps:
     - type: llm
       id: answer
-      model: primary
+      model:
+        provider: secret-fixture
+        id: example-chat
       messages:
         - role: user
           content:
@@ -276,7 +286,9 @@ workflow:
   steps:
     - type: llm
       id: answer
-      model: capture
+      model:
+        provider: fixture
+        id: capture
       messages:
         - role: user
           content:
@@ -295,7 +307,7 @@ workflow:
     let mut models = ModelRegistry::default();
     models
         .register_versioned(
-            "capture",
+            ModelSelector::new("fixture", "capture").unwrap(),
             ModelDeploymentIdentity::new(
                 "render-capture-worker-v1",
                 json!({"adapter": "render-capture"}),

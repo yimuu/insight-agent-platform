@@ -11,9 +11,6 @@ agents:
     - terminal_llm_failure_fixture
     - terminal_stream_fixture
 
-models:
-  terminalStreamBaseUrl: http://terminal-stream-mock:8080/v1
-
 qualification:
   enabled: true
 

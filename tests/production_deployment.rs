@@ -32,7 +32,7 @@ use insight_agent_platform::{
         actions::ActionRegistry,
         models::{
             ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability,
-            ModelDeploymentIdentity, ModelRegistry,
+            ModelDeploymentIdentity, ModelRegistry, ModelSelector,
         },
     },
     runtime::{
@@ -180,7 +180,7 @@ fn model_registry(
     let mut models = ModelRegistry::default();
     models
         .register_versioned(
-            "answer_model",
+            ModelSelector::new("fixture", "answer-model").unwrap(),
             ModelDeploymentIdentity::new(
                 worker_version,
                 json!({
@@ -213,7 +213,7 @@ fn register_model_worker(
 }
 
 #[tokio::test]
-async fn postgres_restart_keeps_old_alias_model_and_worker_in_deployment_archive() {
+async fn postgres_restart_keeps_old_model_revision_and_worker_in_deployment_archive() {
     let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
         return;
     };
@@ -240,7 +240,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: answer_model
+      model:
+        provider: fixture
+        id: answer-model
       messages:
         - role: user
           content:

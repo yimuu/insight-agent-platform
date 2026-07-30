@@ -77,6 +77,8 @@ spec:
             {{- if .Values.qualification.enabled }}
             - name: INSIGHT_QUALIFICATION_ENABLED
               value: "true"
+            - name: TERMINAL_STREAM_FIXTURE_API_KEY
+              value: "qualification-fixture"
             - name: TERMINAL_QUALIFICATION_EFFECT_LEDGER
               value: {{ printf "%s/qualification-effects" .Values.artifacts.mountPath | quote }}
             - name: INSIGHT_TERMINAL_QUALIFICATION_ADMISSION_DELAY_MS

@@ -234,7 +234,9 @@ LLM 基础设施失败会使用脱敏且可操作的稳定分类，不会把 Pro
 | `LLM_PROVIDER_FAILED` | `model provider request failed` |
 
 内部日志另外记录固定字段 `provider_origin`、`model`、`request_mode`、`failure_code`，并按失败阶段
-记录 `transport_kind` 或 `http_status`；这些字段仍不包含 Provider body 或凭据。
+记录 `transport_kind` 或 `http_status`；本地结构化响应失败另以
+`llm.response_validation_failed` 的 `validation_stage=json_parse|schema_validation` 区分。上述字段
+仍不包含 Provider body、模型响应正文或凭据。
 Conversation Attached turn 的 terminal frame 还必须等待 `Run result + assistant message` 同一事务
 提交；token/delta 和 provider chunk 不写入 Conversation。Privacy delete 开始时服务端会取消该
 Conversation 的活动 SSE dispatcher；之后不再入队 live 内容，尚未被传输层消费的有界 delta 队列

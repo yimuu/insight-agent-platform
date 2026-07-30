@@ -111,7 +111,9 @@ JSON Schema；compiler 会生成并执行输入、节点响应和最终输出校
 ```yaml
 - type: llm
   id: answer
-  model: general_chat
+  model:
+    provider: dashscope-cn
+    id: qwen3.6-flash
   stream: true
   publish: true
   messages:
@@ -131,12 +133,25 @@ JSON Schema；compiler 会生成并执行输入、节点响应和最终输出校
 互相独立，最终结果始终按 `response` 类型验证。Prompt 可以用 `inline` 或相对 Agent 文件的 `file`
 声明，message 中的文本槽引用 Prompt 名称。
 
+`model` 必须是只包含 `provider` 与 `id` 的对象。`provider` 是小写 Provider route；`id` 是原样
+发送给该 Provider 的不透明模型 ID，可以包含 `/`。字符串形式的 `model: general_chat` 和
+`model: dashscope-cn/qwen3.6-flash` 都会被拒绝，避免模型别名与含 `/` 的真实 ID 产生歧义。
+`type: llm` 表示一次模型调用；`type: agent` 不是它的同义写法。
+
+`stream`、`tools`、`tool_choice`、`temperature`、`enable_thinking` 和 token budget 都是本次调用
+的选择，属于 LLM 步骤并进入 Canonical Plan，不属于 Provider Catalog。`response` 是唯一的输出
+合同：非字符串响应始终附加平台管理的 JSON Schema 指令，并在本地完成 JSON 解析与类型校验。
+模型原生 `json_schema` 或 `json_object` 模式只作为内部传输优化；没有原生模式的模型仍可使用
+Prompt fallback，Agent 不声明结构化输出 capability。
+
 LLM 节点可以通过部署时冻结的白名单调用注册 Action：
 
 ```yaml
 - type: llm
   id: answer
-  model: general_chat
+  model:
+    provider: dashscope-cn
+    id: qwen3.6-flash
   messages:
     - role: user
       content:

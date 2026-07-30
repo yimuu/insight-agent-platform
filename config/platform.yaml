@@ -15,9 +15,6 @@ agents:
     - tool_assistant
     - progress_tool_assistant
 
-models:
-  config: models.yaml
-
 actions:
   enabled:
     - current_time

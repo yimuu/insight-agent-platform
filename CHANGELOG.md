@@ -9,6 +9,9 @@
 
 ### Added
 
+- 版本化只读 Provider Catalog，内置 `dashscope-cn` / `dashscope-intl` route、官方
+  `DASHSCOPE_API_KEY` 凭据约定、最小模型 Profile，以及可选的 `providers` extension 与
+  `model_policy` 治理配置。
 - `run-stream/v1` 新增 `run.tool.progress`，Action 可通过独立闭合 Schema 和 scoped
   best-effort publisher 公开有界的 `output_text/output_json` 执行进度。
 - `progress_tool_assistant` 与 `progress_counter` 示例，用于演示模型工具参数、两次进度、公开结果
@@ -22,6 +25,9 @@
 
 ### Changed
 
+- Agent `llm.model` clean-cut 为严格的 `{provider, id}` selector；删除模型业务别名、必需的
+  `models.yaml` / `models.config` 和公共 `json_object_output` 配置。结构化 `response` 现在始终
+  使用平台 Prompt 策略与本地 JSON/Schema 校验，Provider 原生 JSON mode 仅作为内部优化。
 - Attached SSE 已 clean-cut 到统一的 `run-stream/v1`：25 个闭合事件全部以 `run.*` 命名，
   lifecycle terminal 只携带一个按状态闭合的 `run` 快照；Full 与 Terminal-only 共享同一
   wire shape。
@@ -43,6 +49,8 @@
 
 ### Security
 
+- Provider extension 只保存 secret reference；Provider/model、endpoint、adapter、Catalog 与
+  extension digest 进入 Deployment Revision，secret 值和 URL query 不进入 Plan、identity 或日志。
 - 工具参数、进度和结果继续独立双重授权；progress 在冻结 Schema、公共结构/大小限制和频率限制
   后才进入 live broker，且不会进入 terminal result、Conversation 或默认正文日志。
 - Conversation principal、tombstone 后公共读取、跨 tenant object 删除和密文明文泄漏均由

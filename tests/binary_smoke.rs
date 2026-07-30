@@ -887,25 +887,8 @@ fn reserve_loopback_addr() -> SocketAddr {
 
 fn write_temp_configs(root: &Path, bind_addr: SocketAddr) -> PathBuf {
     let platform_config = root.join("platform.yaml");
-    let models_config = root.join("models.yaml");
     let history_path = root.join("history.sqlite3");
     let agents_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("agents");
-
-    fs::write(
-        &models_config,
-        r#"version: 1
-
-models:
-  unused_smoke_model:
-    type: open_ai_chat
-    base_url: https://models.example.invalid/v1
-    model: unused-smoke-model
-    capabilities: []
-    connect_timeout: 1s
-    request_timeout: 5s
-"#,
-    )
-    .unwrap();
 
     fs::write(
         &platform_config,
@@ -922,9 +905,6 @@ agents:
   enabled:
     - action_demo
     - workflow_failure_demo
-
-models:
-  config: models.yaml
 
 actions:
   enabled:
@@ -969,7 +949,6 @@ fn write_human_auth_configs(root: &Path, bind_addr: SocketAddr) -> PathBuf {
 
 fn write_restart_configs(root: &Path, bind_addr: SocketAddr) -> PathBuf {
     let platform_config = root.join("restart-platform.yaml");
-    let models_config = root.join("restart-models.yaml");
     let history_path = root.join("restart.sqlite3");
     let agents_dir = root.join("agents");
     let agent_dir = agents_dir.join("restart_waiter");
@@ -998,21 +977,6 @@ workflow:
     )
     .unwrap();
     fs::write(
-        &models_config,
-        r#"version: 1
-
-models:
-  unused_restart_model:
-    type: open_ai_chat
-    base_url: https://models.example.invalid/v1
-    model: unused-restart-model
-    capabilities: []
-    connect_timeout: 1s
-    request_timeout: 5s
-"#,
-    )
-    .unwrap();
-    fs::write(
         &platform_config,
         format!(
             r#"version: 1
@@ -1025,9 +989,6 @@ auth:
 agents:
   directory: {}
   enabled: [restart_waiter]
-
-models:
-  config: restart-models.yaml
 
 actions:
   enabled: []
@@ -1057,24 +1018,8 @@ runtime:
 
 fn write_postgres_action_configs(root: &Path, bind_addr: SocketAddr) -> PathBuf {
     let platform_config = root.join("postgres-platform.yaml");
-    let models_config = root.join("models.yaml");
     let agents_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("agents");
     let artifact_root = root.join("shared-artifacts");
-    fs::write(
-        &models_config,
-        r#"version: 1
-
-models:
-  unused_postgres_smoke_model:
-    type: open_ai_chat
-    base_url: https://models.example.invalid/v1
-    model: unused-postgres-smoke-model
-    capabilities: []
-    connect_timeout: 1s
-    request_timeout: 5s
-"#,
-    )
-    .unwrap();
     fs::write(
         &platform_config,
         format!(
@@ -1088,9 +1033,6 @@ auth:
 agents:
   directory: {}
   enabled: [action_demo]
-
-models:
-  config: models.yaml
 
 actions:
   enabled: [example.text_metrics]
@@ -1259,7 +1201,7 @@ impl ChildGuard<CapturedChild> {
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .env("PLATFORM_CONFIG", platform_config)
             .envs(environment.iter().copied())
-            .env_remove("OPENAI_API_KEY")
+            .env_remove("DASHSCOPE_API_KEY")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let child = command

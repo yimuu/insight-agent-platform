@@ -578,7 +578,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: general_chat
+      model:
+        provider: fixture
+        id: general-chat
       messages:
         - role: user
           content: [{text: hello}]

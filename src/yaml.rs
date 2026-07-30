@@ -3,14 +3,14 @@ use serde::{de::DeserializeOwned, Serialize};
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum YamlSurface {
     Platform,
-    ModelResources,
+    ProviderCatalog,
 }
 
 impl YamlSurface {
     fn label(self) -> &'static str {
         match self {
             Self::Platform => "platform YAML",
-            Self::ModelResources => "model resources YAML",
+            Self::ProviderCatalog => "provider catalog YAML",
         }
     }
 }
@@ -45,10 +45,10 @@ mod tests {
     #[test]
     fn rejects_multi_document_streams() {
         let error =
-            from_str::<SingleDocument>("value: 1\n---\nvalue: 2\n", YamlSurface::ModelResources)
+            from_str::<SingleDocument>("value: 1\n---\nvalue: 2\n", YamlSurface::ProviderCatalog)
                 .unwrap_err();
 
-        assert!(error.contains("model resources YAML"));
+        assert!(error.contains("provider catalog YAML"));
         assert!(error.contains("more than one document"));
     }
 

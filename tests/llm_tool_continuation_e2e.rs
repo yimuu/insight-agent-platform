@@ -34,7 +34,7 @@ use insight_agent_platform::{
             ChatChunk, ChatEvent, ChatEventStream, ChatFinishReason, ChatInputTokensDetails,
             ChatMessage, ChatModel, ChatOutputTokensDetails, ChatRequest, ChatResponse, ChatStream,
             ChatToolCall, ChatToolCallDelta, ChatToolChoice, ChatUsage, ModelCapability,
-            ModelDeploymentIdentity, ModelRegistry, ModelRequestCapability,
+            ModelDeploymentIdentity, ModelRegistry, ModelRequestCapability, ModelSelector,
         },
     },
     runtime::{
@@ -463,7 +463,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: fixture_model
+      model:
+        provider: fixture
+        id: fixture-model
       stream: true
       publish: true
       messages:
@@ -500,7 +502,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: fixture_model
+      model:
+        provider: fixture
+        id: fixture-model
       stream: true
       publish: true
       messages:
@@ -523,7 +527,7 @@ workflow:
         let mut models = ModelRegistry::default();
         models
             .register_versioned(
-                "fixture_model",
+                ModelSelector::new("fixture", "fixture-model").unwrap(),
                 ModelDeploymentIdentity::new(
                     MODEL_WORKER_VERSION,
                     json!({"adapter": "deterministic-continuation", "provider_model": "fixed"}),

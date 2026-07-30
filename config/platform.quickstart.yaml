@@ -10,9 +10,6 @@ agents:
   enabled:
     - action_demo
 
-models:
-  config: models.quickstart.yaml
-
 actions:
   enabled:
     - example.text_metrics

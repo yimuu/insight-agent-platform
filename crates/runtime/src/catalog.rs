@@ -34,7 +34,7 @@ use insight_engine::{
 };
 use insight_resources::{
     actions::{ActionRegistry, CancellationClass, EffectClass, IdempotencyClass, ToolPublicPolicy},
-    models::{ModelCapability, ModelRegistry, ModelRequestCapability},
+    models::{ModelCapability, ModelRegistry, ModelRequestCapability, ModelSelector},
     retrievals::{RetrievalPublicPolicy, RetrievalRegistry},
 };
 use serde::{Deserialize, Serialize};
@@ -861,8 +861,8 @@ impl ResolvedLeafDeployment {
     }
 }
 
-/// Trust boundary used at publication time. Runtime model aliases and plugin
-/// lookups are resolved here, never lazily by the scheduler.
+/// Trust boundary used at publication time. Provider/model selectors and
+/// plugin lookups are resolved here, never lazily by the scheduler.
 pub trait LeafDeploymentResolver: Send + Sync {
     fn resolve_leaf(
         &self,
@@ -1189,9 +1189,9 @@ impl VersionedLeafAdapterRegistry {
     }
 }
 
-/// Production resolver for the reusable model/action registries. The author
-/// alias is resolved once at publication and its non-secret adapter evidence
-/// enters the immutable Deployment Revision.
+/// Production resolver for the reusable model/action registries. The authored
+/// provider/model selector is resolved once at publication and its non-secret
+/// adapter evidence enters the immutable Deployment Revision.
 pub struct ProductionLeafDeploymentResolver<'a> {
     models: &'a ModelRegistry,
     actions: &'a ActionRegistry,
@@ -1287,18 +1287,18 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                         "llm Plan node must use the frozen core.llm adapter",
                     ));
                 }
-                let alias = descriptor
+                let selector = descriptor
                     .public_configuration
                     .get("model")
-                    .and_then(descriptor_string)
                     .ok_or_else(|| {
                         CompileError::new(
                             "LLM_MODEL_BINDING_INVALID",
-                            "llm descriptor must contain one model alias",
+                            "llm descriptor must contain one provider/model selector",
                         )
-                    })?;
-                let model = self.models.resolve(alias)?;
-                let identity = self.models.deployment_identity(alias)?;
+                    })
+                    .and_then(descriptor_model_selector)?;
+                let model = self.models.resolve(&selector)?;
+                let identity = self.models.deployment_identity(&selector)?;
                 let stream = match descriptor.public_configuration.get("stream") {
                     Some(DescriptorValue::Boolean(stream)) => *stream,
                     _ => {
@@ -1318,7 +1318,8 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                     return Err(CompileError::new(
                         "LLM_REQUEST_MODE_UNSUPPORTED",
                         format!(
-                            "model alias '{alias}' does not support {}",
+                            "model '{}' does not support {}",
+                            selector.display_ref(),
                             request_mode.as_str()
                         ),
                     ));
@@ -1500,7 +1501,8 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                     .collect::<Vec<_>>();
                 let mut binding_evidence = serde_json::json!({
                     "adapter": "core.llm",
-                    "model_alias": alias,
+                    "provider_route": selector.provider(),
+                    "model_id": selector.id(),
                     "model_binding_hash": identity.binding_hash(),
                     "model_binding": identity.evidence(),
                     "request_mode": request_mode.as_str(),
@@ -1689,6 +1691,37 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
             }
         }
     }
+}
+
+fn descriptor_model_selector(value: &DescriptorValue) -> Result<ModelSelector, CompileError> {
+    let DescriptorValue::Object(selector) = value else {
+        return Err(CompileError::new(
+            "LLM_MODEL_BINDING_INVALID",
+            "llm model selector must be an object",
+        ));
+    };
+    if selector.len() != 2 || !selector.contains_key("provider") || !selector.contains_key("id") {
+        return Err(CompileError::new(
+            "LLM_MODEL_BINDING_INVALID",
+            "llm model selector must contain exactly provider and id",
+        ));
+    }
+    let provider = selector
+        .get("provider")
+        .and_then(descriptor_string)
+        .ok_or_else(|| {
+            CompileError::new(
+                "LLM_MODEL_BINDING_INVALID",
+                "llm model provider must be a string",
+            )
+        })?;
+    let id = selector
+        .get("id")
+        .and_then(descriptor_string)
+        .ok_or_else(|| {
+            CompileError::new("LLM_MODEL_BINDING_INVALID", "llm model id must be a string")
+        })?;
+    ModelSelector::new(provider, id)
 }
 
 /// Owned publication resolver used by the long-lived Graph Author API. It
@@ -2038,7 +2071,7 @@ impl DeployedAgent {
     }
 
     /// Rehydrates an exact graph deployment from frozen durable contracts.
-    /// No current alias/model/action resolver participates in this path.
+    /// No current mutable model/action resolver participates in this path.
     pub(crate) fn restore_frozen(
         versioned_plan: VersionedPlan,
         subflows: SubflowContractRegistry,

@@ -48,7 +48,7 @@ async fn main() -> MainResult<()> {
     let mut qualification_self_abort =
         QualificationSelfAbortControl::prepare(qualification_enabled)?;
     let config = PlatformConfig::from_env()?;
-    let models = load_model_registry(&config.models.config)?;
+    let models = load_model_registry(&config.providers, config.model_policy.as_ref())?;
     let http_get = config
         .actions
         .http_get

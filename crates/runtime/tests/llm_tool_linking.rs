@@ -11,7 +11,7 @@ use insight_resources::{
     builtin_actions::builtin_action_registry,
     models::{
         ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability, ModelDeploymentIdentity,
-        ModelRegistry, ModelRequestCapability,
+        ModelRegistry, ModelRequestCapability, ModelSelector,
     },
 };
 use insight_runtime::catalog::{
@@ -26,13 +26,14 @@ mod workspace_assets;
 
 #[derive(Debug, Clone)]
 struct ModeModel {
+    capabilities: BTreeSet<ModelCapability>,
     request_capabilities: BTreeSet<ModelRequestCapability>,
 }
 
 #[async_trait]
 impl ChatModel for ModeModel {
     fn capabilities(&self) -> BTreeSet<ModelCapability> {
-        BTreeSet::new()
+        self.capabilities.clone()
     }
 
     fn request_capabilities(&self) -> BTreeSet<ModelRequestCapability> {
@@ -104,13 +105,14 @@ fn model_registry(capabilities: BTreeSet<ModelRequestCapability>) -> ModelRegist
     let mut models = ModelRegistry::default();
     models
         .register_versioned(
-            "fixture_model",
+            ModelSelector::new("fixture", "fixture-model").unwrap(),
             ModelDeploymentIdentity::new(
                 "fixture-model-worker-v2",
                 json!({"adapter": "fixture", "provider_model": "fixture-model"}),
             )
             .unwrap(),
             ModeModel {
+                capabilities: BTreeSet::new(),
                 request_capabilities: capabilities,
             },
         )
@@ -143,7 +145,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: fixture_model
+      model:
+        provider: fixture
+        id: fixture-model
       messages: [{{role: user, content: [{{text: hello}}]}}]
       stream: {stream}
       publish: {publish}
@@ -293,13 +297,14 @@ fn checked_in_multi_tool_agent_links_four_provider_safe_actions() {
     let mut models = ModelRegistry::default();
     models
         .register_versioned(
-            "general_chat",
+            ModelSelector::new("dashscope-cn", "qwen3.6-flash").unwrap(),
             ModelDeploymentIdentity::new(
                 "fixture-model-worker-v2",
                 json!({"adapter": "fixture", "provider_model": "fixture-model"}),
             )
             .unwrap(),
             ModeModel {
+                capabilities: BTreeSet::new(),
                 request_capabilities: BTreeSet::from([
                     ModelRequestCapability::Complete,
                     ModelRequestCapability::Streaming,
@@ -372,6 +377,50 @@ fn checked_in_multi_tool_agent_links_four_provider_safe_actions() {
                 "{name} must publish a closed safe result"
             );
             assert_eq!(policy["result"]["additionalProperties"], false);
+        }
+    }
+}
+
+#[test]
+fn linker_rejects_image_messages_for_a_text_only_model() {
+    let published = Arc::new(
+        compile_agent_dir(&workspace_assets::workspace_path(
+            "agents/medical_report_interpreter",
+        ))
+        .unwrap(),
+    );
+    let actions = ActionRegistry::default();
+
+    for (capabilities, expected_error) in [
+        (BTreeSet::new(), Some("LLM_VISION_BINDING_REQUIRED")),
+        (BTreeSet::from([ModelCapability::Vision]), None),
+    ] {
+        let mut models = ModelRegistry::default();
+        models
+            .register_versioned(
+                ModelSelector::new("dashscope-cn", "qwen-vl-plus").unwrap(),
+                ModelDeploymentIdentity::new(
+                    "fixture-model-worker-v2",
+                    json!({"adapter": "fixture", "provider_model": "qwen-vl-plus"}),
+                )
+                .unwrap(),
+                ModeModel {
+                    capabilities,
+                    request_capabilities: BTreeSet::from([
+                        ModelRequestCapability::Complete,
+                        ModelRequestCapability::Streaming,
+                    ]),
+                },
+            )
+            .unwrap();
+        let result = DeployedAgent::publish(
+            Arc::clone(&published),
+            &ProductionLeafDeploymentResolver::new(&models, &actions),
+            SubflowContractRegistry::new(),
+        );
+        match expected_error {
+            Some(code) => assert_eq!(result.unwrap_err().code(), code),
+            None => assert!(result.is_ok()),
         }
     }
 }

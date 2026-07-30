@@ -25,7 +25,9 @@ workflow:
   steps:
     - type: llm
       id: streamed_answer
-      model: terminal_stream_fixture_model
+      model:
+        provider: fixture
+        id: terminal-stream
       stream: true
       publish: true
       messages:

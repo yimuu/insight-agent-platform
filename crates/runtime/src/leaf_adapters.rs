@@ -46,7 +46,7 @@ use insight_resources::{
         model_response_too_large, ChatContent, ChatContentPart, ChatFinishReason, ChatMessage,
         ChatRequest, ChatRequestMode, ChatResponseFormat, ChatRole, ChatToolCall,
         ChatToolCallDelta, ChatToolChoice, ChatToolDefinition, ChatUsage, ModelCapability,
-        ModelRegistry, ModelRequestCapability,
+        ModelRegistry, ModelRequestCapability, ModelSelector,
     },
 };
 
@@ -172,7 +172,8 @@ impl LlmTokenObservation {
 #[serde(deny_unknown_fields)]
 struct FrozenLlmDeploymentBinding {
     adapter: String,
-    model_alias: String,
+    provider_route: String,
+    model_id: String,
     model_binding_hash: String,
     model_binding: Value,
     request_mode: String,
@@ -234,7 +235,7 @@ impl FrozenLlmToolContract {
 fn frozen_llm_tool_contract(
     request: &TaskExecutionRequest,
     configuration: &BTreeMap<String, DescriptorValue>,
-    model_alias: &str,
+    model_selector: &ModelSelector,
     request_mode: ChatRequestMode,
     model_request_capabilities: &BTreeSet<ModelRequestCapability>,
 ) -> Result<FrozenLlmToolContract, WorkerFailure> {
@@ -255,7 +256,8 @@ fn frozen_llm_tool_contract(
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     if binding.adapter != "core.llm"
-        || binding.model_alias != model_alias
+        || binding.provider_route != model_selector.provider()
+        || binding.model_id != model_selector.id()
         || binding.request_mode != expected_mode
         || !valid_frozen_evidence_string(&binding.model_binding_hash, 256)
         || !binding.model_binding.is_object()
@@ -609,12 +611,12 @@ impl LeafTaskExecutor for LlmTaskExecutor {
             .validate_model_continuation()
             .map_err(|_| invariant(LLM_TOOL_CONTINUATION_INVARIANT))?;
         let configuration = request.public_configuration();
-        let model_alias = descriptor_string(required(configuration, "model")?)?;
+        let model_selector = descriptor_model_selector(required(configuration, "model")?)?;
         let stream_requested = descriptor_bool(required(configuration, "stream")?)?;
         let publish = descriptor_bool(required(configuration, "publish")?)?;
         let model = self
             .models
-            .resolve(model_alias)
+            .resolve(&model_selector)
             .map_err(|_| invariant(LLM_DESCRIPTOR_INVALID))?;
         let request_mode = if stream_requested {
             ChatRequestMode::Streaming
@@ -633,7 +635,7 @@ impl LeafTaskExecutor for LlmTaskExecutor {
         let tool_contract = frozen_llm_tool_contract(
             request,
             configuration,
-            model_alias,
+            &model_selector,
             request_mode,
             &model_request_capabilities,
         )?;
@@ -658,19 +660,19 @@ impl LeafTaskExecutor for LlmTaskExecutor {
                 .value_type()
                 .json_schema_document()
                 .map_err(|_| invariant(LLM_DESCRIPTOR_INVALID))?;
-            let capability = select_structured_output_capability(
+            append_structured_output_instruction(&mut messages, &schema)?;
+            select_structured_output_capability(
                 &model.capabilities(),
                 matches!(output.value_type(), PlanType::Object { .. }),
             )
-            .ok_or_else(|| invariant(LLM_DESCRIPTOR_INVALID))?;
-            Some(match capability {
+            .map(|capability| match capability {
                 ModelCapability::JsonObjectOutput => ChatResponseFormat::JsonObject {
                     name: "response".to_owned(),
-                    schema,
+                    schema: schema.clone(),
                 },
                 ModelCapability::JsonSchemaOutput => ChatResponseFormat::JsonSchema {
                     name: "response".to_owned(),
-                    schema,
+                    schema: schema.clone(),
                 },
                 ModelCapability::Vision => unreachable!("vision is not structured output"),
             })
@@ -682,6 +684,26 @@ impl LeafTaskExecutor for LlmTaskExecutor {
             tools: tool_contract.definitions(),
             tool_choice: tool_contract.choice.clone(),
         };
+        tracing::info!(
+            event_name = "llm.request_prepared",
+            run_id = request.run_id().as_str(),
+            task_id = request.task_id().as_str(),
+            provider_route = model_selector.provider(),
+            model_id = model_selector.id(),
+            adapter = "core.llm",
+            worker_version = request.worker_version().as_str(),
+            request_mode = match request_mode {
+                ChatRequestMode::Complete => "complete",
+                ChatRequestMode::Streaming => "streaming",
+            },
+            structured_output_mode = match &chat_request.response_format {
+                Some(ChatResponseFormat::JsonSchema { .. }) => "native_json_schema",
+                Some(ChatResponseFormat::JsonObject { .. }) => "native_json_object",
+                None if output.value_type().string_constraints().is_some() => "text",
+                None => "prompt_only",
+            },
+            "LLM request prepared from frozen provider/model binding"
+        );
         validate_chat_request(&chat_request).map_err(|_| {
             invariant(if context.continuation_turns().is_empty() {
                 LLM_MESSAGE_INVALID
@@ -1023,6 +1045,12 @@ impl LeafTaskExecutor for LlmTaskExecutor {
             match serde_json::from_str(&text) {
                 Ok(value) => value,
                 Err(_) => {
+                    tracing::warn!(
+                        event_name = "llm.response_validation_failed",
+                        validation_stage = "json_parse",
+                        failure_code = LLM_RESPONSE_INVALID,
+                        "LLM response failed local JSON parsing"
+                    );
                     let seal = publication.fail();
                     return Err(with_model_completion(
                         context,
@@ -1038,6 +1066,12 @@ impl LeafTaskExecutor for LlmTaskExecutor {
         let value = match RuntimeValue::new(value) {
             Ok(value) => value,
             Err(_) => {
+                tracing::warn!(
+                    event_name = "llm.response_validation_failed",
+                    validation_stage = "schema_validation",
+                    failure_code = LLM_RESPONSE_INVALID,
+                    "LLM response failed local value validation"
+                );
                 let seal = publication.fail();
                 return Err(with_model_completion(
                     context,
@@ -1050,6 +1084,12 @@ impl LeafTaskExecutor for LlmTaskExecutor {
             }
         };
         if !value.matches(output.value_type()) {
+            tracing::warn!(
+                event_name = "llm.response_validation_failed",
+                validation_stage = "schema_validation",
+                failure_code = LLM_RESPONSE_INVALID,
+                "LLM response failed local schema validation"
+            );
             let seal = publication.fail();
             return Err(with_model_completion(
                 context,
@@ -1805,8 +1845,8 @@ fn production_worker_registry_inner(
         .map_err(|error| CompileError::new("WORKER_REGISTRY_INVALID", error.to_string()))?;
     let mut registry = WorkerExecutorRegistry::new();
     let mut llm_versions = BTreeSet::new();
-    for alias in models.names() {
-        let identity = models.deployment_identity(alias)?;
+    for selector in models.selectors() {
+        let identity = models.deployment_identity(selector)?;
         if llm_versions.insert(identity.worker_version().to_owned()) {
             let executor = LlmTaskExecutor::new(models.clone());
             let executor = match &live_run_stream_broker {
@@ -2034,6 +2074,29 @@ fn render_messages(
     Ok(messages)
 }
 
+fn append_structured_output_instruction(
+    messages: &mut [ChatMessage],
+    schema: &Value,
+) -> Result<(), WorkerFailure> {
+    let schema = serde_json::to_string(schema).map_err(|_| invariant(LLM_DESCRIPTOR_INVALID))?;
+    let instruction = format!("\n\nReturn only valid JSON matching this JSON Schema:\n{schema}");
+    let content = messages
+        .iter_mut()
+        .rev()
+        .find_map(|message| match message {
+            ChatMessage::User { content } => Some(content),
+            ChatMessage::System { .. }
+            | ChatMessage::Assistant { .. }
+            | ChatMessage::Tool { .. } => None,
+        })
+        .ok_or_else(|| invariant(LLM_MESSAGE_INVALID))?;
+    match content {
+        ChatContent::Text(text) => text.push_str(&instruction),
+        ChatContent::Parts(parts) => parts.push(ChatContentPart::Text { text: instruction }),
+    }
+    Ok(())
+}
+
 fn render_template(source: &str, bindings: &RuntimeBindings) -> Result<String, WorkerFailure> {
     compile_template(source)
         .map_err(|_| invariant(LLM_DESCRIPTOR_INVALID))?
@@ -2129,6 +2192,18 @@ fn descriptor_object(
         DescriptorValue::Object(value) => Ok(value),
         _ => Err(invariant(LLM_DESCRIPTOR_INVALID)),
     }
+}
+
+fn descriptor_model_selector(value: &DescriptorValue) -> Result<ModelSelector, WorkerFailure> {
+    let selector = descriptor_object(value)?;
+    if selector.len() != 2 || !selector.contains_key("provider") || !selector.contains_key("id") {
+        return Err(invariant(LLM_DESCRIPTOR_INVALID));
+    }
+    ModelSelector::new(
+        descriptor_string(required(selector, "provider")?)?,
+        descriptor_string(required(selector, "id")?)?,
+    )
+    .map_err(|_| invariant(LLM_DESCRIPTOR_INVALID))
 }
 
 fn descriptor_string(value: &DescriptorValue) -> Result<&str, WorkerFailure> {
@@ -2426,12 +2501,13 @@ mod tests {
     struct CapturingModel {
         requests: Arc<Mutex<Vec<ChatRequest>>>,
         response: String,
+        capabilities: BTreeSet<ModelCapability>,
     }
 
     #[async_trait]
     impl ChatModel for CapturingModel {
         fn capabilities(&self) -> BTreeSet<ModelCapability> {
-            BTreeSet::from([ModelCapability::JsonSchemaOutput, ModelCapability::Vision])
+            self.capabilities.clone()
         }
 
         fn request_capabilities(&self) -> BTreeSet<ModelRequestCapability> {
@@ -2948,10 +3024,12 @@ mod tests {
         configuration: &BTreeMap<String, DescriptorValue>,
         tools: Vec<Value>,
     ) -> Value {
-        let model_alias = match configuration.get("model") {
-            Some(DescriptorValue::String(value)) => value.clone(),
-            _ => panic!("test llm configuration must contain a model alias"),
-        };
+        let model_selector = descriptor_model_selector(
+            configuration
+                .get("model")
+                .expect("test llm configuration must contain a model selector"),
+        )
+        .unwrap();
         let request_mode = match configuration.get("stream") {
             Some(DescriptorValue::Boolean(true)) => ModelRequestCapability::Streaming.as_str(),
             Some(DescriptorValue::Boolean(false)) => ModelRequestCapability::Complete.as_str(),
@@ -2969,7 +3047,8 @@ mod tests {
         .unwrap();
         let mut binding = json!({
             "adapter": "core.llm",
-            "model_alias": model_alias,
+            "provider_route": model_selector.provider(),
+            "model_id": model_selector.id(),
             "model_binding_hash": "test-model-binding-hash",
             "model_binding": {"adapter": "test"},
             "request_mode": request_mode,
@@ -3004,7 +3083,10 @@ mod tests {
 
     fn finish_reason_configuration(stream: bool) -> BTreeMap<String, DescriptorValue> {
         BTreeMap::from([
-            ("model".to_owned(), string("chat")),
+            (
+                "model".to_owned(),
+                object([("provider", string("fixture")), ("id", string("chat"))]),
+            ),
             ("stream".to_owned(), DescriptorValue::Boolean(stream)),
             ("publish".to_owned(), DescriptorValue::Boolean(true)),
             ("parameters".to_owned(), object([])),
@@ -3110,7 +3192,7 @@ mod tests {
             let mut models = ModelRegistry::default();
             models
                 .register_versioned(
-                    "chat",
+                    ModelSelector::new("fixture", "chat").unwrap(),
                     ModelDeploymentIdentity::new(
                         "model-worker-1",
                         json!({"adapter": "tool-call-test"}),
@@ -3179,7 +3261,7 @@ mod tests {
             let mut models = ModelRegistry::default();
             models
                 .register_versioned(
-                    "chat",
+                    ModelSelector::new("fixture", "chat").unwrap(),
                     ModelDeploymentIdentity::new(
                         "model-worker-1",
                         json!({"adapter": "continuation-capture"}),
@@ -3286,7 +3368,7 @@ mod tests {
         let mut models = ModelRegistry::default();
         models
             .register_versioned(
-                "chat",
+                ModelSelector::new("fixture", "chat").unwrap(),
                 ModelDeploymentIdentity::new(
                     "model-worker-1",
                     json!({"adapter": "catalog-linked-continuation"}),
@@ -3386,7 +3468,7 @@ mod tests {
             let mut models = ModelRegistry::default();
             models
                 .register_versioned(
-                    "chat",
+                    ModelSelector::new("fixture", "chat").unwrap(),
                     ModelDeploymentIdentity::new(
                         "model-worker-1",
                         json!({"adapter": "continuation-limit"}),
@@ -3820,7 +3902,7 @@ mod tests {
                 let mut models = ModelRegistry::default();
                 models
                     .register_versioned(
-                        "chat",
+                        ModelSelector::new("fixture", "chat").unwrap(),
                         ModelDeploymentIdentity::new(
                             "model-worker-1",
                             json!({"adapter": "finish-reason-matrix"}),
@@ -3922,11 +4004,15 @@ mod tests {
         let model = CapturingModel {
             requests: requests.clone(),
             response: "answer".to_owned(),
+            capabilities: BTreeSet::from([
+                ModelCapability::JsonSchemaOutput,
+                ModelCapability::Vision,
+            ]),
         };
         let mut models = ModelRegistry::default();
         models
             .register_versioned(
-                "chat",
+                ModelSelector::new("fixture", "chat").unwrap(),
                 ModelDeploymentIdentity::new("model-worker-1", json!({"model": "fixed"})).unwrap(),
                 model,
             )
@@ -3946,7 +4032,10 @@ mod tests {
             ])
         };
         let configuration = BTreeMap::from([
-            ("model".to_owned(), string("chat")),
+            (
+                "model".to_owned(),
+                object([("provider", string("fixture")), ("id", string("chat"))]),
+            ),
             (
                 "parameters".to_owned(),
                 object([(
@@ -4027,22 +4116,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn structured_outputs_use_prompt_and_local_validation_for_every_native_mode() {
+        let output_type = PlanType::Object {
+            properties: BTreeMap::from([(
+                "answer".to_owned(),
+                PlanProperty::new(PlanType::String, true).unwrap(),
+            )]),
+            additional_properties: None,
+        };
+        let modes = [
+            ("prompt_only", BTreeSet::new()),
+            (
+                "json_object",
+                BTreeSet::from([ModelCapability::JsonObjectOutput]),
+            ),
+            (
+                "json_schema",
+                BTreeSet::from([ModelCapability::JsonSchemaOutput]),
+            ),
+        ];
+
+        for (mode, capabilities) in modes {
+            for (response, expected_error) in [
+                (r#"{"answer":"ok"}"#, None),
+                ("not-json", Some(LLM_RESPONSE_INVALID)),
+                (r#"{"answer":1}"#, Some(LLM_RESPONSE_INVALID)),
+            ] {
+                let requests = Arc::new(Mutex::new(Vec::new()));
+                let mut models = ModelRegistry::default();
+                models
+                    .register_versioned(
+                        ModelSelector::new("fixture", "chat").unwrap(),
+                        ModelDeploymentIdentity::new(
+                            "model-worker-1",
+                            json!({"adapter": "structured-output-test", "mode": mode}),
+                        )
+                        .unwrap(),
+                        CapturingModel {
+                            requests: Arc::clone(&requests),
+                            response: response.to_owned(),
+                            capabilities: capabilities.clone(),
+                        },
+                    )
+                    .unwrap();
+                let mut configuration = finish_reason_configuration(true);
+                configuration.insert("publish".to_owned(), DescriptorValue::Boolean(false));
+                let request = dispatch_request(
+                    SchedulerTaskKind::Llm,
+                    "core.llm",
+                    "model-worker-1",
+                    configuration,
+                    Vec::new(),
+                    output_type.clone(),
+                );
+                let result = LlmTaskExecutor::new(models)
+                    .execute(&worker_context(1), &request, CancellationToken::new())
+                    .await;
+
+                match expected_error {
+                    Some(code) => assert_eq!(result.unwrap_err().code(), code, "{mode}"),
+                    None => assert_eq!(
+                        result.unwrap().outputs().values().next().unwrap().value(),
+                        &json!({"answer": "ok"}),
+                        "{mode}"
+                    ),
+                }
+
+                let requests = requests.lock().unwrap();
+                let captured = &requests[0];
+                let prompt = match captured.messages.last().unwrap().content().unwrap() {
+                    ChatContent::Text(text) => text.clone(),
+                    ChatContent::Parts(parts) => parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            ChatContentPart::Text { text } => Some(text.as_str()),
+                            ChatContentPart::Image { .. } => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(""),
+                };
+                assert!(prompt.contains("Return only valid JSON"), "{mode}");
+                assert!(prompt.contains("JSON Schema"), "{mode}");
+                assert!(prompt.contains("\"answer\""), "{mode}");
+                match mode {
+                    "prompt_only" => assert!(captured.response_format.is_none()),
+                    "json_object" => assert!(matches!(
+                        &captured.response_format,
+                        Some(ChatResponseFormat::JsonObject { .. })
+                    )),
+                    "json_schema" => assert!(matches!(
+                        &captured.response_format,
+                        Some(ChatResponseFormat::JsonSchema { .. })
+                    )),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn llm_adapter_omits_absent_optional_images_and_rejects_present_invalid_values() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let model = CapturingModel {
             requests: requests.clone(),
             response: "answer".to_owned(),
+            capabilities: BTreeSet::from([
+                ModelCapability::JsonSchemaOutput,
+                ModelCapability::Vision,
+            ]),
         };
         let mut models = ModelRegistry::default();
         models
             .register_versioned(
-                "chat",
+                ModelSelector::new("fixture", "chat").unwrap(),
                 ModelDeploymentIdentity::new("model-worker-1", json!({"model": "fixed"})).unwrap(),
                 model,
             )
             .unwrap();
         let configuration = BTreeMap::from([
-            ("model".to_owned(), string("chat")),
+            (
+                "model".to_owned(),
+                object([("provider", string("fixture")), ("id", string("chat"))]),
+            ),
             ("parameters".to_owned(), object([])),
             (
                 "runtime_bindings".to_owned(),
@@ -4144,14 +4339,17 @@ mod tests {
         let mut models = ModelRegistry::default();
         models
             .register_versioned(
-                "chat",
+                ModelSelector::new("fixture", "chat").unwrap(),
                 ModelDeploymentIdentity::new("model-worker-1", json!({"adapter": "chunked-test"}))
                     .unwrap(),
                 ChunkedModel,
             )
             .unwrap();
         let configuration = BTreeMap::from([
-            ("model".to_owned(), string("chat")),
+            (
+                "model".to_owned(),
+                object([("provider", string("fixture")), ("id", string("chat"))]),
+            ),
             ("parameters".to_owned(), object([])),
             (
                 "message_program".to_owned(),

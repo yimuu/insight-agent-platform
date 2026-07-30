@@ -74,6 +74,31 @@ workflow:
 
 完整示例见 [`agents/`](agents) 和 [`tests/fixtures/dsl/`](tests/fixtures/dsl)。
 
+## 模型选择
+
+LLM 步骤直接选择 Provider route 和 Provider 侧模型 ID，不使用业务别名：
+
+```yaml
+- type: llm
+  id: answer
+  model:
+    provider: dashscope-cn
+    id: qwen3.6-flash
+  messages:
+    - role: user
+      content: [{text: "请总结输入"}]
+  parameters:
+    temperature: 0.3
+    enable_thinking: false
+  response: Answer
+```
+
+内置 Provider Catalog 已定义 `dashscope-cn`、`dashscope-intl` 及其已验证模型；两条路由默认都从
+`DASHSCOPE_API_KEY` 读取凭据，但使用不同 endpoint，平台不会自动跨区域切换。不再需要
+`models.yaml`。只有部署实际启用的 Agent 引用了某个模型，发布时才要求对应凭据；因此
+Action-only Quickstart 无需模型配置或模型密钥。私有网关、新模型和独立账户通过
+[`platform.yaml` 的 `providers` 扩展](docs/current/operations.md#provider-catalog-与模型配置)声明。
+
 ## 文档
 
 - [文档首页](docs/README.md)：阅读路线、现行文档与历史档案边界；

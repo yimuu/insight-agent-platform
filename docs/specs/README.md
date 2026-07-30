@@ -15,6 +15,9 @@
 
 最近完成的规范：
 
+- [Provider Catalog 与直接模型选择优化](../archive/specs/2026-07-30-provider-catalog-and-direct-model-selection.md)：
+  已删除必需的模型文件与别名层，交付结构化 selector、版本化 Catalog、可选 Provider extension
+  和统一的结构化输出本地校验；
 - [Run Stream v1 统一事件模型优化](../archive/specs/2026-07-29-run-stream-v1-unified-event-model.md)：
   已将 `/runs/stream` clean-cut 为闭合的 `run.*` 事件，并以单一 canonical durable Run snapshot
   统一 terminal authority；

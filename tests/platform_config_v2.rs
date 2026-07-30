@@ -3,7 +3,8 @@ use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 use insight_agent_platform::{
     config::{
         ArtifactStoreProvider, AuthConfig, DeploymentMode, HistoryConfig,
-        LiveRunStreamBrokerProvider, PlatformConfig, PlatformConfigError,
+        LiveRunStreamBrokerProvider, ModelInputModality, NativeStructuredOutput, PlatformConfig,
+        PlatformConfigError, ProviderExtensionSource, ProviderTransportPolicy,
     },
     engine::PersistenceMode,
     resources::config::load_model_registry_with_env,
@@ -20,8 +21,6 @@ auth:
 {auth}
 agents:
   directory: ../agents
-models:
-  config: models/resources.yaml
 actions:
   enabled: [current_time, example.text_metrics]
 history:
@@ -188,10 +187,8 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
     assert_eq!(config.runtime.max_llm_tool_rounds, 16);
     assert_eq!(config.runtime.max_llm_tool_calls, 64);
     assert_eq!(config.agents.directory, directory.path().join("agents"));
-    assert_eq!(
-        config.models.config,
-        directory.path().join("config/models/resources.yaml")
-    );
+    assert!(config.providers.extensions.is_empty());
+    assert!(config.model_policy.is_none());
     assert_eq!(
         config.history,
         HistoryConfig::Sqlite {
@@ -907,17 +904,17 @@ fn quickstart_configs_load_without_secrets() {
         config.agents.enabled.iter().cloned().collect::<Vec<_>>(),
         vec!["action_demo".to_string()]
     );
-    assert_eq!(
-        config.models.config,
-        root.join("config/models.quickstart.yaml")
-    );
+    assert!(config.providers.extensions.is_empty());
+    assert!(config.model_policy.is_none());
     assert_eq!(
         config.actions.enabled.iter().cloned().collect::<Vec<_>>(),
         vec!["example.text_metrics".to_string()]
     );
 
-    let registry = load_model_registry_with_env(&config.models.config, |_| None).unwrap();
-    registry.resolve("unused_quickstart_model").unwrap();
+    let registry =
+        load_model_registry_with_env(&config.providers, config.model_policy.as_ref(), |_| None)
+            .unwrap();
+    assert!(registry.selectors().count() >= 4);
 }
 
 #[test]
@@ -1490,5 +1487,123 @@ fn public_and_default_public_are_not_part_of_formal_schema() {
             load(&path, BTreeMap::new()).unwrap_err().code(),
             "PLATFORM_CONFIG_INVALID"
         );
+    }
+}
+
+#[test]
+fn provider_extensions_and_model_policy_are_strict_platform_configuration() {
+    let yaml = base_yaml("  mode: disabled").replace(
+        "actions:",
+        r#"providers:
+  company-llm:
+    type: open_ai_compatible
+    endpoint: http://127.0.0.1:11434/v1
+    credential:
+      type: bearer
+      env: COMPANY_LLM_API_KEY
+    models:
+      vendor/internal-chat/v1:
+        input: [text, image]
+        native_structured_output: json_schema
+    connect_timeout: 2s
+    request_timeout: 45s
+    transport:
+      plaintext_http: loopback
+  dashscope-cn-team-a:
+    extends: dashscope-cn
+    credential:
+      env: TEAM_A_DASHSCOPE_API_KEY
+    models:
+      qwen-new-model:
+        input: [text]
+model_policy:
+  allow:
+    - provider: company-llm
+      id: vendor/internal-chat/v1
+    - provider: dashscope-cn-team-a
+      id: qwen-new-model
+actions:"#,
+    );
+    let (_directory, path) = write_config(&yaml);
+    let config = load(&path, BTreeMap::new()).unwrap();
+
+    let custom = &config.providers.extensions["company-llm"];
+    assert_eq!(custom.source, ProviderExtensionSource::OpenAiCompatible);
+    assert_eq!(
+        custom.endpoint.as_deref(),
+        Some("http://127.0.0.1:11434/v1")
+    );
+    assert_eq!(
+        custom.credential_env.as_deref(),
+        Some("COMPANY_LLM_API_KEY")
+    );
+    assert_eq!(custom.connect_timeout, Duration::from_secs(2));
+    assert_eq!(custom.request_timeout, Duration::from_secs(45));
+    assert_eq!(custom.transport, ProviderTransportPolicy::AllowLoopbackHttp);
+    let model = &custom.models["vendor/internal-chat/v1"];
+    assert_eq!(
+        model.input,
+        std::collections::BTreeSet::from([ModelInputModality::Text, ModelInputModality::Image,])
+    );
+    assert_eq!(
+        model.native_structured_output,
+        Some(NativeStructuredOutput::JsonSchema)
+    );
+
+    let inherited = &config.providers.extensions["dashscope-cn-team-a"];
+    assert_eq!(
+        inherited.source,
+        ProviderExtensionSource::Extends {
+            provider: "dashscope-cn".to_owned()
+        }
+    );
+    assert_eq!(config.model_policy.unwrap().allow.len(), 2);
+}
+
+#[test]
+fn legacy_model_registry_and_malformed_provider_extensions_fail_closed() {
+    let cases = [
+        (
+            "models:\n  config: models.yaml\nactions:",
+            "PLATFORM_CONFIG_INVALID",
+        ),
+        (
+            "providers:\n  company-llm:\n    type: open_ai_compatible\n    endpoint: https://llm.example/v1\n    credential: {type: bearer, env: COMPANY_LLM_API_KEY}\n    models: {chat: {input: [text]}}\n    enabled: true\nactions:",
+            "PLATFORM_CONFIG_INVALID",
+        ),
+        (
+            "providers:\n  company-llm:\n    endpoint: https://llm.example/v1\n    credential: {type: bearer, env: COMPANY_LLM_API_KEY}\n    models: {chat: {input: [text]}}\nactions:",
+            "PLATFORM_PROVIDER_INVALID",
+        ),
+        (
+            "providers:\n  company-llm:\n    type: open_ai_compatible\n    extends: dashscope-cn\n    endpoint: https://llm.example/v1\n    credential: {type: bearer, env: COMPANY_LLM_API_KEY}\n    models: {chat: {input: [text]}}\nactions:",
+            "PLATFORM_PROVIDER_INVALID",
+        ),
+        (
+            "providers:\n  company-llm:\n    type: open_ai_compatible\n    endpoint: https://llm.example/v1\n    models: {chat: {input: [text]}}\nactions:",
+            "PLATFORM_PROVIDER_INVALID",
+        ),
+        (
+            "providers:\n  dashscope-cn-team-a:\n    extends: dashscope-cn\n    endpoint: https://override.example/v1\nactions:",
+            "PLATFORM_PROVIDER_INVALID",
+        ),
+        (
+            "providers:\n  company-llm:\n    type: open_ai_compatible\n    endpoint: https://llm.example/v1\n    credential: {type: bearer, env: 1INVALID}\n    models: {chat: {input: [text]}}\nactions:",
+            "PLATFORM_PROVIDER_INVALID",
+        ),
+        (
+            "providers:\n  company-llm:\n    type: open_ai_compatible\n    endpoint: https://llm.example/v1\n    credential: {type: bearer, env: COMPANY_LLM_API_KEY}\n    models: {chat: {input: [image]}}\nactions:",
+            "PLATFORM_PROVIDER_INVALID",
+        ),
+        (
+            "model_policy:\n  allow:\n    - {provider: dashscope-cn, id: qwen3.6-flash}\n    - {provider: dashscope-cn, id: qwen3.6-flash}\nactions:",
+            "PLATFORM_MODEL_POLICY_INVALID",
+        ),
+    ];
+
+    for (replacement, code) in cases {
+        let yaml = base_yaml("  mode: disabled").replace("actions:", replacement);
+        let (_directory, path) = write_config(&yaml);
+        assert_eq!(load(&path, BTreeMap::new()).unwrap_err().code(), code);
     }
 }

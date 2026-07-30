@@ -30,8 +30,11 @@
 [`specs/`](specs/README.md) 描述已经形成实施和验收边界、但尚未完全成为当前可执行合同的目标设计。
 规范中的新 API、配置、schema 和容量数字在实现及 conformance evidence 完成前均不是当前行为。
 
-当前没有活动设计规范；最近完成的设计见
-[归档规范](archive/specs/2026-07-26-durable-runtime-50-active-runs-optimization.md)。
+当前活动规范：
+
+- 当前没有活动设计规范。最近完成的 Provider Catalog 优化见
+  [归档规范](archive/specs/2026-07-30-provider-catalog-and-direct-model-selection.md)，当前合同见
+  [DSL v1 指南](current/dsl.md)与[部署与运维](current/operations.md)。
 
 ## 活动资格验收
 

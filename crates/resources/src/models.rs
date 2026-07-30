@@ -13,6 +13,81 @@ use insight_engine::{author::CompileError, execution::RunError, schema::compile_
 
 use super::image::validate_image_url;
 
+/// Canonical, provider-aware identity for one chat model.
+///
+/// The two fields remain separate throughout compilation, deployment
+/// publication, durable execution, and observability. A provider/model string
+/// is only a display representation because provider model IDs may themselves
+/// contain `/`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSelector {
+    provider: String,
+    id: String,
+}
+
+impl ModelSelector {
+    pub fn new(provider: impl Into<String>, id: impl Into<String>) -> Result<Self, CompileError> {
+        let provider = provider.into();
+        let id = id.into();
+        if provider.is_empty()
+            || provider.len() > 128
+            || !provider.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_lowercase()
+                    || (byte.is_ascii_digit() && index > 0)
+                    || (byte == b'-' && index > 0)
+            })
+            || provider.ends_with('-')
+        {
+            return Err(CompileError::new(
+                "MODEL_PROVIDER_INVALID",
+                "model provider must be a bounded lowercase route identifier",
+            ));
+        }
+        if id.trim().is_empty()
+            || id.len() > 512
+            || id
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+        {
+            return Err(CompileError::new(
+                "MODEL_ID_INVALID",
+                "provider model id must be a bounded non-empty opaque identifier",
+            ));
+        }
+        Ok(Self { provider, id })
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn display_ref(&self) -> String {
+        format!("{}/{}", self.provider, self.id)
+    }
+}
+
+impl<'de> Deserialize<'de> for ModelSelector {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawModelSelector {
+            provider: String,
+            id: String,
+        }
+
+        let raw = RawModelSelector::deserialize(deserializer)?;
+        Self::new(raw.provider, raw.id).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ModelCapability {
     JsonObjectOutput,
@@ -979,7 +1054,7 @@ impl Write for LimitWriter {
     }
 }
 
-/// Non-secret immutable identity for one model alias binding. Secrets are
+/// Non-secret immutable identity for one provider/model binding. Secrets are
 /// deliberately absent; rotating a secret value does not rewrite a published
 /// Deployment Revision, while changing provider/model/adapter policy does.
 #[derive(Debug, Clone, PartialEq)]
@@ -1041,19 +1116,26 @@ impl ModelDeploymentIdentity {
 struct RegisteredModel {
     model: Arc<dyn ChatModel>,
     deployment: ModelDeploymentIdentity,
+    credential: Option<ModelCredentialState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelCredentialState {
+    Present,
+    Missing { environment_variable: String },
+    Empty { environment_variable: String },
 }
 
 #[derive(Clone, Default)]
 pub struct ModelRegistry {
-    models: BTreeMap<String, RegisteredModel>,
+    models: BTreeMap<ModelSelector, RegisteredModel>,
 }
 
 impl ModelRegistry {
-    pub fn register<M>(&mut self, alias: impl Into<String>, model: M) -> Result<(), CompileError>
+    pub fn register<M>(&mut self, selector: ModelSelector, model: M) -> Result<(), CompileError>
     where
         M: ChatModel + 'static,
     {
-        let alias = alias.into();
         let capabilities = model
             .capabilities()
             .into_iter()
@@ -1065,79 +1147,129 @@ impl ModelRegistry {
             .map(ModelRequestCapability::as_str)
             .collect::<Vec<_>>();
         let deployment = ModelDeploymentIdentity::new(
-            "legacy-model-registration-v1",
+            "explicit-model-registration-v2",
             serde_json::json!({
                 "adapter_type": std::any::type_name::<M>(),
-                "alias": alias,
+                "provider_route": selector.provider(),
+                "model_id": selector.id(),
                 "capabilities": capabilities,
                 "request_capabilities": request_capabilities,
-                "registration": "legacy_explicit_test_surface",
+                "registration": "explicit_test_surface",
             }),
         )?;
-        self.register_versioned(alias, deployment, model)
+        self.register_versioned(selector, deployment, model)
     }
 
     pub fn register_versioned<M>(
         &mut self,
-        alias: impl Into<String>,
+        selector: ModelSelector,
         deployment: ModelDeploymentIdentity,
         model: M,
     ) -> Result<(), CompileError>
     where
         M: ChatModel + 'static,
     {
-        let alias = alias.into();
-        if alias.trim().is_empty() {
-            return Err(CompileError::new(
-                "MODEL_ALIAS_INVALID",
-                "model alias must not be empty",
-            ));
-        }
-        if self.models.contains_key(&alias) {
+        self.register_entry(selector, deployment, model, None)
+    }
+
+    pub fn register_provider_model<M>(
+        &mut self,
+        selector: ModelSelector,
+        deployment: ModelDeploymentIdentity,
+        credential_environment_variable: Option<String>,
+        credential_value: Option<&str>,
+        model: M,
+    ) -> Result<(), CompileError>
+    where
+        M: ChatModel + 'static,
+    {
+        let credential =
+            credential_environment_variable.map(|environment_variable| match credential_value {
+                Some(value) if !value.trim().is_empty() => ModelCredentialState::Present,
+                Some(_) => ModelCredentialState::Empty {
+                    environment_variable,
+                },
+                None => ModelCredentialState::Missing {
+                    environment_variable,
+                },
+            });
+        self.register_entry(selector, deployment, model, credential)
+    }
+
+    fn register_entry<M>(
+        &mut self,
+        selector: ModelSelector,
+        deployment: ModelDeploymentIdentity,
+        model: M,
+        credential: Option<ModelCredentialState>,
+    ) -> Result<(), CompileError>
+    where
+        M: ChatModel + 'static,
+    {
+        if self.models.contains_key(&selector) {
             return Err(CompileError::new(
                 "DUPLICATE_MODEL",
-                format!("model alias '{alias}' is already registered"),
+                format!("model '{}' is already registered", selector.display_ref()),
             ));
         }
         self.models.insert(
-            alias,
+            selector,
             RegisteredModel {
                 model: Arc::new(model),
                 deployment,
+                credential,
             },
         );
         Ok(())
     }
 
-    pub fn resolve(&self, alias: &str) -> Result<Arc<dyn ChatModel>, CompileError> {
-        self.models
-            .get(alias)
-            .map(|entry| entry.model.clone())
-            .ok_or_else(|| {
-                CompileError::new(
-                    "MODEL_NOT_FOUND",
-                    format!("model alias '{alias}' is not registered"),
-                )
-            })
+    pub fn resolve(&self, selector: &ModelSelector) -> Result<Arc<dyn ChatModel>, CompileError> {
+        let entry = self.models.get(selector).ok_or_else(|| {
+            CompileError::new(
+                "MODEL_NOT_FOUND",
+                format!("model '{}' is not registered", selector.display_ref()),
+            )
+        })?;
+        match &entry.credential {
+            Some(ModelCredentialState::Missing {
+                environment_variable,
+            }) => Err(CompileError::new(
+                "MODEL_SECRET_MISSING",
+                format!(
+                    "required environment variable '{environment_variable}' for provider route '{}' is missing",
+                    selector.provider()
+                ),
+            )),
+            Some(ModelCredentialState::Empty {
+                environment_variable,
+            }) => Err(CompileError::new(
+                "MODEL_SECRET_EMPTY",
+                format!(
+                    "required environment variable '{environment_variable}' for provider route '{}' is empty",
+                    selector.provider()
+                ),
+            )),
+            Some(ModelCredentialState::Present) | None => Ok(entry.model.clone()),
+        }
     }
 
     pub fn deployment_identity(
         &self,
-        alias: &str,
+        selector: &ModelSelector,
     ) -> Result<&ModelDeploymentIdentity, CompileError> {
         self.models
-            .get(alias)
+            .get(selector)
             .map(|entry| &entry.deployment)
             .ok_or_else(|| {
                 CompileError::new(
                     "MODEL_NOT_FOUND",
-                    format!("model alias '{alias}' is not registered"),
+                    format!("model '{}' is not registered", selector.display_ref()),
                 )
             })
     }
 
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.models.keys().map(String::as_str)
+    pub fn selectors(&self) -> impl Iterator<Item = &ModelSelector> {
+        self.models.keys()
     }
 }
 
@@ -1168,6 +1300,25 @@ pub mod adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_selector_deserialization_preserves_validation_and_closed_fields() {
+        let selector: ModelSelector = serde_json::from_value(serde_json::json!({
+            "provider": "company-llm",
+            "id": "vendor/model/v1"
+        }))
+        .unwrap();
+        assert_eq!(selector.provider(), "company-llm");
+        assert_eq!(selector.id(), "vendor/model/v1");
+
+        for invalid in [
+            serde_json::json!({"provider": "Company", "id": "model"}),
+            serde_json::json!({"provider": "company", "id": "bad model"}),
+            serde_json::json!({"provider": "company", "id": "model", "alias": "forbidden"}),
+        ] {
+            assert!(serde_json::from_value::<ModelSelector>(invalid).is_err());
+        }
+    }
 
     fn request(messages: Vec<ChatMessage>) -> ChatRequest {
         ChatRequest {

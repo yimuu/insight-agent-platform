@@ -273,7 +273,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: general_chat
+      model:
+        provider: fixture
+        id: general-chat
       messages:
         - role: system
           content:
@@ -348,7 +350,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: general_chat
+      model:
+        provider: fixture
+        id: general-chat
       messages:
         - role: user
           content: [{text: hello}]
@@ -422,7 +426,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: general_chat
+      model:
+        provider: fixture
+        id: general-chat
       messages:
         - role: user
           content: [{text: hello}]
@@ -471,7 +477,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: general_chat
+      model:
+        provider: fixture
+        id: general-chat
       messages:
         - role: user
           content: [{text: hello}]
@@ -495,6 +503,140 @@ workflow:
         let error = validate(insight_dsl::parse(&source).unwrap()).unwrap_err();
         assert_eq!(error.code(), INVALID_STEP, "control={control}");
     }
+}
+
+#[test]
+fn llm_model_selector_is_structured_strict_and_preserves_opaque_model_ids() {
+    let base = r#"api_version: insight.agent/v1
+kind: agent
+inputs: {}
+output: string
+workflow:
+  steps:
+    - id: answer
+      type: llm
+      MODEL
+      messages:
+        - role: user
+          content: [{text: hello}]
+      response: string
+    - return: $answer
+"#;
+    for invalid in [
+        "model: general_chat",
+        "model: dashscope-cn/qwen3.6-flash",
+        "model: {provider: dashscope-cn, id: qwen3.6-flash, alias: forbidden}",
+    ] {
+        let source = base.replace("MODEL", invalid);
+        let error = validate(insight_dsl::parse(&source).unwrap()).unwrap_err();
+        assert_eq!(error.code(), INVALID_STEP, "selector={invalid}");
+    }
+
+    let source = base.replace(
+        "MODEL",
+        "model: {provider: company-llm, id: vendor/internal-chat/v1}",
+    );
+    let plan = compile_source(&source, options(&source)).unwrap();
+    let NodeKind::LlmTask(descriptor) = plan.nodes()[0].kind() else {
+        panic!("expected LLM task");
+    };
+    assert_eq!(
+        descriptor.public_configuration.get("model"),
+        Some(&DescriptorValue::Object(std::collections::BTreeMap::from(
+            [
+                (
+                    "id".to_owned(),
+                    DescriptorValue::String("vendor/internal-chat/v1".to_owned()),
+                ),
+                (
+                    "provider".to_owned(),
+                    DescriptorValue::String("company-llm".to_owned()),
+                ),
+            ]
+        )))
+    );
+}
+
+#[test]
+fn agent_is_not_an_llm_step_type_alias() {
+    let source = r#"api_version: insight.agent/v1
+kind: agent
+inputs: {}
+output: string
+workflow:
+  steps:
+    - id: answer
+      type: agent
+      model: {provider: fixture, id: chat}
+      messages:
+        - role: user
+          content: [{text: hello}]
+      response: string
+    - return: $answer
+"#;
+    assert_eq!(
+        validate(insight_dsl::parse(source).unwrap())
+            .unwrap_err()
+            .code(),
+        INVALID_STEP
+    );
+}
+
+#[test]
+fn one_agent_can_select_different_provider_routes_per_llm_step() {
+    let source = r#"api_version: insight.agent/v1
+kind: agent
+inputs: {}
+output: string
+workflow:
+  steps:
+    - id: cn
+      type: llm
+      model: {provider: dashscope-cn, id: qwen3.6-flash}
+      messages: [{role: user, content: [{text: first}]}]
+      response: string
+    - id: intl
+      type: llm
+      model: {provider: dashscope-intl, id: vendor/model/v1}
+      messages: [{role: user, content: [{text: second}]}]
+      response: string
+    - return: $intl
+"#;
+    let plan = compile_source(source, options(source)).unwrap();
+    let selectors = plan
+        .nodes()
+        .iter()
+        .filter_map(|node| match node.kind() {
+            NodeKind::LlmTask(descriptor) => descriptor.public_configuration.get("model"),
+            _ => None,
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selectors,
+        vec![
+            DescriptorValue::Object(std::collections::BTreeMap::from([
+                (
+                    "id".to_owned(),
+                    DescriptorValue::String("qwen3.6-flash".to_owned())
+                ),
+                (
+                    "provider".to_owned(),
+                    DescriptorValue::String("dashscope-cn".to_owned())
+                ),
+            ])),
+            DescriptorValue::Object(std::collections::BTreeMap::from([
+                (
+                    "id".to_owned(),
+                    DescriptorValue::String("vendor/model/v1".to_owned())
+                ),
+                (
+                    "provider".to_owned(),
+                    DescriptorValue::String("dashscope-intl".to_owned())
+                ),
+            ])),
+        ]
+    );
 }
 
 #[test]

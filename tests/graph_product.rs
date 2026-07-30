@@ -203,7 +203,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: fixture_model
+      model:
+        provider: fixture
+        id: fixture-model
       stream: true
       publish: true
       messages:

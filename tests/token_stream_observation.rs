@@ -14,7 +14,7 @@ use insight_agent_platform::{
         actions::ActionRegistry,
         models::{
             ChatChunk, ChatModel, ChatRequest, ChatStream, ModelCapability,
-            ModelDeploymentIdentity, ModelRegistry,
+            ModelDeploymentIdentity, ModelRegistry, ModelSelector,
         },
     },
     runtime::{
@@ -69,7 +69,7 @@ fn models() -> ModelRegistry {
     let mut models = ModelRegistry::default();
     models
         .register_versioned(
-            "answer_model",
+            ModelSelector::new("fixture", "answer-model").unwrap(),
             ModelDeploymentIdentity::new(
                 "token-observer-worker-1",
                 json!({"adapter": "chunked-fixture", "provider_model": "fixed"}),
@@ -159,7 +159,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: answer_model
+      model:
+        provider: fixture
+        id: answer-model
       messages:
         - role: user
           content:

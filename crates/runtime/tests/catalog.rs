@@ -219,14 +219,18 @@ workflow:
   steps:
     - id: z_buffered
       type: llm
-      model: general_chat
+      model:
+        provider: fixture
+        id: general-chat
       messages: [{role: user, content: [{text: buffered}]}]
       stream: false
       publish: true
       response: string
     - id: private
       type: llm
-      model: general_chat
+      model:
+        provider: fixture
+        id: general-chat
       messages: [{role: user, content: [{text: private}]}]
       stream: true
       publish: false
@@ -245,7 +249,9 @@ workflow:
       response: string
     - id: a_streaming
       type: llm
-      model: general_chat
+      model:
+        provider: fixture
+        id: general-chat
       messages: [{role: user, content: [{text: streaming}]}]
       stream: true
       publish: true
@@ -318,7 +324,7 @@ workflow:
     unknown_source_field["sources"][0]
         .as_object_mut()
         .unwrap()
-        .insert("model".to_owned(), json!("private-alias"));
+        .insert("model".to_owned(), json!("private-model-detail"));
     assert!(
         serde_json::from_value::<AgentStreamingContract>(unknown_source_field).is_err(),
         "streaming sources must not grow private fields implicitly"

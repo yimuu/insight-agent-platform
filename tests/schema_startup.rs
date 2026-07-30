@@ -65,7 +65,7 @@ fn run_failing_binary(platform_config: &Path) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_insight-agent-platform"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("PLATFORM_CONFIG", platform_config)
-        .env_remove("OPENAI_API_KEY")
+        .env_remove("DASHSCOPE_API_KEY")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -123,24 +123,7 @@ fn assert_startup_schema_error(output: &Output, expected_code: &str) {
 
 fn write_sqlite_platform_config(root: &Path, bind_addr: SocketAddr, database: &Path) -> PathBuf {
     let platform_config = root.join("platform.yaml");
-    let models_config = root.join("models.yaml");
     let agents_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("agents");
-
-    fs::write(
-        &models_config,
-        r#"version: 1
-
-models:
-  unused_startup_model:
-    type: open_ai_chat
-    base_url: https://models.example.invalid/v1
-    model: unused-startup-model
-    capabilities: []
-    connect_timeout: 1s
-    request_timeout: 5s
-"#,
-    )
-    .unwrap();
 
     fs::write(
         &platform_config,
@@ -156,9 +139,6 @@ agents:
   directory: {}
   enabled:
     - action_demo
-
-models:
-  config: models.yaml
 
 actions:
   enabled:

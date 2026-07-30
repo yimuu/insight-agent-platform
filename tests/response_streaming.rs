@@ -31,6 +31,7 @@ use insight_agent_platform::{
             ChatChunk, ChatEvent, ChatEventStream, ChatFinishReason, ChatInputTokensDetails,
             ChatModel, ChatOutputTokensDetails, ChatRequest, ChatResponse, ChatStream, ChatUsage,
             ModelCapability, ModelDeploymentIdentity, ModelRegistry, ModelRequestCapability,
+            ModelSelector,
         },
     },
     runtime::{
@@ -514,7 +515,7 @@ impl Fixture {
         let mut models = ModelRegistry::default();
         models
             .register_versioned(
-                "fixture_model",
+                ModelSelector::new("fixture", "fixture-model").unwrap(),
                 ModelDeploymentIdentity::new(
                     MODEL_WORKER_VERSION,
                     json!({"adapter": "dual-mode-fixture", "provider_model": "fixed"}),
@@ -527,7 +528,7 @@ impl Fixture {
             .unwrap();
         models
             .register_versioned(
-                "vision_chat",
+                ModelSelector::new("dashscope-cn", "qwen-vl-plus").unwrap(),
                 ModelDeploymentIdentity::new(
                     MODEL_WORKER_VERSION,
                     json!({"adapter": "dual-mode-fixture", "provider_model": "vision-fixed"}),
@@ -540,7 +541,7 @@ impl Fixture {
             .unwrap();
         models
             .register_versioned(
-                "isolation_model",
+                ModelSelector::new("fixture", "isolation-model").unwrap(),
                 ModelDeploymentIdentity::new(
                     MODEL_WORKER_VERSION,
                     json!({"adapter": "stream-isolation-fixture", "provider_model": "fixed"}),
@@ -577,7 +578,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: fixture_model
+      model:
+        provider: fixture
+        id: fixture-model
       stream: {stream_enabled}
       publish: {publish_enabled}
       messages:
@@ -620,7 +623,9 @@ workflow:
         left:
           - id: parallel_left_answer
             type: llm
-            model: isolation_model
+            model:
+              provider: fixture
+              id: isolation-model
             stream: true
             publish: true
             messages:
@@ -632,7 +637,9 @@ workflow:
         right:
           - id: parallel_right_answer
             type: llm
-            model: isolation_model
+            model:
+              provider: fixture
+              id: isolation-model
             stream: true
             publish: true
             messages:
@@ -679,7 +686,9 @@ workflow:
         steps:
           - id: loop_answer
             type: llm
-            model: isolation_model
+            model:
+              provider: fixture
+              id: isolation-model
             stream: true
             publish: true
             messages:
@@ -738,7 +747,9 @@ workflow:
                 steps.push_str(&format!(
                     r#"    - id: answer_{index}
       type: llm
-      model: fixture_model
+      model:
+        provider: fixture
+        id: fixture-model
       stream: true
       publish: true
       messages:

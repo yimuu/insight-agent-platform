@@ -71,7 +71,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: general_chat
+      model:
+        provider: fixture
+        id: general-chat
       publish: true
       messages:
         - role: user
@@ -322,7 +324,8 @@ fn model_tool_queue_binding() -> serde_json::Value {
     .unwrap();
     json!({
         "adapter": "core.llm",
-        "model_alias": "fixture",
+        "provider_route": "fixture",
+        "model_id": "general-chat",
         "model_binding_hash": "sha256:fixture",
         "model_binding": {},
         "request_mode": "streaming_request",

@@ -44,11 +44,12 @@ fail-closed evaluator；已完成的复现命令及正式证据路径保存在
 | `crates/engine/src/` | 无 I/O 的 Plan、scheduler、状态机和公开合同内核 |
 | `crates/dsl/src/` | 作者文档、表达式、类型检查、lowering 与 Graph authoring |
 | `crates/durable/src/` | 后端中立的 repository ports、commands、claims、receipts 与 projection models |
-| `crates/resources/src/` | Model/Action/Retrieval SPI、registry、builtin 与 OpenAI provider |
+| `crates/resources/src/` | Model/Action/Retrieval SPI、registry 与 OpenAI-compatible adapter |
 | `crates/storage/src/` | SQLite/PostgreSQL、Graph SQL、Artifact store 与 PostgreSQL live broker adapter |
 | `crates/runtime/src/` | catalog/deployment、leaf adapter、scheduler/worker pump、RunService 与 live Run stream |
 | `crates/api/src/v1/` | `/v1` Axum HTTP、认证、错误映射与 SSE transport |
-| `src/` | 根兼容 facade、平台配置、严格 YAML 解码和 binary composition |
+| `catalog/provider-catalog.yaml` | 平台版本化的内置 Provider route 与最小模型事实 |
+| `src/` | 根 facade、Provider extension/平台配置、Catalog loader、严格 YAML 解码和 binary composition |
 | `database/durable/` | SQLite/PostgreSQL 完整 Schema、安装与权限合同 |
 | `agents/` | 随仓库交付的 Agent |
 | `tests/fixtures/dsl/` | DSL compiler 正向和负向 fixtures |
@@ -62,6 +63,10 @@ fail-closed evaluator；已完成的复现命令及正式证据路径保存在
 3. 为 durable 行为补充 SQLite 与真实 PostgreSQL 证据；
 4. 更新对应 `docs/current/` 文档；
 5. 设计和迁移记录写入 `docs/archive/`，不要让历史示例重新成为正向输入。
+
+修改 Provider Catalog 时必须同步验证 Catalog digest、route/模型解析、官方 secret reference 和
+Deployment Revision non-interference；调用级参数不得下沉为 Catalog 默认值。添加自定义
+OpenAI-compatible 行为时，保持 Provider 身份与 adapter 协议分离。
 
 Repository 测试必须显式区分数据库安装和连接：先在新的空目标执行
 `database/durable/{postgres,sqlite}/schema.sql`，再创建 repository。生产构造函数没有隐式建表

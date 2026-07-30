@@ -16,6 +16,69 @@ Quickstart 使用 [`config/platform.quickstart.yaml`](../../config/platform.quic
 `action_demo`。生产样例位于 [`config/platform.yaml`](../../config/platform.yaml)。对外暴露服务前，
 必须按部署要求配置认证、数据库凭据、模型凭据和共享 Artifact 挂载。
 
+## Provider Catalog 与模型配置
+
+平台随版本发布只读的
+[`catalog/provider-catalog.yaml`](../../catalog/provider-catalog.yaml)，集中维护 Provider route、
+endpoint、adapter、默认凭据环境变量名和最小模型事实。Agent 直接使用
+`{provider, id}` selector；没有独立的模型别名列表、`models.yaml` 或模型级 `enabled`。
+Catalog 不保存 thinking、stream、tools、temperature 等调用选择。
+
+当前内置路由如下：
+
+| Provider route | Endpoint | 默认凭据 |
+|---|---|---|
+| `dashscope-cn` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` |
+| `dashscope-intl` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` |
+
+区域是 Provider 身份的一部分。Agent 必须显式选择 route；请求失败时不会从 `cn` 自动切换到
+`intl`。单 endpoint Provider 不需要额外 endpoint selector。只在发布已启用 Agent 且实际解析其
+模型引用时检查对应 secret，所以 Action-only 部署无需模型凭据。缺失和空 secret 分别 fail-closed，
+日志与 Deployment Revision identity 只包含环境变量名，不包含值。
+
+不同账户或 Catalog 尚未收录的新模型可以继承内置 route：
+
+```yaml
+providers:
+  dashscope-cn-team-a:
+    extends: dashscope-cn
+    credential:
+      env: TEAM_A_DASHSCOPE_API_KEY
+    models:
+      qwen-new-model:
+        input: [text]
+```
+
+私有 OpenAI-compatible endpoint 使用显式自定义 route：
+
+```yaml
+providers:
+  company-llm:
+    type: open_ai_compatible
+    endpoint: https://llm.company.internal/v1
+    credential:
+      type: bearer
+      env: COMPANY_LLM_API_KEY
+    models:
+      vendor/internal-chat/v1:
+        input: [text, image]
+```
+
+自定义 route 必须声明 endpoint、bearer secret reference 和至少一个模型；模型能力是 operator
+assertion，并与扩展配置 digest 一起进入 Deployment Revision。扩展不能覆盖内置 route。需要组织
+级收窄时，另用可选治理策略：
+
+```yaml
+model_policy:
+  allow:
+    - provider: company-llm
+      id: vendor/internal-chat/v1
+```
+
+`model_policy` 只限制可用集合，不注册模型，也没有隐式默认列表。Provider/model、endpoint identity、
+adapter/version、Catalog/extension digest、非秘密 transport 与能力事实都会冻结到 Deployment
+Revision；secret 值不会进入 Plan、revision 或日志。
+
 ## Run persistence policy
 
 每个 Deployment Revision 冻结一个 `execution.persistence_mode`：
@@ -132,6 +195,8 @@ terminal-only v1 仍限定单 owner replica。
 Terminal-only Gate A～D 还必须最后叠加
 `values-terminal-only-qualification.yaml`。该 overlay 显式选择 terminal-only、允许受限的短
 volatile timer，并启用 effect ledger、故障与流式 fixture；普通 chart 默认禁用这些资格能力。
+普通 chart 不生成占位模型配置；qualification overlay 只为两个 LLM fixture 显式生成
+`providers.fixture` 自定义 route。
 非零 `runtime.qualificationFaults.*` 在 `qualification.enabled=false` 时会被 Helm 拒绝。
 可用的限定故障包括 admission、terminal post-commit 和 Conversation summary 三个最多 30 秒的
 延迟；summary 延迟用于在 Gate C 中于 terminal commit 后、summary 发布前终止进程，验证重启后

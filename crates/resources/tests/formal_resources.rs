@@ -256,7 +256,7 @@ fn provider_finish_reasons_are_normalized_without_preserving_unknown_values() {
 }
 
 #[test]
-fn json_object_request_budget_counts_the_injected_schema_instruction() {
+fn json_object_request_budget_counts_the_caller_prepared_messages() {
     let model = loopback_json_object_model("http://127.0.0.1:9".to_string());
     let schema = json!({
         "type":"object",
@@ -264,10 +264,6 @@ fn json_object_request_budget_counts_the_injected_schema_instruction() {
         "properties":{"answer":{"type":"string"}},
         "additionalProperties":false
     });
-    let instruction = format!(
-        "\n\nReturn only a valid JSON object matching this JSON Schema:\n{}",
-        serde_json::to_string(&schema).unwrap()
-    );
     let request = ChatRequest {
         messages: vec![ChatMessage::from_text(ChatRole::User, "Analyze this.")],
         parameters: json!({}),
@@ -280,7 +276,7 @@ fn json_object_request_budget_counts_the_injected_schema_instruction() {
     };
     let expected_wire_bytes = serde_json::to_vec(&json!({
         "model":"fallback-model",
-        "messages":[{"role":"user", "content":format!("Analyze this.{instruction}")}],
+        "messages":[{"role":"user", "content":"Analyze this."}],
         "stream":true,
         "stream_options":{"include_usage":true},
         "response_format":{"type":"json_object"}
@@ -789,7 +785,7 @@ async fn openai_adapter_serializes_formal_messages_and_allowed_parameters() {
 }
 
 #[tokio::test]
-async fn openai_adapter_serializes_json_object_mode_and_injects_schema_instruction() {
+async fn openai_adapter_serializes_json_object_mode_without_rewriting_messages() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let schema = json!({
@@ -803,16 +799,11 @@ async fn openai_adapter_serializes_json_object_mode_and_injects_schema_instructi
             }
         }
     });
-    let expected_schema = schema.clone();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = read_request_json(&mut socket).await;
         assert_eq!(request["response_format"], json!({"type":"json_object"}));
-        let content = request["messages"][0]["content"].as_str().unwrap();
-        assert!(content.starts_with("Analyze this."));
-        assert!(content.contains("valid JSON object"));
-        assert!(content.contains("JSON Schema"));
-        assert!(content.contains(&serde_json::to_string(&expected_schema).unwrap()));
+        assert_eq!(request["messages"][0]["content"], "Analyze this.");
         write_sse_headers(&mut socket).await;
         socket.write_all(b"data: [DONE]\n\n").await.unwrap();
     });

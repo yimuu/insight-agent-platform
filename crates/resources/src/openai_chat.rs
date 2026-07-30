@@ -258,12 +258,7 @@ impl OpenAiChatModel {
                 "model parameters must be an object",
             )
         })?;
-        let wire_messages = openai_wire_messages(request).ok_or_else(|| {
-            RunError::operation(
-                "VNEXT_LLM_RESPONSE_CONFIG_INVALID",
-                "chat provider structured response format is invalid",
-            )
-        })?;
+        let wire_messages = request.messages.clone();
         Ok(PreparedOpenAiRequest {
             messages_count: wire_messages.len(),
             image_parts_count: request
@@ -682,30 +677,6 @@ fn openai_response_format(
             },
         },
     })
-}
-
-fn openai_wire_messages(request: &ChatRequest) -> Option<Vec<ChatMessage>> {
-    let mut messages = request.messages.clone();
-    let Some(ChatResponseFormat::JsonObject { schema, .. }) = &request.response_format else {
-        return Some(messages);
-    };
-    let schema = serde_json::to_string(schema).ok()?;
-    let instruction =
-        format!("\n\nReturn only a valid JSON object matching this JSON Schema:\n{schema}");
-    let final_user_content = messages
-        .iter_mut()
-        .rev()
-        .find_map(|message| match message {
-            ChatMessage::User { content } => Some(content),
-            ChatMessage::System { .. }
-            | ChatMessage::Assistant { .. }
-            | ChatMessage::Tool { .. } => None,
-        })?;
-    match final_user_content {
-        ChatContent::Text(text) => text.push_str(&instruction),
-        ChatContent::Parts(parts) => parts.push(ChatContentPart::Text { text: instruction }),
-    }
-    Some(messages)
 }
 
 #[derive(Serialize)]

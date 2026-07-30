@@ -40,7 +40,7 @@ use insight_agent_platform::{
         actions::{ActionRegistry, CancellationClass, EffectClass, IdempotencyClass},
         models::{
             ChatFinishReason, ChatModel, ChatRequest, ChatResponse, ChatStream, ModelCapability,
-            ModelDeploymentIdentity, ModelRegistry, ModelRequestCapability,
+            ModelDeploymentIdentity, ModelRegistry, ModelRequestCapability, ModelSelector,
         },
         retrievals::{
             Retrieval, RetrievalContext, RetrievalDescriptor, RetrievalExecutionResult,
@@ -74,7 +74,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: clean_cutover_model
+      model:
+        provider: fixture
+        id: clean-cutover-model
       stream: false
       publish: false
       messages:
@@ -329,7 +331,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: fixture_model
+      model:
+        provider: fixture
+        id: fixture-model
       stream: true
       publish: true
       messages:
@@ -369,7 +373,7 @@ fn clean_cutover_fixture(provider_calls: Arc<AtomicUsize>) -> (Arc<DeployedAgent
     let mut models = ModelRegistry::default();
     models
         .register_versioned(
-            "clean_cutover_model",
+            ModelSelector::new("fixture", "clean-cutover-model").unwrap(),
             ModelDeploymentIdentity::new(
                 CLEAN_CUTOVER_MODEL_WORKER_VERSION,
                 json!({

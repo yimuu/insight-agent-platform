@@ -503,7 +503,21 @@ impl GraphCompiler {
             public_configuration.remove("messages");
             if let Value::Object(configuration) = &mut reference_configuration {
                 configuration.remove("messages");
+                configuration.remove("model");
             }
+            public_configuration.insert(
+                "model".to_owned(),
+                DescriptorValue::Object(BTreeMap::from([
+                    (
+                        "id".to_owned(),
+                        DescriptorValue::String(llm.model.id.clone()),
+                    ),
+                    (
+                        "provider".to_owned(),
+                        DescriptorValue::String(llm.model.provider.clone()),
+                    ),
+                ])),
+            );
             public_configuration.insert("message_program".to_owned(), compile_message_program(llm));
             public_configuration.insert("stream".to_owned(), DescriptorValue::Boolean(llm.stream));
             public_configuration

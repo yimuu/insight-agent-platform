@@ -56,7 +56,7 @@ Deployment Revision 必须具有不同 identity。旧 revision 未携带该字�
 | `insight-engine` | 无 I/O 的执行合同内核：Plan、纯 scheduler、状态机和公开 DTO |
 | `insight-dsl` | DSL v1 与 Graph authoring 的解析、校验、类型检查和 lowering |
 | `insight-durable` | 后端中立的持久化 ports、commands、claims、receipts 和 projection models |
-| `insight-resources` | Model/Action/Retrieval SPI、registry 与具体 provider |
+| `insight-resources` | Model/Action/Retrieval SPI、Provider/model registry 与具体 adapter |
 | `insight-storage` | SQLite/PostgreSQL、Graph SQL、Artifact store 和 PostgreSQL live broker adapter |
 | `insight-runtime` | catalog/deployment、leaf adapter、WorkCoordinator、RunService 和 live Run stream |
 | `insight-api` | Axum HTTP、认证、请求/错误映射和 SSE transport |
@@ -65,6 +65,12 @@ Deployment Revision 必须具有不同 identity。旧 revision 未携带该字�
 依赖只从高层 consumer 指向低层 owner。`storage` 与 `runtime` 不直接依赖彼此，而是通过
 `engine`/`durable` 所有的 ports 在根 composition 中组合；workspace member 直接导入 owner crate，
 不通过根 facade 形成反向依赖。
+
+平台根层装载版本化、只读的 Provider Catalog，并把 Agent 的结构化 `{provider, id}` selector 解析为
+`insight-resources` 中的模型实现。Provider route 冻结 endpoint、adapter 和非秘密 credential
+reference；模型 ID 保持 Provider 原始身份。`insight-runtime` 在 publication 时把解析证据写入
+Deployment Revision，scheduler 不在执行时重新路由，也不会跨区域或跨 Provider 自动故障转移。
+自定义 Provider extension 属于部署配置并形成独立 digest，不能覆盖内置 route。
 
 ## 两条执行路径
 

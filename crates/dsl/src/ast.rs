@@ -99,6 +99,7 @@ const SIGNAL_WAIT_FIELDS: &[&str] = &["signal", "response"];
 const TIMER_WAIT_FIELDS: &[&str] = &["duration_ms"];
 const MATCH_EXPRESSION_FIELDS: &[&str] = &["match", "cases", "default"];
 const LLM_TOOL_LIMIT_FIELDS: &[&str] = &["max_rounds", "max_calls"];
+const LLM_MODEL_SELECTOR_FIELDS: &[&str] = &["provider", "id"];
 const MESSAGE_FIELDS: &[&str] = &["role", "content"];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,12 +203,19 @@ pub struct LeafStep {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmContract {
+    pub model: LlmModelSelector,
     pub messages: Vec<MessageExpr>,
     pub stream: bool,
     pub publish: bool,
     pub tools: Vec<String>,
     pub tool_choice: LlmToolChoice,
     pub tool_limits: LlmToolLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmModelSelector {
+    pub provider: String,
+    pub id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -757,10 +765,7 @@ fn parse_leaf(
     };
     exact_keys(object, allowed)?;
     let llm = match kind {
-        LeafKind::Llm => {
-            string(required(object, "model")?, "llm model")?;
-            Some(parse_llm_contract(object, prompts)?)
-        }
+        LeafKind::Llm => Some(parse_llm_contract(object, prompts)?),
         LeafKind::Action => {
             if let Some(inputs) = object.get("inputs") {
                 object_value(inputs, "action inputs")?;
@@ -1537,12 +1542,49 @@ fn parse_llm_contract(
         });
 
     Ok(LlmContract {
+        model: parse_llm_model_selector(required(object, "model")?)?,
         messages: parse_messages(required(object, "messages")?, prompts)?,
         stream,
         publish,
         tools,
         tool_choice,
         tool_limits,
+    })
+}
+
+fn parse_llm_model_selector(value: &Value) -> Result<LlmModelSelector, CompileError> {
+    let selector = object_value(value, "llm model")?;
+    exact_keys(selector, LLM_MODEL_SELECTOR_FIELDS)?;
+    let provider = string(required(selector, "provider")?, "llm model provider")?;
+    if provider.is_empty()
+        || provider.len() > 128
+        || !provider.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase()
+                || (byte.is_ascii_digit() && index > 0)
+                || (byte == b'-' && index > 0)
+        })
+        || provider.ends_with('-')
+    {
+        return Err(CompileError::new(
+            INVALID_STEP,
+            "llm model provider must be a bounded lowercase route identifier",
+        ));
+    }
+    let id = string(required(selector, "id")?, "llm model id")?;
+    if id.trim().is_empty()
+        || id.len() > 512
+        || id
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(CompileError::new(
+            INVALID_STEP,
+            "llm model id must be a bounded non-empty opaque identifier",
+        ));
+    }
+    Ok(LlmModelSelector {
+        provider: provider.to_owned(),
+        id: id.to_owned(),
     })
 }
 

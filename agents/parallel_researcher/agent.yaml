@@ -78,7 +78,9 @@ workflow:
         technical:
           - type: llm
             id: analyze_technical
-            model: general_chat
+            model:
+              provider: dashscope-cn
+              id: qwen3.6-flash
             messages:
               - role: system
                 content:
@@ -93,7 +95,9 @@ workflow:
         risk:
           - type: llm
             id: analyze_risk
-            model: general_chat
+            model:
+              provider: dashscope-cn
+              id: qwen3.6-flash
             messages:
               - role: system
                 content:
@@ -146,7 +150,9 @@ workflow:
 
     - type: llm
       id: synthesize
-      model: general_chat
+      model:
+        provider: dashscope-cn
+        id: qwen3.6-flash
       messages:
         - role: system
           content:

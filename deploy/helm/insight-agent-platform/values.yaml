@@ -15,17 +15,11 @@ agents:
     - benchmark_wait
     - conversation_demo
 
-models:
-  # The model registry contract requires at least one alias even when the
-  # selected Agents are action-only. This inert HTTPS placeholder is never
-  # contacted by action_demo and should be overridden by model-using installs.
-  defaultBaseUrl: https://models.example.invalid/v1
-  terminalStreamBaseUrl: https://models.example.invalid/v1
-
 # Enables only deterministic qualification fixtures and private fault
 # injection. Keep false for ordinary installations.
 qualification:
   enabled: false
+  terminalStreamBaseUrl: http://terminal-stream-mock:8080/v1
 
 service:
   type: ClusterIP

@@ -35,7 +35,7 @@ use insight_agent_platform::{
             ChatChunk, ChatEvent, ChatEventStream, ChatFinishReason, ChatInputTokensDetails,
             ChatModel, ChatOutputTokensDetails, ChatRequest, ChatResponse, ChatStream,
             ChatToolCallDelta, ChatUsage, ModelCapability, ModelDeploymentIdentity, ModelRegistry,
-            ModelRequestCapability,
+            ModelRequestCapability, ModelSelector,
         },
     },
     runtime::{
@@ -268,7 +268,9 @@ workflow:
   steps:
     - id: answer
       type: llm
-      model: retry_fixture
+      model:
+        provider: fixture
+        id: retry-fixture
       stream: true
       publish: true
       messages:
@@ -288,7 +290,7 @@ workflow:
         let mut models = ModelRegistry::default();
         models
             .register_versioned(
-                "retry_fixture",
+                ModelSelector::new("fixture", "retry-fixture").unwrap(),
                 ModelDeploymentIdentity::new(
                     "public-retry-model-v1",
                     json!({"adapter": "retry-once", "provider_model": "fixture"}),

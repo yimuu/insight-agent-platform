@@ -1,7 +1,7 @@
 //! Strict platform configuration for the durable runtime.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
@@ -73,9 +73,62 @@ pub struct AgentsConfig {
     pub enabled: BTreeSet<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ModelInputModality {
+    Text,
+    Image,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeStructuredOutput {
+    JsonObject,
+    JsonSchema,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelsConfig {
-    pub config: PathBuf,
+pub struct ProviderModelProfileConfig {
+    pub input: BTreeSet<ModelInputModality>,
+    pub native_structured_output: Option<NativeStructuredOutput>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderTransportPolicy {
+    HttpsOnly,
+    AllowLoopbackHttp,
+    AllowTrustedPrivateHttp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderExtensionSource {
+    Extends { provider: String },
+    OpenAiCompatible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderExtensionConfig {
+    pub source: ProviderExtensionSource,
+    pub endpoint: Option<String>,
+    pub credential_env: Option<String>,
+    pub models: BTreeMap<String, ProviderModelProfileConfig>,
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+    pub transport: ProviderTransportPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ModelSelectorConfig {
+    pub provider: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModelPolicyConfig {
+    pub allow: BTreeSet<ModelSelectorConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProvidersConfig {
+    pub extensions: BTreeMap<String, ProviderExtensionConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,7 +299,8 @@ pub struct PlatformConfig {
     pub auth: AuthConfig,
     pub human_task_credentials: Vec<HumanTaskCredentialConfig>,
     pub agents: AgentsConfig,
-    pub models: ModelsConfig,
+    pub providers: ProvidersConfig,
+    pub model_policy: Option<ModelPolicyConfig>,
     pub actions: ActionsConfig,
     pub history: HistoryConfig,
     pub artifacts: ArtifactsConfig,
@@ -317,9 +371,8 @@ impl PlatformConfig {
             directory: resolve_path(parent, &raw.agents.directory),
             enabled: unique_names(raw.agents.enabled, "agents.enabled")?,
         };
-        let models = ModelsConfig {
-            config: resolve_path(parent, &raw.models.config),
-        };
+        let providers = resolve_providers(raw.providers)?;
+        let model_policy = resolve_model_policy(raw.model_policy)?;
         let actions = resolve_actions(raw.actions)?;
         let history = resolve_history(parent, raw.history, &get_env)?;
         if raw.deployment_mode == DeploymentMode::Production
@@ -339,7 +392,8 @@ impl PlatformConfig {
             auth,
             human_task_credentials,
             agents,
-            models,
+            providers,
+            model_policy,
             actions,
             history,
             artifacts,
@@ -384,7 +438,10 @@ struct PlatformYaml {
     bind_addr: String,
     auth: AuthYaml,
     agents: AgentsYaml,
-    models: ModelsYaml,
+    #[serde(default)]
+    providers: BTreeMap<String, ProviderExtensionYaml>,
+    #[serde(default)]
+    model_policy: Option<ModelPolicyYaml>,
     actions: ActionsYaml,
     history: HistoryYaml,
     #[serde(default)]
@@ -442,8 +499,95 @@ struct AgentsYaml {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ModelsYaml {
-    config: PathBuf,
+struct ProviderExtensionYaml {
+    #[serde(default)]
+    extends: Option<String>,
+    #[serde(default, rename = "type")]
+    provider_type: Option<ProviderTypeYaml>,
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default)]
+    credential: Option<ProviderCredentialYaml>,
+    #[serde(default)]
+    models: BTreeMap<String, ProviderModelProfileYaml>,
+    #[serde(default)]
+    connect_timeout: Option<String>,
+    #[serde(default)]
+    request_timeout: Option<String>,
+    #[serde(default)]
+    transport: Option<ProviderTransportYaml>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ProviderTypeYaml {
+    OpenAiCompatible,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderCredentialYaml {
+    #[serde(default)]
+    r#type: Option<ProviderCredentialTypeYaml>,
+    env: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ProviderCredentialTypeYaml {
+    Bearer,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderModelProfileYaml {
+    #[serde(default)]
+    input: BTreeSet<ModelInputModalityYaml>,
+    #[serde(default)]
+    native_structured_output: Option<NativeStructuredOutputYaml>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum ModelInputModalityYaml {
+    Text,
+    Image,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum NativeStructuredOutputYaml {
+    JsonObject,
+    JsonSchema,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderTransportYaml {
+    #[serde(default)]
+    plaintext_http: ProviderPlaintextHttpYaml,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ProviderPlaintextHttpYaml {
+    #[default]
+    Disabled,
+    Loopback,
+    TrustedPrivate,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelPolicyYaml {
+    allow: Vec<ModelSelectorYaml>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelSelectorYaml {
+    provider: String,
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -963,6 +1107,235 @@ fn resolve_actions(raw: ActionsYaml) -> Result<ActionsConfig, PlatformConfigErro
         ));
     }
     Ok(ActionsConfig { enabled, http_get })
+}
+
+fn resolve_providers(
+    raw: BTreeMap<String, ProviderExtensionYaml>,
+) -> Result<ProvidersConfig, PlatformConfigError> {
+    let mut extensions = BTreeMap::new();
+    for (id, extension) in raw {
+        validate_provider_route_id(&id, "providers route id")?;
+        let source = match (extension.extends, extension.provider_type) {
+            (Some(provider), None) => {
+                validate_provider_route_id(&provider, "providers.extends")?;
+                ProviderExtensionSource::Extends { provider }
+            }
+            (None, Some(ProviderTypeYaml::OpenAiCompatible)) => {
+                ProviderExtensionSource::OpenAiCompatible
+            }
+            _ => {
+                return Err(PlatformConfigError::new(
+                    "PLATFORM_PROVIDER_INVALID",
+                    format!("provider route '{id}' must declare exactly one of extends or type"),
+                ))
+            }
+        };
+        if matches!(&source, ProviderExtensionSource::Extends { .. })
+            && extension.endpoint.is_some()
+        {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_PROVIDER_INVALID",
+                format!("inherited provider route '{id}' cannot override its built-in endpoint"),
+            ));
+        }
+        if matches!(&source, ProviderExtensionSource::OpenAiCompatible)
+            && extension.endpoint.is_none()
+        {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_PROVIDER_INVALID",
+                format!("custom provider route '{id}' requires endpoint"),
+            ));
+        }
+        if extension
+            .endpoint
+            .as_deref()
+            .is_some_and(|endpoint| endpoint.trim().is_empty())
+        {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_PROVIDER_INVALID",
+                format!("provider route '{id}' endpoint must not be empty"),
+            ));
+        }
+        let credential_env = extension
+            .credential
+            .map(|credential| {
+                if matches!(&source, ProviderExtensionSource::OpenAiCompatible)
+                    && credential.r#type != Some(ProviderCredentialTypeYaml::Bearer)
+                {
+                    return Err(PlatformConfigError::new(
+                        "PLATFORM_PROVIDER_INVALID",
+                        format!("custom provider route '{id}' requires credential.type=bearer"),
+                    ));
+                }
+                if credential.env.trim().is_empty()
+                    || credential.env.len() > 256
+                    || !credential.env.bytes().enumerate().all(|(index, byte)| {
+                        byte.is_ascii_uppercase()
+                            || byte == b'_'
+                            || (byte.is_ascii_digit() && index > 0)
+                    })
+                {
+                    return Err(PlatformConfigError::new(
+                        "PLATFORM_PROVIDER_INVALID",
+                        format!("provider route '{id}' credential.env is invalid"),
+                    ));
+                }
+                Ok(credential.env)
+            })
+            .transpose()?;
+        if matches!(&source, ProviderExtensionSource::OpenAiCompatible) && credential_env.is_none()
+        {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_PROVIDER_INVALID",
+                format!("custom provider route '{id}' requires credential"),
+            ));
+        }
+        if matches!(&source, ProviderExtensionSource::OpenAiCompatible)
+            && extension.models.is_empty()
+        {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_PROVIDER_INVALID",
+                format!("custom provider route '{id}' requires at least one model"),
+            ));
+        }
+        let models = extension
+            .models
+            .into_iter()
+            .map(|(model_id, profile)| {
+                validate_provider_model_id(&model_id, "providers model id")?;
+                let input = if profile.input.is_empty() {
+                    BTreeSet::from([ModelInputModality::Text])
+                } else {
+                    profile
+                        .input
+                        .into_iter()
+                        .map(|input| match input {
+                            ModelInputModalityYaml::Text => ModelInputModality::Text,
+                            ModelInputModalityYaml::Image => ModelInputModality::Image,
+                        })
+                        .collect()
+                };
+                if input.contains(&ModelInputModality::Image)
+                    && !input.contains(&ModelInputModality::Text)
+                {
+                    return Err(PlatformConfigError::new(
+                        "PLATFORM_PROVIDER_INVALID",
+                        format!(
+                            "provider route '{id}' model '{model_id}' image input requires text input"
+                        ),
+                    ));
+                }
+                let native_structured_output =
+                    profile.native_structured_output.map(|mode| match mode {
+                        NativeStructuredOutputYaml::JsonObject => {
+                            NativeStructuredOutput::JsonObject
+                        }
+                        NativeStructuredOutputYaml::JsonSchema => {
+                            NativeStructuredOutput::JsonSchema
+                        }
+                    });
+                Ok((
+                    model_id,
+                    ProviderModelProfileConfig {
+                        input,
+                        native_structured_output,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, PlatformConfigError>>()?;
+        let transport = match extension.transport.unwrap_or_default().plaintext_http {
+            ProviderPlaintextHttpYaml::Disabled => ProviderTransportPolicy::HttpsOnly,
+            ProviderPlaintextHttpYaml::Loopback => ProviderTransportPolicy::AllowLoopbackHttp,
+            ProviderPlaintextHttpYaml::TrustedPrivate => {
+                ProviderTransportPolicy::AllowTrustedPrivateHttp
+            }
+        };
+        extensions.insert(
+            id,
+            ProviderExtensionConfig {
+                source,
+                endpoint: extension.endpoint,
+                credential_env,
+                models,
+                connect_timeout: extension
+                    .connect_timeout
+                    .as_deref()
+                    .map(|value| positive_duration(value, "providers.connect_timeout"))
+                    .transpose()?
+                    .unwrap_or(Duration::from_secs(5)),
+                request_timeout: extension
+                    .request_timeout
+                    .as_deref()
+                    .map(|value| positive_duration(value, "providers.request_timeout"))
+                    .transpose()?
+                    .unwrap_or(Duration::from_secs(120)),
+                transport,
+            },
+        );
+    }
+    Ok(ProvidersConfig { extensions })
+}
+
+fn resolve_model_policy(
+    raw: Option<ModelPolicyYaml>,
+) -> Result<Option<ModelPolicyConfig>, PlatformConfigError> {
+    raw.map(|policy| {
+        if policy.allow.is_empty() {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_MODEL_POLICY_INVALID",
+                "model_policy.allow must not be empty",
+            ));
+        }
+        let mut allow = BTreeSet::new();
+        for selector in policy.allow {
+            validate_provider_route_id(&selector.provider, "model_policy.allow.provider")?;
+            validate_provider_model_id(&selector.id, "model_policy.allow.id")?;
+            if !allow.insert(ModelSelectorConfig {
+                provider: selector.provider,
+                id: selector.id,
+            }) {
+                return Err(PlatformConfigError::new(
+                    "PLATFORM_MODEL_POLICY_INVALID",
+                    "model_policy.allow contains a duplicate selector",
+                ));
+            }
+        }
+        Ok(ModelPolicyConfig { allow })
+    })
+    .transpose()
+}
+
+fn validate_provider_route_id(value: &str, field: &str) -> Result<(), PlatformConfigError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase()
+                || (byte.is_ascii_digit() && index > 0)
+                || (byte == b'-' && index > 0)
+        })
+        || value.ends_with('-')
+    {
+        return Err(PlatformConfigError::new(
+            "PLATFORM_PROVIDER_INVALID",
+            format!("{field} must be a bounded lowercase route identifier"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_provider_model_id(value: &str, field: &str) -> Result<(), PlatformConfigError> {
+    if value.trim().is_empty()
+        || value.len() > 512
+        || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(PlatformConfigError::new(
+            "PLATFORM_PROVIDER_INVALID",
+            format!("{field} must be a bounded non-empty opaque identifier"),
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_history(
