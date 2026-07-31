@@ -18,6 +18,8 @@ use insight_engine::{
 use super::{RepositoryError, REPOSITORY_DATA_INVALID};
 use super::{RunTerminalKind, RunUsageStatus};
 
+const MAX_TERMINAL_RUN_INTERACTIONS: usize = 1_024;
+
 #[allow(unused_imports)]
 pub(crate) use adapter::{
     PendingRunStreamSnapshot, PreparedModelCallCompletion, PreparedResponseFunctionPublication,
@@ -249,9 +251,7 @@ fn validate_completed_message_item(
             .all(|key| matches!(key.as_str(), "type" | "text" | "annotations"))
             || part.get("type").and_then(Value::as_str) != Some("output_text")
             || part.get("text").and_then(Value::as_str).is_none()
-            || part
-                .get("annotations")
-                .is_some_and(|annotations| !annotations.is_array())
+            || part.get("annotations").and_then(Value::as_array).is_none()
     }) {
         return Err(RepositoryError::invalid_data());
     }
@@ -270,7 +270,15 @@ pub(crate) fn build_terminal_run_stream_snapshot(
         model_calls,
         tool_results,
         retrievals,
+        interactions,
     } = input;
+    if interactions.len() > MAX_TERMINAL_RUN_INTERACTIONS
+        || interactions
+            .windows(2)
+            .any(|pair| pair[0].interaction_id().as_bytes() >= pair[1].interaction_id().as_bytes())
+    {
+        return Err(RepositoryError::invalid_data());
+    }
     let (terminal_kind, run_status) = match lifecycle {
         RunLifecycle::Succeeded => (RunTerminalKind::Completed, "completed"),
         RunLifecycle::Failed => (RunTerminalKind::Failed, "failed"),
@@ -336,6 +344,7 @@ pub(crate) fn build_terminal_run_stream_snapshot(
         "output": public_output,
         "tool_results": tool_results,
         "retrievals": retrievals,
+        "interactions": interactions,
         "usage": usage,
         "usage_status": usage_status.as_str(),
     });
@@ -800,7 +809,7 @@ pub mod adapter {
     use serde::Serialize;
     use serde_json::Value;
 
-    use insight_engine::run_stream::{RunRetrieval, RunToolResult};
+    use insight_engine::run_stream::{RunInteractionSummary, RunRetrieval, RunToolResult};
     use insight_engine::worker::{ModelCallCompletion, ResponseItemAuthority};
     use insight_engine::{
         ActivationId, AdmissionState, AttemptNo, ContentHash, ExecutionEventEnvelope, IntentHash,
@@ -897,6 +906,7 @@ pub mod adapter {
         pub model_calls: Vec<StoredModelCallUsage>,
         pub tool_results: Vec<RunToolResult>,
         pub retrievals: Vec<RunRetrieval>,
+        pub interactions: Vec<RunInteractionSummary>,
     }
 
     /// Backend-neutral persisted row used by the one closed execution-event
@@ -1457,12 +1467,17 @@ mod tests {
     use serde_json::{json, Value};
 
     use insight_engine::resource_policy::{ToolPublicArguments, ToolPublicPolicy};
+    use insight_engine::run_stream::{
+        adapter::durable_run_stream_snapshot_new, RunInteractionMode, RunInteractionOutcome,
+        RunInteractionState, RunInteractionSummary,
+    };
     use insight_engine::{PublicEventId, PublicEventKind, RunId, RunLifecycle, TransitionKey};
 
     use super::{
         build_terminal_run_stream_snapshot, project_terminal_tool_results, public_event_id,
         public_event_ordinal, validate_completed_function_call_item, StoredModelCallUsage,
         StoredResponseItem, StoredSucceededModelToolCall, TerminalRunStreamSnapshotInput,
+        MAX_TERMINAL_RUN_INTERACTIONS,
     };
 
     fn normalized_public_result_schema() -> Value {
@@ -1644,6 +1659,7 @@ mod tests {
                 model_calls: Vec::new(),
                 tool_results,
                 retrievals: Vec::new(),
+                interactions: Vec::new(),
             })
             .unwrap();
             observed.push(snapshot.run["tool_results"].clone());
@@ -1668,6 +1684,7 @@ mod tests {
                 )])
                 .unwrap(),
                 retrievals: Vec::new(),
+                interactions: Vec::new(),
             })
             .unwrap()
         };
@@ -1689,6 +1706,7 @@ mod tests {
             model_calls: Vec::new(),
             tool_results: Vec::new(),
             retrievals: Vec::new(),
+            interactions: Vec::new(),
         })
         .unwrap();
 
@@ -1746,6 +1764,7 @@ mod tests {
                 model_calls: complete_calls(),
                 tool_results: Vec::new(),
                 retrievals: Vec::new(),
+                interactions: Vec::new(),
             })
             .unwrap();
             assert_eq!(snapshot.run["usage"], expected);
@@ -1765,6 +1784,7 @@ mod tests {
             model_calls: Vec::new(),
             tool_results: Vec::new(),
             retrievals: Vec::new(),
+            interactions: Vec::new(),
         })
         .unwrap();
         assert_eq!(unavailable.run["usage"], Value::Null);
@@ -1794,6 +1814,7 @@ mod tests {
             ],
             tool_results: Vec::new(),
             retrievals: Vec::new(),
+            interactions: Vec::new(),
         })
         .unwrap();
         assert_eq!(partial.run["usage"], Value::Null);
@@ -1831,6 +1852,7 @@ mod tests {
             model_calls: Vec::new(),
             tool_results: Vec::new(),
             retrievals: Vec::new(),
+            interactions: Vec::new(),
         })
         .unwrap();
         assert_eq!(snapshot.run["output"][0]["status"], "incomplete");
@@ -1847,8 +1869,159 @@ mod tests {
                 model_calls: Vec::new(),
                 tool_results: Vec::new(),
                 retrievals: Vec::new(),
+                interactions: Vec::new(),
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn terminal_message_annotations_are_required_by_builder_and_durable_loader() {
+        let run_id = RunId::new("run_terminal_message_annotations").unwrap();
+        let item = |safe_item| StoredResponseItem {
+            activation_id: "activation_a".to_owned(),
+            attempt_no: 1,
+            model_call_no: 1,
+            item_id: "msg_safe".to_owned(),
+            output_index: 0,
+            node_id: "answer".to_owned(),
+            item_kind: "message".to_owned(),
+            item_status: "completed".to_owned(),
+            seal_index: Some(1),
+            safe_item: Some(safe_item),
+        };
+        let build = |safe_item| {
+            build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
+                run_id: &run_id,
+                lifecycle: RunLifecycle::Cancelled,
+                output: None,
+                error_code: Some("SCHEDULER_CANCELLED"),
+                items: vec![item(safe_item)],
+                model_calls: Vec::new(),
+                tool_results: Vec::new(),
+                retrievals: Vec::new(),
+                interactions: Vec::new(),
+            })
+        };
+
+        let valid = build(json!({
+            "id": "msg_safe",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": "safe",
+                "annotations": [],
+            }],
+        }))
+        .unwrap();
+        durable_run_stream_snapshot_new(
+            valid.run_id,
+            valid.terminal_kind,
+            valid.run,
+            valid.manifest,
+            valid.snapshot_hash,
+        )
+        .unwrap();
+
+        assert!(build(json!({
+            "id": "msg_safe",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "safe"}],
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn terminal_interactions_are_hash_bound_and_default_to_an_empty_array() {
+        let run_id = RunId::new("run_terminal_interaction_hash").unwrap();
+        let build = |interactions| {
+            build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
+                run_id: &run_id,
+                lifecycle: RunLifecycle::Cancelled,
+                output: None,
+                error_code: Some("SCHEDULER_CANCELLED"),
+                items: Vec::new(),
+                model_calls: Vec::new(),
+                tool_results: Vec::new(),
+                retrievals: Vec::new(),
+                interactions,
+            })
+            .unwrap()
+        };
+        let empty = build(Vec::new());
+        assert_eq!(empty.run["interactions"], json!([]));
+
+        let populated = build(vec![RunInteractionSummary::new(
+            "interaction.hash-bound",
+            "server-a",
+            RunInteractionMode::Approval,
+            RunInteractionState::Closed,
+            Some(RunInteractionOutcome::RunTerminal),
+            "2026-07-30T12:05:00Z".parse().unwrap(),
+        )
+        .unwrap()]);
+        assert_eq!(
+            populated.run["interactions"][0],
+            json!({
+                "interaction_id": "interaction.hash-bound",
+                "source_kind": "mcp",
+                "server_id": "server-a",
+                "mode": "approval",
+                "state": "closed",
+                "outcome": "run_terminal",
+                "deadline": "2026-07-30T12:05:00Z",
+                "detail_url": "/v1/mcp/interactions/interaction.hash-bound",
+            })
+        );
+        assert_ne!(empty.snapshot_hash, populated.snapshot_hash);
+    }
+
+    #[test]
+    fn terminal_interaction_projection_fails_closed_above_the_protocol_limit() {
+        let run_id = RunId::new("run_terminal_interaction_limit").unwrap();
+        let summary = |interaction_id: &str| {
+            RunInteractionSummary::new(
+                interaction_id,
+                "server-a",
+                RunInteractionMode::Form,
+                RunInteractionState::Closed,
+                Some(RunInteractionOutcome::RunTerminal),
+                "2026-07-30T12:05:00Z".parse().unwrap(),
+            )
+            .unwrap()
+        };
+        let build = |interactions| {
+            build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
+                run_id: &run_id,
+                lifecycle: RunLifecycle::Cancelled,
+                output: None,
+                error_code: Some("SCHEDULER_CANCELLED"),
+                items: Vec::new(),
+                model_calls: Vec::new(),
+                tool_results: Vec::new(),
+                retrievals: Vec::new(),
+                interactions,
+            })
+        };
+
+        let maximum = (0..MAX_TERMINAL_RUN_INTERACTIONS)
+            .map(|index| summary(&format!("interaction.limit-{index:04}")))
+            .collect::<Vec<_>>();
+        assert!(build(maximum.clone()).is_ok());
+        let mut overflow = maximum;
+        overflow.push(summary("interaction.limit-overflow"));
+        assert!(build(overflow).is_err());
+
+        let duplicate = summary("interaction.limit-duplicate");
+        assert!(build(vec![duplicate.clone(), duplicate]).is_err());
+        assert!(build(vec![
+            summary("interaction.limit-z"),
+            summary("interaction.limit-a"),
+        ])
+        .is_err());
     }
 }

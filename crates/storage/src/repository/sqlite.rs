@@ -1133,6 +1133,11 @@ pub(crate) async fn persist_terminal_run_stream_snapshot_sqlite(
         super::sqlite_retrieval_publication::load_terminal_retrievals_sqlite(transaction, run_id)
             .await?;
     validate_terminal_retrieval_artifacts_sqlite(transaction, run_id, &retrievals).await?;
+    let interactions = super::mcp_interaction_adapter::close_and_load_terminal_interactions_sqlite(
+        transaction,
+        run_id,
+    )
+    .await?;
     let snapshot = build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
         run_id,
         lifecycle,
@@ -1142,6 +1147,7 @@ pub(crate) async fn persist_terminal_run_stream_snapshot_sqlite(
         model_calls,
         tool_results,
         retrievals,
+        interactions,
     })?;
     sqlx::query(
         "INSERT INTO run_stream_snapshots (
@@ -2663,6 +2669,16 @@ mod terminal_tool_result_tests {
                 run_id TEXT,artifact_id TEXT,content_hash TEXT,size_bytes INTEGER,
                 media_type TEXT,artifact_state TEXT
             )",
+            "CREATE TABLE workflow_runs (
+                run_id TEXT PRIMARY KEY,lifecycle TEXT NOT NULL,terminal_at TEXT
+            )",
+            "CREATE TABLE mcp_interactions (
+                interaction_id TEXT PRIMARY KEY,tenant_id TEXT,user_id TEXT,run_id TEXT,
+                operation_id TEXT,server_id TEXT,binding_hash TEXT,logical_request_key TEXT,
+                generation INTEGER,request_json TEXT,interaction_state TEXT,outcome TEXT,
+                interaction_version INTEGER,deadline TEXT,created_at TEXT,updated_at TEXT,
+                closed_at TEXT
+            )",
             "CREATE TABLE run_stream_snapshots (
                 run_id TEXT PRIMARY KEY,protocol TEXT,terminal_kind TEXT,run_payload TEXT,
                 public_item_manifest TEXT,snapshot_hash TEXT,created_at TEXT
@@ -2672,6 +2688,49 @@ mod terminal_tool_result_tests {
         }
 
         let run_id = RunId::new("run_sqlite_terminal_tool_results").unwrap();
+        sqlx::query(
+            "INSERT INTO workflow_runs(run_id,lifecycle,terminal_at)
+             VALUES (?,'cancelled','2026-07-30 12:00:06')",
+        )
+        .bind(run_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO mcp_interactions(
+                interaction_id,tenant_id,user_id,run_id,operation_id,server_id,binding_hash,
+                logical_request_key,generation,request_json,interaction_state,outcome,
+                interaction_version,deadline,created_at,updated_at,closed_at
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,'requested',NULL,1,?,?,?,NULL)",
+        )
+        .bind("interaction.terminal:tool-1")
+        .bind("tenant-a")
+        .bind("user-a")
+        .bind(run_id.as_str())
+        .bind("operation-a")
+        .bind("server-a")
+        .bind("a".repeat(64))
+        .bind("request-a")
+        .bind(1_i64)
+        .bind(
+            canonical_json(&json!({
+                "mode": "form",
+                "message": "executor-private request body",
+                "requested_schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": false
+                }
+            }))
+            .unwrap(),
+        )
+        .bind("2026-07-30T12:10:00.000000Z")
+        .bind("2026-07-30T12:00:00.000000Z")
+        .bind("2026-07-30T12:00:00.000000Z")
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO model_tool_calls (
                 run_id,activation_id,attempt_no,model_call_no,call_index,call_id,tool_name,
@@ -2745,6 +2804,30 @@ mod terminal_tool_result_tests {
             .execute(&pool)
             .await
             .unwrap();
+
+        sqlx::query(
+            "CREATE TRIGGER reject_terminal_snapshot
+             BEFORE INSERT ON run_stream_snapshots
+             BEGIN SELECT RAISE(ABORT,'injected terminal snapshot failure'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(terminal_attempt(&pool, &run_id).await.is_err());
+        let rolled_back = sqlx::query_as::<_, (String, Option<String>, i64, Option<String>)>(
+            "SELECT interaction_state,outcome,interaction_version,closed_at
+             FROM mcp_interactions WHERE run_id=?",
+        )
+        .bind(run_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rolled_back, ("requested".to_owned(), None, 1, None));
+        sqlx::query("DROP TRIGGER reject_terminal_snapshot")
+            .execute(&pool)
+            .await
+            .unwrap();
+
         terminal_attempt(&pool, &run_id).await.unwrap();
 
         let snapshot = load_run_stream_snapshot_sqlite(&pool, &run_id)
@@ -2760,6 +2843,29 @@ mod terminal_tool_result_tests {
             CONTENT_HASH
         );
         assert_eq!(snapshot.run()["retrievals"], json!([]));
+        assert_eq!(snapshot.run()["interactions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            snapshot.run()["interactions"][0]["interaction_id"],
+            "interaction.terminal:tool-1"
+        );
+        assert_eq!(snapshot.run()["interactions"][0]["state"], "closed");
+        assert_eq!(snapshot.run()["interactions"][0]["outcome"], "run_terminal");
+        assert!(!serde_json::to_string(snapshot.run())
+            .unwrap()
+            .contains("executor-private request body"));
+        let closed = sqlx::query_as::<_, (String, String, i64, String, String)>(
+            "SELECT interaction_state,outcome,interaction_version,updated_at,closed_at
+             FROM mcp_interactions WHERE run_id=?",
+        )
+        .bind(run_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(closed.0, "closed");
+        assert_eq!(closed.1, "run_terminal");
+        assert_eq!(closed.2, 2);
+        assert_eq!(closed.3, "2026-07-30T12:00:06.000000Z");
+        assert_eq!(closed.4, closed.3);
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM run_stream_snapshots")
                 .fetch_one(&pool)

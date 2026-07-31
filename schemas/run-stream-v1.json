@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:insight-agent-platform:run-stream:v1",
   "title": "Insight Agent Platform run-stream/v1",
-  "description": "Closed public SSE data-frame schema for one attached Run.",
+  "description": "Closed public SSE data-frame schema for one attached Run, including durable interaction facts.",
   "oneOf": [
     {"$ref": "#/$defs/runLifecycleCreated"},
     {"$ref": "#/$defs/runLifecycleRunning"},
@@ -28,18 +28,66 @@
     {"$ref": "#/$defs/runStreamGap"},
     {"$ref": "#/$defs/runLifecycleTimedOut"},
     {"$ref": "#/$defs/runLifecycleCancelled"},
-    {"$ref": "#/$defs/runLifecycleInterrupted"}
+    {"$ref": "#/$defs/runLifecycleInterrupted"},
+    {"$ref": "#/$defs/runInteractionRequired"},
+    {"$ref": "#/$defs/runInteractionClosed"}
   ],
   "$defs": {
     "publicLabel": {
       "type": "string",
       "minLength": 1,
       "maxLength": 256,
-      "pattern": "^[^\\s/\\\\]+$"
+      "pattern": "^[^\\s/\\\\\\u0000-\\u001F\\u007F-\\u009F]+$"
+    },
+    "interactionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
     },
     "sequence": {
       "type": "integer",
       "minimum": 0
+    },
+    "interactionMode": {
+      "enum": ["form", "url", "approval", "authorization"]
+    },
+    "interactionOutcome": {
+      "enum": [
+        "declined",
+        "cancelled",
+        "expired",
+        "run_terminal",
+        "retry_completed",
+        "retry_failed"
+      ]
+    },
+    "interactionSummary": {
+      "type": "object",
+      "properties": {
+        "interaction_id": {"$ref": "#/$defs/interactionId"},
+        "source_kind": {"const": "mcp"},
+        "server_id": {"$ref": "#/$defs/publicLabel"},
+        "mode": {"$ref": "#/$defs/interactionMode"},
+        "state": {"const": "closed"},
+        "outcome": {"$ref": "#/$defs/interactionOutcome"},
+        "deadline": {"type": "string", "format": "date-time"},
+        "detail_url": {
+          "type": "string",
+          "pattern": "^/v1/mcp/interactions/[A-Za-z0-9._:-]+$"
+        }
+      },
+      "required": [
+        "interaction_id",
+        "source_kind",
+        "server_id",
+        "mode",
+        "state",
+        "outcome",
+        "deadline",
+        "detail_url"
+      ],
+      "additionalProperties": false
     },
     "usageStatus": {
       "enum": ["complete", "partial", "unavailable"]
@@ -284,7 +332,13 @@
         "tool_results": {"type": "array", "items": {"$ref": "#/$defs/toolResult"}},
         "retrievals": {"type": "array", "items": {"$ref": "#/$defs/retrieval"}},
         "usage": {"oneOf": [{"$ref": "#/$defs/usage"}, {"type": "null"}]},
-        "usage_status": {"$ref": "#/$defs/usageStatus"}
+        "usage_status": {"$ref": "#/$defs/usageStatus"},
+        "interactions": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/interactionSummary"}
+        }
       },
       "required": [
         "id",
@@ -295,7 +349,8 @@
         "tool_results",
         "retrievals",
         "usage",
-        "usage_status"
+        "usage_status",
+        "interactions"
       ],
       "additionalProperties": false
     },
@@ -310,7 +365,13 @@
         "tool_results": {"type": "array", "items": {"$ref": "#/$defs/toolResult"}},
         "retrievals": {"type": "array", "items": {"$ref": "#/$defs/retrieval"}},
         "usage": {"oneOf": [{"$ref": "#/$defs/usage"}, {"type": "null"}]},
-        "usage_status": {"$ref": "#/$defs/usageStatus"}
+        "usage_status": {"$ref": "#/$defs/usageStatus"},
+        "interactions": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/interactionSummary"}
+        }
       },
       "required": [
         "id",
@@ -321,7 +382,8 @@
         "tool_results",
         "retrievals",
         "usage",
-        "usage_status"
+        "usage_status",
+        "interactions"
       ],
       "additionalProperties": false
     },
@@ -336,7 +398,13 @@
         "tool_results": {"type": "array", "items": {"$ref": "#/$defs/toolResult"}},
         "retrievals": {"type": "array", "items": {"$ref": "#/$defs/retrieval"}},
         "usage": {"oneOf": [{"$ref": "#/$defs/usage"}, {"type": "null"}]},
-        "usage_status": {"$ref": "#/$defs/usageStatus"}
+        "usage_status": {"$ref": "#/$defs/usageStatus"},
+        "interactions": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/interactionSummary"}
+        }
       },
       "required": [
         "id",
@@ -347,7 +415,8 @@
         "tool_results",
         "retrievals",
         "usage",
-        "usage_status"
+        "usage_status",
+        "interactions"
       ],
       "additionalProperties": false
     },
@@ -361,7 +430,13 @@
         "tool_results": {"type": "array", "items": {"$ref": "#/$defs/toolResult"}},
         "retrievals": {"type": "array", "items": {"$ref": "#/$defs/retrieval"}},
         "usage": {"oneOf": [{"$ref": "#/$defs/usage"}, {"type": "null"}]},
-        "usage_status": {"$ref": "#/$defs/usageStatus"}
+        "usage_status": {"$ref": "#/$defs/usageStatus"},
+        "interactions": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/interactionSummary"}
+        }
       },
       "required": [
         "id",
@@ -371,7 +446,8 @@
         "tool_results",
         "retrievals",
         "usage",
-        "usage_status"
+        "usage_status",
+        "interactions"
       ],
       "additionalProperties": false
     },
@@ -385,7 +461,13 @@
         "tool_results": {"type": "array", "items": {"$ref": "#/$defs/toolResult"}},
         "retrievals": {"type": "array", "items": {"$ref": "#/$defs/retrieval"}},
         "usage": {"oneOf": [{"$ref": "#/$defs/usage"}, {"type": "null"}]},
-        "usage_status": {"$ref": "#/$defs/usageStatus"}
+        "usage_status": {"$ref": "#/$defs/usageStatus"},
+        "interactions": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/interactionSummary"}
+        }
       },
       "required": [
         "id",
@@ -395,7 +477,8 @@
         "tool_results",
         "retrievals",
         "usage",
-        "usage_status"
+        "usage_status",
+        "interactions"
       ],
       "additionalProperties": false
     },
@@ -777,6 +860,87 @@
         "run": {"$ref": "#/$defs/runInterrupted"}
       },
       "required": ["type", "sequence_number", "run"],
+      "additionalProperties": false
+    },
+    "runInteractionRequired": {
+      "type": "object",
+      "properties": {
+        "type": {"const": "run.interaction.required"},
+        "sequence_number": {"$ref": "#/$defs/sequence"},
+        "interaction_id": {"$ref": "#/$defs/interactionId"},
+        "source_kind": {"const": "mcp"},
+        "server_id": {"$ref": "#/$defs/publicLabel"},
+        "mode": {"$ref": "#/$defs/interactionMode"},
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F]*$"
+        },
+        "url_host": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253,
+              "pattern": "^(?:[A-Za-z0-9.:-]+|\\[[A-Fa-f0-9:.]+\\])$"
+            },
+            {"type": "null"}
+          ]
+        },
+        "deadline": {"type": "string", "format": "date-time"},
+        "detail_url": {
+          "type": "string",
+          "pattern": "^/v1/mcp/interactions/[A-Za-z0-9._:-]+$"
+        }
+      },
+      "required": [
+        "type",
+        "sequence_number",
+        "interaction_id",
+        "source_kind",
+        "server_id",
+        "mode",
+        "message",
+        "url_host",
+        "deadline",
+        "detail_url"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {"mode": {"const": "url"}},
+            "required": ["mode"]
+          },
+          "then": {"properties": {"url_host": {"type": "string"}}},
+          "else": {"properties": {"url_host": {"type": "null"}}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "runInteractionClosed": {
+      "type": "object",
+      "properties": {
+        "type": {"const": "run.interaction.closed"},
+        "sequence_number": {"$ref": "#/$defs/sequence"},
+        "interaction_id": {"$ref": "#/$defs/interactionId"},
+        "source_kind": {"const": "mcp"},
+        "server_id": {"$ref": "#/$defs/publicLabel"},
+        "outcome": {"$ref": "#/$defs/interactionOutcome"},
+        "detail_url": {
+          "type": "string",
+          "pattern": "^/v1/mcp/interactions/[A-Za-z0-9._:-]+$"
+        }
+      },
+      "required": [
+        "type",
+        "sequence_number",
+        "interaction_id",
+        "source_kind",
+        "server_id",
+        "outcome",
+        "detail_url"
+      ],
       "additionalProperties": false
     }
   }

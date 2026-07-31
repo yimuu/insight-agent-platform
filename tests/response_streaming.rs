@@ -13,6 +13,7 @@ use axum::{
     http::{header, Request, StatusCode},
     Router,
 };
+use chrono::{Duration as ChronoDuration, Utc};
 use futures::{stream, StreamExt};
 use insight_agent_platform::{
     catalog::{
@@ -21,8 +22,9 @@ use insight_agent_platform::{
     },
     dsl::CompileError,
     engine::{
-        plan::LeafTaskDescriptor, production_worker_registry_with_live_run_stream,
-        LocalContentAddressedArtifactStore, RunId, SubflowContractRegistry, VersionTag,
+        plan::LeafTaskDescriptor, production_worker_registry_with_live_run_stream, ContentHash,
+        LocalContentAddressedArtifactStore, RunId, SubflowContractRegistry, TransitionOutcome,
+        VersionTag,
     },
     history::types::RunStatus,
     resources::{
@@ -42,7 +44,13 @@ use insight_agent_platform::{
         RunStreamEvent,
     },
 };
-use insight_api::v1::{build_router, ApiAuth, ApiState};
+use insight_api::v1::{build_router, build_router_with_mcp_interactions, ApiAuth, ApiState};
+use insight_durable::{
+    CreateMcpInteractionCommand, McpInteractionDisposition, McpInteractionDurableRepository,
+    McpInteractionId, McpInteractionOutcome, McpInteractionRequest, McpSecretCiphertext,
+    ResolveMcpInteractionCommand, TransitionMcpInteractionCommand,
+};
+use insight_storage::mcp_secret::McpSecretEncryptionKeyring;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Notify;
@@ -485,6 +493,7 @@ struct Fixture {
     counters: ModeCounters,
     isolation: IsolationModelState,
     repository: Arc<dyn ProductionRunRepository>,
+    mcp_repository: Arc<dyn McpInteractionDurableRepository>,
     _temporary: tempfile::TempDir,
 }
 
@@ -503,10 +512,32 @@ impl Fixture {
         Self::start_with_broker_and_timeouts(run_timeout, outbound_write_timeout, broker).await
     }
 
+    async fn start_with_mcp_interactions() -> Self {
+        let broker: Arc<dyn LiveRunStreamBroker> =
+            Arc::new(InMemoryLiveRunStreamBroker::new(64, 16).unwrap());
+        Self::start_with_broker_timeouts_and_mcp(
+            Duration::from_secs(10),
+            Duration::from_secs(2),
+            broker,
+            true,
+        )
+        .await
+    }
+
     async fn start_with_broker_and_timeouts(
         run_timeout: Duration,
         outbound_write_timeout: Duration,
         broker: Arc<dyn LiveRunStreamBroker>,
+    ) -> Self {
+        Self::start_with_broker_timeouts_and_mcp(run_timeout, outbound_write_timeout, broker, false)
+            .await
+    }
+
+    async fn start_with_broker_timeouts_and_mcp(
+        run_timeout: Duration,
+        outbound_write_timeout: Duration,
+        broker: Arc<dyn LiveRunStreamBroker>,
+        enable_mcp_interactions: bool,
     ) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().to_path_buf();
@@ -819,13 +850,15 @@ workflow:
             production_worker_registry_with_live_run_stream(&models, &actions, Arc::clone(&broker))
                 .unwrap();
         database::provision_sqlite_database(&root.join("response-stream.sqlite")).await;
-        let repository: Arc<dyn ProductionRunRepository> = Arc::new(
+        let durable_repository = Arc::new(
             insight_agent_platform::engine::repository::SqliteDurableRepository::connect_path(
                 &root.join("response-stream.sqlite"),
             )
             .await
             .unwrap(),
         );
+        let repository: Arc<dyn ProductionRunRepository> = durable_repository.clone();
+        let mcp_repository: Arc<dyn McpInteractionDurableRepository> = durable_repository;
         let artifact_store = Arc::new(
             LocalContentAddressedArtifactStore::open(root.join("artifacts"), 1024)
                 .await
@@ -849,18 +882,31 @@ workflow:
         )
         .await
         .unwrap();
-        let app = build_router(ApiState {
+        let api_state = ApiState {
             service: service.clone(),
             auth: ApiAuth::disabled(),
             sse_keep_alive_interval: Duration::from_secs(30),
             readiness_probe_timeout: Duration::from_secs(1),
-        });
+        };
+        let app = if enable_mcp_interactions {
+            let protector = Arc::new(
+                McpSecretEncryptionKeyring::from_secret_json(
+                    "test",
+                    &format!(r#"{{"test":"{}"}}"#, "11".repeat(32)),
+                )
+                .unwrap(),
+            );
+            build_router_with_mcp_interactions(api_state, Arc::clone(&mcp_repository), protector)
+        } else {
+            build_router(api_state)
+        };
         Self {
             app,
             service,
             counters,
             isolation,
             repository,
+            mcp_repository,
             _temporary: temporary,
         }
     }
@@ -1367,6 +1413,7 @@ fn assert_terminal_union(
     );
     let mut expected_run_keys = BTreeSet::from([
         "id",
+        "interactions",
         "object",
         "output",
         "retrievals",
@@ -1377,6 +1424,7 @@ fn assert_terminal_union(
     ]);
     expected_run_keys.extend(terminal_specific_keys);
     assert_eq!(object_keys(&terminal["run"]), expected_run_keys);
+    assert!(terminal["run"]["interactions"].is_array());
     assert!(terminal["run"]["tool_results"].is_array());
     assert!(terminal["run"]["retrievals"].is_array());
     assert!(matches!(
@@ -2124,6 +2172,322 @@ async fn terminal_barrier_times_out_to_an_unknown_tail_gap_after_the_last_live_w
 }
 
 #[tokio::test]
+async fn mcp_interactions_are_native_v1_events_and_terminal_durable_summaries() {
+    const REQUEST_SCHEMA_SECRET: &str = "private-request-schema-marker";
+    const REQUEST_CIPHERTEXT_SECRET: &str = "private-request-ciphertext-marker";
+    const RESPONSE_BODY_SECRET: &str = "private-response-body-marker";
+    const RESPONSE_CIPHERTEXT_SECRET: &str = "private-response-ciphertext-marker";
+
+    let fixture = Fixture::start_with_mcp_interactions().await;
+    let response = start_attached_response(
+        &fixture.app,
+        "response_stream_wait",
+        "request-native-v1-mcp-interaction",
+        json!({}),
+    )
+    .await;
+    assert!(
+        !response.headers().contains_key("x-run-stream-protocol"),
+        "native run-stream/v1 must not require or return version negotiation"
+    );
+    let run_id = response.headers()["x-run-id"].to_str().unwrap().to_owned();
+    let mut body = response.into_body().into_data_stream();
+    let mut bytes = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let chunk = body
+                .next()
+                .await
+                .expect("Run stream ended before lifecycle.running")
+                .unwrap();
+            bytes.extend_from_slice(&chunk);
+            assert!(bytes.len() <= 1 << 20, "Run stream exceeded test bound");
+            if String::from_utf8_lossy(&bytes).contains("event: run.lifecycle.running") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("run.lifecycle.running was not emitted promptly");
+
+    let interaction_id = McpInteractionId::new("mcpint_response_stream_v1").unwrap();
+    let principal = fixture
+        .mcp_repository
+        .load_mcp_run_principal(&run_id)
+        .await
+        .unwrap()
+        .expect("the durable Run must define the interaction principal");
+    assert_eq!(principal.tenant_id(), "default");
+    assert_eq!(principal.user_id(), "service");
+    let now = Utc::now();
+    let created = match fixture
+        .mcp_repository
+        .create_mcp_interaction(
+            CreateMcpInteractionCommand::new(
+                interaction_id.clone(),
+                principal.clone(),
+                &run_id,
+                "operation-mcp-stream",
+                "calendar-fixture",
+                "a".repeat(64),
+                "elicitation-mcp-stream",
+                1,
+                McpInteractionRequest::Form {
+                    message: "Choose a calendar".to_owned(),
+                    requested_schema: json!({
+                        "type": "object",
+                        "description": REQUEST_SCHEMA_SECRET,
+                        "properties": {
+                            "answer": {"type": "string", "minLength": 1}
+                        },
+                        "required": ["answer"],
+                        "additionalProperties": false
+                    }),
+                },
+                McpSecretCiphertext::new(format!("enc:v1:{REQUEST_CIPHERTEXT_SECRET}")).unwrap(),
+                "b".repeat(64),
+                now + ChronoDuration::minutes(5),
+                now,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+    {
+        TransitionOutcome::Committed { result } => result,
+        outcome => panic!("unexpected interaction creation outcome: {outcome:?}"),
+    };
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let chunk = body
+                .next()
+                .await
+                .expect("Run stream ended before interaction.required")
+                .unwrap();
+            bytes.extend_from_slice(&chunk);
+            assert!(bytes.len() <= 1 << 20, "Run stream exceeded test bound");
+            if String::from_utf8_lossy(&bytes).contains("event: run.interaction.required") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("run.interaction.required was not emitted promptly");
+
+    let responded = match fixture
+        .mcp_repository
+        .resolve_mcp_interaction(
+            ResolveMcpInteractionCommand::new(
+                &created,
+                principal,
+                "resolve-mcp-stream",
+                created.version(),
+                McpInteractionDisposition::Accept,
+                Some(&json!({"answer": RESPONSE_BODY_SECRET})),
+                Some(
+                    McpSecretCiphertext::new(format!("enc:v1:{RESPONSE_CIPHERTEXT_SECRET}"))
+                        .unwrap(),
+                ),
+                Some("c".repeat(64)),
+                Utc::now(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+    {
+        TransitionOutcome::Committed { result } => result,
+        outcome => panic!("unexpected interaction response outcome: {outcome:?}"),
+    };
+    let retrying = match fixture
+        .mcp_repository
+        .transition_mcp_interaction(
+            TransitionMcpInteractionCommand::begin_retry(
+                interaction_id.clone(),
+                "retry-mcp-stream",
+                responded.version(),
+                Utc::now(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+    {
+        TransitionOutcome::Committed { result } => result,
+        outcome => panic!("unexpected interaction retry outcome: {outcome:?}"),
+    };
+    assert!(matches!(
+        fixture
+            .mcp_repository
+            .transition_mcp_interaction(
+                TransitionMcpInteractionCommand::close(
+                    interaction_id.clone(),
+                    "close-mcp-stream",
+                    retrying.version(),
+                    McpInteractionOutcome::RetryCompleted,
+                    Utc::now(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap(),
+        TransitionOutcome::Committed { .. }
+    ));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let chunk = body
+                .next()
+                .await
+                .expect("Run stream ended before interaction.closed")
+                .unwrap();
+            bytes.extend_from_slice(&chunk);
+            assert!(bytes.len() <= 1 << 20, "Run stream exceeded test bound");
+            if String::from_utf8_lossy(&bytes).contains("event: run.interaction.closed") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("run.interaction.closed was not emitted promptly");
+
+    assert_eq!(
+        fixture.service.cancel(&run_id).await.unwrap().status(),
+        RunStatus::Cancelled
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = body.next().await {
+            bytes.extend_from_slice(&chunk.unwrap());
+            assert!(bytes.len() <= 1 << 20, "Run stream exceeded test bound");
+        }
+    })
+    .await
+    .expect("Run stream did not reach terminal EOF");
+    let transcript = parse_attached_transcript(run_id, bytes);
+
+    let required = transcript
+        .values
+        .iter()
+        .find(|event| event["type"] == "run.interaction.required")
+        .unwrap();
+    assert_eq!(required["interaction_id"], interaction_id.as_str());
+    assert_eq!(required["source_kind"], "mcp");
+    assert_eq!(required["server_id"], "calendar-fixture");
+    assert_eq!(required["mode"], "form");
+    assert_eq!(required["message"], "Choose a calendar");
+    assert!(required["url_host"].is_null());
+    assert_eq!(
+        required["detail_url"],
+        "/v1/mcp/interactions/mcpint_response_stream_v1"
+    );
+    assert_eq!(
+        object_keys(required),
+        BTreeSet::from([
+            "deadline",
+            "detail_url",
+            "interaction_id",
+            "message",
+            "mode",
+            "sequence_number",
+            "server_id",
+            "source_kind",
+            "type",
+            "url_host",
+        ])
+    );
+
+    let closed = transcript
+        .values
+        .iter()
+        .find(|event| event["type"] == "run.interaction.closed")
+        .unwrap();
+    assert_eq!(closed["interaction_id"], interaction_id.as_str());
+    assert_eq!(closed["source_kind"], "mcp");
+    assert_eq!(closed["server_id"], "calendar-fixture");
+    assert_eq!(closed["outcome"], "retry_completed");
+    assert_eq!(closed["detail_url"], required["detail_url"]);
+    assert_eq!(
+        object_keys(closed),
+        BTreeSet::from([
+            "detail_url",
+            "interaction_id",
+            "outcome",
+            "sequence_number",
+            "server_id",
+            "source_kind",
+            "type",
+        ])
+    );
+    assert!(transcript
+        .values
+        .iter()
+        .all(|event| event.get("protocol").is_none()));
+    let public_wire = serde_json::to_string(&transcript.values).unwrap();
+    for secret in [
+        REQUEST_SCHEMA_SECRET,
+        REQUEST_CIPHERTEXT_SECRET,
+        RESPONSE_BODY_SECRET,
+        RESPONSE_CIPHERTEXT_SECRET,
+    ] {
+        assert!(
+            !public_wire.contains(secret),
+            "private MCP request/response material leaked into v1 SSE: {secret}"
+        );
+    }
+
+    assert_terminal_union(
+        &transcript,
+        "run.lifecycle.cancelled",
+        "cancelled",
+        BTreeSet::new(),
+    );
+    let interactions = transcript.terminal()["run"]["interactions"]
+        .as_array()
+        .unwrap();
+    assert_eq!(interactions.len(), 1);
+    assert_eq!(
+        interactions[0],
+        json!({
+            "interaction_id": interaction_id.as_str(),
+            "source_kind": "mcp",
+            "server_id": "calendar-fixture",
+            "mode": "form",
+            "state": "closed",
+            "outcome": "retry_completed",
+            "deadline": required["deadline"],
+            "detail_url": required["detail_url"],
+        })
+    );
+
+    let snapshot = fixture
+        .repository
+        .load_run_stream_snapshot(&RunId::new(transcript.run_id.clone()).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.run(), &transcript.terminal()["run"]);
+    let hash_projection = json!({
+        "protocol": "run-stream/v1",
+        "run_id": &transcript.run_id,
+        "terminal_kind": snapshot.terminal_kind().as_str(),
+        "run": snapshot.run(),
+        "public_item_manifest": snapshot.public_item_manifest(),
+    });
+    assert_eq!(
+        snapshot.snapshot_hash(),
+        &ContentHash::from_bytes(&serde_jcs::to_vec(&hash_projection).unwrap()),
+        "terminal interactions must be inside the durable snapshot hash authority"
+    );
+
+    fixture
+        .service
+        .shutdown(Duration::from_secs(1))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn public_sse_protocol_covers_all_stream_publish_combinations() {
     let fixture = Fixture::start().await;
 
@@ -2140,6 +2504,7 @@ async fn public_sse_protocol_covers_all_stream_publish_combinations() {
     assert_eq!(discovery.status(), StatusCode::OK);
     let discovery: Value =
         serde_json::from_slice(&to_bytes(discovery.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert!(discovery["data"].get("run_stream_protocols").is_none());
     assert_eq!(
         discovery["data"]["streaming"],
         json!({

@@ -6,7 +6,7 @@
 | 日期 | 2026-07-30 |
 | 目标协议 | MCP `2026-07-28` |
 | 兼容协议 | MCP `2025-11-25`（独立兼容 profile） |
-| 平台协议 | `insight.agent/v1`、`run-stream/v2` |
+| 平台协议 | `insight.agent/v1`、`run-stream/v1` |
 | 变更类型 | Protocol Boundary / Resource SPI / Durable Interaction / Authorization / Public API |
 | 影响范围 | 新 `insight-mcp` crate、`insight-resources`、`insight-engine`、`insight-durable`、`insight-storage`、`insight-runtime`、`insight-api`、平台配置、数据库 schema、公开 schema、测试与文档 |
 
@@ -175,7 +175,7 @@ Provider secret reference 只覆盖部署级凭据。完整 MCP HTTP Authorizati
 现有 human task 是 Agent 作者显式声明的业务工作项。MCP Elicitation 是远程 Server 在某次协议请求
 中提出的嵌套输入请求，二者不能共享同一个公共类型或权限模型。
 
-`run-stream/v1` 是闭合的 25 事件协议，未包含 interaction 事件。完整 Host 需要：
+`run-stream/v1` 最初以 25 个闭合事件建立基线，当时未包含 interaction 事件。完整 Host 需要：
 
 - durable interaction 查询与回复 API；
 - 来源、模式、schema、目标 URL host 和截止时间的安全展示；
@@ -183,7 +183,9 @@ Provider secret reference 只覆盖部署级凭据。完整 MCP HTTP Authorizati
 - Attached 客户端的实时通知；
 - terminal snapshot 的安全校准。
 
-因此本规范要求新增 `run-stream/v2`，而不是向 v1 静默增加事件。
+平台仍处于未发布阶段，也没有需要保持 wire compatibility 的旧客户端。因此本规范要求将
+interaction 直接 clean-cut 纳入 `run-stream/v1`，把闭合集合扩展为 27 个事件；不新增
+第二个 run-stream 版本，也不保留版本协商或兼容分支。
 
 ## 4. 目标
 
@@ -319,7 +321,7 @@ Platform Config / OAuth Principal / Agent Revision
                          │
           PostgreSQL / SQLite + Artifact Store
                          │
-         RunService / run-stream/v2 / HTTP API
+         RunService / run-stream/v1 / HTTP API
                          │
               MCP Server export adapter
 ```
@@ -361,7 +363,7 @@ Resource 层不持久化 OAuth token、interaction、remote task 或 subscriptio
 - `ExternalInteraction`、`InteractionMode`、`InteractionOutcome`；
 - remote task 状态机和 first-winner action；
 - MCP content、descriptor、binding 和 safe public projection DTO；
-- `run-stream/v2` interaction 事件与 terminal snapshot 投影；
+- `run-stream/v1` interaction 事件与 terminal snapshot 投影；
 - terminal-only compatibility verifier 所需 capability facts。
 
 这些类型不得导入 HTTP、OAuth、stdio 或数据库实现。
@@ -407,7 +409,7 @@ Resource 层不持久化 OAuth token、interaction、remote task 或 subscriptio
 `insight-api` 增加：
 
 - MCP interaction、connection 和 authorization API；
-- `run-stream/v2` transport；
+- `run-stream/v1` transport；
 - `/mcp` Server endpoint；
 - OAuth callback 与 protected resource metadata 路由；
 - MCP principal 到 tenant/user 的映射。
@@ -957,6 +959,16 @@ Requested
 `Responded` 与 retry request receipt 必须事务关联。Crash 后可以重新领取 retry，但相同 interaction
 response 只能产生一个 committed MCP retry result。
 
+Run terminal path 必须在同一 durable transaction 中完成四件事：
+
+1. 将所有尚未闭合的 interaction 以 first-winner 转为 `run_terminal`；
+2. 按稳定顺序读取完整的安全 interaction 摘要集合；
+3. 将该集合冻结进 canonical `run_payload`；
+4. 对包含该集合的完整 payload 计算 `snapshot_hash` 并持久化 terminal snapshot。
+
+任一步失败必须回滚整个 terminal transaction，不得先提交 Run terminal、再补写
+interaction 摘要或 hash。
+
 ### 13.3 Form mode
 
 Form mode：
@@ -1009,9 +1021,9 @@ MCP `requestState` 是 remote Server 提供的不透明 continuation：
 
 所有 mutation 要求 `X-Request-ID`，repository 使用 interaction version/fence 防止重复和迟到覆盖。
 
-### 13.7 `run-stream/v2`
+### 13.7 `run-stream/v1` interaction 扩展
 
-`run-stream/v2` 保留 v1 的 25 个事件语义，并增加：
+`run-stream/v1` 保留原有 25 个事件语义，并将闭合事件集合扩展为 27 个，新增：
 
 - `run.interaction.required`；
 - `run.interaction.closed`。
@@ -1019,8 +1031,14 @@ MCP `requestState` 是 remote Server 提供的不透明 continuation：
 `required` 只携带 `interaction_id`、source kind、Server ID、mode、safe message、URL host、deadline
 和详情 API link。`closed` 只携带 outcome，不携带 response body。
 
-terminal Run snapshot 增加安全 `interactions[]` 状态摘要。v1 不增加 alias 或未知新事件。实现阶段
-对受控客户端执行一次明确协议升级，并同步 discovery、schema、baselines 和 current 文档。
+terminal Run snapshot 增加安全 `interactions[]` 状态摘要。interaction body 和 credential 不进入
+事件或 terminal snapshot。实现在同一次 pre-release clean-cut 中同步 discovery、schema、
+baselines 和 current 文档；不声明、协商或接受第二个 run-stream 协议身份。
+
+live `run.interaction.required` / `run.interaction.closed` 只是 body-free 通知，不是恢复或终态
+authority。断线、丢帧、重连和重启后，客户端必须以 durable terminal snapshot 中的
+`interactions[]` 校准。每个 Run 最多冻结 1024 个摘要；超限必须 fail closed，不得
+通过截取最新或最早的子集伪造完整 terminal 投影。
 
 ## 14. MCP Tasks extension
 
@@ -1297,6 +1315,8 @@ Tool/Resource/Prompt 大正文继续进入 Artifact 或受控 encrypted object�
 - remote task terminal。
 
 数据库事务决定唯一赢家。迟到动作返回闭合 conflict/capability response，不能重新打开 interaction。
+Run terminal 获胜时，尚未闭合的 interaction 在同一 terminal transaction 内以
+`run_terminal` 闭合；其摘要、canonical `run_payload` 与 `snapshot_hash` 不得分事务写入。
 
 ### 17.3 Retry identity
 
@@ -1384,7 +1404,7 @@ Agent discovery 增加：
 - 是否支持 remote Tasks；
 - 要求的 connection/server IDs 和 scope names；
 - `full|terminal_only` compatibility；
-- streaming protocol `run-stream/v2`。
+- streaming protocol `run-stream/v1`。
 
 不公开 endpoint query、stdio argv secret、token、requestState 或 remote raw instructions。
 
@@ -1395,7 +1415,12 @@ Run terminal snapshot：
 - 保留现有 tool result、retrieval 和 typed result；
 - MCP tool result 只按 frozen public policy 投影；
 - Resource 内容只按 Retrieval/Artifact authorization 投影；
-- interaction 只保存 identity、mode、outcome 和时间；
+- interaction 只保存 identity、mode、outcome 和时间；未闭合项与 Run terminal 在同一
+  durable transaction 内以 first-winner 冻结为 `run_terminal`；
+- `interactions[]` 按稳定顺序完整写入 canonical `run_payload`，最多 1024 项，超限
+  fail closed 而不是静默截断；
+- `snapshot_hash` 覆盖包含 `interactions[]` 的完整 `run_payload`，durable terminal snapshot
+  是恢复与客户端终态校准权威，live interaction 事件只是通知；
 - remote task 只保存 safe status/duration，不保存 opaque task ID；
 - OAuth/credential 事实最多保存 `authorization_required|authorized|declined`，不保存 scope grant 正文。
 
@@ -1653,12 +1678,12 @@ non-interference gates。
 
 完成门槛：动态资源更新不改变固定 Run/Revision，cache/tenant/size/prompt-injection 负向测试通过。
 
-### Phase D：Durable Interaction 与 run-stream/v2
+### Phase D：Durable Interaction 与 run-stream/v1
 
 - interaction engine/durable/storage/API；
 - form/URL Elicitation；
 - approval；
-- `run-stream/v2`；
+- `run-stream/v1` 的两个 interaction 事件与 terminal `interactions[]`；
 - first-winner、restart、timeout/cancel；
 - terminal-only verifier。
 
@@ -1800,8 +1825,8 @@ SQLite 与 PostgreSQL：
 
 ### 24.6 Public protocol
 
-- `run-stream/v2` schema samples 覆盖全部 v1 事件与两个 interaction 事件；
-- v1 decoder 拒绝 v2 identity；
+- `run-stream/v1` schema samples 精确覆盖全部 27 个事件；
+- discovery 与 transport 只声明 `run-stream/v1`，不声明或接受第二个协议身份；
 - interaction body 永不进入事件/terminal；
 - MCP tool public policy 双重授权；
 - attached stream gap/terminal calibration；

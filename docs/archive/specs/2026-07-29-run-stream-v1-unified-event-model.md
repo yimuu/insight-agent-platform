@@ -9,6 +9,13 @@
 | 替代协议 | `/runs/stream` 上的 `response-stream/v1` |
 | 影响范围 | `insight-engine`、`insight-runtime`、`insight-durable`、`insight-storage`、`insight-api`、公开 schema、Agent discovery、示例、当前文档与 conformance tests |
 
+> **2026-07-31 superseded 注记：**本文记录的 25-event 集合是 MCP interaction 接入前的
+> `run-stream/v1` 历史基线。由于协议尚未发布且没有需要兼容的旧客户端，当前
+> `run-stream/v1` 已 clean-cut 扩展为 27 个闭合事件，新增
+> `run.interaction.required` 与 `run.interaction.closed`。当前合同以
+> [HTTP 与 SSE API](../../current/api.md) 和公开 schema 为准；本文中的 25-event 数字仅保留作为
+> 当时的决策记录。
+
 ## 1. 决策摘要
 
 当前 `/v1/agents/{agent_id}/runs/stream` 同时发送 OpenAI Responses 风格的 `response.*` 和平台扩展

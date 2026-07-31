@@ -153,6 +153,7 @@ fn validate_terminal_run(
             let snapshot = serde_json::from_value::<RunCompletedSnapshot>(run.clone())
                 .map_err(|_| RepositoryError::invalid_data())?;
             validate_completed_run(&snapshot).map_err(|_| RepositoryError::invalid_data())?;
+            require_exact_run_payload(run, &snapshot)?;
             (snapshot.id, snapshot.status)
         }
         RunTerminalKind::Failed | RunTerminalKind::TimedOut => {
@@ -165,6 +166,7 @@ fn validate_terminal_run(
             };
             validate_failed_run(&snapshot, expected_status)
                 .map_err(|_| RepositoryError::invalid_data())?;
+            require_exact_run_payload(run, &snapshot)?;
             (snapshot.id, snapshot.status)
         }
         RunTerminalKind::Cancelled | RunTerminalKind::Interrupted => {
@@ -177,6 +179,7 @@ fn validate_terminal_run(
             };
             validate_stopped_run(&snapshot, expected_status)
                 .map_err(|_| RepositoryError::invalid_data())?;
+            require_exact_run_payload(run, &snapshot)?;
             (snapshot.id, snapshot.status)
         }
     };
@@ -188,6 +191,17 @@ fn validate_terminal_run(
         RunTerminalKind::Interrupted => RunStatus::Interrupted,
     };
     if id != run_id || status != expected_status {
+        return Err(RepositoryError::invalid_data());
+    }
+    Ok(())
+}
+
+fn require_exact_run_payload<T: Serialize>(
+    original: &Value,
+    typed: &T,
+) -> Result<(), RepositoryError> {
+    let projected = serde_json::to_value(typed).map_err(|_| RepositoryError::canonicalization())?;
+    if &projected != original {
         return Err(RepositoryError::invalid_data());
     }
     Ok(())
@@ -210,6 +224,7 @@ mod tests {
             "result": "ok",
             "tool_results": [],
             "retrievals": [],
+            "interactions": [],
             "usage": {
                 "input_tokens": 1,
                 "input_tokens_details": {"cached_tokens": 0},
@@ -237,6 +252,28 @@ mod tests {
             hash.clone(),
         )
         .unwrap();
+
+        for required_field in ["usage", "tool_results"] {
+            let mut incomplete = run.clone();
+            incomplete.as_object_mut().unwrap().remove(required_field);
+            let incomplete_projection = json!({
+                "protocol": RUN_STREAM_PROTOCOL_VERSION,
+                "run_id": run_id,
+                "terminal_kind": RunTerminalKind::Completed.as_str(),
+                "run": incomplete,
+                "public_item_manifest": manifest,
+            });
+            let incomplete_hash =
+                ContentHash::from_bytes(&serde_jcs::to_vec(&incomplete_projection).unwrap());
+            assert!(DurableRunStreamSnapshot::new(
+                run_id.clone(),
+                RunTerminalKind::Completed,
+                incomplete,
+                manifest.clone(),
+                incomplete_hash,
+            )
+            .is_err());
+        }
 
         let legacy_projection = json!({
             "protocol": "response-stream/v1",

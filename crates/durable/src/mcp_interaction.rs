@@ -24,6 +24,12 @@ impl McpInteractionId {
     pub fn new(value: impl Into<String>) -> Result<Self, RepositoryError> {
         let value = value.into();
         validate_label(&value)?;
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+        {
+            return Err(RepositoryError::invalid_data());
+        }
         Ok(Self(value))
     }
 
@@ -1058,6 +1064,16 @@ mod tests {
             step_up: false,
         };
         assert!(duplicated.validate().is_err());
+    }
+
+    #[test]
+    fn interaction_ids_are_safe_as_public_detail_path_segments() {
+        for value in ["mcpint_1", "interaction.safe:retry-2"] {
+            assert!(McpInteractionId::new(value).is_ok());
+        }
+        for value in ["unsafe/id", "unsafe id", "unsafe@id", "交互"] {
+            assert!(McpInteractionId::new(value).is_err());
+        }
     }
 
     #[test]

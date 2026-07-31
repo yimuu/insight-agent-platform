@@ -27,7 +27,7 @@ use insight_dsl::{
     GraphAuthorDocument, GraphSemanticEditBatch, StoredGraphView, ViewDocument,
     MAX_GRAPH_DOCUMENT_BYTES,
 };
-use insight_durable::{McpInteractionDurableRepository, McpInteractionPrincipal};
+use insight_durable::McpInteractionDurableRepository;
 use insight_engine::{history::types::RunRecord, human::HumanWorkItem};
 use insight_runtime::{
     catalog::{AgentMcpCapabilitySummary, AgentStreamingContract, DeployedAgent},
@@ -51,9 +51,10 @@ use super::{
     },
     response::{ApiError, ApiResponse},
     sse::{
-        full_conversation_run_stream, full_conversation_run_stream_v2, run_stream, run_stream_v2,
-        terminal_conversation_run_stream, terminal_conversation_run_stream_v2, terminal_run_stream,
-        terminal_run_stream_v2,
+        full_conversation_run_stream, full_conversation_run_stream_with_interactions, run_stream,
+        run_stream_with_interactions, terminal_conversation_run_stream,
+        terminal_conversation_run_stream_with_interactions, terminal_run_stream,
+        terminal_run_stream_with_interactions,
     },
 };
 
@@ -65,7 +66,6 @@ const X_MESSAGE_ID: HeaderName = HeaderName::from_static("x-message-id");
 const X_ACCEL_BUFFERING: HeaderName = HeaderName::from_static("x-accel-buffering");
 const X_CONTENT_TYPE_OPTIONS: HeaderName = HeaderName::from_static("x-content-type-options");
 const CONTENT_SECURITY_POLICY: HeaderName = HeaderName::from_static("content-security-policy");
-const X_RUN_STREAM_PROTOCOL: HeaderName = HeaderName::from_static("x-run-stream-protocol");
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -76,7 +76,7 @@ pub struct ApiState {
 }
 
 #[derive(Clone)]
-struct McpRunStreamV2Authority {
+struct McpInteractionStreamAuthority {
     repository: Arc<dyn McpInteractionDurableRepository>,
 }
 
@@ -200,12 +200,17 @@ pub fn build_router_with_mcp_interactions(
     repository: Arc<dyn insight_durable::McpInteractionDurableRepository>,
     protector: Arc<dyn insight_durable::McpSecretProtector>,
 ) -> Router {
+    let interaction_stream = McpInteractionStreamAuthority {
+        repository: Arc::clone(&repository),
+    };
     let mcp = build_mcp_interaction_router(McpInteractionApiState {
         auth: state.auth.clone(),
         repository,
         protector,
     });
-    build_router(state).merge(mcp)
+    build_router(state)
+        .merge(mcp)
+        .layer(Extension(interaction_stream))
 }
 
 pub fn build_router_with_mcp(
@@ -214,7 +219,7 @@ pub fn build_router_with_mcp(
     protector: Arc<dyn insight_durable::McpSecretProtector>,
     oauth: Option<McpOAuthApiState>,
 ) -> Router {
-    let run_stream_v2 = McpRunStreamV2Authority {
+    let interaction_stream = McpInteractionStreamAuthority {
         repository: Arc::clone(&interaction_repository),
     };
     let interactions = build_mcp_interaction_router(McpInteractionApiState {
@@ -226,7 +231,7 @@ pub fn build_router_with_mcp(
     if let Some(oauth) = oauth {
         router = router.merge(build_mcp_oauth_router(oauth));
     }
-    router.layer(Extension(run_stream_v2))
+    router.layer(Extension(interaction_stream))
 }
 
 async fn live() -> Response {
@@ -357,7 +362,6 @@ struct AgentMetadata {
     input_schema: Value,
     output_schema: Value,
     streaming: AgentStreamingContract,
-    run_stream_protocols: Vec<&'static str>,
     #[serde(flatten)]
     persistence: RunPersistenceCapability,
     /// Whether this immutable Deployment Revision permits process-local waits.
@@ -370,12 +374,12 @@ struct AgentMetadata {
 
 impl From<&DeployedAgent> for AgentMetadata {
     fn from(agent: &DeployedAgent) -> Self {
-        Self::from_agent(agent, false)
+        Self::from_agent(agent)
     }
 }
 
 impl AgentMetadata {
-    fn from_agent(agent: &DeployedAgent, supports_v2: bool) -> Self {
+    fn from_agent(agent: &DeployedAgent) -> Self {
         let published = agent.published();
         let metadata = published.metadata();
         Self {
@@ -386,11 +390,6 @@ impl AgentMetadata {
             input_schema: published.public_input_schema(),
             output_schema: published.public_output_schema(),
             streaming: published.public_streaming_contract(),
-            run_stream_protocols: if supports_v2 {
-                vec!["run-stream/v1", "run-stream/v2"]
-            } else {
-                vec!["run-stream/v1"]
-            },
             persistence: run_persistence_capability_for_mode(agent.persistence_mode()),
             volatile_waits_enabled: agent.persistence_policy().allow_volatile_waits(),
             wait_recovery: match agent.persistence_mode() {
@@ -404,7 +403,6 @@ impl AgentMetadata {
 
 async fn list_agents(
     State(state): State<Arc<ApiState>>,
-    authority: Option<Extension<McpRunStreamV2Authority>>,
 ) -> Result<Json<ApiResponse<Vec<AgentMetadata>>>, ApiError> {
     let agents = state
         .service
@@ -414,7 +412,7 @@ async fn list_agents(
     Ok(Json(ApiResponse::ok(
         agents
             .iter()
-            .map(|agent| AgentMetadata::from_agent(agent.as_ref(), authority.is_some()))
+            .map(|agent| AgentMetadata::from_agent(agent.as_ref()))
             .collect(),
     )))
 }
@@ -422,7 +420,6 @@ async fn list_agents(
 async fn get_agent(
     State(state): State<Arc<ApiState>>,
     Path(agent_id): Path<String>,
-    authority: Option<Extension<McpRunStreamV2Authority>>,
 ) -> Result<Json<ApiResponse<AgentMetadata>>, ApiError> {
     let agent = state
         .service
@@ -431,7 +428,6 @@ async fn get_agent(
         .map_err(ApiError::from)?;
     Ok(Json(ApiResponse::ok(AgentMetadata::from_agent(
         agent.as_ref(),
-        authority.is_some(),
     ))))
 }
 
@@ -618,35 +614,14 @@ async fn strict_document_body(
 
 async fn create_attached_run(
     State(state): State<Arc<ApiState>>,
-    authority: Option<Extension<McpRunStreamV2Authority>>,
+    authority: Option<Extension<McpInteractionStreamAuthority>>,
     Path(agent_id): Path<String>,
     headers: HeaderMap,
     input: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(input) = input.map_err(ApiError::from)?;
     let principal = run_principal(&headers)?;
-    let use_v2 = requested_run_stream_v2(&headers)?;
-    let overlay = if use_v2 {
-        let authority = authority
-            .ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "RUN_STREAM_PROTOCOL_UNAVAILABLE",
-                    "requested Run stream protocol is unavailable",
-                )
-            })?
-            .0;
-        Some((
-            authority.repository,
-            McpInteractionPrincipal::new(
-                &principal.tenant_id,
-                principal.user_id.as_deref().unwrap_or("service"),
-            )
-            .map_err(|_| ApiError::input_invalid())?,
-        ))
-    } else {
-        None
-    };
+    let interaction_repository = authority.map(|Extension(authority)| authority.repository);
     let attached = state
         .service
         .create_attached_any(
@@ -659,31 +634,25 @@ async fn create_attached_run(
         )
         .await
         .map_err(ApiError::from)?;
-    let (run_id, request_id, mut response) = match (attached, overlay) {
-        (AnyAttachedRun::Full(attached), Some((repository, principal))) => (
+    let (run_id, request_id, mut response) = match (attached, interaction_repository) {
+        (AnyAttachedRun::Full(attached), Some(repository)) => (
             attached.run_id.clone(),
             attached.request_id.clone(),
-            run_stream_v2(
-                attached,
-                state.sse_keep_alive_interval,
-                repository,
-                principal,
-            )
-            .into_response(),
+            run_stream_with_interactions(attached, state.sse_keep_alive_interval, repository)
+                .into_response(),
         ),
         (AnyAttachedRun::Full(attached), None) => (
             attached.run_id.clone(),
             attached.request_id.clone(),
             run_stream(attached, state.sse_keep_alive_interval).into_response(),
         ),
-        (AnyAttachedRun::TerminalOnly(attached), Some((repository, principal))) => (
+        (AnyAttachedRun::TerminalOnly(attached), Some(repository)) => (
             attached.run_id.clone(),
             attached.request_id.clone(),
-            terminal_run_stream_v2(
+            terminal_run_stream_with_interactions(
                 attached,
                 state.sse_keep_alive_interval,
                 repository,
-                principal,
             )
             .into_response(),
         ),
@@ -701,15 +670,6 @@ async fn create_attached_run(
         "no-store, no-transform",
     )?;
     insert_header(&mut response, X_ACCEL_BUFFERING, "no")?;
-    insert_header(
-        &mut response,
-        X_RUN_STREAM_PROTOCOL,
-        if use_v2 {
-            "run-stream/v2"
-        } else {
-            "run-stream/v1"
-        },
-    )?;
     Ok(response)
 }
 
@@ -1241,31 +1201,13 @@ async fn create_conversation_detached_turn(
 
 async fn create_conversation_attached_turn(
     State(state): State<Arc<ApiState>>,
-    authority: Option<Extension<McpRunStreamV2Authority>>,
+    authority: Option<Extension<McpInteractionStreamAuthority>>,
     Path(conversation_id): Path<String>,
     headers: HeaderMap,
     input: Result<Json<AppendConversationMessageRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let principal = conversation_principal(&headers)?;
-    let use_v2 = requested_run_stream_v2(&headers)?;
-    let overlay = if use_v2 {
-        let authority = authority
-            .ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "RUN_STREAM_PROTOCOL_UNAVAILABLE",
-                    "requested Run stream protocol is unavailable",
-                )
-            })?
-            .0;
-        Some((
-            authority.repository,
-            McpInteractionPrincipal::new(&principal.tenant_id, &principal.user_id)
-                .map_err(|_| ApiError::input_invalid())?,
-        ))
-    } else {
-        None
-    };
+    let interaction_repository = authority.map(|Extension(authority)| authority.repository);
     let request_id = required_conversation_request_id(&headers)?;
     let Json(input) = input.map_err(|_| conversation_request_invalid())?;
     let turn = state
@@ -1280,11 +1222,12 @@ async fn create_conversation_attached_turn(
         .await
         .map_err(ApiError::from)?;
     let message_id = turn.user_message.message_id;
-    let (run_id, admitted_request_id, mut response) = match (turn.attached, overlay) {
-        (AnyAttachedRun::Full(attached), Some((repository, interaction_principal))) => (
+    let (run_id, admitted_request_id, mut response) = match (turn.attached, interaction_repository)
+    {
+        (AnyAttachedRun::Full(attached), Some(repository)) => (
             attached.run_id.clone(),
             attached.request_id.clone(),
-            full_conversation_run_stream_v2(
+            full_conversation_run_stream_with_interactions(
                 attached,
                 state.sse_keep_alive_interval,
                 state.service.clone(),
@@ -1292,7 +1235,6 @@ async fn create_conversation_attached_turn(
                 principal.tenant_id.clone(),
                 principal.user_id.clone(),
                 repository,
-                interaction_principal,
             )
             .into_response(),
         ),
@@ -1309,17 +1251,16 @@ async fn create_conversation_attached_turn(
             )
             .into_response(),
         ),
-        (AnyAttachedRun::TerminalOnly(attached), Some((repository, interaction_principal))) => (
+        (AnyAttachedRun::TerminalOnly(attached), Some(repository)) => (
             attached.run_id.clone(),
             attached.request_id.clone(),
-            terminal_conversation_run_stream_v2(
+            terminal_conversation_run_stream_with_interactions(
                 attached,
                 state.sse_keep_alive_interval,
                 state.service.clone(),
                 principal.tenant_id.clone(),
                 principal.user_id.clone(),
                 repository,
-                interaction_principal,
             )
             .into_response(),
         ),
@@ -1345,15 +1286,6 @@ async fn create_conversation_attached_turn(
         "no-store, no-transform",
     )?;
     insert_header(&mut response, X_ACCEL_BUFFERING, "no")?;
-    insert_header(
-        &mut response,
-        X_RUN_STREAM_PROTOCOL,
-        if use_v2 {
-            "run-stream/v2"
-        } else {
-            "run-stream/v1"
-        },
-    )?;
     Ok(response)
 }
 
@@ -1549,20 +1481,6 @@ fn run_tenant_id(headers: &HeaderMap) -> Result<String, ApiError> {
         return Ok("default".to_owned());
     }
     bounded_identity_header(headers, &X_TENANT_ID).ok_or_else(ApiError::input_invalid)
-}
-
-fn requested_run_stream_v2(headers: &HeaderMap) -> Result<bool, ApiError> {
-    if !headers.contains_key(&X_RUN_STREAM_PROTOCOL) {
-        return Ok(false);
-    }
-    match exactly_one_header(headers, &X_RUN_STREAM_PROTOCOL)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-    {
-        Some("run-stream/v1") => Ok(false),
-        Some("run-stream/v2") => Ok(true),
-        _ => Err(ApiError::input_invalid()),
-    }
 }
 
 fn required_conversation_request_id(headers: &HeaderMap) -> Result<String, ApiError> {

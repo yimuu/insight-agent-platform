@@ -18,6 +18,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde::{de::Error as _, ser::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use tokio::sync::Notify;
@@ -57,6 +58,9 @@ const MAX_RUN_RETRIEVAL_URI_BYTES: usize = 8 * 1_024;
 const MAX_RUN_RETRIEVAL_SNIPPET_BYTES: usize = 64 * 1_024;
 const MAX_RUN_RETRIEVAL_METADATA_BYTES: usize = 16 * 1_024;
 const MAX_RUN_RETRIEVAL_METADATA_ENTRIES: usize = 128;
+const MAX_RUN_INTERACTIONS: usize = 1_024;
+const MAX_RUN_INTERACTION_MESSAGE_CHARS: usize = 4 * 1_024;
+const MAX_RUN_INTERACTION_HOST_BYTES: usize = 253;
 
 /// Exact public event set frozen by `run-stream/v1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -86,10 +90,12 @@ pub enum RunStreamEventType {
     RunLifecycleTimedOut,
     RunLifecycleCancelled,
     RunLifecycleInterrupted,
+    RunInteractionRequired,
+    RunInteractionClosed,
 }
 
 impl RunStreamEventType {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 27] = [
         Self::RunLifecycleCreated,
         Self::RunLifecycleRunning,
         Self::RunOutputItemAdded,
@@ -115,6 +121,8 @@ impl RunStreamEventType {
         Self::RunLifecycleTimedOut,
         Self::RunLifecycleCancelled,
         Self::RunLifecycleInterrupted,
+        Self::RunInteractionRequired,
+        Self::RunInteractionClosed,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -144,6 +152,8 @@ impl RunStreamEventType {
             Self::RunLifecycleTimedOut => "run.lifecycle.timed_out",
             Self::RunLifecycleCancelled => "run.lifecycle.cancelled",
             Self::RunLifecycleInterrupted => "run.lifecycle.interrupted",
+            Self::RunInteractionRequired => "run.interaction.required",
+            Self::RunInteractionClosed => "run.interaction.closed",
         }
     }
 
@@ -206,6 +216,431 @@ pub enum RunStatus {
     Interrupted,
 }
 
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+/// Public source family for a durable Run interaction.
+///
+/// The Run stream currently projects only MCP interactions. Keeping the
+/// source as a closed enum prevents an arbitrary repository value from being
+/// reflected into the public wire contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunInteractionSourceKind {
+    Mcp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunInteractionMode {
+    Form,
+    Url,
+    Approval,
+    Authorization,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunInteractionState {
+    Requested,
+    Responded,
+    Retrying,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunInteractionOutcome {
+    Accepted,
+    Declined,
+    Cancelled,
+    Expired,
+    RunTerminal,
+    RetryCompleted,
+    RetryFailed,
+}
+
+/// Body-free terminal projection of one durable interaction.
+///
+/// Request schemas, submitted form values, authorization tokens, and retry
+/// payloads deliberately have no representation in this type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunInteractionSummary {
+    interaction_id: String,
+    source_kind: RunInteractionSourceKind,
+    server_id: String,
+    mode: RunInteractionMode,
+    state: RunInteractionState,
+    outcome: Option<RunInteractionOutcome>,
+    deadline: DateTime<Utc>,
+    detail_url: String,
+}
+
+impl RunInteractionSummary {
+    pub fn new(
+        interaction_id: impl Into<String>,
+        server_id: impl Into<String>,
+        mode: RunInteractionMode,
+        state: RunInteractionState,
+        outcome: Option<RunInteractionOutcome>,
+        deadline: DateTime<Utc>,
+    ) -> Result<Self, &'static str> {
+        let interaction_id = interaction_id.into();
+        let server_id = server_id.into();
+        validate_run_interaction_identity(&interaction_id, &server_id)?;
+        if state != RunInteractionState::Closed || !valid_closed_interaction_outcome(outcome) {
+            return Err("terminal Run interaction summary must be closed with a final outcome");
+        }
+        Ok(Self {
+            detail_url: run_interaction_detail_url(&interaction_id),
+            interaction_id,
+            source_kind: RunInteractionSourceKind::Mcp,
+            server_id,
+            mode,
+            state,
+            outcome,
+            deadline,
+        })
+    }
+
+    pub fn interaction_id(&self) -> &str {
+        &self.interaction_id
+    }
+
+    pub const fn source_kind(&self) -> RunInteractionSourceKind {
+        self.source_kind
+    }
+
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    pub const fn mode(&self) -> RunInteractionMode {
+        self.mode
+    }
+
+    pub const fn state(&self) -> RunInteractionState {
+        self.state
+    }
+
+    pub const fn outcome(&self) -> Option<RunInteractionOutcome> {
+        self.outcome
+    }
+
+    pub const fn deadline(&self) -> DateTime<Utc> {
+        self.deadline
+    }
+
+    pub fn detail_url(&self) -> &str {
+        &self.detail_url
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunInteractionSummaryWire {
+    interaction_id: String,
+    source_kind: RunInteractionSourceKind,
+    server_id: String,
+    mode: RunInteractionMode,
+    state: RunInteractionState,
+    outcome: Option<RunInteractionOutcome>,
+    deadline: DateTime<Utc>,
+    detail_url: String,
+}
+
+impl<'de> Deserialize<'de> for RunInteractionSummary {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RunInteractionSummaryWire::deserialize(deserializer)?;
+        let summary = Self::new(
+            wire.interaction_id,
+            wire.server_id,
+            wire.mode,
+            wire.state,
+            wire.outcome,
+            wire.deadline,
+        )
+        .map_err(D::Error::custom)?;
+        if wire.source_kind != RunInteractionSourceKind::Mcp
+            || wire.detail_url != summary.detail_url
+        {
+            return Err(D::Error::custom("invalid Run interaction summary"));
+        }
+        Ok(summary)
+    }
+}
+
+/// Safe public fields for `run.interaction.required`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunInteractionRequiredDetails {
+    interaction_id: String,
+    source_kind: RunInteractionSourceKind,
+    server_id: String,
+    mode: RunInteractionMode,
+    message: String,
+    url_host: Option<String>,
+    deadline: DateTime<Utc>,
+    detail_url: String,
+}
+
+impl RunInteractionRequiredDetails {
+    pub fn new(
+        interaction_id: impl Into<String>,
+        server_id: impl Into<String>,
+        mode: RunInteractionMode,
+        message: impl Into<String>,
+        url_host: Option<String>,
+        deadline: DateTime<Utc>,
+    ) -> Result<Self, &'static str> {
+        let interaction_id = interaction_id.into();
+        let server_id = server_id.into();
+        let message = message.into();
+        validate_run_interaction_identity(&interaction_id, &server_id)?;
+        if message.is_empty()
+            || message.chars().count() > MAX_RUN_INTERACTION_MESSAGE_CHARS
+            || message
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\r' | '\n' | '\t'))
+        {
+            return Err("Run interaction message must be non-empty and bounded");
+        }
+        match (mode, url_host.as_deref()) {
+            (RunInteractionMode::Url, Some(host)) if valid_run_interaction_host(host) => {}
+            (RunInteractionMode::Url, _) => {
+                return Err("URL interaction must contain a safe public host")
+            }
+            (_, None) => {}
+            (_, Some(_)) => return Err("non-URL interaction must not contain a URL host"),
+        }
+        Ok(Self {
+            detail_url: run_interaction_detail_url(&interaction_id),
+            interaction_id,
+            source_kind: RunInteractionSourceKind::Mcp,
+            server_id,
+            mode,
+            message,
+            url_host,
+            deadline,
+        })
+    }
+
+    pub fn interaction_id(&self) -> &str {
+        &self.interaction_id
+    }
+
+    pub const fn source_kind(&self) -> RunInteractionSourceKind {
+        self.source_kind
+    }
+
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    pub const fn mode(&self) -> RunInteractionMode {
+        self.mode
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn url_host(&self) -> Option<&str> {
+        self.url_host.as_deref()
+    }
+
+    pub const fn deadline(&self) -> DateTime<Utc> {
+        self.deadline
+    }
+
+    pub fn detail_url(&self) -> &str {
+        &self.detail_url
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunInteractionRequiredDetailsWire {
+    interaction_id: String,
+    source_kind: RunInteractionSourceKind,
+    server_id: String,
+    mode: RunInteractionMode,
+    message: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    url_host: Option<String>,
+    deadline: DateTime<Utc>,
+    detail_url: String,
+}
+
+impl<'de> Deserialize<'de> for RunInteractionRequiredDetails {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RunInteractionRequiredDetailsWire::deserialize(deserializer)?;
+        let details = Self::new(
+            wire.interaction_id,
+            wire.server_id,
+            wire.mode,
+            wire.message,
+            wire.url_host,
+            wire.deadline,
+        )
+        .map_err(D::Error::custom)?;
+        if wire.source_kind != RunInteractionSourceKind::Mcp
+            || wire.detail_url != details.detail_url
+        {
+            return Err(D::Error::custom(
+                "invalid required Run interaction projection",
+            ));
+        }
+        Ok(details)
+    }
+}
+
+/// Safe public fields for `run.interaction.closed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunInteractionClosedDetails {
+    interaction_id: String,
+    source_kind: RunInteractionSourceKind,
+    server_id: String,
+    outcome: Option<RunInteractionOutcome>,
+    detail_url: String,
+}
+
+impl RunInteractionClosedDetails {
+    pub fn new(
+        interaction_id: impl Into<String>,
+        server_id: impl Into<String>,
+        outcome: Option<RunInteractionOutcome>,
+    ) -> Result<Self, &'static str> {
+        let interaction_id = interaction_id.into();
+        let server_id = server_id.into();
+        validate_run_interaction_identity(&interaction_id, &server_id)?;
+        if !valid_closed_interaction_outcome(outcome) {
+            return Err("closed Run interaction must contain a final outcome");
+        }
+        Ok(Self {
+            detail_url: run_interaction_detail_url(&interaction_id),
+            interaction_id,
+            source_kind: RunInteractionSourceKind::Mcp,
+            server_id,
+            outcome,
+        })
+    }
+
+    pub fn interaction_id(&self) -> &str {
+        &self.interaction_id
+    }
+
+    pub const fn source_kind(&self) -> RunInteractionSourceKind {
+        self.source_kind
+    }
+
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    pub const fn outcome(&self) -> Option<RunInteractionOutcome> {
+        self.outcome
+    }
+
+    pub fn detail_url(&self) -> &str {
+        &self.detail_url
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunInteractionClosedDetailsWire {
+    interaction_id: String,
+    source_kind: RunInteractionSourceKind,
+    server_id: String,
+    outcome: Option<RunInteractionOutcome>,
+    detail_url: String,
+}
+
+impl<'de> Deserialize<'de> for RunInteractionClosedDetails {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RunInteractionClosedDetailsWire::deserialize(deserializer)?;
+        let details = Self::new(wire.interaction_id, wire.server_id, wire.outcome)
+            .map_err(D::Error::custom)?;
+        if wire.source_kind != RunInteractionSourceKind::Mcp
+            || wire.detail_url != details.detail_url
+        {
+            return Err(D::Error::custom(
+                "invalid closed Run interaction projection",
+            ));
+        }
+        Ok(details)
+    }
+}
+
+fn validate_run_interaction_identity(
+    interaction_id: &str,
+    server_id: &str,
+) -> Result<(), &'static str> {
+    if !valid_run_interaction_id(interaction_id) || !valid_public_label(server_id) {
+        return Err("Run interaction identities must be stable public labels");
+    }
+    Ok(())
+}
+
+fn valid_run_interaction_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_PUBLIC_LABEL_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+const fn valid_closed_interaction_outcome(outcome: Option<RunInteractionOutcome>) -> bool {
+    matches!(
+        outcome,
+        Some(
+            RunInteractionOutcome::Declined
+                | RunInteractionOutcome::Cancelled
+                | RunInteractionOutcome::Expired
+                | RunInteractionOutcome::RunTerminal
+                | RunInteractionOutcome::RetryCompleted
+                | RunInteractionOutcome::RetryFailed
+        )
+    )
+}
+
+fn valid_run_interaction_host(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_RUN_INTERACTION_HOST_BYTES || !value.is_ascii() {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    if bytes.first() == Some(&b'[') && bytes.last() == Some(&b']') {
+        return bytes.len() > 2
+            && bytes[1..bytes.len() - 1]
+                .iter()
+                .all(|byte| byte.is_ascii_hexdigit() || matches!(byte, b':' | b'.'));
+    }
+    bytes
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b':' | b'-'))
+}
+
+fn run_interaction_detail_url(interaction_id: &str) -> String {
+    format!("/v1/mcp/interactions/{interaction_id}")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunOutputItemStatus {
@@ -226,7 +661,6 @@ pub enum RunOutputRole {
 pub enum RunOutputContentPart {
     OutputText {
         text: String,
-        #[serde(default)]
         annotations: Vec<Value>,
     },
 }
@@ -250,9 +684,7 @@ pub enum RunOutputItem {
     FileSearchCall {
         id: String,
         status: RunOutputItemStatus,
-        #[serde(default)]
         queries: Vec<String>,
-        #[serde(default)]
         results: Vec<Value>,
     },
 }
@@ -332,6 +764,7 @@ struct RunInitialSnapshotWire {
     object: RunObjectKind,
     status: RunStatus,
     output: Vec<RunOutputItem>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     usage: Option<RunUsage>,
 }
 
@@ -384,15 +817,13 @@ pub struct RunCompletedSnapshot {
     pub id: String,
     pub object: RunObjectKind,
     pub status: RunStatus,
-    #[serde(default)]
     pub output: Vec<RunOutputItem>,
     pub result: Value,
-    #[serde(default)]
     pub tool_results: Vec<RunToolResult>,
-    #[serde(default)]
     pub retrievals: Vec<RunRetrieval>,
     pub usage: Option<RunUsage>,
     pub usage_status: RunUsageStatus,
+    pub interactions: Vec<RunInteractionSummary>,
 }
 
 #[derive(Deserialize)]
@@ -401,15 +832,14 @@ struct RunCompletedSnapshotWire {
     id: String,
     object: RunObjectKind,
     status: RunStatus,
-    #[serde(default)]
     output: Vec<RunOutputItem>,
     result: Value,
-    #[serde(default)]
     tool_results: Vec<RunToolResult>,
-    #[serde(default)]
     retrievals: Vec<RunRetrieval>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     usage: Option<RunUsage>,
     usage_status: RunUsageStatus,
+    interactions: Vec<RunInteractionSummary>,
 }
 
 impl<'de> Deserialize<'de> for RunCompletedSnapshot {
@@ -428,6 +858,7 @@ impl<'de> Deserialize<'de> for RunCompletedSnapshot {
             retrievals: wire.retrievals,
             usage: wire.usage,
             usage_status: wire.usage_status,
+            interactions: wire.interactions,
         };
         validate_completed_run(&run).map_err(D::Error::custom)?;
         Ok(run)
@@ -440,15 +871,13 @@ pub struct RunFailedSnapshot {
     pub id: String,
     pub object: RunObjectKind,
     pub status: RunStatus,
-    #[serde(default)]
     pub output: Vec<RunOutputItem>,
     pub error: RunPublicError,
-    #[serde(default)]
     pub tool_results: Vec<RunToolResult>,
-    #[serde(default)]
     pub retrievals: Vec<RunRetrieval>,
     pub usage: Option<RunUsage>,
     pub usage_status: RunUsageStatus,
+    pub interactions: Vec<RunInteractionSummary>,
 }
 
 #[derive(Deserialize)]
@@ -457,15 +886,14 @@ struct RunFailedSnapshotWire {
     id: String,
     object: RunObjectKind,
     status: RunStatus,
-    #[serde(default)]
     output: Vec<RunOutputItem>,
     error: RunPublicError,
-    #[serde(default)]
     tool_results: Vec<RunToolResult>,
-    #[serde(default)]
     retrievals: Vec<RunRetrieval>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     usage: Option<RunUsage>,
     usage_status: RunUsageStatus,
+    interactions: Vec<RunInteractionSummary>,
 }
 
 impl<'de> Deserialize<'de> for RunFailedSnapshot {
@@ -490,6 +918,7 @@ impl<'de> Deserialize<'de> for RunFailedSnapshot {
             retrievals: wire.retrievals,
             usage: wire.usage,
             usage_status: wire.usage_status,
+            interactions: wire.interactions,
         };
         validate_failed_run(&run, expected_status).map_err(D::Error::custom)?;
         Ok(run)
@@ -502,14 +931,12 @@ pub struct RunStoppedSnapshot {
     pub id: String,
     pub object: RunObjectKind,
     pub status: RunStatus,
-    #[serde(default)]
     pub output: Vec<RunOutputItem>,
-    #[serde(default)]
     pub tool_results: Vec<RunToolResult>,
-    #[serde(default)]
     pub retrievals: Vec<RunRetrieval>,
     pub usage: Option<RunUsage>,
     pub usage_status: RunUsageStatus,
+    pub interactions: Vec<RunInteractionSummary>,
 }
 
 #[derive(Deserialize)]
@@ -518,14 +945,13 @@ struct RunStoppedSnapshotWire {
     id: String,
     object: RunObjectKind,
     status: RunStatus,
-    #[serde(default)]
     output: Vec<RunOutputItem>,
-    #[serde(default)]
     tool_results: Vec<RunToolResult>,
-    #[serde(default)]
     retrievals: Vec<RunRetrieval>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     usage: Option<RunUsage>,
     usage_status: RunUsageStatus,
+    interactions: Vec<RunInteractionSummary>,
 }
 
 impl<'de> Deserialize<'de> for RunStoppedSnapshot {
@@ -549,6 +975,7 @@ impl<'de> Deserialize<'de> for RunStoppedSnapshot {
             retrievals: wire.retrievals,
             usage: wire.usage,
             usage_status: wire.usage_status,
+            interactions: wire.interactions,
         };
         validate_stopped_run(&run, expected_status).map_err(D::Error::custom)?;
         Ok(run)
@@ -1308,6 +1735,18 @@ pub enum RunStreamEvent {
         )]
         run: RunStoppedSnapshot,
     },
+    #[serde(rename = "run.interaction.required")]
+    RunInteractionRequired {
+        sequence_number: u64,
+        #[serde(flatten)]
+        interaction: RunInteractionRequiredDetails,
+    },
+    #[serde(rename = "run.interaction.closed")]
+    RunInteractionClosed {
+        sequence_number: u64,
+        #[serde(flatten)]
+        interaction: RunInteractionClosedDetails,
+    },
 }
 
 fn validate_initial_run(
@@ -1332,11 +1771,16 @@ fn validate_terminal_run_common(
     expected_status: RunStatus,
     usage: Option<&RunUsage>,
     usage_status: RunUsageStatus,
+    interactions: &[RunInteractionSummary],
 ) -> Result<(), &'static str> {
     if object != RunObjectKind::Run
         || status != expected_status
         || !valid_public_label(id)
         || (usage_status == RunUsageStatus::Complete) != usage.is_some()
+        || interactions.len() > MAX_RUN_INTERACTIONS
+        || interactions
+            .windows(2)
+            .any(|pair| pair[0].interaction_id().as_bytes() >= pair[1].interaction_id().as_bytes())
     {
         return Err("terminal run snapshot does not match its lifecycle event");
     }
@@ -1440,6 +1884,7 @@ fn validate_completed_run(run: &RunCompletedSnapshot) -> Result<(), &'static str
         RunStatus::Completed,
         run.usage.as_ref(),
         run.usage_status,
+        &run.interactions,
     )
 }
 
@@ -1471,6 +1916,7 @@ fn validate_failed_run(
         expected_status,
         run.usage.as_ref(),
         run.usage_status,
+        &run.interactions,
     )?;
     if !valid_public_label(&run.error.code)
         || run.error.message.is_empty()
@@ -1525,6 +1971,7 @@ fn validate_stopped_run(
         expected_status,
         run.usage.as_ref(),
         run.usage_status,
+        &run.interactions,
     )
 }
 
@@ -1628,6 +2075,8 @@ impl RunStreamEvent {
             Self::RunLifecycleTimedOut { .. } => RunStreamEventType::RunLifecycleTimedOut,
             Self::RunLifecycleCancelled { .. } => RunStreamEventType::RunLifecycleCancelled,
             Self::RunLifecycleInterrupted { .. } => RunStreamEventType::RunLifecycleInterrupted,
+            Self::RunInteractionRequired { .. } => RunStreamEventType::RunInteractionRequired,
+            Self::RunInteractionClosed { .. } => RunStreamEventType::RunInteractionClosed,
         }
     }
 
@@ -1706,6 +2155,12 @@ impl RunStreamEvent {
                 sequence_number, ..
             }
             | Self::RunLifecycleInterrupted {
+                sequence_number, ..
+            }
+            | Self::RunInteractionRequired {
+                sequence_number, ..
+            }
+            | Self::RunInteractionClosed {
                 sequence_number, ..
             } => *sequence_number,
         }
@@ -3709,6 +4164,22 @@ mod tests {
         }
     }
 
+    fn sample_interaction_deadline() -> DateTime<Utc> {
+        "2026-07-30T12:00:00Z".parse().unwrap()
+    }
+
+    fn sample_interaction_summary() -> RunInteractionSummary {
+        RunInteractionSummary::new(
+            "mcp_schema",
+            "calendar",
+            RunInteractionMode::Form,
+            RunInteractionState::Closed,
+            Some(RunInteractionOutcome::RetryCompleted),
+            sample_interaction_deadline(),
+        )
+        .unwrap()
+    }
+
     fn sample_completed_run() -> RunCompletedSnapshot {
         let artifact = artifact("artifact_schema", "image/png");
         let tool_result = RunToolResult::new(
@@ -3747,6 +4218,7 @@ mod tests {
             retrievals: vec![retrieval],
             usage: Some(sample_usage()),
             usage_status: RunUsageStatus::Complete,
+            interactions: vec![sample_interaction_summary()],
         }
     }
 
@@ -3863,6 +4335,7 @@ mod tests {
                     retrievals: Vec::new(),
                     usage: None,
                     usage_status: RunUsageStatus::Partial,
+                    interactions: Vec::new(),
                 },
             },
             RunStreamEvent::RunStreamError {
@@ -3929,6 +4402,7 @@ mod tests {
                     retrievals: Vec::new(),
                     usage: None,
                     usage_status: RunUsageStatus::Partial,
+                    interactions: Vec::new(),
                 },
             },
             RunStreamEvent::RunLifecycleCancelled {
@@ -3942,6 +4416,7 @@ mod tests {
                     retrievals: Vec::new(),
                     usage: None,
                     usage_status: RunUsageStatus::Partial,
+                    interactions: Vec::new(),
                 },
             },
             RunStreamEvent::RunLifecycleInterrupted {
@@ -3955,7 +4430,29 @@ mod tests {
                     retrievals: Vec::new(),
                     usage: None,
                     usage_status: RunUsageStatus::Partial,
+                    interactions: Vec::new(),
                 },
+            },
+            RunStreamEvent::RunInteractionRequired {
+                sequence_number: 25,
+                interaction: RunInteractionRequiredDetails::new(
+                    "mcp_schema",
+                    "calendar",
+                    RunInteractionMode::Form,
+                    "Choose a calendar",
+                    None,
+                    sample_interaction_deadline(),
+                )
+                .unwrap(),
+            },
+            RunStreamEvent::RunInteractionClosed {
+                sequence_number: 26,
+                interaction: RunInteractionClosedDetails::new(
+                    "mcp_schema",
+                    "calendar",
+                    Some(RunInteractionOutcome::RetryCompleted),
+                )
+                .unwrap(),
             },
         ]
     }
@@ -3978,6 +4475,46 @@ mod tests {
             assert!(
                 validator.is_valid(&encoded),
                 "real {expected_type} serialization must match run-stream/v1"
+            );
+            assert_eq!(
+                serde_json::from_value::<RunStreamEvent>(encoded.clone()).unwrap(),
+                *sample,
+                "real {expected_type} serialization must round-trip through the typed v1 decoder"
+            );
+            if sample.is_run_terminal() {
+                for field in [
+                    "output",
+                    "tool_results",
+                    "retrievals",
+                    "usage",
+                    "interactions",
+                ] {
+                    let mut missing = encoded.clone();
+                    missing["run"].as_object_mut().unwrap().remove(field);
+                    assert!(!validator.is_valid(&missing));
+                    assert!(
+                        serde_json::from_value::<RunStreamEvent>(missing).is_err(),
+                        "terminal v1 decoder must require run.{field}"
+                    );
+                }
+            } else if matches!(
+                sample.event_type(),
+                RunStreamEventType::RunLifecycleCreated | RunStreamEventType::RunLifecycleRunning
+            ) {
+                let mut missing_usage = encoded.clone();
+                missing_usage["run"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("usage");
+                assert!(!validator.is_valid(&missing_usage));
+                assert!(serde_json::from_value::<RunStreamEvent>(missing_usage).is_err());
+            }
+
+            let mut versioned = encoded.clone();
+            versioned["protocol"] = json!("run-stream/unsupported");
+            assert!(
+                !validator.is_valid(&versioned),
+                "v1 must reject a second protocol identity on {expected_type}"
             );
 
             let mut missing_required = encoded.clone();
@@ -4007,74 +4544,45 @@ mod tests {
     }
 
     #[test]
-    fn run_stream_v2_schema_samples_cover_every_v1_event_without_weakening_v1() {
-        let v1_schema: Value =
-            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v1.json")).unwrap();
-        let v2_schema: Value =
-            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v2.json")).unwrap();
-        let v1 =
-            crate::schema::compile_schema_2020(&v1_schema).expect("run-stream/v1 schema compiles");
-        let v2 =
-            crate::schema::compile_schema_2020(&v2_schema).expect("run-stream/v2 schema compiles");
-        let samples = run_stream_event_samples();
-        assert_eq!(samples.len(), 25);
-        for sample in samples {
-            let mut encoded = serde_json::to_value(&sample).unwrap();
-            encoded
-                .as_object_mut()
-                .unwrap()
-                .insert("protocol".to_owned(), json!("run-stream/v2"));
-            if matches!(
-                sample.event_type(),
-                RunStreamEventType::RunLifecycleCompleted
-                    | RunStreamEventType::RunLifecycleFailed
-                    | RunStreamEventType::RunLifecycleTimedOut
-                    | RunStreamEventType::RunLifecycleCancelled
-                    | RunStreamEventType::RunLifecycleInterrupted
-            ) {
-                encoded["run"]
-                    .as_object_mut()
-                    .expect("terminal v1 sample has a Run snapshot")
-                    .insert("interactions".to_owned(), json!([]));
-            }
-            assert!(
-                v2.is_valid(&encoded),
-                "v2 sample for {} must validate",
-                sample.event_type().as_str()
-            );
-            assert!(
-                !v1.is_valid(&encoded),
-                "the v1 decoder must reject a v2 identity"
-            );
-        }
-    }
-
-    #[test]
-    fn checked_in_run_stream_v2_samples_cover_closed_protocol_surface() {
+    fn checked_in_run_stream_v1_samples_cover_closed_protocol_surface() {
+        let typed_samples = run_stream_event_samples()
+            .iter()
+            .map(|sample| serde_json::to_value(sample).unwrap())
+            .collect::<Vec<_>>();
         let schema: Value =
-            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v2.json")).unwrap();
+            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v1.json")).unwrap();
         let validator =
-            crate::schema::compile_schema_2020(&schema).expect("run-stream/v2 schema compiles");
+            crate::schema::compile_schema_2020(&schema).expect("run-stream/v1 schema compiles");
         let samples: Vec<Value> =
-            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v2.samples.json"))
+            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v1.samples.json"))
                 .unwrap();
         assert_eq!(samples.len(), 27);
-        let types = samples
-            .iter()
-            .map(|sample| {
-                assert!(
-                    validator.is_valid(sample),
-                    "checked-in v2 sample must validate"
-                );
-                sample["type"].as_str().unwrap().to_owned()
-            })
+        assert_eq!(typed_samples.len(), 27);
+        let collect_types = |label: &str, candidates: &[Value]| {
+            candidates
+                .iter()
+                .map(|sample| {
+                    assert!(
+                        validator.is_valid(sample),
+                        "{label} v1 sample must validate: {sample}"
+                    );
+                    assert!(
+                        serde_json::from_value::<RunStreamEvent>(sample.clone()).is_ok(),
+                        "{label} v1 sample must pass the typed decoder: {sample}"
+                    );
+                    sample["type"].as_str().unwrap().to_owned()
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let typed_types = collect_types("typed", &typed_samples);
+        let checked_types = collect_types("checked-in", &samples);
+        let expected_types = RunStreamEventType::ALL
+            .map(RunStreamEventType::as_str)
+            .into_iter()
+            .map(str::to_owned)
             .collect::<BTreeSet<_>>();
-        assert_eq!(types.len(), 27);
-        for event_type in RunStreamEventType::ALL {
-            assert!(types.contains(event_type.as_str()));
-        }
-        assert!(types.contains("run.interaction.required"));
-        assert!(types.contains("run.interaction.closed"));
+        assert_eq!(typed_types, expected_types);
+        assert_eq!(checked_types, expected_types);
         for interaction in samples.iter().filter(|sample| {
             sample["type"]
                 .as_str()
@@ -4087,10 +4595,231 @@ mod tests {
                 "access_token",
                 "refresh_token",
                 "form_response",
+                "private_response",
             ] {
                 assert!(!encoded.contains(forbidden));
             }
         }
+    }
+
+    #[test]
+    fn run_interaction_public_contract_rejects_unsafe_ids_messages_and_hosts() {
+        let deadline = sample_interaction_deadline();
+        assert!(RunInteractionRequiredDetails::new(
+            "mcp_safe",
+            "calendar",
+            RunInteractionMode::Form,
+            "line one\r\nline two\tvalue",
+            None,
+            deadline,
+        )
+        .is_ok());
+        for message in [
+            "unsafe\0message",
+            "unsafe\u{7f}message",
+            "unsafe\u{85}message",
+        ] {
+            assert!(RunInteractionRequiredDetails::new(
+                "mcp_safe",
+                "calendar",
+                RunInteractionMode::Form,
+                message,
+                None,
+                deadline,
+            )
+            .is_err());
+        }
+        for host in [
+            "",
+            "calendar example.test",
+            "user@example.test",
+            "example.test/path",
+            "example.test\\path",
+            "example.test?query",
+            "example.test#fragment",
+            "例子.example",
+        ] {
+            assert!(RunInteractionRequiredDetails::new(
+                "mcp_safe",
+                "calendar",
+                RunInteractionMode::Url,
+                "Open the provider",
+                Some(host.to_owned()),
+                deadline,
+            )
+            .is_err());
+        }
+        for host in ["calendar.example.test", "127.0.0.1:8443", "[2001:db8::1]"] {
+            assert!(RunInteractionRequiredDetails::new(
+                "mcp_safe",
+                "calendar",
+                RunInteractionMode::Url,
+                "Open the provider",
+                Some(host.to_owned()),
+                deadline,
+            )
+            .is_ok());
+        }
+        for interaction_id in ["unsafe/id", "unsafe id", "unsafe@id", "交互"] {
+            assert!(RunInteractionClosedDetails::new(
+                interaction_id,
+                "calendar",
+                Some(RunInteractionOutcome::Declined),
+            )
+            .is_err());
+        }
+        for outcome in [None, Some(RunInteractionOutcome::Accepted)] {
+            assert!(RunInteractionClosedDetails::new("mcp_safe", "calendar", outcome).is_err());
+            assert!(RunInteractionSummary::new(
+                "mcp_safe",
+                "calendar",
+                RunInteractionMode::Form,
+                RunInteractionState::Closed,
+                outcome,
+                deadline,
+            )
+            .is_err());
+        }
+        assert!(RunInteractionSummary::new(
+            "mcp_safe",
+            "calendar",
+            RunInteractionMode::Form,
+            RunInteractionState::Requested,
+            Some(RunInteractionOutcome::RunTerminal),
+            deadline,
+        )
+        .is_err());
+
+        let schema: Value =
+            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v1.json")).unwrap();
+        let validator =
+            crate::schema::compile_schema_2020(&schema).expect("run-stream/v1 schema compiles");
+        let required = serde_json::to_value(RunStreamEvent::RunInteractionRequired {
+            sequence_number: 1,
+            interaction: RunInteractionRequiredDetails::new(
+                "mcp_safe",
+                "calendar",
+                RunInteractionMode::Form,
+                "Choose a calendar",
+                None,
+                deadline,
+            )
+            .unwrap(),
+        })
+        .unwrap();
+        for (field, unsafe_value) in [
+            ("interaction_id", json!("unsafe/id")),
+            ("message", json!("unsafe\0message")),
+        ] {
+            let mut candidate = required.clone();
+            candidate[field] = unsafe_value;
+            assert!(!validator.is_valid(&candidate));
+            assert!(serde_json::from_value::<RunStreamEvent>(candidate).is_err());
+        }
+        let mut missing_url_host = required.clone();
+        missing_url_host.as_object_mut().unwrap().remove("url_host");
+        assert!(!validator.is_valid(&missing_url_host));
+        assert!(serde_json::from_value::<RunStreamEvent>(missing_url_host).is_err());
+        for unsafe_host in [
+            "calendar example.test",
+            "user@example.test",
+            "example.test/path",
+            "example.test?query",
+            "example.test#fragment",
+        ] {
+            let mut candidate = required.clone();
+            candidate["mode"] = json!("url");
+            candidate["url_host"] = json!(unsafe_host);
+            assert!(!validator.is_valid(&candidate));
+            assert!(serde_json::from_value::<RunStreamEvent>(candidate).is_err());
+        }
+
+        let closed = serde_json::to_value(RunStreamEvent::RunInteractionClosed {
+            sequence_number: 2,
+            interaction: RunInteractionClosedDetails::new(
+                "mcp_safe",
+                "calendar",
+                Some(RunInteractionOutcome::RetryCompleted),
+            )
+            .unwrap(),
+        })
+        .unwrap();
+        for invalid_outcome in [Value::Null, json!("accepted")] {
+            let mut candidate = closed.clone();
+            candidate["outcome"] = invalid_outcome;
+            assert!(!validator.is_valid(&candidate));
+            assert!(serde_json::from_value::<RunStreamEvent>(candidate).is_err());
+        }
+    }
+
+    #[test]
+    fn terminal_interaction_projection_limit_matches_the_v1_schema() {
+        let schema: Value =
+            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v1.json")).unwrap();
+        let validator =
+            crate::schema::compile_schema_2020(&schema).expect("run-stream/v1 schema compiles");
+        let mut run = sample_completed_run();
+        run.interactions = (0..MAX_RUN_INTERACTIONS)
+            .map(|index| {
+                RunInteractionSummary::new(
+                    format!("mcp_{index:04}"),
+                    "calendar",
+                    RunInteractionMode::Form,
+                    RunInteractionState::Closed,
+                    Some(RunInteractionOutcome::RetryCompleted),
+                    sample_interaction_deadline(),
+                )
+                .unwrap()
+            })
+            .collect();
+        let event = RunStreamEvent::RunLifecycleCompleted {
+            sequence_number: 1,
+            run,
+        };
+        let mut encoded = serde_json::to_value(&event).unwrap();
+        assert!(validator.is_valid(&encoded));
+
+        for (field, invalid_value) in [
+            ("state", json!("requested")),
+            ("outcome", json!("accepted")),
+            ("outcome", Value::Null),
+        ] {
+            let mut invalid = encoded.clone();
+            invalid["run"]["interactions"][0][field] = invalid_value;
+            assert!(!validator.is_valid(&invalid));
+            assert!(serde_json::from_value::<RunStreamEvent>(invalid).is_err());
+        }
+
+        let mut duplicate = encoded.clone();
+        let first = duplicate["run"]["interactions"][0].clone();
+        duplicate["run"]["interactions"][1] = first;
+        assert!(!validator.is_valid(&duplicate));
+        assert!(serde_json::from_value::<RunStreamEvent>(duplicate).is_err());
+
+        let mut out_of_order = encoded.clone();
+        out_of_order["run"]["interactions"]
+            .as_array_mut()
+            .unwrap()
+            .swap(0, 1);
+        assert!(validator.is_valid(&out_of_order));
+        assert!(serde_json::from_value::<RunStreamEvent>(out_of_order).is_err());
+
+        encoded["run"]["interactions"].as_array_mut().unwrap().push(
+            serde_json::to_value(
+                RunInteractionSummary::new(
+                    "mcp_overflow",
+                    "calendar",
+                    RunInteractionMode::Form,
+                    RunInteractionState::Closed,
+                    Some(RunInteractionOutcome::RetryCompleted),
+                    sample_interaction_deadline(),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        assert!(!validator.is_valid(&encoded));
+        assert!(serde_json::from_value::<RunStreamEvent>(encoded).is_err());
     }
 
     #[test]
@@ -4127,6 +4856,8 @@ mod tests {
                 "run.lifecycle.timed_out",
                 "run.lifecycle.cancelled",
                 "run.lifecycle.interrupted",
+                "run.interaction.required",
+                "run.interaction.closed",
             ]
         );
         for event_type in RunStreamEventType::ALL {
@@ -4522,7 +5253,8 @@ mod tests {
                 }]
             }],
             "usage": null,
-            "usage_status": "unavailable"
+            "usage_status": "unavailable",
+            "interactions": []
         }))
         .unwrap();
         assert_eq!(run.tool_results[0].call_id(), "call_lookup");
@@ -4558,7 +5290,8 @@ mod tests {
                 "results": [{"id": "doc_1", "metadata": {}}]
             }],
             "usage": null,
-            "usage_status": "unavailable"
+            "usage_status": "unavailable",
+            "interactions": []
         });
 
         let mut unknown_variant = base.clone();

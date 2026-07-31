@@ -4,6 +4,7 @@
 |---|---|
 | 状态 | Qualified |
 | 验收日期 | 2026-07-30 |
+| Run stream clean-cut 复验 | 2026-07-31；`run-stream/v1` / 27 events |
 | Modern profiles | `mcp-modern-client-v1`、`mcp-modern-server-v1` |
 | Extension profile | `mcp-tasks-v1` |
 | Compatibility profile | `mcp-legacy-client-v1`（MCP `2025-11-25`） |
@@ -25,7 +26,10 @@ client profile 已完成实现并通过资格验收。当前生产合同见
 - 双向 Tasks get/update/cancel/status、断线恢复、lease/fence 与 terminal first-winner；
 - SQLite/PostgreSQL 等价的 interaction、task、OAuth transaction 和加密 credential 状态机；
 - MCP `2025-11-25` initialize/session fallback 与 modern path 的严格隔离；
-- `run-stream/v2` interaction 协商，且不改变闭合的 `run-stream/v1`；
+- `run-stream/v1` 直接包含 27 个闭合事件、body-free interaction 通知与 terminal
+  `interactions[]`，不声明或协商其他 run-stream 协议身份；
+- Run terminal transaction 以 first-winner 将未闭合 interaction 转为 `run_terminal`，并原子
+  冻结完整摘要到 canonical `run_payload` 与 `snapshot_hash`；
 - catalog/revision 冻结、secret non-interference、SSRF/TLS/body/depth/content bounds 与可观测性。
 
 ## 上游与供应链证据
@@ -85,6 +89,14 @@ git diff --check
 完整 workspace gate 在 PostgreSQL 16 上执行，覆盖 74 张表和 216 个索引的最终 schema contract。
 Helm lint 及启用 MCP 的 render 验证 keyring 与 bearer secret 都通过现有 Kubernetes Secret key
 注入，不在 values、ConfigMap 或 Deployment Revision 中保存明文。
+
+2026-07-31 的 run-stream clean-cut 复验额外覆盖：discovery 只公开 `run-stream/v1`，
+27 个事件逐条通过 v1 schema，五种 terminal snapshot 都携带安全
+`interactions[]`，第二个协议身份及其 schema/sample 不再存在，interaction body、credential、
+requestState 和远程原始错误仍不进入公开 wire。复验还覆盖同一 durable
+transaction 内的 `run_terminal` first-winner、interaction 摘要与 `run_payload`/`snapshot_hash`
+原子冻结、1024 项边界、第 1025 项 fail-closed 且不截断，以及重启后使用同一
+durable terminal snapshot 恢复。live `required` / `closed` 事件未被当作恢复权威。
 
 ## 发布判定
 

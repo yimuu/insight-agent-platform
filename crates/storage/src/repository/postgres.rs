@@ -1367,6 +1367,12 @@ pub(crate) async fn persist_terminal_run_stream_snapshot_postgres(
     )
     .await?;
     validate_terminal_retrieval_artifacts_postgres(transaction, run_id, &retrievals).await?;
+    let interactions =
+        super::mcp_interaction_adapter::close_and_load_terminal_interactions_postgres(
+            transaction,
+            run_id,
+        )
+        .await?;
     let snapshot = build_terminal_run_stream_snapshot(TerminalRunStreamSnapshotInput {
         run_id,
         lifecycle,
@@ -1376,6 +1382,7 @@ pub(crate) async fn persist_terminal_run_stream_snapshot_postgres(
         model_calls,
         tool_results,
         retrievals,
+        interactions,
     })?;
     sqlx::query(
         "INSERT INTO run_stream_snapshots (

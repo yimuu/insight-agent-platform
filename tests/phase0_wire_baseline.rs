@@ -283,6 +283,7 @@ fn failed_run(status: &str, code: &str, message: &str) -> Value {
         "error": { "code": code, "message": message },
         "tool_results": [],
         "retrievals": [],
+        "interactions": [],
         "usage": null,
         "usage_status": "partial"
     })
@@ -296,6 +297,7 @@ fn stopped_run(status: &str, usage_status: &str) -> Value {
         "output": [],
         "tool_results": [],
         "retrievals": [],
+        "interactions": [],
         "usage": null,
         "usage_status": usage_status
     })
@@ -418,6 +420,7 @@ fn run_stream_events() -> Vec<RunStreamEvent> {
                 "result": { "answer": "complete" },
                 "tool_results": [],
                 "retrievals": [],
+                "interactions": [],
                 "usage": null,
                 "usage_status": "unavailable"
             }
@@ -502,6 +505,27 @@ fn run_stream_events() -> Vec<RunStreamEvent> {
             "sequence_number": 24,
             "run": stopped_run("interrupted", "unavailable")
         }),
+        json!({
+            "type": "run.interaction.required",
+            "sequence_number": 25,
+            "interaction_id": "mcp_phase0",
+            "source_kind": "mcp",
+            "server_id": "calendar",
+            "mode": "form",
+            "message": "Choose a calendar",
+            "url_host": null,
+            "deadline": "2026-07-30T12:00:00Z",
+            "detail_url": "/v1/mcp/interactions/mcp_phase0"
+        }),
+        json!({
+            "type": "run.interaction.closed",
+            "sequence_number": 26,
+            "interaction_id": "mcp_phase0",
+            "source_kind": "mcp",
+            "server_id": "calendar",
+            "outcome": "retry_completed",
+            "detail_url": "/v1/mcp/interactions/mcp_phase0"
+        }),
     ])
 }
 
@@ -531,7 +555,9 @@ fn assert_run_stream_event_type_is_known(event_type: RunStreamEventType) {
         | RunStreamEventType::RunStreamGap
         | RunStreamEventType::RunLifecycleTimedOut
         | RunStreamEventType::RunLifecycleCancelled
-        | RunStreamEventType::RunLifecycleInterrupted => {}
+        | RunStreamEventType::RunLifecycleInterrupted
+        | RunStreamEventType::RunInteractionRequired
+        | RunStreamEventType::RunInteractionClosed => {}
     }
 }
 
@@ -805,8 +831,8 @@ fn actual_baseline() -> Value {
     );
 
     let run_events = run_stream_events();
-    assert_eq!(RunStreamEventType::ALL.len(), 25);
-    assert_eq!(run_events.len(), 25);
+    assert_eq!(RunStreamEventType::ALL.len(), 27);
+    assert_eq!(run_events.len(), 27);
     RunStreamEventType::ALL
         .into_iter()
         .for_each(assert_run_stream_event_type_is_known);

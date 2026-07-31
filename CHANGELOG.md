@@ -13,7 +13,7 @@
   Completion、Subscriptions、Elicitation、stdio、Streamable HTTP 和 HTTP Authorization；
   官方 Tasks extension 与 `2025-11-25` legacy client 作为独立协商 profile。
 - 独立 `insight-mcp` 协议边界、`/mcp` Server endpoint、MCP catalog/context/connection API、
-  durable interaction API 与 `run-stream/v2` interaction 事件。
+  durable interaction API 与 `run-stream/v1` interaction 事件。
 - SQLite/PostgreSQL 等价的 MCP interaction、remote/server task、OAuth transaction 与加密
   credential 持久化，以及 TypeScript/Go 官方 SDK 双向互操作资格验收。
 - 版本化只读 Provider Catalog，内置 `dashscope-cn` / `dashscope-intl` route、官方
@@ -36,11 +36,13 @@
   `models.yaml` / `models.config` 和公共 `json_object_output` 配置。结构化 `response` 现在始终
   使用平台 Prompt 策略与本地 JSON/Schema 校验；Provider Catalog 和扩展不再声明或自动启用
   原生 `response_format`，对应模型 worker 身份更新为 `openai-chat-adapter-2.1.0`。
-- Attached SSE 已 clean-cut 到统一的 `run-stream/v1`：25 个闭合事件全部以 `run.*` 命名，
+- Attached SSE 已 clean-cut 到统一的 `run-stream/v1`：27 个闭合事件全部以 `run.*` 命名，
   lifecycle terminal 只携带一个按状态闭合的 `run` 快照；Full 与 Terminal-only 共享同一
   wire shape。
 - durable terminal snapshot 改为 canonical `run_payload`，协议哈希域显式包含
-  `run-stream/v1`；旧 `response_snapshots` 结构不支持原地升级。
+  `run-stream/v1`。Run terminal transaction 以 first-winner 将未闭合 interaction 转为
+  `run_terminal`，将完整安全摘要与 terminal 事实一起冻结进 `run_payload`，并纳入
+  `snapshot_hash`；旧 `response_snapshots` 结构不支持原地升级。
 - Attached HTTP 不再返回 `X-Response-ID`，`run_id` 成为公开执行身份；`running` 只在执行
   authority 确认后发出，terminal replay 可直接从 `created` 进入 terminal。
 - 运行时配置键从 `response_stream` clean-cut 为 `run_stream`，不提供旧键别名。
@@ -48,8 +50,12 @@
   durable 首次执行时间并覆盖 retry/backoff，terminal-only 使用同边界的进程内计时。
 - terminal `run.tool_results` 现在保留公开 status-only 成功调用并使用空 `content` 校准；
   `current_time`、`text_metrics`、`integer_calculator` 公开安全结果，`text_replace` 结果继续私有。
-- 新 `run-stream/v1` 的闭合事件集合固定为 25 个；这是 `0.1.x` 受控客户端同步升级，不提供
-  旧 `response-stream/v1` 与目标协议的混合部署兼容层。
+- `run-stream/v1` 的闭合事件集合最终固定为 27 个：原有 25 个运行事件加上
+  `run.interaction.required` / `run.interaction.closed`；未发布期直接 clean-cut，不提供
+  `response-stream/v1` 或第二个 run-stream 版本兼容层。
+- terminal `interactions[]` 最多完整冻结 1024 项，超限 fail closed 且不静默截断；
+  live `run.interaction.required` / `run.interaction.closed` 只是通知，durable terminal snapshot 是恢复与
+  终态校准权威。
 - Deployment Revision identity 冻结 `full|terminal_only` persistence policy；Run DTO 显式返回
   recovery、event replay 与 wait capability。
 - Quickstart、Helm chart 和未声明 Deployment Revision 的默认 persistence mode 继续为 `full`；

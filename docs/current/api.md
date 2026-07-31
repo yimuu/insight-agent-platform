@@ -145,7 +145,7 @@ Agent discovery 额外返回 immutable Deployment Revision 的
 
 ## Attached SSE
 
-`/runs/stream` 默认使用 `run-stream/v1` 用户响应协议：
+`/runs/stream` 统一使用 `run-stream/v1` 用户响应协议：
 
 1. 发送 `run.lifecycle.created` 和 `run.lifecycle.running`；
 2. 发送作者通过 LLM `publish: true` 授权的实时内容；
@@ -166,16 +166,22 @@ snapshot，可以直接发送 `created → terminal`。致命传输/投影故障
 
 `stream` 只控制 Provider 请求模式，`publish` 只控制 provisional 内容可见性。无论组合如何，最终
 快照都是单一、按终态闭合的 `run` 对象，包含强类型 `result`、公开输出、工具结果、检索结果以及
-OpenAI 命名的 token usage。完整闭合定义见
+OpenAI 命名的 token usage。Run terminal path 在同一 durable transaction 内将尚未闭合的
+interaction 以 first-winner 转为 `run_terminal`，冻结全部安全 `interactions[]` 摘要，并把该
+数组写入 canonical `run_payload`；`snapshot_hash` 覆盖包含该数组的完整 payload。一个
+Run 最多冻结 1024 个 interaction 摘要，超过上限必须 fail closed，不得静默截断。
+完整闭合定义见
 [`schemas/run-stream-v1.json`](../../schemas/run-stream-v1.json)。
 
-需要 durable MCP interaction 时，客户端通过
-`X-Run-Stream-Protocol: run-stream/v2` 显式协商。v2 新增 body-free
-`run.interaction.required` / `run.interaction.closed`，并在 terminal snapshot 中加入安全
-`interactions[]`；完整 schema 见
-[`schemas/run-stream-v2.json`](../../schemas/run-stream-v2.json)，全事件样本见
-[`schemas/run-stream-v2.samples.json`](../../schemas/run-stream-v2.samples.json)。MCP Catalog、
-OAuth、Interaction 与 `/mcp` wire 详见 [MCP 使用、运行与安全合同](mcp.md)。
+`run-stream/v1` 直接包含 body-free 的 `run.interaction.required` /
+`run.interaction.closed`，并在 terminal snapshot 中加入安全 `interactions[]`。该公开
+协议是 27 个事件的单一闭合合同，客户端不需要发送版本协商 Header，平台也不公开
+其他 run-stream 协议身份。live `required` / `closed` 帧只是及时通知，可在断线或
+best-effort 投影中丢失；恢复、重连和终态校准必须以 durable terminal snapshot 为权威。
+完整定义见
+[`schemas/run-stream-v1.json`](../../schemas/run-stream-v1.json)，全事件样本见
+[`schemas/run-stream-v1.samples.json`](../../schemas/run-stream-v1.samples.json)。MCP Catalog、OAuth、
+Interaction 与 `/mcp` wire 详见 [MCP 使用、运行与安全合同](mcp.md)。
 模型工具意图和真实执行是两个公开面：
 
 - `run.output.item.*` 与 `run.output.function_call.arguments.*` 表示模型正在形成或已经形成调用
@@ -241,7 +247,7 @@ event: run.output.text.delta
 data: {"type":"run.output.text.delta","sequence_number":12,"item_id":"item_msg_1","output_index":1,"content_index":0,"delta":"工具进度已完成：10/10。"}
 
 event: run.lifecycle.completed
-data: {"type":"run.lifecycle.completed","sequence_number":16,"run":{"id":"run_1","object":"run","status":"completed","output":[{"type":"function_call","id":"item_fc_1","status":"completed","call_id":"call_1","name":"progress_counter","arguments":"{\"total\":10}"},{"type":"message","id":"item_msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"工具进度已完成：10/10。","annotations":[]}]}],"result":"工具进度已完成：10/10。","tool_results":[{"call_id":"call_1","tool_name":"progress_counter","content":[{"type":"output_json","json":{"completed":10,"total":10}}]}],"retrievals":[],"usage":null,"usage_status":"partial"}}
+data: {"type":"run.lifecycle.completed","sequence_number":16,"run":{"id":"run_1","object":"run","status":"completed","output":[{"type":"function_call","id":"item_fc_1","status":"completed","call_id":"call_1","name":"progress_counter","arguments":"{\"total\":10}"},{"type":"message","id":"item_msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"工具进度已完成：10/10。","annotations":[]}]}],"result":"工具进度已完成：10/10。","tool_results":[{"call_id":"call_1","tool_name":"progress_counter","content":[{"type":"output_json","json":{"completed":10,"total":10}}]}],"retrievals":[],"interactions":[],"usage":null,"usage_status":"partial"}}
 ```
 
 客户端 reducer 应按以下规则处理：

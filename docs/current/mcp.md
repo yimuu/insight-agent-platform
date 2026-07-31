@@ -180,11 +180,16 @@ Server 只列出配置 export。它不会自动公开 Run、Conversation、Artif
 检查。Tasks 只有双方协商 extension 后才能出现；过期 Server task 由后台维护先取消底层 Run，再删除
 task authority。
 
-## Interaction 与 run-stream/v2
+## Interaction 与 run-stream/v1
 
 Form、URL、Approval 和 OAuth Authorization 都使用 durable interaction。请求正文和响应正文加密
 保存；公开 API 和 SSE 只返回安全摘要。等待的唯一 authority 是数据库中的 first-winner 状态：
 respond、decline、cancel、expiry、Run terminal 和 retry completion 不能产生两个终态。
+Run 进入终态时，同一 durable transaction 会先将所有尚未闭合的 interaction 以
+first-winner 转为 `run_terminal`，再冻结全部安全摘要。摘要数组进入 canonical
+`run_payload`，`snapshot_hash` 对包含该数组的完整 payload 计算，保证重启后返回同一
+终态事实。每个 Run 最多 1024 个 interaction 摘要；超限必须 fail closed，不得
+静默截断、丢弃早期交互或在 terminal commit 后补写。
 
 主要接口：
 
@@ -197,12 +202,16 @@ respond、decline、cancel、expiry、Run terminal 和 retry completion 不能�
 | `POST` | `/v1/mcp/interactions/{interaction_id}/decline` |
 | `POST` | `/v1/mcp/interactions/{interaction_id}/cancel` |
 
-Attached Run 通过 `X-Run-Stream-Protocol: run-stream/v2` 协商 interaction 事件。v2 在每个帧加入
-`protocol: run-stream/v2`，新增 `run.interaction.required` / `run.interaction.closed`，并在 terminal
-Run snapshot 加入安全 `interactions[]`。v1 不接受这些事件。公开合同见
-[`schemas/run-stream-v2.json`](../../schemas/run-stream-v2.json)，覆盖全部 v1 事件和两个 interaction
-事件的 checked-in 合法样本见
-[`schemas/run-stream-v2.samples.json`](../../schemas/run-stream-v2.samples.json)。
+Attached Run 直接在 `run-stream/v1` 中发送 `run.interaction.required` /
+`run.interaction.closed`，并在 terminal Run snapshot 中加入安全 `interactions[]`。
+live `required` / `closed` 事件只是通知，不是 interaction 或 Run 终态的恢复权威；
+客户端断线、丢帧或重连后必须以 durable terminal snapshot 中冻结的 `interactions[]`
+校准。
+`run-stream/v1` 共有 27 个闭合事件；平台不使用请求 Header 协商另一个 run-stream
+版本。公开合同见
+[`schemas/run-stream-v1.json`](../../schemas/run-stream-v1.json)，覆盖全部 27 个事件的 checked-in
+合法样本见
+[`schemas/run-stream-v1.samples.json`](../../schemas/run-stream-v1.samples.json)。
 
 ## Catalog、OAuth 与撤销 API
 

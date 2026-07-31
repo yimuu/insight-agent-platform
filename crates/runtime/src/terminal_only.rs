@@ -3431,6 +3431,7 @@ fn terminal_snapshot(
         model_calls: Vec::new(),
         tool_results: outcome.tool_results().to_vec(),
         retrievals: Vec::new(),
+        interactions: Vec::new(),
     })
     .map_err(|_| terminal_unavailable())?;
     durable_run_stream_snapshot_new(

@@ -83,8 +83,8 @@ OpenAI-compatible 行为时，保持 Provider 身份与 adapter 协议分离。
 negotiation、stdio 与 Streamable HTTP tests，以及至少两个固定版本外部 SDK 的 interoperability
 fixture。MCP schema、body、secret、tenant、SSRF、header injection 和 prompt injection 均属于发布
 门禁；不能用 loopback mock 代替 real-process/外部 SDK 证据。
-`schemas/run-stream-v2.samples.json` 必须覆盖全部 v1 事件与两个 interaction 事件，并由
-`insight-engine` 测试逐条按 `schemas/run-stream-v2.json` 验证；样本不得包含 interaction body、
+`schemas/run-stream-v1.samples.json` 必须覆盖 `run-stream/v1` 的全部 27 个事件，并由
+`insight-engine` 测试逐条按 `schemas/run-stream-v1.json` 验证；样本不得包含 interaction body、
 credential、requestState 或远程原始错误。
 
 Repository 测试必须显式区分数据库安装和连接：先在新的空目标执行

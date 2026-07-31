@@ -1534,6 +1534,7 @@ async fn terminal_only_attached_run_uses_the_same_progress_wire_and_persists_cal
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
             "id",
+            "interactions",
             "object",
             "output",
             "retrievals",
@@ -1544,6 +1545,7 @@ async fn terminal_only_attached_run_uses_the_same_progress_wire_and_persists_cal
             "usage_status"
         ])
     );
+    assert_eq!(terminal["run"]["interactions"], json!([]));
     assert_eq!(fixture.action.calls.load(Ordering::SeqCst), 1);
 
     fixture

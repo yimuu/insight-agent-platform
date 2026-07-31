@@ -9312,6 +9312,7 @@ mod public_artifact_authorization_tests {
         run.insert("object".to_owned(), json!("run"));
         run.insert("status".to_owned(), json!("completed"));
         run.insert("output".to_owned(), json!([]));
+        run.insert("interactions".to_owned(), json!([]));
         run.insert("usage".to_owned(), Value::Null);
         let run = Value::Object(run);
         let manifest = json!([]);

@@ -6,11 +6,16 @@ use insight_durable::mcp_interaction::adapter as interaction_adapter;
 use insight_durable::{
     CreateMcpInteractionCommand, McpInteraction, McpInteractionDisposition,
     McpInteractionDurableRepository, McpInteractionId, McpInteractionListFilter,
-    McpInteractionOutcome, McpInteractionPrincipal, McpInteractionRequest,
+    McpInteractionMode, McpInteractionOutcome, McpInteractionPrincipal, McpInteractionRequest,
     McpInteractionSecretAuthority, McpInteractionState, McpSecretCiphertext,
     ResolveMcpInteractionCommand, TransitionMcpInteractionCommand,
 };
-use insight_engine::{ContentHash, TransitionOutcome};
+use insight_engine::{
+    run_stream::{
+        RunInteractionMode, RunInteractionOutcome, RunInteractionState, RunInteractionSummary,
+    },
+    ContentHash, RunId, RunLifecycle, TransitionOutcome,
+};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use sqlx::{postgres::PgRow, AssertSqlSafe, Postgres, Row, Sqlite, Transaction};
@@ -18,6 +23,7 @@ use sqlx::{postgres::PgRow, AssertSqlSafe, Postgres, Row, Sqlite, Transaction};
 use super::{PostgresDurableRepository, RepositoryError, SqliteDurableRepository};
 
 const MAX_INTERACTION_LIST: u32 = 1_024;
+const MAX_INTERACTION_LIST_USIZE: usize = 1_024;
 const SQLITE_INTERACTION_COLUMNS: &str = "interaction_id,tenant_id,user_id,run_id,operation_id,server_id,binding_hash,logical_request_key,generation,request_json,interaction_state,outcome,interaction_version,deadline,created_at,updated_at,closed_at";
 const POSTGRES_INTERACTION_COLUMNS: &str = "interaction_id,tenant_id,user_id,run_id,operation_id,server_id,binding_hash,logical_request_key,generation,request_json,interaction_state,outcome,interaction_version,deadline,created_at,updated_at,closed_at";
 
@@ -223,6 +229,221 @@ fn terminal_resolution(
     }
 }
 
+fn run_accepts_new_interactions(lifecycle: String) -> Result<bool, RepositoryError> {
+    Ok(!parse_enum::<RunLifecycle>(lifecycle)?.is_terminal())
+}
+
+const fn project_interaction_mode(mode: McpInteractionMode) -> RunInteractionMode {
+    match mode {
+        McpInteractionMode::Form => RunInteractionMode::Form,
+        McpInteractionMode::Url => RunInteractionMode::Url,
+        McpInteractionMode::Approval => RunInteractionMode::Approval,
+        McpInteractionMode::Authorization => RunInteractionMode::Authorization,
+    }
+}
+
+const fn project_interaction_state(state: McpInteractionState) -> RunInteractionState {
+    match state {
+        McpInteractionState::Requested => RunInteractionState::Requested,
+        McpInteractionState::Responded => RunInteractionState::Responded,
+        McpInteractionState::Retrying => RunInteractionState::Retrying,
+        McpInteractionState::Closed => RunInteractionState::Closed,
+    }
+}
+
+const fn project_interaction_outcome(outcome: McpInteractionOutcome) -> RunInteractionOutcome {
+    match outcome {
+        McpInteractionOutcome::Accepted => RunInteractionOutcome::Accepted,
+        McpInteractionOutcome::Declined => RunInteractionOutcome::Declined,
+        McpInteractionOutcome::Cancelled => RunInteractionOutcome::Cancelled,
+        McpInteractionOutcome::Expired => RunInteractionOutcome::Expired,
+        McpInteractionOutcome::RunTerminal => RunInteractionOutcome::RunTerminal,
+        McpInteractionOutcome::RetryCompleted => RunInteractionOutcome::RetryCompleted,
+        McpInteractionOutcome::RetryFailed => RunInteractionOutcome::RetryFailed,
+    }
+}
+
+fn terminal_interaction_summary(
+    interaction: &McpInteraction,
+) -> Result<RunInteractionSummary, RepositoryError> {
+    RunInteractionSummary::new(
+        interaction.interaction_id().as_str(),
+        interaction.server_id(),
+        project_interaction_mode(interaction.request().mode()),
+        project_interaction_state(interaction.state()),
+        interaction.outcome().map(project_interaction_outcome),
+        interaction.deadline(),
+    )
+    .map_err(|_| RepositoryError::invalid_data())
+}
+
+pub(crate) async fn close_and_load_terminal_interactions_sqlite(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &RunId,
+) -> Result<Vec<RunInteractionSummary>, RepositoryError> {
+    let (lifecycle, terminal_at) = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT lifecycle,strftime('%Y-%m-%dT%H:%M:%fZ',terminal_at)
+         FROM workflow_runs WHERE run_id=?",
+    )
+    .bind(run_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .ok_or_else(RepositoryError::invalid_data)?;
+    if run_accepts_new_interactions(lifecycle)? {
+        return Err(RepositoryError::invalid_data());
+    }
+    let terminal_at = sqlite_time(parse_sqlite_time(
+        terminal_at.ok_or_else(RepositoryError::invalid_data)?,
+    )?);
+    let query = format!(
+        "SELECT {SQLITE_INTERACTION_COLUMNS} FROM mcp_interactions
+         WHERE run_id=? ORDER BY interaction_id COLLATE BINARY LIMIT ?"
+    );
+    let rows = sqlx::query(AssertSqlSafe(query.clone()))
+        .bind(run_id.as_str())
+        .bind(i64::from(MAX_INTERACTION_LIST) + 1)
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
+    if rows.len() > MAX_INTERACTION_LIST_USIZE {
+        return Err(RepositoryError::invalid_data());
+    }
+    let interactions = rows
+        .iter()
+        .map(parse_sqlite_interaction)
+        .collect::<Result<Vec<_>, _>>()?;
+    let open_count = interactions
+        .iter()
+        .filter(|interaction| interaction.state() != McpInteractionState::Closed)
+        .count();
+    if interactions.iter().any(|interaction| {
+        interaction.state() != McpInteractionState::Closed
+            && i64::try_from(interaction.version()) == Ok(i64::MAX)
+    }) {
+        return Err(RepositoryError::invalid_data());
+    }
+    let updated = sqlx::query(
+        "UPDATE mcp_interactions
+         SET interaction_state='closed',outcome='run_terminal',
+             interaction_version=interaction_version+1,updated_at=?,closed_at=?
+         WHERE run_id=? AND interaction_state<>'closed'",
+    )
+    .bind(&terminal_at)
+    .bind(&terminal_at)
+    .bind(run_id.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .rows_affected();
+    if updated != u64::try_from(open_count).map_err(|_| RepositoryError::invalid_data())? {
+        return Err(RepositoryError::invalid_data());
+    }
+    let rows = sqlx::query(AssertSqlSafe(query))
+        .bind(run_id.as_str())
+        .bind(i64::from(MAX_INTERACTION_LIST) + 1)
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
+    if rows.len() != interactions.len() {
+        return Err(RepositoryError::invalid_data());
+    }
+    rows.iter()
+        .map(parse_sqlite_interaction)
+        .map(|interaction| {
+            let interaction = interaction?;
+            if interaction.state() != McpInteractionState::Closed {
+                return Err(RepositoryError::invalid_data());
+            }
+            terminal_interaction_summary(&interaction)
+        })
+        .collect()
+}
+
+pub(crate) async fn close_and_load_terminal_interactions_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+) -> Result<Vec<RunInteractionSummary>, RepositoryError> {
+    let (lifecycle, terminal_at) = sqlx::query_as::<_, (String, Option<DateTime<Utc>>)>(
+        "SELECT lifecycle,terminal_at FROM workflow_runs WHERE run_id=$1 FOR UPDATE",
+    )
+    .bind(run_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .ok_or_else(RepositoryError::invalid_data)?;
+    if run_accepts_new_interactions(lifecycle)? {
+        return Err(RepositoryError::invalid_data());
+    }
+    let terminal_at = terminal_at.ok_or_else(RepositoryError::invalid_data)?;
+    let locked_query = format!(
+        "SELECT {POSTGRES_INTERACTION_COLUMNS} FROM mcp_interactions
+         WHERE run_id=$1 ORDER BY interaction_id COLLATE \"C\" LIMIT $2 FOR UPDATE"
+    );
+    let rows = sqlx::query(AssertSqlSafe(locked_query))
+        .bind(run_id.as_str())
+        .bind(i64::from(MAX_INTERACTION_LIST) + 1)
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
+    if rows.len() > MAX_INTERACTION_LIST_USIZE {
+        return Err(RepositoryError::invalid_data());
+    }
+    let interactions = rows
+        .iter()
+        .map(parse_postgres_interaction)
+        .collect::<Result<Vec<_>, _>>()?;
+    let open_count = interactions
+        .iter()
+        .filter(|interaction| interaction.state() != McpInteractionState::Closed)
+        .count();
+    if interactions.iter().any(|interaction| {
+        interaction.state() != McpInteractionState::Closed
+            && i64::try_from(interaction.version()) == Ok(i64::MAX)
+    }) {
+        return Err(RepositoryError::invalid_data());
+    }
+    let updated = sqlx::query(
+        "UPDATE mcp_interactions
+         SET interaction_state='closed',outcome='run_terminal',
+             interaction_version=interaction_version+1,
+             updated_at=$1,closed_at=$1
+         WHERE run_id=$2 AND interaction_state<>'closed'",
+    )
+    .bind(terminal_at)
+    .bind(run_id.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .rows_affected();
+    if updated != u64::try_from(open_count).map_err(|_| RepositoryError::invalid_data())? {
+        return Err(RepositoryError::invalid_data());
+    }
+    let query = format!(
+        "SELECT {POSTGRES_INTERACTION_COLUMNS} FROM mcp_interactions
+         WHERE run_id=$1 ORDER BY interaction_id COLLATE \"C\" LIMIT $2"
+    );
+    let rows = sqlx::query(AssertSqlSafe(query))
+        .bind(run_id.as_str())
+        .bind(i64::from(MAX_INTERACTION_LIST) + 1)
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
+    if rows.len() != interactions.len() {
+        return Err(RepositoryError::invalid_data());
+    }
+    rows.iter()
+        .map(parse_postgres_interaction)
+        .map(|interaction| {
+            let interaction = interaction?;
+            if interaction.state() != McpInteractionState::Closed {
+                return Err(RepositoryError::invalid_data());
+            }
+            terminal_interaction_summary(&interaction)
+        })
+        .collect()
+}
+
 #[async_trait]
 impl McpInteractionDurableRepository for SqliteDurableRepository {
     async fn load_mcp_run_principal(
@@ -260,6 +481,44 @@ impl McpInteractionDurableRepository for SqliteDurableRepository {
             .map_err(|_| RepositoryError::canonicalization())?;
         let _writer = self.writer.lock().await;
         let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        if let Some(existing_hash) = sqlx::query_scalar::<_, String>(
+            "SELECT creation_intent_hash FROM mcp_interactions WHERE interaction_id=?",
+        )
+        .bind(interaction.interaction_id().as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?
+        {
+            if existing_hash != hash {
+                tx.rollback().await.map_err(RepositoryError::storage)?;
+                return Ok(TransitionOutcome::StateConflict);
+            }
+            let authoritative = load_sqlite_interaction(&mut tx, interaction.interaction_id())
+                .await?
+                .ok_or_else(RepositoryError::invalid_data)?;
+            tx.commit().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::ExactReplay { authoritative });
+        }
+        let lifecycle =
+            sqlx::query_scalar::<_, String>("SELECT lifecycle FROM workflow_runs WHERE run_id=?")
+                .bind(interaction.run_id())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(RepositoryError::storage)?;
+        if lifecycle.map(run_accepts_new_interactions).transpose()? != Some(true) {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        }
+        let interaction_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM mcp_interactions WHERE run_id=?")
+                .bind(interaction.run_id())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(RepositoryError::storage)?;
+        if interaction_count < 0 || interaction_count >= i64::from(MAX_INTERACTION_LIST) {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        }
         let rows = sqlx::query(
             "INSERT OR IGNORE INTO mcp_interactions(
                interaction_id,tenant_id,user_id,run_id,operation_id,server_id,binding_hash,
@@ -646,6 +905,65 @@ impl McpInteractionDurableRepository for PostgresDurableRepository {
         let request_json = serde_json::to_value(interaction.request())
             .map_err(|_| RepositoryError::canonicalization())?;
         let mut tx = self.pool.begin().await.map_err(RepositoryError::storage)?;
+        if let Some(existing_hash) = sqlx::query_scalar::<_, String>(
+            "SELECT creation_intent_hash FROM mcp_interactions WHERE interaction_id=$1",
+        )
+        .bind(interaction.interaction_id().as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?
+        {
+            if existing_hash != hash {
+                tx.rollback().await.map_err(RepositoryError::storage)?;
+                return Ok(TransitionOutcome::StateConflict);
+            }
+            let authoritative =
+                load_postgres_interaction(&mut tx, interaction.interaction_id(), false)
+                    .await?
+                    .ok_or_else(RepositoryError::invalid_data)?;
+            tx.commit().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::ExactReplay { authoritative });
+        }
+        let lifecycle = sqlx::query_scalar::<_, String>(
+            "SELECT lifecycle FROM workflow_runs WHERE run_id=$1 FOR UPDATE",
+        )
+        .bind(interaction.run_id())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?;
+        if let Some(existing_hash) = sqlx::query_scalar::<_, String>(
+            "SELECT creation_intent_hash FROM mcp_interactions WHERE interaction_id=$1",
+        )
+        .bind(interaction.interaction_id().as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(RepositoryError::storage)?
+        {
+            if existing_hash != hash {
+                tx.rollback().await.map_err(RepositoryError::storage)?;
+                return Ok(TransitionOutcome::StateConflict);
+            }
+            let authoritative =
+                load_postgres_interaction(&mut tx, interaction.interaction_id(), false)
+                    .await?
+                    .ok_or_else(RepositoryError::invalid_data)?;
+            tx.commit().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::ExactReplay { authoritative });
+        }
+        if lifecycle.map(run_accepts_new_interactions).transpose()? != Some(true) {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        }
+        let interaction_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM mcp_interactions WHERE run_id=$1")
+                .bind(interaction.run_id())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(RepositoryError::storage)?;
+        if interaction_count < 0 || interaction_count >= i64::from(MAX_INTERACTION_LIST) {
+            tx.rollback().await.map_err(RepositoryError::storage)?;
+            return Ok(TransitionOutcome::StateConflict);
+        }
         let rows = sqlx::query(
             "INSERT INTO mcp_interactions(
                interaction_id,tenant_id,user_id,run_id,operation_id,server_id,binding_hash,
@@ -988,5 +1306,146 @@ impl McpInteractionDurableRepository for PostgresDurableRepository {
             .await
             .map_err(RepositoryError::storage)?;
         rows.iter().map(parse_postgres_interaction).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+
+    use super::*;
+
+    async fn terminal_interaction_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for statement in [
+            "CREATE TABLE workflow_runs (
+                run_id TEXT PRIMARY KEY,lifecycle TEXT NOT NULL,terminal_at TEXT
+             )",
+            "CREATE TABLE mcp_interactions (
+                interaction_id TEXT PRIMARY KEY,tenant_id TEXT,user_id TEXT,run_id TEXT,
+                operation_id TEXT,server_id TEXT,binding_hash TEXT,logical_request_key TEXT,
+                generation INTEGER,request_json TEXT,interaction_state TEXT,outcome TEXT,
+                interaction_version INTEGER,deadline TEXT,created_at TEXT,updated_at TEXT,
+                closed_at TEXT
+             )",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    async fn insert_terminal_run(pool: &SqlitePool, run_id: &RunId) {
+        sqlx::query(
+            "INSERT INTO workflow_runs(run_id,lifecycle,terminal_at)
+             VALUES (?,'cancelled','2026-07-30 12:00:06')",
+        )
+        .bind(run_id.as_str())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_interactions(pool: &SqlitePool, run_id: &RunId, count: i64) {
+        sqlx::query(
+            "WITH digits(d) AS (
+                 VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)
+             ), numbers(n) AS (
+                 SELECT ones.d + 10*tens.d + 100*hundreds.d + 1000*thousands.d
+                 FROM digits ones CROSS JOIN digits tens
+                 CROSS JOIN digits hundreds CROSS JOIN digits thousands
+             )
+             INSERT INTO mcp_interactions(
+                 interaction_id,tenant_id,user_id,run_id,operation_id,server_id,binding_hash,
+                 logical_request_key,generation,request_json,interaction_state,outcome,
+                 interaction_version,deadline,created_at,updated_at,closed_at
+             )
+             SELECT printf('%s.interaction.limit-%04d',?,n),'tenant-a','user-a',?,
+                    printf('operation-%04d',n),'server-a',?,printf('request-%04d',n),n+1,?,
+                    'requested',NULL,1,'2026-07-30T12:10:00.000000Z',
+                    '2026-07-30T12:00:00.000000Z','2026-07-30T12:00:00.000000Z',NULL
+             FROM numbers WHERE n < ? ORDER BY n",
+        )
+        .bind(run_id.as_str())
+        .bind(run_id.as_str())
+        .bind("a".repeat(64))
+        .bind(
+            serde_json::to_string(&McpInteractionRequest::Approval {
+                message: "body-free terminal summary".to_owned(),
+                effect: "read_only".to_owned(),
+            })
+            .unwrap(),
+        )
+        .bind(count)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_terminal_interaction_projection_accepts_1024_and_rejects_1025() {
+        let pool = terminal_interaction_pool().await;
+        let accepted_run = RunId::new("run_interaction_limit_accepted").unwrap();
+        insert_terminal_run(&pool, &accepted_run).await;
+        insert_interactions(&pool, &accepted_run, 1_024).await;
+
+        let mut transaction = pool.begin().await.unwrap();
+        let summaries =
+            close_and_load_terminal_interactions_sqlite(&mut transaction, &accepted_run)
+                .await
+                .unwrap();
+        assert_eq!(summaries.len(), MAX_INTERACTION_LIST_USIZE);
+        assert_eq!(
+            summaries[0].interaction_id(),
+            "run_interaction_limit_accepted.interaction.limit-0000"
+        );
+        assert_eq!(
+            summaries[1_023].interaction_id(),
+            "run_interaction_limit_accepted.interaction.limit-1023"
+        );
+        assert!(summaries.windows(2).all(|pair| {
+            pair[0].interaction_id().as_bytes() < pair[1].interaction_id().as_bytes()
+        }));
+        transaction.commit().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM mcp_interactions
+                 WHERE run_id=? AND interaction_state='closed'
+                   AND outcome='run_terminal' AND interaction_version=2
+                   AND updated_at='2026-07-30T12:00:06.000000Z'
+                   AND closed_at=updated_at",
+            )
+            .bind(accepted_run.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1_024
+        );
+
+        let rejected_run = RunId::new("run_interaction_limit_rejected").unwrap();
+        insert_terminal_run(&pool, &rejected_run).await;
+        insert_interactions(&pool, &rejected_run, 1_025).await;
+        let mut transaction = pool.begin().await.unwrap();
+        assert!(
+            close_and_load_terminal_interactions_sqlite(&mut transaction, &rejected_run)
+                .await
+                .is_err()
+        );
+        transaction.rollback().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM mcp_interactions
+                 WHERE run_id=? AND interaction_state='requested'
+                   AND outcome IS NULL AND interaction_version=1 AND closed_at IS NULL",
+            )
+            .bind(rejected_run.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1_025
+        );
     }
 }
