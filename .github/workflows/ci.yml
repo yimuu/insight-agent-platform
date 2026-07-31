@@ -82,6 +82,38 @@ jobs:
       - name: Documentation tests
         run: cargo test --locked --workspace --doc --all-features
 
+  mcp-interop:
+    name: MCP external SDK interoperability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Enable pinned pnpm
+        run: corepack enable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: tests/interop/go/go.sum
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-registry-only"
+          shared-key: "registry-only"
+          cache-targets: "false"
+          cache-on-failure: "false"
+      - name: Qualify modern MCP and Tasks against two pinned SDKs
+        run: bash scripts/qualify-mcp-external-sdk.sh
+      - name: Preserve qualification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-external-sdk-qualification
+          path: target/mcp-qualification/report.json
+          if-no-files-found: error
+
   policy:
     name: Dependency policy
     runs-on: ubuntu-latest

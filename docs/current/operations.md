@@ -16,6 +16,13 @@ Quickstart 使用 [`config/platform.quickstart.yaml`](../../config/platform.quic
 `action_demo`。生产样例位于 [`config/platform.yaml`](../../config/platform.yaml)。对外暴露服务前，
 必须按部署要求配置认证、数据库凭据、模型凭据和共享 Artifact 挂载。
 
+两份样例都显式关闭 MCP。启用 MCP Client、`/mcp` Server、OAuth/PKCE keyring、stdio isolation、
+Tasks maintenance 和 readiness 的配置及 rollout 顺序见
+[MCP 使用、运行与安全合同](mcp.md)。Helm chart 的 `mcp.client.servers` 与 `mcp.exports.*` 直接生成
+严格平台对象；token、stdio secret env 和 OAuth client secret 通过 `mcp.secretEnv[]` 从现有
+Kubernetes Secret 注入，MCP ciphertext keyring 则通过
+`mcp.secretEncryption.existingSecret` 注入。二者都不会进入平台 ConfigMap。
+
 ## Provider Catalog 与模型配置
 
 平台随版本发布只读的
@@ -350,7 +357,9 @@ token 不应进入配置明文、Debug、错误或日志。
 ## 就绪、保留与关闭
 
 - `/health/live` 只表示进程存活；
-- `/health/ready` 检查 repository 与 runtime admission readiness；
+- `/health/ready` 检查 repository、runtime admission，以及被已启用 Agent 实际引用的 MCP binding。
+  Service-account/legacy binding 运行真实协议探针；`oauth_user` 验证 protected-resource、issuer、
+  PKCE 与 scope metadata。未被引用的 optional MCP Server 不阻断 readiness；
 - `/metrics` 以 Prometheus text format 暴露 bounded-label 的 active、executing、admission、
   coordinator wakeup/poll、claim latency、notification listener，以及跨进程 hint
   `requested/published/error` 指标；`published/requested` 的差值体现进程级合并效果。Conversation
@@ -360,6 +369,10 @@ token 不应进入配置明文、Debug、错误或日志。
   `conversation_context_tokens{persistence_mode}` 和
   `conversation_summary_jobs_{active,total}`；功能关闭时 `full` 样本仍以零值存在，且所有 label
   都不得包含 Run、Conversation、tenant 或 user 标识；
+- MCP 指标覆盖 discovery/list/call/read/get/completion 的计数与 duration、transport event、
+  subscription、interaction、remote task、OAuth、stdio restart、cache、body/frame rejection 与
+  stale publication candidate；label 只允许有界 Server ID、primitive、transport 和结果类，不含
+  tool、URI、Prompt、task、Run、tenant 或 user 标识；
 - work notification listener 断开不会单独使 readiness 失败，安全轮询继续保证最终发现；listener
   状态会在 metrics 中降级；
 - Kubernetes 资格脚本另外保存 PostgreSQL queue oldest age、进程 RSS/PSS、cgroup memory、

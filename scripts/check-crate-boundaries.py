@@ -12,20 +12,22 @@ INTERNAL_ROLES = {
     "insight-dsl": "dsl",
     "insight-durable": "durable",
     "insight-resources": "resources",
+    "insight-mcp": "mcp",
     "insight-storage": "storage",
     "insight-runtime": "runtime",
     "insight-api": "api",
 }
 
 ALLOWED_INTERNAL = {
-    "root": {"engine", "dsl", "durable", "resources", "storage", "runtime", "api"},
+    "root": {"engine", "dsl", "durable", "resources", "mcp", "storage", "runtime", "api"},
     "engine": set(),
     "dsl": {"engine"},
     "durable": {"engine", "dsl"},
-    "resources": {"engine"},
+    "resources": {"engine", "mcp"},
+    "mcp": set(),
     "storage": {"engine", "durable", "dsl"},
-    "runtime": {"engine", "durable", "dsl", "resources"},
-    "api": {"engine", "dsl", "runtime"},
+    "runtime": {"engine", "durable", "dsl", "resources", "mcp"},
+    "api": {"engine", "dsl", "durable", "resources", "runtime", "mcp"},
 }
 
 FORBIDDEN_DIRECT = {
@@ -42,9 +44,13 @@ FORBIDDEN_DIRECT = {
     "dsl": {"axum", "sqlx", "reqwest"},
     "durable": {"axum", "sqlx", "reqwest"},
     "resources": {"axum", "sqlx"},
+    "mcp": {"axum", "sqlx", "dotenvy", "tracing-subscriber", "yaml-rust2", "yaml_serde", "serde_yaml"},
     "storage": {"axum", "reqwest"},
     "runtime": {"axum", "sqlx", "reqwest"},
-    "api": {"sqlx", "reqwest"},
+    # MCP HTTP authorization lives at the API transport boundary and uses the
+    # shared pinned/SSRF-restricted client from insight-mcp for issuer/JWKS
+    # discovery. Direct SQL remains forbidden.
+    "api": {"sqlx"},
 }
 
 TRANSITIVELY_FORBIDDEN = {"axum", "sqlx", "reqwest"}
@@ -257,7 +263,7 @@ def check(metadata, baseline_path, workspace_root):
         missing = sorted(expected_workspace_names - actual_workspace_names)
         unexpected = sorted(actual_workspace_names - expected_workspace_names)
         errors.append(
-            "workspace package set must contain exactly the eight declared packages; "
+            "workspace package set must contain exactly the nine declared packages; "
             f"missing={missing or 'none'}, unexpected={unexpected or 'none'}, "
             f"package_count={len(workspace_ids)}"
         )

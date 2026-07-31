@@ -566,6 +566,23 @@ async fn create_active_sqlite_scheduler_run(
     versioned: &insight_agent_platform::engine::repository::VersionedPlan,
     run_id: &RunId,
 ) -> insight_agent_platform::engine::repository::FencedSchedulerRunCommand {
+    create_active_sqlite_scheduler_run_with_input(
+        repository,
+        control,
+        versioned,
+        run_id,
+        json!({"use_llm": true, "use_action": true}),
+    )
+    .await
+}
+
+async fn create_active_sqlite_scheduler_run_with_input(
+    repository: &insight_agent_platform::engine::repository::SqliteDurableRepository,
+    control: &sqlx::SqlitePool,
+    versioned: &insight_agent_platform::engine::repository::VersionedPlan,
+    run_id: &RunId,
+    input: serde_json::Value,
+) -> insight_agent_platform::engine::repository::FencedSchedulerRunCommand {
     use insight_agent_platform::engine::{
         repository::{CreateRunCommand, DurableRepository},
         TransitionKey, TransitionOutcome,
@@ -575,12 +592,7 @@ async fn create_active_sqlite_scheduler_run(
         repository
             .create_run(
                 TransitionKey::derive("durable.scheduler.worker.gate", &[run_id.as_str()]).unwrap(),
-                CreateRunCommand::new(
-                    run_id.clone(),
-                    versioned,
-                    json!({"use_llm": true, "use_action": true}),
-                )
-                .unwrap(),
+                CreateRunCommand::new(run_id.clone(), versioned, input,).unwrap(),
             )
             .await
             .unwrap(),
@@ -1069,6 +1081,142 @@ async fn sqlite_duplicate_large_worker_values_share_one_verified_artifact_and_su
         .await
         .is_err());
     assert!(repository.load_scheduler_facts(&run_id).await.is_err());
+}
+
+#[tokio::test]
+async fn sqlite_expired_mcp_remote_task_claim_resumes_instead_of_finalizing_lease_loss() {
+    use insight_agent_platform::engine::{
+        repository::{
+            DurableRepository, PlanInstallOutcome, SchedulerDurableRepository,
+            SchedulerTaskClaimMode, SqliteDurableRepository, VersionedPlan,
+        },
+        DeploymentRevisionId, EffectIdempotency, TransitionOutcome, WorkerCancellation,
+        WorkerEffectClass, WorkerEffectPolicy,
+    };
+
+    let policy = WorkerEffectPolicy::frozen(
+        WorkerEffectClass::Mutating,
+        EffectIdempotency::NonIdempotent,
+        1,
+        0,
+        0,
+        60_000,
+        WorkerCancellation::Cooperative,
+    )
+    .unwrap();
+    let (plan, descriptors) = branch_plan_with_worker_policy(false, Some(&policy));
+    let subflows = SubflowContractRegistry::new();
+    let linked = LinkedPlan::link(&plan, &descriptors, &subflows).unwrap();
+    let versioned = VersionedPlan::from_verified_plan(
+        "mcp-remote-resume",
+        "mcp-remote-resume-agent",
+        "MCP remote task resume",
+        DeploymentRevisionId::new("mcp_remote_resume_v1").unwrap(),
+        "expression-3.0.0",
+        json!({"format": "programmatic"}),
+        &plan,
+        json!({"fixture": "descriptor-v1"}),
+        json!({}),
+        json!({"fixture": "worker-1"}),
+    )
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("mcp-remote-resume.sqlite");
+    database::provision_sqlite_database(&database).await;
+    let repository = SqliteDurableRepository::connect_path(&database)
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.install_versioned_plan(&versioned).await.unwrap(),
+        PlanInstallOutcome::Installed
+    );
+    let control = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&database)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    let run_id = RunId::new("run_mcp_remote_resume").unwrap();
+    let fence = create_active_sqlite_scheduler_run_with_input(
+        &repository,
+        &control,
+        &versioned,
+        &run_id,
+        json!({"use_llm": false, "use_action": true}),
+    )
+    .await;
+    drive_sqlite_to_task(&repository, &linked, &fence).await;
+    let claim = repository
+        .claim_scheduler_tasks_with_run_limit("mcp-worker-before-crash", 60, 1, 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        claim.envelope().request().task_kind(),
+        insight_agent_platform::engine::SchedulerTaskKind::Action
+    );
+    assert!(matches!(
+        repository
+            .mark_scheduler_task_started(&claim)
+            .await
+            .unwrap(),
+        TransitionOutcome::Committed { .. }
+    ));
+
+    let request = claim.envelope().request();
+    sqlx::query(
+        "INSERT INTO mcp_remote_tasks(
+           task_id,tenant_id,user_id,run_id,operation_id,logical_request_key,server_id,
+           binding_hash,protocol_version,capability_id,remote_task_ciphertext,remote_task_hash,
+           task_status,task_version,remote_created_at,remote_updated_at,ttl_deadline,
+           poll_interval_ms,next_poll_at,lease_owner,lease_epoch,lease_expires_at,
+           latest_payload_ciphertext,latest_payload_hash,terminal_receipt_hash,terminal_at,
+           created_at,updated_at,creation_intent_hash
+         ) VALUES(
+           'mcp_task_resume','tenant-a','user-a',?,?,?,'server-a',
+           ?,'2026-07-28','io.modelcontextprotocol/tasks','enc:v1:remote',?,
+           'working',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,datetime('now','+1 hour'),
+           1000,CURRENT_TIMESTAMP,NULL,0,NULL,'enc:v1:payload',?,NULL,NULL,
+           CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,?
+         )",
+    )
+    .bind(run_id.as_str())
+    .bind(request.node_id().as_str())
+    .bind(request.effect_id().as_str())
+    .bind("a".repeat(64))
+    .bind("b".repeat(64))
+    .bind("c".repeat(64))
+    .bind("d".repeat(64))
+    .execute(&control)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE task_outbox SET claim_expires_at=datetime('now','-1 second') WHERE run_id=?",
+    )
+    .bind(run_id.as_str())
+    .execute(&control)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE node_attempts SET lease_expires_at=datetime('now','-1 second') WHERE run_id=?",
+    )
+    .bind(run_id.as_str())
+    .execute(&control)
+    .await
+    .unwrap();
+
+    let resumed = repository
+        .claim_scheduler_tasks_with_run_limit("mcp-worker-after-crash", 60, 1, 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(resumed.mode(), SchedulerTaskClaimMode::Execute);
+    assert!(resumed.lease_loss_evidence().is_none());
 }
 
 #[tokio::test]

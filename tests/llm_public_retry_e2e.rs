@@ -163,8 +163,8 @@ struct NeverCalledRetryProbe;
 impl Action for NeverCalledRetryProbe {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "retry_probe",
-            version: "1.0.0",
+            id: "retry_probe".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {"probe": {"type": "string"}},

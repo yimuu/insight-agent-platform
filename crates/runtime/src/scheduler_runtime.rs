@@ -879,6 +879,45 @@ pub async fn consume_claimed_scheduler_task_with_artifact_store_and_retrieval_ob
     artifact_store: Option<&dyn WorkerArtifactStore>,
     retrieval_observer: &O,
     crash: &I,
+    claim: SchedulerTaskClaim,
+) -> Result<SchedulerWorkerPumpOutcome, RepositoryError>
+where
+    R: SchedulerDurableRepository + ?Sized,
+    I: SchedulerCrashInjector,
+    P: SchedulerWorkerFailurePolicy,
+    O: SchedulerRetrievalLiveObserver + ?Sized,
+{
+    consume_claimed_scheduler_task_with_artifact_store_retrieval_observer_and_runtime_services(
+        repository,
+        registry,
+        failure_policy,
+        claim_seconds,
+        cancellation,
+        artifact_store,
+        retrieval_observer,
+        crash,
+        WorkerRuntimeServices::default(),
+        claim,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn consume_claimed_scheduler_task_with_artifact_store_retrieval_observer_and_runtime_services<
+    R,
+    I,
+    P,
+    O,
+>(
+    repository: &R,
+    registry: &WorkerExecutorRegistry,
+    failure_policy: &P,
+    claim_seconds: u32,
+    cancellation: CancellationToken,
+    artifact_store: Option<&dyn WorkerArtifactStore>,
+    retrieval_observer: &O,
+    crash: &I,
+    base_runtime_services: WorkerRuntimeServices,
     mut claim: SchedulerTaskClaim,
 ) -> Result<SchedulerWorkerPumpOutcome, RepositoryError>
 where
@@ -1059,13 +1098,13 @@ where
                 worker_adapter::model_call_public_item_reservation_channel();
             (
                 worker_adapter::services_with_model_call_public_item_allocator(
-                    WorkerRuntimeServices::default(),
+                    base_runtime_services,
                     allocator,
                 ),
                 Some(requests),
             )
         }
-        _ => (WorkerRuntimeServices::default(), None),
+        _ => (base_runtime_services, None),
     };
     let public_item_model_call_no = model_call
         .as_ref()
@@ -1588,6 +1627,35 @@ pub async fn consume_claimed_model_tool_task_with_observer<R, I, O>(
     cancellation: CancellationToken,
     observer: &O,
     crash: &I,
+    claim: ModelToolTaskClaim,
+) -> Result<ModelToolWorkerPumpOutcome, RepositoryError>
+where
+    R: ModelToolWorkerRepository + ?Sized,
+    I: SchedulerCrashInjector,
+    O: ModelToolLiveObserver + ?Sized,
+{
+    consume_claimed_model_tool_task_with_observer_and_runtime_services(
+        repository,
+        registry,
+        claim_seconds,
+        cancellation,
+        observer,
+        crash,
+        WorkerRuntimeServices::default(),
+        claim,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn consume_claimed_model_tool_task_with_observer_and_runtime_services<R, I, O>(
+    repository: &R,
+    registry: &WorkerExecutorRegistry,
+    claim_seconds: u32,
+    cancellation: CancellationToken,
+    observer: &O,
+    crash: &I,
+    base_runtime_services: WorkerRuntimeServices,
     mut claim: ModelToolTaskClaim,
 ) -> Result<ModelToolWorkerPumpOutcome, RepositoryError>
 where
@@ -1733,7 +1801,8 @@ where
     // This is deliberately the last step before the registry Action boundary.
     // It cannot be delayed until the first heartbeat or terminal result.
     live_publication.started();
-    let (runtime_services, mut progress_requests) = live_publication.runtime_services();
+    let (runtime_services, mut progress_requests) =
+        live_publication.runtime_services(base_runtime_services);
     // Keep shutdown authority separate from the executor token. A child token
     // would auto-cancel before this select can classify the cause, allowing a
     // cooperative executor's ControlTermination to be mistaken for a durable
@@ -1925,23 +1994,21 @@ where
 
     fn runtime_services(
         &self,
+        services: WorkerRuntimeServices,
     ) -> (
         WorkerRuntimeServices,
         Option<worker_adapter::ModelToolProgressRequests>,
     ) {
         let Some(state) = &self.state else {
-            return (WorkerRuntimeServices::default(), None);
+            return (services, None);
         };
         if !state.projection.progress_authorized() {
-            return (WorkerRuntimeServices::default(), None);
+            return (services, None);
         }
         let (publisher, requests) =
             worker_adapter::model_tool_progress_channel(MODEL_TOOL_PROGRESS_QUEUE_CAPACITY);
         (
-            worker_adapter::services_with_model_tool_progress_publisher(
-                WorkerRuntimeServices::default(),
-                publisher,
-            ),
+            worker_adapter::services_with_model_tool_progress_publisher(services, publisher),
             Some(requests),
         )
     }
@@ -2464,12 +2531,98 @@ async fn materialize_worker_success<R>(
     claim_seconds: u32,
     heartbeat: &mut tokio::time::Interval,
     mut deadline: Pin<&mut tokio::time::Sleep>,
-    result: insight_engine::worker::TaskExecutionResult,
+    mut result: insight_engine::worker::TaskExecutionResult,
     artifact_store: &dyn WorkerArtifactStore,
 ) -> Result<GuardedWorkerStep<SchedulerTaskSuccess>, RepositoryError>
 where
     R: SchedulerDurableRepository + ?Sized,
 {
+    let artifact_payloads = result.take_artifact_payloads();
+    let mut referenced_artifacts = Vec::with_capacity(artifact_payloads.len());
+    for payload in artifact_payloads {
+        let expected = artifact_store.artifact_for_bytes(
+            payload.bytes(),
+            payload.artifact().media_type().map(str::to_owned),
+        )?;
+        if &expected != payload.artifact() {
+            return Err(repository_invalid_data());
+        }
+        let artifact = payload.artifact().clone();
+        let locator = artifact_store.storage_locator(&artifact)?;
+        let retain_until = claim
+            .claim_expires_at()
+            .checked_add_signed(chrono::Duration::seconds(ARTIFACT_STAGING_GRACE_SECONDS))
+            .ok_or_else(repository_invalid_configuration)?;
+        match await_worker_step(
+            repository,
+            claim,
+            claim_seconds,
+            heartbeat,
+            deadline.as_mut(),
+            repository.stage_artifact(StageArtifactCommand::new(
+                claim.run_id().clone(),
+                artifact.clone(),
+                locator,
+                Some(retain_until),
+            )),
+        )
+        .await?
+        {
+            GuardedWorkerStep::Completed(
+                TransitionOutcome::Committed { .. } | TransitionOutcome::ExactReplay { .. },
+            ) => {}
+            GuardedWorkerStep::Completed(
+                TransitionOutcome::StaleLease | TransitionOutcome::StateConflict,
+            ) => return Err(repository_invalid_data()),
+            GuardedWorkerStep::OperationDeadlineElapsed => {
+                return Ok(GuardedWorkerStep::OperationDeadlineElapsed)
+            }
+            GuardedWorkerStep::LeaseLost => return Ok(GuardedWorkerStep::LeaseLost),
+        }
+        let (actual_hash, actual_size) = match await_worker_step(
+            repository,
+            claim,
+            claim_seconds,
+            heartbeat,
+            deadline.as_mut(),
+            artifact_store.put_and_verify(&artifact, payload.bytes()),
+        )
+        .await?
+        {
+            GuardedWorkerStep::Completed(verified) => verified,
+            GuardedWorkerStep::OperationDeadlineElapsed => {
+                return Ok(GuardedWorkerStep::OperationDeadlineElapsed)
+            }
+            GuardedWorkerStep::LeaseLost => return Ok(GuardedWorkerStep::LeaseLost),
+        };
+        match await_worker_step(
+            repository,
+            claim,
+            claim_seconds,
+            heartbeat,
+            deadline.as_mut(),
+            repository.verify_artifact(VerifyArtifactCommand::new(
+                claim.run_id().clone(),
+                artifact.artifact_id().clone(),
+                actual_hash,
+                actual_size,
+            )),
+        )
+        .await?
+        {
+            GuardedWorkerStep::Completed(
+                TransitionOutcome::Committed { .. } | TransitionOutcome::ExactReplay { .. },
+            ) => {}
+            GuardedWorkerStep::Completed(
+                TransitionOutcome::StaleLease | TransitionOutcome::StateConflict,
+            ) => return Err(repository_invalid_data()),
+            GuardedWorkerStep::OperationDeadlineElapsed => {
+                return Ok(GuardedWorkerStep::OperationDeadlineElapsed)
+            }
+            GuardedWorkerStep::LeaseLost => return Ok(GuardedWorkerStep::LeaseLost),
+        }
+        referenced_artifacts.push(artifact);
+    }
     let mut value_refs = BTreeMap::new();
     // A single worker result may bind the same content-addressed value to
     // multiple output ports. Keep the full ArtifactRef as the cache key so a
@@ -2575,7 +2728,8 @@ where
         };
         value_refs.insert(port_id.clone(), value_ref);
     }
-    SchedulerTaskSuccess::with_value_refs(result, value_refs).map(GuardedWorkerStep::Completed)
+    SchedulerTaskSuccess::with_value_refs_and_artifacts(result, value_refs, referenced_artifacts)
+        .map(GuardedWorkerStep::Completed)
 }
 
 async fn await_and_commit_runtime_deadline<R, I>(

@@ -62,8 +62,8 @@ struct FixtureRetrieval;
 impl Retrieval for FixtureRetrieval {
     fn descriptor(&self) -> RetrievalDescriptor {
         RetrievalDescriptor {
-            id: "fixture.search",
-            version: "1.0.0",
+            id: "fixture.search".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -76,7 +76,7 @@ impl Retrieval for FixtureRetrieval {
                 "required": ["answer"],
                 "additionalProperties": false
             }),
-            query_field: "query",
+            query_field: "query".to_owned(),
             effect: EffectClass::ReadOnly,
             idempotency: IdempotencyClass::Idempotent,
             cancellation: CancellationClass::Cooperative,

@@ -25,6 +25,7 @@ use insight_engine::{
     execution::{ExecutionControl, RunError},
     retrieval::RegisteredRetrievalView,
     schema::{compile_schema_2020, JsonSchemaValidator},
+    worker::{WorkerArtifactPayload, WorkerOperationPermitHandle},
 };
 
 use super::actions::{CancellationClass, EffectClass, IdempotencyClass};
@@ -36,15 +37,15 @@ const MAX_RETRIEVAL_SCHEMA_VALUES: usize = 65_536;
 /// A platform capability which must be granted before a retrieval may run.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
-pub struct RetrievalCapability(&'static str);
+pub struct RetrievalCapability(String);
 
 impl RetrievalCapability {
-    pub const fn new(value: &'static str) -> Self {
-        Self(value)
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
     }
 
-    pub fn as_str(&self) -> &'static str {
-        self.0
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -55,11 +56,11 @@ impl RetrievalCapability {
 /// identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetrievalDescriptor {
-    pub id: &'static str,
-    pub version: &'static str,
+    pub id: String,
+    pub version: String,
     pub input_schema: Value,
     pub output_schema: Value,
-    pub query_field: &'static str,
+    pub query_field: String,
     pub effect: EffectClass,
     pub idempotency: IdempotencyClass,
     pub cancellation: CancellationClass,
@@ -84,6 +85,7 @@ pub struct RetrievalContext {
     pub attempt_id: String,
     pub idempotency_key: String,
     pub control: ExecutionControl,
+    operation_permit: Option<WorkerOperationPermitHandle>,
 }
 
 impl RetrievalContext {
@@ -102,6 +104,7 @@ impl RetrievalContext {
             operation_id,
             attempt,
             control,
+            operation_permit: None,
         }
     }
 
@@ -121,7 +124,18 @@ impl RetrievalContext {
             operation_id,
             attempt,
             control,
+            operation_permit: None,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn with_operation_permit(mut self, permit: WorkerOperationPermitHandle) -> Self {
+        self.operation_permit = Some(permit);
+        self
+    }
+
+    pub fn operation_permit(&self) -> Option<&WorkerOperationPermitHandle> {
+        self.operation_permit.as_ref()
     }
 }
 
@@ -150,6 +164,7 @@ impl RetrievalContext {
 pub struct RetrievalExecutionResult {
     pub model_output: Value,
     pub public_candidate: Option<Value>,
+    artifact_payloads: Vec<WorkerArtifactPayload>,
 }
 
 impl RetrievalExecutionResult {
@@ -157,7 +172,28 @@ impl RetrievalExecutionResult {
         Self {
             model_output,
             public_candidate,
+            artifact_payloads: Vec::new(),
         }
+    }
+
+    pub fn with_artifact_payloads(
+        model_output: Value,
+        public_candidate: Option<Value>,
+        artifact_payloads: Vec<WorkerArtifactPayload>,
+    ) -> Self {
+        Self {
+            model_output,
+            public_candidate,
+            artifact_payloads,
+        }
+    }
+
+    pub fn into_parts(self) -> (Value, Option<Value>, Vec<WorkerArtifactPayload>) {
+        (
+            self.model_output,
+            self.public_candidate,
+            self.artifact_payloads,
+        )
     }
 }
 
@@ -248,7 +284,7 @@ impl RegisteredRetrievalView for RegisteredRetrieval {
     }
 
     fn query_field(&self) -> &str {
-        self.descriptor.query_field
+        &self.descriptor.query_field
     }
 
     fn effect(&self) -> &str {
@@ -311,21 +347,21 @@ impl RetrievalRegistry {
     {
         let mut descriptor = retrieval.descriptor();
         let mut public_policy = retrieval.public_policy();
-        let id = descriptor.id;
+        let id = descriptor.id.clone();
 
-        if !is_qualified_identifier(id) {
+        if !is_qualified_identifier(&id) {
             return Err(CompileError::new(
                 "RETRIEVAL_ID_INVALID",
                 "retrieval id must be a valid qualified identifier",
             ));
         }
-        if self.retrievals.contains_key(id) {
+        if self.retrievals.contains_key(&id) {
             return Err(CompileError::new(
                 "DUPLICATE_RETRIEVAL",
                 format!("retrieval '{id}' is already registered"),
             ));
         }
-        let version = Version::parse(descriptor.version).map_err(|_| {
+        let version = Version::parse(&descriptor.version).map_err(|_| {
             CompileError::new(
                 "RETRIEVAL_VERSION_INVALID",
                 format!("retrieval '{id}' version is not valid SemVer"),
@@ -339,7 +375,7 @@ impl RetrievalRegistry {
                 ));
             }
         }
-        if !is_schema_identifier(descriptor.query_field) {
+        if !is_schema_identifier(&descriptor.query_field) {
             return Err(CompileError::new(
                 "RETRIEVAL_QUERY_FIELD_INVALID",
                 format!("retrieval '{id}' query_field must be a canonical identifier"),
@@ -359,7 +395,7 @@ impl RetrievalRegistry {
                 format!("retrieval '{id}' input schema must describe a closed object"),
             ));
         }
-        validate_required_string_query_field(id, descriptor.query_field, &input_schema)?;
+        validate_required_string_query_field(&id, &descriptor.query_field, &input_schema)?;
 
         let (output_schema, output_validator) =
             normalize_retrieval_schema(&descriptor.output_schema).map_err(|error| {
@@ -405,10 +441,10 @@ impl RetrievalRegistry {
         descriptor.output_schema = output_schema;
         let descriptor_hash = descriptor_hash(&descriptor, &public_policy)?;
         self.retrievals.insert(
-            id.to_owned(),
+            id.clone(),
             Arc::new(RegisteredRetrieval {
                 identity: RetrievalDescriptorIdentity {
-                    id: id.to_owned(),
+                    id,
                     version,
                     descriptor_hash,
                 },
@@ -754,11 +790,11 @@ fn descriptor_hash(
         .collect::<Vec<_>>();
     capabilities.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     let canonical = serde_jcs::to_vec(&CanonicalRetrievalDescriptor {
-        id: descriptor.id,
-        version: descriptor.version,
+        id: &descriptor.id,
+        version: &descriptor.version,
         input_schema: &descriptor.input_schema,
         output_schema: &descriptor.output_schema,
-        query_field: descriptor.query_field,
+        query_field: &descriptor.query_field,
         effect: descriptor.effect,
         idempotency: descriptor.idempotency,
         cancellation: descriptor.cancellation,
@@ -828,11 +864,11 @@ mod tests {
         })
     }
 
-    fn retrieval(id: &'static str) -> StaticRetrieval {
+    fn retrieval(id: impl Into<String>) -> StaticRetrieval {
         StaticRetrieval {
             descriptor: RetrievalDescriptor {
-                id,
-                version: "1.2.3",
+                id: id.into(),
+                version: "1.2.3".to_owned(),
                 input_schema: object_schema(
                     json!({
                         "query": {"type": "string", "minLength": 1},
@@ -844,7 +880,7 @@ mod tests {
                     json!({"documents": {"type": "array", "items": {"type": "string"}}}),
                     &["documents"],
                 ),
-                query_field: "query",
+                query_field: "query".to_owned(),
                 effect: EffectClass::ReadOnly,
                 idempotency: IdempotencyClass::Idempotent,
                 cancellation: CancellationClass::Cooperative,
@@ -899,7 +935,7 @@ mod tests {
             "RETRIEVAL_ID_INVALID"
         );
         let mut invalid_version = retrieval("search.version");
-        invalid_version.descriptor.version = "latest";
+        invalid_version.descriptor.version = "latest".to_owned();
         assert_eq!(
             RetrievalRegistry::default()
                 .register(invalid_version)
@@ -940,10 +976,8 @@ mod tests {
             ),
         ];
         for (index, (query_field, input_schema)) in cases.into_iter().enumerate() {
-            let mut candidate = retrieval(Box::leak(
-                format!("search.invalid_{index}").into_boxed_str(),
-            ));
-            candidate.descriptor.query_field = Box::leak(query_field.to_owned().into_boxed_str());
+            let mut candidate = retrieval(format!("search.invalid_{index}"));
+            candidate.descriptor.query_field = query_field.to_owned();
             candidate.descriptor.input_schema = input_schema;
             let code = RetrievalRegistry::default()
                 .register(candidate)

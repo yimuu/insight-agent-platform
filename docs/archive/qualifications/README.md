@@ -6,4 +6,5 @@
 
 | 日期 | 记录 | 结果 | 正式报告 |
 |---|---|---|---|
+| 2026-07-30 | [MCP 完整支持资格验收](2026-07-30-complete-mcp-qualification.md) | Qualified；modern client/server、Tasks 与 legacy profile 通过 | 本记录；外部 SDK 原始报告由 qualification harness 生成 |
 | 2026-07-28 | [Terminal-only 验收与 WAL 资格](2026-07-28-terminal-only-qualification.md) | Qualified；Phase 0、Gate A～D 通过 | [资格报告](../../../bench/reports/2026-07-27-terminal-only-runtime-and-conversations-qualified.md) |

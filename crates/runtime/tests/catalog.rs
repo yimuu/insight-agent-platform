@@ -89,6 +89,37 @@ impl LeafDeploymentResolver for RetryingFixtureResolver {
     }
 }
 
+struct FullRuntimeMcpFixtureResolver;
+
+impl LeafDeploymentResolver for FullRuntimeMcpFixtureResolver {
+    fn resolve_leaf(
+        &self,
+        kind: LeafTaskKind,
+        descriptor: &LeafTaskDescriptor,
+    ) -> Result<ResolvedLeafDeployment, CompileError> {
+        let resolved = ResolvedLeafDeployment::new(
+            VersionTag::new("fixture-worker-1").unwrap(),
+            json!({
+                "task_kind": kind.name(),
+                "implementation": descriptor.implementation,
+                "required_capabilities": ["runtime.mcp.interaction.v1"],
+            }),
+        )?;
+        Ok(resolved.with_effect_policy(
+            WorkerEffectPolicy::frozen(
+                WorkerEffectClass::ReadOnly,
+                EffectIdempotency::Idempotent,
+                1,
+                0,
+                0,
+                20,
+                WorkerCancellation::Cooperative,
+            )
+            .unwrap(),
+        ))
+    }
+}
+
 fn published_fixture(id: &str, source: &str) -> Arc<PublishedAgent> {
     let graph = GraphAuthorDocument::from_structured_source(
         GraphDocumentId::new(format!("{id}_graph")).unwrap(),
@@ -788,6 +819,23 @@ fn terminal_only_validator_rejects_worker_retry_and_aggregate_workflow_over_budg
     .unwrap_err();
     assert_eq!(error.code(), "TERMINAL_ONLY_WORKFLOW_INCOMPATIBLE");
     assert!(error.message().contains("conservative workflow"));
+}
+
+#[test]
+fn terminal_only_validator_rejects_mcp_full_runtime_capabilities() {
+    let agent = published_fixture(
+        "terminal_mcp_interaction",
+        "api_version: insight.agent/v1\nkind: agent\ninputs: {}\noutput: string\nworkflow:\n  steps:\n    - type: action\n      id: remote\n      call: mcp.fixture.remote\n      inputs: {}\n      response: string\n    - return: $remote\n",
+    );
+    let error = DeployedAgent::publish_with_persistence_policy(
+        agent,
+        &FullRuntimeMcpFixtureResolver,
+        SubflowContractRegistry::new(),
+        DeploymentPersistencePolicy::terminal_only(false, Duration::from_secs(1)).unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "TERMINAL_ONLY_WORKFLOW_INCOMPATIBLE");
+    assert!(error.message().contains("durable effect fence"));
 }
 
 #[test]

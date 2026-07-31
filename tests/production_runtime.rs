@@ -115,8 +115,8 @@ struct PublicRetrievalFixture;
 impl Retrieval for PublicRetrievalFixture {
     fn descriptor(&self) -> RetrievalDescriptor {
         RetrievalDescriptor {
-            id: "fixture.public_search",
-            version: "1.0.0",
+            id: "fixture.public_search".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -129,7 +129,7 @@ impl Retrieval for PublicRetrievalFixture {
                 "required": ["answer"],
                 "additionalProperties": false
             }),
-            query_field: "query",
+            query_field: "query".to_owned(),
             effect: EffectClass::ReadOnly,
             idempotency: IdempotencyClass::Idempotent,
             cancellation: CancellationClass::Cooperative,

@@ -12,6 +12,10 @@ use insight_engine::PersistenceMode;
 use insight_storage::postgres_config::PostgresHistoryUrlError;
 use serde::Deserialize;
 
+#[path = "mcp_config.rs"]
+mod mcp_config;
+pub use mcp_config::*;
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretString(String);
 
@@ -299,6 +303,7 @@ pub struct PlatformConfig {
     pub artifacts: ArtifactsConfig,
     pub runtime: RuntimeConfig,
     pub conversations: ConversationsConfig,
+    pub mcp: McpConfig,
 }
 
 impl PlatformConfig {
@@ -379,6 +384,7 @@ impl PlatformConfig {
         let artifacts = resolve_artifacts(parent, raw.artifacts, raw.deployment_mode, &get_env)?;
         let runtime = resolve_runtime(raw.runtime, raw.deployment_mode)?;
         let conversations = resolve_conversations(raw.conversations)?;
+        let mcp = resolve_mcp(raw.mcp, parent, raw.deployment_mode, &get_env)?;
         Ok(Self {
             deployment_mode: raw.deployment_mode,
             bind_addr,
@@ -392,6 +398,7 @@ impl PlatformConfig {
             artifacts,
             runtime,
             conversations,
+            mcp,
         })
     }
 }
@@ -442,6 +449,8 @@ struct PlatformYaml {
     runtime: RuntimeYaml,
     #[serde(default)]
     conversations: Option<ConversationsYaml>,
+    #[serde(default)]
+    mcp: Option<McpYaml>,
 }
 
 impl<'de> Deserialize<'de> for DeploymentMode {

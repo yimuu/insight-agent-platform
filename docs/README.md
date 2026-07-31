@@ -12,8 +12,9 @@
 2. [架构概览](current/architecture.md)：理解 durable graph execution；
 3. [DSL v1 指南](current/dsl.md)：编写 Agent；
 4. [HTTP 与 SSE API](current/api.md)：创建、观察和控制 Run；
-5. [部署与运维](current/operations.md)：配置生产环境；
-6. [开发指南](current/development.md)：修改和验证实现。
+5. [MCP 使用、运行与安全合同](current/mcp.md)：连接或暴露 MCP；
+6. [部署与运维](current/operations.md)：配置生产环境；
+7. [开发指南](current/development.md)：修改和验证实现。
 
 ## 当前文档
 
@@ -22,6 +23,7 @@
 | [架构概览](current/architecture.md) | 架构师、开发者 | 运行模型、持久化边界与核心不变量 |
 | [DSL v1 指南](current/dsl.md) | Agent 作者 | 作者语法、类型、表达式、控制流 |
 | [HTTP 与 SSE API](current/api.md) | API 使用者 | 路由、幂等、响应流和人工任务 |
+| [MCP 使用、运行与安全合同](current/mcp.md) | 集成者、平台开发者 | MCP profiles、传输、授权、交互与运维 |
 | [部署与运维](current/operations.md) | 运维、平台开发者 | Schema 预置、数据库、Artifact、认证 |
 | [开发指南](current/development.md) | 贡献者 | 代码导航、测试和 CI 门禁 |
 
@@ -30,11 +32,11 @@
 [`specs/`](specs/README.md) 描述已经形成实施和验收边界、但尚未完全成为当前可执行合同的目标设计。
 规范中的新 API、配置、schema 和容量数字在实现及 conformance evidence 完成前均不是当前行为。
 
-当前活动规范：
-
-- 当前没有活动设计规范。最近完成的 Provider Catalog 优化见
-  [归档规范](archive/specs/2026-07-30-provider-catalog-and-direct-model-selection.md)，当前合同见
-  [DSL v1 指南](current/dsl.md)与[部署与运维](current/operations.md)。
+当前没有活动设计规范。最近完成的
+[MCP 完整支持规范](archive/specs/2026-07-30-complete-mcp-support.md)及其
+[资格验收](archive/qualifications/2026-07-30-complete-mcp-qualification.md)已归档；当前合同见
+[MCP 使用、运行与安全合同](current/mcp.md)。Provider Catalog 优化见
+[归档规范](archive/specs/2026-07-30-provider-catalog-and-direct-model-selection.md)。
 
 ## 活动资格验收
 

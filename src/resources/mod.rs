@@ -3,8 +3,9 @@ pub mod config;
 pub mod actions {
     pub use insight_resources::actions::{
         Action, ActionCapability, ActionContext, ActionDescriptor, ActionDescriptorIdentity,
-        ActionProgressDisposition, ActionProgressError, ActionRegistry, CancellationClass,
-        EffectClass, IdempotencyClass, RegisteredAction, ToolPublicArguments, ToolPublicPolicy,
+        ActionModelTool, ActionProgressDisposition, ActionProgressError, ActionRegistry,
+        ActionSchemaDialect, CancellationClass, EffectClass, IdempotencyClass, RegisteredAction,
+        ToolPublicArguments, ToolPublicPolicy,
     };
 }
 
@@ -25,6 +26,9 @@ pub mod models {
         MODEL_RESPONSE_TOO_LARGE_MESSAGE,
     };
 }
+
+pub mod mcp;
+pub mod mcp_server;
 
 pub mod openai_chat {
     pub use insight_resources::openai_chat::{

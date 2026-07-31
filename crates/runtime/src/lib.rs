@@ -24,7 +24,8 @@ pub use run_service::{
     FullConversationVisibilityGuard, GraphPublication, MigrationNodeMappingRequest,
     ProductionRunRepository, PublicArtifact, RecoveryOperation, RecoveryRequestMetadata,
     RecoveryReusePolicy, RecoveryRunResult, RequestMetadata, RunRepositoryCapability, RunService,
-    RunServiceConfig, RunSubscription, ServiceError, SubscriptionError, WorkCoordinatorConfig,
+    RunServiceConfig, RunSubscription, RuntimeReadinessProbe, ServiceError, SubscriptionError,
+    WorkCoordinatorConfig,
 };
 pub use run_stream::{
     CompletedFunctionCallPublication, CompletedFunctionCallTailPublication,

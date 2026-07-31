@@ -47,8 +47,8 @@ pub struct CurrentTimeAction;
 impl Action for CurrentTimeAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "current_time",
-            version: "1.0.0",
+            id: "current_time".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: json!({
                 "type":"object",
                 "properties":{"timezone":{"type":"string"}},
@@ -114,8 +114,8 @@ impl Action for TextMetricsAction {
 
 fn text_metrics_descriptor(id: &'static str) -> ActionDescriptor {
     ActionDescriptor {
-        id,
-        version: "1.0.0",
+        id: id.to_owned(),
+        version: "1.0.0".to_owned(),
         input_schema: json!({
             "type":"object",
             "description":"Count Unicode characters, whitespace-separated words, and lines.",
@@ -193,8 +193,8 @@ struct IntegerCalculatorAction;
 impl Action for IntegerCalculatorAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "integer_calculator",
-            version: "1.0.0",
+            id: "integer_calculator".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: json!({
                 "type":"object",
                 "description":"Perform exact checked arithmetic on two signed integers.",
@@ -277,8 +277,8 @@ struct TextReplaceAction;
 impl Action for TextReplaceAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "text_replace",
-            version: "1.0.0",
+            id: "text_replace".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: json!({
                 "type":"object",
                 "description":"Replace every non-overlapping occurrence of one literal string.",
@@ -356,8 +356,8 @@ struct ProgressCounterAction;
 impl Action for ProgressCounterAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "progress_counter",
-            version: "1.0.0",
+            id: "progress_counter".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: json!({
                 "type":"object",
                 "required":["total"],
@@ -445,8 +445,8 @@ fn qualification_effect_lock() -> &'static Mutex<()> {
 impl Action for QualificationEffectMarkerAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "qualification.effect_marker",
-            version: "1.0.0",
+            id: "qualification.effect_marker".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: json!({
                 "type":"object",
                 "required":["effect_id", "idempotency_key"],
@@ -700,8 +700,8 @@ impl RestrictedHttpGetAction {
 impl Action for RestrictedHttpGetAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "http_get",
-            version: "1.0.0",
+            id: "http_get".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: json!({
                 "type":"object",
                 "required":["url"],

@@ -3595,6 +3595,8 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::{ArtifactId, ContentHash};
     use serde_json::json;
@@ -4001,6 +4003,93 @@ mod tests {
                 !validator.is_valid(&unknown_field),
                 "{expected_type} must reject unknown fields"
             );
+        }
+    }
+
+    #[test]
+    fn run_stream_v2_schema_samples_cover_every_v1_event_without_weakening_v1() {
+        let v1_schema: Value =
+            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v1.json")).unwrap();
+        let v2_schema: Value =
+            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v2.json")).unwrap();
+        let v1 =
+            crate::schema::compile_schema_2020(&v1_schema).expect("run-stream/v1 schema compiles");
+        let v2 =
+            crate::schema::compile_schema_2020(&v2_schema).expect("run-stream/v2 schema compiles");
+        let samples = run_stream_event_samples();
+        assert_eq!(samples.len(), 25);
+        for sample in samples {
+            let mut encoded = serde_json::to_value(&sample).unwrap();
+            encoded
+                .as_object_mut()
+                .unwrap()
+                .insert("protocol".to_owned(), json!("run-stream/v2"));
+            if matches!(
+                sample.event_type(),
+                RunStreamEventType::RunLifecycleCompleted
+                    | RunStreamEventType::RunLifecycleFailed
+                    | RunStreamEventType::RunLifecycleTimedOut
+                    | RunStreamEventType::RunLifecycleCancelled
+                    | RunStreamEventType::RunLifecycleInterrupted
+            ) {
+                encoded["run"]
+                    .as_object_mut()
+                    .expect("terminal v1 sample has a Run snapshot")
+                    .insert("interactions".to_owned(), json!([]));
+            }
+            assert!(
+                v2.is_valid(&encoded),
+                "v2 sample for {} must validate",
+                sample.event_type().as_str()
+            );
+            assert!(
+                !v1.is_valid(&encoded),
+                "the v1 decoder must reject a v2 identity"
+            );
+        }
+    }
+
+    #[test]
+    fn checked_in_run_stream_v2_samples_cover_closed_protocol_surface() {
+        let schema: Value =
+            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v2.json")).unwrap();
+        let validator =
+            crate::schema::compile_schema_2020(&schema).expect("run-stream/v2 schema compiles");
+        let samples: Vec<Value> =
+            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v2.samples.json"))
+                .unwrap();
+        assert_eq!(samples.len(), 27);
+        let types = samples
+            .iter()
+            .map(|sample| {
+                assert!(
+                    validator.is_valid(sample),
+                    "checked-in v2 sample must validate"
+                );
+                sample["type"].as_str().unwrap().to_owned()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(types.len(), 27);
+        for event_type in RunStreamEventType::ALL {
+            assert!(types.contains(event_type.as_str()));
+        }
+        assert!(types.contains("run.interaction.required"));
+        assert!(types.contains("run.interaction.closed"));
+        for interaction in samples.iter().filter(|sample| {
+            sample["type"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("run.interaction."))
+        }) {
+            let encoded = serde_json::to_string(interaction).unwrap();
+            for forbidden in [
+                "requestState",
+                "inputResponses",
+                "access_token",
+                "refresh_token",
+                "form_response",
+            ] {
+                assert!(!encoded.contains(forbidden));
+            }
         }
     }
 

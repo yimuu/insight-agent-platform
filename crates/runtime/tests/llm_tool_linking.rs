@@ -5,8 +5,8 @@ use futures::stream;
 use insight_engine::{author::CompileError, execution::RunError, NodeId, SubflowContractRegistry};
 use insight_resources::{
     actions::{
-        Action, ActionContext, ActionDescriptor, ActionRegistry, CancellationClass, EffectClass,
-        IdempotencyClass, ToolPublicArguments, ToolPublicPolicy,
+        Action, ActionContext, ActionDescriptor, ActionModelTool, ActionRegistry,
+        CancellationClass, EffectClass, IdempotencyClass, ToolPublicArguments, ToolPublicPolicy,
     },
     builtin_actions::builtin_action_registry,
     models::{
@@ -65,8 +65,8 @@ struct LookupAction {
 impl Action for LookupAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "lookup",
-            version: "2.1.0",
+            id: "lookup".to_owned(),
+            version: "2.1.0".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -94,6 +94,29 @@ impl Action for LookupAction {
 
     fn public_policy(&self) -> ToolPublicPolicy {
         self.public.clone()
+    }
+
+    async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
+        Ok(input)
+    }
+}
+
+#[derive(Clone)]
+struct AliasedLookupAction;
+
+#[async_trait]
+impl Action for AliasedLookupAction {
+    fn descriptor(&self) -> ActionDescriptor {
+        LookupAction {
+            public: ToolPublicPolicy::private(),
+        }
+        .descriptor()
+    }
+
+    fn model_tool(&self) -> ActionModelTool {
+        ActionModelTool::new("remote_search")
+            .with_title("Repository search")
+            .with_description("Search the publication-frozen remote repository catalog.")
     }
 
     async fn call(&self, input: Value, _context: ActionContext) -> Result<Value, RunError> {
@@ -289,6 +312,30 @@ fn linker_resolves_whitelist_request_mode_and_freezes_effective_public_policy() 
         deployment.deployment_revision_id(),
         private_deployment.deployment_revision_id(),
         "the Agent-side publish decision participates in frozen deployment identity"
+    );
+}
+
+#[test]
+fn linker_keeps_action_identity_separate_from_model_presentation() {
+    let models = model_registry(BTreeSet::from([ModelRequestCapability::Complete]));
+    let mut actions = ActionRegistry::default();
+    actions.register(AliasedLookupAction).unwrap();
+
+    let deployment =
+        publish_with_tool_continuation(false, false, "[lookup]", &models, &actions).unwrap();
+    let binding = llm_binding(&deployment);
+    let tool = &binding["tools"][0];
+
+    assert_eq!(tool["action_id"], "lookup");
+    assert_eq!(tool["name"], "remote_search");
+    assert_eq!(tool["title"], "Repository search");
+    assert_eq!(
+        tool["description"],
+        "Search the publication-frozen remote repository catalog."
+    );
+    assert_eq!(
+        binding["tool_choice"], "remote_search",
+        "named DSL choices are translated from Action identity to model alias"
     );
 }
 

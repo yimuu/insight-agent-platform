@@ -691,6 +691,8 @@ struct ToolLimitsWire {
 #[serde(deny_unknown_fields)]
 struct ToolBindingWire {
     name: String,
+    title: Option<String>,
+    description: Option<String>,
     action_id: String,
     action_version: String,
     descriptor_hash: String,
@@ -743,9 +745,14 @@ pub(crate) fn parse_frozen_model_tool_contract(
     for value in tools {
         let wire: ToolBindingWire =
             serde_json::from_value(value.clone()).map_err(|_| RepositoryError::invalid_data())?;
-        if !valid_qualified_name(&wire.name)
+        if !valid_model_tool_name(&wire.name)
             || !valid_qualified_name(&wire.action_id)
-            || wire.action_id != wire.name
+            || wire.title.as_ref().is_some_and(|value| {
+                value.is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+            })
+            || wire.description.as_ref().is_some_and(|value| {
+                value.is_empty() || value.len() > 16 * 1024 || value.chars().any(char::is_control)
+            })
             || wire.action_version.is_empty()
             || wire.action_version.len() > 64
             || !is_lower_sha256(&wire.descriptor_hash)
@@ -826,6 +833,14 @@ pub(crate) fn parse_frozen_model_tool_contract(
         max_calls: limits.max_calls,
         tools: frozen,
     })
+}
+
+fn valid_model_tool_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 pub(crate) fn validate_tool_arguments(

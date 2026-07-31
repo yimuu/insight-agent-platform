@@ -74,6 +74,20 @@ spec:
                   name: {{ .Values.artifacts.tenantEncryption.existingSecret | quote }}
                   key: {{ .Values.artifacts.tenantEncryption.keyringKey | quote }}
             {{- end }}
+            {{- if .Values.mcp.secretEncryption.enabled }}
+            - name: INSIGHT_MCP_SECRET_KEYRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mcp.secretEncryption.existingSecret | quote }}
+                  key: {{ .Values.mcp.secretEncryption.keyringKey | quote }}
+            {{- end }}
+            {{- range .Values.mcp.secretEnv }}
+            - name: {{ .name | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName | quote }}
+                  key: {{ .secretKey | quote }}
+            {{- end }}
             {{- if .Values.qualification.enabled }}
             - name: INSIGHT_QUALIFICATION_ENABLED
               value: "true"

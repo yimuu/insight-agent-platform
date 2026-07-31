@@ -195,6 +195,8 @@ struct FrozenLlmToolLimits {
 #[serde(deny_unknown_fields)]
 struct FrozenLlmToolBinding {
     name: String,
+    title: Option<String>,
+    description: Option<String>,
     action_id: String,
     action_version: String,
     descriptor_hash: String,
@@ -277,8 +279,7 @@ fn frozen_llm_tool_contract(
     } else {
         vec![LLM_TOOL_CONTINUATION_CAPABILITY]
     };
-    if binding.tool_choice != configured_choice
-        || binding.tool_limits != configured_limits
+    if binding.tool_limits != configured_limits
         || binding.tools.len() != configured_tools.len()
         || binding
             .runtime_capabilities
@@ -287,6 +288,19 @@ fn frozen_llm_tool_contract(
             .collect::<Vec<_>>()
             != expected_runtime_capabilities
     {
+        return Err(invariant(LLM_BINDING_INVALID));
+    }
+    let expected_choice = match configured_choice {
+        "auto" | "required" => configured_choice.to_owned(),
+        action_id => binding
+            .tools
+            .iter()
+            .zip(&configured_tools)
+            .find(|(_, configured_name)| **configured_name == action_id)
+            .map(|(tool, _)| tool.name.clone())
+            .ok_or_else(|| invariant(LLM_BINDING_INVALID))?,
+    };
+    if binding.tool_choice != expected_choice {
         return Err(invariant(LLM_BINDING_INVALID));
     }
 
@@ -309,10 +323,15 @@ fn frozen_llm_tool_contract(
             "not_supported" => WorkerCancellation::LeaseOnly,
             _ => return Err(invariant(LLM_BINDING_INVALID)),
         };
-        if linked.name != configured_name
-            || linked.action_id != linked.name
+        if linked.action_id != configured_name
             || !valid_tool_name(&linked.name)
             || !names.insert(linked.name.clone())
+            || linked.title.as_ref().is_some_and(|value| {
+                value.is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+            })
+            || linked.description.as_ref().is_some_and(|value| {
+                value.is_empty() || value.len() > 16 * 1024 || value.chars().any(char::is_control)
+            })
             || semver::Version::parse(&linked.action_version).is_err()
             || !is_lower_sha256(&linked.descriptor_hash)
             || !linked.input_schema.is_object()
@@ -346,7 +365,7 @@ fn frozen_llm_tool_contract(
         tools.push(FrozenLlmTool {
             definition: ChatToolDefinition {
                 name: linked.name,
-                description: None,
+                description: linked.description,
                 input_schema: linked.input_schema,
             },
             validator,
@@ -1747,6 +1766,9 @@ impl LeafTaskExecutor for ActionTaskExecutor {
             request.effect_id().as_str(),
             control,
         );
+        if let Some(permit) = worker_adapter::services_operation_permit(services) {
+            action_context = action_context.with_operation_permit(permit.clone());
+        }
         if model_tool_request {
             if let Some(publisher) =
                 worker_adapter::services_model_tool_progress_publisher(services)
@@ -1757,9 +1779,11 @@ impl LeafTaskExecutor for ActionTaskExecutor {
         }
         let call = async {
             if model_tool_request {
-                action.call_model_tool(input, action_context).await
+                action
+                    .call_model_tool_with_artifacts(input, action_context)
+                    .await
             } else {
-                action.call(input, action_context).await
+                action.call_with_artifacts(input, action_context).await
             }
         };
         tokio::pin!(call);
@@ -1775,15 +1799,19 @@ impl LeafTaskExecutor for ActionTaskExecutor {
             },
         };
         cancellation_bridge.abort();
-        let value = RuntimeValue::new(result?).map_err(|_| invariant(ACTION_EXECUTION_FAILED))?;
+        let (output_value, artifact_payloads) = result?.into_parts();
+        let value =
+            RuntimeValue::new(output_value).map_err(|_| invariant(ACTION_EXECUTION_FAILED))?;
         let output = only_output(request)?;
         if !value.matches(output.value_type()) {
             return Err(invariant(ACTION_EXECUTION_FAILED));
         }
-        Ok(TaskExecutionResult::new(
+        TaskExecutionResult::new(
             BTreeMap::from([(output.port_id().clone(), value)]),
             EffectEvidence::Committed,
-        ))
+        )
+        .with_artifact_payloads(artifact_payloads)
+        .map_err(|_| invariant(ACTION_EXECUTION_FAILED))
     }
 }
 
@@ -2760,8 +2788,8 @@ mod tests {
                 "additionalProperties": false
             });
             ActionDescriptor {
-                id: "example.capture",
-                version: "1.2.3",
+                id: "example.capture".to_owned(),
+                version: "1.2.3".to_owned(),
                 input_schema: contract.clone(),
                 output_schema: contract,
                 effect: EffectClass::Mutating,
@@ -2791,8 +2819,8 @@ mod tests {
                 "additionalProperties": false
             });
             ActionDescriptor {
-                id: "example.server_injecting_capture",
-                version: "1.0.0",
+                id: "example.server_injecting_capture".to_owned(),
+                version: "1.0.0".to_owned(),
                 input_schema: contract.clone(),
                 output_schema: contract,
                 effect: EffectClass::Pure,
@@ -2840,8 +2868,8 @@ mod tests {
     impl Action for LookupContinuationAction {
         fn descriptor(&self) -> ActionDescriptor {
             ActionDescriptor {
-                id: "lookup",
-                version: "1.0.0",
+                id: "lookup".to_owned(),
+                version: "1.0.0".to_owned(),
                 input_schema: lookup_schema(),
                 output_schema: json!({"type": "object"}),
                 effect: EffectClass::Pure,
@@ -4457,6 +4485,7 @@ mod tests {
         let registered = actions.resolve("example.capture").unwrap();
         let descriptor = registered.descriptor();
         let identity = registered.identity();
+        let model_tool_name = registered.model_tool().name.clone();
         let effect_policy = WorkerEffectPolicy::new(
             EffectIdempotency::Idempotent,
             1,
@@ -4465,7 +4494,7 @@ mod tests {
         .unwrap();
         let deployment_binding = frozen_action_binding(registered.as_ref());
         let frozen_action = parse_action_from_stored_evidence(
-            identity.id.clone(),
+            model_tool_name,
             identity.id.clone(),
             identity.version.to_string(),
             identity.descriptor_hash.clone(),
@@ -4576,6 +4605,7 @@ mod tests {
             let registered = actions.resolve("example.server_injecting_capture").unwrap();
             let descriptor = registered.descriptor();
             let identity = registered.identity();
+            let model_tool_name = registered.model_tool().name.clone();
             let effect_policy = WorkerEffectPolicy::frozen(
                 WorkerEffectClass::Pure,
                 EffectIdempotency::Idempotent,
@@ -4588,7 +4618,7 @@ mod tests {
             .unwrap();
             let deployment_binding = frozen_action_binding(registered.as_ref());
             let frozen_action = parse_action_from_stored_evidence(
-                identity.id.clone(),
+                model_tool_name,
                 identity.id.clone(),
                 identity.version.to_string(),
                 identity.descriptor_hash.clone(),

@@ -1629,6 +1629,217 @@ BEGIN
         updated_at = CURRENT_TIMESTAMP, closed_at = CURRENT_TIMESTAMP
     WHERE run_id = NEW.run_id AND work_state IN ('open','claimed');
 END;
+CREATE TABLE mcp_interactions(
+  interaction_id TEXT NOT NULL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE RESTRICT,
+  operation_id TEXT NOT NULL,
+  server_id TEXT NOT NULL,
+  binding_hash TEXT NOT NULL,
+  logical_request_key TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK(generation >= 1),
+  request_json TEXT NOT NULL CHECK(json_valid(request_json)),
+  interaction_state TEXT NOT NULL
+    CHECK(interaction_state IN('requested','responded','retrying','closed')),
+  outcome TEXT CHECK(outcome IN(
+    'accepted','declined','cancelled','expired','run_terminal',
+    'retry_completed','retry_failed'
+  )),
+  interaction_version INTEGER NOT NULL CHECK(interaction_version >= 1),
+  deadline TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  closed_at TEXT,
+  creation_intent_hash TEXT NOT NULL,
+  UNIQUE(run_id, operation_id, generation, logical_request_key),
+  CHECK(length(binding_hash)=64 AND binding_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK(interaction_state='closed' OR closed_at IS NULL),
+  CHECK(interaction_state<>'closed' OR (closed_at IS NOT NULL AND outcome IS NOT NULL))
+);
+CREATE INDEX idx_mcp_interactions_principal
+ON mcp_interactions(tenant_id,user_id,interaction_state,created_at,interaction_id);
+CREATE INDEX idx_mcp_interactions_retry
+ON mcp_interactions(interaction_state,updated_at,interaction_id);
+CREATE TABLE mcp_interaction_secrets(
+  interaction_id TEXT NOT NULL PRIMARY KEY
+    REFERENCES mcp_interactions(interaction_id) ON DELETE CASCADE,
+  request_ciphertext TEXT NOT NULL CHECK(substr(request_ciphertext,1,7)='enc:v1:'),
+  request_secret_hash TEXT NOT NULL,
+  response_ciphertext TEXT,
+  response_hash TEXT,
+  CHECK(length(request_secret_hash)=64 AND request_secret_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK((response_ciphertext IS NULL)=(response_hash IS NULL)),
+  CHECK(response_ciphertext IS NULL OR substr(response_ciphertext,1,7)='enc:v1:'),
+  CHECK(response_hash IS NULL OR
+        (length(response_hash)=64 AND response_hash NOT GLOB '*[^0-9a-f]*'))
+);
+CREATE TABLE mcp_interaction_transition_receipts(
+  interaction_id TEXT NOT NULL
+    REFERENCES mcp_interactions(interaction_id) ON DELETE CASCADE,
+  request_id TEXT NOT NULL,
+  intent_hash TEXT NOT NULL,
+  result_version INTEGER NOT NULL CHECK(result_version >= 1),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(interaction_id,request_id)
+);
+CREATE TABLE mcp_oauth_transactions(
+  transaction_id TEXT NOT NULL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  server_id TEXT NOT NULL,
+  issuer TEXT NOT NULL,
+  resource TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  redirect_uri TEXT NOT NULL,
+  scopes_json TEXT NOT NULL CHECK(json_valid(scopes_json)),
+  state_hash TEXT NOT NULL,
+  transaction_state TEXT NOT NULL CHECK(transaction_state IN('pending','consumed','expired')),
+  transaction_version INTEGER NOT NULL CHECK(transaction_version >= 1),
+  transaction_ciphertext TEXT NOT NULL CHECK(substr(transaction_ciphertext,1,7)='enc:v1:'),
+  transaction_secret_hash TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  consumed_at TEXT,
+  creation_intent_hash TEXT NOT NULL,
+  CHECK(length(state_hash)=64 AND state_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK(length(transaction_secret_hash)=64 AND transaction_secret_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK((transaction_state='pending' AND consumed_at IS NULL) OR
+        (transaction_state<>'pending' AND consumed_at IS NOT NULL))
+);
+CREATE INDEX idx_mcp_oauth_transactions_expiry
+ON mcp_oauth_transactions(transaction_state,expires_at,transaction_id);
+CREATE TABLE mcp_oauth_transaction_receipts(
+  transaction_id TEXT NOT NULL
+    REFERENCES mcp_oauth_transactions(transaction_id) ON DELETE CASCADE,
+  request_id TEXT NOT NULL,
+  intent_hash TEXT NOT NULL,
+  result_version INTEGER NOT NULL CHECK(result_version >= 1),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(transaction_id,request_id)
+);
+CREATE TABLE mcp_oauth_credentials(
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  server_id TEXT NOT NULL,
+  issuer TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  resource TEXT NOT NULL,
+  scopes_json TEXT NOT NULL CHECK(json_valid(scopes_json)),
+  token_type TEXT NOT NULL CHECK(token_type='Bearer'),
+  credential_generation INTEGER NOT NULL CHECK(credential_generation >= 1),
+  access_ciphertext TEXT NOT NULL CHECK(substr(access_ciphertext,1,7)='enc:v1:'),
+  access_token_hash TEXT NOT NULL,
+  refresh_ciphertext TEXT,
+  refresh_token_hash TEXT,
+  access_expires_at TEXT,
+  updated_at TEXT NOT NULL,
+  revoked_at TEXT,
+  PRIMARY KEY(tenant_id,user_id,server_id),
+  CHECK(length(access_token_hash)=64 AND access_token_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK((refresh_ciphertext IS NULL)=(refresh_token_hash IS NULL)),
+  CHECK(refresh_ciphertext IS NULL OR substr(refresh_ciphertext,1,7)='enc:v1:'),
+  CHECK(refresh_token_hash IS NULL OR
+        (length(refresh_token_hash)=64 AND refresh_token_hash NOT GLOB '*[^0-9a-f]*'))
+);
+CREATE TABLE mcp_oauth_refresh_leases(
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  server_id TEXT NOT NULL,
+  credential_generation INTEGER NOT NULL CHECK(credential_generation >= 1),
+  lease_owner TEXT NOT NULL,
+  lease_expires_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  dispatched_at TEXT,
+  PRIMARY KEY(tenant_id,user_id,server_id),
+  FOREIGN KEY(tenant_id,user_id,server_id)
+    REFERENCES mcp_oauth_credentials(tenant_id,user_id,server_id) ON DELETE CASCADE,
+  CHECK(lease_owner<>''),
+  CHECK(dispatched_at IS NULL OR dispatched_at>=updated_at)
+);
+CREATE TABLE mcp_oauth_credential_receipts(
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  server_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  intent_hash TEXT NOT NULL,
+  result_generation INTEGER NOT NULL CHECK(result_generation >= 1),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(tenant_id,user_id,server_id,request_id)
+);
+CREATE TABLE mcp_remote_tasks(
+  task_id TEXT NOT NULL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  logical_request_key TEXT NOT NULL,
+  server_id TEXT NOT NULL,
+  binding_hash TEXT NOT NULL,
+  protocol_version TEXT NOT NULL,
+  capability_id TEXT NOT NULL,
+  remote_task_ciphertext TEXT NOT NULL CHECK(substr(remote_task_ciphertext,1,7)='enc:v1:'),
+  remote_task_hash TEXT NOT NULL,
+  task_status TEXT NOT NULL CHECK(task_status IN(
+    'working','input_required','completed','failed','cancelled','expired'
+  )),
+  task_version INTEGER NOT NULL CHECK(task_version>=1),
+  remote_created_at TEXT NOT NULL,
+  remote_updated_at TEXT NOT NULL,
+  ttl_deadline TEXT NOT NULL,
+  poll_interval_ms INTEGER NOT NULL CHECK(poll_interval_ms>=1 AND poll_interval_ms<=86400000),
+  next_poll_at TEXT,
+  lease_owner TEXT,
+  lease_epoch INTEGER NOT NULL DEFAULT 0 CHECK(lease_epoch>=0),
+  lease_expires_at TEXT,
+  latest_payload_ciphertext TEXT NOT NULL CHECK(substr(latest_payload_ciphertext,1,7)='enc:v1:'),
+  latest_payload_hash TEXT NOT NULL,
+  terminal_receipt_hash TEXT,
+  terminal_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  creation_intent_hash TEXT NOT NULL,
+  UNIQUE(run_id,operation_id,logical_request_key),
+  CHECK(task_id<>'' AND tenant_id<>'' AND user_id<>'' AND run_id<>'' AND operation_id<>''),
+  CHECK(length(binding_hash)=64 AND binding_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK(length(remote_task_hash)=64 AND remote_task_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK(length(latest_payload_hash)=64 AND latest_payload_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK(terminal_receipt_hash IS NULL OR
+        (length(terminal_receipt_hash)=64 AND terminal_receipt_hash NOT GLOB '*[^0-9a-f]*')),
+  CHECK((lease_owner IS NULL)=(lease_expires_at IS NULL)),
+  CHECK(
+    (task_status IN('completed','failed','cancelled','expired')
+      AND next_poll_at IS NULL AND terminal_receipt_hash IS NOT NULL AND terminal_at IS NOT NULL)
+    OR
+    (task_status IN('working','input_required')
+      AND next_poll_at IS NOT NULL AND terminal_receipt_hash IS NULL AND terminal_at IS NULL)
+  )
+);
+CREATE INDEX idx_mcp_remote_tasks_claim
+ON mcp_remote_tasks(task_status,next_poll_at,lease_expires_at,task_id);
+CREATE INDEX idx_mcp_remote_tasks_expiry
+ON mcp_remote_tasks(task_status,ttl_deadline,task_id);
+CREATE TABLE mcp_remote_task_receipts(
+  task_id TEXT NOT NULL REFERENCES mcp_remote_tasks(task_id) ON DELETE CASCADE,
+  request_id TEXT NOT NULL,
+  intent_hash TEXT NOT NULL,
+  result_version INTEGER NOT NULL CHECK(result_version>=1),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(task_id,request_id)
+);
+CREATE TABLE mcp_server_tasks(
+  task_id TEXT NOT NULL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  run_id TEXT NOT NULL UNIQUE,
+  agent_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  CHECK(task_id<>'' AND length(task_id)<=256),
+  CHECK(tenant_id<>'' AND user_id<>'' AND agent_id<>'')
+);
+CREATE INDEX idx_mcp_server_tasks_expiry
+ON mcp_server_tasks(expires_at,task_id);
 CREATE TABLE workflow_definition_public_metadata(
   definition_id TEXT NOT NULL,
   definition_revision_id TEXT NOT NULL,
@@ -2936,7 +3147,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-ed759e21-5c5d-42e9-90d3-744029ea19b2',
+    'durable-schema-8b03b243-1b08-438e-bd21-3a37711e0489',
     'sqlite'
 );
 

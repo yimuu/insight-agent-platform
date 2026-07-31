@@ -3,8 +3,9 @@ use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 use insight_agent_platform::{
     config::{
         ArtifactStoreProvider, AuthConfig, DeploymentMode, HistoryConfig,
-        LiveRunStreamBrokerProvider, ModelInputModality, PlatformConfig, PlatformConfigError,
-        ProviderExtensionSource, ProviderTransportPolicy,
+        LiveRunStreamBrokerProvider, McpClientAuthorizationConfig, McpClientTransportConfig,
+        McpDiscoveryConfig, McpEffectConfig, McpInteractionConfig, ModelInputModality,
+        PlatformConfig, PlatformConfigError, ProviderExtensionSource, ProviderTransportPolicy,
     },
     engine::PersistenceMode,
     resources::config::load_model_registry_with_env,
@@ -80,6 +81,331 @@ fn strict_parser_rejects_unknown_top_level_and_nested_fields() {
     let error = load(&path, BTreeMap::new()).unwrap_err();
     assert_eq!(error.code(), "PLATFORM_CONFIG_INVALID");
     assert!(!error.to_string().is_empty());
+}
+
+#[test]
+fn mcp_config_is_strict_bounded_and_secret_backed() {
+    let yaml = format!(
+        "{}{}",
+        base_yaml("  mode: disabled"),
+        r#"
+mcp:
+  version: 1
+  protocol:
+    preferred: "2026-07-28"
+  client:
+    enabled: true
+    servers:
+      engineering:
+        transport:
+          type: streamable_http
+          endpoint: http://127.0.0.1:9000/mcp
+          allow_plaintext_loopback: true
+          connect_timeout: 2s
+          request_timeout: 30s
+        discovery:
+          type: live_service_account
+        authorization:
+          type: bearer_env
+          token_env: MCP_ENGINEERING_TOKEN
+        imports:
+          tools:
+            - remote: search_repositories
+              as: engineering_search
+              effect: read_only
+              idempotency: idempotent
+              cancellation: cooperative
+              approval: never
+              input_required: denied
+              tasks: denied
+              terminal_only_compatible: true
+        limits:
+          max_request_bytes: 1048576
+          max_response_bytes: 16777216
+          max_sse_line_bytes: 65536
+          max_sse_event_bytes: 1048576
+          max_content_items: 128
+          max_catalog_items: 4096
+  server:
+    enabled: false
+    authorization:
+      type: disabled
+"#
+    );
+    let (_directory, path) = write_config(&yaml);
+    let config = load(
+        &path,
+        BTreeMap::from([(
+            "MCP_ENGINEERING_TOKEN".to_owned(),
+            "fixture-secret".to_owned(),
+        )]),
+    )
+    .unwrap();
+    let server = &config.mcp.client.servers["engineering"];
+    assert!(matches!(
+        server.transport,
+        McpClientTransportConfig::StreamableHttp {
+            allow_plaintext_loopback: true,
+            ..
+        }
+    ));
+    assert_eq!(server.discovery, McpDiscoveryConfig::LiveServiceAccount);
+    assert!(matches!(
+        server.authorization,
+        McpClientAuthorizationConfig::BearerEnv { .. }
+    ));
+    assert!(!format!("{:?}", server.authorization).contains("fixture-secret"));
+    assert_eq!(server.imports.tools[0].effect, McpEffectConfig::ReadOnly);
+    assert_eq!(
+        server.imports.tools[0].input_required,
+        McpInteractionConfig::Denied
+    );
+
+    let invalid = yaml.replace(
+        "          max_catalog_items: 4096",
+        "          max_catalog_items: 0",
+    );
+    let (_directory, path) = write_config(&invalid);
+    assert_eq!(
+        load(
+            &path,
+            BTreeMap::from([(
+                "MCP_ENGINEERING_TOKEN".to_owned(),
+                "fixture-secret".to_owned()
+            )])
+        )
+        .unwrap_err()
+        .code(),
+        "PLATFORM_MCP_INVALID"
+    );
+}
+
+#[test]
+fn mcp_config_rejects_unknown_fields_and_unsafe_remote_plaintext() {
+    let base = format!(
+        "{}{}",
+        base_yaml("  mode: disabled"),
+        r#"
+mcp:
+  version: 1
+  protocol:
+    preferred: "2026-07-28"
+  client:
+    enabled: true
+    servers:
+      remote:
+        transport:
+          type: streamable_http
+          endpoint: http://example.com/mcp
+          allow_plaintext_loopback: true
+        discovery:
+          type: live_service_account
+        authorization:
+          type: none
+        imports: {}
+  server:
+    enabled: false
+    authorization:
+      type: disabled
+"#
+    );
+    let (_directory, path) = write_config(&base);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_MCP_INVALID"
+    );
+
+    let unknown = base
+        .replace("http://example.com/mcp", "https://example.com/mcp")
+        .replace(
+            "        imports: {}",
+            "        imports: {}\n        magic: true",
+        );
+    let (_directory, path) = write_config(&unknown);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_CONFIG_INVALID"
+    );
+}
+
+#[test]
+fn oauth_user_mcp_tools_cannot_claim_terminal_only_compatibility() {
+    let yaml = format!(
+        "{}{}",
+        base_yaml("  mode: disabled"),
+        r#"
+mcp:
+  version: 1
+  protocol:
+    preferred: "2026-07-28"
+  client:
+    enabled: true
+    servers:
+      user-calendar:
+        transport:
+          type: streamable_http
+          endpoint: https://calendar.example.test/mcp
+        discovery:
+          type: signed_manifest
+          path: ../mcp/calendar.json
+          trust_keys_env: MCP_MANIFEST_KEYS
+        authorization:
+          type: oauth_user
+          scopes: [calendar.read]
+          client_id: insight-agent-platform
+          redirect_uri: https://agents.example.test/v1/mcp/oauth/callback
+        imports:
+          tools:
+            - remote: events.list
+              as: calendar_events
+              effect: read_only
+              idempotency: idempotent
+              cancellation: cooperative
+              approval: never
+              input_required: denied
+              tasks: denied
+              terminal_only_compatible: true
+  server:
+    enabled: false
+    authorization:
+      type: disabled
+"#
+    );
+    let (_directory, path) = write_config(&yaml);
+    let error = load(
+        &path,
+        BTreeMap::from([("MCP_MANIFEST_KEYS".to_owned(), "fixture-keys".to_owned())]),
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "PLATFORM_MCP_INVALID");
+    assert!(error
+        .to_string()
+        .contains("cannot be terminal-only compatible"));
+}
+
+#[test]
+fn mcp_oauth_resource_server_requires_explicit_scope_authority() {
+    let yaml = format!(
+        "{}{}",
+        base_yaml("  mode: disabled"),
+        r#"
+mcp:
+  version: 1
+  protocol:
+    preferred: "2026-07-28"
+  client:
+    enabled: false
+    servers: {}
+  server:
+    enabled: true
+    endpoint: /mcp
+    authorization:
+      type: oauth_resource_server
+      resource: https://agents.example.com/mcp
+      authorization_servers:
+        - https://identity.example.com
+      required_scopes: [mcp.invoke]
+"#
+    );
+    let (_directory, path) = write_config(&yaml);
+    let config = load(&path, BTreeMap::new()).unwrap();
+    assert!(matches!(
+        &config.mcp.server.authorization,
+        insight_agent_platform::config::McpServerAuthorizationConfig::OauthResourceServer {
+            required_scopes,
+            ..
+        } if required_scopes.contains("mcp.invoke")
+    ));
+
+    let missing_scope = yaml.replace("      required_scopes: [mcp.invoke]\n", "");
+    let (_directory, path) = write_config(&missing_scope);
+    assert!(load(&path, BTreeMap::new()).is_err());
+}
+
+#[test]
+fn mcp_server_public_resources_prompts_and_export_scopes_are_closed() {
+    let yaml = format!(
+        "{}{}",
+        base_yaml("  mode: disabled"),
+        r#"
+mcp:
+  version: 1
+  protocol:
+    preferred: "2026-07-28"
+  client:
+    enabled: false
+    servers: {}
+  server:
+    enabled: true
+    endpoint: /mcp
+    authorization:
+      type: oauth_resource_server
+      resource: https://agents.example.com/mcp
+      authorization_servers: [https://identity.example.com]
+      required_scopes: [mcp.read]
+    exports:
+      agents:
+        - agent: researcher
+          as: researcher
+          execution: task_preferred
+          input_required: allowed
+          required_scope: mcp.read
+      resources:
+        - uri: insight://public/guide
+          name: public_guide
+          title: Public guide
+          mime_type: text/markdown
+          text: "Safe public content."
+          required_scope: mcp.read
+      prompts:
+        - name: review_topic
+          description: Review a user-selected topic.
+          required_scope: mcp.read
+          arguments:
+            - name: topic
+              required: true
+          messages:
+            - role: user
+              text: "Review {{topic}}."
+          completions:
+            topic: [security, reliability]
+"#
+    );
+    let (_directory, path) = write_config(&yaml);
+    let config = load(&path, BTreeMap::new()).unwrap();
+    assert_eq!(
+        config.mcp.server.exports.resources[0].uri,
+        "insight://public/guide"
+    );
+    assert_eq!(
+        config.mcp.server.exports.agents[0].input_required,
+        McpInteractionConfig::Allowed
+    );
+    assert_eq!(
+        config.mcp.server.exports.prompts[0].completions["topic"],
+        ["security", "reliability"]
+    );
+
+    let missing_scope = yaml.replace("          required_scope: mcp.read\n", "");
+    let (_directory, path) = write_config(&missing_scope);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_MCP_INVALID"
+    );
+
+    let hidden_argument = yaml.replace("Review {{topic}}.", "Review {{internal_prompt}}.");
+    let (_directory, path) = write_config(&hidden_argument);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_MCP_INVALID"
+    );
+
+    let implicit_interaction_policy = yaml.replace("          input_required: allowed\n", "");
+    let (_directory, path) = write_config(&implicit_interaction_policy);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_CONFIG_INVALID"
+    );
 }
 
 #[test]

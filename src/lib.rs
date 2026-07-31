@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod config;
 pub mod dsl;
 pub mod engine;
+pub mod mcp;
 pub mod resources;
 pub mod runtime;
 #[cfg(test)]

@@ -4,7 +4,7 @@
 use super::RepositoryErrorExt as _;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -19,7 +19,7 @@ use insight_engine::{
         ResponseItemAuthority, TaskExecutionRequest, TaskExecutionResult, WorkerFailure,
         WorkerFailureClass,
     },
-    ActivationId, AttemptNo, ContentHash, DefinitionRevisionId, DeploymentRevisionId,
+    ActivationId, ArtifactRef, AttemptNo, ContentHash, DefinitionRevisionId, DeploymentRevisionId,
     EffectEvidence, ExecutionRevisionPin, LeaseEpoch, LeaseFence, NodeId, PlannedSchedulerAction,
     RunId, RuntimeValue, SafeError, SchedulerAction, SchedulerCheckpointId, SchedulerFacts,
     SchedulerTaskId, TransitionOutcome, ValueRef,
@@ -464,6 +464,8 @@ impl SchedulerStoredValue {
 pub struct SchedulerTaskSuccess {
     result: TaskExecutionResult,
     value_refs: BTreeMap<DataPortId, ValueRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    referenced_artifacts: Vec<ArtifactRef>,
 }
 
 #[derive(Deserialize)]
@@ -471,6 +473,8 @@ pub struct SchedulerTaskSuccess {
 struct SchedulerTaskSuccessWire {
     result: TaskExecutionResult,
     value_refs: BTreeMap<DataPortId, ValueRef>,
+    #[serde(default)]
+    referenced_artifacts: Vec<ArtifactRef>,
 }
 
 impl<'de> Deserialize<'de> for SchedulerTaskSuccess {
@@ -479,7 +483,8 @@ impl<'de> Deserialize<'de> for SchedulerTaskSuccess {
         D: Deserializer<'de>,
     {
         let wire = SchedulerTaskSuccessWire::deserialize(deserializer)?;
-        Self::with_value_refs(wire.result, wire.value_refs).map_err(D::Error::custom)
+        Self::with_value_refs_and_artifacts(wire.result, wire.value_refs, wire.referenced_artifacts)
+            .map_err(D::Error::custom)
     }
 }
 
@@ -505,10 +510,22 @@ impl SchedulerTaskSuccess {
         result: TaskExecutionResult,
         value_refs: BTreeMap<DataPortId, ValueRef>,
     ) -> Result<Self, RepositoryError> {
+        Self::with_value_refs_and_artifacts(result, value_refs, Vec::new())
+    }
+
+    pub fn with_value_refs_and_artifacts(
+        result: TaskExecutionResult,
+        value_refs: BTreeMap<DataPortId, ValueRef>,
+        referenced_artifacts: Vec<ArtifactRef>,
+    ) -> Result<Self, RepositoryError> {
         if result.outputs().keys().ne(value_refs.keys()) {
             return Err(RepositoryError::invalid_configuration());
         }
-        let success = Self { result, value_refs };
+        let success = Self {
+            result,
+            value_refs,
+            referenced_artifacts,
+        };
         success.validate_value_ref_integrity()?;
         Ok(success)
     }
@@ -517,7 +534,10 @@ impl SchedulerTaskSuccess {
     /// inline/artifact reference. Repository commits call this again so a
     /// value/reference pair can never rely only on an adapter-side check.
     pub(crate) fn validate_value_ref_integrity(&self) -> Result<(), RepositoryError> {
-        if self.result.outputs().keys().ne(self.value_refs.keys()) {
+        if self.result.outputs().keys().ne(self.value_refs.keys())
+            || !self.result.artifact_payloads().is_empty()
+            || self.referenced_artifacts.len() > 256
+        {
             return Err(RepositoryError::invalid_data());
         }
         for (port_id, runtime_value) in self.result.outputs() {
@@ -527,6 +547,18 @@ impl SchedulerTaskSuccess {
                 .ok_or_else(RepositoryError::invalid_data)?;
             validate_runtime_value_ref(runtime_value, value_ref)?;
         }
+        let mut artifact_ids = BTreeSet::new();
+        for artifact in &self.referenced_artifacts {
+            if !artifact_ids.insert(artifact.artifact_id().clone())
+                || !self
+                    .result
+                    .outputs()
+                    .values()
+                    .any(|output| value_contains_artifact(output.value(), artifact))
+            {
+                return Err(RepositoryError::invalid_data());
+            }
+        }
         Ok(())
     }
 
@@ -534,7 +566,11 @@ impl SchedulerTaskSuccess {
         result: TaskExecutionResult,
         value_refs: BTreeMap<DataPortId, ValueRef>,
     ) -> Self {
-        Self { result, value_refs }
+        Self {
+            result,
+            value_refs,
+            referenced_artifacts: Vec::new(),
+        }
     }
 
     pub fn result(&self) -> &TaskExecutionResult {
@@ -544,6 +580,31 @@ impl SchedulerTaskSuccess {
     pub fn value_refs(&self) -> &BTreeMap<DataPortId, ValueRef> {
         &self.value_refs
     }
+
+    pub fn referenced_artifacts(&self) -> &[ArtifactRef] {
+        &self.referenced_artifacts
+    }
+}
+
+fn value_contains_artifact(value: &serde_json::Value, artifact: &ArtifactRef) -> bool {
+    let Ok(expected) = serde_json::to_value(artifact) else {
+        return false;
+    };
+    fn contains(value: &serde_json::Value, expected: &serde_json::Value) -> bool {
+        if value == expected {
+            return true;
+        }
+        match value {
+            serde_json::Value::Array(values) => {
+                values.iter().any(|value| contains(value, expected))
+            }
+            serde_json::Value::Object(values) => {
+                values.values().any(|value| contains(value, expected))
+            }
+            _ => false,
+        }
+    }
+    contains(value, &expected)
 }
 
 pub(crate) fn scheduler_validation_fixture(

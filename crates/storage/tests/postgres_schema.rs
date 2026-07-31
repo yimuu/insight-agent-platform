@@ -146,7 +146,7 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(tables.len(), 63, "the complete table contract must install");
+    assert_eq!(tables.len(), 74, "the complete table contract must install");
     for table in [
         "durable_schema_contract",
         "workflow_runs",
@@ -170,6 +170,17 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
         "conversation_messages",
         "conversation_summaries",
         "conversation_summary_jobs",
+        "mcp_interactions",
+        "mcp_interaction_secrets",
+        "mcp_interaction_transition_receipts",
+        "mcp_oauth_transactions",
+        "mcp_oauth_transaction_receipts",
+        "mcp_oauth_credentials",
+        "mcp_oauth_refresh_leases",
+        "mcp_oauth_credential_receipts",
+        "mcp_remote_tasks",
+        "mcp_remote_task_receipts",
+        "mcp_server_tasks",
     ] {
         assert!(
             tables.contains(table),
@@ -189,7 +200,7 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .collect::<BTreeSet<_>>();
     assert_eq!(
         indexes.len(),
-        196,
+        216,
         "all explicit and constraint-backed indexes must be installed"
     );
     for (index, table) in [
@@ -220,6 +231,15 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
             "idx_terminal_artifact_staging_reclaim",
             "terminal_artifact_staging",
         ),
+        ("idx_mcp_interactions_principal", "mcp_interactions"),
+        ("idx_mcp_interactions_retry", "mcp_interactions"),
+        (
+            "idx_mcp_oauth_transactions_expiry",
+            "mcp_oauth_transactions",
+        ),
+        ("idx_mcp_remote_tasks_claim", "mcp_remote_tasks"),
+        ("idx_mcp_remote_tasks_expiry", "mcp_remote_tasks"),
+        ("idx_mcp_server_tasks_expiry", "mcp_server_tasks"),
     ] {
         assert!(
             indexes.contains(&(index.to_owned(), table.to_owned())),

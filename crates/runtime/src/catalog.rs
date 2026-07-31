@@ -1368,7 +1368,9 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                     ));
                 }
                 let mut tool_bindings = Vec::with_capacity(tool_names.len());
+                let mut linked_action_ids = BTreeSet::new();
                 let mut linked_tool_names = BTreeSet::new();
+                let mut model_name_by_action_id = BTreeMap::new();
                 for tool in tool_names {
                     let DescriptorValue::String(tool_name) = tool else {
                         return Err(CompileError::new(
@@ -1376,7 +1378,7 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                             "llm tool whitelist contains a non-string name",
                         ));
                     };
-                    if !linked_tool_names.insert(tool_name.as_str()) {
+                    if !linked_action_ids.insert(tool_name.clone()) {
                         return Err(CompileError::new(
                             "LLM_TOOL_BINDING_INVALID",
                             "llm tool whitelist contains a duplicate name",
@@ -1391,6 +1393,14 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                     action.validate_public_policy_for_link()?;
                     let action_identity = action.identity();
                     let action_descriptor = action.descriptor();
+                    let model_tool = action.model_tool();
+                    if !linked_tool_names.insert(model_tool.name.clone()) {
+                        return Err(CompileError::new(
+                            "LLM_TOOL_BINDING_INVALID",
+                            "llm tool whitelist resolves to duplicate model tool names",
+                        ));
+                    }
+                    model_name_by_action_id.insert(tool_name.clone(), model_tool.name.clone());
                     let effective_public = if publish {
                         action.public_policy().clone()
                     } else {
@@ -1417,7 +1427,9 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                     )
                     .map_err(plan_compile_error)?;
                     tool_bindings.push(serde_json::json!({
-                        "name": tool_name,
+                        "name": model_tool.name,
+                        "title": model_tool.title,
+                        "description": model_tool.description,
                         "action_id": action_identity.id,
                         "action_version": action_identity.version.to_string(),
                         "descriptor_hash": action_identity.descriptor_hash,
@@ -1451,7 +1463,7 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                             "llm cannot require a tool when its whitelist is empty",
                         ))
                     }
-                    tool if linked_tool_names.contains(tool) => {}
+                    tool if linked_action_ids.contains(tool) => {}
                     _ => {
                         return Err(CompileError::new(
                             "LLM_TOOL_BINDING_INVALID",
@@ -1459,6 +1471,18 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                         ))
                     }
                 }
+                let frozen_tool_choice = match tool_choice {
+                    "auto" | "required" => tool_choice,
+                    action_id => model_name_by_action_id
+                        .get(action_id)
+                        .map(String::as_str)
+                        .ok_or_else(|| {
+                            CompileError::new(
+                                "LLM_TOOL_BINDING_INVALID",
+                                "llm tool choice is outside its frozen whitelist",
+                            )
+                        })?,
+                };
                 let tool_limits = descriptor
                     .public_configuration
                     .get("tool_limits")
@@ -1507,7 +1531,7 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                     "model_binding": identity.evidence(),
                     "request_mode": request_mode.as_str(),
                     "request_capabilities": request_capabilities,
-                    "tool_choice": tool_choice,
+                    "tool_choice": frozen_tool_choice,
                     "tool_limits": {"max_rounds": max_rounds, "max_calls": max_calls},
                     "tools": tool_bindings,
                 });
@@ -1831,6 +1855,15 @@ pub struct DeployedAgent {
     subflows: SubflowContractRegistry,
     versioned_plan: VersionedPlan,
     risk_diagnostics: Vec<DeploymentRiskDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentMcpCapabilitySummary {
+    pub server_ids: BTreeSet<String>,
+    pub required_scopes: BTreeSet<String>,
+    pub interactions: bool,
+    pub tasks: bool,
+    pub terminal_only_compatible: bool,
 }
 
 impl DeployedAgent {
@@ -2328,6 +2361,37 @@ impl DeployedAgent {
         &self.risk_diagnostics
     }
 
+    pub fn mcp_capability_summary(&self) -> Option<AgentMcpCapabilitySummary> {
+        let bindings =
+            durable_model_adapter::versioned_plan_resolved_bindings(&self.versioned_plan);
+        let mut server_ids = BTreeSet::new();
+        let mut required_scopes = BTreeSet::new();
+        let mut capabilities = BTreeSet::new();
+        collect_mcp_binding_facts(
+            bindings,
+            &mut server_ids,
+            &mut required_scopes,
+            &mut capabilities,
+        );
+        if server_ids.is_empty()
+            && !capabilities
+                .iter()
+                .any(|capability| capability.starts_with("runtime.mcp."))
+        {
+            return None;
+        }
+        let interactions = capabilities.contains("runtime.mcp.interaction.v1");
+        let tasks = capabilities.contains("runtime.mcp.tasks.v1");
+        let requires_full = capabilities.contains("runtime.mcp.full_persistence.v1");
+        Some(AgentMcpCapabilitySummary {
+            server_ids,
+            required_scopes,
+            interactions,
+            tasks,
+            terminal_only_compatible: !requires_full && !interactions && !tasks,
+        })
+    }
+
     pub fn linked_plan(&self) -> Result<LinkedPlan<'_>, CompileError> {
         LinkedPlan::link(self.published.plan(), &self.descriptors, &self.subflows)
             .map_err(plan_compile_error)
@@ -2355,6 +2419,68 @@ impl DeployedAgent {
                 contract.worker().worker_version(),
             )
         })
+    }
+}
+
+fn collect_mcp_binding_facts(
+    value: &Value,
+    server_ids: &mut BTreeSet<String>,
+    required_scopes: &mut BTreeSet<String>,
+    capabilities: &mut BTreeSet<String>,
+) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_mcp_binding_facts(value, server_ids, required_scopes, capabilities);
+            }
+        }
+        Value::Object(object) => {
+            for (key, value) in object {
+                if matches!(key.as_str(), "action_id" | "implementation") {
+                    if let Some(identity) = value.as_str() {
+                        if let Some(rest) = identity.strip_prefix("mcp.") {
+                            if let Some(server_id) = rest.split('.').next().filter(|server_id| {
+                                !server_id.is_empty()
+                                    && server_id.len() <= 64
+                                    && server_id.bytes().all(|byte| {
+                                        byte.is_ascii_lowercase()
+                                            || byte.is_ascii_digit()
+                                            || byte == b'-'
+                                    })
+                            }) {
+                                server_ids.insert(server_id.to_owned());
+                            }
+                        }
+                    }
+                } else if key == "required_capabilities" {
+                    if let Some(values) = value.as_array() {
+                        capabilities.extend(
+                            values
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .filter(|value| value.starts_with("runtime.mcp."))
+                                .map(str::to_owned),
+                        );
+                    }
+                } else if key == "required_scopes" {
+                    if let Some(values) = value.as_array() {
+                        required_scopes.extend(
+                            values
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .filter(|value| {
+                                    !value.is_empty()
+                                        && value.len() <= 256
+                                        && !value.chars().any(char::is_control)
+                                })
+                                .map(str::to_owned),
+                        );
+                    }
+                }
+                collect_mcp_binding_facts(value, server_ids, required_scopes, capabilities);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
 }
 
@@ -2566,15 +2692,21 @@ fn worker_requires_durable_fence(policy: &WorkerEffectPolicy) -> bool {
 }
 
 fn binding_requires_durable_fence(binding: &Value) -> bool {
+    const FULL_RUNTIME_CAPABILITIES: [&str; 5] = [
+        "runtime.durable_effect_fence.v1",
+        "durable_effect_fence",
+        "runtime.mcp.full_persistence.v1",
+        "runtime.mcp.interaction.v1",
+        "runtime.mcp.tasks.v1",
+    ];
     let declares_capability = binding
         .get("required_capabilities")
         .and_then(Value::as_array)
         .is_some_and(|capabilities| {
             capabilities.iter().any(|capability| {
-                matches!(
-                    capability.as_str(),
-                    Some("runtime.durable_effect_fence.v1" | "durable_effect_fence")
-                )
+                capability
+                    .as_str()
+                    .is_some_and(|value| FULL_RUNTIME_CAPABILITIES.contains(&value))
             })
         });
     let nested_tool_requires_fence =
@@ -2593,13 +2725,9 @@ fn binding_requires_durable_fence(binding: &Value) -> bool {
                             .and_then(Value::as_array)
                             .is_some_and(|capabilities| {
                                 capabilities.iter().any(|capability| {
-                                    matches!(
-                                        capability.as_str(),
-                                        Some(
-                                            "runtime.durable_effect_fence.v1"
-                                                | "durable_effect_fence"
-                                        )
-                                    )
+                                    capability.as_str().is_some_and(|value| {
+                                        FULL_RUNTIME_CAPABILITIES.contains(&value)
+                                    })
                                 })
                             })
                 })
@@ -3299,4 +3427,38 @@ fn validate_agent_directory_name(agent_id: &str) -> Result<(), CompileError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod mcp_capability_summary_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn binding_fact_collection_is_recursive_and_ignores_unbounded_remote_names() {
+        let binding = json!({
+            "implementation": "mcp.calendar.tool_find",
+            "tools": [{
+                "action_id": "mcp.engineering.tool_search",
+                "required_capabilities": [
+                    "runtime.mcp.interaction.v1",
+                    "runtime.mcp.tasks.v1"
+                ],
+                "required_scopes": ["repo.read"]
+            }],
+            "remote_tool_name": "customer/private/tool"
+        });
+        let mut server_ids = BTreeSet::new();
+        let mut scopes = BTreeSet::new();
+        let mut capabilities = BTreeSet::new();
+        collect_mcp_binding_facts(&binding, &mut server_ids, &mut scopes, &mut capabilities);
+        assert_eq!(
+            server_ids,
+            BTreeSet::from(["calendar".to_owned(), "engineering".to_owned()])
+        );
+        assert_eq!(scopes, BTreeSet::from(["repo.read".to_owned()]));
+        assert!(capabilities.contains("runtime.mcp.interaction.v1"));
+        assert!(capabilities.contains("runtime.mcp.tasks.v1"));
+        assert!(!server_ids.contains("customer/private/tool"));
+    }
 }

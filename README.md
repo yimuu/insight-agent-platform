@@ -8,6 +8,18 @@ lease/fence 与恢复；显式 opt-in 的 `terminal_only` 在 owner 进程内执
 
 当前只支持 `insight.agent/v1`，不提供旧 DSL 或旧运行内核兼容层。
 
+## MCP 支持
+
+平台已完整实现 MCP `2026-07-28` modern Host/Client 与 Server profile，以及独立协商的官方
+Tasks extension；`2025-11-25` 作为显式开启、与 modern path 隔离的 legacy client profile。
+Client 支持 stdio 与 Streamable HTTP，覆盖 Tools、Resources、Prompts、Completion、
+Subscriptions、durable Elicitation 和 HTTP Authorization；Server 通过独立 `/mcp` endpoint
+只暴露显式授权的 Agent、Action、Resource 与 Prompt。
+
+MCP 不绕过平台既有的 schema、effect、tenant、Deployment Revision、持久化与公开策略。
+配置示例、profile 矩阵、安全边界和 API 见
+[MCP 使用、运行与安全合同](docs/current/mcp.md)。
+
 ## 快速启动
 
 仓库要求 Rust `1.94.1`。Quickstart 只启用本地 `action_demo`，不需要模型密钥：
@@ -105,6 +117,7 @@ Action-only Quickstart 无需模型配置或模型密钥。私有网关、新模
 - [架构概览](docs/current/architecture.md)：执行模型、核心不变量与权威边界；
 - [DSL v1 指南](docs/current/dsl.md)：Agent 结构、类型、表达式和控制流；
 - [HTTP 与 SSE API](docs/current/api.md)：路由、幂等要求和响应流；
+- [MCP 使用、运行与安全合同](docs/current/mcp.md)：profiles、传输、授权、交互与安全边界；
 - [部署与运维](docs/current/operations.md)：Schema 预置、配置、存储、认证和生命周期；
 - [开发指南](docs/current/development.md)：代码导航和验证命令；
 - [变更记录](CHANGELOG.md)：发布版本的重要变化与兼容性说明。

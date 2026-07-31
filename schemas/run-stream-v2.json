@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:insight-agent-platform:run-stream:v2",
+  "title": "Insight Agent Platform run-stream/v2",
+  "description": "Closed public SSE data-frame envelope adding body-free durable interaction facts to run-stream/v1.",
+  "oneOf": [
+    {"$ref": "#/$defs/coreEvent"},
+    {"$ref": "#/$defs/interactionRequired"},
+    {"$ref": "#/$defs/interactionClosed"}
+  ],
+  "$defs": {
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\s/\\\\]+$"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "interactionMode": {
+      "enum": ["form", "url", "approval", "authorization"]
+    },
+    "interactionOutcome": {
+      "type": ["string", "null"],
+      "enum": [
+        "accepted",
+        "declined",
+        "cancelled",
+        "expired",
+        "run_terminal",
+        "retry_completed",
+        "retry_failed",
+        null
+      ]
+    },
+    "interactionSummary": {
+      "type": "object",
+      "properties": {
+        "interaction_id": {"$ref": "#/$defs/label"},
+        "source_kind": {"const": "mcp"},
+        "server_id": {"$ref": "#/$defs/label"},
+        "mode": {"$ref": "#/$defs/interactionMode"},
+        "state": {"enum": ["requested", "responded", "retrying", "closed"]},
+        "outcome": {"$ref": "#/$defs/interactionOutcome"},
+        "deadline": {"type": "string", "format": "date-time"},
+        "detail_url": {
+          "type": "string",
+          "pattern": "^/v1/mcp/interactions/[A-Za-z0-9._:-]+$"
+        }
+      },
+      "required": [
+        "interaction_id",
+        "source_kind",
+        "server_id",
+        "mode",
+        "state",
+        "outcome",
+        "deadline",
+        "detail_url"
+      ],
+      "additionalProperties": false
+    },
+    "terminalRun": {
+      "type": "object",
+      "properties": {
+        "id": {"$ref": "#/$defs/label"},
+        "object": {"const": "run"},
+        "status": {
+          "enum": ["completed", "failed", "timed_out", "cancelled", "interrupted"]
+        },
+        "output": {"type": "array"},
+        "result": {},
+        "error": {"type": "object"},
+        "tool_results": {"type": "array"},
+        "retrievals": {"type": "array"},
+        "usage": {"type": ["object", "null"]},
+        "usage_status": {"enum": ["complete", "partial", "unavailable"]},
+        "interactions": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {"$ref": "#/$defs/interactionSummary"}
+        }
+      },
+      "required": [
+        "id",
+        "object",
+        "status",
+        "output",
+        "tool_results",
+        "retrievals",
+        "usage",
+        "usage_status",
+        "interactions"
+      ],
+      "additionalProperties": false
+    },
+    "coreEvent": {
+      "type": "object",
+      "properties": {
+        "protocol": {"const": "run-stream/v2"},
+        "type": {
+          "enum": [
+            "run.lifecycle.created",
+            "run.lifecycle.running",
+            "run.output.item.added",
+            "run.output.content_part.added",
+            "run.output.text.delta",
+            "run.output.text.done",
+            "run.output.content_part.done",
+            "run.output.function_call.arguments.delta",
+            "run.output.function_call.arguments.done",
+            "run.output.item.done",
+            "run.output.file_search_call.in_progress",
+            "run.output.file_search_call.searching",
+            "run.output.file_search_call.completed",
+            "run.lifecycle.completed",
+            "run.lifecycle.failed",
+            "run.stream.error",
+            "run.tool.started",
+            "run.tool.progress",
+            "run.tool.completed",
+            "run.tool.failed",
+            "run.retrieval.completed",
+            "run.stream.gap",
+            "run.lifecycle.timed_out",
+            "run.lifecycle.cancelled",
+            "run.lifecycle.interrupted"
+          ]
+        },
+        "sequence_number": {"$ref": "#/$defs/sequence"},
+        "run": {"type": "object"},
+        "output_index": {"type": "integer", "minimum": 0},
+        "content_index": {"type": "integer", "minimum": 0},
+        "item_id": {"$ref": "#/$defs/label"},
+        "item": {"type": "object"},
+        "part": {"type": "object"},
+        "delta": {"type": "string"},
+        "text": {"type": "string"},
+        "name": {"$ref": "#/$defs/label"},
+        "arguments": {"type": ["string", "object"]},
+        "code": {"type": "string", "minLength": 1, "maxLength": 128},
+        "message": {"type": "string", "minLength": 1, "maxLength": 512},
+        "call_id": {"$ref": "#/$defs/label"},
+        "tool_name": {"$ref": "#/$defs/label"},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "content": {"type": "array"},
+        "error": {"type": "object"},
+        "retrieval_id": {"$ref": "#/$defs/label"},
+        "query": {"type": "string", "minLength": 1},
+        "results": {"type": "array"},
+        "attempt_no": {"type": "integer", "minimum": 1},
+        "missing_from": {"type": "integer", "minimum": 0},
+        "missing_to": {"type": ["integer", "null"], "minimum": 0},
+        "unknown_tail": {"type": "boolean"},
+        "action": {"const": "discard_provisional_item"}
+      },
+      "required": ["protocol", "type", "sequence_number"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "run.lifecycle.completed",
+                  "run.lifecycle.failed",
+                  "run.lifecycle.timed_out",
+                  "run.lifecycle.cancelled",
+                  "run.lifecycle.interrupted"
+                ]
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["run"],
+            "properties": {"run": {"$ref": "#/$defs/terminalRun"}}
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "interactionRequired": {
+      "type": "object",
+      "properties": {
+        "protocol": {"const": "run-stream/v2"},
+        "type": {"const": "run.interaction.required"},
+        "sequence_number": {"$ref": "#/$defs/sequence"},
+        "interaction_id": {"$ref": "#/$defs/label"},
+        "source_kind": {"const": "mcp"},
+        "server_id": {"$ref": "#/$defs/label"},
+        "mode": {"$ref": "#/$defs/interactionMode"},
+        "message": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "url_host": {"type": ["string", "null"], "maxLength": 253},
+        "deadline": {"type": "string", "format": "date-time"},
+        "detail_url": {
+          "type": "string",
+          "pattern": "^/v1/mcp/interactions/[A-Za-z0-9._:-]+$"
+        }
+      },
+      "required": [
+        "protocol",
+        "type",
+        "sequence_number",
+        "interaction_id",
+        "source_kind",
+        "server_id",
+        "mode",
+        "message",
+        "url_host",
+        "deadline",
+        "detail_url"
+      ],
+      "additionalProperties": false
+    },
+    "interactionClosed": {
+      "type": "object",
+      "properties": {
+        "protocol": {"const": "run-stream/v2"},
+        "type": {"const": "run.interaction.closed"},
+        "sequence_number": {"$ref": "#/$defs/sequence"},
+        "interaction_id": {"$ref": "#/$defs/label"},
+        "source_kind": {"const": "mcp"},
+        "server_id": {"$ref": "#/$defs/label"},
+        "outcome": {"$ref": "#/$defs/interactionOutcome"},
+        "detail_url": {
+          "type": "string",
+          "pattern": "^/v1/mcp/interactions/[A-Za-z0-9._:-]+$"
+        }
+      },
+      "required": [
+        "protocol",
+        "type",
+        "sequence_number",
+        "interaction_id",
+        "source_kind",
+        "server_id",
+        "outcome",
+        "detail_url"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

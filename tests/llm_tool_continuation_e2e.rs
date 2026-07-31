@@ -271,8 +271,8 @@ struct RecordingLookupAction {
 impl Action for RecordingLookupAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "lookup",
-            version: "1.0.0",
+            id: "lookup".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {"query": {"type": "string"}},

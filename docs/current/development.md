@@ -18,6 +18,7 @@ cargo test --locked --workspace --all-targets --all-features
 cargo test --locked --workspace --doc --all-features
 cargo audit
 cargo deny check
+bash scripts/qualify-mcp-external-sdk.sh
 ```
 
 其中：
@@ -28,6 +29,15 @@ cargo deny check
 - 真实 PostgreSQL 16 repository、恢复与竞态合同测试；
 - real-process restart、SIGINT 和 shutdown 测试；
 - 空数据库 Schema 安装、contract 校验、运行时零 DDL 和依赖策略检查。
+
+MCP 外部互操作门禁固定 TypeScript `@modelcontextprotocol/sdk@1.30.0` 和 Go SDK commit
+`91e4e1a0b8ca01cfa680f142815b1152a0513326`。依赖 lockfile 位于 `tests/interop/`，runner 使用真实
+子进程，覆盖平台 Client 到两个 SDK Server 的 stdio/Streamable HTTP、两个 SDK Client 到平台
+`/mcp` 的 Streamable HTTP，以及 Tasks。上游 SDK 在该固定版本尚未提供 modern high-level API 的
+部分由 fixture 中使用 SDK JSON-RPC/types/validator 的 `2026-07-28` adapter 承接，不能误报为
+high-level API 覆盖；完整边界见 [`tests/interop/README.md`](../../tests/interop/README.md)。
+成功运行会生成 `target/mcp-qualification/report.json`，发布证据另保存于
+[`docs/archive/qualifications/2026-07-30-complete-mcp-qualification.md`](../archive/qualifications/2026-07-30-complete-mcp-qualification.md)。
 
 完整 PostgreSQL 门禁必须在 PostgreSQL 16 上以 `CI=1` 运行，并设置
 `RUN_HISTORY_POSTGRES_URL` 和 `TEST_POSTGRES_URL`。CI 中这些变量必须存在，相关门禁不能静默跳过。
@@ -45,6 +55,7 @@ fail-closed evaluator；已完成的复现命令及正式证据路径保存在
 | `crates/dsl/src/` | 作者文档、表达式、类型检查、lowering 与 Graph authoring |
 | `crates/durable/src/` | 后端中立的 repository ports、commands、claims、receipts 与 projection models |
 | `crates/resources/src/` | Model/Action/Retrieval SPI、registry 与 OpenAI-compatible adapter |
+| `crates/mcp/src/` | MCP codec、wire、transport、OAuth、Tasks 与 Server dispatcher |
 | `crates/storage/src/` | SQLite/PostgreSQL、Graph SQL、Artifact store 与 PostgreSQL live broker adapter |
 | `crates/runtime/src/` | catalog/deployment、leaf adapter、scheduler/worker pump、RunService 与 live Run stream |
 | `crates/api/src/v1/` | `/v1` Axum HTTP、认证、错误映射与 SSE transport |
@@ -67,6 +78,14 @@ fail-closed evaluator；已完成的复现命令及正式证据路径保存在
 修改 Provider Catalog 时必须同步验证 Catalog digest、route/模型解析、官方 secret reference 和
 Deployment Revision non-interference；调用级参数不得下沉为 Catalog 默认值。添加自定义
 OpenAI-compatible 行为时，保持 Provider 身份与 adapter 协议分离。
+
+修改 MCP wire 时必须同步 vendor schema provenance、bounded codec、Client/Server capability
+negotiation、stdio 与 Streamable HTTP tests，以及至少两个固定版本外部 SDK 的 interoperability
+fixture。MCP schema、body、secret、tenant、SSRF、header injection 和 prompt injection 均属于发布
+门禁；不能用 loopback mock 代替 real-process/外部 SDK 证据。
+`schemas/run-stream-v2.samples.json` 必须覆盖全部 v1 事件与两个 interaction 事件，并由
+`insight-engine` 测试逐条按 `schemas/run-stream-v2.json` 验证；样本不得包含 interaction body、
+credential、requestState 或远程原始错误。
 
 Repository 测试必须显式区分数据库安装和连接：先在新的空目标执行
 `database/durable/{postgres,sqlite}/schema.sql`，再创建 repository。生产构造函数没有隐式建表

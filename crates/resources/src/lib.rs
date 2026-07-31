@@ -3,6 +3,8 @@
 pub mod actions;
 pub mod builtin_actions;
 mod image;
+pub mod mcp;
+pub mod mcp_context;
 pub mod models;
 mod observability;
 pub mod openai_chat;

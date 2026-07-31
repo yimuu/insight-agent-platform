@@ -32,6 +32,31 @@
 {{- if and .Values.artifacts.tenantEncryption.enabled (empty .Values.artifacts.tenantEncryption.existingSecret) }}
 {{- fail "artifacts.tenantEncryption.existingSecret is required when tenant encryption is enabled" }}
 {{- end }}
+{{- if and .Values.mcp.secretEncryption.enabled (empty .Values.mcp.secretEncryption.existingSecret) }}
+{{- fail "mcp.secretEncryption.existingSecret is required when MCP secret encryption is enabled" }}
+{{- end }}
+{{- $mcpSecretEnvNames := dict }}
+{{- range $entry := .Values.mcp.secretEnv }}
+{{- if not (regexMatch "^[A-Za-z_][A-Za-z0-9_]*$" (default "" $entry.name)) }}
+{{- fail "mcp.secretEnv[].name must be a valid environment variable name" }}
+{{- end }}
+{{- if or (empty $entry.secretName) (empty $entry.secretKey) }}
+{{- fail "mcp.secretEnv[].secretName and secretKey are required" }}
+{{- end }}
+{{- if hasKey $mcpSecretEnvNames $entry.name }}
+{{- fail "mcp.secretEnv[].name must be unique" }}
+{{- end }}
+{{- if and $.Values.mcp.secretEncryption.enabled (eq $entry.name "INSIGHT_MCP_SECRET_KEYRING") }}
+{{- fail "mcp.secretEnv must not override INSIGHT_MCP_SECRET_KEYRING" }}
+{{- end }}
+{{- $_ := set $mcpSecretEnvNames $entry.name true }}
+{{- end }}
+{{- if and .Values.mcp.enabled (not (has .Values.mcp.authorization.type (list "bearer_compatible" "oauth_resource_server"))) }}
+{{- fail "mcp.authorization.type must be bearer_compatible or oauth_resource_server when MCP Server is enabled" }}
+{{- end }}
+{{- if and .Values.mcp.enabled (eq .Values.mcp.authorization.type "oauth_resource_server") (or (empty .Values.mcp.authorization.resource) (empty .Values.mcp.authorization.authorizationServers) (empty .Values.mcp.authorization.requiredScopes)) }}
+{{- fail "MCP OAuth resource, authorizationServers, and requiredScopes are required" }}
+{{- end }}
 {{- if or (lt (int .Values.runtime.qualificationFaults.admissionDelayMs) 0) (gt (int .Values.runtime.qualificationFaults.admissionDelayMs) 30000) }}
 {{- fail "runtime.qualificationFaults.admissionDelayMs must be between 0 and 30000" }}
 {{- end }}
@@ -108,6 +133,46 @@ data:
         {{- if .Values.qualification.enabled }}
         - qualification.effect_marker
         {{- end }}
+
+    mcp:
+      version: 1
+      protocol:
+        preferred: "2026-07-28"
+        legacy_fallback: []
+      client:
+        enabled: {{ .Values.mcp.client.enabled }}
+        servers:
+          {{- toYaml .Values.mcp.client.servers | nindent 10 }}
+        {{- if .Values.mcp.secretEncryption.enabled }}
+        secret_encryption:
+          active_key_version: {{ .Values.mcp.secretEncryption.activeKeyVersion | quote }}
+          keyring_env: INSIGHT_MCP_SECRET_KEYRING
+        {{- end }}
+      server:
+        enabled: {{ .Values.mcp.enabled }}
+        endpoint: {{ .Values.mcp.endpoint | quote }}
+        authorization:
+          {{- if .Values.mcp.enabled }}
+          type: {{ .Values.mcp.authorization.type }}
+          {{- if eq .Values.mcp.authorization.type "oauth_resource_server" }}
+          resource: {{ .Values.mcp.authorization.resource | quote }}
+          authorization_servers:
+            {{- toYaml .Values.mcp.authorization.authorizationServers | nindent 12 }}
+          required_scopes:
+            {{- toYaml .Values.mcp.authorization.requiredScopes | nindent 12 }}
+          {{- end }}
+          {{- else }}
+          type: disabled
+          {{- end }}
+        exports:
+          agents:
+            {{- toYaml .Values.mcp.exports.agents | nindent 10 }}
+          actions:
+            {{- toYaml .Values.mcp.exports.actions | nindent 10 }}
+          resources:
+            {{- toYaml .Values.mcp.exports.resources | nindent 10 }}
+          prompts:
+            {{- toYaml .Values.mcp.exports.prompts | nindent 10 }}
 
     history:
       provider: postgres

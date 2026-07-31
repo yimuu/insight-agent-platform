@@ -48,7 +48,10 @@ use insight_engine::{
     outcome::{FailureKind, RunFailure, RunOutput},
     plan::{DataPort, DataPortId, NodeKind, PlanIndex, PortDirection},
     run_stream::public_failure_message,
-    worker::WorkerExecutorRegistry,
+    worker::{
+        adapter as worker_adapter, WorkerExecutorRegistry, WorkerOperationPermit,
+        WorkerOperationPermitHandle, WorkerRuntimeServices,
+    },
     AdmissionState, ArtifactId, ArtifactRef, ContentHash, DefinitionRevisionId,
     ExecutionEventContext, ExecutionEventPayload, ExecutionRevisionPin, MigrationNodeMapping,
     NodeId, PendingExecutionEvent, PersistenceMode, PlannedSchedulerAction, PublicEventEnvelope,
@@ -59,7 +62,9 @@ use insight_engine::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{
-    sync::{broadcast, Mutex as AsyncMutex, Notify, OwnedMutexGuard},
+    sync::{
+        broadcast, Mutex as AsyncMutex, Notify, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore,
+    },
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -74,8 +79,8 @@ use crate::{
         LeafDeploymentResolver, PublishedAgent,
     },
     scheduler_runtime::{
-        consume_claimed_model_tool_task_with_observer,
-        consume_claimed_scheduler_task_with_artifact_store_and_retrieval_observer,
+        consume_claimed_model_tool_task_with_observer_and_runtime_services,
+        consume_claimed_scheduler_task_with_artifact_store_retrieval_observer_and_runtime_services,
         drive_scheduler_until_quiescent_with_preparer, FrozenSchedulerWorkerFailurePolicy,
         SchedulerActionPreparer, SchedulerRecoveryOutcome, SchedulerWorkerPumpOutcome,
     },
@@ -1599,6 +1604,11 @@ pub struct RunService {
     inner: Arc<RunServiceInner>,
 }
 
+#[async_trait]
+pub trait RuntimeReadinessProbe: Send + Sync {
+    async fn check_readiness(&self, timeout: Duration) -> Result<(), ServiceError>;
+}
+
 impl fmt::Debug for RunService {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1623,8 +1633,9 @@ struct RunServiceInner {
     /// Both queues therefore share the same process-global worker pool without
     /// allowing either continuously-ready queue to starve the other.
     model_tool_turn: AtomicBool,
-    pending_work: AtomicU8,
-    work_wakeup: Notify,
+    pending_work: Arc<AtomicU8>,
+    work_wakeup: Arc<Notify>,
+    operation_permits: Arc<Semaphore>,
     work_notification_publish_pending: AtomicBool,
     work_notification_publish_wakeup: Notify,
     metrics: RunServiceMetrics,
@@ -1642,6 +1653,7 @@ struct RunServiceInner {
     /// bounded pass before the worker retires.
     full_conversation_summary_jobs: Mutex<BTreeMap<String, bool>>,
     full_conversation_summary_delay: RwLock<Duration>,
+    readiness_probes: RwLock<Vec<Arc<dyn RuntimeReadinessProbe>>>,
 }
 
 impl RunService {
@@ -1879,6 +1891,7 @@ impl RunService {
             || agents
                 .archived_deployments()
                 .any(|agent| agent.persistence_mode() == PersistenceMode::Full);
+        let operation_permits = Arc::new(Semaphore::new(config.max_concurrent_operations));
         let service = Self {
             inner: Arc::new(RunServiceInner {
                 agents,
@@ -1891,8 +1904,9 @@ impl RunService {
                 owner: format!("runtime_{}", Uuid::new_v4().simple()),
                 accepting: AtomicBool::new(true),
                 model_tool_turn: AtomicBool::new(true),
-                pending_work: AtomicU8::new(0),
-                work_wakeup: Notify::new(),
+                pending_work: Arc::new(AtomicU8::new(0)),
+                work_wakeup: Arc::new(Notify::new()),
+                operation_permits,
                 work_notification_publish_pending: AtomicBool::new(false),
                 work_notification_publish_wakeup: Notify::new(),
                 metrics: RunServiceMetrics::default(),
@@ -1909,6 +1923,7 @@ impl RunService {
                 full_conversation_streams: Mutex::new(BTreeMap::new()),
                 full_conversation_summary_jobs: Mutex::new(BTreeMap::new()),
                 full_conversation_summary_delay: RwLock::new(Duration::ZERO),
+                readiness_probes: RwLock::new(Vec::new()),
             }),
         };
         if durable_coordinator_enabled {
@@ -1923,6 +1938,29 @@ impl RunService {
 
     pub fn agents(&self) -> &DeployedAgentCatalog {
         &self.inner.agents
+    }
+
+    pub fn add_readiness_probe(
+        &self,
+        probe: Arc<dyn RuntimeReadinessProbe>,
+    ) -> Result<(), ServiceError> {
+        if !self.inner.accepting.load(Ordering::Acquire) {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_STOPPING",
+                "Run service is stopping",
+            ));
+        }
+        self.inner
+            .readiness_probes
+            .write()
+            .map_err(|_| {
+                ServiceError::new(
+                    "RUN_SERVICE_UNAVAILABLE",
+                    "runtime readiness registry is unavailable",
+                )
+            })?
+            .push(probe);
+        Ok(())
     }
 
     /// Installs the process-local terminal-only runtime alongside the durable
@@ -2534,6 +2572,28 @@ impl RunService {
                 "RUN_SERVICE_UNAVAILABLE",
                 "terminal-only runtime owner lease is unavailable",
             ));
+        }
+        let probes = self
+            .inner
+            .readiness_probes
+            .read()
+            .map_err(|_| {
+                ServiceError::new(
+                    "RUN_SERVICE_UNAVAILABLE",
+                    "runtime readiness registry is unavailable",
+                )
+            })?
+            .clone();
+        let deadline = tokio::time::Instant::now() + timeout;
+        for probe in probes {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(ServiceError::new(
+                    "RUN_SERVICE_UNAVAILABLE",
+                    "runtime readiness probe timed out",
+                ));
+            }
+            probe.check_readiness(remaining).await?;
         }
         Ok(())
     }
@@ -6770,6 +6830,72 @@ enum CoordinatedWorkClaim {
     Recovery(RunId),
 }
 
+struct CoordinatedOperationPermit {
+    semaphore: Arc<Semaphore>,
+    held: Mutex<Option<OwnedSemaphorePermit>>,
+    pending_work: Arc<AtomicU8>,
+    work_wakeup: Arc<Notify>,
+}
+
+impl CoordinatedOperationPermit {
+    fn runtime_services(
+        semaphore: Arc<Semaphore>,
+        permit: OwnedSemaphorePermit,
+        pending_work: Arc<AtomicU8>,
+        work_wakeup: Arc<Notify>,
+    ) -> WorkerRuntimeServices {
+        let handle = WorkerOperationPermitHandle::new(Arc::new(Self {
+            semaphore,
+            held: Mutex::new(Some(permit)),
+            pending_work,
+            work_wakeup,
+        }));
+        worker_adapter::services_with_operation_permit(WorkerRuntimeServices::default(), handle)
+    }
+}
+
+#[async_trait]
+impl WorkerOperationPermit for CoordinatedOperationPermit {
+    fn suspend(&self) {
+        let released = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .is_some();
+        if released {
+            self.pending_work.fetch_or(
+                WORK_SCHEDULER_TASK | WORK_MODEL_TOOL_TASK | WORK_RECOVERY,
+                Ordering::Release,
+            );
+            self.work_wakeup.notify_one();
+        }
+    }
+
+    async fn resume(&self) -> Result<(), ()> {
+        if self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return Ok(());
+        }
+        let permit = Arc::clone(&self.semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|_| ())?;
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.is_none() {
+            *held = Some(permit);
+        }
+        Ok(())
+    }
+}
+
 type WorkerExecutionResult = Result<Result<(), ServiceError>, Box<dyn std::any::Any + Send>>;
 type WorkerCompletion =
     Result<(usize, Option<RunId>, WorkerExecutionResult), tokio::task::JoinError>;
@@ -7715,11 +7841,15 @@ impl RunServiceInner {
         Ok(None)
     }
 
-    async fn execute_worker_claim(&self, claim: CoordinatedWorkClaim) -> Result<(), ServiceError> {
+    async fn execute_worker_claim(
+        &self,
+        claim: CoordinatedWorkClaim,
+        runtime_services: WorkerRuntimeServices,
+    ) -> Result<(), ServiceError> {
         match claim {
             CoordinatedWorkClaim::Scheduler(claim) => {
                 let outcome =
-                    consume_claimed_scheduler_task_with_artifact_store_and_retrieval_observer(
+                    consume_claimed_scheduler_task_with_artifact_store_retrieval_observer_and_runtime_services(
                         self.repository.as_ref(),
                         self.workers.as_ref(),
                         &FrozenSchedulerWorkerFailurePolicy,
@@ -7728,6 +7858,7 @@ impl RunServiceInner {
                         self.artifact_store.as_deref(),
                         self.live_run_stream_broker.as_ref(),
                         &NoSchedulerCrash,
+                        runtime_services,
                         *claim,
                     )
                     .await?;
@@ -7736,18 +7867,20 @@ impl RunServiceInner {
                 }
             }
             CoordinatedWorkClaim::ModelTool(claim) => {
-                consume_claimed_model_tool_task_with_observer(
+                consume_claimed_model_tool_task_with_observer_and_runtime_services(
                     self.repository.as_ref(),
                     self.workers.as_ref(),
                     self.config.task_claim_seconds,
                     self.shutdown.child_token(),
                     self.live_run_stream_broker.as_ref(),
                     &NoSchedulerCrash,
+                    runtime_services,
                     *claim,
                 )
                 .await?;
             }
             CoordinatedWorkClaim::Recovery(run_id) => {
+                let _runtime_services = runtime_services;
                 self.resume_run(&run_id, false).await?;
             }
         }
@@ -8504,10 +8637,7 @@ fn spawn_worker_coordinator(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
 
             let mut claimed_any = false;
             if ready_work & WORK_RECOVERY != 0 {
-                let available_permits = inner
-                    .config
-                    .max_concurrent_operations
-                    .saturating_sub(workers.len());
+                let available_permits = inner.operation_permits.available_permits();
                 let recovery_budget = available_permits
                     .min(coordinator.claim_batch_size as usize)
                     .min(MAX_RECOVERY_BATCH as usize);
@@ -8526,17 +8656,29 @@ fn spawn_worker_coordinator(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
                                 .filter(|run_id| in_flight_recovery.insert(run_id.clone()))
                                 .take(recovery_budget)
                             {
+                                let Ok(permit) =
+                                    Arc::clone(&inner.operation_permits).try_acquire_owned()
+                                else {
+                                    in_flight_recovery.remove(&run_id);
+                                    break;
+                                };
                                 claimed_any = true;
                                 let claim = CoordinatedWorkClaim::Recovery(run_id.clone());
                                 let work_class = claim.work_class();
                                 let task_inner = Arc::clone(&inner);
                                 let task_worker_index = worker_index;
+                                let runtime_services = CoordinatedOperationPermit::runtime_services(
+                                    Arc::clone(&task_inner.operation_permits),
+                                    permit,
+                                    Arc::clone(&task_inner.pending_work),
+                                    Arc::clone(&task_inner.work_wakeup),
+                                );
                                 workers.spawn(async move {
                                     let executing =
                                         task_inner.metrics.executing_counter(work_class);
                                     executing.fetch_add(1, Ordering::Relaxed);
                                     let result = std::panic::AssertUnwindSafe(
-                                        task_inner.execute_worker_claim(claim),
+                                        task_inner.execute_worker_claim(claim, runtime_services),
                                     )
                                     .catch_unwind()
                                     .await;
@@ -8558,12 +8700,13 @@ fn spawn_worker_coordinator(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
 
             let requested_worker_work = ready_work & (WORK_SCHEDULER_TASK | WORK_MODEL_TOOL_TASK);
             if requested_worker_work != 0 {
-                let available_permits = inner
-                    .config
-                    .max_concurrent_operations
-                    .saturating_sub(workers.len());
+                let available_permits = inner.operation_permits.available_permits();
                 let claim_budget = available_permits.min(coordinator.claim_batch_size as usize);
                 for _ in 0..claim_budget {
+                    let Ok(permit) = Arc::clone(&inner.operation_permits).try_acquire_owned()
+                    else {
+                        break;
+                    };
                     let claim = match std::panic::AssertUnwindSafe(
                         inner.claim_worker_task(worker_index, requested_worker_work),
                     )
@@ -8587,13 +8730,20 @@ fn spawn_worker_coordinator(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
                     let work_class = claim.work_class();
                     let task_inner = Arc::clone(&inner);
                     let task_worker_index = worker_index;
+                    let runtime_services = CoordinatedOperationPermit::runtime_services(
+                        Arc::clone(&task_inner.operation_permits),
+                        permit,
+                        Arc::clone(&task_inner.pending_work),
+                        Arc::clone(&task_inner.work_wakeup),
+                    );
                     workers.spawn(async move {
                         let executing = task_inner.metrics.executing_counter(work_class);
                         executing.fetch_add(1, Ordering::Relaxed);
-                        let result =
-                            std::panic::AssertUnwindSafe(task_inner.execute_worker_claim(claim))
-                                .catch_unwind()
-                                .await;
+                        let result = std::panic::AssertUnwindSafe(
+                            task_inner.execute_worker_claim(claim, runtime_services),
+                        )
+                        .catch_unwind()
+                        .await;
                         executing.fetch_sub(1, Ordering::Relaxed);
                         (task_worker_index, None, result)
                     });
@@ -8616,7 +8766,7 @@ fn spawn_worker_coordinator(inner: Arc<RunServiceInner>) -> JoinHandle<()> {
             } else {
                 coordinator.active_poll_interval
             };
-            let queue_poll_deadline = (workers.len() < inner.config.max_concurrent_operations)
+            let queue_poll_deadline = (inner.operation_permits.available_permits() > 0)
                 .then(|| tokio::time::Instant::now() + poll_interval);
             let mut wake_deadline = next_safety_deadline;
             if let Some(deadline) = queue_poll_deadline {
@@ -9008,6 +9158,52 @@ pub(crate) fn test_has_live_subscription(service: &RunService, run_id: &RunId) -
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .contains_key(run_id.as_str())
+}
+
+#[cfg(test)]
+mod coordinated_operation_permit_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn suspended_wait_releases_capacity_and_resume_reacquires_it() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let pending_work = Arc::new(AtomicU8::new(0));
+        let wakeup = Arc::new(Notify::new());
+        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+        let services = CoordinatedOperationPermit::runtime_services(
+            Arc::clone(&semaphore),
+            permit,
+            Arc::clone(&pending_work),
+            wakeup,
+        );
+        let handle = worker_adapter::services_operation_permit(&services)
+            .unwrap()
+            .clone();
+        assert_eq!(semaphore.available_permits(), 0);
+
+        handle.suspend();
+        assert_eq!(semaphore.available_permits(), 1);
+        assert_ne!(
+            pending_work.load(Ordering::Acquire)
+                & (WORK_SCHEDULER_TASK | WORK_MODEL_TOOL_TASK | WORK_RECOVERY),
+            0
+        );
+
+        let competing = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+        let resume = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.resume().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!resume.is_finished());
+        drop(competing);
+        resume.await.unwrap().unwrap();
+        assert_eq!(semaphore.available_permits(), 0);
+
+        drop(handle);
+        drop(services);
+        assert_eq!(semaphore.available_permits(), 1);
+    }
 }
 
 #[cfg(test)]

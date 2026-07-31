@@ -41,8 +41,8 @@ use insight_engine::{
     ExecutionControlFrame, ExecutionEventContext, ExecutionEventPayload, ExecutionValueSummary,
     LeaseEpoch, PendingExecutionEvent, PlannedSchedulerAction, ProjectionMutationKind,
     PublicEventPayload, RunId, RunLifecycle, RunTerminalFact, RuntimeValue, SchedulerAction,
-    SchedulerCheckpointId, SchedulerFacts, SchedulerIntent, SchedulerTaskId, TerminationReason,
-    TransitionKey, TransitionOutcome, ValueRef,
+    SchedulerCheckpointId, SchedulerFacts, SchedulerIntent, SchedulerTaskId, SchedulerTaskKind,
+    TerminationReason, TransitionKey, TransitionOutcome, ValueRef,
 };
 
 use super::model_tool_parent_resume::{
@@ -6525,10 +6525,29 @@ async fn claim_tasks(
             attempt_effect_evidence,
             latest.as_ref(),
         );
+        let resumable_remote_task = claim_class == "finalize_lease_loss"
+            && envelope.request().task_kind() == SchedulerTaskKind::Action
+            && sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM mcp_remote_tasks
+                 WHERE run_id=$1 AND operation_id=$2 AND logical_request_key=$3",
+            )
+            .bind(run_id.as_str())
+            .bind(envelope.request().node_id().as_str())
+            .bind(envelope.request().effect_id().as_str())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(RepositoryError::storage)?
+                == 1;
+        let claim_class = if resumable_remote_task {
+            "resume_remote_task"
+        } else {
+            claim_class
+        };
         let mode = match claim_class {
-            "initial_execute" | "activate_checkpointed" | "continue_ready" => {
-                SchedulerTaskClaimMode::Execute
-            }
+            "initial_execute"
+            | "activate_checkpointed"
+            | "continue_ready"
+            | "resume_remote_task" => SchedulerTaskClaimMode::Execute,
             "finalize_lease_loss" => SchedulerTaskClaimMode::FinalizeLeaseLoss,
             "acknowledge" => SchedulerTaskClaimMode::Acknowledge,
             "ineligible" => continue,
@@ -6631,6 +6650,7 @@ async fn claim_tasks(
                                 AND resume_batch.continuation_status='ready_cancelled'))
                    )
                  WHEN 'finalize_lease_loss' THEN task_state='claimed'
+                 WHEN 'resume_remote_task' THEN task_state='claimed'
                  WHEN 'acknowledge' THEN task_state='published'
                  ELSE FALSE
                END
@@ -6670,7 +6690,10 @@ async fn claim_tasks(
             .try_get::<DateTime<Utc>, _>("claim_expires_at")
             .map_err(|_| RepositoryError::invalid_data())?;
         if mode == SchedulerTaskClaimMode::Execute {
-            let resume_running = matches!(claim_class, "activate_checkpointed" | "continue_ready");
+            let resume_running = matches!(
+                claim_class,
+                "activate_checkpointed" | "continue_ready" | "resume_remote_task"
+            );
             let attempt_rows = if resume_running {
                 sqlx::query(
                     "UPDATE node_attempts SET lease_expires_at=$1,heartbeat_at=clock_timestamp(),
@@ -9226,6 +9249,9 @@ async fn commit_success(
         }
         output_versions.insert(port_id.clone(), receipt.canonical_projection_version);
         output_receipts.insert(port_id.clone(), receipt);
+    }
+    for artifact in success.referenced_artifacts() {
+        reference_scheduler_artifact(tx, claim.run_id(), artifact).await?;
     }
     if let Some(publication) = retrieval_publication.as_ref() {
         super::postgres_retrieval_publication::insert_retrieval_publication_postgres(

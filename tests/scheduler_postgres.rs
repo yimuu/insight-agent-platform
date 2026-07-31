@@ -29,9 +29,9 @@ use insight_agent_platform::{
             FrozenSchedulerWorkerFailurePolicy, NoSchedulerCrash, OrphanSweepCommand,
             PlanInstallOutcome, PostgresDurableRepository, RepositoryError, SchedulerCrashInjector,
             SchedulerCrashPoint, SchedulerDriveOutcome, SchedulerDurableRepository,
-            SchedulerLeaseRepository, SchedulerRecoveryOutcome, SchedulerTaskCommitOutcome,
-            SchedulerTaskHeartbeatOutcome, SchedulerTaskOutcome, SchedulerTaskSuccess,
-            SchedulerWorkerFailurePolicy, SchedulerWorkerPumpOutcome,
+            SchedulerLeaseRepository, SchedulerRecoveryOutcome, SchedulerTaskClaimMode,
+            SchedulerTaskCommitOutcome, SchedulerTaskHeartbeatOutcome, SchedulerTaskOutcome,
+            SchedulerTaskSuccess, SchedulerWorkerFailurePolicy, SchedulerWorkerPumpOutcome,
             TerminalSchedulerWorkerFailurePolicy, VersionedPlan,
         },
         ContentHash, DefinitionRevisionId, DeploymentRevisionId, EffectEvidence, EffectIdempotency,
@@ -2228,6 +2228,116 @@ async fn postgres_parallel_fork_persists_exact_join_arrivals() {
         assert!(sqlx::Row::get::<Option<String>, _>(&arrival, "value_payload_id").is_some());
         assert!(sqlx::Row::get::<Option<String>, _>(&arrival, "value_hash").is_some());
     }
+}
+
+#[tokio::test]
+async fn postgres_expired_mcp_remote_task_claim_resumes_instead_of_finalizing_lease_loss() {
+    let Some((repository, control, _admin, _schema)) = isolated_repository().await else {
+        return;
+    };
+    let policy = WorkerEffectPolicy::frozen(
+        WorkerEffectClass::Mutating,
+        EffectIdempotency::NonIdempotent,
+        1,
+        0,
+        0,
+        60_000,
+        WorkerCancellation::Cooperative,
+    )
+    .unwrap();
+    let (plan, descriptors) = compile_fixture_with_policy(LINEAR_AGENT, Some(&policy));
+    let subflows = SubflowContractRegistry::new();
+    let linked = LinkedPlan::link(&plan, &descriptors, &subflows).unwrap();
+    let versioned = versioned(&plan);
+    repository.install_versioned_plan(&versioned).await.unwrap();
+    let run_id = RunId::new("run_scheduler_pg_mcp_remote_resume").unwrap();
+    create_active_run(&repository, &control, &versioned, run_id.clone()).await;
+    let fence = repository
+        .claim_scheduler_run(
+            key("mcp-remote-resume-claim", &run_id),
+            ClaimSchedulerRunCommand::new(run_id.clone(), "scheduler-mcp-remote-resume", 60)
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .committed_result()
+        .cloned()
+        .unwrap()
+        .fence()
+        .unwrap();
+    drive_to_task(&repository, &linked, &fence).await;
+    let claim = repository
+        .claim_scheduler_tasks_with_run_limit("mcp-worker-before-crash", 60, 1, 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        claim.envelope().request().task_kind(),
+        SchedulerTaskKind::Action
+    );
+    assert!(matches!(
+        repository
+            .mark_scheduler_task_started(&claim)
+            .await
+            .unwrap(),
+        TransitionOutcome::Committed { .. }
+    ));
+
+    let request = claim.envelope().request();
+    sqlx::query(
+        "INSERT INTO mcp_remote_tasks(
+           task_id,tenant_id,user_id,run_id,operation_id,logical_request_key,server_id,
+           binding_hash,protocol_version,capability_id,remote_task_ciphertext,remote_task_hash,
+           task_status,task_version,remote_created_at,remote_updated_at,ttl_deadline,
+           poll_interval_ms,next_poll_at,lease_owner,lease_epoch,lease_expires_at,
+           latest_payload_ciphertext,latest_payload_hash,terminal_receipt_hash,terminal_at,
+           created_at,updated_at,creation_intent_hash
+         ) VALUES(
+           'mcp_task_resume','tenant-a','user-a',$1,$2,$3,'server-a',
+           $4,'2026-07-28','io.modelcontextprotocol/tasks','enc:v1:remote',$5,
+           'working',1,clock_timestamp(),clock_timestamp(),clock_timestamp()+INTERVAL '1 hour',
+           1000,clock_timestamp(),NULL,0,NULL,'enc:v1:payload',$6,NULL,NULL,
+           clock_timestamp(),clock_timestamp(),$7
+         )",
+    )
+    .bind(run_id.as_str())
+    .bind(request.node_id().as_str())
+    .bind(request.effect_id().as_str())
+    .bind("a".repeat(64))
+    .bind("b".repeat(64))
+    .bind("c".repeat(64))
+    .bind("d".repeat(64))
+    .execute(&control)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE task_outbox
+         SET claim_expires_at=clock_timestamp()-INTERVAL '1 second'
+         WHERE run_id=$1",
+    )
+    .bind(run_id.as_str())
+    .execute(&control)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE node_attempts
+         SET lease_expires_at=clock_timestamp()-INTERVAL '1 second'
+         WHERE run_id=$1",
+    )
+    .bind(run_id.as_str())
+    .execute(&control)
+    .await
+    .unwrap();
+
+    let resumed = repository
+        .claim_scheduler_tasks_with_run_limit("mcp-worker-after-crash", 60, 1, 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(resumed.mode(), SchedulerTaskClaimMode::Execute);
+    assert!(resumed.lease_loss_evidence().is_none());
 }
 
 #[tokio::test]

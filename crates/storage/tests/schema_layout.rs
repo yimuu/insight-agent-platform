@@ -31,6 +31,17 @@ const REQUIRED_TABLES: &[&str] = &[
     "graph_view_documents",
     "human_work_items",
     "join_arrivals",
+    "mcp_interaction_secrets",
+    "mcp_interaction_transition_receipts",
+    "mcp_interactions",
+    "mcp_oauth_credential_receipts",
+    "mcp_oauth_credentials",
+    "mcp_oauth_refresh_leases",
+    "mcp_oauth_transaction_receipts",
+    "mcp_oauth_transactions",
+    "mcp_remote_task_receipts",
+    "mcp_remote_tasks",
+    "mcp_server_tasks",
     "model_call_usage",
     "model_tool_call_batches",
     "model_tool_calls",
@@ -335,7 +346,7 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(indexes.len(), 52, "all explicit indexes must be installed");
+    assert_eq!(indexes.len(), 58, "all explicit indexes must be installed");
     for (index, table) in [
         ("idx_runs_dispatch", "workflow_runs"),
         ("idx_runs_recovery", "workflow_runs"),
@@ -344,6 +355,8 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
         ("idx_task_outbox_acknowledge", "task_outbox"),
         ("idx_public_outbox_dispatch", "public_event_outbox"),
         ("idx_public_outbox_retention", "public_event_outbox"),
+        ("idx_mcp_interactions_principal", "mcp_interactions"),
+        ("idx_mcp_interactions_retry", "mcp_interactions"),
         (
             "idx_public_projection_order",
             "public_event_projection_decisions",

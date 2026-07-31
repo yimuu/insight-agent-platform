@@ -64,8 +64,8 @@ struct SearchRetrieval;
 impl Retrieval for SearchRetrieval {
     fn descriptor(&self) -> RetrievalDescriptor {
         RetrievalDescriptor {
-            id: "medical.search",
-            version: "2.3.4",
+            id: "medical.search".to_owned(),
+            version: "2.3.4".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -78,7 +78,7 @@ impl Retrieval for SearchRetrieval {
                 "required": ["answer"],
                 "additionalProperties": false
             }),
-            query_field: "query",
+            query_field: "query".to_owned(),
             effect: EffectClass::ReadOnly,
             idempotency: IdempotencyClass::Idempotent,
             cancellation: CancellationClass::Cooperative,

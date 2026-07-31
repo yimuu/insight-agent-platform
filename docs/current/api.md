@@ -16,6 +16,38 @@ HTTP `/v1` 是服务 API 版本，与 Agent DSL 的 `insight.agent/v1` 是两个
 | `GET` | `/health/ready` | repository 与 runtime 就绪 |
 | `GET` | `/v1/agents` | Agent discovery 与输入 schema |
 | `GET` | `/v1/agents/{agent_id}` | 单个 Agent discovery |
+| `GET` | `/v1/mcp/profiles` | MCP profile 与 capability matrix |
+
+Agent discovery 在 Deployment Revision 含 MCP binding 时返回闭合的 MCP capability summary，包括
+所选协议版本、transport、principal scope、primitive 和支持的 `run-stream` 协议；不会暴露远程
+tool、URI 或 Prompt 名称。
+
+## MCP Catalog、Context 与 Interaction
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| `GET` | `/v1/mcp/servers` | 当前 principal 可见的冻结 Server catalog |
+| `GET` | `/v1/mcp/servers/{server_id}/tools` | 分页读取显式导入 Tool |
+| `GET` | `/v1/mcp/servers/{server_id}/resources` | 分页读取显式导入 Resource |
+| `POST` | `/v1/mcp/servers/{server_id}/resources/read` | 按 allowlist 读取 Resource 快照 |
+| `GET` | `/v1/mcp/servers/{server_id}/prompts` | 分页读取显式导入 Prompt |
+| `POST` | `/v1/mcp/servers/{server_id}/prompts/{prompt_name}/preview` | 获取 user-invocation Prompt 快照 |
+| `POST` | `/v1/mcp/servers/{server_id}/completion` | 请求受限 Completion |
+| `POST` | `/v1/mcp/servers/{server_id}/agents/{agent_id}/runs` | 固定选定 Resource/Prompt 后创建 Run |
+| `GET` | `/v1/mcp/interactions` | 分页读取当前 principal 的安全 interaction 摘要 |
+| `GET` | `/v1/mcp/interactions/{interaction_id}` | 读取单个安全 interaction 摘要 |
+| `POST` | `/v1/mcp/interactions/{interaction_id}/respond` | 提交 form/approval 响应 |
+| `POST` | `/v1/mcp/interactions/{interaction_id}/open` | 确认打开 URL interaction |
+| `POST` | `/v1/mcp/interactions/{interaction_id}/decline` | 拒绝 interaction |
+| `POST` | `/v1/mcp/interactions/{interaction_id}/cancel` | 取消 interaction |
+| `POST` | `/v1/mcp/servers/{server_id}/authorize` | 创建 OAuth Authorization Code + PKCE 事务 |
+| `GET` | `/v1/mcp/connections` | 读取当前 principal 的连接摘要 |
+| `DELETE` | `/v1/mcp/connections/{server_id}` | 本地优先撤销连接 |
+
+这些接口要求可信认证层提供 `X-Tenant-ID` / `X-User-ID`，返回
+`Cache-Control: private, no-store`，且不返回 Resource/Prompt/interaction 私密正文、OAuth token、
+PKCE verifier 或 requestState。Context admission 最多选择 16 个属于路径 Server 的导入项，先固定
+快照并执行 Agent input schema 校验，再进入普通 Run admission。
 
 ## Graph 发布
 
@@ -113,7 +145,7 @@ Agent discovery 额外返回 immutable Deployment Revision 的
 
 ## Attached SSE
 
-`/runs/stream` 使用 `run-stream/v1` 用户响应协议：
+`/runs/stream` 默认使用 `run-stream/v1` 用户响应协议：
 
 1. 发送 `run.lifecycle.created` 和 `run.lifecycle.running`；
 2. 发送作者通过 LLM `publish: true` 授权的实时内容；
@@ -136,6 +168,14 @@ snapshot，可以直接发送 `created → terminal`。致命传输/投影故障
 快照都是单一、按终态闭合的 `run` 对象，包含强类型 `result`、公开输出、工具结果、检索结果以及
 OpenAI 命名的 token usage。完整闭合定义见
 [`schemas/run-stream-v1.json`](../../schemas/run-stream-v1.json)。
+
+需要 durable MCP interaction 时，客户端通过
+`X-Run-Stream-Protocol: run-stream/v2` 显式协商。v2 新增 body-free
+`run.interaction.required` / `run.interaction.closed`，并在 terminal snapshot 中加入安全
+`interactions[]`；完整 schema 见
+[`schemas/run-stream-v2.json`](../../schemas/run-stream-v2.json)，全事件样本见
+[`schemas/run-stream-v2.samples.json`](../../schemas/run-stream-v2.samples.json)。MCP Catalog、
+OAuth、Interaction 与 `/mcp` wire 详见 [MCP 使用、运行与安全合同](mcp.md)。
 模型工具意图和真实执行是两个公开面：
 
 - `run.output.item.*` 与 `run.output.function_call.arguments.*` 表示模型正在形成或已经形成调用

@@ -21,6 +21,37 @@ qualification:
   enabled: false
   terminalStreamBaseUrl: http://terminal-stream-mock:8080/v1
 
+mcp:
+  enabled: false
+  endpoint: /mcp
+  # Environment-backed MCP credentials and stdio secret inputs. Values are
+  # always read from existing Kubernetes Secrets and never rendered into the
+  # platform ConfigMap.
+  secretEnv: []
+  # - name: ENGINEERING_MCP_TOKEN
+  #   secretName: engineering-mcp
+  #   secretKey: token
+  client:
+    enabled: false
+    # Strict platform MCP server entries. Secret values must remain
+    # environment references supplied through separately managed Secrets.
+    servers: {}
+  authorization:
+    type: bearer_compatible
+    resource: ""
+    authorizationServers: []
+    requiredScopes: []
+  secretEncryption:
+    enabled: false
+    activeKeyVersion: v1
+    existingSecret: ""
+    keyringKey: keyring.json
+  exports:
+    agents: []
+    actions: []
+    resources: []
+    prompts: []
+
 service:
   type: ClusterIP
   port: 3000

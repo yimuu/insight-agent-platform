@@ -14,6 +14,25 @@ actions:
   enabled:
     - example.text_metrics
 
+mcp:
+  version: 1
+  protocol:
+    preferred: "2026-07-28"
+    legacy_fallback: []
+  client:
+    enabled: false
+    servers: {}
+  server:
+    enabled: false
+    endpoint: /mcp
+    authorization:
+      type: disabled
+    exports:
+      agents: []
+      actions: []
+      resources: []
+      prompts: []
+
 history:
   provider: sqlite
   path: ../data/quickstart.sqlite3

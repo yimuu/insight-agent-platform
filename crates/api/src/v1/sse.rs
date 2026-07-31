@@ -12,6 +12,10 @@ use std::{
 use async_trait::async_trait;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::Stream;
+use insight_durable::{
+    McpInteraction, McpInteractionDurableRepository, McpInteractionListFilter,
+    McpInteractionPrincipal, McpInteractionRequest, McpInteractionState,
+};
 use insight_engine::{
     events::protocol::RunEventType,
     run_stream::{
@@ -26,7 +30,8 @@ use insight_runtime::{
     AttachedRun, ConversationStreamDelivery, ConversationStreamPrivacy,
     ConversationVisibilityGuard, FullConversationVisibilityGuard, RunService, RunSubscription,
 };
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Serialize};
+use serde_json::{json, Value};
 use tokio::{sync::mpsc, time::Instant};
 
 const OUTBOUND_EVENT_CAPACITY: usize = 32;
@@ -204,6 +209,21 @@ pub(crate) fn run_stream(
         attached,
         keep_alive_interval,
         Arc::new(SnapshotCommitBarrier),
+        None,
+    )
+}
+
+pub(crate) fn run_stream_v2(
+    attached: AttachedRun,
+    keep_alive_interval: Duration,
+    repository: Arc<dyn McpInteractionDurableRepository>,
+    principal: McpInteractionPrincipal,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    run_stream_with_terminal_barrier(
+        attached,
+        keep_alive_interval,
+        Arc::new(SnapshotCommitBarrier),
+        Some(McpInteractionOverlay::new(repository, principal)),
     )
 }
 
@@ -225,6 +245,32 @@ pub(crate) fn full_conversation_run_stream(
             user_id,
             visibility_guard: tokio::sync::Mutex::new(None),
         }),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn full_conversation_run_stream_v2(
+    attached: AttachedRun,
+    keep_alive_interval: Duration,
+    service: RunService,
+    conversation_id: String,
+    tenant_id: String,
+    user_id: String,
+    repository: Arc<dyn McpInteractionDurableRepository>,
+    principal: McpInteractionPrincipal,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    run_stream_with_terminal_barrier(
+        attached,
+        keep_alive_interval,
+        Arc::new(FullConversationSnapshotCommitBarrier {
+            service,
+            conversation_id,
+            tenant_id,
+            user_id,
+            visibility_guard: tokio::sync::Mutex::new(None),
+        }),
+        Some(McpInteractionOverlay::new(repository, principal)),
     )
 }
 
@@ -236,6 +282,21 @@ pub(crate) fn terminal_run_stream(
         attached,
         keep_alive_interval,
         Arc::new(SnapshotCommitBarrier),
+        None,
+    )
+}
+
+pub(crate) fn terminal_run_stream_v2(
+    attached: TerminalAttachedRun,
+    keep_alive_interval: Duration,
+    repository: Arc<dyn McpInteractionDurableRepository>,
+    principal: McpInteractionPrincipal,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    terminal_run_stream_with_terminal_barrier(
+        attached,
+        keep_alive_interval,
+        Arc::new(SnapshotCommitBarrier),
+        Some(McpInteractionOverlay::new(repository, principal)),
     )
 }
 
@@ -255,6 +316,30 @@ pub(crate) fn terminal_conversation_run_stream(
             user_id,
             visibility_guard: tokio::sync::Mutex::new(None),
         }),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn terminal_conversation_run_stream_v2(
+    attached: TerminalAttachedRun,
+    keep_alive_interval: Duration,
+    service: RunService,
+    tenant_id: String,
+    user_id: String,
+    repository: Arc<dyn McpInteractionDurableRepository>,
+    principal: McpInteractionPrincipal,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    terminal_run_stream_with_terminal_barrier(
+        attached,
+        keep_alive_interval,
+        Arc::new(TerminalConversationSnapshotCommitBarrier {
+            service,
+            tenant_id,
+            user_id,
+            visibility_guard: tokio::sync::Mutex::new(None),
+        }),
+        Some(McpInteractionOverlay::new(repository, principal)),
     )
 }
 
@@ -262,11 +347,13 @@ pub(crate) fn run_stream_with_terminal_barrier(
     attached: AttachedRun,
     keep_alive_interval: Duration,
     terminal_frame_barrier: Arc<dyn TerminalFrameBarrier>,
+    interaction_overlay: Option<McpInteractionOverlay>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     run_stream_from_attached(
         RunAttachedStream::from_durable(attached),
         keep_alive_interval,
         terminal_frame_barrier,
+        interaction_overlay,
     )
 }
 
@@ -274,11 +361,13 @@ pub(crate) fn terminal_run_stream_with_terminal_barrier(
     attached: TerminalAttachedRun,
     keep_alive_interval: Duration,
     terminal_frame_barrier: Arc<dyn TerminalFrameBarrier>,
+    interaction_overlay: Option<McpInteractionOverlay>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     run_stream_from_attached(
         RunAttachedStream::from_terminal(attached),
         keep_alive_interval,
         terminal_frame_barrier,
+        interaction_overlay,
     )
 }
 
@@ -286,6 +375,7 @@ fn run_stream_from_attached(
     attached: RunAttachedStream,
     keep_alive_interval: Duration,
     terminal_frame_barrier: Arc<dyn TerminalFrameBarrier>,
+    mut interaction_overlay: Option<McpInteractionOverlay>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let outbound_write_timeout = attached.outbound_write_timeout;
     let conversation_privacy = attached.conversation_privacy.clone();
@@ -293,6 +383,7 @@ fn run_stream_from_attached(
     tokio::spawn(async move {
         let mut dispatcher = RunStreamDispatcher::new(attached, terminal_frame_barrier);
         loop {
+            let run_id = dispatcher.run_id().to_owned();
             let public_event = tokio::select! {
                 _ = sender.closed() => {
                     tracing::debug!(
@@ -311,9 +402,18 @@ fn run_stream_from_attached(
                     break;
                 }
                 public_event = dispatcher.next_event() => match public_event {
-                    Some(public_event) => public_event,
+                    Some(public_event) => OutboundPublicEvent::V1(public_event),
                     None => break,
                 },
+                interaction = next_interaction_event(&mut interaction_overlay, &run_id),
+                    if interaction_overlay.is_some() => {
+                    match interaction {
+                        Some(interaction) => OutboundPublicEvent::Interaction(
+                            interaction.with_sequence(dispatcher.allocate_sequence())
+                        ),
+                        None => continue,
+                    }
+                }
             };
             if dispatcher
                 .conversation_privacy()
@@ -324,7 +424,12 @@ fn run_stream_from_attached(
             }
             let run_terminal = public_event.is_run_terminal();
             let ends_stream = public_event.ends_stream();
-            let encoded = match encode_event(&public_event) {
+            if run_terminal {
+                if let Some(overlay) = interaction_overlay.as_mut() {
+                    let _ = overlay.refresh(&run_id).await;
+                }
+            }
+            let encoded = match encode_outbound_event(&public_event, interaction_overlay.as_ref()) {
                 Ok(encoded) => encoded,
                 Err(error) => {
                     tracing::error!(
@@ -854,6 +959,253 @@ fn protocol_error(
     }
 }
 
+enum OutboundPublicEvent {
+    V1(RunStreamEvent),
+    Interaction(RunStreamV2InteractionEvent),
+}
+
+impl OutboundPublicEvent {
+    fn is_run_terminal(&self) -> bool {
+        matches!(self, Self::V1(event) if event.is_run_terminal())
+    }
+
+    fn ends_stream(&self) -> bool {
+        matches!(self, Self::V1(event) if event.ends_stream())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum RunStreamV2InteractionEvent {
+    #[serde(rename = "run.interaction.required")]
+    Required {
+        sequence_number: u64,
+        interaction_id: String,
+        source_kind: &'static str,
+        server_id: String,
+        mode: insight_durable::McpInteractionMode,
+        message: String,
+        url_host: Option<String>,
+        deadline: chrono::DateTime<chrono::Utc>,
+        detail_url: String,
+    },
+    #[serde(rename = "run.interaction.closed")]
+    Closed {
+        sequence_number: u64,
+        interaction_id: String,
+        source_kind: &'static str,
+        server_id: String,
+        outcome: Option<insight_durable::McpInteractionOutcome>,
+        detail_url: String,
+    },
+}
+
+impl RunStreamV2InteractionEvent {
+    fn with_sequence(mut self, sequence_number: u64) -> Self {
+        match &mut self {
+            Self::Required {
+                sequence_number: value,
+                ..
+            }
+            | Self::Closed {
+                sequence_number: value,
+                ..
+            } => *value = sequence_number,
+        }
+        self
+    }
+
+    const fn event_type(&self) -> &'static str {
+        match self {
+            Self::Required { .. } => "run.interaction.required",
+            Self::Closed { .. } => "run.interaction.closed",
+        }
+    }
+}
+
+pub(crate) struct McpInteractionOverlay {
+    repository: Arc<dyn McpInteractionDurableRepository>,
+    principal: McpInteractionPrincipal,
+    poll: tokio::time::Interval,
+    observed: BTreeMap<String, (u64, McpInteractionState)>,
+    pending: VecDeque<RunStreamV2InteractionEvent>,
+    summaries: Vec<Value>,
+}
+
+impl McpInteractionOverlay {
+    fn new(
+        repository: Arc<dyn McpInteractionDurableRepository>,
+        principal: McpInteractionPrincipal,
+    ) -> Self {
+        let mut poll = tokio::time::interval(Duration::from_millis(250));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        Self {
+            repository,
+            principal,
+            poll,
+            observed: BTreeMap::new(),
+            pending: VecDeque::new(),
+            summaries: Vec::new(),
+        }
+    }
+
+    async fn next_event(&mut self, run_id: &str) -> Option<RunStreamV2InteractionEvent> {
+        if let Some(event) = self.pending.pop_front() {
+            return Some(event);
+        }
+        self.poll.tick().await;
+        self.refresh(run_id).await.ok()?;
+        self.pending.pop_front()
+    }
+
+    async fn refresh(&mut self, run_id: &str) -> Result<(), ()> {
+        let interactions = self
+            .repository
+            .list_mcp_interactions(
+                &self.principal,
+                &McpInteractionListFilter {
+                    run_id: Some(run_id.to_owned()),
+                    state: None,
+                    after_interaction_id: None,
+                },
+                100,
+            )
+            .await
+            .map_err(|_| ())?;
+        self.summaries = interactions
+            .iter()
+            .map(interaction_summary)
+            .collect::<Vec<_>>();
+        for interaction in interactions {
+            let id = interaction.interaction_id().as_str().to_owned();
+            match self.observed.get(&id).copied() {
+                None => {
+                    self.pending
+                        .push_back(interaction_required_event(&interaction));
+                    if interaction.state() == McpInteractionState::Closed {
+                        self.pending
+                            .push_back(interaction_closed_event(&interaction));
+                    }
+                }
+                Some((version, previous))
+                    if interaction.version() > version
+                        && previous != McpInteractionState::Closed
+                        && interaction.state() == McpInteractionState::Closed =>
+                {
+                    self.pending
+                        .push_back(interaction_closed_event(&interaction));
+                }
+                _ => {}
+            }
+            self.observed
+                .insert(id, (interaction.version(), interaction.state()));
+        }
+        Ok(())
+    }
+}
+
+async fn next_interaction_event(
+    overlay: &mut Option<McpInteractionOverlay>,
+    run_id: &str,
+) -> Option<RunStreamV2InteractionEvent> {
+    match overlay {
+        Some(overlay) => overlay.next_event(run_id).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn interaction_required_event(interaction: &McpInteraction) -> RunStreamV2InteractionEvent {
+    let (message, url_host) = match interaction.request() {
+        McpInteractionRequest::Form { message, .. }
+        | McpInteractionRequest::Approval { message, .. }
+        | McpInteractionRequest::Authorization { message, .. } => (message.clone(), None),
+        McpInteractionRequest::Url { message, host, .. } => (message.clone(), Some(host.clone())),
+    };
+    RunStreamV2InteractionEvent::Required {
+        sequence_number: 0,
+        interaction_id: interaction.interaction_id().as_str().to_owned(),
+        source_kind: "mcp",
+        server_id: interaction.server_id().to_owned(),
+        mode: interaction.request().mode(),
+        message,
+        url_host,
+        deadline: interaction.deadline(),
+        detail_url: format!(
+            "/v1/mcp/interactions/{}",
+            interaction.interaction_id().as_str()
+        ),
+    }
+}
+
+fn interaction_closed_event(interaction: &McpInteraction) -> RunStreamV2InteractionEvent {
+    RunStreamV2InteractionEvent::Closed {
+        sequence_number: 0,
+        interaction_id: interaction.interaction_id().as_str().to_owned(),
+        source_kind: "mcp",
+        server_id: interaction.server_id().to_owned(),
+        outcome: interaction.outcome(),
+        detail_url: format!(
+            "/v1/mcp/interactions/{}",
+            interaction.interaction_id().as_str()
+        ),
+    }
+}
+
+fn interaction_summary(interaction: &McpInteraction) -> Value {
+    json!({
+        "interaction_id": interaction.interaction_id().as_str(),
+        "source_kind": "mcp",
+        "server_id": interaction.server_id(),
+        "mode": interaction.request().mode(),
+        "state": interaction.state(),
+        "outcome": interaction.outcome(),
+        "deadline": interaction.deadline(),
+        "detail_url": format!(
+            "/v1/mcp/interactions/{}",
+            interaction.interaction_id().as_str()
+        ),
+    })
+}
+
+fn encode_outbound_event(
+    event: &OutboundPublicEvent,
+    interaction_overlay: Option<&McpInteractionOverlay>,
+) -> Result<Event, axum::Error> {
+    match (event, interaction_overlay) {
+        (OutboundPublicEvent::V1(event), None) => encode_event(event),
+        (OutboundPublicEvent::V1(event), Some(overlay)) => {
+            let mut value = serde_json::to_value(event).map_err(axum::Error::new)?;
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| axum::Error::new(std::io::Error::other("invalid v2 event")))?;
+            object.insert("protocol".to_owned(), json!("run-stream/v2"));
+            if event.is_run_terminal() {
+                object
+                    .get_mut("run")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| {
+                        axum::Error::new(std::io::Error::other("invalid v2 terminal event"))
+                    })?
+                    .insert("interactions".to_owned(), json!(overlay.summaries));
+            }
+            Event::default()
+                .event(event.event_type().as_str())
+                .json_data(value)
+        }
+        (OutboundPublicEvent::Interaction(event), Some(_)) => {
+            let mut value = serde_json::to_value(event).map_err(axum::Error::new)?;
+            value
+                .as_object_mut()
+                .ok_or_else(|| axum::Error::new(std::io::Error::other("invalid v2 event")))?
+                .insert("protocol".to_owned(), json!("run-stream/v2"));
+            Event::default().event(event.event_type()).json_data(value)
+        }
+        (OutboundPublicEvent::Interaction(_), None) => Err(axum::Error::new(
+            std::io::Error::other("v2 interaction event on a v1 stream"),
+        )),
+    }
+}
+
 fn encode_event(event: &RunStreamEvent) -> Result<Event, axum::Error> {
     Event::default()
         .event(event.event_type().as_str())
@@ -873,6 +1225,7 @@ mod tests {
 
     use async_trait::async_trait;
     use futures::StreamExt;
+    use insight_durable::{McpInteractionMode, McpInteractionOutcome};
     use insight_engine::{
         run_stream::{
             adapter::durable_run_stream_snapshot_new, DurableRunStreamSnapshot, RunTerminalKind,
@@ -881,13 +1234,14 @@ mod tests {
         ContentHash, RunId,
     };
     use insight_runtime::{InMemoryLiveRunStreamBroker, LiveRunStreamBroker};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use tokio::sync::Notify;
 
     use super::{
         manifest_items_without_terminal_evidence, protocol_error, RunAttachedStream,
         RunLifecycleSource, RunLifecycleSourceEvent, RunOutboundStream, RunStreamDispatcher,
-        SnapshotCommitBarrier, TerminalFrameBarrier, TerminalFrameBarrierError,
+        RunStreamV2InteractionEvent, SnapshotCommitBarrier, TerminalFrameBarrier,
+        TerminalFrameBarrierError,
     };
 
     struct UnusedTerminalSource;
@@ -958,6 +1312,63 @@ mod tests {
         assert_eq!(encoded["sequence_number"], 7);
         assert_eq!(encoded["code"], "RUN_STREAM_FAILED");
         assert!(!encoded.to_string().contains("output_bytes"));
+    }
+
+    #[test]
+    fn run_stream_v2_interactions_are_body_free_and_rejected_by_v1_decoders() {
+        let schema: Value =
+            serde_json::from_str(workspace_asset_str!("schemas/run-stream-v2.json")).unwrap();
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("run-stream/v2 schema must compile");
+        let required = RunStreamV2InteractionEvent::Required {
+            sequence_number: 7,
+            interaction_id: "interaction-safe".to_owned(),
+            source_kind: "mcp",
+            server_id: "calendar".to_owned(),
+            mode: McpInteractionMode::Form,
+            message: "Choose a calendar".to_owned(),
+            url_host: None,
+            deadline: "2026-07-30T12:00:00Z".parse().unwrap(),
+            detail_url: "/v1/mcp/interactions/interaction-safe".to_owned(),
+        };
+        let mut value = serde_json::to_value(required).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("protocol".to_owned(), json!("run-stream/v2"));
+        let encoded = serde_json::to_string(&value).unwrap();
+        assert!(encoded.contains("run.interaction.required"));
+        assert!(!encoded.contains("requestedSchema"));
+        assert!(!encoded.contains("requestState"));
+        assert!(!encoded.contains("inputResponses"));
+        assert!(validator.is_valid(&value));
+        assert!(
+            serde_json::from_value::<insight_engine::run_stream::RunStreamEvent>(value).is_err()
+        );
+
+        let closed = RunStreamV2InteractionEvent::Closed {
+            sequence_number: 8,
+            interaction_id: "interaction-safe".to_owned(),
+            source_kind: "mcp",
+            server_id: "calendar".to_owned(),
+            outcome: Some(McpInteractionOutcome::Accepted),
+            detail_url: "/v1/mcp/interactions/interaction-safe".to_owned(),
+        };
+        let mut closed = serde_json::to_value(closed).unwrap();
+        closed
+            .as_object_mut()
+            .unwrap()
+            .insert("protocol".to_owned(), json!("run-stream/v2"));
+        assert!(validator.is_valid(&closed));
+        let encoded = serde_json::to_string(&closed).unwrap();
+        assert!(encoded.contains("run.interaction.closed"));
+        assert!(!encoded.contains("response"));
+
+        let mut unknown = closed;
+        unknown["private_response"] = json!({"secret": true});
+        assert!(!validator.is_valid(&unknown));
     }
 
     #[test]

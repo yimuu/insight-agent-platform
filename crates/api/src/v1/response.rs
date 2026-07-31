@@ -59,7 +59,7 @@ impl ApiError {
         )
     }
 
-    fn new(status: StatusCode, code: &'static str, message: &'static str) -> Self {
+    pub(crate) fn new(status: StatusCode, code: &'static str, message: &'static str) -> Self {
         Self {
             status,
             code,
@@ -249,6 +249,26 @@ impl From<ServiceError> for ApiError {
                 StatusCode::CONFLICT,
                 "HUMAN_TASK_COMPLETION_CONFLICT",
                 "human task completion conflicts with its claim",
+            ),
+            "MCP_INTERACTION_RESPONSE_INVALID" => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "MCP_INTERACTION_RESPONSE_INVALID",
+                "interaction response does not match the requested schema",
+            ),
+            "MCP_INTERACTION_NOT_FOUND" => Self::new(
+                StatusCode::NOT_FOUND,
+                "MCP_INTERACTION_NOT_FOUND",
+                "MCP interaction not found",
+            ),
+            "MCP_INTERACTION_CONFLICT" => Self::new(
+                StatusCode::CONFLICT,
+                "MCP_INTERACTION_CONFLICT",
+                "MCP interaction conflicts with its current state",
+            ),
+            "MCP_INTERACTION_UNAVAILABLE" => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "MCP_INTERACTION_UNAVAILABLE",
+                "MCP interaction service is unavailable",
             ),
             "RUN_SERVICE_STOPPING"
             | "RUN_SERVICE_UNAVAILABLE"

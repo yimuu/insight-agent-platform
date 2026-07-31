@@ -24,6 +24,25 @@ actions:
     - text_replace
     - progress_counter
 
+mcp:
+  version: 1
+  protocol:
+    preferred: "2026-07-28"
+    legacy_fallback: []
+  client:
+    enabled: false
+    servers: {}
+  server:
+    enabled: false
+    endpoint: /mcp
+    authorization:
+      type: disabled
+    exports:
+      agents: []
+      actions: []
+      resources: []
+      prompts: []
+
 history:
   provider: postgres
   database_url_env: RUN_HISTORY_POSTGRES_URL

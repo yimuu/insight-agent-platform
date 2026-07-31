@@ -42,6 +42,7 @@ const DEFAULT_ACTION_BUDGET: u32 = 100_000;
 const DEFAULT_MAX_MODEL_TOOL_CALLS: u32 = 1_024;
 const TERMINAL_EXECUTION_INVALID: &str = "TERMINAL_EXECUTION_INVALID";
 const TERMINAL_EXECUTOR_PANICKED: &str = "TERMINAL_EXECUTOR_PANICKED";
+const TERMINAL_ARTIFACT_SIDECAR_UNSUPPORTED: &str = "MCP_TERMINAL_ONLY_ARTIFACT_UNSUPPORTED";
 const TERMINAL_WAIT_UNAVAILABLE: &str = "TERMINAL_WAIT_UNAVAILABLE";
 const TERMINAL_SUBFLOW_UNAVAILABLE: &str = "TERMINAL_SUBFLOW_UNAVAILABLE";
 const TERMINAL_ACTION_BUDGET_EXHAUSTED: &str = "TERMINAL_ACTION_BUDGET_EXHAUSTED";
@@ -400,7 +401,7 @@ async fn execute_task_with_retries(
             .await
         };
         match result {
-            Ok(result) => return Ok(result),
+            Ok(result) => return reject_unmaterialized_artifact_sidecars(result),
             Err(failure) => {
                 let evidence = if failure.class() == WorkerFailureClass::EffectOutcomeUnknown {
                     EffectEvidence::Unknown
@@ -418,6 +419,23 @@ async fn execute_task_with_retries(
                 wait_retry_backoff(backoff, &cancellation, run_deadline).await?;
             }
         }
+    }
+}
+
+fn reject_unmaterialized_artifact_sidecars(
+    result: TaskExecutionResult,
+) -> Result<TaskExecutionResult, WorkerFailure> {
+    if result.artifact_payloads().is_empty() {
+        Ok(result)
+    } else {
+        // Terminal-only has no fenced worker-artifact transaction. Never let
+        // the ArtifactRef projection escape after silently dropping its
+        // private byte sidecar.
+        Err(worker_failure(
+            WorkerFailureClass::InfrastructureFailure,
+            TERMINAL_ARTIFACT_SIDECAR_UNSUPPORTED,
+            false,
+        ))
     }
 }
 
@@ -1306,6 +1324,8 @@ mod tests {
     use super::*;
     use crate::run_stream::InMemoryLiveRunStreamBroker;
     use insight_engine::run_stream::{LiveRunStreamDelivery, RunStreamEvent};
+    use insight_engine::worker::WorkerArtifactPayload;
+    use std::collections::BTreeMap;
 
     #[tokio::test(start_paused = true)]
     async fn retry_backoff_is_cut_off_by_the_hard_run_deadline() {
@@ -1316,6 +1336,20 @@ mod tests {
             .unwrap_err();
         assert_eq!(failure.code(), "WORKER_TIMEOUT");
         assert_eq!(tokio::time::Instant::now(), deadline);
+    }
+
+    #[test]
+    fn terminal_execution_rejects_unmaterialized_worker_artifact_sidecars() {
+        let payload =
+            WorkerArtifactPayload::new(vec![1, 2, 3], Some("application/octet-stream".to_owned()))
+                .unwrap();
+        let result = TaskExecutionResult::new(BTreeMap::new(), EffectEvidence::Committed)
+            .with_artifact_payloads(vec![payload])
+            .unwrap();
+        let failure = reject_unmaterialized_artifact_sidecars(result).unwrap_err();
+        assert_eq!(failure.class(), WorkerFailureClass::InfrastructureFailure);
+        assert_eq!(failure.code(), "MCP_TERMINAL_ONLY_ARTIFACT_UNSUPPORTED");
+        assert!(!failure.retryable());
     }
 
     #[tokio::test]

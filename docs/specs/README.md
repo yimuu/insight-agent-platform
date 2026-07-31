@@ -15,6 +15,9 @@
 
 最近完成的规范：
 
+- [MCP 2026-07-28 完整支持规范](../archive/specs/2026-07-30-complete-mcp-support.md)：
+  已交付 modern Host/Client、Server、Tasks、独立 legacy profile、双标准传输、OAuth、
+  durable Elicitation、Resources/Prompts/Completion/Subscriptions 与 `run-stream/v2`；
 - [Provider Catalog 与直接模型选择优化](../archive/specs/2026-07-30-provider-catalog-and-direct-model-selection.md)：
   已删除必需的模型文件与别名层，交付结构化 selector、版本化 Catalog、可选 Provider extension
   和统一的结构化输出本地校验；

@@ -57,8 +57,8 @@ struct EchoAction;
 impl Action for EchoAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "echo",
-            version: "1.0.0",
+            id: "echo".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "required": ["text"],
@@ -89,8 +89,8 @@ struct InvalidOutputAction;
 impl Action for InvalidOutputAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "invalid_output",
-            version: "1.0.0",
+            id: "invalid_output".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: json!({"type":"object", "additionalProperties":false}),
             output_schema: json!({"type":"string"}),
             effect: EffectClass::Pure,
@@ -111,8 +111,8 @@ struct SchemaMatrixAction;
 impl Action for SchemaMatrixAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "schema_matrix",
-            version: "1.0.0",
+            id: "schema_matrix".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: json!({
                 "type":"object",
                 "required":["typed","sized","patterned","selected","choice"],
@@ -283,8 +283,8 @@ struct SchemaPolicyAction {
 impl Action for SchemaPolicyAction {
     fn descriptor(&self) -> ActionDescriptor {
         ActionDescriptor {
-            id: "schema_policy",
-            version: "1.0.0",
+            id: "schema_policy".to_owned(),
+            version: "1.0.0".to_owned(),
             input_schema: (self.input_schema)(),
             output_schema: (self.output_schema)(),
             effect: EffectClass::Pure,

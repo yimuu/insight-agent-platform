@@ -18,8 +18,9 @@ use insight_engine::{
     retrieval::{deterministic_retrieval_id, FrozenRetrievalTarget, RetrievalCompletion},
     run_stream::LiveRunStreamBroker,
     worker::{
-        LeafTaskExecutor, TaskExecutionRequest, TaskExecutionResult, WorkerExecutionContext,
-        WorkerExecutorRegistry, WorkerFailure, WorkerFailureClass,
+        adapter as worker_adapter, LeafTaskExecutor, TaskExecutionRequest, TaskExecutionResult,
+        WorkerExecutionContext, WorkerExecutorRegistry, WorkerFailure, WorkerFailureClass,
+        WorkerRuntimeServices,
     },
     EffectEvidence, RuntimeValue, SchedulerTaskKind, TaskOutputContract, WorkerEffectClass,
     WorkerEffectPolicy,
@@ -59,6 +60,22 @@ impl LeafTaskExecutor for RetrievalTaskExecutor {
         &self,
         context: &WorkerExecutionContext,
         request: &TaskExecutionRequest,
+        cancellation: CancellationToken,
+    ) -> Result<TaskExecutionResult, WorkerFailure> {
+        self.execute_with_runtime_services(
+            context,
+            request,
+            &WorkerRuntimeServices::default(),
+            cancellation,
+        )
+        .await
+    }
+
+    async fn execute_with_runtime_services(
+        &self,
+        context: &WorkerExecutionContext,
+        request: &TaskExecutionRequest,
+        services: &WorkerRuntimeServices,
         cancellation: CancellationToken,
     ) -> Result<TaskExecutionResult, WorkerFailure> {
         if request.task_kind() != SchedulerTaskKind::Retrieval
@@ -110,13 +127,16 @@ impl LeafTaskExecutor for RetrievalTaskExecutor {
             cancellation_for_retrieval.cancelled().await;
             stop_for_retrieval.request(StopReason::Cancelled);
         });
-        let retrieval_context = RetrievalContext::for_durable_effect(
+        let mut retrieval_context = RetrievalContext::for_durable_effect(
             request.run_id().as_str(),
             request.activation_id().as_str(),
             context.attempt_no().get(),
             request.effect_id().as_str(),
             control,
         );
+        if let Some(permit) = worker_adapter::services_operation_permit(services) {
+            retrieval_context = retrieval_context.with_operation_permit(permit.clone());
+        }
         let call = registered.retrieve(input.clone(), retrieval_context);
         tokio::pin!(call);
         let execution = tokio::select! {
@@ -134,24 +154,27 @@ impl LeafTaskExecutor for RetrievalTaskExecutor {
         let execution = execution?;
 
         let retrieval_id = deterministic_retrieval_id(request.run_id(), request.activation_id());
+        let (model_output, public_candidate, artifact_payloads) = execution.into_parts();
         let public = target
             .public_projection()
             .map_err(|_| invariant(RETRIEVAL_BINDING_INVALID))?
-            .project_validated_completed(retrieval_id, &input, execution.public_candidate.as_ref())
+            .project_validated_completed(retrieval_id, &input, public_candidate.as_ref())
             .map_err(|_| invariant(RETRIEVAL_PUBLIC_RESULT_INVALID))?;
         let completion = RetrievalCompletion::new(public)
             .map_err(|_| invariant(RETRIEVAL_PUBLIC_RESULT_INVALID))?;
-        let value = RuntimeValue::new(execution.model_output)
-            .map_err(|_| invariant(RETRIEVAL_EXECUTION_FAILED))?;
+        let value =
+            RuntimeValue::new(model_output).map_err(|_| invariant(RETRIEVAL_EXECUTION_FAILED))?;
         let output = only_output(request)?;
         if !value.matches(output.value_type()) {
             return Err(invariant(RETRIEVAL_EXECUTION_FAILED));
         }
-        Ok(TaskExecutionResult::new(
+        TaskExecutionResult::new(
             BTreeMap::from([(output.port_id().clone(), value)]),
             EffectEvidence::Committed,
         )
-        .with_retrieval_completion(completion))
+        .with_retrieval_completion(completion)
+        .with_artifact_payloads(artifact_payloads)
+        .map_err(|_| invariant(RETRIEVAL_EXECUTION_FAILED))
     }
 }
 

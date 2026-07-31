@@ -10,7 +10,7 @@ rows.
 `cargo tree --locked --workspace --all-features -e features` record.  Workspace
 paths are normalized to `<workspace>`; its header records the pinned toolchain.
 
-Both files capture the Phase 0 dependency state.  Regenerate them with
-`scripts/record-crate-boundary-baselines.sh` only for a separately reviewed
-dependency/feature change; workspace crate moves must leave the normative TSV
-unchanged.
+The current files include the reviewed MCP protocol/JWT/PKCE cryptography
+surface. Regenerate them with `scripts/record-crate-boundary-baselines.sh` only
+for a separately reviewed dependency/feature change; workspace crate moves
+must leave the normative TSV unchanged.

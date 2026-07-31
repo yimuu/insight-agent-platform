@@ -14,8 +14,11 @@ pub use insight_engine::resource_policy::{ToolPublicArguments, ToolPublicPolicy}
 use insight_engine::{
     author::CompileError,
     execution::{ExecutionControl, RunError, RunErrorKind},
-    schema::{compile_schema_2020, JsonSchemaValidator},
-    worker::adapter::{ModelToolProgressDisposition, ModelToolProgressPublisher},
+    schema::{compile_schema, compile_schema_2020, JsonSchemaValidator},
+    worker::{
+        adapter::{ModelToolProgressDisposition, ModelToolProgressPublisher},
+        WorkerArtifactPayload, WorkerOperationPermitHandle,
+    },
 };
 
 /// A platform capability which must be granted before an action may run.
@@ -25,15 +28,15 @@ use insight_engine::{
 /// boundary which validates every descriptor before publishing it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
-pub struct ActionCapability(&'static str);
+pub struct ActionCapability(String);
 
 impl ActionCapability {
-    pub const fn new(value: &'static str) -> Self {
-        Self(value)
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
     }
 
-    pub fn as_str(&self) -> &'static str {
-        self.0
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -65,6 +68,16 @@ pub enum CancellationClass {
     NotSupported,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionSchemaDialect {
+    /// Native platform Actions use the strict, closed Draft 2020-12 profile.
+    Platform202012,
+    /// Externally described tools may use MCP's Draft 2020-12 or Draft 7
+    /// profile, while remaining self-contained and network-resolution-free.
+    ProviderDeclared,
+}
+
 /// The complete, closed metadata which defines one action contract.
 ///
 /// `descriptor_hash` deliberately is not a field here: it is derived by the
@@ -72,14 +85,63 @@ pub enum CancellationClass {
 /// [`ActionDescriptorIdentity`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActionDescriptor {
-    pub id: &'static str,
-    pub version: &'static str,
+    pub id: String,
+    pub version: String,
     pub input_schema: Value,
     pub output_schema: Value,
     pub effect: EffectClass,
     pub idempotency: IdempotencyClass,
     pub cancellation: CancellationClass,
     pub required_capabilities: BTreeSet<ActionCapability>,
+}
+
+/// Model-facing presentation is intentionally distinct from Action identity.
+///
+/// Dynamic providers such as MCP keep their qualified, publication-stable
+/// `action_id`, while assigning a provider-compatible alias to the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionModelTool {
+    pub name: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
+impl ActionModelTool {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            title: None,
+            description: None,
+        }
+    }
+
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn from_action_id(action_id: &str) -> Self {
+        let candidate = action_id.replace('.', "_");
+        let name = if candidate.len() <= 64 {
+            candidate
+        } else {
+            let digest = Sha256::digest(action_id.as_bytes());
+            let mut suffix = String::with_capacity(16);
+            for byte in &digest[..8] {
+                write!(&mut suffix, "{byte:02x}").expect("writing to String cannot fail");
+            }
+            let prefix = candidate
+                .get(..47)
+                .expect("qualified Action ids are ASCII and 47 is a character boundary");
+            format!("{prefix}_{suffix}")
+        };
+        Self::new(name)
+    }
 }
 
 /// Frozen identity consumed by compiled action call plans.
@@ -102,6 +164,7 @@ pub struct ActionContext {
     pub idempotency_key: String,
     pub control: ExecutionControl,
     progress_publisher: Option<ModelToolProgressPublisher>,
+    operation_permit: Option<WorkerOperationPermitHandle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +215,7 @@ impl ActionContext {
             attempt,
             control,
             progress_publisher: None,
+            operation_permit: None,
         }
     }
 
@@ -175,6 +239,7 @@ impl ActionContext {
             attempt,
             control,
             progress_publisher: None,
+            operation_permit: None,
         }
     }
 
@@ -185,6 +250,16 @@ impl ActionContext {
     ) -> Self {
         self.progress_publisher = Some(publisher);
         self
+    }
+
+    #[doc(hidden)]
+    pub fn with_operation_permit(mut self, permit: WorkerOperationPermitHandle) -> Self {
+        self.operation_permit = Some(permit);
+        self
+    }
+
+    pub fn operation_permit(&self) -> Option<&WorkerOperationPermitHandle> {
+        self.operation_permit.as_ref()
     }
 
     /// Publishes one schema-validated, live-only model-tool progress update.
@@ -213,9 +288,60 @@ impl ActionContext {
     }
 }
 
+/// Private leaf result carrying typed JSON plus transient Artifact bytes.
+///
+/// The bytes never enter Action schemas, public projection, logs, or durable
+/// task envelopes. The scheduler writes them before committing the typed
+/// references contained in `output`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActionExecutionResult {
+    output: Value,
+    artifact_payloads: Vec<WorkerArtifactPayload>,
+}
+
+impl ActionExecutionResult {
+    pub fn new(output: Value) -> Self {
+        Self {
+            output,
+            artifact_payloads: Vec::new(),
+        }
+    }
+
+    pub fn with_artifact_payloads(
+        output: Value,
+        artifact_payloads: Vec<WorkerArtifactPayload>,
+    ) -> Self {
+        Self {
+            output,
+            artifact_payloads,
+        }
+    }
+
+    pub fn output(&self) -> &Value {
+        &self.output
+    }
+
+    pub fn into_parts(self) -> (Value, Vec<WorkerArtifactPayload>) {
+        (self.output, self.artifact_payloads)
+    }
+}
+
 #[async_trait]
 pub trait Action: Send + Sync {
     fn descriptor(&self) -> ActionDescriptor;
+
+    fn schema_dialect(&self) -> ActionSchemaDialect {
+        ActionSchemaDialect::Platform202012
+    }
+
+    /// Returns the model-visible alias and human-readable presentation.
+    ///
+    /// Native actions preserve the historical behavior by default. Dynamic
+    /// providers override this to decouple a remote/action identity from the
+    /// model-provider tool grammar.
+    fn model_tool(&self) -> ActionModelTool {
+        ActionModelTool::from_action_id(&self.descriptor().id)
+    }
 
     /// Returns the descriptor's public projection policy. Existing actions
     /// remain private unless they opt in explicitly.
@@ -243,11 +369,42 @@ pub trait Action: Send + Sync {
     }
 
     async fn call(&self, input: Value, context: ActionContext) -> Result<Value, RunError>;
+
+    async fn call_with_artifacts(
+        &self,
+        input: Value,
+        context: ActionContext,
+    ) -> Result<ActionExecutionResult, RunError> {
+        self.call(input, context)
+            .await
+            .map(ActionExecutionResult::new)
+    }
+
+    /// Model-originated calls may preserve provider tool-result semantics
+    /// (for example MCP `isError`) without changing direct workflow calls.
+    async fn call_model_tool(
+        &self,
+        input: Value,
+        context: ActionContext,
+    ) -> Result<Value, RunError> {
+        self.call(input, context).await
+    }
+
+    async fn call_model_tool_with_artifacts(
+        &self,
+        input: Value,
+        context: ActionContext,
+    ) -> Result<ActionExecutionResult, RunError> {
+        self.call_model_tool(input, context)
+            .await
+            .map(ActionExecutionResult::new)
+    }
 }
 
 pub struct RegisteredAction {
     descriptor: ActionDescriptor,
     identity: ActionDescriptorIdentity,
+    model_tool: ActionModelTool,
     action: Arc<dyn Action>,
     input_validator: JsonSchemaValidator,
     output_validator: JsonSchemaValidator,
@@ -263,6 +420,10 @@ impl RegisteredAction {
 
     pub fn identity(&self) -> &ActionDescriptorIdentity {
         &self.identity
+    }
+
+    pub fn model_tool(&self) -> &ActionModelTool {
+        &self.model_tool
     }
 
     pub fn public_policy(&self) -> &ToolPublicPolicy {
@@ -329,10 +490,20 @@ impl RegisteredAction {
     }
 
     pub async fn call(&self, input: Value, context: ActionContext) -> Result<Value, RunError> {
+        self.call_with_artifacts(input, context)
+            .await
+            .map(|result| result.into_parts().0)
+    }
+
+    pub async fn call_with_artifacts(
+        &self,
+        input: Value,
+        context: ActionContext,
+    ) -> Result<ActionExecutionResult, RunError> {
         self.validate_input(&input)?;
-        let output = self.action.call(input, context).await?;
-        self.validate_output(&output)?;
-        Ok(output)
+        let result = self.action.call_with_artifacts(input, context).await?;
+        self.validate_output(result.output())?;
+        Ok(result)
     }
 
     /// Executes one model-originated tool call without ever making injected
@@ -347,18 +518,28 @@ impl RegisteredAction {
         model_visible_input: Value,
         context: ActionContext,
     ) -> Result<Value, RunError> {
+        self.call_model_tool_with_artifacts(model_visible_input, context)
+            .await
+            .map(|result| result.into_parts().0)
+    }
+
+    pub async fn call_model_tool_with_artifacts(
+        &self,
+        model_visible_input: Value,
+        context: ActionContext,
+    ) -> Result<ActionExecutionResult, RunError> {
         self.validate_input(&model_visible_input)?;
         let input = self
             .action
             .inject_model_tool_input(model_visible_input, &context)
             .map_err(sanitize_model_tool_error)?;
-        let output = self
+        let result = self
             .action
-            .call(input, context)
+            .call_model_tool_with_artifacts(input, context)
             .await
             .map_err(sanitize_model_tool_error)?;
-        self.validate_output(&output)?;
-        Ok(output)
+        self.validate_output(result.output())?;
+        Ok(result)
     }
 
     fn validate_output(&self, output: &Value) -> Result<(), RunError> {
@@ -417,21 +598,23 @@ impl ActionRegistry {
         A: Action + 'static,
     {
         let mut descriptor = action.descriptor();
+        let model_tool = action.model_tool();
+        let schema_dialect = action.schema_dialect();
         let mut public_policy = action.public_policy();
-        let id = descriptor.id;
-        if !is_qualified_identifier(id) {
+        let id = descriptor.id.clone();
+        if !is_qualified_identifier(&id) {
             return Err(CompileError::new(
                 "ACTION_ID_INVALID",
                 "action id must be a valid qualified identifier",
             ));
         }
-        if self.actions.contains_key(id) {
+        if self.actions.contains_key(&id) {
             return Err(CompileError::new(
                 "DUPLICATE_ACTION",
                 format!("action '{id}' is already registered"),
             ));
         }
-        let version = Version::parse(descriptor.version).map_err(|_| {
+        let version = Version::parse(&descriptor.version).map_err(|_| {
             CompileError::new(
                 "ACTION_VERSION_INVALID",
                 format!("action '{id}' version is not valid SemVer"),
@@ -445,14 +628,17 @@ impl ActionRegistry {
                 ));
             }
         }
-        let (input_schema, input_validator) = normalize_action_schema(&descriptor.input_schema)
-            .map_err(|error| {
+        validate_model_tool(&id, &model_tool)?;
+        let (input_schema, input_validator) =
+            normalize_schema(&descriptor.input_schema, schema_dialect).map_err(|error| {
                 CompileError::new(
                     "ACTION_INPUT_SCHEMA_INVALID",
                     format!("action '{id}' input schema is invalid: {error}"),
                 )
             })?;
-        if !is_closed_object_schema(&input_schema) {
+        if schema_dialect == ActionSchemaDialect::Platform202012
+            && !is_closed_object_schema(&input_schema)
+        {
             return Err(CompileError::new(
                 "ACTION_INPUT_SCHEMA_NOT_CLOSED",
                 format!("action '{id}' input schema must describe a closed object"),
@@ -465,7 +651,7 @@ impl ActionRegistry {
                     format!("action '{id}' output schema is invalid: {error}"),
                 )
             })?;
-        validate_public_argument_policy(id, &public_policy.arguments, &input_schema)?;
+        validate_public_argument_policy(&id, &public_policy.arguments, &input_schema)?;
         let public_progress_validator = match public_policy.progress_schema.take() {
             Some(schema) => {
                 let (schema, validator) = normalize_action_schema(&schema).map_err(|error| {
@@ -508,16 +694,18 @@ impl ActionRegistry {
         };
         descriptor.input_schema = input_schema;
         descriptor.output_schema = output_schema;
-        let descriptor_hash = descriptor_hash(&descriptor, &public_policy)?;
+        let descriptor_hash =
+            descriptor_hash(&descriptor, &model_tool, schema_dialect, &public_policy)?;
         self.actions.insert(
-            id.to_string(),
+            id.clone(),
             Arc::new(RegisteredAction {
                 identity: ActionDescriptorIdentity {
-                    id: id.to_string(),
+                    id,
                     version,
                     descriptor_hash,
                 },
                 descriptor,
+                model_tool,
                 action: Arc::new(action),
                 input_validator,
                 output_validator,
@@ -541,6 +729,32 @@ impl ActionRegistry {
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.actions.keys().map(String::as_str)
     }
+}
+
+fn validate_model_tool(action_id: &str, model_tool: &ActionModelTool) -> Result<(), CompileError> {
+    if !is_model_tool_name(&model_tool.name) {
+        return Err(CompileError::new(
+            "ACTION_MODEL_TOOL_NAME_INVALID",
+            format!("action '{action_id}' model tool name is invalid"),
+        ));
+    }
+    if model_tool.title.as_ref().is_some_and(|value| {
+        value.is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+    }) {
+        return Err(CompileError::new(
+            "ACTION_MODEL_TOOL_TITLE_INVALID",
+            format!("action '{action_id}' model tool title is invalid"),
+        ));
+    }
+    if model_tool.description.as_ref().is_some_and(|value| {
+        value.is_empty() || value.len() > 16 * 1024 || value.chars().any(char::is_control)
+    }) {
+        return Err(CompileError::new(
+            "ACTION_MODEL_TOOL_DESCRIPTION_INVALID",
+            format!("action '{action_id}' model tool description is invalid"),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_public_argument_policy(
@@ -615,6 +829,71 @@ fn normalize_action_schema(authored: &Value) -> Result<(Value, JsonSchemaValidat
     Ok((document, validator))
 }
 
+fn normalize_schema(
+    authored: &Value,
+    dialect: ActionSchemaDialect,
+) -> Result<(Value, JsonSchemaValidator), String> {
+    match dialect {
+        ActionSchemaDialect::Platform202012 => normalize_action_schema(authored),
+        ActionSchemaDialect::ProviderDeclared => normalize_provider_schema(authored),
+    }
+}
+
+fn normalize_provider_schema(authored: &Value) -> Result<(Value, JsonSchemaValidator), String> {
+    reject_external_schema_references(authored)?;
+    let Value::Object(mut document) = authored.clone() else {
+        return Err("provider schema must be an object".to_string());
+    };
+    let dialect = match document.get("$schema").and_then(Value::as_str) {
+        None
+        | Some("https://json-schema.org/draft/2020-12/schema")
+        | Some("https://json-schema.org/draft/2020-12/schema#") => {
+            document.entry("$schema".to_owned()).or_insert_with(|| {
+                Value::String("https://json-schema.org/draft/2020-12/schema".to_owned())
+            });
+            ActionSchemaDialect::Platform202012
+        }
+        Some("http://json-schema.org/draft-07/schema#")
+        | Some("https://json-schema.org/draft-07/schema#") => ActionSchemaDialect::ProviderDeclared,
+        Some(_) => return Err("provider schema uses an unsupported draft".to_string()),
+    };
+    let document = Value::Object(document);
+    let validator = match dialect {
+        ActionSchemaDialect::Platform202012 => compile_schema_2020(&document),
+        ActionSchemaDialect::ProviderDeclared => compile_schema(&document),
+    }?;
+    Ok((document, validator))
+}
+
+fn reject_external_schema_references(value: &Value) -> Result<(), String> {
+    match value {
+        Value::Object(object) => {
+            if object.contains_key("$dynamicRef") || object.contains_key("$recursiveRef") {
+                return Err("dynamic JSON Schema references are not supported".to_string());
+            }
+            if object.get("$ref").is_some_and(|reference| {
+                !reference
+                    .as_str()
+                    .is_some_and(|value| value.starts_with('#'))
+            }) {
+                return Err(
+                    "provider schema references must remain inside the document".to_string()
+                );
+            }
+            for value in object.values() {
+                reject_external_schema_references(value)?;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                reject_external_schema_references(value)?;
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+    Ok(())
+}
+
 fn is_schema_identifier(value: &str) -> bool {
     let mut characters = value.chars();
     matches!(characters.next(), Some(first) if first.is_ascii_alphabetic() || first == '_')
@@ -655,6 +934,10 @@ fn reject_dynamic_schema_references(value: &Value) -> Result<(), String> {
 struct CanonicalActionDescriptor<'a> {
     id: &'a str,
     version: &'a str,
+    model_tool_name: &'a str,
+    model_tool_title: &'a Option<String>,
+    model_tool_description: &'a Option<String>,
+    schema_dialect: ActionSchemaDialect,
     input_schema: &'a Value,
     output_schema: &'a Value,
     effect: EffectClass,
@@ -666,6 +949,8 @@ struct CanonicalActionDescriptor<'a> {
 
 fn descriptor_hash(
     descriptor: &ActionDescriptor,
+    model_tool: &ActionModelTool,
+    schema_dialect: ActionSchemaDialect,
     public: &ToolPublicPolicy,
 ) -> Result<String, CompileError> {
     // Sorting explicitly by UTF-8 bytes makes the Set -> JSON array rule part
@@ -678,8 +963,12 @@ fn descriptor_hash(
     required_capabilities.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
 
     let canonical = serde_jcs::to_vec(&CanonicalActionDescriptor {
-        id: descriptor.id,
-        version: descriptor.version,
+        id: &descriptor.id,
+        version: &descriptor.version,
+        model_tool_name: &model_tool.name,
+        model_tool_title: &model_tool.title,
+        model_tool_description: &model_tool.description,
+        schema_dialect,
         input_schema: &descriptor.input_schema,
         output_schema: &descriptor.output_schema,
         effect: descriptor.effect,
@@ -713,6 +1002,14 @@ fn is_qualified_identifier(value: &str) -> bool {
                 character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
             })
     })
+}
+
+fn is_model_tool_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn is_closed_object_schema(schema: &Value) -> bool {
@@ -766,8 +1063,8 @@ mod tests {
 
     use super::{
         descriptor_hash, normalize_action_schema, Action, ActionCapability, ActionContext,
-        ActionDescriptor, ActionProgressDisposition, ActionRegistry, CancellationClass,
-        EffectClass, IdempotencyClass, ToolPublicArguments, ToolPublicPolicy,
+        ActionDescriptor, ActionProgressDisposition, ActionRegistry, ActionSchemaDialect,
+        CancellationClass, EffectClass, IdempotencyClass, ToolPublicArguments, ToolPublicPolicy,
     };
     use insight_engine::execution::{stop_pair, ExecutionControl, RunError};
 
@@ -818,8 +1115,8 @@ mod tests {
     impl Action for ServerInjectingAction {
         fn descriptor(&self) -> ActionDescriptor {
             ActionDescriptor {
-                id: "example.server_injection",
-                version: "1.0.0",
+                id: "example.server_injection".to_owned(),
+                version: "1.0.0".to_owned(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {"query": {"type": "string"}},
@@ -882,8 +1179,8 @@ mod tests {
         input_schema: Value,
     ) -> ActionDescriptor {
         ActionDescriptor {
-            id,
-            version,
+            id: id.to_owned(),
+            version: version.to_owned(),
             input_schema,
             output_schema: json!({
                 "type": "object",
@@ -1164,7 +1461,13 @@ mod tests {
         );
         assert_eq!(
             registered.identity.descriptor_hash,
-            descriptor_hash(&registered.descriptor, &registered.public_policy).unwrap()
+            descriptor_hash(
+                &registered.descriptor,
+                &registered.model_tool,
+                ActionSchemaDialect::Platform202012,
+                &registered.public_policy,
+            )
+            .unwrap()
         );
         assert_eq!(
             normalize_action_schema(&registered.descriptor.input_schema)
@@ -1182,7 +1485,7 @@ mod tests {
         let variants = [
             base.clone(),
             ActionDescriptor {
-                version: "1.0.1",
+                version: "1.0.1".to_owned(),
                 ..base.clone()
             },
             ActionDescriptor {

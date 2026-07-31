@@ -25,8 +25,8 @@ use super::{
         BoundTaskInput, RuntimeValue, SafeError, SchedulerAction, SchedulerIntent, SchedulerTaskId,
         SchedulerTaskKind, TaskAdmissionClass, TaskOutputContract,
     },
-    ActivationId, AttemptNo, EffectEvidence, EffectId, LeaseEpoch, NodeId, RunId,
-    WorkerEffectPolicy,
+    ActivationId, ArtifactId, ArtifactRef, AttemptNo, ContentHash, EffectEvidence, EffectId,
+    LeaseEpoch, NodeId, RunId, WorkerEffectPolicy,
 };
 
 pub const WORKER_TASK_KIND_MISMATCH: &str = "ENGINE_WORKER_TASK_KIND_MISMATCH";
@@ -154,7 +154,8 @@ pub mod adapter {
 
     use super::{
         ResponseItemAuthority, SafeError, TaskExecutionRequest, TaskExecutionResult,
-        WorkerExecutionContext, WorkerExecutorRegistry, WorkerFailure, WorkerRuntimeServices,
+        WorkerExecutionContext, WorkerExecutorRegistry, WorkerFailure, WorkerOperationPermitHandle,
+        WorkerRuntimeServices,
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +366,20 @@ pub mod adapter {
         services.model_tool_progress_publisher.as_ref()
     }
 
+    pub fn services_with_operation_permit(
+        mut services: WorkerRuntimeServices,
+        permit: WorkerOperationPermitHandle,
+    ) -> WorkerRuntimeServices {
+        services.operation_permit = Some(permit);
+        services
+    }
+
+    pub fn services_operation_permit(
+        services: &WorkerRuntimeServices,
+    ) -> Option<&WorkerOperationPermitHandle> {
+        services.operation_permit.as_ref()
+    }
+
     pub fn worker_failure_typed_safe_error(failure: &WorkerFailure) -> Option<&SafeError> {
         failure.typed_safe_error()
     }
@@ -386,10 +401,47 @@ pub mod adapter {
     }
 }
 
+#[async_trait]
+pub trait WorkerOperationPermit: Send + Sync {
+    /// Releases process-local execution capacity while durable external
+    /// authority is waiting for a user or remote task.
+    fn suspend(&self);
+
+    /// Reacquires execution capacity before provider or repository work
+    /// resumes. Failure is body-free and treated as infrastructure loss.
+    async fn resume(&self) -> Result<(), ()>;
+}
+
+#[derive(Clone)]
+pub struct WorkerOperationPermitHandle(Arc<dyn WorkerOperationPermit>);
+
+impl WorkerOperationPermitHandle {
+    pub fn new(permit: Arc<dyn WorkerOperationPermit>) -> Self {
+        Self(permit)
+    }
+
+    pub fn suspend(&self) {
+        self.0.suspend();
+    }
+
+    pub async fn resume(&self) -> Result<(), ()> {
+        self.0.resume().await
+    }
+}
+
+impl fmt::Debug for WorkerOperationPermitHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkerOperationPermitHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct WorkerRuntimeServices {
     model_call_public_item_allocator: Option<adapter::ModelCallPublicItemAllocator>,
     model_tool_progress_publisher: Option<adapter::ModelToolProgressPublisher>,
+    operation_permit: Option<WorkerOperationPermitHandle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1781,6 +1833,63 @@ fn descriptor_value_from_model_tool_json(
     })
 }
 
+/// Transient binary payload produced by a leaf adapter.
+///
+/// The durable scheduler stages and verifies these bytes before committing the
+/// typed [`ArtifactRef`] already present in the worker's JSON output. Bytes are
+/// deliberately excluded from serialization and redacted from `Debug`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct WorkerArtifactPayload {
+    artifact: ArtifactRef,
+    bytes: Vec<u8>,
+}
+
+impl WorkerArtifactPayload {
+    pub fn new(bytes: Vec<u8>, media_type: Option<String>) -> Result<Self, &'static str> {
+        if bytes.is_empty() || bytes.len() > 256 * 1024 * 1024 {
+            return Err(WORKER_OUTPUT_INVALID);
+        }
+        let content_hash = ContentHash::from_bytes(&bytes);
+        let artifact_id = ArtifactId::new(format!(
+            "artifact_{}",
+            content_hash.as_str().trim_start_matches("sha256:")
+        ))
+        .map_err(|_| WORKER_OUTPUT_INVALID)?;
+        let artifact = ArtifactRef::new(
+            artifact_id,
+            content_hash,
+            u64::try_from(bytes.len()).map_err(|_| WORKER_OUTPUT_INVALID)?,
+            media_type,
+        )
+        .map_err(|_| WORKER_OUTPUT_INVALID)?;
+        Ok(Self { artifact, bytes })
+    }
+
+    pub fn artifact(&self) -> &ArtifactRef {
+        &self.artifact
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl fmt::Debug for WorkerArtifactPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkerArtifactPayload")
+            .field("artifact", &self.artifact)
+            .field("bytes", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for WorkerArtifactPayload {
+    fn drop(&mut self) {
+        self.bytes.fill(0);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskExecutionResult {
@@ -1792,6 +1901,8 @@ pub struct TaskExecutionResult {
     model_tool_call_batch: Option<ModelToolCallBatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     retrieval: Option<RetrievalCompletion>,
+    #[serde(skip, default)]
+    artifact_payloads: Vec<WorkerArtifactPayload>,
 }
 
 impl TaskExecutionResult {
@@ -1805,6 +1916,7 @@ impl TaskExecutionResult {
             model_call: None,
             model_tool_call_batch: None,
             retrieval: None,
+            artifact_payloads: Vec::new(),
         }
     }
 
@@ -1821,6 +1933,25 @@ impl TaskExecutionResult {
     pub fn with_retrieval_completion(mut self, completion: RetrievalCompletion) -> Self {
         self.retrieval = Some(completion);
         self
+    }
+
+    pub fn with_artifact_payloads(
+        mut self,
+        artifact_payloads: Vec<WorkerArtifactPayload>,
+    ) -> Result<Self, &'static str> {
+        let mut artifact_ids = BTreeSet::new();
+        let mut total_bytes = 0usize;
+        if artifact_payloads.len() > 256
+            || artifact_payloads.iter().any(|payload| {
+                total_bytes = total_bytes.saturating_add(payload.bytes.len());
+                !artifact_ids.insert(payload.artifact.artifact_id().clone())
+            })
+            || total_bytes > 256 * 1024 * 1024
+        {
+            return Err(WORKER_OUTPUT_INVALID);
+        }
+        self.artifact_payloads = artifact_payloads;
+        Ok(self)
     }
 
     pub fn outputs(&self) -> &BTreeMap<DataPortId, RuntimeValue> {
@@ -1841,6 +1972,14 @@ impl TaskExecutionResult {
 
     pub fn retrieval_completion(&self) -> Option<&RetrievalCompletion> {
         self.retrieval.as_ref()
+    }
+
+    pub fn artifact_payloads(&self) -> &[WorkerArtifactPayload] {
+        &self.artifact_payloads
+    }
+
+    pub fn take_artifact_payloads(&mut self) -> Vec<WorkerArtifactPayload> {
+        std::mem::take(&mut self.artifact_payloads)
     }
 
     /// Removes model-call telemetry after its dedicated fenced checkpoint;

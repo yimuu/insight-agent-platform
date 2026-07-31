@@ -2,6 +2,9 @@
 
 mod auth;
 mod conversation;
+mod mcp_catalog;
+mod mcp_interactions;
+mod mcp_oauth;
 mod models;
 mod response;
 mod routes;
@@ -15,8 +18,15 @@ pub use conversation::{
     ConversationMessageCursor, ConversationMessagePageDto, ConversationMessagesQuery,
     ConversationTurnDto, CreateConversationRequest,
 };
+pub use mcp_catalog::{
+    build_mcp_catalog_router, McpCatalogApiState, McpCatalogServer, McpProfileReport,
+    McpProfileState,
+};
+pub use mcp_oauth::{build_mcp_oauth_router, McpOAuthApiState, McpOAuthServer};
 pub use models::{
     PersistenceMode, RecoveryCapability, RecoveryRunDto, RunDto, RunPersistenceCapability,
 };
-pub use routes::{build_router, ApiState};
+pub use routes::{
+    build_router, build_router_with_mcp, build_router_with_mcp_interactions, ApiState,
+};
 pub use sse::{TerminalFrameBarrier, TerminalFrameBarrierError};

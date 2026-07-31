@@ -1,0 +1,25 @@
+//! Public MCP protocol contracts.
+
+pub use insight_mcp::{
+    negotiate_version, BindingIdentityError, CacheScope, CancelledNotificationParams,
+    CatalogRejection, ClientCapabilities, ClientError, ClientInfo, CodecError, CompleteResult,
+    Completion, CompletionArgument, CompletionReference, ContentBlock, CoreMethod, DiscoverParams,
+    DiscoverResult, ElicitAction, ElicitRequestParams, ElicitResult, EmbeddedResource, EmptyParams,
+    GetPromptResult, HttpCredential, InputRequest, InputRequiredResult, InputResponse,
+    InvalidToolHeader, JsonRpcError, JsonRpcErrorResponse, JsonRpcNotification, JsonRpcRequest,
+    JsonRpcResponse, LegacyCompatibilityTransport, LegacyError, ListPromptsResult,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, McpCallOutcome, McpCatalog,
+    McpClient, McpClientLimits, McpCodec, McpGetPromptOutcome, McpNotificationObserver,
+    McpPromptBinding, McpReadResourceOutcome, McpResourceBinding, McpResourceBindingKind,
+    McpServerBindingIdentity, McpToolBinding, McpToolBindingDescriptor, McpTransport,
+    McpTransportKind, MetaMap, ModernRequest, NoopNotificationObserver, PaginatedResult,
+    PrincipalScope, ProgressNotificationParams, Prompt, PromptArgument, PromptCatalog,
+    PromptMessage, ProtocolLimits, ReadResourceResult, RequestId, RequestMetadata, Resource,
+    ResourceCatalog, ResourceContents, ResourceTemplate, ResourceTemplateCatalog,
+    ResourceUpdatedNotificationParams, Role, ServerCapabilities, ServerInfo, StreamableHttpPolicy,
+    StreamableHttpTransport, SubscriptionFilter, SubscriptionsAcknowledgedParams,
+    SubscriptionsListenParams, Tool, ToolAnnotations, ToolCallResult, ToolCatalog,
+    ToolCatalogRejection, ToolHeaderError, ToolHeaderPlan, ToolHeaderRejection, TransportError,
+    TransportKind, VersionNegotiationError, JSON_RPC_VERSION, MCP_LEGACY_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION,
+};

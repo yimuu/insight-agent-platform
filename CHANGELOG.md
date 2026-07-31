@@ -9,6 +9,13 @@
 
 ### Added
 
+- 完整 MCP `2026-07-28` modern Host/Client 与 Server profiles，覆盖 Tools、Resources、Prompts、
+  Completion、Subscriptions、Elicitation、stdio、Streamable HTTP 和 HTTP Authorization；
+  官方 Tasks extension 与 `2025-11-25` legacy client 作为独立协商 profile。
+- 独立 `insight-mcp` 协议边界、`/mcp` Server endpoint、MCP catalog/context/connection API、
+  durable interaction API 与 `run-stream/v2` interaction 事件。
+- SQLite/PostgreSQL 等价的 MCP interaction、remote/server task、OAuth transaction 与加密
+  credential 持久化，以及 TypeScript/Go 官方 SDK 双向互操作资格验收。
 - 版本化只读 Provider Catalog，内置 `dashscope-cn` / `dashscope-intl` route、官方
   `DASHSCOPE_API_KEY` 凭据约定、最小模型 Profile，以及可选的 `providers` extension 与
   `model_policy` 治理配置。
@@ -50,6 +57,9 @@
 
 ### Security
 
+- MCP secret 与 OAuth token 仅通过 Secret 引用和版本化 envelope encryption 使用；远程 metadata、
+  resource/prompt/tool content、stderr、request state 与用户响应均经过边界校验、隔离和脱敏，
+  不成为 Plan、revision identity 或默认日志中的安全权威。
 - Provider extension 只保存 secret reference；Provider/model、endpoint、adapter、Catalog 与
   extension digest 进入 Deployment Revision，secret 值和 URL query 不进入 Plan、identity 或日志。
 - 工具参数、进度和结果继续独立双重授权；progress 在冻结 Schema、公共结构/大小限制和频率限制

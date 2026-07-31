@@ -1,6 +1,7 @@
 .worktrees/
 .superpowers/
 /target
+/tests/interop/typescript/node_modules/
 /data
 .env
 *.log

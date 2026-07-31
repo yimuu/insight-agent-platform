@@ -13,6 +13,14 @@ pub mod human_task;
 #[doc(hidden)]
 pub mod ingress;
 #[doc(hidden)]
+pub mod mcp_interaction;
+#[doc(hidden)]
+pub mod mcp_oauth;
+#[doc(hidden)]
+pub mod mcp_remote_task;
+#[doc(hidden)]
+pub mod mcp_server_task;
+#[doc(hidden)]
 pub mod model;
 #[doc(hidden)]
 pub mod model_tool_parent_resume;
@@ -114,6 +122,27 @@ pub use insight_engine::repository::{
     REPOSITORY_RUN_MIGRATING, REPOSITORY_RUN_NOT_FOUND, REPOSITORY_SCHEDULER_ACTION_UNSUPPORTED,
     REPOSITORY_SCHEDULER_CRASH_INJECTED, REPOSITORY_STORAGE_FAILURE,
 };
+pub use mcp_interaction::{
+    CreateMcpInteractionCommand, McpInteraction, McpInteractionDisposition,
+    McpInteractionDurableRepository, McpInteractionId, McpInteractionListFilter,
+    McpInteractionMode, McpInteractionOutcome, McpInteractionPrincipal, McpInteractionRequest,
+    McpInteractionSecretAuthority, McpInteractionState, McpProtectedSecret, McpSecretCiphertext,
+    McpSecretProtector, McpSecretPurpose, McpSecretScope, ResolveMcpInteractionCommand,
+    TransitionMcpInteractionCommand,
+};
+pub use mcp_oauth::{
+    ClaimMcpOAuthRefreshCommand, CompleteMcpOAuthCallbackCommand,
+    ConsumeMcpOAuthTransactionCommand, CreateMcpOAuthTransactionCommand,
+    McpOAuthCallbackCompletion, McpOAuthCredential, McpOAuthCredentialSecret,
+    McpOAuthDurableRepository, McpOAuthTransaction, McpOAuthTransactionId,
+    McpOAuthTransactionSecret, McpOAuthTransactionState, StoreMcpOAuthCredentialCommand,
+};
+pub use mcp_remote_task::{
+    ClaimMcpRemoteTasksCommand, CreateMcpRemoteTaskCommand, FinalizeMcpRemoteTaskCommand,
+    McpRemoteTask, McpRemoteTaskDurableRepository, McpRemoteTaskId, McpRemoteTaskPollClaim,
+    McpRemoteTaskSecret, McpRemoteTaskStatus, ObserveMcpRemoteTaskCommand,
+};
+pub use mcp_server_task::{McpServerTask, McpServerTaskDurableRepository};
 pub use model::{
     CommitReceipt, CreateRunCommand, DurableRunStreamSnapshot, FullConversationRunAdmission,
     PlanInstallOutcome, PlanPublicationOutcome, PublicEventIntent, PublicRunAttachment,

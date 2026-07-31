@@ -12,17 +12,28 @@ path = "src/lib.rs"
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
+chrono.workspace = true
 futures.workspace = true
+insight-durable.workspace = true
 insight-dsl.workspace = true
 insight-engine.workspace = true
+insight-mcp.workspace = true
+insight-resources.workspace = true
 insight-runtime.workspace = true
+jsonwebtoken.workspace = true
+reqwest.workspace = true
 serde.workspace = true
+serde_jcs.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 chrono.workspace = true
+jsonschema.workspace = true
+ring.workspace = true
 serde_jcs.workspace = true
 tower.workspace = true

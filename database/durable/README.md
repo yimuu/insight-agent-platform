@@ -24,7 +24,7 @@ Schema 文件，也不能创建、修改、修复或升级任何数据库对象�
 当前使用的不透明契约 ID 为：
 
 ```text
-durable-schema-ed759e21-5c5d-42e9-90d3-744029ea19b2
+durable-schema-8b03b243-1b08-438e-bd21-3a37711e0489
 ```
 
 两个后端共享同一个契约 ID。元数据记录通过 `postgres` 或 `sqlite` 单独标识实际
