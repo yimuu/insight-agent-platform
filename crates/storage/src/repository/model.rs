@@ -200,6 +200,7 @@ pub(crate) trait CreateRunCommandAdapter {
     fn artifact_reference_retention_seconds(&self) -> u32;
     fn expected_publication_head(&self) -> Option<&PublicationHead>;
     fn expected_mcp_server_fences(&self) -> &BTreeMap<String, u64>;
+    fn expected_provider_fences(&self) -> &BTreeMap<String, u64>;
     fn full_conversation(&self) -> Option<&FullConversationRunAdmission>;
 }
 
@@ -239,6 +240,9 @@ impl CreateRunCommandAdapter for CreateRunCommand {
     }
     fn expected_mcp_server_fences(&self) -> &BTreeMap<String, u64> {
         durable_model_adapter::create_run_expected_mcp_server_fences(self)
+    }
+    fn expected_provider_fences(&self) -> &BTreeMap<String, u64> {
+        durable_model_adapter::create_run_expected_provider_fences(self)
     }
     fn full_conversation(&self) -> Option<&FullConversationRunAdmission> {
         durable_model_adapter::create_run_full_conversation(self)

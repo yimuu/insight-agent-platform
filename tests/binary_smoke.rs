@@ -27,6 +27,9 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const BINARY_POSTGRES_URL_ENV: &str = "BINARY_SMOKE_POSTGRES_URL";
 const BINARY_POSTGRES_ARTIFACT_NAMESPACE: &str = "binary-pg-restart";
+const BINARY_MANAGEMENT_TOKEN_ENV: &str = "BINARY_MANAGEMENT_TOKEN";
+const BINARY_MANAGEMENT_TOKEN: &str = "binary-management-secret";
+const BINARY_PROVIDER_SECRET_ENV: &str = "BINARY_PROVIDER_SECRET_MUST_NOT_BE_READ";
 static BINARY_STARTUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
@@ -79,6 +82,21 @@ async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
 
     let mut child = ChildGuard::spawn(&platform_config);
     wait_for_health(&client, &base_url, &mut child).await;
+    import_and_activate_yaml_agent(
+        &client,
+        &base_url,
+        "action_demo",
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("agents/action_demo/agent.yaml"),
+    )
+    .await;
+    import_and_activate_yaml_agent(
+        &client,
+        &base_url,
+        "workflow_failure_demo",
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("agents/workflow_failure_demo/agent.yaml"),
+    )
+    .await;
+    import_and_activate_provider_extension(&base_url, temp.path());
     drop(startup_guard);
 
     let ready_url = format!("{base_url}/health/ready");
@@ -104,6 +122,45 @@ async fn binary_starts_and_observes_success_and_workflow_failure_runs() {
     )
     .await;
     assert_eq!(live["data"]["status"], "live");
+
+    let metrics = wait_for_management_metrics(&client, &base_url).await;
+    for family in [
+        "agent_management_operations_total",
+        "agent_drafts_current",
+        "agent_validations_pending",
+        "agent_deployment_resolutions_pending",
+        "agent_activations_total",
+        "agent_debug_sessions",
+        "provider_management_operations_total",
+        "provider_discoveries_pending",
+        "provider_connection_tests_total",
+        "provider_activations_total",
+        "provider_operational_state",
+        "provider_registry_projection_lag_seconds",
+    ] {
+        assert!(metrics.contains(family), "missing metric family {family}");
+    }
+    assert!(
+        metrics.contains(
+            "agent_management_operations_total{operation=\"create\",outcome=\"accepted\"} 2"
+        ),
+        "Agent creation count did not converge:\n{metrics}"
+    );
+    for forbidden in [
+        "action_demo",
+        "workflow_failure_demo",
+        "company-llm",
+        "imported-company",
+        "secret://",
+        "http://",
+        "https://",
+        "req_",
+    ] {
+        assert!(
+            !metrics.contains(forbidden),
+            "management metrics must not expose high-cardinality or sensitive value {forbidden:?}:\n{metrics}"
+        );
+    }
 
     let human_tasks_url = format!("{base_url}/v1/human-tasks");
     let unauthorized_human_tasks = expect_json(
@@ -274,6 +331,13 @@ async fn ordinary_process_restart_keeps_a_nonterminal_run_recoverable() {
 
     let mut first = ChildGuard::spawn(&platform_config);
     wait_for_health(&client, &first_base, &mut first).await;
+    import_and_activate_yaml_agent(
+        &client,
+        &first_base,
+        "restart_waiter",
+        &temp.path().join("agents/restart_waiter/agent.yaml"),
+    )
+    .await;
     drop(first_startup_guard);
     let created = expect_json(
         format!("POST {first_base}/v1/agents/restart_waiter/runs"),
@@ -383,6 +447,13 @@ async fn stock_production_binary_runs_and_restarts_with_a_no_ddl_postgres_role()
 
         let mut first = ChildGuard::spawn_with_env(&platform_config, &process_environment);
         wait_for_health(&client, &first_base, &mut first).await;
+        import_and_activate_yaml_agent(
+            &client,
+            &first_base,
+            "action_demo",
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("agents/action_demo/agent.yaml"),
+        )
+        .await;
         drop(first_startup_guard);
         let attached = create_attached_action_and_read_response(&client, &first_base).await;
         let run_id = attached.run_id;
@@ -900,6 +971,26 @@ bind_addr: {bind_addr}
 auth:
   mode: disabled
 
+management:
+  version: 1
+  enabled: true
+  operator_credentials:
+    - identity: binary-importer
+      token_env: {BINARY_MANAGEMENT_TOKEN_ENV}
+      capabilities:
+        - agent.read
+        - agent.write
+        - agent.validate
+        - agent.publish
+        - agent.deploy
+        - agent.activate
+        - provider.write
+        - provider.publish
+        - provider.activate
+  provider_secret_resolver:
+    type: environment_reference
+    allowed_names: [{BINARY_PROVIDER_SECRET_ENV}]
+
 agents:
   directory: {}
   enabled:
@@ -986,6 +1077,26 @@ bind_addr: {bind_addr}
 auth:
   mode: disabled
 
+management:
+  version: 1
+  enabled: true
+  operator_credentials:
+    - identity: binary-importer
+      token_env: {BINARY_MANAGEMENT_TOKEN_ENV}
+      capabilities:
+        - agent.read
+        - agent.write
+        - agent.validate
+        - agent.publish
+        - agent.deploy
+        - agent.activate
+        - provider.write
+        - provider.publish
+        - provider.activate
+  provider_secret_resolver:
+    type: environment_reference
+    allowed_names: [{BINARY_PROVIDER_SECRET_ENV}]
+
 agents:
   directory: {}
   enabled: [restart_waiter]
@@ -1029,6 +1140,26 @@ bind_addr: {}
 
 auth:
   mode: disabled
+
+management:
+  version: 1
+  enabled: true
+  operator_credentials:
+    - identity: binary-importer
+      token_env: {BINARY_MANAGEMENT_TOKEN_ENV}
+      capabilities:
+        - agent.read
+        - agent.write
+        - agent.validate
+        - agent.publish
+        - agent.deploy
+        - agent.activate
+        - provider.write
+        - provider.publish
+        - provider.activate
+  provider_secret_resolver:
+    type: environment_reference
+    allowed_names: [{BINARY_PROVIDER_SECRET_ENV}]
 
 agents:
   directory: {}
@@ -1200,6 +1331,8 @@ impl ChildGuard<CapturedChild> {
         command
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .env("PLATFORM_CONFIG", platform_config)
+            .env(BINARY_MANAGEMENT_TOKEN_ENV, BINARY_MANAGEMENT_TOKEN)
+            .env(BINARY_PROVIDER_SECRET_ENV, "server-only-provider-secret")
             .envs(environment.iter().copied())
             .env_remove("DASHSCOPE_API_KEY")
             .stdout(Stdio::piped())
@@ -1406,6 +1539,109 @@ async fn expect_json(
         let detail = format!("response body for HTTP status {status} is not JSON: {error}");
         panic!("{}", http_diagnostic_message(&label, &detail, Some(&body)));
     })
+}
+
+async fn import_and_activate_yaml_agent(
+    _client: &Client,
+    base_url: &str,
+    agent_id: &str,
+    source_path: &Path,
+) {
+    let agent_dir = source_path
+        .parent()
+        .expect("agent.yaml must have a parent directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_agentctl"))
+        .args([
+            "import",
+            "--server",
+            base_url,
+            "--token-env",
+            BINARY_MANAGEMENT_TOKEN_ENV,
+            "--agent-dir",
+            agent_dir.to_str().expect("fixture path must be UTF-8"),
+            "--activate",
+        ])
+        .env(BINARY_MANAGEMENT_TOKEN_ENV, BINARY_MANAGEMENT_TOKEN)
+        .output()
+        .expect("agentctl import must start");
+    assert!(
+        output.status.success(),
+        "agentctl failed for {agent_id}:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["agent_id"], agent_id);
+    assert_eq!(report["activated"], true);
+    assert!(report["definition_revision_id"].as_str().is_some());
+    assert!(report["deployment_revision_id"].as_str().is_some());
+}
+
+fn import_and_activate_provider_extension(base_url: &str, root: &Path) {
+    let import_config = root.join("provider-import.yaml");
+    let with_provider = include_str!("../config/platform.quickstart.yaml").replace(
+        "actions:\n",
+        "providers:\n  imported-company:\n    type: open_ai_compatible\n    endpoint: https://llm.company.test/v1\n    credential:\n      type: bearer\n      env: BINARY_PROVIDER_SECRET_MUST_NOT_BE_READ\n    models:\n      chat-v1:\n        input: [text]\n\nactions:\n",
+    );
+    fs::write(&import_config, with_provider).unwrap();
+    let catalog_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/provider-catalog.yaml");
+    let output = Command::new(env!("CARGO_BIN_EXE_providerctl"))
+        .args([
+            "import-extensions",
+            "--server",
+            base_url,
+            "--token-env",
+            BINARY_MANAGEMENT_TOKEN_ENV,
+            "--platform-config",
+            import_config.to_str().expect("fixture path must be UTF-8"),
+            "--catalog",
+            catalog_path.to_str().expect("fixture path must be UTF-8"),
+            "--activate",
+        ])
+        .env(BINARY_MANAGEMENT_TOKEN_ENV, BINARY_MANAGEMENT_TOKEN)
+        .env_remove(BINARY_PROVIDER_SECRET_ENV)
+        .output()
+        .expect("providerctl import must start");
+    assert!(
+        output.status.success(),
+        "providerctl failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["providers"][0]["provider_id"], "imported-company");
+    assert_eq!(report["providers"][0]["activated"], true);
+    let rendered = String::from_utf8_lossy(&output.stdout);
+    assert!(!rendered.contains("llm.company.test"));
+    assert!(!rendered.contains("BINARY_PROVIDER_SECRET_MUST_NOT_BE_READ"));
+}
+
+async fn wait_for_management_metrics(client: &Client, base_url: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let metrics_url = format!("{base_url}/metrics");
+    loop {
+        let response = client
+            .get(&metrics_url)
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("GET {metrics_url} failed: {error}"));
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|error| panic!("GET {metrics_url} body failed: {error}"));
+        assert_eq!(status, StatusCode::OK, "GET {metrics_url}:\n{body}");
+        if body.contains(
+            "agent_management_operations_total{operation=\"create\",outcome=\"accepted\"} 2",
+        ) {
+            return body;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "management metrics did not converge within 5s:\n{body}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
 
 async fn create_and_wait(client: &Client, base_url: &str, agent_id: &str, input: Value) -> Value {

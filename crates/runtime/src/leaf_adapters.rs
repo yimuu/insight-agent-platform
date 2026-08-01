@@ -632,9 +632,19 @@ impl LeafTaskExecutor for LlmTaskExecutor {
         let model_selector = descriptor_model_selector(required(configuration, "model")?)?;
         let stream_requested = descriptor_bool(required(configuration, "stream")?)?;
         let publish = descriptor_bool(required(configuration, "publish")?)?;
+        let frozen_binding = serde_json::from_value::<FrozenLlmDeploymentBinding>(
+            request.deployment_binding().clone(),
+        )
+        .map_err(|_| invariant(LLM_BINDING_INVALID))?;
+        if frozen_binding.provider_route != model_selector.provider()
+            || frozen_binding.model_id != model_selector.id()
+            || !valid_frozen_evidence_string(&frozen_binding.model_binding_hash, 256)
+        {
+            return Err(invariant(LLM_BINDING_INVALID));
+        }
         let model = self
             .models
-            .resolve(&model_selector)
+            .resolve_versioned(&model_selector, &frozen_binding.model_binding_hash)
             .map_err(|_| invariant(LLM_DESCRIPTOR_INVALID))?;
         let request_mode = if stream_requested {
             ChatRequestMode::Streaming
@@ -1862,8 +1872,24 @@ fn production_worker_registry_inner(
         .map_err(|error| CompileError::new("WORKER_REGISTRY_INVALID", error.to_string()))?;
     let mut registry = WorkerExecutorRegistry::new();
     let mut llm_versions = BTreeSet::new();
+    llm_versions.insert(insight_resources::openai_chat::OPENAI_CHAT_WORKER_VERSION.to_owned());
+    let managed_executor = LlmTaskExecutor::new(models.clone());
+    let managed_executor = match &live_run_stream_broker {
+        Some(broker) => managed_executor.with_live_run_stream_broker(Arc::clone(broker)),
+        None => managed_executor,
+    };
+    registry
+        .register(
+            SchedulerTaskKind::Llm,
+            "core.llm",
+            llm_descriptor_version.clone(),
+            VersionTag::new(insight_resources::openai_chat::OPENAI_CHAT_WORKER_VERSION)
+                .map_err(|error| CompileError::new("WORKER_REGISTRY_INVALID", error.to_string()))?,
+            Arc::new(managed_executor),
+        )
+        .map_err(|code| CompileError::new(code, "failed to register managed LLM worker"))?;
     for selector in models.selectors() {
-        let identity = models.deployment_identity(selector)?;
+        let identity = models.deployment_identity(&selector)?;
         if llm_versions.insert(identity.worker_version().to_owned()) {
             let executor = LlmTaskExecutor::new(models.clone());
             let executor = match &live_run_stream_broker {
@@ -3044,6 +3070,7 @@ mod tests {
         configuration: &BTreeMap<String, DescriptorValue>,
         tools: Vec<Value>,
     ) -> Value {
+        let identity = test_model_deployment_identity();
         let model_selector = descriptor_model_selector(
             configuration
                 .get("model")
@@ -3069,8 +3096,8 @@ mod tests {
             "adapter": "core.llm",
             "provider_route": model_selector.provider(),
             "model_id": model_selector.id(),
-            "model_binding_hash": "test-model-binding-hash",
-            "model_binding": {"adapter": "test"},
+            "model_binding_hash": identity.binding_hash(),
+            "model_binding": identity.evidence(),
             "request_mode": request_mode,
             "request_capabilities": ["complete_request", "streaming_request"],
             "tool_choice": tool_choice,
@@ -3084,6 +3111,10 @@ mod tests {
             binding["runtime_capabilities"] = json!([LLM_TOOL_CONTINUATION_CAPABILITY]);
         }
         binding
+    }
+
+    fn test_model_deployment_identity() -> ModelDeploymentIdentity {
+        ModelDeploymentIdentity::new("model-worker-1", json!({"adapter": "test"})).unwrap()
     }
 
     fn object(
@@ -3213,11 +3244,7 @@ mod tests {
             models
                 .register_versioned(
                     ModelSelector::new("fixture", "chat").unwrap(),
-                    ModelDeploymentIdentity::new(
-                        "model-worker-1",
-                        json!({"adapter": "tool-call-test"}),
-                    )
-                    .unwrap(),
+                    test_model_deployment_identity(),
                     ToolCallingModel {
                         requests: requests.clone(),
                     },
@@ -3282,11 +3309,7 @@ mod tests {
             models
                 .register_versioned(
                     ModelSelector::new("fixture", "chat").unwrap(),
-                    ModelDeploymentIdentity::new(
-                        "model-worker-1",
-                        json!({"adapter": "continuation-capture"}),
-                    )
-                    .unwrap(),
+                    test_model_deployment_identity(),
                     ContinuationCapturingModel {
                         requests: requests.clone(),
                     },
@@ -3489,11 +3512,7 @@ mod tests {
             models
                 .register_versioned(
                     ModelSelector::new("fixture", "chat").unwrap(),
-                    ModelDeploymentIdentity::new(
-                        "model-worker-1",
-                        json!({"adapter": "continuation-limit"}),
-                    )
-                    .unwrap(),
+                    test_model_deployment_identity(),
                     ToolCallingModel {
                         requests: requests.clone(),
                     },
@@ -3923,11 +3942,7 @@ mod tests {
                 models
                     .register_versioned(
                         ModelSelector::new("fixture", "chat").unwrap(),
-                        ModelDeploymentIdentity::new(
-                            "model-worker-1",
-                            json!({"adapter": "finish-reason-matrix"}),
-                        )
-                        .unwrap(),
+                        test_model_deployment_identity(),
                         FinishReasonModel {
                             finish_reason: case.provider_reason.map(str::to_owned),
                         },
@@ -4033,7 +4048,7 @@ mod tests {
         models
             .register_versioned(
                 ModelSelector::new("fixture", "chat").unwrap(),
-                ModelDeploymentIdentity::new("model-worker-1", json!({"model": "fixed"})).unwrap(),
+                test_model_deployment_identity(),
                 model,
             )
             .unwrap();
@@ -4167,11 +4182,7 @@ mod tests {
                 models
                     .register_versioned(
                         ModelSelector::new("fixture", "chat").unwrap(),
-                        ModelDeploymentIdentity::new(
-                            "model-worker-1",
-                            json!({"adapter": "structured-output-test", "mode": mode}),
-                        )
-                        .unwrap(),
+                        test_model_deployment_identity(),
                         CapturingModel {
                             requests: Arc::clone(&requests),
                             response: response.to_owned(),
@@ -4241,7 +4252,7 @@ mod tests {
         models
             .register_versioned(
                 ModelSelector::new("fixture", "chat").unwrap(),
-                ModelDeploymentIdentity::new("model-worker-1", json!({"model": "fixed"})).unwrap(),
+                test_model_deployment_identity(),
                 model,
             )
             .unwrap();
@@ -4352,8 +4363,7 @@ mod tests {
         models
             .register_versioned(
                 ModelSelector::new("fixture", "chat").unwrap(),
-                ModelDeploymentIdentity::new("model-worker-1", json!({"adapter": "chunked-test"}))
-                    .unwrap(),
+                test_model_deployment_identity(),
                 ChunkedModel,
             )
             .unwrap();

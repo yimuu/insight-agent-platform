@@ -794,43 +794,9 @@ async fn exercise_graph_product(
     let graph = graph();
     let graph_bytes = graph.encode_json().unwrap();
 
-    let encoded_graph = String::from_utf8(graph_bytes.clone()).unwrap();
-    let duplicate_key_graph = encoded_graph.replacen(
-        "\"schema_version\":2",
-        "\"schema_version\":2,\"schema_version\":2",
-        1,
-    );
-    let rejected_duplicate = app
-        .clone()
-        .oneshot(
-            authorized(Request::post(format!(
-                "/v1/graph-agents/{AGENT_ID}/revisions"
-            )))
-            .header("content-type", "application/json")
-            .body(Body::from(duplicate_key_graph))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(rejected_duplicate.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        response_json(rejected_duplicate).await["code"],
-        "GRAPH_DOCUMENT_INVALID"
-    );
-
-    let unauthorized = app
-        .clone()
-        .oneshot(
-            Request::post(format!("/v1/graph-agents/{AGENT_ID}/revisions"))
-                .header("content-type", "application/json")
-                .body(Body::from(graph_bytes.clone()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-
-    let published = app
+    // Graph authoring moved to the Agent Draft management state machine. The
+    // former publish-and-activate route is deliberately absent.
+    let removed_graph_route = app
         .clone()
         .oneshot(
             authorized(Request::post(format!(
@@ -842,22 +808,18 @@ async fn exercise_graph_product(
         )
         .await
         .unwrap();
-    assert_eq!(published.status(), StatusCode::CREATED);
-    let published = response_json(published).await;
-    let definition_revision_id = published["data"]["definition_revision_id"]
-        .as_str()
+    assert_eq!(removed_graph_route.status(), StatusCode::NOT_FOUND);
+
+    // The internal durable Graph primitive remains covered for recovery and
+    // execution compatibility; it is no longer exposed as a public product API.
+    let published = service
+        .publish_graph(AGENT_ID, graph.clone())
+        .await
         .unwrap();
-    let deployment_revision_id = published["data"]["deployment_revision_id"]
-        .as_str()
-        .unwrap();
-    assert_eq!(
-        published["data"]["graph_document_id"],
-        "graph_product_canvas"
-    );
-    assert_eq!(
-        published["data"]["semantic_hash"],
-        graph.semantic_hash().as_str()
-    );
+    let definition_revision_id = published.definition_revision_id.clone();
+    let deployment_revision_id = published.deployment_revision_id.clone();
+    assert_eq!(published.graph_document_id, "graph_product_canvas");
+    assert_eq!(published.semantic_hash, graph.semantic_hash().as_str());
 
     // Resolver output is only a deployment proposal. A Graph publication
     // whose exact worker is absent from this runtime must fail before it can
@@ -893,21 +855,10 @@ async fn exercise_graph_product(
     assert_eq!(old_alias.agent_version, deployment_revision_id);
     wait_for_completed(&service, &old_alias.run_id).await;
 
-    let revision = app
-        .clone()
-        .oneshot(
-            authorized(Request::get(format!(
-                "/v1/graph-agents/{AGENT_ID}/revisions/{definition_revision_id}"
-            )))
-            .body(Body::empty())
-            .unwrap(),
-        )
+    let revision = service
+        .graph_author(AGENT_ID, &definition_revision_id)
         .await
         .unwrap();
-    assert_eq!(revision.status(), StatusCode::OK);
-    let revision = response_json(revision).await;
-    let revision =
-        GraphAuthorDocument::decode_json(&serde_json::to_vec(&revision["data"]).unwrap()).unwrap();
     assert_eq!(revision, graph);
 
     let topology_target = topology_edited_graph();
@@ -922,29 +873,17 @@ async fn exercise_graph_product(
         topology_edits(&graph, &topology_target),
     )
     .unwrap();
-    let edited = app
-        .clone()
-        .oneshot(
-            authorized(Request::post(format!(
-                "/v1/graph-agents/{AGENT_ID}/revisions/{definition_revision_id}/semantic-edits"
-            )))
-            .header("content-type", "application/json")
-            .body(Body::from(edit_batch.encode_json().unwrap()))
-            .unwrap(),
-        )
+    let edited = service
+        .apply_graph_semantic_edits(AGENT_ID, &definition_revision_id, edit_batch)
         .await
         .unwrap();
-    assert_eq!(edited.status(), StatusCode::CREATED);
-    let edited = response_json(edited).await;
-    assert_eq!(edited["data"]["definition_revision_id"], edited_revision_id);
+    assert_eq!(edited.definition_revision_id, edited_revision_id);
     assert_eq!(
-        edited["data"]["semantic_hash"],
+        edited.semantic_hash,
         topology_target.semantic_hash().as_str()
     );
-    let edited_semantic_hash = insight_agent_platform::engine::plan::SemanticHash::parse(
-        edited["data"]["semantic_hash"].as_str().unwrap(),
-    )
-    .unwrap();
+    let edited_semantic_hash =
+        insight_agent_platform::engine::plan::SemanticHash::parse(&edited.semantic_hash).unwrap();
     let edited_graph = service
         .graph_author(AGENT_ID, edited_revision_id)
         .await
@@ -963,23 +902,16 @@ async fn exercise_graph_product(
     // inherited View document.
     assert_eq!(
         service
-            .graph_author(AGENT_ID, definition_revision_id)
+            .graph_author(AGENT_ID, &definition_revision_id)
             .await
             .unwrap(),
         graph
     );
-    let missing_new_view = app
-        .clone()
-        .oneshot(
-            authorized(Request::get(format!(
-                "/v1/graph-agents/{AGENT_ID}/revisions/{edited_revision_id}/view"
-            )))
-            .body(Body::empty())
-            .unwrap(),
-        )
+    let missing_new_view = service
+        .graph_view(AGENT_ID, edited_revision_id)
         .await
-        .unwrap();
-    assert_eq!(missing_new_view.status(), StatusCode::NOT_FOUND);
+        .unwrap_err();
+    assert_eq!(missing_new_view.code(), "GRAPH_VIEW_NOT_FOUND");
 
     // A stale base may compile locally, but the repository route CAS rejects
     // it before installing the proposed target revision.
@@ -990,20 +922,11 @@ async fn exercise_graph_product(
         topology_edits(&graph, &topology_target),
     )
     .unwrap();
-    let stale = app
-        .clone()
-        .oneshot(
-            authorized(Request::post(format!(
-                "/v1/graph-agents/{AGENT_ID}/revisions/{definition_revision_id}/semantic-edits"
-            )))
-            .header("content-type", "application/json")
-            .body(Body::from(stale_batch.encode_json().unwrap()))
-            .unwrap(),
-        )
+    let stale = service
+        .apply_graph_semantic_edits(AGENT_ID, &definition_revision_id, stale_batch)
         .await
-        .unwrap();
-    assert_eq!(stale.status(), StatusCode::CONFLICT);
-    assert_eq!(response_json(stale).await["code"], "GRAPH_EDIT_CONFLICT");
+        .unwrap_err();
+    assert_eq!(stale.code(), "GRAPH_EDIT_CONFLICT");
     assert_eq!(
         service
             .graph_author(AGENT_ID, stale_revision_id)
@@ -1023,20 +946,11 @@ async fn exercise_graph_product(
         }],
     )
     .unwrap();
-    let invalid = app
-        .clone()
-        .oneshot(
-            authorized(Request::post(format!(
-                "/v1/graph-agents/{AGENT_ID}/revisions/{edited_revision_id}/semantic-edits"
-            )))
-            .header("content-type", "application/json")
-            .body(Body::from(invalid_batch.encode_json().unwrap()))
-            .unwrap(),
-        )
+    let invalid = service
+        .apply_graph_semantic_edits(AGENT_ID, edited_revision_id, invalid_batch)
         .await
-        .unwrap();
-    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(response_json(invalid).await["code"], "GRAPH_EDIT_INVALID");
+        .unwrap_err();
+    assert_eq!(invalid.code(), "GRAPH_EDIT_INVALID");
     assert_eq!(
         service
             .graph_author(AGENT_ID, invalid_revision_id)
@@ -1046,8 +960,18 @@ async fn exercise_graph_product(
         "GRAPH_DOCUMENT_NOT_FOUND"
     );
 
-    let created = create_pinned_run(&app, deployment_revision_id, "first question").await;
-    let run_id = created["data"]["run_id"].as_str().unwrap().to_owned();
+    let created = service
+        .create_detached_from_deployment(
+            AGENT_ID,
+            &deployment_revision_id,
+            json!({"question":"first question"}),
+            RequestMetadata {
+                request_id: Some("graph-product-first-run".to_owned()),
+            },
+        )
+        .await
+        .unwrap();
+    let run_id = created.run_id;
     wait_for_completed(&service, &run_id).await;
 
     let execution_graph = app
@@ -1085,51 +1009,41 @@ async fn exercise_graph_product(
     let mut view = ViewDocument::new(graph.document_id().clone());
     view.set_node(graph.nodes()[0].id().clone(), NodeView::at(10.0, 20.0))
         .unwrap();
-    let saved_view = put_view(&app, definition_revision_id, 0, &view).await;
-    assert_eq!(saved_view.status(), StatusCode::OK);
-    let saved_view = response_json(saved_view).await;
-    assert_eq!(saved_view["data"]["version"], 1);
-    let loaded_view = app
-        .clone()
-        .oneshot(
-            authorized(Request::get(format!(
-                "/v1/graph-agents/{AGENT_ID}/revisions/{definition_revision_id}/view"
-            )))
-            .body(Body::empty())
-            .unwrap(),
-        )
+    let saved_view = service
+        .save_graph_view(AGENT_ID, &definition_revision_id, 0, view.clone())
         .await
         .unwrap();
-    assert_eq!(loaded_view.status(), StatusCode::OK);
-    assert_eq!(response_json(loaded_view).await["data"]["version"], 1);
+    assert_eq!(saved_view.version(), 1);
+    let loaded_view = service
+        .graph_view(AGENT_ID, &definition_revision_id)
+        .await
+        .unwrap();
+    assert_eq!(loaded_view.version(), 1);
 
     let mut competing = view.clone();
     competing
         .set_node(graph.nodes()[0].id().clone(), NodeView::at(80.0, 90.0))
         .unwrap();
-    let conflict = put_view(&app, definition_revision_id, 0, &competing).await;
-    assert_eq!(conflict.status(), StatusCode::CONFLICT);
-    assert_eq!(response_json(conflict).await["code"], "GRAPH_VIEW_CONFLICT");
+    let conflict = service
+        .save_graph_view(AGENT_ID, &definition_revision_id, 0, competing)
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code(), "GRAPH_VIEW_CONFLICT");
 
-    let damaged = app
-        .clone()
-        .oneshot(
-            authorized(Request::put(format!(
-                "/v1/graph-agents/{AGENT_ID}/revisions/{definition_revision_id}/view?expected_version=1"
-            )))
-            .header("content-type", "application/json")
-            .body(Body::from("{}"))
-            .unwrap(),
+    let second = service
+        .create_detached_from_deployment(
+            AGENT_ID,
+            &deployment_revision_id,
+            json!({"question":"after view conflict"}),
+            RequestMetadata {
+                request_id: Some("graph-product-second-run".to_owned()),
+            },
         )
         .await
         .unwrap();
-    assert_eq!(damaged.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(response_json(damaged).await["code"], "GRAPH_VIEW_INVALID");
-
-    let second = create_pinned_run(&app, deployment_revision_id, "after bad view").await;
-    let second_run_id = second["data"]["run_id"].as_str().unwrap();
-    wait_for_completed(&service, second_run_id).await;
-    let still_same_graph = service.execution_graph(second_run_id).await.unwrap();
+    let second_run_id = second.run_id;
+    wait_for_completed(&service, &second_run_id).await;
+    let still_same_graph = service.execution_graph(&second_run_id).await.unwrap();
     assert_eq!(still_same_graph.semantic_hash(), graph.semantic_hash());
 
     let restart_publication = service
@@ -1221,46 +1135,6 @@ async fn exercise_graph_product(
     }
     wait_for_completed(&restarted, &restart_run.run_id).await;
     restarted.shutdown(Duration::from_secs(2)).await.unwrap();
-}
-
-async fn create_pinned_run(app: &Router, deployment_revision_id: &str, question: &str) -> Value {
-    let response = app
-        .clone()
-        .oneshot(
-            authorized(Request::post(format!(
-                "/v1/agents/{AGENT_ID}/deployments/{deployment_revision_id}/runs"
-            )))
-            .header("content-type", "application/json")
-            .body(Body::from(json!({"question": question}).to_string()))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    if response.status() != StatusCode::ACCEPTED {
-        let status = response.status();
-        let body = response_json(response).await;
-        panic!("pinned Graph Run returned {status}: {body}");
-    }
-    response_json(response).await
-}
-
-async fn put_view(
-    app: &Router,
-    definition_revision_id: &str,
-    expected_version: u64,
-    view: &ViewDocument,
-) -> axum::response::Response {
-    app.clone()
-        .oneshot(
-            authorized(Request::put(format!(
-                "/v1/graph-agents/{AGENT_ID}/revisions/{definition_revision_id}/view?expected_version={expected_version}"
-            )))
-            .header("content-type", "application/json")
-            .body(Body::from(view.encode_json().unwrap()))
-            .unwrap(),
-        )
-        .await
-        .unwrap()
 }
 
 #[tokio::test]

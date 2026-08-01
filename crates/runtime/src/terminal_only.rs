@@ -34,6 +34,7 @@ use insight_durable::terminal_store::{
     CONVERSATION_NOT_FOUND as STORE_CONVERSATION_NOT_FOUND, CONVERSATION_OWNERSHIP_MISMATCH,
     TERMINAL_RUN_OWNER_LEASE_LOST, TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE,
 };
+use insight_durable::PublicationHead;
 use insight_engine::{
     artifact_store::WorkerArtifactStore,
     history::types::{RunAttachment, RunLifecycle as PublicRunLifecycle, RunRecord, StopError},
@@ -70,6 +71,7 @@ use crate::{
 };
 
 const DEFAULT_TENANT_ID: &str = "default";
+pub(crate) const ADMIN_DEBUG_TENANT_ID: &str = "__admin_debug";
 const TERMINAL_ONLY_UNAVAILABLE: &str = "TERMINAL_ONLY_UNAVAILABLE";
 const TERMINAL_ONLY_OWNER_LOST: &str = "TERMINAL_ONLY_OWNER_LOST";
 const CONVERSATION_INPUT_INVALID: &str = "CONVERSATION_INPUT_INVALID";
@@ -198,6 +200,15 @@ pub struct ConversationAttachedTurn {
     pub user_message: ConversationMessageView,
     pub attached: TerminalAttachedRun,
     pub replayed: bool,
+}
+
+/// Exact mutable safety evidence for a public terminal-only admission. Empty
+/// authority is reserved for explicit immutable/admin paths.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TerminalAdmissionAuthority {
+    pub publication_head: Option<PublicationHead>,
+    pub mcp_server_fences: BTreeMap<String, u64>,
+    pub provider_fences: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -523,7 +534,25 @@ impl TerminalOnlyRunEngine {
         request_id: String,
     ) -> Result<RunRecord, ServiceError> {
         let agent = self.terminal_agent(agent_id)?;
-        self.create_detached_with_agent(tenant_id, agent, input, request_id)
+        self.create_detached_with_agent(
+            tenant_id,
+            agent,
+            input,
+            request_id,
+            TerminalAdmissionAuthority::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_detached_for_tenant_with_authority(
+        &self,
+        tenant_id: &str,
+        agent: Arc<DeployedAgent>,
+        input: Value,
+        request_id: String,
+        authority: TerminalAdmissionAuthority,
+    ) -> Result<RunRecord, ServiceError> {
+        self.create_detached_with_agent(tenant_id, agent, input, request_id, authority)
             .await
     }
 
@@ -549,8 +578,127 @@ impl TerminalOnlyRunEngine {
                     "graph deployment revision was not found for this agent",
                 )
             })?;
-        self.create_detached_with_agent(tenant_id, agent, input, request_id)
+        self.create_detached_with_agent(
+            tenant_id,
+            agent,
+            input,
+            request_id,
+            TerminalAdmissionAuthority::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_admin_debug_detached_from_deployment(
+        &self,
+        agent_id: &str,
+        deployment_revision_id: &str,
+        run_id: RunId,
+        input: Value,
+        request_id: String,
+    ) -> Result<RunRecord, ServiceError> {
+        let agent = self
+            .inner
+            .agents
+            .get_deployment(deployment_revision_id)
+            .filter(|agent| {
+                agent.published().metadata().id == agent_id
+                    && agent.persistence_mode() == PersistenceMode::TerminalOnly
+            })
+            .ok_or_else(|| {
+                ServiceError::new(
+                    "AGENT_DEBUG_SOURCE_NOT_FOUND",
+                    "Debug deployment was not found for this Agent",
+                )
+            })?;
+        let normalized = agent
+            .published()
+            .normalize_input(input)
+            .map_err(|_| ServiceError::new("INPUT_INVALID", "agent input is invalid"))?;
+        let admission = self
+            .admit(
+                ADMIN_DEBUG_TENANT_ID.to_owned(),
+                request_id,
+                agent,
+                normalized,
+                None,
+                RunAttachment::Detached,
+                None,
+                Some(run_id),
+                TerminalAdmissionAuthority::default(),
+            )
+            .await?;
+        Ok(admission.run)
+    }
+
+    pub(crate) async fn open_admin_debug_stream(
+        &self,
+        run_id: &str,
+    ) -> Result<TerminalAttachedRun, ServiceError> {
+        let run_id = RunId::new(run_id.to_owned())
+            .map_err(|_| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
+        let view = self
+            .inner
+            .store
+            .get_terminal_run(TerminalRunQuery {
+                tenant_id: ADMIN_DEBUG_TENANT_ID.to_owned(),
+                run_id: run_id.clone(),
+                observed_at: Utc::now(),
+            })
             .await
+            .map_err(store_unavailable)?
+            .ok_or_else(|| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
+        let active = {
+            let active = self
+                .inner
+                .active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            active
+                .get(run_id.as_str())
+                .filter(|run| run.tenant_id == ADMIN_DEBUG_TENANT_ID)
+                .map(|run| (run.terminal.subscribe(), run.cancellation.clone()))
+        };
+        if let Some((receiver, cancellation)) = active {
+            let live_run_stream = self
+                .inner
+                .live_run_stream_broker
+                .subscribe(run_id.clone())
+                .await
+                .map_err(|_| terminal_unavailable())?;
+            return Ok(TerminalAttachedRun {
+                run_id: run_id.as_str().to_owned(),
+                response_id: response_id(&run_id),
+                request_id: view.admission.request_id.clone(),
+                subscription: TerminalRunSubscription {
+                    run_id,
+                    receiver,
+                    cancellation,
+                    terminal: false,
+                },
+                live_run_stream,
+                live_run_stream_broker: Arc::clone(&self.inner.live_run_stream_broker),
+                terminal_barrier_timeout: self.inner.config.terminal_barrier_timeout,
+                outbound_write_timeout: self.inner.config.outbound_write_timeout,
+                conversation_privacy: None,
+            });
+        }
+        self.attach_terminal_replay(&view.admission)
+            .await?
+            .ok_or_else(|| ServiceError::new("RUN_NOT_FOUND", "Run not found"))
+    }
+
+    pub(crate) async fn get_admin_debug_run(
+        &self,
+        run_id: &str,
+    ) -> Result<RunRecord, ServiceError> {
+        self.get_run(ADMIN_DEBUG_TENANT_ID, run_id).await
+    }
+
+    pub(crate) async fn cancel_admin_debug_run(
+        &self,
+        run_id: &str,
+    ) -> Result<RunRecord, ServiceError> {
+        self.cancel(ADMIN_DEBUG_TENANT_ID, run_id).await
     }
 
     async fn create_detached_with_agent(
@@ -559,6 +707,7 @@ impl TerminalOnlyRunEngine {
         agent: Arc<DeployedAgent>,
         input: Value,
         request_id: String,
+        authority: TerminalAdmissionAuthority,
     ) -> Result<RunRecord, ServiceError> {
         let normalized = agent
             .published()
@@ -573,6 +722,8 @@ impl TerminalOnlyRunEngine {
                 None,
                 RunAttachment::Detached,
                 None,
+                None,
+                authority,
             )
             .await?;
         Ok(admission.run)
@@ -586,6 +737,24 @@ impl TerminalOnlyRunEngine {
         request_id: String,
     ) -> Result<TerminalAttachedRun, ServiceError> {
         let agent = self.terminal_agent(agent_id)?;
+        self.create_attached_with_authority(
+            tenant_id,
+            agent,
+            input,
+            request_id,
+            TerminalAdmissionAuthority::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_attached_with_authority(
+        &self,
+        tenant_id: &str,
+        agent: Arc<DeployedAgent>,
+        input: Value,
+        request_id: String,
+        authority: TerminalAdmissionAuthority,
+    ) -> Result<TerminalAttachedRun, ServiceError> {
         let normalized = agent
             .published()
             .normalize_input(input)
@@ -599,6 +768,8 @@ impl TerminalOnlyRunEngine {
                 None,
                 RunAttachment::Attached,
                 None,
+                None,
+                authority,
             )
             .await?;
         admission
@@ -938,12 +1109,38 @@ impl TerminalOnlyRunEngine {
         request_id: &str,
         content: Value,
     ) -> Result<ConversationDetachedTurn, ServiceError> {
+        self.create_conversation_detached_turn_with_authority(
+            conversation_id,
+            tenant_id,
+            user_id,
+            request_id,
+            content,
+            TerminalAdmissionAuthority::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_conversation_detached_turn_with_authority(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+        request_id: &str,
+        content: Value,
+        authority: TerminalAdmissionAuthority,
+    ) -> Result<ConversationDetachedTurn, ServiceError> {
         self.ensure_conversations_enabled()?;
         let conversation = self
             .get_conversation(conversation_id, tenant_id, user_id)
             .await?;
         let admitted = self
-            .admit_conversation_turn(conversation, request_id, content, RunAttachment::Detached)
+            .admit_conversation_turn(
+                conversation,
+                request_id,
+                content,
+                RunAttachment::Detached,
+                authority,
+            )
             .await?;
         Ok(ConversationDetachedTurn {
             user_message: self
@@ -962,12 +1159,38 @@ impl TerminalOnlyRunEngine {
         request_id: &str,
         content: Value,
     ) -> Result<ConversationAttachedTurn, ServiceError> {
+        self.create_conversation_attached_turn_with_authority(
+            conversation_id,
+            tenant_id,
+            user_id,
+            request_id,
+            content,
+            TerminalAdmissionAuthority::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_conversation_attached_turn_with_authority(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+        request_id: &str,
+        content: Value,
+        authority: TerminalAdmissionAuthority,
+    ) -> Result<ConversationAttachedTurn, ServiceError> {
         self.ensure_conversations_enabled()?;
         let conversation = self
             .get_conversation(conversation_id, tenant_id, user_id)
             .await?;
         let admitted = self
-            .admit_conversation_turn(conversation, request_id, content, RunAttachment::Attached)
+            .admit_conversation_turn(
+                conversation,
+                request_id,
+                content,
+                RunAttachment::Attached,
+                authority,
+            )
             .await?;
         let attached = admitted.attached.ok_or_else(|| {
             ServiceError::new("RUN_CONFLICT", "attached Run replay is unavailable")
@@ -1275,6 +1498,7 @@ impl TerminalOnlyRunEngine {
         request_id: &str,
         content: Value,
         attachment: RunAttachment,
+        authority: TerminalAdmissionAuthority,
     ) -> Result<ConversationAdmission, ServiceError> {
         let _mutation = self
             .conversation_mutation(&conversation.conversation_id)
@@ -1437,6 +1661,7 @@ impl TerminalOnlyRunEngine {
                 }),
                 Some(selected_context_hash),
                 slot.owner.clone(),
+                authority,
             )?,
         };
         let candidate_run_id = command.admission.run_id.clone();
@@ -1528,6 +1753,8 @@ impl TerminalOnlyRunEngine {
         conversation: Option<AdmissionConversation>,
         attachment: RunAttachment,
         pending_conversation: Option<PendingConversationCommit>,
+        run_id_override: Option<RunId>,
+        authority: TerminalAdmissionAuthority,
     ) -> Result<AdmittedRun, ServiceError> {
         let expected_input_hash = canonical_hash(normalized.value())?;
         if let Some(view) = self
@@ -1574,7 +1801,7 @@ impl TerminalOnlyRunEngine {
         }
         let slot = self.reserve_slot()?;
         let command = self.new_admission(
-            RunId::random(),
+            run_id_override.unwrap_or_else(RunId::random),
             tenant_id,
             request_id,
             agent.as_ref(),
@@ -1582,6 +1809,7 @@ impl TerminalOnlyRunEngine {
             conversation,
             None,
             slot.owner.clone(),
+            authority,
         )?;
         let candidate_run_id = command.run_id.clone();
         let outcome = match persist_admission_with_recovery(|| {
@@ -2209,6 +2437,7 @@ impl TerminalOnlyRunEngine {
         conversation: Option<AdmissionConversation>,
         selected_context_hash: Option<ContentHash>,
         owner: RuntimeOwner,
+        authority: TerminalAdmissionAuthority,
     ) -> Result<NewTerminalRunAdmission, ServiceError> {
         if !valid_request_identity_component(&tenant_id)
             || !valid_request_identity_component(&request_id)
@@ -2229,6 +2458,9 @@ impl TerminalOnlyRunEngine {
             input_ref: None,
             input_hash: canonical_hash(input.value())?,
             selected_context_hash,
+            expected_publication_head: authority.publication_head,
+            expected_mcp_server_fences: authority.mcp_server_fences,
+            expected_provider_fences: authority.provider_fences,
             owner,
             accepted_at: Utc::now(),
         })

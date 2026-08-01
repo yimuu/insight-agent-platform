@@ -525,7 +525,7 @@ pub fn build_mcp_management_router(state: McpManagementApiState) -> Router {
         .route_layer(DefaultBodyLimit::max(MAX_MANAGEMENT_BODY_BYTES))
         .route_layer(middleware::from_fn(
             move |headers: HeaderMap,
-                  mut request: axum::http::Request<axum::body::Body>,
+                  request: axum::http::Request<axum::body::Body>,
                   next: Next| {
                 let auth = auth.clone();
                 let audit_repository = audit_repository.clone();
@@ -545,8 +545,18 @@ pub fn build_mcp_management_router(state: McpManagementApiState) -> Router {
                     let principal = auth.resolve(&headers);
                     let response = match principal.clone() {
                         Some(principal) => {
-                            request.extensions_mut().insert(principal);
-                            next.run(request).await
+                            match super::strict_json::validate_request(
+                                request,
+                                MAX_MANAGEMENT_BODY_BYTES,
+                            )
+                            .await
+                            {
+                                Ok(mut request) => {
+                                    request.extensions_mut().insert(principal);
+                                    next.run(request).await
+                                }
+                                Err(()) => ManagementError::invalid().into_response(),
+                            }
                         }
                         None if hide_object => ManagementError::not_found().into_response(),
                         None => ManagementError::unauthorized().into_response(),

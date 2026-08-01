@@ -1,0 +1,16 @@
+{
+  "valid":{
+    "create_yaml":{"agent_id":"support-agent","authoring_mode":"yaml_package","labels":{"team":"support"},"draft":{"source":{"type":"yaml_package","agent_yaml":"api_version: insight.agent/v1\nkind: agent\n","prompt_files":[{"path":"prompts/system.md","content":"You help."}]}}},
+    "publish":{"validation_id":"agentval_example"},
+    "resolution":{"definition_revision_id":"defrev_example"},
+    "deployment":{"resolution_id":"agentres_example"},
+    "activate":{"deployment_revision_id":"deployrev_example"},
+    "debug":{"source":{"type":"draft","draft_version":1},"execution_profile_id":"author-sandbox","input":{"query":"test"}}
+  },
+  "invalid":{
+    "wildcard_tool":{"agent_id":"support-agent","authoring_mode":"yaml_package","draft":{"source":{"type":"yaml_package","agent_yaml":"tools: [\"*\"]"}},"auto_import":true},
+    "path_escape":{"source":{"type":"yaml_package","agent_yaml":"x","prompt_files":[{"path":"../secret","content":"x"}]}},
+    "debug_endpoint":{"source":{"type":"draft","draft_version":1},"execution_profile_id":"author-sandbox","input":{},"endpoint":"https://forbidden.test"},
+    "live_without_flag":{"source":{"type":"draft","draft_version":1},"execution_profile_id":"author-live","input":{}}
+  }
+}

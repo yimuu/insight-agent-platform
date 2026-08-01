@@ -5,6 +5,64 @@
 平台配置文件的顶层 `version` 仍为 `1`；MCP 子系统已经 clean-cut 到 `mcp.version: 2`。这两个版本
 属于不同命名空间。配置解析严格拒绝未知字段，所有相对路径以配置文件目录为基准。
 
+## 共享 Management v1
+
+Agent、Provider 和 MCP 管理 API 共用顶层 `management.version: 1`。启用任一管理路由时必须设置
+`management.enabled: true` 并至少配置一个 environment-backed Operator credential；普通 `auth.mode`
+不能让管理路由匿名，也不能把 Operator token 当作 tenant/user 提权。capability 是闭合集合且互不隐含。
+
+```yaml
+management:
+  version: 1
+  enabled: true
+  operator_credentials:
+    - identity: platform-author
+      token_env: INSIGHT_PLATFORM_AUTHOR_TOKEN
+      capabilities:
+        - agent.read
+        - agent.write
+        - agent.validate
+        - agent.publish
+        - agent.deploy
+        - agent.activate
+        - agent.archive
+        - agent.debug.sandbox
+        - provider.read
+        - provider.write
+        - provider.discover
+        - provider.test
+        - provider.publish
+        - provider.activate
+        - provider.suspend
+        - provider.retire
+        - mcp.server.read
+  provider_secret_resolver:
+    type: environment_reference
+    allowed_names: [COMPANY_LLM_TOKEN]
+  limits:
+    max_agent_draft_bytes: 4194304
+    max_agent_prompt_files: 128
+    max_provider_models: 4096
+    max_pending_operations: 256
+    operation_retention_days: 30
+  debug_execution_profiles:
+    author-sandbox:
+      mode: sandbox
+      max_concurrent_sessions: 4
+      session_timeout: 10m
+      retention: 24h
+      allow_external_actions: false
+      allow_live_provider_credentials: false
+```
+
+Sandbox profile 不能允许外部 action 或 live credential。Live profile 还要求 `agent.debug.live` 和每次
+请求的显式确认。token value、debug input 和 secret value都不能写入配置文件。
+
+`management.provider_secret_resolver` 是 managed Provider credential reference 的唯一白名单；
+`environment_reference.allowed_names` 只列环境变量名，Draft 中对应
+`secret://environment/<NAME>`。Provider validation/publish 要求该名称在服务进程环境中可解析，但 API、
+`providerctl`、Revision、hash 与审计都不读取或保存 value。它不再从旧 `providers.extensions` 推导。
+
 ## MCP v2 权威边界
 
 `mcp.client` 只定义全局安全策略，不包含第三方 Server 实例。Server、Draft、Discovery、Import、
@@ -14,7 +72,7 @@ Validation、Revision 和 active pointer 的唯一权威是 durable management s
 管理面启用时必须同时满足：
 
 - `mcp.client.enabled: true`；
-- 至少一个互不重复的 Operator credential，token 只能来自 `token_env`；
+- 共享 `management.operator_credentials` 中至少一个具备相应 MCP capability 的 credential；
 - `secret_encryption` keyring 可解析；
 - `secret_resolver.allowed_names` 非空，且管理对象只能引用该集合；
 - discovery worker 数为 `1..=64`，pending 上限为 `1..=10000`；
@@ -28,7 +86,7 @@ Streamable HTTP Draft 只接受无 userinfo/query/fragment 的 HTTPS endpoint；
 完整示例和各字段说明见 [MCP 使用、运行与安全合同](mcp.md)。生产/Quickstart 的可执行基线分别见
 [`config/platform.yaml`](../../config/platform.yaml) 与
 [`config/platform.quickstart.yaml`](../../config/platform.quickstart.yaml)。Helm values 使用
-`mcp.client.*` 渲染同一合同，secret value 只能通过 `mcp.secretEnv[]` 或专用 existing Secret 注入。
+`management.*` 与 `mcp.client.*` 渲染同一合同，secret value 只能通过 `mcp.secretEnv[]` 或专用 existing Secret 注入。
 可直接 lint/render 的启用示例见
 [`values-mcp-management-example.yaml`](../../deploy/helm/insight-agent-platform/values-mcp-management-example.yaml)。
 

@@ -4909,6 +4909,27 @@ mod tests {
 
     #[async_trait]
     impl DurableRepository for MockParentContinuationRepository {
+        async fn install_definition_revision(
+            &self,
+            _plan: &VersionedPlan,
+        ) -> Result<PlanInstallOutcome, RepositoryError> {
+            unexpected_parent_repository_call()
+        }
+
+        async fn install_deployment_revision(
+            &self,
+            _plan: &VersionedPlan,
+        ) -> Result<PlanInstallOutcome, RepositoryError> {
+            unexpected_parent_repository_call()
+        }
+
+        async fn activate_agent_deployment(
+            &self,
+            _command: insight_durable::ActivateAgentDeploymentCommand,
+        ) -> Result<insight_durable::AgentDeploymentActivationOutcome, RepositoryError> {
+            unexpected_parent_repository_call()
+        }
+
         async fn install_versioned_plan(
             &self,
             _plan: &VersionedPlan,

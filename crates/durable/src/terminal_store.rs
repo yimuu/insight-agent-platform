@@ -12,6 +12,9 @@ use insight_engine::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
+
+use crate::PublicationHead;
 
 pub const TERMINAL_RUN_OWNER_LEASE_LOST: &str = "TERMINAL_RUN_OWNER_LEASE_LOST";
 pub const TERMINAL_RUN_NOT_FOUND: &str = "TERMINAL_RUN_NOT_FOUND";
@@ -82,6 +85,14 @@ pub struct NewTerminalRunAdmission {
     pub input_ref: Option<String>,
     pub input_hash: ContentHash,
     pub selected_context_hash: Option<ContentHash>,
+    /// Mutable public-route evidence frozen by the runtime and rechecked in
+    /// the same transaction that admits a terminal-only Run. Exact admin or
+    /// recovery admissions leave this absent intentionally.
+    pub expected_publication_head: Option<PublicationHead>,
+    /// MCP and Provider kill-switch generations share the admission
+    /// transaction with the terminal record, matching full persistence.
+    pub expected_mcp_server_fences: BTreeMap<String, u64>,
+    pub expected_provider_fences: BTreeMap<String, u64>,
     pub owner: RuntimeOwner,
     pub accepted_at: DateTime<Utc>,
 }

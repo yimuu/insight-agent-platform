@@ -9,6 +9,30 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+management:
+  enabled: false
+  operatorCredentials: []
+  providerSecretResolverAllowedNames: []
+  # Names must also be backed by mcp.secretEnv entries; values are injected
+  # into the runtime Secret environment and never rendered into ConfigMap.
+  # - identity: platform-operator
+  #   tokenEnv: INSIGHT_PLATFORM_OPERATOR_TOKEN
+  #   capabilities: [agent.read, agent.write, agent.validate, agent.publish, agent.deploy, agent.activate, agent.archive, agent.debug.sandbox, provider.read, provider.write, provider.discover, provider.test, provider.publish, provider.activate, provider.suspend, provider.retire, mcp.server.read, mcp.server.write, mcp.server.discover, mcp.server.publish]
+  limits:
+    maxAgentDraftBytes: 4194304
+    maxAgentPromptFiles: 128
+    maxProviderModels: 4096
+    maxPendingOperations: 256
+    operationRetentionDays: 30
+  debugExecutionProfiles: {}
+  # author-sandbox:
+  #   mode: sandbox
+  #   maxConcurrentSessions: 4
+  #   sessionTimeout: 10m
+  #   retention: 24h
+  #   allowExternalActions: false
+  #   allowLiveProviderCredentials: false
+
 agents:
   enabled:
     - action_demo
@@ -37,10 +61,6 @@ mcp:
       enabled: false
       discoveryWorkers: 4
       maxPendingDiscoveries: 128
-      operatorCredentials: []
-      # - identity: mcp-operator
-      #   tokenEnv: INSIGHT_MCP_OPERATOR_TOKEN
-      #   capabilities: [mcp.server.read, mcp.server.write, mcp.server.discover, mcp.server.publish]
     secretResolverAllowedNames: []
     signedManifestTrust:
       maxValidity: 24h

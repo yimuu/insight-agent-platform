@@ -105,11 +105,11 @@ LLM 步骤直接选择 Provider route 和 Provider 侧模型 ID，不使用业�
   response: Answer
 ```
 
-内置 Provider Catalog 已定义 `dashscope-cn`、`dashscope-intl` 及其已验证模型；两条路由默认都从
-`DASHSCOPE_API_KEY` 读取凭据，但使用不同 endpoint，平台不会自动跨区域切换。不再需要
-`models.yaml`。只有部署实际启用的 Agent 引用了某个模型，发布时才要求对应凭据；因此
-Action-only Quickstart 无需模型配置或模型密钥。私有网关、新模型和独立账户通过
-[`platform.yaml` 的 `providers` 扩展](docs/current/operations.md#provider-catalog-与模型配置)声明。
+Provider route 与模型通过 durable `/v1/admin/providers/**` 管理。内置 Catalog 只提供可导入的
+template，不会因进程启动自动注册 live route。Operator 显式创建 Draft、导入逐项模型、validation、
+发布 Provider Revision 并 activate；Agent Deployment 随后冻结 exact Provider Revision、模型 ID、
+adapter/worker 和 credential reference。平台不会自动跨区域切换，也不存在 `models.yaml`、通配符或
+`auto_import`。Action-only Quickstart 无需 Provider route 或模型密钥。
 
 ## 文档
 
@@ -118,6 +118,7 @@ Action-only Quickstart 无需模型配置或模型密钥。私有网关、新模
 - [DSL v1 指南](docs/current/dsl.md)：Agent 结构、类型、表达式和控制流；
 - [HTTP 与 SSE API](docs/current/api.md)：路由、幂等要求和响应流；
 - [MCP 使用、运行与安全合同](docs/current/mcp.md)：profiles、传输、授权、交互与安全边界；
+- [Agent 与 Provider 管理面](docs/current/management.md)：Draft、Revision、Deployment、调试与安全门；
 - [部署与运维](docs/current/operations.md)：Schema 预置、配置、存储、认证和生命周期；
 - [开发指南](docs/current/development.md)：代码导航和验证命令；
 - [变更记录](CHANGELOG.md)：发布版本的重要变化与兼容性说明。

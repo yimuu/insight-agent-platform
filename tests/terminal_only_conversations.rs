@@ -552,7 +552,7 @@ fn assert_terminal_capability(value: &Value) {
 }
 
 #[tokio::test]
-async fn pinned_terminal_admission_is_tenant_scoped_and_unbound_full_runs_fail_closed() {
+async fn active_terminal_admission_is_tenant_scoped_and_historical_routes_fail_closed() {
     let fixture = TerminalHttpFixture::start().await;
     let terminal_revision = fixture
         .service
@@ -573,9 +573,25 @@ async fn pinned_terminal_admission_is_tenant_scoped_and_unbound_full_runs_fail_c
     let pinned_body = json!({"message": "pinned", "conversation_context": []});
     let pinned_path = format!("/v1/agents/{AGENT_ID}/deployments/{terminal_revision}/runs");
 
-    let tenant_a = send(
+    // Historical Deployment admission was removed by the managed-Agent
+    // clean cut. Ordinary clients can only resolve the durable active head.
+    let historical_terminal = send(
         &fixture.app,
         Request::post(&pinned_path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-tenant-id", "tenant-pinned-a")
+            .header("x-request-id", "historical-terminal-request")
+            .body(Body::from(serde_json::to_vec(&pinned_body).unwrap()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(historical_terminal.status(), StatusCode::NOT_FOUND);
+
+    let active_path = format!("/v1/agents/{AGENT_ID}/runs");
+
+    let tenant_a = send(
+        &fixture.app,
+        Request::post(&active_path)
             .header(header::CONTENT_TYPE, "application/json")
             .header("x-tenant-id", "tenant-pinned-a")
             .header("x-request-id", "same-pinned-request")
@@ -587,7 +603,7 @@ async fn pinned_terminal_admission_is_tenant_scoped_and_unbound_full_runs_fail_c
     let run_a = tenant_a.headers()["x-run-id"].to_str().unwrap().to_owned();
     let tenant_b = send(
         &fixture.app,
-        Request::post(&pinned_path)
+        Request::post(&active_path)
             .header(header::CONTENT_TYPE, "application/json")
             .header("x-tenant-id", "tenant-pinned-b")
             .header("x-request-id", "same-pinned-request")
@@ -642,7 +658,7 @@ async fn pinned_terminal_admission_is_tenant_scoped_and_unbound_full_runs_fail_c
 
     let default_full = send(
         &fixture.app,
-        Request::post(&full_pinned_path)
+        Request::post(format!("/v1/agents/{FULL_AGENT_ID}/runs"))
             .header(header::CONTENT_TYPE, "application/json")
             .header("x-request-id", "full-pinned-default")
             .body(Body::from(serde_json::to_vec(&pinned_body).unwrap()))

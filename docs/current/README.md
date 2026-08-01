@@ -1,6 +1,6 @@
 # 当前文档
 
-本目录只包含与当前 DSL v1、full durable runtime、terminal-only runtime、Conversation 和 MCP
+本目录只包含与当前 DSL v1、durable Agent/Provider/MCP 管理面、full durable runtime、terminal-only runtime、Conversation 和 MCP
 合同一致的使用、运维和开发文档：
 
 - [架构概览](architecture.md)
@@ -8,6 +8,7 @@
 - [HTTP 与 SSE API](api.md)
 - [平台配置](configuration.md)
 - [MCP 使用、运行与安全合同](mcp.md)
+- [Agent 与 Provider 管理面](management.md)
 - [部署与运维](operations.md)
 - [开发指南](development.md)
 

@@ -375,19 +375,36 @@ where
         .unwrap();
     assert!(matches!(admitted, TransitionOutcome::Committed { .. }));
 
-    repository
-        .disable_mcp_server(DisableMcpServerCommand {
-            metadata: metadata(
-                "disable-1",
-                "DELETE",
-                "/v1/admin/mcp/servers/engineering/active-revision",
-                "sha256:disable",
-            ),
-            server_id: "engineering".to_owned(),
-            expected_server_version: 2,
-        })
-        .await
-        .unwrap();
+    let raced_run = RunId::new("run_mcp_fence_race").unwrap();
+    let race_admission = repository.create_run(
+        TransitionKey::derive("mcp.management.test", &["raced-admission"]).unwrap(),
+        CreateRunCommand::new(raced_run.clone(), &plan, json!({}))
+            .unwrap()
+            .with_expected_mcp_server_fences(BTreeMap::from([("engineering".to_owned(), 0)]))
+            .unwrap(),
+    );
+    let race_disable = repository.disable_mcp_server(DisableMcpServerCommand {
+        metadata: metadata(
+            "disable-1",
+            "DELETE",
+            "/v1/admin/mcp/servers/engineering/active-revision",
+            "sha256:disable",
+        ),
+        server_id: "engineering".to_owned(),
+        expected_server_version: 2,
+    });
+    let (race_admission, race_disable) = tokio::join!(race_admission, race_disable);
+    race_disable.unwrap();
+    let race_admission = race_admission.unwrap();
+    assert!(matches!(
+        &race_admission,
+        TransitionOutcome::Committed { .. } | TransitionOutcome::StateConflict
+    ));
+    assert_eq!(
+        repository.load_run(&raced_run).await.unwrap().is_some(),
+        matches!(&race_admission, TransitionOutcome::Committed { .. }),
+        "raced admission must be all-or-nothing on its linearization side"
+    );
     let fence = repository
         .load_mcp_server_fence("engineering")
         .await

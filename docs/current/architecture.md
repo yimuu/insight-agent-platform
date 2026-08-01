@@ -20,6 +20,11 @@ Run ────┤
 PostgreSQL（生产）/ SQLite（单进程开发） + Artifact store
 ```
 
+Agent 和 Provider 的 managed 对象以数据库为唯一 live authority。工作区 `agents/*` 与内置 Provider
+Catalog 只作为 fixture、template 或显式导入输入，进程启动不会扫描它们来覆盖 current route。Agent
+Draft 可变；Definition、Resolution、Deployment 与 Run pin 不可变。Provider active pointer 只影响新
+resolution，Provider suspension、MCP disable 和 Agent archive 另作为 admission/leaf-start 安全门。
+
 ## 核心对象
 
 - **Definition Revision**：发布后不可变的作者定义版本；
@@ -30,6 +35,10 @@ PostgreSQL（生产）/ SQLite（单进程开发） + Artifact store
 - **Attempt**：Worker 对 Activation 的一次带 lease 执行尝试；
 - **Artifact**：超过内联阈值的大值或二进制内容，按内容寻址保存；Conversation/terminal scoped
   envelope 可在对象层按 tenant 派生 key 做带版本 AEAD 加密。
+- **Agent Entity/Draft**：稳定 public ID 与唯一可变 authoring package；
+- **Deployment Resolution**：一次有期限的精确 Provider/MCP/Action/Retrieval/Subflow head 提案；
+- **Provider Revision**：冻结 adapter、endpoint identity、credential reference 和显式模型事实；
+- **Debug Session**：不写 public head 的 admin-only 临时 exact Deployment 与 `debugrun_*` Run。
 
 Run 始终固定到不可变 revision。ViewDocument 和 trace overlay 用于布局与观察，不参与执行真相。
 Deployment binding hash 包含 persistence policy，因此相同 Plan 的 `full` 与 `terminal_only`
@@ -67,11 +76,17 @@ Deployment Revision 必须具有不同 identity。旧 revision 未携带该字�
 `engine`/`durable` 所有的 ports 在根 composition 中组合；workspace member 直接导入 owner crate，
 不通过根 facade 形成反向依赖。
 
-平台根层装载版本化、只读的 Provider Catalog，并把 Agent 的结构化 `{provider, id}` selector 解析为
-`insight-resources` 中的模型实现。Provider route 冻结 endpoint、adapter 和非秘密 credential
-reference；模型 ID 保持 Provider 原始身份。`insight-runtime` 在 publication 时把解析证据写入
-Deployment Revision，scheduler 不在执行时重新路由，也不会跨区域或跨 Provider 自动故障转移。
-自定义 Provider extension 属于部署配置并形成独立 digest，不能覆盖内置 route。
+平台根层从 durable active Provider Revision 重建 `insight-resources` 模型 registry，并把 Agent 的
+结构化 `{provider, id}` selector 解析为精确实现。只读 Provider Catalog 是 template/import 输入，
+不是 live route。Provider Revision 冻结 endpoint identity、adapter/worker 和非秘密 credential
+reference；模型 ID 保持 Provider 原始身份。`insight-runtime` 在 Agent Deployment resolution 时把
+解析证据写入 Deployment Revision，scheduler 不在执行时重新路由，也不会跨区域或跨 Provider 自动
+故障转移。
+
+PostgreSQL Provider registry 投影使用“durable snapshot + opaque wake hint + generation poll”：schema
+trigger 在 management outbox commit 后发不含对象 identity 的通知，runtime 每次都重读 active 与被历史
+Deployment/Run 引用的 archive。通知只缩短延迟；丢失、重复、乱序和 reconnect 均不改变 durable head、
+suspension fence 或 exact revision 的权威。
 
 MCP 使用独立 `insight-mcp` 协议边界。Host 在 publication 时冻结远程 discovery/list evidence，并把
 Tool、Resource 和 Prompt 分别适配到 Action、Retrieval 与 untrusted Prompt snapshot；运行时只执行

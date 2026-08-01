@@ -8,7 +8,7 @@ use std::{
 };
 
 use axum::{
-    body::{to_bytes, Body, Bytes},
+    body::{Body, Bytes},
     extract::{
         rejection::{JsonRejection, QueryRejection},
         Extension, Path, Query, State,
@@ -23,10 +23,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use insight_dsl::{
-    GraphAuthorDocument, GraphSemanticEditBatch, StoredGraphView, ViewDocument,
-    MAX_GRAPH_DOCUMENT_BYTES,
-};
+use insight_dsl::GraphAuthorDocument;
 use insight_durable::McpInteractionDurableRepository;
 use insight_engine::{history::types::RunRecord, human::HumanWorkItem};
 use insight_runtime::{
@@ -88,26 +85,6 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/v1/agents", get(list_agents))
         .route("/v1/agents/{agent_id}", get(get_agent))
         .route(
-            "/v1/graph-agents/{agent_id}/revisions",
-            post(publish_graph_revision),
-        )
-        .route(
-            "/v1/graph-agents/{agent_id}/revisions/{definition_revision_id}",
-            get(get_graph_revision),
-        )
-        .route(
-            "/v1/graph-agents/{agent_id}/revisions/{definition_revision_id}/semantic-edits",
-            post(apply_graph_semantic_edits),
-        )
-        .route(
-            "/v1/graph-agents/{agent_id}/revisions/{definition_revision_id}/view",
-            get(get_graph_view).put(put_graph_view),
-        )
-        .route(
-            "/v1/agents/{agent_id}/deployments/{deployment_revision_id}/runs",
-            post(create_pinned_run),
-        )
-        .route(
             "/v1/agents/{agent_id}/runs/stream",
             post(create_attached_run),
         )
@@ -153,6 +130,17 @@ pub fn build_router(state: ApiState) -> Router {
             move |headers: HeaderMap, request: Request<Body>, next: Next| {
                 let auth = auth.clone();
                 async move {
+                    if request
+                        .uri()
+                        .path()
+                        .split('/')
+                        .any(|segment| segment.starts_with("debugrun_"))
+                    {
+                        return Err(ApiError::from(ServiceError::new(
+                            "RUN_NOT_FOUND",
+                            "Run not found",
+                        )));
+                    }
                     if !auth.accepts(&headers) {
                         return Err(ApiError::unauthorized());
                     }
@@ -431,138 +419,6 @@ async fn get_agent(
     ))))
 }
 
-async fn publish_graph_revision(
-    State(state): State<Arc<ApiState>>,
-    Path(agent_id): Path<String>,
-    body: Body,
-) -> Result<Response, ApiError> {
-    let bytes = strict_document_body(body, "GRAPH_DOCUMENT_INVALID").await?;
-    let graph = GraphAuthorDocument::decode_json(&bytes).map_err(|_| {
-        ApiError::from(ServiceError::new(
-            "GRAPH_DOCUMENT_INVALID",
-            "graph author document is invalid",
-        ))
-    })?;
-    let publication = state
-        .service
-        .publish_graph(&agent_id, graph)
-        .await
-        .map_err(ApiError::from)?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::ok(publication))).into_response())
-}
-
-async fn get_graph_revision(
-    State(state): State<Arc<ApiState>>,
-    Path((agent_id, definition_revision_id)): Path<(String, String)>,
-) -> Result<Json<ApiResponse<GraphAuthorDocument>>, ApiError> {
-    let graph = state
-        .service
-        .graph_author(&agent_id, &definition_revision_id)
-        .await
-        .map_err(ApiError::from)?;
-    Ok(Json(ApiResponse::ok(graph)))
-}
-
-async fn apply_graph_semantic_edits(
-    State(state): State<Arc<ApiState>>,
-    Path((agent_id, definition_revision_id)): Path<(String, String)>,
-    body: Body,
-) -> Result<Response, ApiError> {
-    let bytes = strict_document_body(body, "GRAPH_EDIT_INVALID").await?;
-    let batch = GraphSemanticEditBatch::decode_json(&bytes).map_err(|_| {
-        ApiError::from(ServiceError::new(
-            "GRAPH_EDIT_INVALID",
-            "graph semantic edit document is invalid",
-        ))
-    })?;
-    let publication = state
-        .service
-        .apply_graph_semantic_edits(&agent_id, &definition_revision_id, batch)
-        .await
-        .map_err(ApiError::from)?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::ok(publication))).into_response())
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GraphViewQuery {
-    expected_version: u64,
-}
-
-async fn get_graph_view(
-    State(state): State<Arc<ApiState>>,
-    Path((agent_id, definition_revision_id)): Path<(String, String)>,
-) -> Result<Json<ApiResponse<StoredGraphView>>, ApiError> {
-    let view = state
-        .service
-        .graph_view(&agent_id, &definition_revision_id)
-        .await
-        .map_err(ApiError::from)?;
-    Ok(Json(ApiResponse::ok(view)))
-}
-
-async fn put_graph_view(
-    State(state): State<Arc<ApiState>>,
-    Path((agent_id, definition_revision_id)): Path<(String, String)>,
-    Query(query): Query<GraphViewQuery>,
-    body: Body,
-) -> Result<Json<ApiResponse<StoredGraphView>>, ApiError> {
-    let bytes = strict_document_body(body, "GRAPH_VIEW_INVALID").await?;
-    let view = ViewDocument::decode_json(&bytes).map_err(|_| {
-        ApiError::from(ServiceError::new(
-            "GRAPH_VIEW_INVALID",
-            "graph view document is invalid",
-        ))
-    })?;
-    let stored = state
-        .service
-        .save_graph_view(
-            &agent_id,
-            &definition_revision_id,
-            query.expected_version,
-            view,
-        )
-        .await
-        .map_err(ApiError::from)?;
-    Ok(Json(ApiResponse::ok(stored)))
-}
-
-async fn create_pinned_run(
-    State(state): State<Arc<ApiState>>,
-    Path((agent_id, deployment_revision_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    input: Result<Json<Value>, JsonRejection>,
-) -> Result<Response, ApiError> {
-    let Json(input) = input.map_err(ApiError::from)?;
-    let principal = run_principal(&headers)?;
-    let record = state
-        .service
-        .create_detached_from_deployment_for_tenant(
-            &principal.tenant_id,
-            &agent_id,
-            &deployment_revision_id,
-            input,
-            RequestMetadata {
-                request_id: request_id(&headers),
-            },
-        )
-        .await
-        .map_err(ApiError::from)?;
-    let request_id = record.request_id.clone();
-    let run_id = record.run_id.clone();
-    let dto = run_dto(
-        &state,
-        &principal.tenant_id,
-        principal.user_id.as_deref(),
-        record,
-    )
-    .await?;
-    let mut response = (StatusCode::ACCEPTED, Json(ApiResponse::ok(dto))).into_response();
-    insert_header(&mut response, X_RUN_ID, &run_id)?;
-    insert_header(&mut response, X_REQUEST_ID, &request_id)?;
-    Ok(response)
-}
-
 async fn get_execution_graph(
     State(state): State<Arc<ApiState>>,
     Path(run_id): Path<String>,
@@ -601,15 +457,6 @@ async fn get_trace_overlay(
         no_store(Json(ApiResponse::ok(trace))),
         visibility,
     ))
-}
-
-async fn strict_document_body(
-    body: Body,
-    code: &'static str,
-) -> Result<axum::body::Bytes, ApiError> {
-    to_bytes(body, MAX_GRAPH_DOCUMENT_BYTES + 1)
-        .await
-        .map_err(|_| ApiError::from(ServiceError::new(code, "graph document body is invalid")))
 }
 
 async fn create_attached_run(

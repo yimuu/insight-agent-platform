@@ -22,10 +22,11 @@ pub use run_service::{
     AnyAttachedRun, AttachedRun, ConversationResponseVisibilityGuard, ConversationStreamDelivery,
     ConversationStreamPrivacy, DeployedAgentCatalog, ForkRecoveryOptions,
     FullConversationVisibilityGuard, GraphPublication, McpRunAdmissionAuthority,
-    MigrationNodeMappingRequest, ProductionRunRepository, PublicArtifact, RecoveryOperation,
-    RecoveryRequestMetadata, RecoveryReusePolicy, RecoveryRunResult, RequestMetadata,
-    RunRepositoryCapability, RunService, RunServiceConfig, RunSubscription, RuntimeReadinessProbe,
-    ServiceError, SubscriptionError, WorkCoordinatorConfig,
+    MigrationNodeMappingRequest, ProductionRunRepository, ProviderRunAdmissionAuthority,
+    PublicArtifact, RecoveryOperation, RecoveryRequestMetadata, RecoveryReusePolicy,
+    RecoveryRunResult, RequestMetadata, RunRepositoryCapability, RunService, RunServiceConfig,
+    RunSubscription, RuntimeMetricsSource, RuntimeReadinessProbe, ServiceError, SubscriptionError,
+    WorkCoordinatorConfig,
 };
 pub use run_stream::{
     CompletedFunctionCallPublication, CompletedFunctionCallTailPublication,

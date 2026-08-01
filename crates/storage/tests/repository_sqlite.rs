@@ -8,9 +8,10 @@ mod support;
 
 use insight_dsl::{compile_source, CompileOptions};
 use insight_durable::{
+    ActivateAgentDeploymentCommand, AgentDeploymentActivationOutcome, AgentDeploymentTarget,
     ContinueAsNewCommand, CreateRunCommand, DurableRepository, PlanInstallOutcome,
     PlanPublicationOutcome, ProjectionAudit, ProjectionDurableRepository, ProjectionSubject,
-    PublishVersionedPlanCommand, RecoveryDurableRepository, VersionedPlan,
+    PublicationOrigin, PublishVersionedPlanCommand, RecoveryDurableRepository, VersionedPlan,
 };
 use insight_engine::{
     plan::{
@@ -31,6 +32,85 @@ use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 
 fn key(label: &str) -> TransitionKey {
     TransitionKey::derive("repository.test", &[label]).unwrap()
+}
+
+#[tokio::test]
+async fn definition_deployment_and_route_transitions_are_independent() {
+    let (_directory, repository, _inspection) = file_repository().await;
+    let plan = graph_plan(
+        "definition_sqlite_split_management",
+        "agent_sqlite_split_management",
+        "deployment_sqlite_split_management_v1",
+        json!([]),
+    );
+
+    assert_eq!(
+        repository.install_definition_revision(&plan).await.unwrap(),
+        PlanInstallOutcome::Installed
+    );
+    let definition_only = repository.load_versioned_plan_catalog().await.unwrap();
+    assert!(definition_only.plans().is_empty());
+    assert!(definition_only.heads().is_empty());
+
+    assert_eq!(
+        repository.install_deployment_revision(&plan).await.unwrap(),
+        PlanInstallOutcome::Installed
+    );
+    let deployed_inactive = repository.load_versioned_plan_catalog().await.unwrap();
+    assert_eq!(deployed_inactive.plans(), std::slice::from_ref(&plan));
+    assert!(deployed_inactive.heads().is_empty());
+
+    let target = AgentDeploymentTarget::new(
+        plan.agent_id().to_owned(),
+        plan.definition_id().to_owned(),
+        plan.definition_revision_id().clone(),
+        plan.deployment_revision_id().clone(),
+        PublicationOrigin::Managed,
+    )
+    .unwrap();
+    let activated = repository
+        .activate_agent_deployment(
+            ActivateAgentDeploymentCommand::new(
+                plan.agent_id().to_owned(),
+                None,
+                Some(target.clone()),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let AgentDeploymentActivationOutcome::Changed(Some(head)) = activated else {
+        panic!("first CAS must activate the exact deployment")
+    };
+    assert_eq!(head.origin(), PublicationOrigin::Managed);
+
+    assert_eq!(
+        repository
+            .activate_agent_deployment(
+                ActivateAgentDeploymentCommand::new(
+                    plan.agent_id().to_owned(),
+                    Some(head.clone()),
+                    Some(target),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap(),
+        AgentDeploymentActivationOutcome::Unchanged(Some(head.clone()))
+    );
+    assert_eq!(
+        repository
+            .activate_agent_deployment(
+                ActivateAgentDeploymentCommand::new(plan.agent_id().to_owned(), Some(head), None,)
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        AgentDeploymentActivationOutcome::Changed(None)
+    );
+    let deactivated = repository.load_versioned_plan_catalog().await.unwrap();
+    assert_eq!(deactivated.plans(), std::slice::from_ref(&plan));
+    assert!(deactivated.heads().is_empty());
 }
 
 fn verified_plan() -> insight_engine::Plan {

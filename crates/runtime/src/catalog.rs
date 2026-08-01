@@ -2066,6 +2066,7 @@ impl DeployedAgent {
                 let author_document = serde_json::json!({
                     "authoring_mode": "structured",
                     "source": published.author_source(),
+                    "prompt_files": published.prompt_files(),
                     "prompt_hashes": published.prompt_files().iter().map(|(path, content)| {
                         (path.clone(), ContentHash::from_bytes(content.as_bytes()).to_string())
                     }).collect::<BTreeMap<_, _>>(),
@@ -2392,6 +2393,19 @@ impl DeployedAgent {
         })
     }
 
+    /// Managed Provider routes referenced by the exact frozen deployment.
+    /// A Provider ID is accepted only when it appears beside an immutable
+    /// Provider Revision ID, avoiding accidental interpretation of unrelated
+    /// author metadata as a runtime safety dependency.
+    pub fn managed_provider_ids(&self) -> BTreeSet<String> {
+        let mut provider_ids = BTreeSet::new();
+        collect_managed_provider_ids(
+            durable_model_adapter::versioned_plan_resolved_bindings(&self.versioned_plan),
+            &mut provider_ids,
+        );
+        provider_ids
+    }
+
     pub fn linked_plan(&self) -> Result<LinkedPlan<'_>, CompileError> {
         LinkedPlan::link(self.published.plan(), &self.descriptors, &self.subflows)
             .map_err(plan_compile_error)
@@ -2419,6 +2433,38 @@ impl DeployedAgent {
                 contract.worker().worker_version(),
             )
         })
+    }
+}
+
+fn collect_managed_provider_ids(value: &Value, provider_ids: &mut BTreeSet<String>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_managed_provider_ids(value, provider_ids);
+            }
+        }
+        Value::Object(object) => {
+            if object
+                .get("provider_revision_id")
+                .and_then(Value::as_str)
+                .is_some()
+            {
+                if let Some(provider_id) = object.get("provider_id").and_then(Value::as_str) {
+                    if !provider_id.is_empty()
+                        && provider_id.len() <= 64
+                        && provider_id.bytes().all(|byte| {
+                            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                        })
+                    {
+                        provider_ids.insert(provider_id.to_owned());
+                    }
+                }
+            }
+            for value in object.values() {
+                collect_managed_provider_ids(value, provider_ids);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
 }
 
@@ -3220,6 +3266,160 @@ pub fn compile_agent_dir(directory: &Path) -> Result<PublishedAgent, CompileErro
         plan,
         graph_author_document: None,
     })
+}
+
+/// Compiles an API-managed YAML package without touching the filesystem.
+/// The caller owns path normalization and size policy; this function owns DSL
+/// parsing, prompt declaration resolution, immutable revision injection and
+/// the same published LLM contract checks as file-backed Agents.
+pub fn compile_managed_agent_package(
+    expected_agent_id: &str,
+    definition_revision_id: DefinitionRevisionId,
+    source: String,
+    prompt_files: BTreeMap<String, String>,
+) -> Result<PublishedAgent, CompileError> {
+    let raw = insight_dsl::parse(&source).map_err(CompileError::from)?;
+    let declared_persistence_mode = raw
+        .execution
+        .as_ref()
+        .and_then(|execution| execution.persistence_mode);
+    let document = insight_dsl::validate(raw)?;
+    let metadata = document.metadata.clone().ok_or_else(|| {
+        CompileError::new(
+            "AGENT_METADATA_REQUIRED",
+            "published agents must declare metadata",
+        )
+    })?;
+    if metadata.id != expected_agent_id {
+        return Err(CompileError::new(
+            "AGENT_ID_MISMATCH",
+            "managed Agent identity does not match YAML metadata.id",
+        ));
+    }
+    let declared_files = document
+        .prompts
+        .values()
+        .filter_map(|prompt| match prompt {
+            PromptDeclaration::File(path) => Some(path.as_str()),
+            PromptDeclaration::Inline(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let supplied_files = prompt_files
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if declared_files != supplied_files {
+        return Err(CompileError::new(
+            "PROMPT_PACKAGE_MISMATCH",
+            "managed prompt files must exactly cover YAML file declarations",
+        ));
+    }
+    let source_id = format!("managed/{expected_agent_id}/agent.yaml");
+    let mut options = CompileOptions::new(definition_revision_id.clone(), source_id, &source);
+    for (path, content) in &prompt_files {
+        options = options.with_prompt_file(path.clone(), content.clone());
+    }
+    let plan = insight_dsl::compile(document, options)?;
+    if plan.metadata().definition_revision_id() != &definition_revision_id {
+        return Err(CompileError::new(
+            "DEFINITION_REVISION_MISMATCH",
+            "compiled Plan did not retain its managed definition revision",
+        ));
+    }
+    validate_published_llm_contracts(&plan)?;
+    Ok(PublishedAgent {
+        metadata,
+        definition_revision_id,
+        declared_persistence_mode,
+        author_source: source,
+        prompt_files,
+        plan,
+        graph_author_document: None,
+    })
+}
+
+/// Freezes one managed author document and Canonical Plan as a Definition
+/// Revision without consulting any mutable Provider, MCP, Action, Retrieval,
+/// Subflow or worker route. Exact dependencies are deliberately absent until
+/// a later Deployment Resolution.
+pub fn freeze_managed_agent_definition(
+    published: &PublishedAgent,
+) -> Result<VersionedPlan, CompileError> {
+    let plan = published.plan();
+    let index = PlanIndex::new(plan).map_err(plan_compile_error)?;
+    let mut descriptor_documents = Vec::new();
+    for node in plan.nodes() {
+        let Some(leaf) = index.leaf_descriptor(node.id()) else {
+            continue;
+        };
+        let descriptor = leaf.descriptor();
+        descriptor_documents.push(serde_json::json!({
+            "node_id":node.id(),
+            "task_kind":leaf.kind().name(),
+            "implementation":descriptor.implementation,
+            "descriptor_version":descriptor.descriptor_version,
+            "public_configuration":descriptor.public_configuration,
+            "secret_slots":descriptor.secret_configuration.keys().collect::<Vec<_>>(),
+        }));
+    }
+    let identity = serde_json::json!({
+        "domain":"insight-agent/managed-definition-placeholder/v1",
+        "definition_revision_id":published.definition_revision_id(),
+        "plan_hash":plan.semantic_hash(),
+    });
+    let identity = serde_jcs::to_vec(&identity).map_err(|_| {
+        CompileError::new(
+            "DEFINITION_REVISION_INVALID",
+            "managed Definition identity cannot be canonicalized",
+        )
+    })?;
+    let placeholder = ContentHash::from_bytes(&identity);
+    let deployment_revision_id = DeploymentRevisionId::new(format!(
+        "deployrev_definition_{}",
+        placeholder.as_str().trim_start_matches("sha256:")
+    ))
+    .map_err(|error| CompileError::new("DEFINITION_REVISION_INVALID", error.to_string()))?;
+    let descriptor_contracts = Value::Array(descriptor_documents);
+    let value = match published.graph_author_document() {
+        Some(graph) => VersionedPlan::from_verified_graph(
+            published.metadata.id.clone(),
+            published.metadata.id.clone(),
+            published.metadata.name.clone(),
+            deployment_revision_id,
+            "cel-0.14+match-jcs-v1+value-jcs-v1",
+            graph,
+            descriptor_contracts,
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+        ),
+        None => VersionedPlan::from_verified_plan(
+            published.metadata.id.clone(),
+            published.metadata.id.clone(),
+            published.metadata.name.clone(),
+            deployment_revision_id,
+            "cel-0.14+match-jcs-v1+value-jcs-v1",
+            serde_json::json!({
+                "authoring_mode":"structured",
+                "source":published.author_source(),
+                "prompt_files":published.prompt_files(),
+                "prompt_hashes":published.prompt_files().iter().map(|(path, content)| {
+                    (path.clone(), ContentHash::from_bytes(content.as_bytes()).to_string())
+                }).collect::<BTreeMap<_, _>>(),
+            }),
+            plan,
+            descriptor_contracts,
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+        ),
+    }
+    .and_then(|plan| {
+        durable_model_adapter::versioned_plan_with_public_description(
+            plan,
+            published.metadata.description.clone(),
+        )
+    })
+    .map_err(|error| CompileError::new("DEFINITION_PUBLICATION_FAILED", error.to_string()))?;
+    Ok(value)
 }
 
 fn resolve_prompt_files(

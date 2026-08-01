@@ -41,8 +41,11 @@
 {{- if and .Values.mcp.client.managementApi.enabled (not .Values.mcp.secretEncryption.enabled) }}
 {{- fail "mcp.secretEncryption must be enabled when managementApi is enabled" }}
 {{- end }}
-{{- if and .Values.mcp.client.managementApi.enabled (empty .Values.mcp.client.managementApi.operatorCredentials) }}
-{{- fail "mcp.client.managementApi.operatorCredentials is required when managementApi is enabled" }}
+{{- if and .Values.mcp.client.managementApi.enabled (not .Values.management.enabled) }}
+{{- fail "management.enabled is required when MCP managementApi is enabled" }}
+{{- end }}
+{{- if and .Values.management.enabled (empty .Values.management.operatorCredentials) }}
+{{- fail "management.operatorCredentials is required when management is enabled" }}
 {{- end }}
 {{- if and .Values.mcp.client.managementApi.enabled (empty .Values.mcp.client.secretResolverAllowedNames) }}
 {{- fail "mcp.client.secretResolverAllowedNames is required when managementApi is enabled" }}
@@ -63,12 +66,19 @@
 {{- end }}
 {{- $_ := set $mcpSecretEnvNames $entry.name true }}
 {{- end }}
-{{- if .Values.mcp.client.managementApi.enabled }}
-{{- range $credential := .Values.mcp.client.managementApi.operatorCredentials }}
+{{- if .Values.management.enabled }}
+{{- range $credential := .Values.management.operatorCredentials }}
 {{- if not (hasKey $mcpSecretEnvNames (default "" $credential.tokenEnv)) }}
-{{- fail "each MCP operator credential tokenEnv must be provided by mcp.secretEnv" }}
+{{- fail "each management operator credential tokenEnv must be provided by mcp.secretEnv" }}
 {{- end }}
 {{- end }}
+{{- range $name := .Values.management.providerSecretResolverAllowedNames }}
+{{- if not (hasKey $mcpSecretEnvNames $name) }}
+{{- fail "each management.providerSecretResolverAllowedNames entry must be provided by mcp.secretEnv" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.mcp.client.managementApi.enabled }}
 {{- range $name := .Values.mcp.client.secretResolverAllowedNames }}
 {{- if not (hasKey $mcpSecretEnvNames $name) }}
 {{- fail "each MCP secretResolverAllowedNames entry must be provided by mcp.secretEnv" }}
@@ -129,6 +139,49 @@ data:
     auth:
       mode: disabled
 
+    management:
+      version: 1
+      enabled: {{ .Values.management.enabled }}
+      {{- if .Values.management.operatorCredentials }}
+      operator_credentials:
+        {{- range .Values.management.operatorCredentials }}
+        - identity: {{ .identity | quote }}
+          token_env: {{ .tokenEnv | quote }}
+          capabilities:
+            {{- toYaml .capabilities | nindent 12 }}
+        {{- end }}
+      {{- else }}
+      operator_credentials: []
+      {{- end }}
+      provider_secret_resolver:
+        {{- if .Values.management.providerSecretResolverAllowedNames }}
+        type: environment_reference
+        allowed_names:
+          {{- toYaml .Values.management.providerSecretResolverAllowedNames | nindent 10 }}
+        {{- else }}
+        type: disabled
+        {{- end }}
+      limits:
+        max_agent_draft_bytes: {{ int .Values.management.limits.maxAgentDraftBytes }}
+        max_agent_prompt_files: {{ int .Values.management.limits.maxAgentPromptFiles }}
+        max_provider_models: {{ int .Values.management.limits.maxProviderModels }}
+        max_pending_operations: {{ int .Values.management.limits.maxPendingOperations }}
+        operation_retention_days: {{ int .Values.management.limits.operationRetentionDays }}
+      {{- if .Values.management.debugExecutionProfiles }}
+      debug_execution_profiles:
+        {{- range $profileId, $profile := .Values.management.debugExecutionProfiles }}
+        {{ $profileId }}:
+          mode: {{ $profile.mode }}
+          max_concurrent_sessions: {{ int $profile.maxConcurrentSessions }}
+          session_timeout: {{ $profile.sessionTimeout | quote }}
+          retention: {{ $profile.retention | quote }}
+          allow_external_actions: {{ $profile.allowExternalActions }}
+          allow_live_provider_credentials: {{ $profile.allowLiveProviderCredentials }}
+        {{- end }}
+      {{- else }}
+      debug_execution_profiles: {}
+      {{- end }}
+
     agents:
       directory: /app/agents
       enabled:
@@ -169,17 +222,6 @@ data:
           enabled: {{ .Values.mcp.client.managementApi.enabled }}
           discovery_workers: {{ .Values.mcp.client.managementApi.discoveryWorkers }}
           max_pending_discoveries: {{ .Values.mcp.client.managementApi.maxPendingDiscoveries }}
-          {{- if .Values.mcp.client.managementApi.operatorCredentials }}
-          operator_credentials:
-            {{- range .Values.mcp.client.managementApi.operatorCredentials }}
-            - identity: {{ .identity | quote }}
-              token_env: {{ .tokenEnv | quote }}
-              capabilities:
-                {{- toYaml .capabilities | nindent 16 }}
-            {{- end }}
-          {{- else }}
-          operator_credentials: []
-          {{- end }}
         {{- if .Values.mcp.secretEncryption.enabled }}
         secret_encryption:
           active_key_version: {{ .Values.mcp.secretEncryption.activeKeyVersion | quote }}

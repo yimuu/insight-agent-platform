@@ -37,6 +37,61 @@ pub enum AuthConfig {
     Bearer { token: SecretString },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagementOperatorCredentialConfig {
+    identity: String,
+    token: SecretString,
+    capabilities: BTreeSet<String>,
+}
+
+impl ManagementOperatorCredentialConfig {
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    pub fn token(&self) -> &SecretString {
+        &self.token
+    }
+
+    pub fn capabilities(&self) -> &BTreeSet<String> {
+        &self.capabilities
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugExecutionProfileMode {
+    Sandbox,
+    Live,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugExecutionProfileConfig {
+    pub mode: DebugExecutionProfileMode,
+    pub max_concurrent_sessions: u32,
+    pub session_timeout: Duration,
+    pub retention: Duration,
+    pub allow_external_actions: bool,
+    pub allow_live_provider_credentials: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagementLimitsConfig {
+    pub max_agent_draft_bytes: usize,
+    pub max_agent_prompt_files: usize,
+    pub max_provider_models: usize,
+    pub max_pending_operations: u32,
+    pub operation_retention_days: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagementConfig {
+    pub enabled: bool,
+    pub operator_credentials: Vec<ManagementOperatorCredentialConfig>,
+    pub provider_secret_resolver_allowed_names: BTreeSet<String>,
+    pub limits: ManagementLimitsConfig,
+    pub debug_execution_profiles: BTreeMap<String, DebugExecutionProfileConfig>,
+}
+
 impl AuthConfig {
     pub fn bearer_token(&self) -> Option<&str> {
         match self {
@@ -295,6 +350,7 @@ pub struct PlatformConfig {
     pub bind_addr: SocketAddr,
     pub auth: AuthConfig,
     pub human_task_credentials: Vec<HumanTaskCredentialConfig>,
+    pub management: ManagementConfig,
     pub agents: AgentsConfig,
     pub providers: ProvidersConfig,
     pub model_policy: Option<ModelPolicyConfig>,
@@ -365,6 +421,7 @@ impl PlatformConfig {
             )
         })?;
         let (auth, human_task_credentials) = resolve_auth(raw.auth, &get_env)?;
+        let management = resolve_management(raw.management, raw.deployment_mode, &get_env)?;
         let agents = AgentsConfig {
             directory: resolve_path(parent, &raw.agents.directory),
             enabled: unique_names(raw.agents.enabled, "agents.enabled")?,
@@ -385,11 +442,18 @@ impl PlatformConfig {
         let runtime = resolve_runtime(raw.runtime, raw.deployment_mode)?;
         let conversations = resolve_conversations(raw.conversations)?;
         let mcp = resolve_mcp(raw.mcp, parent, raw.deployment_mode, &get_env)?;
+        if mcp.client.management_api.enabled && !management.enabled {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_MANAGEMENT_REQUIRED",
+                "MCP management routes require management.enabled=true",
+            ));
+        }
         Ok(Self {
             deployment_mode: raw.deployment_mode,
             bind_addr,
             auth,
             human_task_credentials,
+            management,
             agents,
             providers,
             model_policy,
@@ -437,6 +501,8 @@ struct PlatformYaml {
     deployment_mode: DeploymentMode,
     bind_addr: String,
     auth: AuthYaml,
+    #[serde(default)]
+    management: Option<ManagementYaml>,
     agents: AgentsYaml,
     #[serde(default)]
     providers: BTreeMap<String, ProviderExtensionYaml>,
@@ -480,6 +546,110 @@ enum AuthYaml {
         #[serde(default)]
         human_task_credentials: Vec<HumanTaskCredentialYaml>,
     },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagementYaml {
+    version: u32,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    operator_credentials: Vec<ManagementOperatorCredentialYaml>,
+    #[serde(default)]
+    provider_secret_resolver: ProviderSecretResolverYaml,
+    #[serde(default)]
+    limits: Option<ManagementLimitsYaml>,
+    #[serde(default)]
+    debug_execution_profiles: BTreeMap<String, DebugExecutionProfileYaml>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum ProviderSecretResolverYaml {
+    #[default]
+    Disabled,
+    EnvironmentReference {
+        allowed_names: Vec<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagementOperatorCredentialYaml {
+    identity: String,
+    token_env: String,
+    capabilities: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagementLimitsYaml {
+    #[serde(default = "default_max_agent_draft_bytes")]
+    max_agent_draft_bytes: usize,
+    #[serde(default = "default_max_agent_prompt_files")]
+    max_agent_prompt_files: usize,
+    #[serde(default = "default_max_provider_models")]
+    max_provider_models: usize,
+    #[serde(default = "default_max_pending_operations")]
+    max_pending_operations: u32,
+    #[serde(default = "default_operation_retention_days")]
+    operation_retention_days: u32,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DebugExecutionProfileModeYaml {
+    Sandbox,
+    Live,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DebugExecutionProfileYaml {
+    mode: DebugExecutionProfileModeYaml,
+    #[serde(default = "default_debug_max_concurrent_sessions")]
+    max_concurrent_sessions: u32,
+    #[serde(default = "default_debug_session_timeout")]
+    session_timeout: String,
+    #[serde(default = "default_debug_retention")]
+    retention: String,
+    #[serde(default)]
+    allow_external_actions: bool,
+    #[serde(default)]
+    allow_live_provider_credentials: bool,
+}
+
+const fn default_max_agent_draft_bytes() -> usize {
+    4 * 1_024 * 1_024
+}
+
+const fn default_max_agent_prompt_files() -> usize {
+    128
+}
+
+const fn default_max_provider_models() -> usize {
+    4_096
+}
+
+const fn default_max_pending_operations() -> u32 {
+    256
+}
+
+const fn default_operation_retention_days() -> u32 {
+    30
+}
+
+const fn default_debug_max_concurrent_sessions() -> u32 {
+    4
+}
+
+fn default_debug_session_timeout() -> String {
+    "10m".to_owned()
+}
+
+fn default_debug_retention() -> String {
+    "24h".to_owned()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1015,6 +1185,207 @@ fn resolve_auth(
         ));
     }
     Ok((auth, human_task_credentials))
+}
+
+fn resolve_management(
+    raw: Option<ManagementYaml>,
+    _deployment_mode: DeploymentMode,
+    get_env: &impl Fn(&str) -> Option<String>,
+) -> Result<ManagementConfig, PlatformConfigError> {
+    let Some(raw) = raw else {
+        return Ok(ManagementConfig {
+            enabled: false,
+            operator_credentials: Vec::new(),
+            provider_secret_resolver_allowed_names: BTreeSet::new(),
+            limits: ManagementLimitsConfig {
+                max_agent_draft_bytes: default_max_agent_draft_bytes(),
+                max_agent_prompt_files: default_max_agent_prompt_files(),
+                max_provider_models: default_max_provider_models(),
+                max_pending_operations: default_max_pending_operations(),
+                operation_retention_days: default_operation_retention_days(),
+            },
+            debug_execution_profiles: BTreeMap::new(),
+        });
+    };
+    if raw.version != 1 {
+        return Err(PlatformConfigError::new(
+            "PLATFORM_MANAGEMENT_VERSION_UNSUPPORTED",
+            "management.version must be 1",
+        ));
+    }
+    let allowed_capabilities = BTreeSet::from([
+        "agent.read",
+        "agent.write",
+        "agent.validate",
+        "agent.publish",
+        "agent.deploy",
+        "agent.activate",
+        "agent.archive",
+        "agent.debug.sandbox",
+        "agent.debug.live",
+        "provider.read",
+        "provider.write",
+        "provider.discover",
+        "provider.test",
+        "provider.publish",
+        "provider.activate",
+        "provider.suspend",
+        "provider.retire",
+        "mcp.server.read",
+        "mcp.server.write",
+        "mcp.server.discover",
+        "mcp.server.publish",
+    ]);
+    let mut identities = BTreeSet::new();
+    let mut tokens = BTreeSet::new();
+    let mut operator_credentials = Vec::with_capacity(raw.operator_credentials.len());
+    for credential in raw.operator_credentials {
+        let identity = credential.identity.trim().to_owned();
+        let capabilities = unique_names(
+            credential.capabilities,
+            "management.operator_credentials.capabilities",
+        )?;
+        if !valid_human_principal_label(&identity)
+            || !identities.insert(identity.clone())
+            || capabilities.is_empty()
+            || capabilities
+                .iter()
+                .any(|capability| !allowed_capabilities.contains(capability.as_str()))
+        {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_MANAGEMENT_INVALID",
+                "management Operator identity or capability set is invalid",
+            ));
+        }
+        let token = required_secret(&credential.token_env, get_env)?;
+        if !tokens.insert(token.expose().to_owned()) {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_MANAGEMENT_INVALID",
+                "management Operator bearer credentials must be unique",
+            ));
+        }
+        operator_credentials.push(ManagementOperatorCredentialConfig {
+            identity,
+            token,
+            capabilities,
+        });
+    }
+    if raw.enabled && operator_credentials.is_empty() {
+        return Err(PlatformConfigError::new(
+            "PLATFORM_MANAGEMENT_INVALID",
+            "enabled management requires at least one Operator credential",
+        ));
+    }
+    let provider_secret_resolver_allowed_names = match raw.provider_secret_resolver {
+        ProviderSecretResolverYaml::Disabled => BTreeSet::new(),
+        ProviderSecretResolverYaml::EnvironmentReference { allowed_names } => {
+            let names = unique_names(
+                allowed_names,
+                "management.provider_secret_resolver.allowed_names",
+            )?;
+            if names.is_empty()
+                || names.iter().any(|name| {
+                    name.len() > 256
+                        || !name.bytes().enumerate().all(|(index, byte)| {
+                            byte.is_ascii_uppercase()
+                                || byte == b'_'
+                                || (byte.is_ascii_digit() && index > 0)
+                        })
+                })
+            {
+                return Err(PlatformConfigError::new(
+                    "PLATFORM_MANAGEMENT_INVALID",
+                    "management Provider secret resolver policy is invalid",
+                ));
+            }
+            names
+        }
+    };
+    let limits = raw.limits.unwrap_or(ManagementLimitsYaml {
+        max_agent_draft_bytes: default_max_agent_draft_bytes(),
+        max_agent_prompt_files: default_max_agent_prompt_files(),
+        max_provider_models: default_max_provider_models(),
+        max_pending_operations: default_max_pending_operations(),
+        operation_retention_days: default_operation_retention_days(),
+    });
+    if limits.max_agent_draft_bytes == 0
+        || limits.max_agent_draft_bytes > 64 * 1_024 * 1_024
+        || limits.max_agent_prompt_files == 0
+        || limits.max_agent_prompt_files > 4_096
+        || limits.max_provider_models == 0
+        || limits.max_provider_models > 65_536
+        || limits.max_pending_operations == 0
+        || limits.max_pending_operations > 10_000
+        || limits.operation_retention_days == 0
+        || limits.operation_retention_days > 3_650
+    {
+        return Err(PlatformConfigError::new(
+            "PLATFORM_MANAGEMENT_INVALID",
+            "management limits are outside supported bounds",
+        ));
+    }
+    let mut debug_execution_profiles = BTreeMap::new();
+    for (profile_id, profile) in raw.debug_execution_profiles {
+        if !valid_human_principal_label(&profile_id)
+            || profile.max_concurrent_sessions == 0
+            || profile.max_concurrent_sessions > 1_024
+        {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_MANAGEMENT_INVALID",
+                "management debug execution profile is invalid",
+            ));
+        }
+        let mode = match profile.mode {
+            DebugExecutionProfileModeYaml::Sandbox => DebugExecutionProfileMode::Sandbox,
+            DebugExecutionProfileModeYaml::Live => DebugExecutionProfileMode::Live,
+        };
+        if mode == DebugExecutionProfileMode::Sandbox
+            && (profile.allow_external_actions || profile.allow_live_provider_credentials)
+        {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_MANAGEMENT_INVALID",
+                "sandbox debug profiles cannot allow live external effects or credentials",
+            ));
+        }
+        let session_timeout = positive_duration(
+            &profile.session_timeout,
+            "management.debug_execution_profiles.session_timeout",
+        )?;
+        let retention = positive_duration(
+            &profile.retention,
+            "management.debug_execution_profiles.retention",
+        )?;
+        if retention < session_timeout {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_MANAGEMENT_INVALID",
+                "Debug content retention cannot be shorter than the Session timeout",
+            ));
+        }
+        debug_execution_profiles.insert(
+            profile_id,
+            DebugExecutionProfileConfig {
+                mode,
+                max_concurrent_sessions: profile.max_concurrent_sessions,
+                session_timeout,
+                retention,
+                allow_external_actions: profile.allow_external_actions,
+                allow_live_provider_credentials: profile.allow_live_provider_credentials,
+            },
+        );
+    }
+    Ok(ManagementConfig {
+        enabled: raw.enabled,
+        operator_credentials,
+        provider_secret_resolver_allowed_names,
+        limits: ManagementLimitsConfig {
+            max_agent_draft_bytes: limits.max_agent_draft_bytes,
+            max_agent_prompt_files: limits.max_agent_prompt_files,
+            max_provider_models: limits.max_provider_models,
+            max_pending_operations: limits.max_pending_operations,
+            operation_retention_days: limits.operation_retention_days,
+        },
+        debug_execution_profiles,
+    })
 }
 
 fn resolve_human_task_credentials(

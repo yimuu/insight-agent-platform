@@ -117,6 +117,9 @@ fn admission(
         selected_context_hash: Some(ContentHash::from_bytes(
             format!("context:{label}").as_bytes(),
         )),
+        expected_publication_head: None,
+        expected_mcp_server_fences: Default::default(),
+        expected_provider_fences: Default::default(),
         owner: owner.clone(),
         accepted_at: now,
     }
@@ -250,6 +253,34 @@ where
     let replayed = store.admit_terminal_run(replay).await.unwrap();
     assert!(replayed.replayed);
     assert_eq!(replayed.admission.run_id, standalone.run_id);
+
+    let mut fenced = admission(
+        &format!("{label}_fenced"),
+        &tenant,
+        &format!("request_{label}_fenced"),
+        &agent,
+        &owner,
+        now,
+        None,
+    );
+    fenced
+        .expected_provider_fences
+        .insert("missing-provider".to_owned(), 0);
+    let fenced_run_id = fenced.run_id.clone();
+    assert_eq!(
+        store.admit_terminal_run(fenced).await.unwrap_err().code(),
+        REPOSITORY_CONSTRAINT_CONFLICT,
+        "terminal-only admission must fail closed inside its storage transaction"
+    );
+    assert!(store
+        .get_terminal_run(TerminalRunQuery {
+            tenant_id: tenant.clone(),
+            run_id: fenced_run_id,
+            observed_at: now,
+        })
+        .await
+        .unwrap()
+        .is_none());
 
     let mut mismatched_replay = standalone.clone();
     mismatched_replay.input_hash = ContentHash::from_bytes(b"different request body");

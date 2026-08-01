@@ -98,6 +98,57 @@ fn validate_admission(command: &NewTerminalRunAdmission) -> Result<(), Repositor
     Ok(())
 }
 
+async fn require_admission_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &NewTerminalRunAdmission,
+) -> Result<(), RepositoryError> {
+    if let Some(expected) = &command.expected_publication_head {
+        let current = sqlx::query(
+            "SELECT agent_id,definition_id,definition_revision_id,deployment_revision_id,
+                    publication_origin
+             FROM agent_publication_heads WHERE agent_id=$1 FOR SHARE",
+        )
+        .bind(expected.agent_id())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?
+        .map(|row| crate::repository::postgres_publication_head(&row))
+        .transpose()?;
+        if current.as_ref() != Some(expected) {
+            return Err(constraint_conflict());
+        }
+    }
+    for (server_id, fence) in &command.expected_mcp_server_fences {
+        let fence = i64::try_from(*fence).map_err(|_| invalid_data())?;
+        let current = sqlx::query_as::<_, (String, i64)>(
+            "SELECT server_state,disable_fence
+             FROM mcp_managed_servers WHERE server_id=$1 FOR SHARE",
+        )
+        .bind(server_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
+        if current.as_ref() != Some(&("active".to_owned(), fence)) {
+            return Err(constraint_conflict());
+        }
+    }
+    for (provider_id, fence) in &command.expected_provider_fences {
+        let fence = i64::try_from(*fence).map_err(|_| invalid_data())?;
+        let current = sqlx::query_as::<_, (String, i64)>(
+            "SELECT operational_state,suspension_fence
+             FROM managed_providers WHERE provider_id=$1 FOR SHARE",
+        )
+        .bind(provider_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
+        if current.as_ref() != Some(&("enabled".to_owned(), fence)) {
+            return Err(constraint_conflict());
+        }
+    }
+    Ok(())
+}
+
 fn validate_result(command: &NewTerminalRunResult) -> Result<(), RepositoryError> {
     validate_owner(&command.owner)?;
     validate_text(&command.response_id, 256)?;
@@ -939,6 +990,7 @@ impl TerminalRunStore for PostgresDurableRepository {
                 replayed: true,
             });
         }
+        require_admission_authority(&mut transaction, &command).await?;
         require_active_owner(&mut transaction, &command.owner).await?;
         let inserted = insert_admission(&mut transaction, &command).await?;
         let admission =
@@ -1822,6 +1874,7 @@ impl ConversationStore for PostgresDurableRepository {
         if conversation.archived_at.is_some() {
             return Err(conversation_archived());
         }
+        require_admission_authority(&mut transaction, &command.admission).await?;
         require_active_owner(&mut transaction, &command.admission.owner).await?;
         if let ConversationContent::Ref(reference) = &command.message.content {
             super::staging_postgres::consume_terminal_artifact_stage(

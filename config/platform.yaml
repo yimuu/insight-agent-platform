@@ -5,6 +5,20 @@ bind_addr: 127.0.0.1:3000
 auth:
   mode: disabled
 
+management:
+  version: 1
+  enabled: false
+  operator_credentials: []
+  provider_secret_resolver:
+    type: disabled
+  limits:
+    max_agent_draft_bytes: 4194304
+    max_agent_prompt_files: 128
+    max_provider_models: 4096
+    max_pending_operations: 256
+    operation_retention_days: 30
+  debug_execution_profiles: {}
+
 agents:
   directory: ../agents
   enabled:

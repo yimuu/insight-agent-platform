@@ -9,6 +9,23 @@ pub const MCP_SERVER_READ: &str = "mcp.server.read";
 pub const MCP_SERVER_WRITE: &str = "mcp.server.write";
 pub const MCP_SERVER_DISCOVER: &str = "mcp.server.discover";
 pub const MCP_SERVER_PUBLISH: &str = "mcp.server.publish";
+pub const AGENT_READ: &str = "agent.read";
+pub const AGENT_WRITE: &str = "agent.write";
+pub const AGENT_VALIDATE: &str = "agent.validate";
+pub const AGENT_PUBLISH: &str = "agent.publish";
+pub const AGENT_DEPLOY: &str = "agent.deploy";
+pub const AGENT_ACTIVATE: &str = "agent.activate";
+pub const AGENT_ARCHIVE: &str = "agent.archive";
+pub const AGENT_DEBUG_SANDBOX: &str = "agent.debug.sandbox";
+pub const AGENT_DEBUG_LIVE: &str = "agent.debug.live";
+pub const PROVIDER_READ: &str = "provider.read";
+pub const PROVIDER_WRITE: &str = "provider.write";
+pub const PROVIDER_DISCOVER: &str = "provider.discover";
+pub const PROVIDER_TEST: &str = "provider.test";
+pub const PROVIDER_PUBLISH: &str = "provider.publish";
+pub const PROVIDER_ACTIVATE: &str = "provider.activate";
+pub const PROVIDER_SUSPEND: &str = "provider.suspend";
+pub const PROVIDER_RETIRE: &str = "provider.retire";
 
 #[derive(Clone)]
 pub enum ApiAuth {
@@ -60,9 +77,9 @@ pub struct BearerHumanPrincipalResolver {
     entries: Vec<(String, ResolvedHumanPrincipal)>,
 }
 
-/// Installation-scoped Operator identity used exclusively by the MCP
-/// management control plane. It is intentionally independent from ordinary
-/// API and MCP resource-server credentials.
+/// Installation-scoped Operator identity used exclusively by the shared
+/// Agent, Provider, and MCP management control plane. It is intentionally
+/// independent from ordinary API and MCP resource-server credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperatorPrincipal {
     identity: String,
@@ -93,10 +110,27 @@ impl OperatorAuth {
         entries: impl IntoIterator<Item = (String, String, BTreeSet<String>)>,
     ) -> Option<Self> {
         let allowed = BTreeSet::from([
+            AGENT_READ.to_owned(),
+            AGENT_WRITE.to_owned(),
+            AGENT_VALIDATE.to_owned(),
+            AGENT_PUBLISH.to_owned(),
+            AGENT_DEPLOY.to_owned(),
+            AGENT_ACTIVATE.to_owned(),
+            AGENT_ARCHIVE.to_owned(),
+            AGENT_DEBUG_SANDBOX.to_owned(),
+            AGENT_DEBUG_LIVE.to_owned(),
             MCP_SERVER_READ.to_owned(),
             MCP_SERVER_WRITE.to_owned(),
             MCP_SERVER_DISCOVER.to_owned(),
             MCP_SERVER_PUBLISH.to_owned(),
+            PROVIDER_READ.to_owned(),
+            PROVIDER_WRITE.to_owned(),
+            PROVIDER_DISCOVER.to_owned(),
+            PROVIDER_TEST.to_owned(),
+            PROVIDER_PUBLISH.to_owned(),
+            PROVIDER_ACTIVATE.to_owned(),
+            PROVIDER_SUSPEND.to_owned(),
+            PROVIDER_RETIRE.to_owned(),
         ]);
         let mut resolved: Vec<(String, OperatorPrincipal)> = Vec::new();
         let mut identities = BTreeSet::new();

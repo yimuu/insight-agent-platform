@@ -49,6 +49,7 @@ use super::postgres_projection::{
 };
 use super::schema_contract::{validate_contract_row, POSTGRES_SCHEMA_BACKEND};
 use super::{
+    ActivateAgentDeploymentCommand, AgentDeploymentActivationOutcome, AgentDeploymentTarget,
     CommitReceipt, CreateRunCommand, DurableRepository, DurableRunStreamSnapshot,
     FullConversationRunAdmission, PlanInstallOutcome, PlanPublicationOutcome, PublicationHead,
     PublicationOrigin, PublishVersionedPlanCommand, RepositoryError, RunProjection,
@@ -643,12 +644,103 @@ impl WorkWakeupRepository for PostgresDurableRepository {
 
 #[async_trait]
 impl DurableRepository for PostgresDurableRepository {
+    async fn install_definition_revision(
+        &self,
+        plan: &VersionedPlan,
+    ) -> Result<PlanInstallOutcome, RepositoryError> {
+        let mut transaction = begin_write_transaction(&self.pool).await?;
+        let installed = install_plan(&mut transaction, plan, PlanInstallScope::Definition).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(RepositoryError::storage)?;
+        Ok(plan_install_outcome(installed))
+    }
+
+    async fn install_deployment_revision(
+        &self,
+        plan: &VersionedPlan,
+    ) -> Result<PlanInstallOutcome, RepositoryError> {
+        let mut transaction = begin_write_transaction(&self.pool).await?;
+        let installed = install_plan(&mut transaction, plan, PlanInstallScope::Deployment).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(RepositoryError::storage)?;
+        Ok(plan_install_outcome(installed))
+    }
+
+    async fn activate_agent_deployment(
+        &self,
+        command: ActivateAgentDeploymentCommand,
+    ) -> Result<AgentDeploymentActivationOutcome, RepositoryError> {
+        let mut transaction = begin_write_transaction(&self.pool).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(command.agent_id())
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::storage)?;
+        let current = load_postgres_publication_head(&mut transaction, command.agent_id()).await?;
+        if current.as_ref() != command.expected_head() {
+            transaction
+                .rollback()
+                .await
+                .map_err(RepositoryError::storage)?;
+            return Ok(AgentDeploymentActivationOutcome::HeadChanged);
+        }
+        let target = command
+            .target()
+            .map(|target| target.publication_head())
+            .transpose()?;
+        if current == target {
+            transaction
+                .commit()
+                .await
+                .map_err(RepositoryError::storage)?;
+            return Ok(AgentDeploymentActivationOutcome::Unchanged(current));
+        }
+        if let Some(target) = command.target() {
+            ensure_postgres_deployment_target(&mut transaction, target).await?;
+            sqlx::query(
+                "INSERT INTO agent_publication_heads (
+                    agent_id,definition_id,definition_revision_id,deployment_revision_id,
+                    publication_origin,updated_at
+                 ) VALUES ($1,$2,$3,$4,$5,CURRENT_TIMESTAMP)
+                 ON CONFLICT (agent_id) DO UPDATE SET
+                    definition_id=EXCLUDED.definition_id,
+                    definition_revision_id=EXCLUDED.definition_revision_id,
+                    deployment_revision_id=EXCLUDED.deployment_revision_id,
+                    publication_origin=EXCLUDED.publication_origin,
+                    updated_at=CURRENT_TIMESTAMP",
+            )
+            .bind(target.agent_id())
+            .bind(target.definition_id())
+            .bind(target.definition_revision_id().as_str())
+            .bind(target.deployment_revision_id().as_str())
+            .bind(target.origin().as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::storage)?;
+        } else {
+            sqlx::query("DELETE FROM agent_publication_heads WHERE agent_id=$1")
+                .bind(command.agent_id())
+                .execute(&mut *transaction)
+                .await
+                .map_err(RepositoryError::storage)?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(RepositoryError::storage)?;
+        Ok(AgentDeploymentActivationOutcome::Changed(target))
+    }
+
     async fn install_versioned_plan(
         &self,
         plan: &VersionedPlan,
     ) -> Result<PlanInstallOutcome, RepositoryError> {
         let mut transaction = begin_write_transaction(&self.pool).await?;
-        let installed = install_plan(&mut transaction, plan).await?;
+        let installed = install_plan(&mut transaction, plan, PlanInstallScope::All).await?;
         transaction
             .commit()
             .await
@@ -672,7 +764,8 @@ impl DurableRepository for PostgresDurableRepository {
                 .map_err(RepositoryError::storage)?;
             return Ok(PlanPublicationOutcome::DependencyHeadChanged);
         }
-        let installed = install_plan(&mut transaction, command.plan()).await?;
+        let installed =
+            install_plan(&mut transaction, command.plan(), PlanInstallScope::All).await?;
         upsert_publication_head(&mut transaction, command.plan()).await?;
         transaction
             .commit()
@@ -690,7 +783,7 @@ impl DurableRepository for PostgresDurableRepository {
         plan: &VersionedPlan,
     ) -> Result<PublicationHead, RepositoryError> {
         let mut transaction = begin_write_transaction(&self.pool).await?;
-        install_plan(&mut transaction, plan).await?;
+        install_plan(&mut transaction, plan, PlanInstallScope::All).await?;
         sqlx::query(
             "INSERT INTO agent_publication_heads (
                 agent_id,definition_id,definition_revision_id,deployment_revision_id,
@@ -799,6 +892,29 @@ impl DurableRepository for PostgresDurableRepository {
             let expected_fence =
                 i64::try_from(*expected_fence).map_err(|_| RepositoryError::invalid_data())?;
             if current.as_ref() != Some(&("active".to_owned(), expected_fence)) {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(RepositoryError::storage)?;
+                return Ok(TransitionOutcome::StateConflict);
+            }
+        }
+
+        // Share-lock Provider safety rows through Run insertion. Concurrent
+        // suspension/retirement must update the same row and consequently
+        // linearizes before or after this admission transaction.
+        for (provider_id, expected_fence) in command.expected_provider_fences() {
+            let current = sqlx::query_as::<_, (String, i64)>(
+                "SELECT operational_state,suspension_fence
+                 FROM managed_providers WHERE provider_id=$1 FOR SHARE",
+            )
+            .bind(provider_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(RepositoryError::storage)?;
+            let expected_fence =
+                i64::try_from(*expected_fence).map_err(|_| RepositoryError::invalid_data())?;
+            if current.as_ref() != Some(&("enabled".to_owned(), expected_fence)) {
                 transaction
                     .rollback()
                     .await
@@ -1683,7 +1799,7 @@ async fn upsert_publication_head(
     Ok(())
 }
 
-fn postgres_publication_head(row: &PgRow) -> Result<PublicationHead, RepositoryError> {
+pub(crate) fn postgres_publication_head(row: &PgRow) -> Result<PublicationHead, RepositoryError> {
     PublicationHead::new(
         row.try_get("agent_id")
             .map_err(|_| RepositoryError::invalid_data())?,
@@ -1802,10 +1918,30 @@ async fn load_postgres_versioned_plan_catalog(
     VersionedPlanCatalog::new(plans, heads)
 }
 
-async fn install_plan(
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlanInstallScope {
+    Definition,
+    Deployment,
+    All,
+}
+
+fn plan_install_outcome(installed: bool) -> PlanInstallOutcome {
+    if installed {
+        PlanInstallOutcome::Installed
+    } else {
+        PlanInstallOutcome::AlreadyInstalled
+    }
+}
+
+pub(super) async fn install_plan(
     transaction: &mut Transaction<'_, Postgres>,
     plan: &VersionedPlan,
+    scope: PlanInstallScope,
 ) -> Result<bool, RepositoryError> {
+    if scope == PlanInstallScope::Deployment {
+        ensure_postgres_definition_revision(transaction, plan).await?;
+        return install_postgres_deployment_revision(transaction, plan).await;
+    }
     let mut installed = false;
     installed |= sqlx::query(
         "INSERT INTO workflow_definitions (
@@ -1932,7 +2068,18 @@ async fn install_plan(
         return Err(plan_conflict());
     }
 
-    installed |= sqlx::query(
+    if scope == PlanInstallScope::Definition {
+        return Ok(installed);
+    }
+    installed |= install_postgres_deployment_revision(transaction, plan).await?;
+    Ok(installed)
+}
+
+async fn install_postgres_deployment_revision(
+    transaction: &mut Transaction<'_, Postgres>,
+    plan: &VersionedPlan,
+) -> Result<bool, RepositoryError> {
+    let installed = sqlx::query(
         "INSERT INTO deployment_revisions (
             definition_id, definition_revision_id, deployment_revision_id,
             plan_hash, binding_hash, resolved_bindings, worker_contracts, created_at
@@ -1986,6 +2133,99 @@ async fn install_plan(
         return Err(plan_conflict());
     }
     Ok(installed)
+}
+
+async fn ensure_postgres_definition_revision(
+    transaction: &mut Transaction<'_, Postgres>,
+    plan: &VersionedPlan,
+) -> Result<(), RepositoryError> {
+    let row = sqlx::query(
+        "SELECT d.agent_id,r.plan_hash,r.compiler_version,r.expression_engine_version,
+                r.author_document,r.canonical_plan,r.descriptor_contracts,
+                m.display_name,m.public_description
+         FROM workflow_definitions d
+         JOIN workflow_definition_revisions r ON r.definition_id=d.definition_id
+         JOIN workflow_definition_public_metadata m
+           ON m.definition_id=r.definition_id
+          AND m.definition_revision_id=r.definition_revision_id
+         WHERE d.definition_id=$1 AND r.definition_revision_id=$2",
+    )
+    .bind(plan.definition_id())
+    .bind(plan.definition_revision_id().as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .ok_or_else(plan_conflict)?;
+    let matches = row.try_get::<String, _>("agent_id").ok().as_deref() == Some(plan.agent_id())
+        && row.try_get::<String, _>("plan_hash").ok().as_deref() == Some(plan.plan_hash().as_str())
+        && row.try_get::<String, _>("compiler_version").ok().as_deref()
+            == Some(plan.compiler_version())
+        && row
+            .try_get::<String, _>("expression_engine_version")
+            .ok()
+            .as_deref()
+            == Some(plan.expression_engine_version())
+        && row.try_get::<Value, _>("author_document").ok().as_ref() == Some(plan.author_document())
+        && row.try_get::<Value, _>("canonical_plan").ok().as_ref() == Some(plan.canonical_plan())
+        && row
+            .try_get::<Value, _>("descriptor_contracts")
+            .ok()
+            .as_ref()
+            == Some(plan.descriptor_contracts())
+        && row.try_get::<String, _>("display_name").ok().as_deref() == Some(plan.display_name())
+        && row
+            .try_get::<String, _>("public_description")
+            .ok()
+            .as_deref()
+            == Some(plan.public_description());
+    if matches {
+        Ok(())
+    } else {
+        Err(plan_conflict())
+    }
+}
+
+async fn load_postgres_publication_head(
+    transaction: &mut Transaction<'_, Postgres>,
+    agent_id: &str,
+) -> Result<Option<PublicationHead>, RepositoryError> {
+    sqlx::query(
+        "SELECT agent_id,definition_id,definition_revision_id,deployment_revision_id,
+                publication_origin
+         FROM agent_publication_heads WHERE agent_id=$1 FOR UPDATE",
+    )
+    .bind(agent_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?
+    .as_ref()
+    .map(postgres_publication_head)
+    .transpose()
+}
+
+async fn ensure_postgres_deployment_target(
+    transaction: &mut Transaction<'_, Postgres>,
+    target: &AgentDeploymentTarget,
+) -> Result<(), RepositoryError> {
+    let exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)
+         FROM deployment_revisions x
+         JOIN workflow_definitions d ON d.definition_id=x.definition_id
+         WHERE d.agent_id=$1 AND x.definition_id=$2
+           AND x.definition_revision_id=$3 AND x.deployment_revision_id=$4",
+    )
+    .bind(target.agent_id())
+    .bind(target.definition_id())
+    .bind(target.definition_revision_id().as_str())
+    .bind(target.deployment_revision_id().as_str())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(RepositoryError::storage)?;
+    if exists == 1 {
+        Ok(())
+    } else {
+        Err(plan_conflict())
+    }
 }
 
 pub(crate) fn decode_execution_event_row(

@@ -1869,7 +1869,7 @@ CREATE TABLE agent_publication_heads(
   definition_id TEXT NOT NULL UNIQUE,
   definition_revision_id TEXT NOT NULL,
   deployment_revision_id TEXT NOT NULL,
-  publication_origin TEXT NOT NULL CHECK(publication_origin IN('built_in','graph')),
+  publication_origin TEXT NOT NULL CHECK(publication_origin IN('built_in','graph','managed')),
   updated_at TEXT NOT NULL,
   FOREIGN KEY(definition_id, deployment_revision_id)
   REFERENCES deployment_revisions(definition_id, deployment_revision_id)
@@ -3295,7 +3295,7 @@ CREATE TABLE mcp_validation_reports(
   server_id TEXT NOT NULL REFERENCES mcp_managed_servers(server_id) ON DELETE CASCADE,
   draft_version INTEGER NOT NULL CHECK(draft_version>=1),
   discovery_id TEXT NOT NULL REFERENCES mcp_discovery_snapshots(discovery_id) ON DELETE RESTRICT,
-  report_hash TEXT NOT NULL UNIQUE
+  report_hash TEXT NOT NULL
     CHECK(length(report_hash)=71 AND substr(report_hash,1,7)='sha256:'),
   valid INTEGER NOT NULL CHECK(valid IN(0,1)),
   document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=1048576),
@@ -3449,6 +3449,424 @@ CREATE TABLE mcp_management_outbox(
 CREATE INDEX idx_mcp_management_outbox_delivery
 ON mcp_management_outbox(delivered_at,created_at,event_id);
 
+-- Durable model Provider management authority.
+CREATE TABLE managed_providers(
+  provider_id TEXT NOT NULL PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  adapter_type TEXT NOT NULL,
+  operational_state TEXT NOT NULL CHECK(operational_state IN('enabled','suspended','retired')),
+  provider_version INTEGER NOT NULL CHECK(provider_version>=1),
+  draft_version INTEGER NOT NULL CHECK(draft_version>=1),
+  active_revision_id TEXT,
+  suspension_fence INTEGER NOT NULL DEFAULT 0 CHECK(suspension_fence>=0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK(provider_id GLOB '[a-z0-9]*' AND provider_id NOT GLOB '*[^a-z0-9-]*'
+        AND length(provider_id) BETWEEN 1 AND 64),
+  CHECK(display_name<>'' AND length(CAST(display_name AS BLOB))<=256),
+  CHECK(adapter_type<>'' AND length(CAST(adapter_type AS BLOB))<=128),
+  CHECK(operational_state<>'retired' OR active_revision_id IS NULL)
+);
+CREATE TABLE provider_drafts(
+  provider_id TEXT NOT NULL PRIMARY KEY REFERENCES managed_providers(provider_id) ON DELETE CASCADE,
+  draft_version INTEGER NOT NULL CHECK(draft_version>=1),
+  provider_input_hash TEXT NOT NULL CHECK(length(provider_input_hash)=71 AND substr(provider_input_hash,1,7)='sha256:'),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=16777216),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(provider_id,draft_version)
+);
+CREATE TABLE provider_discovery_operations(
+  discovery_id TEXT NOT NULL PRIMARY KEY,
+  provider_id TEXT NOT NULL REFERENCES managed_providers(provider_id) ON DELETE CASCADE,
+  source_draft_version INTEGER NOT NULL CHECK(source_draft_version>=1),
+  provider_input_hash TEXT NOT NULL CHECK(length(provider_input_hash)=71 AND substr(provider_input_hash,1,7)='sha256:'),
+  draft_document TEXT NOT NULL CHECK(json_valid(draft_document) AND length(CAST(draft_document AS BLOB))<=16777216),
+  operation_status TEXT NOT NULL CHECK(operation_status IN('pending','running','succeeded','failed','cancelled')),
+  cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN(0,1)),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+  claimed_by TEXT,
+  claim_token TEXT UNIQUE,
+  claim_expires_at TEXT,
+  failure_code TEXT,
+  failure_stage TEXT,
+  failure_retryable INTEGER CHECK(failure_retryable IS NULL OR failure_retryable IN(0,1)),
+  failure_correlation_id TEXT,
+  stale INTEGER NOT NULL DEFAULT 0 CHECK(stale IN(0,1)),
+  stale_reason TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  CHECK((claimed_by IS NULL)=(claim_token IS NULL)),
+  CHECK((claim_token IS NULL)=(claim_expires_at IS NULL)),
+  CHECK(operation_status='running' OR claim_token IS NULL),
+  CHECK((operation_status IN('succeeded','cancelled') AND failure_code IS NULL)
+        OR operation_status IN('pending','running')
+        OR (operation_status='failed' AND failure_code IS NOT NULL)),
+  CHECK((stale=0 AND stale_reason IS NULL) OR (stale=1 AND stale_reason IS NOT NULL))
+);
+CREATE INDEX idx_provider_discovery_claim
+ON provider_discovery_operations(operation_status,claim_expires_at,created_at,discovery_id);
+CREATE INDEX idx_provider_discovery_provider
+ON provider_discovery_operations(provider_id,created_at,discovery_id);
+CREATE TABLE provider_discovery_snapshots(
+  discovery_id TEXT NOT NULL PRIMARY KEY REFERENCES provider_discovery_operations(discovery_id) ON DELETE CASCADE,
+  provider_id TEXT NOT NULL REFERENCES managed_providers(provider_id) ON DELETE CASCADE,
+  source_draft_version INTEGER NOT NULL CHECK(source_draft_version>=1),
+  provider_input_hash TEXT NOT NULL CHECK(length(provider_input_hash)=71 AND substr(provider_input_hash,1,7)='sha256:'),
+  catalog_fingerprint TEXT NOT NULL CHECK(length(catalog_fingerprint)=71 AND substr(catalog_fingerprint,1,7)='sha256:'),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=16777216),
+  created_at TEXT NOT NULL,
+  UNIQUE(provider_id,catalog_fingerprint)
+);
+CREATE TABLE provider_model_candidates(
+  discovery_id TEXT NOT NULL REFERENCES provider_discovery_snapshots(discovery_id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+  model_id TEXT NOT NULL CHECK(model_id<>'' AND length(CAST(model_id AS BLOB))<=512),
+  candidate_fingerprint TEXT NOT NULL CHECK(length(candidate_fingerprint)=71 AND substr(candidate_fingerprint,1,7)='sha256:'),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=1048576),
+  PRIMARY KEY(discovery_id,ordinal),
+  UNIQUE(discovery_id,model_id)
+);
+CREATE TABLE provider_connection_tests(
+  test_id TEXT NOT NULL PRIMARY KEY,
+  provider_id TEXT NOT NULL REFERENCES managed_providers(provider_id) ON DELETE CASCADE,
+  source_draft_version INTEGER NOT NULL CHECK(source_draft_version>=1),
+  provider_input_hash TEXT NOT NULL CHECK(length(provider_input_hash)=71 AND substr(provider_input_hash,1,7)='sha256:'),
+  draft_document TEXT NOT NULL CHECK(json_valid(draft_document) AND length(CAST(draft_document AS BLOB))<=16777216),
+  test_mode TEXT NOT NULL CHECK(test_mode IN('metadata','canary','capability_probe')),
+  operation_status TEXT NOT NULL CHECK(operation_status IN('pending','running','succeeded','failed','cancelled')),
+  cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN(0,1)),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+  claimed_by TEXT,
+  claim_token TEXT UNIQUE,
+  claim_expires_at TEXT,
+  failure_code TEXT,
+  failure_stage TEXT,
+  failure_retryable INTEGER CHECK(failure_retryable IS NULL OR failure_retryable IN(0,1)),
+  failure_correlation_id TEXT,
+  result_hash TEXT CHECK(result_hash IS NULL OR (length(result_hash)=71 AND substr(result_hash,1,7)='sha256:')),
+  result_document TEXT CHECK(result_document IS NULL OR (json_valid(result_document) AND length(CAST(result_document AS BLOB))<=1048576)),
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  CHECK((claimed_by IS NULL)=(claim_token IS NULL)),
+  CHECK((claim_token IS NULL)=(claim_expires_at IS NULL)),
+  CHECK(operation_status='running' OR claim_token IS NULL),
+  CHECK((operation_status='succeeded' AND failure_code IS NULL AND result_hash IS NOT NULL AND result_document IS NOT NULL)
+        OR (operation_status='failed' AND failure_code IS NOT NULL AND result_hash IS NULL AND result_document IS NULL)
+        OR (operation_status IN('pending','running','cancelled') AND failure_code IS NULL AND result_hash IS NULL AND result_document IS NULL))
+);
+CREATE INDEX idx_provider_test_claim
+ON provider_connection_tests(operation_status,claim_expires_at,created_at,test_id);
+CREATE INDEX idx_provider_test_provider
+ON provider_connection_tests(provider_id,created_at,test_id);
+CREATE TABLE provider_validation_reports(
+  validation_id TEXT NOT NULL PRIMARY KEY,
+  provider_id TEXT NOT NULL REFERENCES managed_providers(provider_id) ON DELETE CASCADE,
+  draft_version INTEGER NOT NULL CHECK(draft_version>=1),
+  provider_input_hash TEXT NOT NULL CHECK(length(provider_input_hash)=71 AND substr(provider_input_hash,1,7)='sha256:'),
+  report_hash TEXT NOT NULL CHECK(length(report_hash)=71 AND substr(report_hash,1,7)='sha256:'),
+  valid INTEGER NOT NULL CHECK(valid IN(0,1)),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=1048576),
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL CHECK(created_by<>'' AND length(CAST(created_by AS BLOB))<=256)
+);
+CREATE INDEX idx_provider_validation_provider
+ON provider_validation_reports(provider_id,created_at,validation_id);
+CREATE TABLE provider_revisions(
+  revision_id TEXT NOT NULL PRIMARY KEY,
+  provider_id TEXT NOT NULL REFERENCES managed_providers(provider_id) ON DELETE RESTRICT,
+  revision_number INTEGER NOT NULL CHECK(revision_number>=1),
+  source_draft_version INTEGER NOT NULL CHECK(source_draft_version>=1),
+  validation_id TEXT NOT NULL REFERENCES provider_validation_reports(validation_id) ON DELETE RESTRICT,
+  discovery_id TEXT REFERENCES provider_discovery_snapshots(discovery_id) ON DELETE RESTRICT,
+  connection_test_id TEXT REFERENCES provider_connection_tests(test_id) ON DELETE RESTRICT,
+  revision_hash TEXT NOT NULL UNIQUE CHECK(length(revision_hash)=71 AND substr(revision_hash,1,7)='sha256:'),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=16777216),
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL CHECK(created_by<>'' AND length(CAST(created_by AS BLOB))<=256),
+  UNIQUE(provider_id,revision_number),
+  UNIQUE(provider_id,revision_id)
+);
+CREATE INDEX idx_provider_revisions_provider
+ON provider_revisions(provider_id,revision_number,revision_id);
+CREATE TABLE provider_revision_models(
+  revision_id TEXT NOT NULL REFERENCES provider_revisions(revision_id) ON DELETE RESTRICT,
+  ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+  model_id TEXT NOT NULL CHECK(model_id<>'' AND length(CAST(model_id AS BLOB))<=512),
+  capability_hash TEXT NOT NULL CHECK(length(capability_hash)=71 AND substr(capability_hash,1,7)='sha256:'),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=1048576),
+  PRIMARY KEY(revision_id,ordinal),
+  UNIQUE(revision_id,model_id)
+);
+CREATE TABLE provider_revision_legacy_model_bindings(
+  revision_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  legacy_binding_hash TEXT NOT NULL CHECK(length(legacy_binding_hash)=71 AND substr(legacy_binding_hash,1,7)='sha256:'),
+  legacy_binding_evidence TEXT NOT NULL CHECK(json_valid(legacy_binding_evidence) AND json_type(legacy_binding_evidence)='object' AND length(CAST(legacy_binding_evidence AS BLOB))<=1048576),
+  source_definition_id TEXT NOT NULL,
+  source_deployment_revision_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(revision_id,model_id,legacy_binding_hash),
+  FOREIGN KEY(provider_id,revision_id) REFERENCES provider_revisions(provider_id,revision_id) ON DELETE RESTRICT,
+  FOREIGN KEY(revision_id,model_id) REFERENCES provider_revision_models(revision_id,model_id) ON DELETE RESTRICT,
+  FOREIGN KEY(source_definition_id,source_deployment_revision_id) REFERENCES deployment_revisions(definition_id,deployment_revision_id) ON DELETE RESTRICT
+);
+CREATE TRIGGER provider_active_revision_same_provider
+BEFORE UPDATE OF active_revision_id ON managed_providers
+WHEN NEW.active_revision_id IS NOT NULL AND NOT EXISTS(
+  SELECT 1 FROM provider_revisions r WHERE r.revision_id=NEW.active_revision_id AND r.provider_id=NEW.provider_id
+)
+BEGIN SELECT RAISE(ABORT,'active Provider Revision must belong to the same Provider'); END;
+CREATE TRIGGER provider_discovery_snapshot_rewrite_forbidden
+BEFORE UPDATE ON provider_discovery_snapshots BEGIN SELECT RAISE(ABORT,'immutable Provider discovery snapshot'); END;
+CREATE TRIGGER provider_model_candidate_rewrite_forbidden
+BEFORE UPDATE ON provider_model_candidates BEGIN SELECT RAISE(ABORT,'immutable Provider model candidate'); END;
+CREATE TRIGGER provider_validation_report_rewrite_forbidden
+BEFORE UPDATE ON provider_validation_reports BEGIN SELECT RAISE(ABORT,'immutable Provider validation report'); END;
+CREATE TRIGGER provider_revision_rewrite_forbidden
+BEFORE UPDATE ON provider_revisions BEGIN SELECT RAISE(ABORT,'immutable Provider Revision'); END;
+CREATE TRIGGER provider_revision_delete_forbidden
+BEFORE DELETE ON provider_revisions BEGIN SELECT RAISE(ABORT,'immutable Provider Revision'); END;
+CREATE TRIGGER provider_revision_model_rewrite_forbidden
+BEFORE UPDATE ON provider_revision_models BEGIN SELECT RAISE(ABORT,'immutable Provider Revision model'); END;
+CREATE TRIGGER provider_revision_model_delete_forbidden
+BEFORE DELETE ON provider_revision_models BEGIN SELECT RAISE(ABORT,'immutable Provider Revision model'); END;
+CREATE TRIGGER provider_revision_legacy_binding_rewrite_forbidden
+BEFORE UPDATE ON provider_revision_legacy_model_bindings BEGIN SELECT RAISE(ABORT,'immutable legacy Provider binding evidence'); END;
+CREATE TRIGGER provider_revision_legacy_binding_delete_forbidden
+BEFORE DELETE ON provider_revision_legacy_model_bindings BEGIN SELECT RAISE(ABORT,'immutable legacy Provider binding evidence'); END;
+CREATE TABLE provider_management_requests(
+  operator_id TEXT NOT NULL,
+  method TEXT NOT NULL,
+  canonical_path TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL CHECK(length(request_hash)=71 AND substr(request_hash,1,7)='sha256:'),
+  response_status INTEGER NOT NULL CHECK(response_status BETWEEN 200 AND 599),
+  response_json TEXT NOT NULL CHECK(json_valid(response_json) AND length(CAST(response_json AS BLOB))<=16777216),
+  response_etag TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(operator_id,method,canonical_path,request_id),
+  CHECK(operator_id<>'' AND length(CAST(operator_id AS BLOB))<=256),
+  CHECK(request_id<>'' AND length(CAST(request_id AS BLOB))<=256)
+);
+CREATE TABLE provider_management_audit_events(
+  audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_kind TEXT NOT NULL,
+  provider_id TEXT,
+  subject_id TEXT,
+  actor_id TEXT NOT NULL,
+  capability TEXT NOT NULL,
+  request_id_hash TEXT NOT NULL,
+  before_hash TEXT,
+  after_hash TEXT,
+  result_code TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  CHECK(event_kind<>'' AND capability<>'' AND result_code<>''),
+  CHECK(capability IN('provider.read','provider.write','provider.discover','provider.test',
+                      'provider.publish','provider.activate','provider.suspend','provider.retire')),
+  CHECK(actor_id<>'' AND length(CAST(actor_id AS BLOB))<=256)
+);
+CREATE INDEX idx_provider_management_audit_provider
+ON provider_management_audit_events(provider_id,created_at,audit_id);
+CREATE TABLE provider_management_outbox(
+  event_id TEXT NOT NULL PRIMARY KEY,
+  event_kind TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  safe_payload TEXT NOT NULL CHECK(json_valid(safe_payload) AND length(CAST(safe_payload AS BLOB))<=65536),
+  created_at TEXT NOT NULL,
+  delivered_at TEXT
+);
+CREATE INDEX idx_provider_management_outbox_delivery
+ON provider_management_outbox(delivered_at,created_at,event_id);
+
+-- Durable Agent authoring, deployment and debug management authority.
+CREATE TABLE managed_agents(
+  agent_id TEXT NOT NULL PRIMARY KEY,
+  authoring_mode TEXT NOT NULL CHECK(authoring_mode IN('yaml_package','graph')),
+  labels TEXT NOT NULL CHECK(json_valid(labels) AND json_type(labels)='object' AND length(CAST(labels AS BLOB))<=65536),
+  lifecycle TEXT NOT NULL CHECK(lifecycle IN('editable','archived')),
+  entity_version INTEGER NOT NULL CHECK(entity_version>=1),
+  draft_version INTEGER NOT NULL CHECK(draft_version>=1),
+  active_definition_revision_id TEXT,
+  active_deployment_revision_id TEXT,
+  archived_publication_head TEXT CHECK(archived_publication_head IS NULL OR json_valid(archived_publication_head)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK(agent_id GLOB '[a-z0-9]*' AND agent_id NOT GLOB '*[^a-z0-9_-]*'
+        AND length(agent_id) BETWEEN 1 AND 64),
+  CHECK((active_definition_revision_id IS NULL)=(active_deployment_revision_id IS NULL)),
+  CHECK(lifecycle='editable' OR active_deployment_revision_id IS NULL)
+);
+CREATE TABLE agent_drafts(
+  agent_id TEXT NOT NULL PRIMARY KEY REFERENCES managed_agents(agent_id) ON DELETE CASCADE,
+  draft_version INTEGER NOT NULL CHECK(draft_version>=1),
+  author_hash TEXT NOT NULL CHECK(length(author_hash)=71 AND substr(author_hash,1,7)='sha256:'),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=16777216),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(agent_id,draft_version)
+);
+CREATE TABLE agent_draft_views(
+  agent_id TEXT NOT NULL PRIMARY KEY REFERENCES managed_agents(agent_id) ON DELETE CASCADE,
+  view_version INTEGER NOT NULL CHECK(view_version>=0),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=4194304),
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE agent_validations(
+  validation_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES managed_agents(agent_id) ON DELETE CASCADE,
+  draft_version INTEGER NOT NULL CHECK(draft_version>=1),
+  author_hash TEXT NOT NULL CHECK(length(author_hash)=71 AND substr(author_hash,1,7)='sha256:'),
+  policy_digest TEXT NOT NULL CHECK(length(policy_digest)=71 AND substr(policy_digest,1,7)='sha256:'),
+  operation_status TEXT NOT NULL CHECK(operation_status IN('queued','running','succeeded','failed','cancelled')),
+  semantic_hash TEXT CHECK(semantic_hash IS NULL OR (length(semantic_hash)=71 AND substr(semantic_hash,1,7)='sha256:')),
+  report_hash TEXT NOT NULL CHECK(length(report_hash)=71 AND substr(report_hash,1,7)='sha256:'),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=1048576),
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL CHECK(created_by<>'' AND length(CAST(created_by AS BLOB))<=256),
+  CHECK((operation_status='succeeded' AND semantic_hash IS NOT NULL)
+        OR operation_status IN('queued','running','failed','cancelled'))
+);
+CREATE INDEX idx_agent_validations_agent
+ON agent_validations(agent_id,created_at,validation_id);
+CREATE TABLE agent_definition_publications(
+  agent_id TEXT NOT NULL REFERENCES managed_agents(agent_id) ON DELETE RESTRICT,
+  definition_id TEXT NOT NULL,
+  definition_revision_id TEXT NOT NULL,
+  revision_number INTEGER NOT NULL CHECK(revision_number>=1),
+  source_draft_version INTEGER NOT NULL CHECK(source_draft_version>=1),
+  validation_id TEXT NOT NULL REFERENCES agent_validations(validation_id) ON DELETE RESTRICT,
+  author_hash TEXT NOT NULL CHECK(length(author_hash)=71 AND substr(author_hash,1,7)='sha256:'),
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL CHECK(created_by<>'' AND length(CAST(created_by AS BLOB))<=256),
+  PRIMARY KEY(agent_id,definition_revision_id),
+  UNIQUE(agent_id,revision_number),
+  FOREIGN KEY(definition_id,definition_revision_id)
+    REFERENCES workflow_definition_revisions(definition_id,definition_revision_id) ON DELETE RESTRICT
+);
+CREATE INDEX idx_agent_definitions_agent
+ON agent_definition_publications(agent_id,revision_number,definition_revision_id);
+CREATE TABLE agent_deployment_resolutions(
+  resolution_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES managed_agents(agent_id) ON DELETE RESTRICT,
+  definition_revision_id TEXT NOT NULL,
+  operation_status TEXT NOT NULL CHECK(operation_status IN('queued','running','succeeded','failed','cancelled')),
+  catalog_snapshot_hash TEXT NOT NULL CHECK(length(catalog_snapshot_hash)=71 AND substr(catalog_snapshot_hash,1,7)='sha256:'),
+  resolution_hash TEXT NOT NULL UNIQUE CHECK(length(resolution_hash)=71 AND substr(resolution_hash,1,7)='sha256:'),
+  resolved_bindings TEXT NOT NULL CHECK(json_valid(resolved_bindings) AND length(CAST(resolved_bindings AS BLOB))<=16777216),
+  worker_contracts TEXT NOT NULL CHECK(json_valid(worker_contracts) AND length(CAST(worker_contracts AS BLOB))<=16777216),
+  dependency_heads TEXT NOT NULL CHECK(json_valid(dependency_heads) AND length(CAST(dependency_heads AS BLOB))<=4194304),
+  risks TEXT NOT NULL CHECK(json_valid(risks) AND length(CAST(risks AS BLOB))<=1048576),
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL CHECK(created_by<>'' AND length(CAST(created_by AS BLOB))<=256),
+  FOREIGN KEY(agent_id,definition_revision_id)
+    REFERENCES agent_definition_publications(agent_id,definition_revision_id) ON DELETE RESTRICT
+);
+CREATE INDEX idx_agent_resolutions_agent
+ON agent_deployment_resolutions(agent_id,created_at,resolution_id);
+CREATE TABLE agent_deployment_publications(
+  agent_id TEXT NOT NULL REFERENCES managed_agents(agent_id) ON DELETE RESTRICT,
+  definition_id TEXT NOT NULL,
+  definition_revision_id TEXT NOT NULL,
+  deployment_revision_id TEXT NOT NULL,
+  resolution_id TEXT NOT NULL REFERENCES agent_deployment_resolutions(resolution_id) ON DELETE RESTRICT,
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL CHECK(created_by<>'' AND length(CAST(created_by AS BLOB))<=256),
+  PRIMARY KEY(agent_id,deployment_revision_id),
+  UNIQUE(resolution_id),
+  FOREIGN KEY(definition_id,deployment_revision_id)
+    REFERENCES deployment_revisions(definition_id,deployment_revision_id) ON DELETE RESTRICT
+);
+CREATE INDEX idx_agent_deployments_agent
+ON agent_deployment_publications(agent_id,created_at,deployment_revision_id);
+CREATE TABLE agent_debug_sessions(
+  debug_session_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES managed_agents(agent_id) ON DELETE RESTRICT,
+  source TEXT NOT NULL CHECK(json_valid(source) AND length(CAST(source AS BLOB))<=1048576),
+  source_hash TEXT NOT NULL CHECK(length(source_hash)=71 AND substr(source_hash,1,7)='sha256:'),
+  execution_profile_id TEXT NOT NULL CHECK(execution_profile_id<>'' AND length(CAST(execution_profile_id AS BLOB))<=128),
+  profile_mode TEXT NOT NULL CHECK(profile_mode IN('sandbox','live')),
+  session_status TEXT NOT NULL CHECK(session_status IN('queued','running','succeeded','failed','cancelled','expired')),
+  definition_revision_id TEXT,
+  deployment_revision_id TEXT,
+  run_id TEXT REFERENCES workflow_runs(run_id) ON DELETE RESTRICT,
+  failure_code TEXT,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  finished_at TEXT,
+  created_by TEXT NOT NULL CHECK(created_by<>'' AND length(CAST(created_by AS BLOB))<=256)
+);
+CREATE INDEX idx_agent_debug_sessions_agent
+ON agent_debug_sessions(agent_id,created_at,debug_session_id);
+CREATE INDEX idx_agent_debug_sessions_expiry
+ON agent_debug_sessions(session_status,expires_at,debug_session_id);
+CREATE TABLE agent_debug_content_retention(
+  debug_session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_debug_sessions(debug_session_id) ON DELETE CASCADE,
+  retain_until TEXT NOT NULL,
+  content_deleted_at TEXT
+);
+CREATE TABLE agent_management_requests(
+  operator_id TEXT NOT NULL,
+  method TEXT NOT NULL,
+  canonical_path TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL CHECK(length(request_hash)=71 AND substr(request_hash,1,7)='sha256:'),
+  response_status INTEGER NOT NULL CHECK(response_status BETWEEN 200 AND 599),
+  response_json TEXT NOT NULL CHECK(json_valid(response_json) AND length(CAST(response_json AS BLOB))<=16777216),
+  response_etag TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(operator_id,method,canonical_path,request_id),
+  CHECK(operator_id<>'' AND length(CAST(operator_id AS BLOB))<=256),
+  CHECK(request_id<>'' AND length(CAST(request_id AS BLOB))<=256)
+);
+CREATE TABLE agent_management_audit_events(
+  audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_kind TEXT NOT NULL,
+  agent_id TEXT,
+  subject_id TEXT,
+  actor_id TEXT NOT NULL,
+  capability TEXT NOT NULL,
+  request_id_hash TEXT NOT NULL,
+  before_hash TEXT,
+  after_hash TEXT,
+  result_code TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  CHECK(event_kind<>'' AND capability<>'' AND result_code<>''),
+  CHECK(capability IN('agent.read','agent.write','agent.validate','agent.publish','agent.deploy',
+                      'agent.activate','agent.archive','agent.debug.sandbox','agent.debug.live')),
+  CHECK(actor_id<>'' AND length(CAST(actor_id AS BLOB))<=256)
+);
+CREATE INDEX idx_agent_management_audit_agent
+ON agent_management_audit_events(agent_id,created_at,audit_id);
+CREATE TABLE agent_management_outbox(
+  event_id TEXT NOT NULL PRIMARY KEY,
+  event_kind TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  safe_payload TEXT NOT NULL CHECK(json_valid(safe_payload) AND length(CAST(safe_payload AS BLOB))<=65536),
+  created_at TEXT NOT NULL,
+  delivered_at TEXT
+);
+CREATE INDEX idx_agent_management_outbox_delivery
+ON agent_management_outbox(delivered_at,created_at,event_id);
+CREATE TRIGGER agent_validation_rewrite_forbidden
+BEFORE UPDATE ON agent_validations BEGIN SELECT RAISE(ABORT,'immutable Agent validation'); END;
+CREATE TRIGGER agent_definition_publication_rewrite_forbidden
+BEFORE UPDATE ON agent_definition_publications BEGIN SELECT RAISE(ABORT,'immutable Agent Definition publication'); END;
+CREATE TRIGGER agent_definition_publication_delete_forbidden
+BEFORE DELETE ON agent_definition_publications BEGIN SELECT RAISE(ABORT,'immutable Agent Definition publication'); END;
+CREATE TRIGGER agent_resolution_rewrite_forbidden
+BEFORE UPDATE ON agent_deployment_resolutions BEGIN SELECT RAISE(ABORT,'immutable Agent deployment resolution'); END;
+CREATE TRIGGER agent_deployment_publication_rewrite_forbidden
+BEFORE UPDATE ON agent_deployment_publications BEGIN SELECT RAISE(ABORT,'immutable Agent Deployment publication'); END;
+CREATE TRIGGER agent_deployment_publication_delete_forbidden
+BEFORE DELETE ON agent_deployment_publications BEGIN SELECT RAISE(ABORT,'immutable Agent Deployment publication'); END;
+
 CREATE TABLE durable_schema_contract (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     contract_id TEXT NOT NULL,
@@ -3459,7 +3877,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-eb07a629-e22a-4935-9bba-4835c7b027f1',
+    'durable-schema-a7d26783-48d3-4bce-b337-8e634fda99a3',
     'sqlite'
 );
 

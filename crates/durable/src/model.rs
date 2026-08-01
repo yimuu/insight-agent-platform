@@ -569,6 +569,12 @@ pub mod adapter {
         command.expected_mcp_server_fences()
     }
 
+    pub fn create_run_expected_provider_fences(
+        command: &CreateRunCommand,
+    ) -> &BTreeMap<String, u64> {
+        command.expected_provider_fences()
+    }
+
     pub fn create_run_full_conversation(
         command: &CreateRunCommand,
     ) -> Option<&FullConversationRunAdmission> {
@@ -780,7 +786,7 @@ pub mod adapter {
 
 /// Durable public-route head. Archive installation never mutates this value;
 /// only explicit publication or first-start seeding may do so.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicationHead {
     agent_id: String,
     definition_id: String,
@@ -789,11 +795,12 @@ pub struct PublicationHead {
     origin: PublicationOrigin,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PublicationOrigin {
     BuiltIn,
     Graph,
+    Managed,
 }
 
 impl PublicationOrigin {
@@ -801,7 +808,16 @@ impl PublicationOrigin {
         match value {
             "built_in" => Ok(Self::BuiltIn),
             "graph" => Ok(Self::Graph),
+            "managed" => Ok(Self::Managed),
             _ => Err(RepositoryError::invalid_data()),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BuiltIn => "built_in",
+            Self::Graph => "graph",
+            Self::Managed => "managed",
         }
     }
 }
@@ -895,6 +911,118 @@ impl VersionedPlanCatalog {
 pub enum PlanInstallOutcome {
     Installed,
     AlreadyInstalled,
+}
+
+/// Exact immutable deployment selected for an explicit route transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentDeploymentTarget {
+    agent_id: String,
+    definition_id: String,
+    definition_revision_id: DefinitionRevisionId,
+    deployment_revision_id: DeploymentRevisionId,
+    origin: PublicationOrigin,
+}
+
+impl AgentDeploymentTarget {
+    pub fn new(
+        agent_id: String,
+        definition_id: String,
+        definition_revision_id: DefinitionRevisionId,
+        deployment_revision_id: DeploymentRevisionId,
+        origin: PublicationOrigin,
+    ) -> Result<Self, RepositoryError> {
+        validate_body_free_label(&agent_id)?;
+        validate_body_free_label(&definition_id)?;
+        Ok(Self {
+            agent_id,
+            definition_id,
+            definition_revision_id,
+            deployment_revision_id,
+            origin,
+        })
+    }
+
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
+    pub fn definition_id(&self) -> &str {
+        &self.definition_id
+    }
+
+    pub fn definition_revision_id(&self) -> &DefinitionRevisionId {
+        &self.definition_revision_id
+    }
+
+    pub fn deployment_revision_id(&self) -> &DeploymentRevisionId {
+        &self.deployment_revision_id
+    }
+
+    pub fn origin(&self) -> PublicationOrigin {
+        self.origin
+    }
+
+    pub fn publication_head(&self) -> Result<PublicationHead, RepositoryError> {
+        PublicationHead::new(
+            self.agent_id.clone(),
+            self.definition_id.clone(),
+            self.definition_revision_id.clone(),
+            self.deployment_revision_id.clone(),
+            self.origin,
+        )
+    }
+}
+
+/// A route-only compare-and-swap. `target=None` deactivates the public route;
+/// immutable Definition and Deployment rows are never created by this command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivateAgentDeploymentCommand {
+    agent_id: String,
+    expected_head: Option<PublicationHead>,
+    target: Option<AgentDeploymentTarget>,
+}
+
+impl ActivateAgentDeploymentCommand {
+    pub fn new(
+        agent_id: String,
+        expected_head: Option<PublicationHead>,
+        target: Option<AgentDeploymentTarget>,
+    ) -> Result<Self, RepositoryError> {
+        validate_body_free_label(&agent_id)?;
+        if expected_head
+            .as_ref()
+            .is_some_and(|head| head.agent_id() != agent_id)
+            || target
+                .as_ref()
+                .is_some_and(|target| target.agent_id() != agent_id)
+        {
+            return Err(invalid_command());
+        }
+        Ok(Self {
+            agent_id,
+            expected_head,
+            target,
+        })
+    }
+
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
+    pub fn expected_head(&self) -> Option<&PublicationHead> {
+        self.expected_head.as_ref()
+    }
+
+    pub fn target(&self) -> Option<&AgentDeploymentTarget> {
+        self.target.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentDeploymentActivationOutcome {
+    Changed(Option<PublicationHead>),
+    Unchanged(Option<PublicationHead>),
+    HeadChanged,
 }
 
 /// One graph publication proposal together with the durable route heads used
@@ -1185,6 +1313,11 @@ pub struct CreateRunCommand {
     /// also part of the canonical idempotency intent.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     expected_mcp_server_fences: BTreeMap<String, u64>,
+    /// Provider suspension generations checked in the same transaction that
+    /// admits the Run. Active publication is intentionally not required:
+    /// historical exact Deployments remain recoverable unless suspended.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    expected_provider_fences: BTreeMap<String, u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     full_conversation: Option<FullConversationRunAdmission>,
 }
@@ -1213,6 +1346,7 @@ impl CreateRunCommand {
             artifact_reference_retention_seconds: 30 * 24 * 60 * 60,
             expected_publication_head: None,
             expected_mcp_server_fences: BTreeMap::new(),
+            expected_provider_fences: BTreeMap::new(),
             full_conversation: None,
         })
     }
@@ -1257,6 +1391,23 @@ impl CreateRunCommand {
             return Err(invalid_command());
         }
         self.expected_mcp_server_fences = fences;
+        Ok(self)
+    }
+
+    pub fn with_expected_provider_fences(
+        mut self,
+        fences: BTreeMap<String, u64>,
+    ) -> Result<Self, RepositoryError> {
+        if fences.keys().any(|provider_id| {
+            provider_id.is_empty()
+                || provider_id.len() > 64
+                || !provider_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        }) {
+            return Err(invalid_command());
+        }
+        self.expected_provider_fences = fences;
         Ok(self)
     }
 
@@ -1349,6 +1500,10 @@ impl CreateRunCommand {
 
     pub(crate) fn expected_mcp_server_fences(&self) -> &BTreeMap<String, u64> {
         &self.expected_mcp_server_fences
+    }
+
+    pub(crate) fn expected_provider_fences(&self) -> &BTreeMap<String, u64> {
+        &self.expected_provider_fences
     }
 
     pub(crate) fn full_conversation(&self) -> Option<&FullConversationRunAdmission> {

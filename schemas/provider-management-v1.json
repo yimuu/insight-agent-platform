@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://insight-agent.local/schemas/provider-management-v1.json",
+  "title": "Insight Provider Management API v1",
+  "$defs": {
+    "providerId": {"type":"string","pattern":"^[a-z0-9][a-z0-9-]{0,63}$"},
+    "sha256": {"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    "closedEmptyRequest": {"type":"object","additionalProperties":false,"maxProperties":0},
+    "adapter": {
+      "type":"object","additionalProperties":false,"required":["type"],
+      "properties":{"type":{"const":"open_ai_compatible"}}
+    },
+    "credential": {
+      "oneOf":[
+        {"type":"object","additionalProperties":false,"required":["type","reference"],"properties":{"type":{"const":"bearer"},"reference":{"type":"string","pattern":"^secret://[^\\s]+$","maxLength":1024}}},
+        {"type":"object","additionalProperties":false,"required":["type","reference"],"properties":{"type":{"const":"api_key"},"reference":{"type":"string","pattern":"^secret://[^\\s]+$","maxLength":1024}}},
+        {"type":"object","additionalProperties":false,"required":["type"],"properties":{"type":{"const":"none"}}}
+      ]
+    },
+    "transport": {
+      "type":"object","additionalProperties":false,
+      "properties":{
+        "tls":{"const":"required"},"redirects":{"const":"deny"},
+        "connect_timeout_ms":{"type":"integer","minimum":1,"maximum":30000},
+        "request_timeout_ms":{"type":"integer","minimum":1,"maximum":600000}
+      }
+    },
+    "provenance": {
+      "type":"object","additionalProperties":false,"required":["type"],
+      "properties":{"type":{"enum":["template_verified","adapter_verified","probe_verified","operator_asserted"]}}
+    },
+    "model": {
+      "type":"object","additionalProperties":false,"required":["id","provenance"],
+      "properties":{
+        "id":{"type":"string","minLength":1,"maxLength":512,"not":{"pattern":"\\*"}},
+        "input":{"type":"array","maxItems":8,"uniqueItems":true,"items":{"enum":["text","image","audio"]}},
+        "capabilities":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"enum":["complete","streaming","tools","structured_output","reasoning"]}},
+        "provenance":{"$ref":"#/$defs/provenance"}
+      }
+    },
+    "draft": {
+      "type":"object","additionalProperties":false,"required":["adapter","endpoint","credential"],
+      "properties":{
+        "adapter":{"$ref":"#/$defs/adapter"},"endpoint":{"type":"string","format":"uri","maxLength":2048},
+        "credential":{"$ref":"#/$defs/credential"},"transport":{"$ref":"#/$defs/transport"},
+        "models":{"type":"array","maxItems":1024,"items":{"$ref":"#/$defs/model"}},
+        "description":{"type":"string","minLength":1,"maxLength":4096},
+        "operator_note":{"type":"string","minLength":1,"maxLength":4096}
+      }
+    },
+    "createProviderRequest": {
+      "type":"object","additionalProperties":false,"required":["provider_id","display_name","adapter_type","draft"],
+      "properties":{"provider_id":{"$ref":"#/$defs/providerId"},"display_name":{"type":"string","minLength":1,"maxLength":256},"adapter_type":{"const":"open_ai_compatible"},"draft":{"$ref":"#/$defs/draft"}}
+    },
+    "draftVersionRequest": {"type":"object","additionalProperties":false,"required":["draft_version"],"properties":{"draft_version":{"type":"integer","minimum":1}}},
+    "connectionTestRequest": {"type":"object","additionalProperties":false,"required":["draft_version","mode"],"properties":{"draft_version":{"type":"integer","minimum":1},"mode":{"enum":["metadata","canary","capability_probe"]}}},
+    "replaceModelsRequest": {"type":"object","additionalProperties":false,"required":["models"],"properties":{"models":{"type":"array","maxItems":1024,"items":{"$ref":"#/$defs/model"}}}},
+    "modelImportPreviewRequest": {
+      "type":"object","additionalProperties":false,"required":["discovery_id"],
+      "properties":{"discovery_id":{"type":"string","minLength":1,"maxLength":128},"select_all":{"type":"boolean"},"model_ids":{"type":"array","maxItems":1024,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":512}},"policies":{"type":"object","maxProperties":1024,"additionalProperties":{"$ref":"#/$defs/model"}}},
+      "oneOf":[{"required":["select_all"],"properties":{"select_all":{"const":true},"model_ids":{"maxItems":0}}},{"required":["model_ids"],"properties":{"select_all":{"const":false},"model_ids":{"minItems":1}}}]
+    },
+    "publishRequest": {
+      "type":"object","additionalProperties":false,"required":["draft_version","validation_id"],
+      "properties":{"draft_version":{"type":"integer","minimum":1},"validation_id":{"type":"string","minLength":1,"maxLength":128},"discovery_id":{"type":"string","minLength":1,"maxLength":128},"connection_test_id":{"type":"string","minLength":1,"maxLength":128}}
+    },
+    "activateRequest": {"type":"object","additionalProperties":false,"required":["revision_id"],"properties":{"revision_id":{"type":"string","minLength":1,"maxLength":128}}},
+    "reasonRequest": {"type":"object","additionalProperties":false,"required":["reason_code"],"properties":{"reason_code":{"type":"string","pattern":"^[A-Za-z0-9_.-]{1,128}$"}}},
+    "successEnvelope": {"type":"object","additionalProperties":false,"required":["data"],"properties":{"data":true}},
+    "errorEnvelope": {"type":"object","additionalProperties":false,"required":["code","message","data"],"properties":{"code":{"type":"string"},"message":{"type":"string"},"data":{"type":"null"}}}
+  }
+}

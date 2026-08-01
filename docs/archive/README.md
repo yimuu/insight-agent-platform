@@ -18,6 +18,8 @@
 
 | 记录 | 状态 | 当前入口 |
 |---|---|---|
+| [Agent 与 Provider 管理 Control Plane v1](specs/2026-08-01-agent-and-provider-management-control-plane.md) | Implemented / verified（2026-08-01） | [Agent 与 Provider 管理面](../current/management.md) |
+| [Agent 与 Provider 管理 Control Plane v1 资格验收](qualifications/2026-08-01-agent-provider-management-v1-qualification.md) | Qualified（2026-08-02 复验） | [Agent 与 Provider 管理面](../current/management.md) |
 | [MCP 管理 API v1 与显式导入规范](specs/2026-07-31-mcp-management-api-v1.md) | Implemented / verified（2026-07-31） | [MCP 当前合同](../current/mcp.md) |
 | [MCP 管理 API v1 资格验收](qualifications/2026-07-31-mcp-management-api-v1-qualification.md) | Qualified（2026-07-31） | [MCP 当前合同](../current/mcp.md) |
 | [MCP 2026-07-28 完整支持规范](specs/2026-07-30-complete-mcp-support.md) | Implemented / verified（2026-07-30） | [MCP 当前合同](../current/mcp.md) |

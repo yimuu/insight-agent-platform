@@ -1,0 +1,16 @@
+{
+  "valid": {
+    "create_provider": {
+      "provider_id":"company-llm","display_name":"Company LLM","adapter_type":"open_ai_compatible",
+      "draft":{"adapter":{"type":"open_ai_compatible"},"endpoint":"https://llm.company.internal/v1","credential":{"type":"bearer","reference":"secret://environment/COMPANY_LLM_TOKEN"},"transport":{"tls":"required","redirects":"deny","connect_timeout_ms":5000,"request_timeout_ms":120000},"models":[]}
+    },
+    "connection_test":{"draft_version":1,"mode":"metadata"},
+    "publish":{"draft_version":1,"validation_id":"pval_example"},
+    "activate":{"revision_id":"prev_example"}
+  },
+  "invalid": {
+    "secret_value":{"adapter":{"type":"open_ai_compatible"},"endpoint":"https://example.test/v1","credential":{"type":"bearer","value":"forbidden"}},
+    "wildcard_model":{"models":[{"id":"*","provenance":{"type":"operator_asserted"}}]},
+    "arbitrary_probe":{"draft_version":1,"mode":"canary","prompt":"forbidden"}
+  }
+}

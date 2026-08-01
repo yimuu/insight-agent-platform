@@ -71,11 +71,24 @@ profile；远程 HTTP 必须为无凭据 HTTPS URL，只有单进程开发的精
 
 ## Client 管理配置与 Server 创建
 
-`mcp.version: 2` 把 Client Server 实例从 YAML 移到 durable management store。YAML 只保存全局硬策略、
-Operator credential reference、secret resolver、签名信任根、stdio launch profile 和默认上限；不应把
+`mcp.version: 2` 把 Client Server 实例从 YAML 移到 durable management store。顶层
+`management.version: 1` 保存共享 Operator credential；MCP YAML 只保存全局硬策略、secret resolver、
+签名信任根、stdio launch profile 和默认上限；不应把
 token、client secret 或签名私钥写入 YAML：
 
 ```yaml
+management:
+  version: 1
+  enabled: true
+  operator_credentials:
+    - identity: mcp-platform-operator
+      token_env: INSIGHT_PLATFORM_OPERATOR_TOKEN
+      capabilities:
+        - mcp.server.read
+        - mcp.server.write
+        - mcp.server.discover
+        - mcp.server.publish
+
 mcp:
   version: 2
   protocol:
@@ -87,14 +100,6 @@ mcp:
       enabled: true
       discovery_workers: 4
       max_pending_discoveries: 128
-      operator_credentials:
-        - identity: mcp-platform-operator
-          token_env: INSIGHT_MCP_OPERATOR_TOKEN
-          capabilities:
-            - mcp.server.read
-            - mcp.server.write
-            - mcp.server.discover
-            - mcp.server.publish
     secret_encryption:
       active_key_version: v1
       keyring_env: INSIGHT_MCP_SECRET_KEYRING

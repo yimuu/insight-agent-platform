@@ -48,39 +48,6 @@ pub struct McpManagementApiConfig {
     pub enabled: bool,
     pub discovery_workers: u32,
     pub max_pending_discoveries: u32,
-    pub operator_credentials: Vec<McpOperatorCredentialConfig>,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct McpOperatorCredentialConfig {
-    identity: String,
-    capabilities: BTreeSet<String>,
-    token: SecretString,
-}
-
-impl McpOperatorCredentialConfig {
-    pub fn identity(&self) -> &str {
-        &self.identity
-    }
-
-    pub fn capabilities(&self) -> &BTreeSet<String> {
-        &self.capabilities
-    }
-
-    pub fn token(&self) -> &SecretString {
-        &self.token
-    }
-}
-
-impl std::fmt::Debug for McpOperatorCredentialConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("McpOperatorCredentialConfig")
-            .field("identity", &self.identity)
-            .field("capabilities", &self.capabilities)
-            .field("token", &"REDACTED")
-            .finish()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -299,8 +266,6 @@ struct McpManagementApiYaml {
     discovery_workers: u32,
     #[serde(default = "default_max_pending_discoveries")]
     max_pending_discoveries: u32,
-    #[serde(default)]
-    operator_credentials: Vec<McpOperatorCredentialYaml>,
 }
 
 impl Default for McpManagementApiYaml {
@@ -309,17 +274,8 @@ impl Default for McpManagementApiYaml {
             enabled: false,
             discovery_workers: default_discovery_workers(),
             max_pending_discoveries: default_max_pending_discoveries(),
-            operator_credentials: Vec::new(),
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct McpOperatorCredentialYaml {
-    identity: String,
-    token_env: String,
-    capabilities: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -591,53 +547,6 @@ pub(crate) fn resolve_mcp(
     {
         return Err(mcp_error("MCP management worker limits are invalid"));
     }
-    let mut operator_identities = BTreeSet::new();
-    let mut operator_tokens = BTreeSet::new();
-    let allowed_operator_capabilities = BTreeSet::from([
-        "mcp.server.read".to_owned(),
-        "mcp.server.write".to_owned(),
-        "mcp.server.discover".to_owned(),
-        "mcp.server.publish".to_owned(),
-    ]);
-    let operator_credentials = raw
-        .client
-        .management_api
-        .operator_credentials
-        .into_iter()
-        .map(|credential| {
-            let identity = credential.identity.trim().to_owned();
-            let capabilities = unique_nonempty(credential.capabilities, "MCP Operator capability")?;
-            let token = required_secret(&credential.token_env, get_env)?;
-            if !valid_principal_label(&identity)
-                || !operator_identities.insert(identity.clone())
-                || !operator_tokens.insert(token.expose().to_owned())
-                || capabilities.is_empty()
-                || !capabilities.is_subset(&allowed_operator_capabilities)
-            {
-                return Err(mcp_error(
-                    "MCP Operator credential is invalid or duplicated",
-                ));
-            }
-            Ok(McpOperatorCredentialConfig {
-                identity,
-                capabilities,
-                token,
-            })
-        })
-        .collect::<Result<Vec<_>, PlatformConfigError>>()?;
-    if raw.client.management_api.enabled && operator_credentials.is_empty() {
-        return Err(mcp_error(
-            "enabled MCP management API requires Operator authentication",
-        ));
-    }
-    if raw.client.management_api.enabled
-        && deployment_mode == DeploymentMode::Production
-        && operator_credentials.is_empty()
-    {
-        return Err(mcp_error(
-            "production MCP management API cannot use disabled authentication",
-        ));
-    }
     let secret_encryption = raw
         .client
         .secret_encryption
@@ -801,7 +710,6 @@ pub(crate) fn resolve_mcp(
                 enabled: raw.client.management_api.enabled,
                 discovery_workers: raw.client.management_api.discovery_workers,
                 max_pending_discoveries: raw.client.management_api.max_pending_discoveries,
-                operator_credentials,
             },
             secret_encryption,
             secret_resolver,
@@ -1085,7 +993,6 @@ fn disabled_mcp_config() -> McpConfig {
                 enabled: false,
                 discovery_workers: default_discovery_workers(),
                 max_pending_discoveries: default_max_pending_discoveries(),
-                operator_credentials: Vec::new(),
             },
             secret_encryption: None,
             secret_resolver: McpSecretResolverConfig::default(),
@@ -1255,14 +1162,6 @@ fn valid_environment_name(value: &str) -> bool {
         && value.bytes().enumerate().all(|(index, byte)| {
             byte == b'_' || byte.is_ascii_uppercase() || (index > 0 && byte.is_ascii_digit())
         })
-}
-
-fn valid_principal_label(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && !value
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
 }
 
 fn valid_argv(value: &str) -> bool {

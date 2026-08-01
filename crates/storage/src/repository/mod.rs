@@ -1,3 +1,4 @@
+mod agent_management_adapter;
 mod artifact_adapter;
 mod error;
 mod human_task_adapter;
@@ -17,6 +18,7 @@ mod postgres_projection;
 mod postgres_recovery;
 mod postgres_retrieval_publication;
 mod postgres_scheduler;
+mod provider_management_adapter;
 mod public_outbox_adapter;
 #[cfg(test)]
 mod recovery_repository;
@@ -36,6 +38,8 @@ pub use postgres::PostgresDurableRepository;
 pub use sqlite::SqliteDurableRepository;
 
 pub(crate) use error::RepositoryErrorExt;
+pub(crate) use postgres::postgres_publication_head;
+pub(crate) use sqlite::sqlite_publication_head;
 
 pub(crate) fn database_time(value: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp_micros(value.timestamp_micros())

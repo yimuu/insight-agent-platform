@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeSet, VecDeque},
-    fmt,
+    fmt, io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -33,6 +35,8 @@ pub const DEFAULT_MAX_BUFFERED_LINE_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_MAX_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_MAX_CHUNK_TEXT_BYTES: usize = 256 * 1024;
 pub const DEFAULT_MAX_USAGE_JSON_BYTES: usize = 64 * 1024;
+pub const OPENAI_CHAT_ADAPTER_VERSION: &str = "2.1.0";
+pub const OPENAI_CHAT_WORKER_VERSION: &str = "openai-chat-adapter-2.1.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenAiChatLimits {
@@ -83,6 +87,34 @@ pub enum OpenAiTransportPolicy {
     HttpsOnly,
     AllowLoopbackHttp,
     AllowTrustedPrivateHttp,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PolicyDnsResolver {
+    policy: OpenAiTransportPolicy,
+}
+
+impl reqwest::dns::Resolve for PolicyDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        let policy = self.policy;
+        Box::pin(async move {
+            let resolved = tokio::net::lookup_host((host.as_str(), 0)).await?;
+            let addresses = resolved.collect::<Vec<SocketAddr>>();
+            if addresses.is_empty()
+                || addresses
+                    .iter()
+                    .any(|address| !transport_ip_allowed(address.ip(), policy))
+            {
+                return Err(Box::new(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "Provider endpoint DNS resolution is denied by network policy",
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 impl OpenAiTransportPolicy {
@@ -174,9 +206,7 @@ impl OpenAiChatModel {
         endpoint.set_fragment(None);
         let path = format!("{}/chat/completions", endpoint.path().trim_end_matches('/'));
         endpoint.set_path(&path);
-        let client = Client::builder()
-            .tls_backend_rustls()
-            .redirect(Policy::none())
+        let client = client_builder_with_transport_policy(&base_url, transport_policy)?
             .connect_timeout(connect_timeout)
             .timeout(request_timeout)
             .build()
@@ -1295,7 +1325,7 @@ fn endpoint_origin(endpoint: &Url) -> String {
     }
 }
 
-fn validate_endpoint_transport(
+pub fn validate_endpoint_transport(
     endpoint: &Url,
     base_url: &str,
     policy: OpenAiTransportPolicy,
@@ -1312,6 +1342,17 @@ fn validate_endpoint_transport(
             "OpenAI base URL must not include username or password",
         ));
     }
+    if let Some(ip) = endpoint
+        .host_str()
+        .and_then(|host| host.trim_matches(['[', ']']).parse::<IpAddr>().ok())
+    {
+        if !transport_ip_allowed(ip, policy) {
+            return Err(CompileError::new(
+                "MODEL_CONFIG_INVALID",
+                "OpenAI endpoint IP is denied by network policy",
+            ));
+        }
+    }
     match endpoint.scheme() {
         "https" => Ok(()),
         "http" => validate_plaintext_http(base_url, policy),
@@ -1320,6 +1361,66 @@ fn validate_endpoint_transport(
             "OpenAI base URL must use HTTP or HTTPS and include a host",
         )),
     }
+}
+
+pub fn client_builder_with_transport_policy(
+    base_url: &str,
+    policy: OpenAiTransportPolicy,
+) -> Result<reqwest::ClientBuilder, CompileError> {
+    let endpoint = Url::parse(base_url)
+        .map_err(|_| CompileError::new("MODEL_CONFIG_INVALID", "OpenAI base URL is invalid"))?;
+    validate_endpoint_transport(&endpoint, base_url, policy)?;
+    Ok(Client::builder()
+        .tls_backend_rustls()
+        .redirect(Policy::none())
+        .dns_resolver(Arc::new(PolicyDnsResolver { policy })))
+}
+
+fn transport_ip_allowed(ip: IpAddr, policy: OpenAiTransportPolicy) -> bool {
+    match policy {
+        OpenAiTransportPolicy::AllowLoopbackHttp => ip.is_loopback(),
+        OpenAiTransportPolicy::AllowTrustedPrivateHttp => {
+            !ip.is_unspecified() && !ip.is_multicast()
+        }
+        OpenAiTransportPolicy::HttpsOnly => is_public_ip(ip),
+    }
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_public_ipv4(ip),
+        IpAddr::V6(ip) => is_public_ipv6(ip),
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 224)
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(ipv4) = ip.to_ipv4_mapped() {
+        return is_public_ipv4(ipv4);
+    }
+    let segments = ip.segments();
+    !(ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_multicast()
+        || (segments[0] & 0xfe00) == 0xfc00
+        || (segments[0] & 0xffc0) == 0xfe80
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8))
 }
 
 fn validate_plaintext_http(
@@ -1399,5 +1500,65 @@ fn classify_status_failure_code(status: StatusCode) -> &'static str {
         500..=599 => "UPSTREAM_UNAVAILABLE",
         300..=499 => "UPSTREAM_REQUEST_REJECTED",
         _ => "UPSTREAM_STATUS",
+    }
+}
+
+#[cfg(test)]
+mod network_policy_tests {
+    use super::*;
+
+    #[test]
+    fn public_https_policy_rejects_literal_private_metadata_and_loopback_addresses() {
+        for endpoint in [
+            "https://10.0.0.1/v1",
+            "https://127.0.0.1/v1",
+            "https://169.254.169.254/latest/meta-data",
+            "https://192.168.1.1/v1",
+            "https://[::1]/v1",
+            "https://[fe80::1]/v1",
+            "https://[fd00::1]/v1",
+        ] {
+            let url = Url::parse(endpoint).unwrap();
+            assert!(
+                validate_endpoint_transport(&url, endpoint, OpenAiTransportPolicy::HttpsOnly)
+                    .is_err(),
+                "public policy unexpectedly accepted {endpoint}"
+            );
+        }
+        let public = "https://8.8.8.8/v1";
+        assert!(validate_endpoint_transport(
+            &Url::parse(public).unwrap(),
+            public,
+            OpenAiTransportPolicy::HttpsOnly,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn development_loopback_policy_is_exact_and_does_not_admit_private_networks() {
+        for endpoint in [
+            "http://localhost:8080/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://[::1]:8080/v1",
+        ] {
+            assert!(validate_endpoint_transport(
+                &Url::parse(endpoint).unwrap(),
+                endpoint,
+                OpenAiTransportPolicy::AllowLoopbackHttp,
+            )
+            .is_ok());
+        }
+        for endpoint in [
+            "http://10.0.0.1/v1",
+            "http://127.0.0.2/v1",
+            "http://example.test/v1",
+        ] {
+            assert!(validate_endpoint_transport(
+                &Url::parse(endpoint).unwrap(),
+                endpoint,
+                OpenAiTransportPolicy::AllowLoopbackHttp,
+            )
+            .is_err());
+        }
     }
 }

@@ -27,6 +27,7 @@ pub mod models {
     };
 }
 
+pub mod management_observability;
 pub mod mcp;
 pub mod mcp_management;
 pub mod mcp_server;
@@ -35,9 +36,11 @@ pub mod openai_chat {
     pub use insight_resources::openai_chat::{
         OpenAiChatLimits, OpenAiChatModel, OpenAiTransportPolicy, DEFAULT_MAX_BUFFERED_LINE_BYTES,
         DEFAULT_MAX_CHUNK_TEXT_BYTES, DEFAULT_MAX_EVENT_PAYLOAD_BYTES, DEFAULT_MAX_UPSTREAM_BYTES,
-        DEFAULT_MAX_USAGE_JSON_BYTES,
+        DEFAULT_MAX_USAGE_JSON_BYTES, OPENAI_CHAT_ADAPTER_VERSION, OPENAI_CHAT_WORKER_VERSION,
     };
 }
+
+pub mod provider_management;
 
 pub mod retrievals {
     pub use insight_resources::retrievals::{

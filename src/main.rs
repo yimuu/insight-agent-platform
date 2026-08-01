@@ -1,14 +1,10 @@
 use std::{error::Error, ffi::OsStr, future::IntoFuture, io, sync::Arc};
 
 use insight_agent_platform::{
-    catalog::{
-        compile_enabled_agents, deploy_agents_with_persistence,
-        OwnedProductionLeafDeploymentResolver, ProductionLeafDeploymentResolver,
-        TerminalOnlyDeploymentConfig,
-    },
+    catalog::{OwnedProductionLeafDeploymentResolver, TerminalOnlyDeploymentConfig},
     config::{
-        ArtifactStoreProvider, DeploymentMode, HistoryConfig, LiveRunStreamBrokerProvider,
-        PlatformConfig, RunStreamConfig,
+        ArtifactStoreProvider, DebugExecutionProfileMode, DeploymentMode, HistoryConfig,
+        LiveRunStreamBrokerProvider, PlatformConfig, RunStreamConfig,
     },
     engine::{
         production_worker_registry_with_live_run_stream_and_retrievals,
@@ -17,7 +13,7 @@ use insight_agent_platform::{
     },
     resources::{
         builtin_actions::{builtin_action_registry, RestrictedHttpGetAction},
-        config::load_model_registry,
+        management_observability::ManagementObservabilityRuntime,
         mcp::{DurableMcpInteractionHandler, McpInteractionHandler},
         mcp_management::{
             mcp_management_policy_material, DurableMcpRunAdmissionAuthority,
@@ -25,6 +21,11 @@ use insight_agent_platform::{
             McpRevisionRuntime,
         },
         mcp_server::PlatformMcpServerBackend,
+        models::ModelRegistry,
+        provider_management::{
+            DurableProviderRunAdmissionAuthority, ManagedProviderRevisionReadiness,
+            ProviderManagementRuntime, ProviderManagementRuntimeConfig,
+        },
         retrievals::RetrievalRegistry,
     },
     runtime::{
@@ -40,14 +41,18 @@ use insight_api::mcp::{
     McpHttpAuthorizer, McpHttpService, OAuthResourceServerAuthorizer,
 };
 use insight_api::v1::{
-    build_mcp_catalog_router, build_mcp_management_router, build_router, ApiAuth, ApiState,
+    build_agent_management_router, build_mcp_catalog_router, build_mcp_management_router,
+    build_provider_management_router, build_router, AgentDebugProfileMode, AgentDebugProfilePolicy,
+    AgentManagementApiState, AgentManagementPolicy, ApiAuth, ApiState,
     BearerHumanPrincipalResolver, McpCatalogApiState, McpCatalogRegistry, McpManagementApiState,
     McpManagementPolicy, McpManifestSignerPolicy, McpOAuthRegistry, McpProfileReport, OperatorAuth,
+    ProviderManagementApiState, ProviderManagementPolicy, ProviderTemplate,
 };
 use insight_api::v1::{build_router_with_mcp, McpOAuthApiState};
 use insight_durable::{
-    McpInteractionDurableRepository, McpManagementDurableRepository, McpOAuthDurableRepository,
-    McpRemoteTaskDurableRepository, McpSecretProtector, McpServerTaskDurableRepository,
+    AgentManagementDurableRepository, McpInteractionDurableRepository,
+    McpManagementDurableRepository, McpOAuthDurableRepository, McpRemoteTaskDurableRepository,
+    McpSecretProtector, McpServerTaskDurableRepository, ProviderManagementDurableRepository,
 };
 use insight_mcp::McpServerDispatcher;
 use insight_storage::mcp_secret::McpSecretEncryptionKeyring;
@@ -82,6 +87,8 @@ async fn main() -> MainResult<()> {
         mcp_remote_tasks,
         mcp_server_tasks,
         mcp_management,
+        provider_management,
+        agent_management,
     ) = initialize_repository_and_live_run_stream(&config.history, config.runtime.run_stream)
         .await?;
     let mcp_policy_material = mcp_management_policy_material(
@@ -113,7 +120,32 @@ async fn main() -> MainResult<()> {
             Arc::clone(protector),
         )) as Arc<dyn McpInteractionHandler>
     });
-    let models = load_model_registry(&config.providers, config.model_policy.as_ref())?;
+    // Durable managed Provider revisions are the only live model routes. The
+    // built-in catalog and platform extensions are import/template inputs,
+    // never implicit executable registrations.
+    let models = ModelRegistry::default();
+    let provider_runtime_config = ProviderManagementRuntimeConfig {
+        enabled: config.management.enabled,
+        workers: config.mcp.client.management_api.discovery_workers.max(1) as usize,
+        poll_interval: std::time::Duration::from_millis(250),
+        lease_duration: config
+            .runtime
+            .operation_timeout
+            .checked_add(std::time::Duration::from_secs(30))
+            .unwrap_or(std::time::Duration::from_secs(630)),
+        retention: chrono::Duration::days(i64::from(
+            config.management.limits.operation_retention_days,
+        )),
+        max_response_bytes: config.mcp.client.default_limits.limits.max_response_bytes,
+        allow_loopback_development: config.mcp.client.network_policy.allow_loopback_development,
+    };
+    let mut provider_management_runtime = ProviderManagementRuntime::start(
+        Arc::clone(&provider_management),
+        models.clone(),
+        provider_runtime_config.clone(),
+    )
+    .await
+    .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
     let http_get = config
         .actions
         .http_get
@@ -162,15 +194,6 @@ async fn main() -> MainResult<()> {
     .await
     .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
 
-    let published = compile_enabled_agents(&config.agents.directory, &config.agents.enabled)?;
-    let resolver = ProductionLeafDeploymentResolver::new(&models, &actions)
-        .with_retrievals(&retrievals)
-        .with_llm_tool_continuation_capability()
-        .with_operation_timeout(config.runtime.operation_timeout)?
-        .with_llm_tool_limits(
-            config.runtime.max_llm_tool_rounds,
-            config.runtime.max_llm_tool_calls,
-        )?;
     let graph_publication_resolver = Arc::new(
         OwnedProductionLeafDeploymentResolver::new(&models, &actions)
             .with_retrievals(&retrievals)
@@ -193,13 +216,9 @@ async fn main() -> MainResult<()> {
     )?;
     let graph_persistence_policy =
         terminal_only_deployment.resolve(config.runtime.default_persistence_mode)?;
-    let deployed = deploy_agents_with_persistence(
-        &published,
-        &resolver,
-        config.runtime.default_persistence_mode,
-        terminal_only_deployment,
-    )?;
-    let agents = DeployedAgentCatalog::new(deployed)?;
+    // RunService restores exact durable Deployment archives and current heads
+    // during startup. File Agents no longer create process-local public routes.
+    let agents = DeployedAgentCatalog::new(Vec::new())?;
     let workers = production_worker_registry_with_live_run_stream_and_retrievals(
         &models,
         &actions,
@@ -322,6 +341,9 @@ async fn main() -> MainResult<()> {
         Arc::clone(&mcp_management),
         mcp_policy_material.clone(),
     )))?;
+    service.set_provider_run_admission_authority(Arc::new(
+        DurableProviderRunAdmissionAuthority::new(Arc::clone(&provider_management)),
+    ))?;
     if config.mcp.client.management_api.enabled {
         service.add_readiness_probe(Arc::new(McpManagementStoreReadiness::new(Arc::clone(
             &mcp_management,
@@ -365,6 +387,22 @@ async fn main() -> MainResult<()> {
         Arc::clone(&mcp_server_tasks),
         config.mcp.server.enabled,
     );
+    let mut agent_debug_maintenance = AgentDebugMaintenanceRuntime::start(
+        Arc::clone(&agent_management),
+        config.management.enabled,
+    );
+    let mut management_observability = ManagementObservabilityRuntime::start(
+        Arc::clone(&agent_management),
+        Arc::clone(&provider_management),
+        provider_management_runtime.projection_health(),
+        config.management.enabled,
+    )
+    .await?;
+    if config.management.enabled {
+        let probe = management_observability.probe();
+        service.add_readiness_probe(probe.clone())?;
+        service.add_metrics_source(probe)?;
+    }
 
     let api_auth = build_api_auth(&config)?;
     let api_state = ApiState {
@@ -399,99 +437,262 @@ async fn main() -> MainResult<()> {
         ),
         None => build_router(api_state),
     };
-    if config.mcp.client.management_api.enabled {
-        let operator_auth = OperatorAuth::new(
-            config
-                .mcp
-                .client
-                .management_api
-                .operator_credentials
-                .iter()
-                .map(|credential| {
-                    (
-                        credential.token().expose().to_owned(),
-                        credential.identity().to_owned(),
-                        credential.capabilities().clone(),
-                    )
-                }),
-        )
+    if config.management.enabled {
+        let operator_auth = OperatorAuth::new(config.management.operator_credentials.iter().map(
+            |credential| {
+                (
+                    credential.token().expose().to_owned(),
+                    credential.identity().to_owned(),
+                    credential.capabilities().clone(),
+                )
+            },
+        ))
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "MCP Operator authentication is invalid",
+                "shared management Operator authentication is invalid",
             )
         })?;
         let mut cursor_hasher = Sha256::new();
-        cursor_hasher.update(b"insight-mcp-management-cursor-v1\0");
-        cursor_hasher.update(
-            config
-                .mcp
-                .client
-                .secret_encryption
-                .as_ref()
-                .expect("management configuration requires secret encryption")
-                .keyring
-                .expose()
-                .as_bytes(),
-        );
+        cursor_hasher.update(b"insight-management-cursor-v1\0");
+        for credential in &config.management.operator_credentials {
+            cursor_hasher.update(credential.identity().as_bytes());
+            cursor_hasher.update([0]);
+            cursor_hasher.update(credential.token().expose().as_bytes());
+            cursor_hasher.update([0]);
+        }
         let cursor_signing_key: [u8; 32] = cursor_hasher.finalize().into();
-        let policy = McpManagementPolicy {
-            preferred_protocol: config.mcp.protocol.preferred.clone(),
-            legacy_protocols: config
-                .mcp
-                .protocol
-                .legacy_fallback
-                .iter()
-                .cloned()
-                .collect(),
-            allowed_secret_refs: config.mcp.client.secret_resolver.allowed_names.clone(),
-            resolvable_secret_refs: config
-                .mcp
-                .client
-                .secret_resolver
-                .allowed_names
-                .iter()
-                .filter(|name| std::env::var_os(name).is_some())
-                .cloned()
-                .collect(),
-            stdio_profile_fingerprints: mcp_policy_material.stdio_profile_fingerprints.clone(),
-            stdio_profile_allowed_parameters: mcp_policy_material
-                .stdio_profile_allowed_parameters
-                .clone(),
-            allow_loopback_development: config.mcp.client.network_policy.allow_loopback_development,
-            trusted_manifest_signers: config
-                .mcp
-                .client
-                .signed_manifest_trust
-                .trusted_signers
-                .iter()
-                .map(|(key_id, signer)| {
-                    (
-                        key_id.clone(),
-                        McpManifestSignerPolicy {
-                            public_key: signer.public_key.clone(),
-                        },
-                    )
-                })
-                .collect(),
-            manifest_max_validity: config.mcp.client.signed_manifest_trust.max_validity,
-            max_pending_discoveries: config.mcp.client.management_api.max_pending_discoveries,
-            max_request_bytes: config.mcp.client.default_limits.limits.max_request_bytes,
-            max_response_bytes: config.mcp.client.default_limits.limits.max_response_bytes,
-            max_sse_line_bytes: config.mcp.client.default_limits.limits.max_sse_line_bytes,
-            max_sse_event_bytes: config.mcp.client.default_limits.limits.max_sse_event_bytes,
-            max_content_items: config.mcp.client.default_limits.limits.max_content_items,
-            max_catalog_items: config.mcp.client.default_limits.limits.max_catalog_items,
-            policy_fingerprint: mcp_policy_material.policy_fingerprint.clone(),
-            cursor_signing_key,
+        if config.mcp.client.management_api.enabled {
+            let policy = McpManagementPolicy {
+                preferred_protocol: config.mcp.protocol.preferred.clone(),
+                legacy_protocols: config
+                    .mcp
+                    .protocol
+                    .legacy_fallback
+                    .iter()
+                    .cloned()
+                    .collect(),
+                allowed_secret_refs: config.mcp.client.secret_resolver.allowed_names.clone(),
+                resolvable_secret_refs: config
+                    .mcp
+                    .client
+                    .secret_resolver
+                    .allowed_names
+                    .iter()
+                    .filter(|name| std::env::var_os(name).is_some())
+                    .cloned()
+                    .collect(),
+                stdio_profile_fingerprints: mcp_policy_material.stdio_profile_fingerprints.clone(),
+                stdio_profile_allowed_parameters: mcp_policy_material
+                    .stdio_profile_allowed_parameters
+                    .clone(),
+                allow_loopback_development: config
+                    .mcp
+                    .client
+                    .network_policy
+                    .allow_loopback_development,
+                trusted_manifest_signers: config
+                    .mcp
+                    .client
+                    .signed_manifest_trust
+                    .trusted_signers
+                    .iter()
+                    .map(|(key_id, signer)| {
+                        (
+                            key_id.clone(),
+                            McpManifestSignerPolicy {
+                                public_key: signer.public_key.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+                manifest_max_validity: config.mcp.client.signed_manifest_trust.max_validity,
+                max_pending_discoveries: config.mcp.client.management_api.max_pending_discoveries,
+                max_request_bytes: config.mcp.client.default_limits.limits.max_request_bytes,
+                max_response_bytes: config.mcp.client.default_limits.limits.max_response_bytes,
+                max_sse_line_bytes: config.mcp.client.default_limits.limits.max_sse_line_bytes,
+                max_sse_event_bytes: config.mcp.client.default_limits.limits.max_sse_event_bytes,
+                max_content_items: config.mcp.client.default_limits.limits.max_content_items,
+                max_catalog_items: config.mcp.client.default_limits.limits.max_catalog_items,
+                policy_fingerprint: mcp_policy_material.policy_fingerprint.clone(),
+                cursor_signing_key,
+            };
+            let managed_mcp_revision = ManagedMcpRevisionReadiness::new(config.mcp.client.clone());
+            app = app.merge(build_mcp_management_router(McpManagementApiState {
+                auth: operator_auth.clone(),
+                repository: Arc::clone(&mcp_management),
+                policy: Arc::new(policy),
+                authoring: Arc::new(managed_mcp_revision.clone()),
+                readiness: Arc::new(managed_mcp_revision),
+            }));
+        }
+
+        let provider_secret_refs = config
+            .management
+            .provider_secret_resolver_allowed_names
+            .iter()
+            .map(|name| format!("secret://environment/{name}"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let provider_resolvable_secret_refs = config
+            .management
+            .provider_secret_resolver_allowed_names
+            .iter()
+            .filter(|name| std::env::var_os(name).is_some())
+            .map(|name| format!("secret://environment/{name}"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let provider_policy_document = serde_json::json!({
+            "adapter":"open_ai_compatible",
+            "adapter_version":"2.1.0",
+            "allowed_secret_refs":provider_secret_refs,
+            "max_models":config.management.limits.max_provider_models,
+            "transport":{"tls":"required","redirects":"deny"}
+        });
+        let provider_policy_bytes = serde_jcs::to_vec(&provider_policy_document).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Provider policy is not canonicalizable",
+            )
+        })?;
+        let mut provider_policy_hash = String::from("sha256:");
+        for byte in Sha256::digest(&provider_policy_bytes) {
+            use std::fmt::Write as _;
+            write!(&mut provider_policy_hash, "{byte:02x}")?;
+        }
+        let mut provider_cursor_hasher = Sha256::new();
+        provider_cursor_hasher.update(b"insight-provider-management-cursor-v1\0");
+        provider_cursor_hasher.update(cursor_signing_key);
+        let provider_cursor_signing_key: [u8; 32] = provider_cursor_hasher.finalize().into();
+        let provider_template_document = serde_json::json!({
+            "adapter":{"type":"open_ai_compatible","version":"2.1.0"},
+            "transport":{"tls":"required","redirects":"deny"},
+            "credential_slots":["bearer","api_key"],
+            "model_discovery":"models_endpoint"
+        });
+        let provider_template_digest = {
+            let bytes = serde_jcs::to_vec(&provider_template_document).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Provider template is not canonicalizable",
+                )
+            })?;
+            let mut value = String::from("sha256:");
+            for byte in Sha256::digest(bytes) {
+                use std::fmt::Write as _;
+                write!(&mut value, "{byte:02x}")?;
+            }
+            value
         };
-        let managed_mcp_revision = ManagedMcpRevisionReadiness::new(config.mcp.client.clone());
-        app = app.merge(build_mcp_management_router(McpManagementApiState {
+        app = app.merge(build_provider_management_router(
+            ProviderManagementApiState {
+                auth: operator_auth.clone(),
+                repository: Arc::clone(&provider_management),
+                policy: Arc::new(ProviderManagementPolicy {
+                    installed_adapters: std::collections::BTreeMap::from([(
+                        "open_ai_compatible".to_owned(),
+                        "2.1.0".to_owned(),
+                    )]),
+                    allowed_secret_refs: provider_secret_refs,
+                    resolvable_secret_refs: provider_resolvable_secret_refs,
+                    templates: vec![ProviderTemplate {
+                        template_id: "open-ai-compatible".to_owned(),
+                        adapter_type: "open_ai_compatible".to_owned(),
+                        adapter_version: "2.1.0".to_owned(),
+                        manifest_digest: provider_template_digest,
+                        document: provider_template_document,
+                    }],
+                    allow_loopback_development: config
+                        .mcp
+                        .client
+                        .network_policy
+                        .allow_loopback_development,
+                    max_models: config.management.limits.max_provider_models,
+                    max_connect_timeout_ms: 30_000,
+                    max_request_timeout_ms: 600_000,
+                    max_pending_operations: config.management.limits.max_pending_operations,
+                    require_connection_test_for_publish: false,
+                    policy_fingerprint: provider_policy_hash,
+                    cursor_signing_key: provider_cursor_signing_key,
+                }),
+                readiness: Arc::new(ManagedProviderRevisionReadiness::new(
+                    provider_runtime_config.clone(),
+                )),
+            },
+        ));
+
+        let debug_profiles = config
+            .management
+            .debug_execution_profiles
+            .iter()
+            .map(|(profile_id, profile)| -> MainResult<_> {
+                Ok((
+                    profile_id.clone(),
+                    AgentDebugProfilePolicy {
+                        mode: match profile.mode {
+                            DebugExecutionProfileMode::Sandbox => AgentDebugProfileMode::Sandbox,
+                            DebugExecutionProfileMode::Live => AgentDebugProfileMode::Live,
+                        },
+                        max_concurrent_sessions: profile.max_concurrent_sessions,
+                        session_timeout: chrono::Duration::from_std(profile.session_timeout)
+                            .map_err(|_| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    "management Debug Session timeout is unsupported",
+                                )
+                            })?,
+                        content_retention: chrono::Duration::from_std(profile.retention).map_err(
+                            |_| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    "management Debug content retention is unsupported",
+                                )
+                            },
+                        )?,
+                        allow_external_actions: profile.allow_external_actions,
+                        allow_live_provider_credentials: profile.allow_live_provider_credentials,
+                    },
+                ))
+            })
+            .collect::<MainResult<std::collections::BTreeMap<_, _>>>()?;
+        let validation_policy_document = serde_json::json!({
+            "schema_version":1,
+            "max_agent_draft_bytes":config.management.limits.max_agent_draft_bytes,
+            "max_agent_prompt_files":config.management.limits.max_agent_prompt_files,
+            "deployment_mode":match config.deployment_mode {
+                DeploymentMode::Production => "production",
+                DeploymentMode::SingleProcessDevelopment => "single_process_development",
+            }
+        });
+        let validation_policy_digest = {
+            let bytes = serde_jcs::to_vec(&validation_policy_document).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Agent validation policy is invalid",
+                )
+            })?;
+            let mut value = String::from("sha256:");
+            for byte in Sha256::digest(bytes) {
+                use std::fmt::Write as _;
+                write!(&mut value, "{byte:02x}")?;
+            }
+            value
+        };
+        let mut agent_cursor_hasher = Sha256::new();
+        agent_cursor_hasher.update(b"insight-agent-management-cursor-v1\0");
+        agent_cursor_hasher.update(cursor_signing_key);
+        app = app.merge(build_agent_management_router(AgentManagementApiState {
             auth: operator_auth,
-            repository: Arc::clone(&mcp_management),
-            policy: Arc::new(policy),
-            authoring: Arc::new(managed_mcp_revision.clone()),
-            readiness: Arc::new(managed_mcp_revision),
+            repository: Arc::clone(&agent_management),
+            run_service: service.clone(),
+            debug_stream_keep_alive_interval: config.runtime.sse_keep_alive_interval,
+            policy: Arc::new(AgentManagementPolicy {
+                validation_policy_digest,
+                cursor_signing_key: agent_cursor_hasher.finalize().into(),
+                max_prompt_files: config.management.limits.max_agent_prompt_files,
+                max_prompt_file_bytes: config.management.limits.max_agent_draft_bytes,
+                max_package_bytes: config.management.limits.max_agent_draft_bytes,
+                resolution_ttl: chrono::Duration::minutes(10),
+                debug_profiles,
+            }),
         }));
     }
     let mut mcp_profiles = McpProfileReport::default();
@@ -598,6 +799,9 @@ async fn main() -> MainResult<()> {
             service.begin_shutdown();
             mcp_discovery_runtime.shutdown().await;
             mcp_revision_runtime.shutdown().await;
+            provider_management_runtime.shutdown().await;
+            agent_debug_maintenance.shutdown().await;
+            management_observability.shutdown().await;
             mcp_oauth_maintenance.shutdown().await;
             mcp_server_task_maintenance.shutdown().await;
             service.shutdown(config.runtime.shutdown_grace_period).await?;
@@ -611,6 +815,9 @@ async fn main() -> MainResult<()> {
             let _ = http_shutdown.send(());
             mcp_discovery_runtime.shutdown().await;
             mcp_revision_runtime.shutdown().await;
+            provider_management_runtime.shutdown().await;
+            agent_debug_maintenance.shutdown().await;
+            management_observability.shutdown().await;
             mcp_oauth_maintenance.shutdown().await;
             mcp_server_task_maintenance.shutdown().await;
             tokio::time::timeout(config.runtime.shutdown_hard_deadline, async {
@@ -628,6 +835,9 @@ async fn main() -> MainResult<()> {
         self_abort = qualification_self_abort.wait() => {
             mcp_discovery_runtime.shutdown().await;
             mcp_revision_runtime.shutdown().await;
+            provider_management_runtime.shutdown().await;
+            agent_debug_maintenance.shutdown().await;
+            management_observability.shutdown().await;
             self_abort?;
             tracing::error!(
                 code = "QUALIFICATION_SELF_ABORT",
@@ -734,6 +944,64 @@ impl McpServerTaskMaintenanceRuntime {
 }
 
 impl Drop for McpServerTaskMaintenanceRuntime {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
+struct AgentDebugMaintenanceRuntime {
+    cancellation: CancellationToken,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl AgentDebugMaintenanceRuntime {
+    fn start(repository: Arc<dyn AgentManagementDurableRepository>, enabled: bool) -> Self {
+        const BATCH_SIZE: u32 = 256;
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let handle = enabled.then(|| {
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = task_cancellation.cancelled() => return,
+                        _ = interval.tick() => {}
+                    }
+                    match repository
+                        .cleanup_expired_agent_debug_sessions(chrono::Utc::now(), BATCH_SIZE)
+                        .await
+                    {
+                        Ok(expired) if expired >= u64::from(BATCH_SIZE) => {
+                            tokio::task::yield_now().await;
+                        }
+                        Ok(_) => {}
+                        Err(_) => tracing::warn!(
+                            code = "AGENT_DEBUG_RETENTION_UNAVAILABLE",
+                            "Agent Debug expiry and content-retention cleanup failed"
+                        ),
+                    }
+                }
+            })
+        });
+        Self {
+            cancellation,
+            handle,
+        }
+    }
+
+    async fn shutdown(&mut self) {
+        self.cancellation.cancel();
+        if let Some(handle) = self.handle.take() {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        }
+    }
+}
+
+impl Drop for AgentDebugMaintenanceRuntime {
     fn drop(&mut self) {
         self.cancellation.cancel();
         if let Some(handle) = &self.handle {
@@ -915,6 +1183,8 @@ async fn initialize_repository_and_live_run_stream(
     Arc<dyn McpRemoteTaskDurableRepository>,
     Arc<dyn McpServerTaskDurableRepository>,
     Arc<dyn McpManagementDurableRepository>,
+    Arc<dyn ProviderManagementDurableRepository>,
+    Arc<dyn AgentManagementDurableRepository>,
 )> {
     match config {
         HistoryConfig::Sqlite { path } => {
@@ -932,7 +1202,10 @@ async fn initialize_repository_and_live_run_stream(
             let mcp_oauth: Arc<dyn McpOAuthDurableRepository> = concrete.clone();
             let mcp_remote_tasks: Arc<dyn McpRemoteTaskDurableRepository> = concrete.clone();
             let mcp_server_tasks: Arc<dyn McpServerTaskDurableRepository> = concrete.clone();
-            let mcp_management: Arc<dyn McpManagementDurableRepository> = concrete;
+            let mcp_management: Arc<dyn McpManagementDurableRepository> = concrete.clone();
+            let provider_management: Arc<dyn ProviderManagementDurableRepository> =
+                concrete.clone();
+            let agent_management: Arc<dyn AgentManagementDurableRepository> = concrete;
             let broker = Arc::new(InMemoryLiveRunStreamBroker::new_with_limits(
                 run_stream.body_queue_capacity,
                 run_stream.control_queue_capacity,
@@ -951,6 +1224,8 @@ async fn initialize_repository_and_live_run_stream(
                 mcp_remote_tasks,
                 mcp_server_tasks,
                 mcp_management,
+                provider_management,
+                agent_management,
             ))
         }
         HistoryConfig::Postgres {
@@ -998,7 +1273,10 @@ async fn initialize_repository_and_live_run_stream(
             let mcp_oauth: Arc<dyn McpOAuthDurableRepository> = concrete.clone();
             let mcp_remote_tasks: Arc<dyn McpRemoteTaskDurableRepository> = concrete.clone();
             let mcp_server_tasks: Arc<dyn McpServerTaskDurableRepository> = concrete.clone();
-            let mcp_management: Arc<dyn McpManagementDurableRepository> = concrete;
+            let mcp_management: Arc<dyn McpManagementDurableRepository> = concrete.clone();
+            let provider_management: Arc<dyn ProviderManagementDurableRepository> =
+                concrete.clone();
+            let agent_management: Arc<dyn AgentManagementDurableRepository> = concrete;
             Ok((
                 production,
                 terminal_store,
@@ -1008,6 +1286,8 @@ async fn initialize_repository_and_live_run_stream(
                 mcp_remote_tasks,
                 mcp_server_tasks,
                 mcp_management,
+                provider_management,
+                agent_management,
             ))
         }
     }

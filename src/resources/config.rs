@@ -21,8 +21,7 @@ use super::{
 };
 
 const BUILTIN_PROVIDER_CATALOG: &str = include_str!("../../catalog/provider-catalog.yaml");
-const OPENAI_CHAT_ADAPTER_VERSION: &str = "2.1.0";
-const OPENAI_CHAT_WORKER_VERSION: &str = "openai-chat-adapter-2.1.0";
+use insight_resources::openai_chat::{OPENAI_CHAT_ADAPTER_VERSION, OPENAI_CHAT_WORKER_VERSION};
 
 pub fn load_model_registry(
     providers: &ProvidersConfig,

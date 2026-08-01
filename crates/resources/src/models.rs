@@ -1115,7 +1115,13 @@ enum ModelCredentialState {
 
 #[derive(Clone, Default)]
 pub struct ModelRegistry {
-    models: BTreeMap<ModelSelector, RegisteredModel>,
+    state: Arc<std::sync::RwLock<ModelRegistryState>>,
+}
+
+#[derive(Default)]
+struct ModelRegistryState {
+    current: BTreeMap<ModelSelector, RegisteredModel>,
+    archive: BTreeMap<(ModelSelector, String), RegisteredModel>,
 }
 
 impl ModelRegistry {
@@ -1193,25 +1199,33 @@ impl ModelRegistry {
     where
         M: ChatModel + 'static,
     {
-        if self.models.contains_key(&selector) {
+        let mut state = self.state.write().map_err(|_| {
+            CompileError::new("MODEL_REGISTRY_POISONED", "model registry lock is poisoned")
+        })?;
+        if state.current.contains_key(&selector) {
             return Err(CompileError::new(
                 "DUPLICATE_MODEL",
                 format!("model '{}' is already registered", selector.display_ref()),
             ));
         }
-        self.models.insert(
-            selector,
-            RegisteredModel {
-                model: Arc::new(model),
-                deployment,
-                credential,
-            },
+        let entry = RegisteredModel {
+            model: Arc::new(model),
+            deployment,
+            credential,
+        };
+        state.archive.insert(
+            (selector.clone(), entry.deployment.binding_hash().to_owned()),
+            entry.clone(),
         );
+        state.current.insert(selector, entry);
         Ok(())
     }
 
     pub fn resolve(&self, selector: &ModelSelector) -> Result<Arc<dyn ChatModel>, CompileError> {
-        let entry = self.models.get(selector).ok_or_else(|| {
+        let state = self.state.read().map_err(|_| {
+            CompileError::new("MODEL_REGISTRY_POISONED", "model registry lock is poisoned")
+        })?;
+        let entry = state.current.get(selector).ok_or_else(|| {
             CompileError::new(
                 "MODEL_NOT_FOUND",
                 format!("model '{}' is not registered", selector.display_ref()),
@@ -1240,13 +1254,48 @@ impl ModelRegistry {
         }
     }
 
+    pub fn resolve_versioned(
+        &self,
+        selector: &ModelSelector,
+        binding_hash: &str,
+    ) -> Result<Arc<dyn ChatModel>, CompileError> {
+        let state = self.state.read().map_err(|_| {
+            CompileError::new("MODEL_REGISTRY_POISONED", "model registry lock is poisoned")
+        })?;
+        let entry = state
+            .archive
+            .get(&(selector.clone(), binding_hash.to_owned()))
+            .ok_or_else(|| {
+                CompileError::new(
+                    "MODEL_REVISION_NOT_FOUND",
+                    format!(
+                        "model revision '{}' at '{}' is not registered",
+                        selector.display_ref(),
+                        binding_hash
+                    ),
+                )
+            })?;
+        match &entry.credential {
+            Some(ModelCredentialState::Missing { environment_variable }) => Err(CompileError::new(
+                "MODEL_SECRET_MISSING", format!("required environment variable '{environment_variable}' for provider route '{}' is missing", selector.provider()))),
+            Some(ModelCredentialState::Empty { environment_variable }) => Err(CompileError::new(
+                "MODEL_SECRET_EMPTY", format!("required environment variable '{environment_variable}' for provider route '{}' is empty", selector.provider()))),
+            Some(ModelCredentialState::Present) | None => Ok(entry.model.clone()),
+        }
+    }
+
     pub fn deployment_identity(
         &self,
         selector: &ModelSelector,
-    ) -> Result<&ModelDeploymentIdentity, CompileError> {
-        self.models
+    ) -> Result<ModelDeploymentIdentity, CompileError> {
+        self.state
+            .read()
+            .map_err(|_| {
+                CompileError::new("MODEL_REGISTRY_POISONED", "model registry lock is poisoned")
+            })?
+            .current
             .get(selector)
-            .map(|entry| &entry.deployment)
+            .map(|entry| entry.deployment.clone())
             .ok_or_else(|| {
                 CompileError::new(
                     "MODEL_NOT_FOUND",
@@ -1255,8 +1304,143 @@ impl ModelRegistry {
             })
     }
 
-    pub fn selectors(&self) -> impl Iterator<Item = &ModelSelector> {
-        self.models.keys()
+    pub fn selectors(&self) -> impl Iterator<Item = ModelSelector> {
+        self.state
+            .read()
+            .map(|state| state.current.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+    }
+
+    /// Atomically replaces every model route owned by one durable Provider.
+    /// Readers observe either the previous complete revision or the new one.
+    pub fn replace_provider_models<M>(
+        &self,
+        provider_id: &str,
+        registrations: Vec<(
+            ModelSelector,
+            ModelDeploymentIdentity,
+            Option<String>,
+            Option<String>,
+            M,
+        )>,
+    ) -> Result<(), CompileError>
+    where
+        M: ChatModel + 'static,
+    {
+        let mut replacement = Vec::with_capacity(registrations.len());
+        let mut selectors = BTreeSet::new();
+        for (selector, deployment, credential_environment_variable, credential_value, model) in
+            registrations
+        {
+            if selector.provider() != provider_id || !selectors.insert(selector.clone()) {
+                return Err(CompileError::new(
+                    "DUPLICATE_MODEL",
+                    "managed Provider replacement contains an invalid or duplicate selector",
+                ));
+            }
+            let credential =
+                credential_environment_variable.map(|environment_variable| match credential_value
+                    .as_deref()
+                {
+                    Some(value) if !value.trim().is_empty() => ModelCredentialState::Present,
+                    Some(_) => ModelCredentialState::Empty {
+                        environment_variable,
+                    },
+                    None => ModelCredentialState::Missing {
+                        environment_variable,
+                    },
+                });
+            replacement.push((
+                selector,
+                RegisteredModel {
+                    model: Arc::new(model),
+                    deployment,
+                    credential,
+                },
+            ));
+        }
+        let mut state = self.state.write().map_err(|_| {
+            CompileError::new("MODEL_REGISTRY_POISONED", "model registry lock is poisoned")
+        })?;
+        state
+            .current
+            .retain(|selector, _| selector.provider() != provider_id);
+        for (selector, entry) in replacement {
+            state.archive.insert(
+                (selector.clone(), entry.deployment.binding_hash().to_owned()),
+                entry.clone(),
+            );
+            state.current.insert(selector, entry);
+        }
+        Ok(())
+    }
+
+    /// Installs historical Provider revisions without changing current route
+    /// resolution. Existing exact identities are refreshed for secret rotation.
+    pub fn archive_provider_models<M>(
+        &self,
+        provider_id: &str,
+        registrations: Vec<(
+            ModelSelector,
+            ModelDeploymentIdentity,
+            Option<String>,
+            Option<String>,
+            M,
+        )>,
+    ) -> Result<(), CompileError>
+    where
+        M: ChatModel + 'static,
+    {
+        let mut archive = Vec::with_capacity(registrations.len());
+        let mut identities = BTreeSet::new();
+        for (selector, deployment, credential_environment_variable, credential_value, model) in
+            registrations
+        {
+            let identity = (selector.clone(), deployment.binding_hash().to_owned());
+            if selector.provider() != provider_id || !identities.insert(identity) {
+                return Err(CompileError::new(
+                    "DUPLICATE_MODEL",
+                    "Provider archive contains an invalid or duplicate exact model identity",
+                ));
+            }
+            let credential =
+                credential_environment_variable.map(|environment_variable| match credential_value
+                    .as_deref()
+                {
+                    Some(value) if !value.trim().is_empty() => ModelCredentialState::Present,
+                    Some(_) => ModelCredentialState::Empty {
+                        environment_variable,
+                    },
+                    None => ModelCredentialState::Missing {
+                        environment_variable,
+                    },
+                });
+            let hash = deployment.binding_hash().to_owned();
+            archive.push((
+                (selector, hash),
+                RegisteredModel {
+                    model: Arc::new(model),
+                    deployment,
+                    credential,
+                },
+            ));
+        }
+        let mut state = self.state.write().map_err(|_| {
+            CompileError::new("MODEL_REGISTRY_POISONED", "model registry lock is poisoned")
+        })?;
+        state.archive.extend(archive);
+        Ok(())
+    }
+
+    pub fn withdraw_provider(&self, provider_id: &str) -> Result<(), CompileError> {
+        let mut state = self.state.write().map_err(|_| {
+            CompileError::new("MODEL_REGISTRY_POISONED", "model registry lock is poisoned")
+        })?;
+        state
+            .current
+            .retain(|selector, _| selector.provider() != provider_id);
+        Ok(())
     }
 }
 
@@ -1278,6 +1462,66 @@ pub mod adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn registry_model(id: &str) -> crate::openai_chat::OpenAiChatModel {
+        crate::openai_chat::OpenAiChatModel::new(
+            None,
+            "https://models.example.test/v1".to_owned(),
+            id.to_owned(),
+            BTreeSet::new(),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap()
+    }
+
+    fn deployment(id: &str) -> ModelDeploymentIdentity {
+        ModelDeploymentIdentity::new("worker-v1", serde_json::json!({"id":id})).unwrap()
+    }
+
+    #[test]
+    fn cloned_model_registries_observe_atomic_provider_revision_replacement() {
+        let registry = ModelRegistry::default();
+        let clone = registry.clone();
+        let first = ModelSelector::new("managed", "model-a").unwrap();
+        registry
+            .replace_provider_models(
+                "managed",
+                vec![(
+                    first.clone(),
+                    deployment("a"),
+                    None,
+                    None,
+                    registry_model("model-a"),
+                )],
+            )
+            .unwrap();
+        assert!(clone.resolve(&first).is_ok());
+        let first_binding_hash = clone
+            .deployment_identity(&first)
+            .unwrap()
+            .binding_hash()
+            .to_owned();
+
+        let second = ModelSelector::new("managed", "model-b").unwrap();
+        registry
+            .replace_provider_models(
+                "managed",
+                vec![(
+                    second.clone(),
+                    deployment("b"),
+                    None,
+                    None,
+                    registry_model("model-b"),
+                )],
+            )
+            .unwrap();
+        assert!(clone.resolve(&first).is_err());
+        assert!(clone.resolve_versioned(&first, &first_binding_hash).is_ok());
+        assert_eq!(clone.deployment_identity(&second).unwrap(), deployment("b"));
+        clone.withdraw_provider("managed").unwrap();
+        assert!(registry.resolve(&second).is_err());
+    }
 
     #[test]
     fn model_selector_deserialization_preserves_validation_and_closed_fields() {

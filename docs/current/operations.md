@@ -29,68 +29,37 @@ MCP discovery worker 使用 durable claim/lease，running operation 的取消请
 同一事务写 body-free audit 和 bounded outbox evidence。`list_changed` 只把成功候选快照标记为 stale，
 不会改写 Draft、Revision、Deployment 或 Run。
 
-## Provider Catalog 与模型配置
+## Managed Agent 与 Provider rollout
 
-平台随版本发布只读的
-[`catalog/provider-catalog.yaml`](../../catalog/provider-catalog.yaml)，集中维护 Provider route、
-endpoint、adapter、默认凭据环境变量名和最小模型事实。Agent 直接使用
-`{provider, id}` selector；没有独立的模型别名列表、`models.yaml` 或模型级 `enabled`。
-Catalog 不保存 thinking、stream、tools、temperature 等调用选择。
+生产服务不再把 `agents.directory + agents.enabled` 或 `providers` extension 当作 live route。工作区
+Agent 和 [`catalog/provider-catalog.yaml`](../../catalog/provider-catalog.yaml) 只作为显式导入输入与
+template manifest；runtime 启动从 durable active Agent/Provider head 恢复 registry，不用文件覆盖。
 
-当前内置路由如下：
+Provider rollout 顺序必须是：create/Draft → 可选 discovery 与显式 model import → validation →
+必要的 connection test → immutable Revision publish → CAS activate。activate 只影响新的 Agent
+Deployment Resolution；升级使用该 Provider 的 Agent 时，还要为原 Definition 创建新 resolution、
+Deployment 并显式 activate Agent。不得期待 Provider active 切换自动重写 Agent。
 
-| Provider route | Endpoint | 默认凭据 |
-|---|---|---|
-| `dashscope-cn` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` |
-| `dashscope-intl` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` |
+Provider suspension 是紧急开关：保留 active pointer 和历史证据，但阻止新 admission 与尚未开始的
+外部调用；resume 不改变 pointer。DELETE active revision 只阻止新 binding。Retirement 不可逆并清除
+active route。credential value 在相同 `secret://` reference 下轮换不改变 revision hash；reference、
+slot 或 type 变化需要新 Revision。
 
-区域是 Provider 身份的一部分。Agent 必须显式选择 route；请求失败时不会从 `cn` 自动切换到
-`intl`。单 endpoint Provider 不需要额外 endpoint selector。只在发布已启用 Agent 且实际解析其
-模型引用时检查对应 secret，所以 Action-only 部署无需模型凭据。缺失和空 secret 分别 fail-closed，
-日志与 Deployment Revision identity 只包含环境变量名，不包含值。
+Agent rollout 顺序必须是：Draft → validation → Definition publish → Deployment resolution →
+Deployment create → CAS activate。publish/deploy 后先审阅 immutable evidence，再切 route。回滚是把
+active pointer PUT 到历史 Deployment；deactivate 删除 pointer；archive 原子撤下 public route并阻止
+编辑，restore 只回到 inactive。详细 API、ETag 和错误合同见
+[Agent 与 Provider 管理面](management.md)。
 
-不同账户或 Catalog 尚未收录的新模型可以继承内置 route：
+多 runtime 中数据库 head/fence 是权威；outbox/notification 只是加速。告警应关注 Provider registry
+projection lag、pending operation、debug session、suspension/retirement 以及 runtime 缺少 exact
+adapter/worker version 的 readiness 失败。Operator token、Draft/Prompt、debug input/output、Provider
+response body 和 secret value不得进入日志、metric label、audit 或 outbox。
 
-```yaml
-providers:
-  dashscope-cn-team-a:
-    extends: dashscope-cn
-    credential:
-      env: TEAM_A_DASHSCOPE_API_KEY
-    models:
-      qwen-new-model:
-        input: [text]
-```
-
-私有 OpenAI-compatible endpoint 使用显式自定义 route：
-
-```yaml
-providers:
-  company-llm:
-    type: open_ai_compatible
-    endpoint: https://llm.company.internal/v1
-    credential:
-      type: bearer
-      env: COMPANY_LLM_API_KEY
-    models:
-      vendor/internal-chat/v1:
-        input: [text, image]
-```
-
-自定义 route 必须声明 endpoint、bearer secret reference 和至少一个模型；模型能力是 operator
-assertion，并与扩展配置 digest 一起进入 Deployment Revision。扩展不能覆盖内置 route。需要组织
-级收窄时，另用可选治理策略：
-
-```yaml
-model_policy:
-  allow:
-    - provider: company-llm
-      id: vendor/internal-chat/v1
-```
-
-`model_policy` 只限制可用集合，不注册模型，也没有隐式默认列表。Provider/model、endpoint identity、
-adapter/version、Catalog/extension digest、非秘密 transport 与能力事实都会冻结到 Deployment
-Revision；secret 值不会进入 Plan、revision 或日志。
+PostgreSQL 在 Provider management outbox 成功插入后发送 schema-scoped opaque `NOTIFY`；payload 不含
+对象 ID 或业务字段。每个 runtime 在建立 listener 后先做一次完整 reconcile，收到任意 hint 后再次读取
+durable active/archive state。hint 丢失、重复、乱序或 listener 断开都不能改变结果；周期 safety poll
+负责最终收敛并尝试恢复 listener。SQLite management 只用于单进程开发，不提供跨进程通知。
 
 ## Run persistence policy
 

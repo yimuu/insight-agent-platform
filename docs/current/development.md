@@ -65,6 +65,8 @@ fail-closed evaluator；已完成的复现命令及正式证据路径保存在
 | `schemas/mcp-management-v1.json` | MCP Operator 管理请求的闭合 JSON Schema |
 | `schemas/mcp-management-v1.openapi.json` | 全部 MCP Operator 管理 endpoint 的 OpenAPI 3.1 合同 |
 | `schemas/mcp-management-v1.samples.json` | MCP 管理合法/非法 checked-in fixtures |
+| `schemas/agent-management-v1*.json` | Agent 管理 JSON Schema、OpenAPI 与正/负样例 |
+| `schemas/provider-management-v1*.json` | Provider 管理 JSON Schema、OpenAPI 与正/负样例 |
 | `agents/` | 随仓库交付的 Agent |
 | `tests/fixtures/dsl/` | DSL compiler 正向和负向 fixtures |
 | `crates/*/{src,tests}` | owner crate 的单元与合同测试 |
@@ -78,9 +80,10 @@ fail-closed evaluator；已完成的复现命令及正式证据路径保存在
 4. 更新对应 `docs/current/` 文档；
 5. 设计和迁移记录写入 `docs/archive/`，不要让历史示例重新成为正向输入。
 
-修改 Provider Catalog 时必须同步验证 Catalog digest、route/模型解析、官方 secret reference 和
-Deployment Revision non-interference；调用级参数不得下沉为 Catalog 默认值。添加自定义
-OpenAI-compatible 行为时，保持 Provider 身份与 adapter 协议分离。
+修改 Provider template catalog 时必须验证 manifest digest、显式 import 和“启动不注册 live route”；
+修改 durable Provider 时必须验证 route/模型解析、secret reference、Revision restore 与 Deployment
+non-interference。调用级参数不得下沉为 template 默认值；添加 OpenAI-compatible 行为时保持 Provider
+身份与 adapter 协议分离。
 
 修改 MCP wire 时必须同步 vendor schema provenance、bounded codec、Client/Server capability
 negotiation、stdio 与 Streamable HTTP tests，以及至少两个固定版本外部 SDK 的 interoperability
@@ -93,6 +96,21 @@ fixture。MCP schema、body、secret、tenant、SSRF、header injection 和 prom
 `TEST_POSTGRES_URL` 存在时对 SQLite 与
 PostgreSQL 16 执行同一 Draft、discovery、publish、activate、disable、retention、CAS、幂等和不可变
 Revision 合同；CI 缺少 PostgreSQL URL 会失败，不能静默降级为 SQLite-only 证据。
+
+修改 Agent 或 Provider 管理控制面时必须分别运行 API contract、根 HTTP E2E 和 storage parity tests：
+
+```bash
+cargo test -p insight-api agent_management
+cargo test --test agent_management_api
+cargo test -p insight-storage --test agent_management
+cargo test -p insight-api provider_management
+cargo test --test provider_management_api
+cargo test -p insight-storage --test provider_management
+```
+
+Definition publish、Deployment create 与 route activate 是三个独立事务边界；测试不得用旧 Graph API 或
+public historical Deployment admission 绕过它们。Provider/MCP active 变化不得改写已有 binding hash，
+suspension/disable/archive 必须同时覆盖 admission 与 leaf-start fence。
 `schemas/run-stream-v1.samples.json` 必须覆盖 `run-stream/v1` 的全部 27 个事件，并由
 `insight-engine` 测试逐条按 `schemas/run-stream-v1.json` 验证；样本不得包含 interaction body、
 credential、requestState 或远程原始错误。

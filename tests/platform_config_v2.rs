@@ -88,6 +88,16 @@ fn mcp_config_is_strict_bounded_and_secret_backed() {
         "{}{}",
         base_yaml("  mode: disabled"),
         r#"
+management:
+  version: 1
+  enabled: true
+  operator_credentials:
+    - identity: platform-operator
+      token_env: MCP_OPERATOR_TOKEN
+      capabilities: [mcp.server.read, mcp.server.write, mcp.server.discover, mcp.server.publish]
+  provider_secret_resolver:
+    type: environment_reference
+    allowed_names: [PROVIDER_TOKEN]
 mcp:
   version: 2
   protocol:
@@ -98,10 +108,6 @@ mcp:
       enabled: true
       discovery_workers: 4
       max_pending_discoveries: 128
-      operator_credentials:
-        - identity: platform-operator
-          token_env: MCP_OPERATOR_TOKEN
-          capabilities: [mcp.server.read, mcp.server.write, mcp.server.discover, mcp.server.publish]
     secret_encryption:
       active_key_version: v1
       keyring_env: MCP_SECRET_KEYRING
@@ -140,16 +146,37 @@ mcp:
     assert!(config.mcp.client.management_api.enabled);
     assert_eq!(config.mcp.client.management_api.discovery_workers, 4);
     assert!(config
+        .management
+        .provider_secret_resolver_allowed_names
+        .contains("PROVIDER_TOKEN"));
+    assert!(config
         .mcp
         .client
         .secret_resolver
         .allowed_names
         .contains("MCP_ENGINEERING_TOKEN"));
-    assert!(!format!(
-        "{:?}",
-        config.mcp.client.management_api.operator_credentials
-    )
-    .contains("operator-secret"));
+    assert!(!format!("{:?}", config.management.operator_credentials).contains("operator-secret"));
+
+    let invalid_provider_secret = yaml.replace("PROVIDER_TOKEN", "provider-token");
+    let (_directory, path) = write_config(&invalid_provider_secret);
+    assert_eq!(
+        load(
+            &path,
+            BTreeMap::from([
+                (
+                    "MCP_OPERATOR_TOKEN".to_owned(),
+                    "operator-secret".to_owned()
+                ),
+                (
+                    "MCP_SECRET_KEYRING".to_owned(),
+                    format!(r#"{{"v1":"{}"}}"#, "11".repeat(32))
+                ),
+            ])
+        )
+        .unwrap_err()
+        .code(),
+        "PLATFORM_MANAGEMENT_INVALID"
+    );
 
     let invalid = yaml.replace(
         "      max_catalog_items: 4096",
@@ -212,7 +239,7 @@ mcp:
 }
 
 #[test]
-fn enabled_mcp_management_requires_closed_operator_and_secret_policies() {
+fn legacy_mcp_operator_credentials_are_rejected_by_the_shared_management_cutover() {
     let yaml = format!(
         "{}{}",
         base_yaml("  mode: disabled"),
@@ -234,8 +261,7 @@ mcp:
     );
     let (_directory, path) = write_config(&yaml);
     let error = load(&path, BTreeMap::new()).unwrap_err();
-    assert_eq!(error.code(), "PLATFORM_MCP_INVALID");
-    assert!(error.to_string().contains("Operator authentication"));
+    assert_eq!(error.code(), "PLATFORM_CONFIG_INVALID");
 }
 
 #[test]

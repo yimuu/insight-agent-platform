@@ -9,6 +9,13 @@
 
 ### Added
 
+- SQLite/PostgreSQL 等价的 Agent 与 Provider Operator 管理面：Agent Draft、Validation、Definition、
+  Deployment Resolution/Revision、Activate、Archive/Restore、Debug Session，以及 Provider Draft、
+  Discovery、显式模型导入、Connection Test、Validation、Revision、Activate、Suspension/Resume、
+  Retirement；附带严格 JSON Schema/OpenAPI、CLI 导入和 clean-cut migration 工具。
+- 多 runtime Provider Revision registry 投影：PostgreSQL body-free opaque notification 只用于唤醒，
+  generation poll 与 durable active/archive state 保持权威；Agent Deployment 固定 exact Provider、
+  MCP、Action、Retrieval、Subflow 与 worker evidence。
 - 完整 MCP `2026-07-28` modern Host/Client 与 Server profiles，覆盖 Tools、Resources、Prompts、
   Completion、Subscriptions、Elicitation、stdio、Streamable HTTP 和 HTTP Authorization；
   官方 Tasks extension 与 `2025-11-25` legacy client 作为独立协商 profile。
@@ -32,6 +39,11 @@
 
 ### Changed
 
+- Graph/YAML authoring 统一进入 managed Agent Draft；semantic edit、Definition publish、Deployment
+  create 和 active route 切换不再隐式合并。普通历史 Deployment Run 路由与旧
+  `/v1/graph-agents/**` clean-cut 删除。
+- 静态 Agent 目录与 `providers.extensions` 只作为显式导入源；服务启动不再用文件状态覆盖 durable
+  Agent/Provider head。MCP/Provider discovery 均不提供 wildcard 或 auto-import。
 - Agent `llm.model` clean-cut 为严格的 `{provider, id}` selector；删除模型业务别名、必需的
   `models.yaml` / `models.config` 和公共 `json_object_output` 配置。结构化 `response` 现在始终
   使用平台 Prompt 策略与本地 JSON/Schema 校验；Provider Catalog 和扩展不再声明或自动启用
@@ -63,6 +75,9 @@
 
 ### Security
 
+- Agent/Provider/MCP 管理路由使用共享但 capability 闭合的 Operator credential，mutation 强制
+  request ID/ETag/idempotency，并在同一事务提交 body-free audit/outbox；Provider credential 只接受
+  独立 `management.provider_secret_resolver` 白名单中的 reference。
 - MCP secret 与 OAuth token 仅通过 Secret 引用和版本化 envelope encryption 使用；远程 metadata、
   resource/prompt/tool content、stderr、request state 与用户响应均经过边界校验、隔离和脱敏，
   不成为 Plan、revision identity 或默认日志中的安全权威。

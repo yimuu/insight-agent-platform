@@ -211,6 +211,24 @@ async fn management_auth_strict_contract_cursor_and_rejection_audit_fail_closed(
         .unwrap();
     assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
 
+    let duplicate_key = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/admin/mcp/servers")
+                .header(header::AUTHORIZATION, "Bearer operator-token")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-request-id", "duplicate-mcp-key")
+                .body(Body::from(
+                    r#"{"server_id":"first","server_id":"second","display_name":"Duplicate","draft":{}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate_key.status(), StatusCode::BAD_REQUEST);
+
     let created = app
         .clone()
         .oneshot(request(

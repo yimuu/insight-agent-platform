@@ -88,8 +88,9 @@ use crate::{
         estimated_json_tokens, flat_summary_value, normalized_summary_entries,
         qualification_summary_delay_from_environment, summary_preview, ConversationAttachedTurn,
         ConversationDetachedTurn, ConversationMessagePageView, ConversationMessageView,
-        ConversationVisibilityGuard, RunPersistenceCapability, TerminalAttachedRun,
-        TerminalOnlyRunConfig, TerminalOnlyRunEngine, TerminalOnlyStore, SUMMARY_MAX_ENTRIES,
+        ConversationVisibilityGuard, RunPersistenceCapability, TerminalAdmissionAuthority,
+        TerminalAttachedRun, TerminalOnlyRunConfig, TerminalOnlyRunEngine, TerminalOnlyStore,
+        SUMMARY_MAX_ENTRIES,
     },
 };
 
@@ -369,6 +370,28 @@ impl DeployedAgentCatalog {
         }
         state.deployment_archive.insert(deployment, agent);
         Ok(())
+    }
+
+    fn activate_archived(&self, deployment_revision_id: &str) -> Result<(), ServiceError> {
+        let mut state = self.write();
+        let deployment = state
+            .deployment_archive
+            .get(deployment_revision_id)
+            .cloned()
+            .ok_or_else(|| {
+                ServiceError::new(
+                    "AGENT_DEPLOYMENT_NOT_FOUND",
+                    "managed deployment is not installed in the runtime archive",
+                )
+            })?;
+        state
+            .current_by_agent_id
+            .insert(deployment.published().metadata().id.clone(), deployment);
+        Ok(())
+    }
+
+    fn withdraw_current(&self, agent_id: &str) {
+        self.write().current_by_agent_id.remove(agent_id);
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, DeployedAgentCatalogState> {
@@ -1053,6 +1076,28 @@ fn require_default_full_tenant(tenant_id: &str) -> Result<(), ServiceError> {
     }
 }
 
+const ADMIN_DEBUG_RUN_PREFIX: &str = "debugrun_";
+
+fn is_admin_debug_run_id(value: &str) -> bool {
+    value.starts_with(ADMIN_DEBUG_RUN_PREFIX)
+}
+
+fn admin_debug_run_not_found() -> ServiceError {
+    ServiceError::new("AGENT_DEBUG_RUN_NOT_FOUND", "Debug Run was not found")
+}
+
+fn admin_debug_run_id(value: &str) -> Result<RunId, ServiceError> {
+    if !is_admin_debug_run_id(value)
+        || value.len() > 128
+        || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(admin_debug_run_not_found());
+    }
+    RunId::new(value.to_owned()).map_err(|_| admin_debug_run_not_found())
+}
+
 fn validate_full_conversation_identity(value: &str) -> Result<(), ServiceError> {
     if value.is_empty()
         || value.len() > 256
@@ -1168,6 +1213,49 @@ pub struct GraphPublication {
     pub deployment_revision_id: String,
     pub semantic_hash: String,
     pub risks: Vec<DeploymentRiskDiagnostic>,
+}
+
+/// Opaque, exact deployment proposal produced from one immutable managed
+/// Definition and one durable dependency-head snapshot.
+#[derive(Clone)]
+pub struct ManagedDeploymentCandidate {
+    deployed: Arc<DeployedAgent>,
+    dependency_heads: Vec<PublicationHead>,
+}
+
+impl ManagedDeploymentCandidate {
+    pub fn versioned_plan(&self) -> &VersionedPlan {
+        self.deployed.versioned_plan()
+    }
+
+    pub fn dependency_heads(&self) -> &[PublicationHead] {
+        &self.dependency_heads
+    }
+
+    pub fn resolved_bindings(&self) -> &Value {
+        durable_model_adapter::versioned_plan_resolved_bindings(self.deployed.versioned_plan())
+    }
+
+    pub fn worker_contracts(&self) -> &Value {
+        durable_model_adapter::versioned_plan_worker_contracts(self.deployed.versioned_plan())
+    }
+
+    pub fn risks(&self) -> &[DeploymentRiskDiagnostic] {
+        self.deployed.risk_diagnostics()
+    }
+
+    /// Debug requires an administrator-only interaction authority. Until one
+    /// is configured, Plans that could create user-visible human/signal waits
+    /// are rejected before temporary deployment installation.
+    pub fn requires_interaction_authority(&self) -> bool {
+        self.deployed.published().plan().nodes().iter().any(|node| {
+            matches!(
+                node.kind(),
+                insight_engine::plan::NodeKind::HumanTask(_)
+                    | insight_engine::plan::NodeKind::WaitSignal(_)
+            )
+        })
+    }
 }
 
 /// Closed recovery policy exposed by the production API. Even when compatible
@@ -1609,6 +1697,12 @@ pub trait RuntimeReadinessProbe: Send + Sync {
     async fn check_readiness(&self, timeout: Duration) -> Result<(), ServiceError>;
 }
 
+/// Adds bounded-cardinality process metrics owned by optional control-plane
+/// components without coupling the public API router to their repositories.
+pub trait RuntimeMetricsSource: Send + Sync {
+    fn prometheus_metrics(&self) -> String;
+}
+
 /// Supplies fail-closed MCP kill-switch evidence for one immutable Agent
 /// deployment. The Run repository rechecks this evidence in its admission
 /// transaction; this process-local read is not the final safety boundary.
@@ -1617,6 +1711,17 @@ pub trait McpRunAdmissionAuthority: Send + Sync {
     async fn active_fences(
         &self,
         server_ids: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, u64>, ServiceError>;
+}
+
+/// Supplies fail-closed Provider suspension evidence for an immutable Agent
+/// deployment. Full-persistence admission rechecks the returned generations
+/// in the Run creation transaction.
+#[async_trait]
+pub trait ProviderRunAdmissionAuthority: Send + Sync {
+    async fn enabled_fences(
+        &self,
+        provider_ids: &BTreeSet<String>,
     ) -> Result<BTreeMap<String, u64>, ServiceError>;
 }
 
@@ -1665,7 +1770,9 @@ struct RunServiceInner {
     full_conversation_summary_jobs: Mutex<BTreeMap<String, bool>>,
     full_conversation_summary_delay: RwLock<Duration>,
     readiness_probes: RwLock<Vec<Arc<dyn RuntimeReadinessProbe>>>,
+    metrics_sources: RwLock<Vec<Arc<dyn RuntimeMetricsSource>>>,
     mcp_run_admission_authority: RwLock<Option<Arc<dyn McpRunAdmissionAuthority>>>,
+    provider_run_admission_authority: RwLock<Option<Arc<dyn ProviderRunAdmissionAuthority>>>,
 }
 
 impl RunService {
@@ -1936,7 +2043,9 @@ impl RunService {
                 full_conversation_summary_jobs: Mutex::new(BTreeMap::new()),
                 full_conversation_summary_delay: RwLock::new(Duration::ZERO),
                 readiness_probes: RwLock::new(Vec::new()),
+                metrics_sources: RwLock::new(Vec::new()),
                 mcp_run_admission_authority: RwLock::new(None),
+                provider_run_admission_authority: RwLock::new(None),
             }),
         };
         if durable_coordinator_enabled {
@@ -1976,6 +2085,29 @@ impl RunService {
         Ok(())
     }
 
+    pub fn add_metrics_source(
+        &self,
+        source: Arc<dyn RuntimeMetricsSource>,
+    ) -> Result<(), ServiceError> {
+        if !self.inner.accepting.load(Ordering::Acquire) {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_STOPPING",
+                "Run service is stopping",
+            ));
+        }
+        self.inner
+            .metrics_sources
+            .write()
+            .map_err(|_| {
+                ServiceError::new(
+                    "RUN_SERVICE_UNAVAILABLE",
+                    "runtime metrics registry is unavailable",
+                )
+            })?
+            .push(source);
+        Ok(())
+    }
+
     pub fn set_mcp_run_admission_authority(
         &self,
         authority: Arc<dyn McpRunAdmissionAuthority>,
@@ -2000,6 +2132,36 @@ impl RunService {
             return Err(ServiceError::new(
                 "RUN_SERVICE_CONFIG_INVALID",
                 "MCP Run admission authority is already installed",
+            ));
+        }
+        *installed = Some(authority);
+        Ok(())
+    }
+
+    pub fn set_provider_run_admission_authority(
+        &self,
+        authority: Arc<dyn ProviderRunAdmissionAuthority>,
+    ) -> Result<(), ServiceError> {
+        if !self.inner.accepting.load(Ordering::Acquire) {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_STOPPING",
+                "Run service is stopping",
+            ));
+        }
+        let mut installed = self
+            .inner
+            .provider_run_admission_authority
+            .write()
+            .map_err(|_| {
+                ServiceError::new(
+                    "RUN_SERVICE_UNAVAILABLE",
+                    "Provider Run admission authority is unavailable",
+                )
+            })?;
+        if installed.is_some() {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_CONFIG_INVALID",
+                "Provider Run admission authority is already installed",
             ));
         }
         *installed = Some(authority);
@@ -2485,6 +2647,11 @@ impl RunService {
         if let Some(terminal) = self.terminal_engine() {
             output.push_str(&terminal.prometheus_metrics());
         }
+        if let Ok(sources) = self.inner.metrics_sources.read() {
+            for source in sources.iter() {
+                output.push_str(&source.prometheus_metrics());
+            }
+        }
         output
     }
 
@@ -2650,6 +2817,148 @@ impl RunService {
         graph: GraphAuthorDocument,
     ) -> Result<GraphPublication, ServiceError> {
         self.publish_graph_inner(agent_id, graph, None).await
+    }
+
+    /// Resolves a managed Definition against one durable catalog snapshot but
+    /// does not install or activate anything. The returned candidate can be
+    /// persisted as immutable Resolution evidence and resolved again at the
+    /// Deployment transaction boundary to detect dependency changes.
+    pub async fn resolve_managed_deployment(
+        &self,
+        published: Arc<PublishedAgent>,
+    ) -> Result<ManagedDeploymentCandidate, ServiceError> {
+        if !self.inner.accepting.load(Ordering::Acquire) {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_STOPPING",
+                "Run service is stopping",
+            ));
+        }
+        let resolver = self
+            .inner
+            .graph_publication_resolver
+            .as_ref()
+            .ok_or_else(|| {
+                ServiceError::new(
+                    "AGENT_DEPLOYMENT_RESOLUTION_UNAVAILABLE",
+                    "managed Agent deployment resolution is not configured",
+                )
+            })?;
+        let durable_catalog = self
+            .inner
+            .repository
+            .load_versioned_plan_catalog()
+            .await
+            .map_err(|_| {
+                ServiceError::new(
+                    "AGENT_DEPLOYMENT_RESOLUTION_UNAVAILABLE",
+                    "managed deployment could not load durable dependency routes",
+                )
+            })?;
+        let (subflow_candidates, dependency_heads) = durable_publication_subflows(
+            &published,
+            &self.inner.agents,
+            &self.inner.workers,
+            &durable_catalog,
+        )?;
+        let subflows =
+            subflow_registry_for_available(&published, subflow_candidates).map_err(|_| {
+                ServiceError::new(
+                    "AGENT_DEPLOYMENT_RESOLUTION_INVALID",
+                    "managed deployment cannot link its subflow contracts",
+                )
+            })?;
+        let deployed = Arc::new(
+            DeployedAgent::publish_with_persistence_policy(
+                published,
+                resolver.as_ref(),
+                subflows,
+                self.inner.config.graph_persistence_policy,
+            )
+            .map_err(|_| {
+                ServiceError::new(
+                    "AGENT_DEPLOYMENT_RESOLUTION_INVALID",
+                    "managed deployment cannot resolve exact dependencies",
+                )
+            })?,
+        );
+        if self.inner.config.deployment_mode == RunServiceDeploymentMode::Production
+            && self.inner.live_run_stream_broker.deployment_capability()
+                != LiveRunStreamBrokerCapability::Shared
+            && has_public_streaming_source(deployed.published())
+        {
+            return Err(ServiceError::new(
+                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER,
+                "production managed Agent with public streaming sources requires a shared live Run stream broker",
+            ));
+        }
+        if has_public_llm_streaming_source(deployed.published())
+            && !self.inner.workers.supports_public_llm_response()
+        {
+            return Err(ServiceError::new(
+                "AGENT_DEPLOYMENT_RESOLUTION_INVALID",
+                "managed Agent requires a live-response-capable LLM worker",
+            ));
+        }
+        if !deployed.workers_available(self.inner.workers.as_ref()) {
+            return Err(ServiceError::new(
+                "AGENT_DEPLOYMENT_RESOLUTION_INVALID",
+                "managed Agent requires an unavailable exact worker version",
+            ));
+        }
+        Ok(ManagedDeploymentCandidate {
+            deployed,
+            dependency_heads,
+        })
+    }
+
+    /// Adds a transactionally installed managed Deployment to the process
+    /// archive. This never changes the current public route.
+    pub fn install_managed_deployment_archive(
+        &self,
+        candidate: ManagedDeploymentCandidate,
+    ) -> Result<(), ServiceError> {
+        self.inner.agents.install_archive(candidate.deployed)
+    }
+
+    /// Projects a successful durable route CAS into the process-local current
+    /// catalog. Durable recovery remains authoritative across restarts.
+    pub fn activate_managed_deployment_runtime(
+        &self,
+        deployment_revision_id: &str,
+    ) -> Result<(), ServiceError> {
+        self.inner.agents.activate_archived(deployment_revision_id)
+    }
+
+    pub fn withdraw_managed_agent_runtime(&self, agent_id: &str) {
+        self.inner.agents.withdraw_current(agent_id);
+    }
+
+    /// Reconciles one process-local route after a durable management CAS.
+    /// Missing heads withdraw the route; present heads restore exact archived
+    /// dependencies from the durable catalog before publishing it locally.
+    pub async fn refresh_managed_agent_route(&self, agent_id: &str) -> Result<(), ServiceError> {
+        let catalog = self
+            .inner
+            .repository
+            .load_versioned_plan_catalog()
+            .await
+            .map_err(|_| {
+                ServiceError::new(
+                    "AGENT_ROUTE_REFRESH_UNAVAILABLE",
+                    "durable Agent route could not be loaded",
+                )
+            })?;
+        let Some(head) = catalog
+            .heads()
+            .iter()
+            .find(|head| head.agent_id() == agent_id)
+        else {
+            self.inner.agents.withdraw_current(agent_id);
+            return Ok(());
+        };
+        let deployment =
+            restore_persisted_head(&self.inner.agents, &self.inner.workers, &catalog, head)?;
+        self.inner.agents.install_current(deployment)
     }
 
     /// Applies a closed semantic edit transaction to the current durable Graph
@@ -3038,23 +3347,23 @@ impl RunService {
         input: Value,
         request: RequestMetadata,
     ) -> Result<RunRecord, ServiceError> {
-        if let Some(agent) = self
-            .inner
-            .agents
-            .get(agent_id)
-            .filter(|agent| agent.persistence_mode() == PersistenceMode::TerminalOnly)
-        {
-            self.mcp_run_admission_fences(&agent).await?;
+        let (current, head) = self.resolve_durable_alias(agent_id).await?;
+        if current.persistence_mode() == PersistenceMode::TerminalOnly {
+            let agent = current;
+            let authority = self
+                .terminal_admission_authority(&agent, Some(head))
+                .await?;
             return self
                 .terminal_engine()
                 .ok_or_else(terminal_only_not_installed)?
-                .create_detached_for_tenant(
+                .create_detached_for_tenant_with_authority(
                     tenant_id,
-                    agent_id,
+                    agent,
                     input,
                     request
                         .request_id
                         .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
+                    authority,
                 )
                 .await;
         }
@@ -3108,18 +3417,18 @@ impl RunService {
                     && agent.persistence_mode() == PersistenceMode::TerminalOnly
             })
         {
-            self.mcp_run_admission_fences(&agent).await?;
+            let authority = self.terminal_admission_authority(&agent, None).await?;
             return self
                 .terminal_engine()
                 .ok_or_else(terminal_only_not_installed)?
-                .create_detached_from_deployment(
+                .create_detached_for_tenant_with_authority(
                     tenant_id,
-                    agent_id,
-                    deployment_revision_id,
+                    agent,
                     input,
                     request
                         .request_id
                         .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
+                    authority,
                 )
                 .await;
         }
@@ -3147,6 +3456,126 @@ impl RunService {
             )
             .await?;
         self.inner.record(&projection).await
+    }
+
+    /// Admit an administrator-only Debug Run against one exact immutable
+    /// Deployment. Debug identities use a disjoint namespace and are never
+    /// resolved through the mutable public Agent route.
+    pub async fn create_admin_debug_detached_from_deployment(
+        &self,
+        agent_id: &str,
+        deployment_revision_id: &str,
+        debug_run_id: &str,
+        input: Value,
+        request: RequestMetadata,
+    ) -> Result<RunRecord, ServiceError> {
+        let run_id = admin_debug_run_id(debug_run_id)?;
+        let agent = self
+            .inner
+            .load_exact_durable_deployment(deployment_revision_id)
+            .await?;
+        if agent.published().metadata().id != agent_id {
+            return Err(ServiceError::new(
+                "AGENT_DEBUG_SOURCE_NOT_FOUND",
+                "Debug deployment was not found for this Agent",
+            ));
+        }
+        if agent.persistence_mode() == PersistenceMode::TerminalOnly {
+            self.mcp_run_admission_fences(&agent).await?;
+            self.provider_run_admission_fences(&agent).await?;
+            return self
+                .terminal_engine()
+                .ok_or_else(terminal_only_not_installed)?
+                .create_admin_debug_detached_from_deployment(
+                    agent_id,
+                    deployment_revision_id,
+                    run_id,
+                    input,
+                    request
+                        .request_id
+                        .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
+                )
+                .await;
+        }
+        let (projection, _, _) = self
+            .create_run_with_agent(
+                agent,
+                input,
+                request,
+                PublicRunAttachment::Detached,
+                false,
+                None,
+                Some(run_id),
+                None,
+            )
+            .await?;
+        self.inner.record(&projection).await
+    }
+
+    /// Open an admin-only `run-stream/v1` projection for a Debug Run. The
+    /// durable snapshot is authoritative, so this remains usable after a
+    /// process restart even though there is no public replay endpoint.
+    pub async fn open_admin_debug_stream(
+        &self,
+        debug_run_id: &str,
+    ) -> Result<AnyAttachedRun, ServiceError> {
+        let run_id = admin_debug_run_id(debug_run_id)?;
+        let Some(projection) = self.inner.repository.load_run(&run_id).await? else {
+            let attached = self
+                .terminal_engine()
+                .ok_or_else(admin_debug_run_not_found)?
+                .open_admin_debug_stream(run_id.as_str())
+                .await
+                .map_err(|_| admin_debug_run_not_found())?;
+            return Ok(AnyAttachedRun::TerminalOnly(attached));
+        };
+        let receiver = self.inner.open_subscription(&run_id);
+        Ok(AnyAttachedRun::Full(AttachedRun {
+            run_id: run_id.as_str().to_owned(),
+            response_id: projection.response_id().to_owned(),
+            request_id: projection.request_id().to_owned(),
+            subscription: RunSubscription {
+                run_id: run_id.as_str().to_owned(),
+                run_id_model: run_id.clone(),
+                receiver,
+                owner: Arc::downgrade(&self.inner),
+                position: None,
+                last_seq: 0,
+                terminal: false,
+            },
+            live_run_stream: Box::new(ReplayWithoutLiveTail { run_id }),
+            live_run_stream_broker: Arc::clone(&self.inner.live_run_stream_broker),
+            terminal_barrier_timeout: self.inner.config.terminal_barrier_timeout,
+            outbound_write_timeout: self.inner.config.outbound_write_timeout,
+            conversation_privacy: None,
+        }))
+    }
+
+    pub async fn get_admin_debug_run(&self, debug_run_id: &str) -> Result<RunRecord, ServiceError> {
+        let run_id = admin_debug_run_id(debug_run_id)?;
+        if let Some(projection) = self.inner.repository.load_run(&run_id).await? {
+            return self.inner.record(&projection).await;
+        }
+        self.terminal_engine()
+            .ok_or_else(admin_debug_run_not_found)?
+            .get_admin_debug_run(run_id.as_str())
+            .await
+            .map_err(|_| admin_debug_run_not_found())
+    }
+
+    pub async fn cancel_admin_debug_run(
+        &self,
+        debug_run_id: &str,
+    ) -> Result<RunRecord, ServiceError> {
+        let run_id = admin_debug_run_id(debug_run_id)?;
+        if self.inner.repository.load_run(&run_id).await?.is_some() {
+            return self.cancel_model(run_id).await;
+        }
+        self.terminal_engine()
+            .ok_or_else(admin_debug_run_not_found)?
+            .cancel_admin_debug_run(run_id.as_str())
+            .await
+            .map_err(|_| admin_debug_run_not_found())
     }
 
     pub async fn create_attached(
@@ -3197,23 +3626,22 @@ impl RunService {
         input: Value,
         request: RequestMetadata,
     ) -> Result<AnyAttachedRun, ServiceError> {
-        if let Some(agent) = self
-            .inner
-            .agents
-            .get(agent_id)
-            .filter(|agent| agent.persistence_mode() == PersistenceMode::TerminalOnly)
-        {
-            self.mcp_run_admission_fences(&agent).await?;
+        let (agent, head) = self.resolve_durable_alias(agent_id).await?;
+        if agent.persistence_mode() == PersistenceMode::TerminalOnly {
+            let authority = self
+                .terminal_admission_authority(&agent, Some(head))
+                .await?;
             let attached = self
                 .terminal_engine()
                 .ok_or_else(terminal_only_not_installed)?
-                .create_attached(
+                .create_attached_with_authority(
                     tenant_id,
-                    agent_id,
+                    agent,
                     input,
                     request
                         .request_id
                         .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
+                    authority,
                 )
                 .await?;
             return Ok(AnyAttachedRun::TerminalOnly(attached));
@@ -3330,6 +3758,53 @@ impl RunService {
         Ok(fences)
     }
 
+    async fn provider_run_admission_fences(
+        &self,
+        agent: &DeployedAgent,
+    ) -> Result<BTreeMap<String, u64>, ServiceError> {
+        let provider_ids = agent.managed_provider_ids();
+        if provider_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let authority = self
+            .inner
+            .provider_run_admission_authority
+            .read()
+            .map_err(|_| {
+                ServiceError::new(
+                    "RUN_SERVICE_UNAVAILABLE",
+                    "Provider Run admission authority is unavailable",
+                )
+            })?
+            .clone()
+            .ok_or_else(|| {
+                ServiceError::new(
+                    "PROVIDER_SUSPENDED",
+                    "Provider route is not operational for Run admission",
+                )
+            })?;
+        let fences = authority.enabled_fences(&provider_ids).await?;
+        if fences.keys().ne(provider_ids.iter()) {
+            return Err(ServiceError::new(
+                "PROVIDER_SUSPENDED",
+                "Provider route is not operational for Run admission",
+            ));
+        }
+        Ok(fences)
+    }
+
+    async fn terminal_admission_authority(
+        &self,
+        agent: &DeployedAgent,
+        publication_head: Option<PublicationHead>,
+    ) -> Result<TerminalAdmissionAuthority, ServiceError> {
+        Ok(TerminalAdmissionAuthority {
+            publication_head,
+            mcp_server_fences: self.mcp_run_admission_fences(agent).await?,
+            provider_fences: self.provider_run_admission_fences(agent).await?,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn create_run_with_agent(
         &self,
@@ -3350,6 +3825,7 @@ impl RunService {
         ServiceError,
     > {
         let expected_mcp_server_fences = self.mcp_run_admission_fences(&agent).await?;
+        let expected_provider_fences = self.provider_run_admission_fences(&agent).await?;
         if self.inner.config.deployment_mode == RunServiceDeploymentMode::Production
             && self.inner.live_run_stream_broker.deployment_capability()
                 != LiveRunStreamBrokerCapability::Shared
@@ -3437,6 +3913,7 @@ impl RunService {
         };
         let command =
             command.with_expected_mcp_server_fences(expected_mcp_server_fences.clone())?;
+        let command = command.with_expected_provider_fences(expected_provider_fences.clone())?;
         let command = match full_conversation {
             Some(conversation) => command.with_full_conversation(conversation)?,
             None => command,
@@ -3457,6 +3934,14 @@ impl RunService {
                     return Err(ServiceError::new(
                         "MCP_SERVER_DISABLED",
                         "MCP Server was disabled during Run admission",
+                    ));
+                }
+                if !expected_provider_fences.is_empty()
+                    && self.provider_run_admission_fences(&agent).await? != expected_provider_fences
+                {
+                    return Err(ServiceError::new(
+                        "PROVIDER_SUSPENDED",
+                        "Provider was suspended during Run admission",
                     ));
                 }
                 return Err(if alias_admission {
@@ -4161,6 +4646,9 @@ impl RunService {
         user_id: Option<&str>,
         run_id: &str,
     ) -> Result<RunRecord, ServiceError> {
+        if is_admin_debug_run_id(run_id) {
+            return Err(ServiceError::new("RUN_NOT_FOUND", "Run not found"));
+        }
         let run_id = RunId::new(run_id.to_owned())
             .map_err(|_| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
         if let Some(projection) = self.inner.repository.load_run(&run_id).await? {
@@ -4266,11 +4754,7 @@ impl RunService {
         agent_id: &str,
         request_id: &str,
     ) -> Result<insight_durable::terminal_store::Conversation, ServiceError> {
-        let agent = self
-            .inner
-            .agents
-            .get(agent_id)
-            .ok_or_else(|| ServiceError::new("AGENT_NOT_FOUND", "agent not found"))?;
+        let (agent, _) = self.resolve_durable_alias(agent_id).await?;
         if agent.persistence_mode() == PersistenceMode::TerminalOnly {
             return self
                 .terminal_engine()
@@ -4415,15 +4899,25 @@ impl RunService {
             .inner
             .load_exact_durable_deployment(conversation.deployment_revision_id.as_str())
             .await?;
-        self.mcp_run_admission_fences(&agent).await?;
+        let (_, head) = self.resolve_durable_alias(&conversation.agent_id).await?;
+        if head.deployment_revision_id() != &conversation.deployment_revision_id {
+            return Err(ServiceError::new(
+                "AGENT_PUBLICATION_CHANGED",
+                "conversation deployment is no longer the active Agent route",
+            ));
+        }
+        let authority = self
+            .terminal_admission_authority(&agent, Some(head))
+            .await?;
         self.terminal_engine()
             .ok_or_else(terminal_only_not_installed)?
-            .create_conversation_detached_turn(
+            .create_conversation_detached_turn_with_authority(
                 conversation_id,
                 tenant_id,
                 user_id,
                 request_id,
                 content,
+                authority,
             )
             .await
     }
@@ -4448,16 +4942,26 @@ impl RunService {
             .inner
             .load_exact_durable_deployment(conversation.deployment_revision_id.as_str())
             .await?;
-        self.mcp_run_admission_fences(&agent).await?;
+        let (_, head) = self.resolve_durable_alias(&conversation.agent_id).await?;
+        if head.deployment_revision_id() != &conversation.deployment_revision_id {
+            return Err(ServiceError::new(
+                "AGENT_PUBLICATION_CHANGED",
+                "conversation deployment is no longer the active Agent route",
+            ));
+        }
+        let authority = self
+            .terminal_admission_authority(&agent, Some(head))
+            .await?;
         let turn: ConversationAttachedTurn = self
             .terminal_engine()
             .ok_or_else(terminal_only_not_installed)?
-            .create_conversation_attached_turn(
+            .create_conversation_attached_turn_with_authority(
                 conversation_id,
                 tenant_id,
                 user_id,
                 request_id,
                 content,
+                authority,
             )
             .await?;
         Ok(AnyConversationAttachedTurn {
@@ -4768,6 +5272,13 @@ impl RunService {
                     "Conversation-bound full Runs do not support subflow lineage",
                 ));
             }
+            let (_, head) = self.resolve_durable_alias(&conversation.agent_id).await?;
+            if head.deployment_revision_id() != &conversation.deployment_revision_id {
+                return Err(ServiceError::new(
+                    "AGENT_PUBLICATION_CHANGED",
+                    "conversation deployment is no longer the active Agent route",
+                ));
+            }
             match self
                 .create_run_with_agent(
                     agent,
@@ -4777,7 +5288,7 @@ impl RunService {
                     },
                     attachment,
                     subscribe,
-                    None,
+                    Some(head),
                     Some(run_id.clone()),
                     Some(full_conversation.clone()),
                 )
@@ -6305,6 +6816,9 @@ impl RunService {
         user_id: Option<&str>,
         run_id: &str,
     ) -> Result<RunRecord, ServiceError> {
+        if is_admin_debug_run_id(run_id) {
+            return Err(ServiceError::new("RUN_NOT_FOUND", "Run not found"));
+        }
         let run_id = RunId::new(run_id.to_owned())
             .map_err(|_| ServiceError::new("RUN_NOT_FOUND", "Run not found"))?;
         if self.inner.repository.load_run(&run_id).await?.is_none() {

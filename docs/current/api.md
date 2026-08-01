@@ -143,23 +143,28 @@ curl -sS -X PUT 'https://platform.example/v1/admin/mcp/servers/engineering/activ
   --data '{"revision_id":"mcprev_..."}'
 ```
 
-## Graph 发布
+## Agent 与 Provider Operator 管理 API
 
-| 方法 | 路径 | 用途 |
-|---|---|---|
-| `POST` | `/v1/graph-agents/{agent_id}/revisions` | 校验并发布不可变定义和部署 revision |
-| `GET` | `/v1/graph-agents/{agent_id}/revisions/{definition_revision_id}` | 读取 Graph 作者文档 |
-| `POST` | `/v1/graph-agents/{agent_id}/revisions/{definition_revision_id}/semantic-edits` | 通过 base hash/head 双 CAS 提交语义编辑 |
-| `GET/PUT` | `/v1/graph-agents/{agent_id}/revisions/{definition_revision_id}/view` | 读取或 CAS 更新 ViewDocument |
+`/v1/admin/agents/**` 和 `/v1/admin/providers/**` 与 MCP 管理面共用 `management.version: 1` 的
+Operator Bearer principal，但 capability 互不隐含。Agent 的执行链严格拆成
+`Draft → Validation → Definition Revision → Deployment Resolution → Deployment Revision → Activate`；
+Provider 拆成 `Draft → Discovery/Test/Validation → Provider Revision → Activate`。publish 和 deploy
+都不会改变 public route，只有带 entity ETag 的 activate 才会改变 durable current pointer。
 
-GraphAuthorDocument 在发布时重新验证并编译为 Canonical Plan。ViewDocument 只保存布局，不影响已经
-发布的 revision 或 pinned Run。
+Agent 管理共 30 个操作，覆盖 YAML/Graph Draft、Graph semantic edits、独立 View CAS、revision、
+resolution、deployment、rollback/deactivate、archive/restore 和 admin-only Debug Session/SSE。Provider
+管理共 27 个操作，覆盖模板、显式模型 discovery/import、connection test、revision、active pointer、
+suspension/resume 与 retirement。完整列表和请求合同见 [Agent 与 Provider 管理面](management.md)、
+[`agent-management-v1.openapi.json`](../../schemas/agent-management-v1.openapi.json) 与
+[`provider-management-v1.openapi.json`](../../schemas/provider-management-v1.openapi.json)。
+
+旧 `/v1/graph-agents/**` 已删除。Graph 和 YAML 都先编辑 Agent Draft；ViewDocument 不改变 Draft
+version、`author_hash` 或执行语义。旧 public historical Deployment admission 也已删除。
 
 ## Run
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| `POST` | `/v1/agents/{agent_id}/deployments/{deployment_revision_id}/runs` | 从指定 Deployment Revision 创建 pinned Run |
 | `POST` | `/v1/agents/{agent_id}/runs` | 创建 Detached Run |
 | `POST` | `/v1/agents/{agent_id}/runs/stream` | 创建 Attached SSE Run |
 | `GET` | `/v1/runs/{run_id}` | 查询 Run 状态与已持久化终态；恢复/重放能力由 DTO capability 区分 |
@@ -178,6 +183,10 @@ GraphAuthorDocument 在发布时重新验证并编译为 Canonical Plan。ViewDo
 创建和控制类请求应携带稳定的 `X-Request-ID`。恢复类接口还要求
 `expected_projection_version`；checkpoint hash、effect proof 和 revision/schema 兼容证据由服务端
 从 durable authority 推导，客户端不能注入。
+
+普通新 Run 只能通过当前 active Agent route admission。历史 Deployment 仅用于服务端恢复链和
+admin Debug Session；公共客户端不能自行选择 inactive history，从而无法绕过 deactivate、rollback
+或 archive。
 
 Detached 创建接口以 durable admission commit 为成功边界，成功响应统一为 `202 Accepted`。
 响应中的 Run 可以仍是 `created`，也可以已经被后台 coordinator 推进为 `running` 或终态。

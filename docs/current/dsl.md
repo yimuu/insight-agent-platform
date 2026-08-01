@@ -7,6 +7,10 @@
 DSL v1 使用自然 YAML 表达类型、数据依赖和结构化控制流。平台在启动或发布 revision 时完成解析、
 类型检查、链接与 lowering；编译失败的 Agent 不会进入运行时。
 
+生产 managed Agent 通过 `/v1/admin/agents/**` 把 YAML package 或 Graph 保存为 Draft，再显式执行
+validation、Definition publish、Deployment resolution/create 和 activate。仓库 `agents/*/agent.yaml`
+是导入/fixture 输入，不是服务进程启动时的 live route authority。
+
 ## 最小结构
 
 ```yaml
@@ -143,6 +147,11 @@ JSON Schema；compiler 会生成并执行输入、节点响应和最终输出校
 合同：非字符串响应始终附加平台管理的 JSON Schema 指令，并在本地完成 JSON 解析与类型校验。
 Provider Catalog 和 Agent 不声明结构化输出 capability，常规运行路径也不发送 Provider 原生
 `response_format`。
+
+Provider route 必须来自已激活的 durable Provider Revision；Deployment 创建时会冻结 exact
+`provider_revision_id`、model ID、adapter/worker version、capability digest、endpoint identity 和
+credential reference identity。Provider active revision 后续切换不会改写已有 Deployment。模型和工具
+列表都必须逐项写入 Draft；DSL 不接受 `*`、regex、`auto_import` 或“当前全部”。
 
 LLM 节点可以通过部署时冻结的白名单调用注册 Action：
 

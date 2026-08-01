@@ -9,7 +9,18 @@ use sqlx::{
 };
 
 const REQUIRED_TABLES: &[&str] = &[
+    "agent_debug_content_retention",
+    "agent_debug_sessions",
+    "agent_definition_publications",
+    "agent_deployment_publications",
+    "agent_deployment_resolutions",
+    "agent_draft_views",
+    "agent_drafts",
+    "agent_management_audit_events",
+    "agent_management_outbox",
+    "agent_management_requests",
     "agent_publication_heads",
+    "agent_validations",
     "artifact_gc_claims",
     "artifact_gc_sweeps",
     "artifact_retention_releases",
@@ -31,6 +42,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "graph_view_documents",
     "human_work_items",
     "join_arrivals",
+    "managed_agents",
     "mcp_interaction_secrets",
     "mcp_interaction_transition_receipts",
     "mcp_interactions",
@@ -64,6 +76,19 @@ const REQUIRED_TABLES: &[&str] = &[
     "node_activations",
     "node_attempts",
     "payloads",
+    "managed_providers",
+    "provider_connection_tests",
+    "provider_discovery_operations",
+    "provider_discovery_snapshots",
+    "provider_drafts",
+    "provider_management_audit_events",
+    "provider_management_outbox",
+    "provider_management_requests",
+    "provider_model_candidates",
+    "provider_revision_models",
+    "provider_revision_legacy_model_bindings",
+    "provider_revisions",
+    "provider_validation_reports",
     "projection_checkpoint_batches",
     "projection_checkpoints",
     "public_event_delivery_heads",
@@ -102,6 +127,10 @@ const REQUIRED_TABLES: &[&str] = &[
 ];
 
 const SHARED_CRITICAL_TRIGGERS: &[&str] = &[
+    "agent_definition_publication_rewrite_forbidden",
+    "agent_deployment_publication_rewrite_forbidden",
+    "agent_resolution_rewrite_forbidden",
+    "agent_validation_rewrite_forbidden",
     "artifact_retention_release_delete_forbidden",
     "control_transition_result_delete_forbidden",
     "control_transition_result_rewrite_forbidden",
@@ -114,6 +143,10 @@ const SHARED_CRITICAL_TRIGGERS: &[&str] = &[
     "public_event_receipt_delete_forbidden",
     "public_event_receipt_insert_provenance",
     "public_event_receipt_update_forbidden",
+    "provider_revision_model_rewrite_forbidden",
+    "provider_revision_legacy_binding_delete_forbidden",
+    "provider_revision_legacy_binding_rewrite_forbidden",
+    "provider_revision_rewrite_forbidden",
     "recovery_transition_result_delete_forbidden",
     "recovery_transition_result_rewrite_forbidden",
     "trg_deployment_revision_immutable",
@@ -362,7 +395,7 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(indexes.len(), 65, "all explicit indexes must be installed");
+    assert_eq!(indexes.len(), 81, "all explicit indexes must be installed");
     for (index, table) in [
         ("idx_runs_dispatch", "workflow_runs"),
         ("idx_runs_recovery", "workflow_runs"),
@@ -379,6 +412,34 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
         (
             "idx_mcp_management_outbox_delivery",
             "mcp_management_outbox",
+        ),
+        (
+            "idx_provider_discovery_claim",
+            "provider_discovery_operations",
+        ),
+        ("idx_provider_test_claim", "provider_connection_tests"),
+        ("idx_provider_revisions_provider", "provider_revisions"),
+        (
+            "idx_provider_management_outbox_delivery",
+            "provider_management_outbox",
+        ),
+        ("idx_agent_validations_agent", "agent_validations"),
+        (
+            "idx_agent_definitions_agent",
+            "agent_definition_publications",
+        ),
+        (
+            "idx_agent_resolutions_agent",
+            "agent_deployment_resolutions",
+        ),
+        (
+            "idx_agent_deployments_agent",
+            "agent_deployment_publications",
+        ),
+        ("idx_agent_debug_sessions_expiry", "agent_debug_sessions"),
+        (
+            "idx_agent_management_outbox_delivery",
+            "agent_management_outbox",
         ),
         (
             "idx_public_projection_order",
@@ -520,7 +581,7 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(triggers.len(), 52, "all user triggers must be installed");
+    assert_eq!(triggers.len(), 68, "all user triggers must be installed");
     for (trigger, table) in [
         (
             "execution_event_projection_ledger_immutable",

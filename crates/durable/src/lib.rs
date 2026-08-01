@@ -3,6 +3,8 @@
 #[doc(hidden)]
 pub mod activation;
 #[doc(hidden)]
+pub mod agent_management;
+#[doc(hidden)]
 pub mod artifact;
 #[doc(hidden)]
 pub mod common;
@@ -32,6 +34,8 @@ pub mod model_tool_queue;
 pub mod production;
 #[doc(hidden)]
 pub mod projection;
+#[doc(hidden)]
+pub mod provider_management;
 #[doc(hidden)]
 pub mod public_outbox;
 #[doc(hidden)]
@@ -88,6 +92,21 @@ pub use activation::{
     ReceiveSignalCommand, RecordEffectEvidenceCommand, RegisterWaitCommand, ResolveSignalCommand,
     RetryScheduleAuthority, ScheduleActivationTimerCommand, SignalReceipt, TaskClaim,
     TaskDispatchSpec, TaskEnvelope, TimerFireAuthority, WaitResolutionAuthority,
+};
+pub use agent_management::{
+    ActivateManagedAgentDeploymentCommand, AgentAuthoringMode, AgentDebugRuntimeCount,
+    AgentDebugSession, AgentDebugStatus, AgentDefinitionRevision, AgentDeploymentResolution,
+    AgentDeploymentRevision, AgentLifecycle, AgentManagementConflict,
+    AgentManagementDurableRepository, AgentManagementOperationCount, AgentManagementPage,
+    AgentManagementRuntimeStats, AgentManagementWriteError, AgentMutationMetadata,
+    AgentMutationReceipt, AgentOperationStatus, AgentStoredDraft, AgentStoredDraftView,
+    AgentValidationReport, ArchiveAgentCommand, CancelAgentDebugSessionCommand,
+    CompleteAgentDebugSessionCommand, CreateAgentCommand, CreateAgentDebugSessionCommand,
+    CreateAgentResolutionCommand, CreateAgentValidationCommand, DeactivateManagedAgentCommand,
+    DeleteAgentCommand, InstallAgentDeploymentCommand, ManagedAgent, PublishAgentDefinitionCommand,
+    RecordAgentManagementRejectionCommand, ReplaceAgentDraftCommand, ReplaceAgentDraftViewCommand,
+    RestoreAgentCommand, UpdateAgentLabelsCommand, AGENT_MANAGEMENT_MAX_OPERATOR_ID_BYTES,
+    AGENT_MANAGEMENT_MAX_REQUEST_ID_BYTES,
 };
 pub use artifact::{
     AcknowledgeArtifactDeletionCommand, ArtifactDeletionClaim, ArtifactDurableRepository,
@@ -160,6 +179,7 @@ pub use mcp_remote_task::{
 };
 pub use mcp_server_task::{McpServerTask, McpServerTaskDurableRepository};
 pub use model::{
+    ActivateAgentDeploymentCommand, AgentDeploymentActivationOutcome, AgentDeploymentTarget,
     CommitReceipt, CreateRunCommand, DurableRunStreamSnapshot, FullConversationRunAdmission,
     PlanInstallOutcome, PlanPublicationOutcome, PublicEventIntent, PublicRunAttachment,
     PublicationHead, PublicationOrigin, PublishVersionedPlanCommand, RunProjection,
@@ -177,6 +197,26 @@ pub use production::{PendingMigrationWait, ProductionRunRepository, RunRepositor
 pub use projection::{
     ProjectionAudit, ProjectionDurableRepository, ProjectionRebuildSnapshot,
     ProjectionRepairReceipt, ProjectionSubject, ProjectionSubjectKind,
+};
+pub use provider_management::{
+    ActivateProviderRevisionCommand, CancelProviderOperationCommand,
+    ClaimProviderOperationsCommand, CompleteProviderConnectionTestCommand,
+    CompleteProviderConnectionTestResult, CompleteProviderDiscoveryCommand,
+    CompleteProviderDiscoveryResult, CreateProviderCommand, CreateProviderConnectionTestCommand,
+    CreateProviderDiscoveryCommand, CreateProviderValidationCommand,
+    DeactivateProviderRevisionCommand, DeleteProviderCommand, ManagedProvider,
+    ProviderConnectionTest, ProviderConnectionTestClaim, ProviderConnectionTestMode,
+    ProviderConnectionTestRuntimeCount, ProviderDiscoveryClaim, ProviderDiscoveryOperation,
+    ProviderDiscoverySnapshot, ProviderFence, ProviderLegacyModelBinding,
+    ProviderManagementConflict, ProviderManagementDurableRepository,
+    ProviderManagementNotificationStream, ProviderManagementOperationCount, ProviderManagementPage,
+    ProviderManagementRuntimeStats, ProviderManagementWriteError, ProviderModelCandidate,
+    ProviderMutationMetadata, ProviderMutationReceipt, ProviderOperationFailure,
+    ProviderOperationStatus, ProviderOperationalState, ProviderRevision, ProviderStoredDraft,
+    ProviderValidationReport, PublishProviderRevisionCommand,
+    RecordProviderManagementRejectionCommand, ReplaceProviderDraftCommand, ResumeProviderCommand,
+    RetireProviderCommand, SuspendProviderCommand, PROVIDER_MANAGEMENT_MAX_OPERATOR_ID_BYTES,
+    PROVIDER_MANAGEMENT_MAX_REQUEST_ID_BYTES, PROVIDER_MANAGEMENT_NOTIFY_CHANNEL_PREFIX,
 };
 pub use public_outbox::{
     OrderedPublicEventRead, PublicEventClaim, PublicEventNotificationStream,
@@ -203,6 +243,25 @@ pub use work_wakeup::{
 
 #[async_trait]
 pub trait DurableRepository: Send + Sync {
+    /// Installs only the immutable author/canonical Definition Revision.
+    async fn install_definition_revision(
+        &self,
+        plan: &VersionedPlan,
+    ) -> Result<PlanInstallOutcome, RepositoryError>;
+
+    /// Installs only the immutable exact-binding Deployment Revision. The
+    /// referenced Definition Revision must already exist.
+    async fn install_deployment_revision(
+        &self,
+        plan: &VersionedPlan,
+    ) -> Result<PlanInstallOutcome, RepositoryError>;
+
+    /// Changes only the current public route using compare-and-swap.
+    async fn activate_agent_deployment(
+        &self,
+        command: ActivateAgentDeploymentCommand,
+    ) -> Result<AgentDeploymentActivationOutcome, RepositoryError>;
+
     async fn install_versioned_plan(
         &self,
         plan: &VersionedPlan,
