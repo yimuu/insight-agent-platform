@@ -34,6 +34,15 @@ const REQUIRED_TABLES: &[&str] = &[
     "mcp_interaction_secrets",
     "mcp_interaction_transition_receipts",
     "mcp_interactions",
+    "mcp_discovery_operations",
+    "mcp_discovery_prompts",
+    "mcp_discovery_resources",
+    "mcp_discovery_snapshots",
+    "mcp_discovery_tools",
+    "mcp_managed_servers",
+    "mcp_management_audit_events",
+    "mcp_management_outbox",
+    "mcp_management_requests",
     "mcp_oauth_credential_receipts",
     "mcp_oauth_credentials",
     "mcp_oauth_refresh_leases",
@@ -41,7 +50,14 @@ const REQUIRED_TABLES: &[&str] = &[
     "mcp_oauth_transactions",
     "mcp_remote_task_receipts",
     "mcp_remote_tasks",
+    "mcp_server_drafts",
+    "mcp_server_revisions",
+    "mcp_revision_prompts",
+    "mcp_revision_resources",
+    "mcp_revision_tools",
     "mcp_server_tasks",
+    "mcp_signed_manifests",
+    "mcp_validation_reports",
     "model_call_usage",
     "model_tool_call_batches",
     "model_tool_calls",
@@ -346,7 +362,7 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(indexes.len(), 58, "all explicit indexes must be installed");
+    assert_eq!(indexes.len(), 65, "all explicit indexes must be installed");
     for (index, table) in [
         ("idx_runs_dispatch", "workflow_runs"),
         ("idx_runs_recovery", "workflow_runs"),
@@ -357,6 +373,13 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
         ("idx_public_outbox_retention", "public_event_outbox"),
         ("idx_mcp_interactions_principal", "mcp_interactions"),
         ("idx_mcp_interactions_retry", "mcp_interactions"),
+        ("idx_mcp_discovery_claim", "mcp_discovery_operations"),
+        ("idx_mcp_discovery_server", "mcp_discovery_operations"),
+        ("idx_mcp_server_revisions_server", "mcp_server_revisions"),
+        (
+            "idx_mcp_management_outbox_delivery",
+            "mcp_management_outbox",
+        ),
         (
             "idx_public_projection_order",
             "public_event_projection_decisions",
@@ -497,7 +520,7 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(triggers.len(), 37, "all user triggers must be installed");
+    assert_eq!(triggers.len(), 52, "all user triggers must be installed");
     for (trigger, table) in [
         (
             "execution_event_projection_ledger_immutable",
@@ -527,6 +550,12 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
             "workflow_retrieval_publication_update_forbidden",
             "workflow_retrieval_publications",
         ),
+        (
+            "mcp_discovery_tools_rewrite_forbidden",
+            "mcp_discovery_tools",
+        ),
+        ("mcp_revision_tools_rewrite_forbidden", "mcp_revision_tools"),
+        ("mcp_revision_tools_delete_forbidden", "mcp_revision_tools"),
     ] {
         assert!(
             triggers.contains(&(trigger.to_owned(), table.to_owned())),

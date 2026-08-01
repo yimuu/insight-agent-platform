@@ -18,6 +18,8 @@
 
 | 记录 | 状态 | 当前入口 |
 |---|---|---|
+| [MCP 管理 API v1 与显式导入规范](specs/2026-07-31-mcp-management-api-v1.md) | Implemented / verified（2026-07-31） | [MCP 当前合同](../current/mcp.md) |
+| [MCP 管理 API v1 资格验收](qualifications/2026-07-31-mcp-management-api-v1-qualification.md) | Qualified（2026-07-31） | [MCP 当前合同](../current/mcp.md) |
 | [MCP 2026-07-28 完整支持规范](specs/2026-07-30-complete-mcp-support.md) | Implemented / verified（2026-07-30） | [MCP 当前合同](../current/mcp.md) |
 | [MCP 完整支持资格验收](qualifications/2026-07-30-complete-mcp-qualification.md) | Qualified（2026-07-30） | [MCP 当前合同](../current/mcp.md) |
 | [Provider Catalog 与直接模型选择优化](specs/2026-07-30-provider-catalog-and-direct-model-selection.md) | Implemented / verified（2026-07-30） | [DSL](../current/dsl.md) / [部署与运维](../current/operations.md) |

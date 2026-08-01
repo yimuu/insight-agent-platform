@@ -11,10 +11,14 @@
 
 ## 当前规范
 
-当前没有活动设计规范。
+当前没有尚未完成的活动设计规范。
 
 最近完成的规范：
 
+- [MCP 管理 API v1 与显式导入规范](../archive/specs/2026-07-31-mcp-management-api-v1.md)：
+  已以 durable 管理控制面替代 YAML Server 权威，交付 Draft、异步 Discovery、显式
+  Tool/Resource/Prompt 导入、不可变 Revision、CAS 生命周期、Operator 权限和 Agent 精确 binding；
+  不包含运行时 Tool 通配符或自动授权；
 - [MCP 2026-07-28 完整支持规范](../archive/specs/2026-07-30-complete-mcp-support.md)：
   已交付 modern Host/Client、Server、Tasks、独立 legacy profile、双标准传输、OAuth、
   durable Elicitation、Resources/Prompts/Completion/Subscriptions 与包含 interaction 事件的

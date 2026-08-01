@@ -299,6 +299,35 @@ impl McpContextProvider {
         Ok(self)
     }
 
+    pub fn with_definition_prompt_results(
+        mut self,
+        results: BTreeMap<String, insight_mcp::GetPromptResult>,
+    ) -> Result<Self, McpContextError> {
+        let required = self
+            .prompts
+            .values()
+            .filter(|prompt| prompt.policy.definition_arguments.is_some())
+            .map(|prompt| prompt.descriptor.name.clone())
+            .collect::<BTreeSet<_>>();
+        if results.keys().cloned().collect::<BTreeSet<_>>() != required {
+            return Err(McpContextError::Policy);
+        }
+        for (name, result) in results {
+            let imported = self.prompts.get(&name).ok_or(McpContextError::Policy)?;
+            self.definition_prompt_snapshots.insert(
+                name,
+                McpPromptSnapshot {
+                    binding: imported.binding.clone(),
+                    content_hash: canonical_sha256(&result)?,
+                    result,
+                    observed_at_unix_ms: 0,
+                    untrusted: true,
+                },
+            );
+        }
+        Ok(self)
+    }
+
     pub async fn read_resource(
         &self,
         uri: &str,

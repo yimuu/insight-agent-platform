@@ -23,6 +23,129 @@ fn transport_events() -> &'static Mutex<BTreeMap<(&'static str, &'static str), u
     EVENTS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+fn management_requests() -> &'static Mutex<BTreeMap<(&'static str, &'static str), OperationMetric>>
+{
+    static REQUESTS: OnceLock<Mutex<BTreeMap<(&'static str, &'static str), OperationMetric>>> =
+        OnceLock::new();
+    REQUESTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum McpManagementEvent {
+    ValidationSucceeded,
+    ValidationFailed,
+    DiscoverySucceeded,
+    DiscoveryFailed,
+    DiscoveryCancelled,
+    DiscoveryRetried,
+    Published,
+    PublishFailed,
+    Activated,
+    ActivateFailed,
+    Disabled,
+    DisableFailed,
+    Retired,
+    RetireFailed,
+    AgentBindingNotFound,
+    AgentBindingPolicyInvalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum McpManagementGauge {
+    DiscoveryPending,
+    DiscoveryRunning,
+    DiscoveryOldestAgeSeconds,
+    ActiveServers,
+    DisabledServers,
+    StaleServers,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct CountHistogram {
+    buckets: [u64; 10],
+    count: u64,
+    sum: u64,
+}
+
+const COUNT_BUCKETS: [u64; 10] = [0, 1, 5, 10, 25, 50, 100, 500, 1_000, 4_096];
+
+fn management_events() -> &'static Mutex<BTreeMap<McpManagementEvent, OperationMetric>> {
+    static EVENTS: OnceLock<Mutex<BTreeMap<McpManagementEvent, OperationMetric>>> = OnceLock::new();
+    EVENTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn management_gauges() -> &'static Mutex<BTreeMap<McpManagementGauge, u64>> {
+    static GAUGES: OnceLock<Mutex<BTreeMap<McpManagementGauge, u64>>> = OnceLock::new();
+    GAUGES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn catalog_count_histograms(
+) -> &'static Mutex<BTreeMap<(&'static str, &'static str), CountHistogram>> {
+    static HISTOGRAMS: OnceLock<Mutex<BTreeMap<(&'static str, &'static str), CountHistogram>>> =
+        OnceLock::new();
+    HISTOGRAMS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+pub fn record_management_event(event: McpManagementEvent, duration: Duration) {
+    let mut events = management_events()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let metric = events.entry(event).or_default();
+    metric.count = metric.count.saturating_add(1);
+    metric.duration_nanos = metric.duration_nanos.saturating_add(duration.as_nanos());
+}
+
+pub fn set_management_gauge(gauge: McpManagementGauge, value: u64) {
+    management_gauges()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(gauge, value);
+}
+
+pub fn record_management_catalog_count(kind: &'static str, outcome: &'static str, value: u64) {
+    let kind = match kind {
+        "tool" | "resource" | "prompt" => kind,
+        _ => "invalid",
+    };
+    let outcome = match outcome {
+        "discovered" | "imported" | "rejected" => outcome,
+        _ => "invalid",
+    };
+    let mut histograms = catalog_count_histograms()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let histogram = histograms.entry((kind, outcome)).or_default();
+    for (index, upper_bound) in COUNT_BUCKETS.iter().enumerate() {
+        if value <= *upper_bound {
+            histogram.buckets[index] = histogram.buckets[index].saturating_add(1);
+        }
+    }
+    histogram.count = histogram.count.saturating_add(1);
+    histogram.sum = histogram.sum.saturating_add(value);
+}
+
+pub fn record_management_request(
+    route_class: &'static str,
+    result_class: &'static str,
+    duration: Duration,
+) {
+    let route_class = match route_class {
+        "servers" | "draft" | "manifest" | "discovery" | "candidate" | "import" | "validation"
+        | "revision" | "activation" | "retirement" => route_class,
+        _ => "invalid",
+    };
+    let result_class = match result_class {
+        "success" | "client_error" | "server_error" => result_class,
+        _ => "invalid",
+    };
+    let mut requests = management_requests()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let metric = requests.entry((route_class, result_class)).or_default();
+    metric.count = metric.count.saturating_add(1);
+    metric.duration_nanos = metric.duration_nanos.saturating_add(duration.as_nanos());
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum McpOperationalEvent {
     InteractionAccepted,
@@ -42,6 +165,8 @@ pub enum McpOperationalEvent {
     CacheInvalidated,
     BodyLimitRejected,
     FrameLimitRejected,
+    DisableFenceRejected,
+    DisableFenceUncertain,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -181,6 +306,132 @@ pub fn prometheus_metrics() -> String {
     }
     drop(metrics);
     output.push_str(
+        "# HELP insight_mcp_management_requests_total MCP management requests by bounded route and result class.\n\
+         # TYPE insight_mcp_management_requests_total counter\n\
+         # HELP insight_mcp_management_request_duration_seconds MCP management request duration summary.\n\
+         # TYPE insight_mcp_management_request_duration_seconds summary\n",
+    );
+    let management = management_requests()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for ((route, result), metric) in management.iter() {
+        let _ = writeln!(
+            output,
+            "insight_mcp_management_requests_total{{route=\"{route}\",result=\"{result}\"}} {}",
+            metric.count
+        );
+        let _ = writeln!(
+            output,
+            "insight_mcp_management_request_duration_seconds_count{{route=\"{route}\",result=\"{result}\"}} {}",
+            metric.count
+        );
+        let _ = writeln!(
+            output,
+            "insight_mcp_management_request_duration_seconds_sum{{route=\"{route}\",result=\"{result}\"}} {:.9}",
+            metric.duration_nanos as f64 / 1_000_000_000_f64
+        );
+    }
+    drop(management);
+    output.push_str(
+        "# HELP insight_mcp_management_lifecycle_total MCP management lifecycle outcomes.\n\
+         # TYPE insight_mcp_management_lifecycle_total counter\n\
+         # HELP insight_mcp_management_lifecycle_duration_seconds MCP management lifecycle duration summary.\n\
+         # TYPE insight_mcp_management_lifecycle_duration_seconds summary\n",
+    );
+    let lifecycle = management_events()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (event, metric) in lifecycle.iter() {
+        let (operation, outcome) = match event {
+            McpManagementEvent::ValidationSucceeded => ("validation", "succeeded"),
+            McpManagementEvent::ValidationFailed => ("validation", "failed"),
+            McpManagementEvent::DiscoverySucceeded => ("discovery", "succeeded"),
+            McpManagementEvent::DiscoveryFailed => ("discovery", "failed"),
+            McpManagementEvent::DiscoveryCancelled => ("discovery", "cancelled"),
+            McpManagementEvent::DiscoveryRetried => ("discovery", "retried"),
+            McpManagementEvent::Published => ("publish", "succeeded"),
+            McpManagementEvent::PublishFailed => ("publish", "failed"),
+            McpManagementEvent::Activated => ("activate", "succeeded"),
+            McpManagementEvent::ActivateFailed => ("activate", "failed"),
+            McpManagementEvent::Disabled => ("disable", "succeeded"),
+            McpManagementEvent::DisableFailed => ("disable", "failed"),
+            McpManagementEvent::Retired => ("retire", "succeeded"),
+            McpManagementEvent::RetireFailed => ("retire", "failed"),
+            McpManagementEvent::AgentBindingNotFound => ("agent_binding", "not_found"),
+            McpManagementEvent::AgentBindingPolicyInvalid => ("agent_binding", "policy_invalid"),
+        };
+        let _ = writeln!(
+            output,
+            "insight_mcp_management_lifecycle_total{{operation=\"{operation}\",outcome=\"{outcome}\"}} {}",
+            metric.count
+        );
+        let _ = writeln!(
+            output,
+            "insight_mcp_management_lifecycle_duration_seconds_count{{operation=\"{operation}\",outcome=\"{outcome}\"}} {}",
+            metric.count
+        );
+        let _ = writeln!(
+            output,
+            "insight_mcp_management_lifecycle_duration_seconds_sum{{operation=\"{operation}\",outcome=\"{outcome}\"}} {:.9}",
+            metric.duration_nanos as f64 / 1_000_000_000_f64
+        );
+    }
+    drop(lifecycle);
+    output.push_str(
+        "# HELP insight_mcp_management_catalog_items MCP discovered, imported, and rejected catalog item counts.\n\
+         # TYPE insight_mcp_management_catalog_items histogram\n",
+    );
+    let histograms = catalog_count_histograms()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for ((kind, outcome), histogram) in histograms.iter() {
+        for (index, upper_bound) in COUNT_BUCKETS.iter().enumerate() {
+            let _ = writeln!(
+                output,
+                "insight_mcp_management_catalog_items_bucket{{kind=\"{kind}\",outcome=\"{outcome}\",le=\"{upper_bound}\"}} {}",
+                histogram.buckets[index]
+            );
+        }
+        let _ = writeln!(
+            output,
+            "insight_mcp_management_catalog_items_bucket{{kind=\"{kind}\",outcome=\"{outcome}\",le=\"+Inf\"}} {}",
+            histogram.count
+        );
+        let _ = writeln!(
+            output,
+            "insight_mcp_management_catalog_items_count{{kind=\"{kind}\",outcome=\"{outcome}\"}} {}",
+            histogram.count
+        );
+        let _ = writeln!(
+            output,
+            "insight_mcp_management_catalog_items_sum{{kind=\"{kind}\",outcome=\"{outcome}\"}} {}",
+            histogram.sum
+        );
+    }
+    drop(histograms);
+    output.push_str(
+        "# HELP insight_mcp_management_objects Current bounded MCP management object counts.\n\
+         # TYPE insight_mcp_management_objects gauge\n",
+    );
+    let management_gauges = management_gauges()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (gauge, value) in management_gauges.iter() {
+        let (kind, state) = match gauge {
+            McpManagementGauge::DiscoveryPending => ("discovery", "pending"),
+            McpManagementGauge::DiscoveryRunning => ("discovery", "running"),
+            McpManagementGauge::DiscoveryOldestAgeSeconds => ("discovery_age_seconds", "open"),
+            McpManagementGauge::ActiveServers => ("server", "active"),
+            McpManagementGauge::DisabledServers => ("server", "disabled"),
+            McpManagementGauge::StaleServers => ("server", "stale"),
+        };
+        let _ = writeln!(
+            output,
+            "insight_mcp_management_objects{{kind=\"{kind}\",state=\"{state}\"}} {value}"
+        );
+    }
+    drop(management_gauges);
+    output.push_str(
         "# HELP insight_mcp_transport_events_total MCP transport lifecycle and bounded rejection events.\n\
          # TYPE insight_mcp_transport_events_total counter\n",
     );
@@ -260,6 +511,14 @@ pub fn prometheus_metrics() -> String {
             McpOperationalEvent::FrameLimitRejected => {
                 ("insight_mcp_limit_rejections_total", "kind=\"frame\"")
             }
+            McpOperationalEvent::DisableFenceRejected => (
+                "insight_mcp_disable_fence_outcomes_total",
+                "outcome=\"rejected_before_dispatch\"",
+            ),
+            McpOperationalEvent::DisableFenceUncertain => (
+                "insight_mcp_disable_fence_outcomes_total",
+                "outcome=\"in_flight_uncertain\"",
+            ),
         };
         let _ = writeln!(
             output,
@@ -339,6 +598,24 @@ mod tests {
         assert!(metrics.contains(
             "insight_mcp_remote_tasks{server_id=\"calendar\",state=\"input_required\"} 2"
         ));
+        assert!(!metrics.contains("customer/tool/name"));
+    }
+
+    #[test]
+    fn management_metrics_use_only_closed_low_cardinality_labels() {
+        record_management_event(
+            McpManagementEvent::DiscoverySucceeded,
+            Duration::from_millis(12),
+        );
+        record_management_catalog_count("customer/tool/name", "discovered", 6);
+        set_management_gauge(McpManagementGauge::DiscoveryRunning, 2);
+        let metrics = prometheus_metrics();
+        assert!(metrics.contains(
+            "insight_mcp_management_lifecycle_total{operation=\"discovery\",outcome=\"succeeded\"}"
+        ));
+        assert!(metrics.contains("kind=\"invalid\",outcome=\"discovered\""));
+        assert!(metrics
+            .contains("insight_mcp_management_objects{kind=\"discovery\",state=\"running\"} 2"));
         assert!(!metrics.contains("customer/tool/name"));
     }
 }

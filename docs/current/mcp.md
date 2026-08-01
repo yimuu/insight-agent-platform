@@ -1,11 +1,12 @@
 # MCP 使用、运行与安全合同
 
-状态：Current / profiles Implemented & Verified（2026-07-30）
+状态：Current / management API v1 Implemented & Verified（2026-07-31）
 
 协议基线：MCP `2026-07-28`
 
 正式验收记录：
-[MCP 完整支持资格验收](../archive/qualifications/2026-07-30-complete-mcp-qualification.md)
+[MCP 完整支持资格验收](../archive/qualifications/2026-07-30-complete-mcp-qualification.md)、
+[MCP 管理 API v1 资格验收](../archive/qualifications/2026-07-31-mcp-management-api-v1-qualification.md)
 
 平台同时提供两个彼此隔离的方向：
 
@@ -44,13 +45,14 @@ wire 不接受 legacy envelope，legacy wire 不携带 modern metadata、不声�
 
 ```yaml
 mcp:
-  version: 1
+  version: 2
   protocol:
     preferred: "2026-07-28"
     legacy_fallback: []
   client:
     enabled: false
-    servers: {}
+    management_api:
+      enabled: false
   server:
     enabled: false
     endpoint: /mcp
@@ -67,60 +69,55 @@ mcp:
 catalog、content 和 SSE frame 均有硬上限。生产 stdio 必须使用绝对 executable 和显式 isolation
 profile；远程 HTTP 必须为无凭据 HTTPS URL，只有单进程开发的精确 loopback 可显式允许明文。
 
-## Client Server 示例
+## Client 管理配置与 Server 创建
 
-下面展示结构，不应把 token、client secret 或签名私钥写入 YAML：
+`mcp.version: 2` 把 Client Server 实例从 YAML 移到 durable management store。YAML 只保存全局硬策略、
+Operator credential reference、secret resolver、签名信任根、stdio launch profile 和默认上限；不应把
+token、client secret 或签名私钥写入 YAML：
 
 ```yaml
 mcp:
-  version: 1
+  version: 2
   protocol:
     preferred: "2026-07-28"
     legacy_fallback: []
   client:
     enabled: true
+    management_api:
+      enabled: true
+      discovery_workers: 4
+      max_pending_discoveries: 128
+      operator_credentials:
+        - identity: mcp-platform-operator
+          token_env: INSIGHT_MCP_OPERATOR_TOKEN
+          capabilities:
+            - mcp.server.read
+            - mcp.server.write
+            - mcp.server.discover
+            - mcp.server.publish
     secret_encryption:
       active_key_version: v1
       keyring_env: INSIGHT_MCP_SECRET_KEYRING
-    servers:
-      engineering:
-        transport:
-          type: streamable_http
-          endpoint: https://mcp.example.com/mcp
-          connect_timeout: 5s
-          request_timeout: 2m
-        discovery:
-          type: live_service_account
-        authorization:
-          type: bearer_env
-          token_env: ENGINEERING_MCP_TOKEN
-        imports:
-          tools:
-            - remote: search_repositories
-              as: engineering_search_repositories
-              effect: read_only
-              idempotency: idempotent
-              cancellation: cooperative
-              approval: never
-              input_required: allowed
-              tasks: allowed
-              public:
-                call: false
-          resources:
-            allow: ["repo://*"]
-          prompts:
-            allow:
-              - remote: review_change
-                user_invocation: true
-                definition_arguments:
-                  style: concise
-        limits:
-          max_request_bytes: 1048576
-          max_response_bytes: 16777216
-          max_sse_line_bytes: 65536
-          max_sse_event_bytes: 1048576
-          max_content_items: 128
-          max_catalog_items: 4096
+    secret_resolver:
+      type: environment_reference
+      allowed_names: [ENGINEERING_MCP_TOKEN]
+    signed_manifest_trust:
+      max_validity: 24h
+      trusted_signers: []
+    network_policy:
+      allow_loopback_development: false
+      allow_private_networks: false
+      allow_redirects: false
+    stdio_launch_profiles: {}
+    default_limits:
+      connect_timeout: 5s
+      request_timeout: 2m
+      max_request_bytes: 1048576
+      max_response_bytes: 16777216
+      max_sse_line_bytes: 65536
+      max_sse_event_bytes: 1048576
+      max_content_items: 128
+      max_catalog_items: 4096
   server:
     enabled: false
     endpoint: /mcp
@@ -128,6 +125,17 @@ mcp:
       type: disabled
     exports: {agents: [], actions: [], resources: [], prompts: []}
 ```
+
+随后使用 `POST /v1/admin/mcp/servers` 创建 Draft，异步 discovery 得到候选 catalog，再通过三个
+imports PUT 显式采纳 Tool/Resource/Prompt。Validation 和 publish 生成不可变 Revision；激活使用
+Server ETag 做 CAS。远端 `tools/list`、`resources/list`、`resources/templates/list` 和
+`prompts/list` 只提供候选，不授予 Agent 执行权限。系统不接受 `tools: ["*"]`、`auto_import` 或
+Server 级动态授权；“全选” preview 只展开为当次 discovery 的逐项 immutable 清单。
+
+管理 API 使用独立 Operator Bearer token，普通 tenant/user API token 与 MCP OAuth token 均不能访问。
+所有 mutation 要求 `X-Request-ID`，修改 Draft/Server 还要求精确 `If-Match`。公开请求 schema 见
+[`schemas/mcp-management-v1.json`](../../schemas/mcp-management-v1.json)，完整 HTTP 合同见
+[`schemas/mcp-management-v1.openapi.json`](../../schemas/mcp-management-v1.openapi.json)。
 
 `oauth_user` 连接使用 Authorization Code + PKCE。浏览器 callback 只接受高熵、单次、限时 state；
 access/refresh token 和 interaction body 使用独立 keyring 加密，普通 API、日志、metrics、trace、
@@ -144,13 +152,14 @@ Resource allowlist 会在读取时再次校验 canonical URI、Server binding、
 
 ```yaml
 mcp:
-  version: 1
+  version: 2
   protocol:
     preferred: "2026-07-28"
     legacy_fallback: []
   client:
     enabled: false
-    servers: {}
+    management_api:
+      enabled: false
   server:
     enabled: true
     endpoint: /mcp
@@ -213,6 +222,32 @@ live `required` / `closed` 事件只是通知，不是 interaction 或 Run 终�
 合法样本见
 [`schemas/run-stream-v1.samples.json`](../../schemas/run-stream-v1.samples.json)。
 
+## Operator 管理 API
+
+| 方法 | 路径 |
+|---|---|
+| `POST/GET` | `/v1/admin/mcp/servers` |
+| `GET/DELETE` | `/v1/admin/mcp/servers/{server_id}` |
+| `GET/PUT` | `/v1/admin/mcp/servers/{server_id}/draft` |
+| `POST/GET` | `/v1/admin/mcp/servers/{server_id}/manifests` |
+| `GET` | `/v1/admin/mcp/servers/{server_id}/manifests/{manifest_id}` |
+| `POST/GET` | `/v1/admin/mcp/servers/{server_id}/discoveries` |
+| `GET/DELETE` | `/v1/admin/mcp/servers/{server_id}/discoveries/{discovery_id}` |
+| `GET` | `/v1/admin/mcp/servers/{server_id}/discoveries/{discovery_id}/{tools\|resources\|prompts}` |
+| `POST` | `/v1/admin/mcp/servers/{server_id}/tool-import-previews` |
+| `PUT` | `/v1/admin/mcp/servers/{server_id}/draft/imports/{tools\|resources\|prompts}` |
+| `POST` | `/v1/admin/mcp/servers/{server_id}/validations` |
+| `GET` | `/v1/admin/mcp/servers/{server_id}/validations/{validation_id}` |
+| `POST/GET` | `/v1/admin/mcp/servers/{server_id}/revisions` |
+| `GET` | `/v1/admin/mcp/servers/{server_id}/revisions/{revision_id}` |
+| `PUT/DELETE` | `/v1/admin/mcp/servers/{server_id}/active-revision` |
+| `POST` | `/v1/admin/mcp/servers/{server_id}/retirement` |
+
+Operator capability 是闭合集合：`mcp.server.read`、`mcp.server.write`、`mcp.server.discover` 和
+`mcp.server.publish`，互不隐含。Draft、discovery snapshot、validation 与 Revision 都使用 durable
+authority；publish、activate、disable、retire、idempotency receipt、body-free audit 与 outbox 分别在
+短事务内原子提交。网络、DNS、OAuth metadata 和 stdio I/O 不在数据库事务中执行。
+
 ## Catalog、OAuth 与撤销 API
 
 | 方法 | 路径 |
@@ -256,7 +291,11 @@ principal、allowlist、大小、MIME、Prompt user-invocation 与 Agent input s
 `/metrics` 提供 `insight_mcp_operations_total`、operation duration、transport event、active
 subscription、interaction open/oldest-age/outcome、remote task state/oldest-age、OAuth
 transaction/refresh/revoke、stdio restart、cache hit/miss/invalidation、body/frame limit rejection
-和 stale publication candidate 指标。所有 Server label 都经过闭合集合/长度校验。
+和 stale publication candidate 指标。管理面另外提供
+`insight_mcp_management_requests_total`、`insight_mcp_management_request_duration_seconds`、
+`insight_mcp_management_lifecycle_total`、`insight_mcp_management_lifecycle_duration_seconds`、
+`insight_mcp_management_catalog_items` 和 `insight_mcp_management_objects`。后者覆盖 pending/running
+discovery、oldest age，以及 active/disabled/stale Server 数。所有 label 都来自闭合低基数集合。
 
 SQLite 仅用于单进程开发；生产的 durable interaction、OAuth、remote Tasks 与 Server Tasks 使用
 PostgreSQL 16 和同一套已 provision schema。

@@ -15,13 +15,14 @@ actions:
     - example.text_metrics
 
 mcp:
-  version: 1
+  version: 2
   protocol:
     preferred: "2026-07-28"
     legacy_fallback: []
   client:
     enabled: false
-    servers: {}
+    management_api:
+      enabled: false
   server:
     enabled: false
     endpoint: /mcp

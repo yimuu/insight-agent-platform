@@ -7,27 +7,25 @@ use std::{
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{Duration as ChronoDuration, Utc};
 use insight_durable::{
     ClaimMcpOAuthRefreshCommand, ClaimMcpRemoteTasksCommand, CreateMcpInteractionCommand,
     CreateMcpRemoteTaskCommand, FinalizeMcpRemoteTaskCommand, McpInteraction,
     McpInteractionDurableRepository, McpInteractionId, McpInteractionOutcome,
-    McpInteractionPrincipal, McpInteractionRequest, McpInteractionState, McpOAuthDurableRepository,
-    McpProtectedSecret, McpRemoteTaskDurableRepository, McpRemoteTaskId, McpRemoteTaskStatus,
-    McpSecretProtector, McpSecretPurpose, McpSecretScope, ObserveMcpRemoteTaskCommand,
-    StoreMcpOAuthCredentialCommand, TransitionMcpInteractionCommand,
+    McpInteractionPrincipal, McpInteractionRequest, McpInteractionState, McpManagedServer,
+    McpOAuthDurableRepository, McpProtectedSecret, McpRemoteTaskDurableRepository, McpRemoteTaskId,
+    McpRemoteTaskStatus, McpSecretProtector, McpSecretPurpose, McpSecretScope, McpServerRevision,
+    ObserveMcpRemoteTaskCommand, StoreMcpOAuthCredentialCommand, TransitionMcpInteractionCommand,
 };
 use insight_engine::{execution::RunError, worker::WorkerArtifactPayload};
 use insight_mcp::{
-    ClientCapabilities, ClientError, ClientInfo, ElicitAction, ElicitRequestParams, ElicitResult,
-    GetTaskResult, HttpCredential, InputRequest, InputRequiredResult, InputResponse,
-    LegacyCompatibilityTransport, ListPromptsResult, ListResourceTemplatesResult,
-    ListResourcesResult, ListToolsResult, McpClient, McpClientLimits, McpNotificationObserver,
-    McpServerBindingIdentity, McpToolBinding, McpTransport, McpTransportKind, MetaMap,
-    NoopNotificationObserver, OAuthClient, OAuthClientRegistration, PrincipalScope, PromptCatalog,
-    ProtocolLimits, ReadResourceResult, ResourceCatalog, ResourceContents, ResourceTemplateCatalog,
-    StdioTransport, StdioTransportPolicy, StreamableHttpPolicy, StreamableHttpTransport,
-    SubscriptionFilter, TransportError, TransportKind, MCP_LEGACY_PROTOCOL_VERSION,
+    ClientCapabilities, ClientInfo, ElicitAction, ElicitRequestParams, ElicitResult, GetTaskResult,
+    HttpCredential, InputRequest, InputRequiredResult, InputResponse, LegacyCompatibilityTransport,
+    McpClient, McpClientLimits, McpServerBindingIdentity, McpToolBinding, McpTransport,
+    McpTransportKind, MetaMap, NoopNotificationObserver, OAuthClient, OAuthClientRegistration,
+    PrincipalScope, PromptCatalog, ProtocolLimits, ReadResourceResult, ResourceCatalog,
+    ResourceContents, ResourceTemplateCatalog, StdioTransport, StdioTransportPolicy,
+    StreamableHttpPolicy, StreamableHttpTransport, SubscriptionFilter, MCP_LEGACY_PROTOCOL_VERSION,
     MCP_PROTOCOL_VERSION,
 };
 use insight_resources::actions::{
@@ -37,25 +35,24 @@ use insight_resources::actions::{
 use insight_resources::retrievals::{
     Retrieval, RetrievalContext, RetrievalDescriptor, RetrievalExecutionResult, RetrievalRegistry,
 };
-use insight_runtime::{RuntimeReadinessProbe, ServiceError};
-use ring::signature;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{
-    McpApprovalConfig, McpCancellationConfig, McpClientAuthorizationConfig, McpClientConfig,
-    McpClientTransportConfig, McpDescriptionSourceConfig, McpDiscoveryConfig, McpEffectConfig,
-    McpIdempotencyConfig, McpInteractionConfig, McpToolImportConfig,
+use crate::config::McpClientConfig;
+use insight_api::v1::{
+    McpCatalogServer, McpDraftAuthorization, McpDraftDocument, McpDraftTransport, McpOAuthServer,
+    McpToolDescriptionPolicy,
 };
 
 pub use insight_resources::mcp::{
-    McpApprovalPolicy, McpDescriptionPolicy, McpImportedTool, McpInteractionContext,
-    McpInteractionHandler, McpInteractionHandlerError, McpInteractionResolution, McpProviderError,
-    McpRecoveredRemoteTask, McpRemoteTaskHandle, McpRemoteTaskHandler, McpRemoteTaskHandlerError,
-    McpRemoteTaskLocalTerminal, McpRemoteTaskObservation, McpRemoteTaskPollAuthority,
-    McpRuntimeClientResolver, McpRuntimeClientResolverError, McpToolImport, McpToolProvider,
+    McpApprovalPolicy, McpDescriptionPolicy, McpExecutionFence, McpImportedTool,
+    McpInteractionContext, McpInteractionHandler, McpInteractionHandlerError,
+    McpInteractionResolution, McpProviderError, McpRecoveredRemoteTask, McpRemoteTaskHandle,
+    McpRemoteTaskHandler, McpRemoteTaskHandlerError, McpRemoteTaskLocalTerminal,
+    McpRemoteTaskObservation, McpRemoteTaskPollAuthority, McpRuntimeClientResolver,
+    McpRuntimeClientResolverError, McpToolImport, McpToolProvider,
 };
 pub use insight_resources::mcp_context::{
     McpCatalogInvalidation, McpCatalogInvalidationState, McpContextError, McpContextOutcome,
@@ -63,19 +60,6 @@ pub use insight_resources::mcp_context::{
     McpPrincipalClientResolver, McpPrincipalClientResolverError, McpPromptImportPolicy,
     McpPromptSnapshot, McpResourceImportPolicy, McpResourceSnapshot,
 };
-
-#[derive(Debug, Clone)]
-pub struct McpClientPublication {
-    pub server_id: String,
-    pub binding: McpServerBindingIdentity,
-    pub capabilities: insight_mcp::ServerCapabilities,
-    pub server_info: insight_mcp::ServerInfo,
-    pub required_scopes: BTreeSet<String>,
-    pub discovery_fingerprint: String,
-    pub tool_catalog_fingerprint: Option<String>,
-    pub tool_bindings: Vec<McpToolBinding>,
-    pub catalog_invalidation: Option<Arc<McpCatalogInvalidation>>,
-}
 
 #[derive(Clone)]
 pub struct McpClientSubscription {
@@ -86,157 +70,9 @@ pub struct McpClientSubscription {
 }
 
 #[derive(Clone)]
-pub struct McpLoadedProviders {
-    pub publications: Vec<McpClientPublication>,
-    pub contexts: BTreeMap<String, Arc<McpContextProvider>>,
-    pub subscriptions: Vec<McpClientSubscription>,
-    pub readiness: Arc<McpClientReadinessProbe>,
-}
-
-#[derive(Clone)]
-enum RequiredMcpReadiness {
-    Service {
-        client: Arc<McpClient>,
-        capabilities: Box<insight_mcp::ServerCapabilities>,
-    },
-    OAuthUser {
-        client: OAuthClient,
-        resource: String,
-        registration: OAuthClientRegistration,
-    },
-}
-
-#[derive(Clone, Default)]
-pub struct McpClientReadinessProbe {
-    required: Vec<RequiredMcpReadiness>,
-}
-
-#[async_trait]
-impl RuntimeReadinessProbe for McpClientReadinessProbe {
-    async fn check_readiness(&self, timeout: Duration) -> Result<(), ServiceError> {
-        let cancellation = CancellationToken::new();
-        let check = async {
-            for required in &self.required {
-                match required {
-                    RequiredMcpReadiness::Service {
-                        client,
-                        capabilities,
-                    } => {
-                        client
-                            .discover(&cancellation, &NoopNotificationObserver)
-                            .await
-                            .map_err(|_| {
-                                ServiceError::new(
-                                    "MCP_BINDING_UNAVAILABLE",
-                                    "a required MCP Server is unavailable",
-                                )
-                            })?;
-                        // Modern discovery is a live request. The legacy
-                        // adapter intentionally caches its initialize
-                        // evidence, so exercise one non-deprecated primitive
-                        // as the liveness probe.
-                        if client.protocol_version() == MCP_LEGACY_PROTOCOL_VERSION {
-                            if capabilities.tools.is_some() {
-                                client
-                                    .list_tools(&cancellation, &NoopNotificationObserver)
-                                    .await
-                                    .map_err(|_| {
-                                        ServiceError::new(
-                                            "MCP_BINDING_UNAVAILABLE",
-                                            "a required legacy MCP Server is unavailable",
-                                        )
-                                    })?;
-                            } else if capabilities.resources.is_some() {
-                                client
-                                    .list_resources(&cancellation, &NoopNotificationObserver)
-                                    .await
-                                    .map_err(|_| {
-                                        ServiceError::new(
-                                            "MCP_BINDING_UNAVAILABLE",
-                                            "a required legacy MCP Server is unavailable",
-                                        )
-                                    })?;
-                            } else if capabilities.prompts.is_some() {
-                                client
-                                    .list_prompts(&cancellation, &NoopNotificationObserver)
-                                    .await
-                                    .map_err(|_| {
-                                        ServiceError::new(
-                                            "MCP_BINDING_UNAVAILABLE",
-                                            "a required legacy MCP Server is unavailable",
-                                        )
-                                    })?;
-                            }
-                        }
-                    }
-                    RequiredMcpReadiness::OAuthUser {
-                        client,
-                        resource,
-                        registration,
-                    } => {
-                        // Publication discovery for a user-authorized binding
-                        // is frozen in a signed manifest. A credential-free
-                        // MCP request would correctly receive 401, so
-                        // readiness instead validates the live OAuth metadata
-                        // chain and the configured PKCE/scope contract.
-                        let protected = client
-                            .discover_protected_resource(resource)
-                            .await
-                            .map_err(|_| {
-                                ServiceError::new(
-                                    "MCP_OAUTH_METADATA_UNAVAILABLE",
-                                    "required MCP OAuth metadata is unavailable",
-                                )
-                            })?;
-                        let mut compatible_issuer = false;
-                        for issuer in &protected.authorization_servers {
-                            let authorization_server = client
-                                .discover_authorization_server(issuer)
-                                .await
-                                .map_err(|_| {
-                                    ServiceError::new(
-                                        "MCP_OAUTH_METADATA_UNAVAILABLE",
-                                        "required MCP OAuth metadata is unavailable",
-                                    )
-                                })?;
-                            if client
-                                .begin_authorization(
-                                    &protected,
-                                    &authorization_server,
-                                    registration,
-                                )
-                                .is_ok()
-                            {
-                                compatible_issuer = true;
-                            }
-                        }
-                        if !compatible_issuer {
-                            return Err(ServiceError::new(
-                                "MCP_OAUTH_METADATA_UNAVAILABLE",
-                                "required MCP OAuth metadata is incompatible",
-                            ));
-                        }
-                    }
-                }
-            }
-            Ok(())
-        };
-        match tokio::time::timeout(timeout, check).await {
-            Ok(result) => result,
-            Err(_) => {
-                cancellation.cancel();
-                Err(ServiceError::new(
-                    "MCP_BINDING_UNAVAILABLE",
-                    "required MCP readiness probe timed out",
-                ))
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
 struct McpResourceRetrieval {
     id: String,
+    version: String,
     imported: McpImportedResource,
     context: Arc<McpContextProvider>,
     principal_repository: Option<Arc<dyn McpInteractionDurableRepository>>,
@@ -260,11 +96,24 @@ impl McpResourceRetrieval {
                 "mcp.{}.resource_{}",
                 imported.binding.server.server_id, suffix
             ),
+            version: "0.0.0+mcp".to_owned(),
             imported,
             context,
             principal_repository,
             interaction_handler,
         }
+    }
+
+    fn for_revision(
+        imported: McpImportedResource,
+        context: Arc<McpContextProvider>,
+        principal_repository: Option<Arc<dyn McpInteractionDurableRepository>>,
+        interaction_handler: Option<Arc<dyn McpInteractionHandler>>,
+        revision_suffix: &str,
+    ) -> Self {
+        let mut retrieval = Self::new(imported, context, principal_repository, interaction_handler);
+        retrieval.version = format!("0.0.0+mcp.{revision_suffix}");
+        retrieval
     }
 
     async fn run_principal(
@@ -372,7 +221,7 @@ impl Retrieval for McpResourceRetrieval {
     fn descriptor(&self) -> RetrievalDescriptor {
         RetrievalDescriptor {
             id: self.id.clone(),
-            version: "0.0.0+mcp".to_owned(),
+            version: self.version.clone(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1826,218 +1675,6 @@ impl DurableOAuthRuntimeClientResolver {
     }
 }
 
-const MAX_SIGNED_MANIFEST_BYTES: usize = 32 * 1024 * 1024;
-const MAX_MANIFEST_LIFETIME: ChronoDuration = ChronoDuration::days(30);
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct SignedMcpManifest {
-    schema_version: u32,
-    server_id: String,
-    protocol_version: String,
-    generated_at: DateTime<Utc>,
-    expires_at: DateTime<Utc>,
-    discover: insight_mcp::DiscoverResult,
-    #[serde(default)]
-    tools: Vec<ListToolsResult>,
-    #[serde(default)]
-    resources: Vec<ListResourcesResult>,
-    #[serde(default)]
-    resource_templates: Vec<ListResourceTemplatesResult>,
-    #[serde(default)]
-    prompts: Vec<ListPromptsResult>,
-    signer_key_id: String,
-    content_hash: String,
-    signature: String,
-}
-
-#[derive(Serialize)]
-struct SignedMcpManifestPayload<'a> {
-    schema_version: u32,
-    server_id: &'a str,
-    protocol_version: &'a str,
-    generated_at: DateTime<Utc>,
-    expires_at: DateTime<Utc>,
-    discover: &'a insight_mcp::DiscoverResult,
-    tools: &'a [ListToolsResult],
-    resources: &'a [ListResourcesResult],
-    resource_templates: &'a [ListResourceTemplatesResult],
-    prompts: &'a [ListPromptsResult],
-    signer_key_id: &'a str,
-}
-
-struct SignedManifestTransport {
-    kind: TransportKind,
-    responses: BTreeMap<(String, Option<String>), Value>,
-}
-
-#[async_trait]
-impl McpTransport for SignedManifestTransport {
-    fn kind(&self) -> TransportKind {
-        self.kind
-    }
-
-    async fn exchange(
-        &self,
-        request: &Value,
-        parameter_headers: &BTreeMap<String, String>,
-        cancellation: &CancellationToken,
-        _observer: &dyn McpNotificationObserver,
-    ) -> Result<Value, TransportError> {
-        if cancellation.is_cancelled() {
-            return Err(TransportError::Cancelled);
-        }
-        if !parameter_headers.is_empty() {
-            return Err(TransportError::Header);
-        }
-        let method = request
-            .get("method")
-            .and_then(Value::as_str)
-            .ok_or(TransportError::Request)?;
-        let cursor = request
-            .get("params")
-            .and_then(|params| params.get("cursor"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let result = self
-            .responses
-            .get(&(method.to_owned(), cursor))
-            .cloned()
-            .ok_or(TransportError::Response)?;
-        Ok(json!({
-            "jsonrpc":"2.0",
-            "id":request.get("id").cloned().ok_or(TransportError::Request)?,
-            "result":result
-        }))
-    }
-}
-
-async fn signed_manifest_transport(
-    server_id: &str,
-    path: &std::path::Path,
-    trust_keys_json: &str,
-    kind: TransportKind,
-) -> Result<Arc<dyn McpTransport>, McpResourceConfigError> {
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|_| McpResourceConfigError::ManifestRequired)?;
-    if bytes.is_empty() || bytes.len() > MAX_SIGNED_MANIFEST_BYTES {
-        return Err(McpResourceConfigError::ManifestInvalid);
-    }
-    let manifest: SignedMcpManifest =
-        serde_json::from_slice(&bytes).map_err(|_| McpResourceConfigError::ManifestInvalid)?;
-    let now = Utc::now();
-    if manifest.schema_version != 1
-        || manifest.server_id != server_id
-        || manifest.protocol_version != MCP_PROTOCOL_VERSION
-        || manifest.generated_at > now + ChronoDuration::minutes(5)
-        || manifest.expires_at <= now
-        || manifest.expires_at - manifest.generated_at > MAX_MANIFEST_LIFETIME
-        || manifest.discover.result_type != "complete"
-        || !manifest
-            .discover
-            .supported_versions
-            .iter()
-            .any(|version| version == MCP_PROTOCOL_VERSION)
-    {
-        return Err(McpResourceConfigError::ManifestInvalid);
-    }
-    let payload = SignedMcpManifestPayload {
-        schema_version: manifest.schema_version,
-        server_id: &manifest.server_id,
-        protocol_version: &manifest.protocol_version,
-        generated_at: manifest.generated_at,
-        expires_at: manifest.expires_at,
-        discover: &manifest.discover,
-        tools: &manifest.tools,
-        resources: &manifest.resources,
-        resource_templates: &manifest.resource_templates,
-        prompts: &manifest.prompts,
-        signer_key_id: &manifest.signer_key_id,
-    };
-    let canonical =
-        serde_jcs::to_vec(&payload).map_err(|_| McpResourceConfigError::ManifestInvalid)?;
-    if canonical_sha256_bytes(&canonical) != manifest.content_hash {
-        return Err(McpResourceConfigError::ManifestInvalid);
-    }
-    let trust_keys = serde_json::from_str::<BTreeMap<String, String>>(trust_keys_json)
-        .map_err(|_| McpResourceConfigError::ManifestInvalid)?;
-    let public_key = trust_keys
-        .get(&manifest.signer_key_id)
-        .ok_or(McpResourceConfigError::ManifestInvalid)
-        .and_then(|encoded| {
-            BASE64_STANDARD
-                .decode(encoded)
-                .map_err(|_| McpResourceConfigError::ManifestInvalid)
-        })?;
-    let signature_bytes = BASE64_STANDARD
-        .decode(&manifest.signature)
-        .map_err(|_| McpResourceConfigError::ManifestInvalid)?;
-    signature::UnparsedPublicKey::new(&signature::ED25519, public_key)
-        .verify(&canonical, &signature_bytes)
-        .map_err(|_| McpResourceConfigError::ManifestInvalid)?;
-
-    let mut responses = BTreeMap::new();
-    responses.insert(
-        ("server/discover".to_owned(), None),
-        serde_json::to_value(&manifest.discover)
-            .map_err(|_| McpResourceConfigError::ManifestInvalid)?,
-    );
-    insert_manifest_pages(&mut responses, "tools/list", &manifest.tools)?;
-    insert_manifest_pages(&mut responses, "resources/list", &manifest.resources)?;
-    insert_manifest_pages(
-        &mut responses,
-        "resources/templates/list",
-        &manifest.resource_templates,
-    )?;
-    insert_manifest_pages(&mut responses, "prompts/list", &manifest.prompts)?;
-    Ok(Arc::new(SignedManifestTransport { kind, responses }))
-}
-
-fn insert_manifest_pages<T: Serialize>(
-    responses: &mut BTreeMap<(String, Option<String>), Value>,
-    method: &str,
-    pages: &[T],
-) -> Result<(), McpResourceConfigError> {
-    let mut cursor = None;
-    for (index, page) in pages.iter().enumerate() {
-        let value =
-            serde_json::to_value(page).map_err(|_| McpResourceConfigError::ManifestInvalid)?;
-        if responses
-            .insert((method.to_owned(), cursor.clone()), value.clone())
-            .is_some()
-        {
-            return Err(McpResourceConfigError::ManifestInvalid);
-        }
-        cursor = value
-            .get("nextCursor")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        if cursor.is_none() && index + 1 != pages.len() {
-            return Err(McpResourceConfigError::ManifestInvalid);
-        }
-    }
-    if !pages.is_empty() && cursor.is_some() {
-        return Err(McpResourceConfigError::ManifestInvalid);
-    }
-    Ok(())
-}
-
-fn build_mcp_client(
-    transport: Arc<dyn McpTransport>,
-    limits: McpClientLimits,
-    max_message_bytes: usize,
-    allow_tasks: bool,
-) -> Result<Arc<McpClient>, McpResourceConfigError> {
-    build_mcp_client_for_protocol(
-        transport,
-        limits,
-        max_message_bytes,
-        allow_tasks,
-        MCP_PROTOCOL_VERSION,
-    )
-}
-
 fn build_mcp_client_for_protocol(
     transport: Arc<dyn McpTransport>,
     limits: McpClientLimits,
@@ -2603,496 +2240,612 @@ fn deterministic_interaction_id(
     McpInteractionId::new(encoded).map_err(|_| McpInteractionHandlerError::Invalid)
 }
 
-/// Resolve service-account MCP catalogs at publication time and register only
-/// explicitly imported tools. Runtime execution reuses these frozen bindings.
-pub async fn load_mcp_action_providers(
+/// Materializes one immutable active management Revision into the shared
+/// Action Registry. No remote catalog read occurs: schemas and bindings come
+/// only from the frozen revision document.
+pub struct ManagedMcpRevisionProjection {
+    pub action_identities: Vec<(String, String)>,
+    pub retrieval_identities: Vec<(String, String)>,
+    pub catalog_server: McpCatalogServer,
+    pub oauth_server: Option<McpOAuthServer>,
+    pub subscription: Option<McpClientSubscription>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_managed_mcp_revision_actions(
     config: &McpClientConfig,
-    allow_legacy_fallback: bool,
-    registry: &mut ActionRegistry,
-    retrievals: &mut RetrievalRegistry,
+    server: &McpManagedServer,
+    revision: &McpServerRevision,
+    registry: &ActionRegistry,
+    retrievals: &RetrievalRegistry,
     interaction_handler: Option<Arc<dyn McpInteractionHandler>>,
     oauth_runtime: Option<McpOAuthRuntimeAuthority>,
     remote_task_runtime: Option<McpRemoteTaskRuntimeAuthority>,
-) -> Result<McpLoadedProviders, McpResourceConfigError> {
-    if !config.enabled {
-        return Ok(McpLoadedProviders {
-            publications: Vec::new(),
-            contexts: BTreeMap::new(),
-            subscriptions: Vec::new(),
-            readiness: Arc::new(McpClientReadinessProbe::default()),
-        });
-    }
-    let mut publications = Vec::with_capacity(config.servers.len());
-    let mut contexts = BTreeMap::new();
-    let mut subscriptions = Vec::new();
-    let mut readiness_clients = Vec::new();
-    for (server_id, server) in &config.servers {
-        let (transport, transport_kind, http_policy) = match &server.transport {
-            McpClientTransportConfig::StreamableHttp {
-                endpoint,
-                allow_plaintext_loopback,
-                connect_timeout,
-                request_timeout,
-            } => {
-                let policy = if *allow_plaintext_loopback {
-                    StreamableHttpPolicy::for_loopback_test(endpoint)
-                } else {
-                    StreamableHttpPolicy::new(endpoint)
-                }
-                .map_err(|_| McpResourceConfigError::Transport)?
-                .with_timeouts(*connect_timeout, *request_timeout)
-                .map_err(|_| McpResourceConfigError::Transport)?
-                .with_server_id(server_id)
-                .map_err(|_| McpResourceConfigError::Transport)?
-                .with_request_limit(server.limits.max_request_bytes)
-                .map_err(|_| McpResourceConfigError::Transport)?
-                .with_limits(
-                    server.limits.max_response_bytes,
-                    server.limits.max_sse_line_bytes,
-                    server.limits.max_sse_event_bytes,
-                )
-                .map_err(|_| McpResourceConfigError::Transport)?;
-                let credential = match &server.authorization {
-                    McpClientAuthorizationConfig::None => None,
-                    McpClientAuthorizationConfig::BearerEnv { token, .. } => Some(
-                        HttpCredential::bearer(token.expose())
+    execution_fence: Arc<dyn McpExecutionFence>,
+) -> Result<ManagedMcpRevisionProjection, McpResourceConfigError> {
+    let draft: McpDraftDocument = serde_json::from_value(
+        revision
+            .document
+            .get("draft")
+            .cloned()
+            .ok_or(McpResourceConfigError::Provider)?,
+    )
+    .map_err(|_| McpResourceConfigError::Provider)?;
+    let limits = &config.default_limits.limits;
+    let request_limit = draft
+        .limits
+        .max_request_bytes
+        .unwrap_or(limits.max_request_bytes);
+    let response_limit = draft
+        .limits
+        .max_response_bytes
+        .unwrap_or(limits.max_response_bytes);
+    let line_limit = draft
+        .limits
+        .max_sse_line_bytes
+        .unwrap_or(limits.max_sse_line_bytes);
+    let event_limit = draft
+        .limits
+        .max_sse_event_bytes
+        .unwrap_or(limits.max_sse_event_bytes);
+    let content_limit = draft
+        .limits
+        .max_content_items
+        .unwrap_or(limits.max_content_items);
+    let catalog_limit = draft
+        .limits
+        .max_catalog_items
+        .unwrap_or(limits.max_catalog_items);
+    let (transport, transport_kind, http_policy) = match draft
+        .transport
+        .as_ref()
+        .ok_or(McpResourceConfigError::Transport)?
+    {
+        McpDraftTransport::StreamableHttp { endpoint } => {
+            let policy = if config.network_policy.allow_loopback_development
+                && endpoint.starts_with("http://")
+            {
+                StreamableHttpPolicy::for_loopback_test(endpoint)
+            } else {
+                StreamableHttpPolicy::new(endpoint)
+            }
+            .map_err(|_| McpResourceConfigError::Transport)?
+            .with_timeouts(
+                config.default_limits.connect_timeout,
+                config.default_limits.request_timeout,
+            )
+            .map_err(|_| McpResourceConfigError::Transport)?
+            .with_server_id(&server.server_id)
+            .map_err(|_| McpResourceConfigError::Transport)?
+            .with_request_limit(request_limit)
+            .map_err(|_| McpResourceConfigError::Transport)?
+            .with_limits(response_limit, line_limit, event_limit)
+            .map_err(|_| McpResourceConfigError::Transport)?;
+            let credential = match draft
+                .authorization
+                .as_ref()
+                .ok_or(McpResourceConfigError::Credential)?
+            {
+                McpDraftAuthorization::None | McpDraftAuthorization::OauthUser { .. } => None,
+                McpDraftAuthorization::BearerSecretRef { secret_ref } => {
+                    let token = std::env::var(secret_ref)
+                        .map_err(|_| McpResourceConfigError::Credential)?;
+                    Some(
+                        HttpCredential::bearer(&token)
                             .map_err(|_| McpResourceConfigError::Credential)?,
-                    ),
-                    McpClientAuthorizationConfig::OauthUser { .. } => None,
-                };
-                let transport = StreamableHttpTransport::new(policy.clone(), credential)
-                    .map_err(|_| McpResourceConfigError::Transport)?;
-                (
-                    Arc::new(transport) as Arc<dyn insight_mcp::McpTransport>,
-                    McpTransportKind::StreamableHttp,
-                    Some(policy),
-                )
-            }
-            McpClientTransportConfig::Stdio {
-                executable,
-                args,
-                working_directory,
-                environment,
-                isolation_profile: _,
-                startup_timeout,
-                request_timeout,
-                shutdown_timeout,
-            } => {
-                let environment = environment
-                    .iter()
-                    .map(|(name, source)| {
-                        std::env::var(source)
-                            .map(|value| (name.clone(), value))
-                            .map_err(|_| McpResourceConfigError::Credential)
-                    })
-                    .collect::<Result<BTreeMap<_, _>, _>>()?;
-                let policy = StdioTransportPolicy::new(
-                    executable.clone(),
-                    args.clone(),
-                    working_directory.clone(),
-                    environment,
-                )
-                .and_then(|policy| {
-                    policy.with_timeouts(*startup_timeout, *request_timeout, *shutdown_timeout)
-                })
-                .and_then(|policy| policy.with_server_id(server_id))
-                .and_then(|policy| {
-                    policy.with_limits(
-                        server.limits.max_request_bytes,
-                        server.limits.max_response_bytes,
-                        server.limits.max_sse_line_bytes,
                     )
-                })
+                }
+            };
+            let transport = StreamableHttpTransport::new(policy.clone(), credential)
                 .map_err(|_| McpResourceConfigError::Transport)?;
-                let transport =
-                    StdioTransport::new(policy).map_err(|_| McpResourceConfigError::Transport)?;
-                (
-                    Arc::new(transport) as Arc<dyn insight_mcp::McpTransport>,
-                    McpTransportKind::Stdio,
-                    None,
-                )
-            }
-        };
-        let mut limits = McpClientLimits::default();
-        limits.max_tools = server.limits.max_catalog_items;
-        limits.max_resources = server.limits.max_catalog_items;
-        limits.max_prompts = server.limits.max_catalog_items;
-        limits.max_content_items = server.limits.max_content_items;
-        limits.max_content_bytes = server.limits.max_response_bytes;
-        let tasks_requested = server
-            .imports
-            .tools
-            .iter()
-            .any(|tool| tool.tasks == McpInteractionConfig::Allowed);
-        let discovery_transport = match &server.discovery {
-            McpDiscoveryConfig::LiveServiceAccount => Arc::clone(&transport),
-            McpDiscoveryConfig::SignedManifest {
-                path, trust_keys, ..
-            } => {
-                signed_manifest_transport(server_id, path, trust_keys.expose(), transport.kind())
-                    .await?
-            }
-        };
-        let max_message_bytes = server
-            .limits
-            .max_request_bytes
-            .max(server.limits.max_response_bytes);
-        let modern_discovery_client = build_mcp_client(
-            Arc::clone(&discovery_transport),
-            limits,
-            max_message_bytes,
-            tasks_requested,
-        )?;
-        let cancellation = CancellationToken::new();
-        let modern_discovery = modern_discovery_client
-            .discover(&cancellation, &NoopNotificationObserver)
-            .await;
-        let (selected_protocol, discovery_client, client, discovery) = match modern_discovery {
-            Ok(discovery) => (
-                MCP_PROTOCOL_VERSION,
-                modern_discovery_client,
-                build_mcp_client(
-                    Arc::clone(&transport),
-                    limits,
-                    max_message_bytes,
-                    tasks_requested,
-                )?,
-                discovery,
-            ),
-            Err(error)
-                if allow_legacy_fallback
-                    && matches!(server.discovery, McpDiscoveryConfig::LiveServiceAccount)
-                    && legacy_fallback_allowed(&error) =>
-            {
-                if tasks_requested {
-                    return Err(McpResourceConfigError::Capability);
-                }
-                // A failed modern stdio probe must not leave a half-selected
-                // process behind. HTTP modern is stateless and has no legacy
-                // session at this point; shutdown remains a no-op there.
-                transport
-                    .shutdown()
-                    .await
-                    .map_err(|_| McpResourceConfigError::Transport)?;
-                let legacy_client = build_mcp_client_for_protocol(
-                    Arc::clone(&transport),
-                    limits,
-                    max_message_bytes,
-                    false,
-                    MCP_LEGACY_PROTOCOL_VERSION,
-                )?;
-                let discovery = legacy_client
-                    .discover(&cancellation, &NoopNotificationObserver)
-                    .await
-                    .map_err(|_| McpResourceConfigError::Discovery)?;
-                (
-                    MCP_LEGACY_PROTOCOL_VERSION,
-                    Arc::clone(&legacy_client),
-                    legacy_client,
-                    discovery,
-                )
-            }
-            Err(_) => return Err(McpResourceConfigError::Discovery),
-        };
-        let tasks_discovered = discovery
-            .capabilities
-            .extensions
-            .as_ref()
-            .and_then(|extensions| extensions.get(insight_mcp::MCP_TASKS_EXTENSION_ID))
-            .is_some();
-        if tasks_requested && !tasks_discovered {
-            return Err(McpResourceConfigError::Capability);
-        }
-        let discovery_fingerprint = canonical_sha256(&discovery)?;
-        let binding = McpServerBindingIdentity {
-            connection_id: format!("mcp.{server_id}"),
-            server_id: server_id.clone(),
-            protocol_version: selected_protocol.to_owned(),
-            transport: transport_kind,
-            principal_scope: if matches!(
-                server.authorization,
-                McpClientAuthorizationConfig::OauthUser { .. }
-            ) {
-                PrincipalScope::User("oauth_user".to_owned())
-            } else {
-                PrincipalScope::Service
-            },
-            discovery_fingerprint: discovery_fingerprint.clone(),
-        };
-        let (tool_catalog_fingerprint, tool_bindings) = if server.imports.tools.is_empty() {
-            (None, Vec::new())
-        } else {
-            if discovery.capabilities.tools.is_none() {
-                return Err(McpResourceConfigError::Capability);
-            }
-            let catalog = discovery_client
-                .list_tools(&cancellation, &NoopNotificationObserver)
-                .await
-                .map_err(|_| McpResourceConfigError::Catalog)?;
-            let imports = server
-                .imports
-                .tools
-                .iter()
-                .map(|tool| resolve_tool_import(server_id, tool))
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut provider = McpToolProvider::freeze(
-                binding.clone(),
-                Arc::clone(&client),
-                catalog.clone(),
-                imports,
+            (
+                Arc::new(transport) as Arc<dyn McpTransport>,
+                McpTransportKind::StreamableHttp,
+                Some(policy),
             )
+        }
+        McpDraftTransport::Stdio {
+            launch_profile_id,
+            parameters,
+        } => {
+            let profile = config
+                .stdio_launch_profiles
+                .get(launch_profile_id)
+                .ok_or(McpResourceConfigError::Transport)?;
+            if parameters
+                .keys()
+                .any(|name| !profile.allowed_parameters.contains(name))
+            {
+                return Err(McpResourceConfigError::Transport);
+            }
+            let mut args = profile.fixed_args.clone();
+            for (name, value) in parameters {
+                args.push(format!("--{name}"));
+                args.push(value.clone());
+            }
+            let environment = profile
+                .secret_environment
+                .iter()
+                .map(|(name, source)| {
+                    std::env::var(source)
+                        .map(|value| (name.clone(), value))
+                        .map_err(|_| McpResourceConfigError::Credential)
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            let policy = StdioTransportPolicy::new(
+                profile.executable.clone(),
+                args,
+                profile.working_directory.clone(),
+                environment,
+            )
+            .and_then(|policy| {
+                policy.with_timeouts(
+                    Duration::from_secs(10),
+                    config.default_limits.request_timeout,
+                    Duration::from_secs(10),
+                )
+            })
+            .and_then(|policy| policy.with_limits(request_limit, response_limit, 64 * 1024))
+            .and_then(|policy| policy.with_server_id(&server.server_id))
+            .map_err(|_| McpResourceConfigError::Transport)?;
+            let transport =
+                StdioTransport::new(policy).map_err(|_| McpResourceConfigError::Transport)?;
+            (
+                Arc::new(transport) as Arc<dyn McpTransport>,
+                McpTransportKind::Stdio,
+                None,
+            )
+        }
+    };
+    let tool_documents = revision
+        .document
+        .pointer("/bindings/tools")
+        .and_then(Value::as_array)
+        .ok_or(McpResourceConfigError::Provider)?;
+    let tasks_requested = tool_documents
+        .iter()
+        .any(|item| item.pointer("/import/tasks").and_then(Value::as_str) == Some("allowed"));
+    let client_limits = McpClientLimits {
+        max_tools: catalog_limit,
+        max_resources: catalog_limit,
+        max_prompts: catalog_limit,
+        max_content_items: content_limit,
+        max_content_bytes: response_limit,
+        ..McpClientLimits::default()
+    };
+    let selected_protocol = revision
+        .document
+        .pointer("/discovery/selected_protocol")
+        .and_then(Value::as_str)
+        .unwrap_or(&draft.protocol.preferred);
+    let client = build_mcp_client_for_protocol(
+        Arc::clone(&transport),
+        client_limits,
+        request_limit.max(response_limit),
+        tasks_requested,
+        selected_protocol,
+    )?;
+    let mut tools = Vec::with_capacity(tool_documents.len());
+    let mut imports = Vec::with_capacity(tool_documents.len());
+    let version_suffix = revision
+        .revision_id
+        .trim_start_matches("mrev_")
+        .replace('_', ".");
+    let revision_hash_suffix = revision
+        .revision_hash
+        .strip_prefix("sha256:")
+        .ok_or(McpResourceConfigError::Provider)?;
+    for item in tool_documents {
+        let policy: insight_api::v1::McpDraftToolImport = serde_json::from_value(
+            item.get("import")
+                .cloned()
+                .ok_or(McpResourceConfigError::Provider)?,
+        )
+        .map_err(|_| McpResourceConfigError::Provider)?;
+        let candidate = item
+            .get("candidate")
+            .ok_or(McpResourceConfigError::Provider)?;
+        let annotations = candidate
+            .get("annotations")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
             .map_err(|_| McpResourceConfigError::Provider)?;
-            if let Some(handler) = interaction_handler.as_ref() {
-                provider = provider.with_interaction_handler(Arc::clone(handler));
-            }
-            if tasks_requested {
-                let handler = remote_task_runtime
-                    .as_ref()
-                    .cloned()
-                    .ok_or(McpResourceConfigError::Capability)?;
-                provider = provider.with_remote_task_handler(Arc::new(handler));
-            }
-            if let McpClientAuthorizationConfig::OauthUser {
-                scopes,
-                client_id,
-                redirect_uri,
-            } = &server.authorization
-            {
-                let authority = oauth_runtime
-                    .as_ref()
-                    .cloned()
-                    .ok_or(McpResourceConfigError::Credential)?;
-                let policy = http_policy
-                    .clone()
-                    .ok_or(McpResourceConfigError::Credential)?;
-                provider = provider.with_runtime_client_resolver(Arc::new(
-                    DurableOAuthRuntimeClientResolver {
-                        authority,
-                        server_id: server_id.clone(),
-                        resource: policy.endpoint().to_string(),
-                        client_id: client_id.clone(),
-                        redirect_uri: redirect_uri.clone(),
-                        required_scopes: scopes.clone(),
-                        policy,
-                        limits,
-                        max_message_bytes: server
-                            .limits
-                            .max_request_bytes
-                            .max(server.limits.max_response_bytes),
-                        allow_tasks: tasks_requested,
-                        protocol_version: selected_protocol.to_owned(),
-                    },
-                ));
-            }
-            let tool_bindings = provider
-                .imports()
-                .iter()
-                .map(|imported| imported.binding.clone())
-                .collect();
-            provider
-                .register_into(registry)
-                .map_err(|_| McpResourceConfigError::Provider)?;
-            (Some(catalog.descriptor_hash), tool_bindings)
+        tools.push(insight_mcp::Tool {
+            name: policy.remote.clone(),
+            title: candidate
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            description: candidate
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            input_schema: candidate
+                .get("input_schema")
+                .cloned()
+                .ok_or(McpResourceConfigError::Provider)?,
+            output_schema: candidate
+                .get("output_schema")
+                .filter(|value| !value.is_null())
+                .cloned(),
+            annotations,
+            metadata: None,
+            icons: Vec::new(),
+        });
+        let effect = match policy.effect.as_str() {
+            "pure" => EffectClass::Pure,
+            "read_only" => EffectClass::ReadOnly,
+            "mutating" => EffectClass::Mutating,
+            _ => return Err(McpResourceConfigError::Provider),
         };
-
-        let mut catalog_invalidation = None;
-        if !server.imports.tools.is_empty()
-            || !server.imports.resources.is_empty()
-            || !server.imports.prompts.is_empty()
-        {
-            let shared_invalidation = Arc::new(McpCatalogInvalidation::default());
-            if !server.imports.resources.is_empty() && discovery.capabilities.resources.is_none() {
-                return Err(McpResourceConfigError::Capability);
-            }
-            if !server.imports.prompts.is_empty() && discovery.capabilities.prompts.is_none() {
-                return Err(McpResourceConfigError::Capability);
-            }
-            let resource_catalog = if server.imports.resources.is_empty() {
-                ResourceCatalog::empty("resources").map_err(|_| McpResourceConfigError::Catalog)?
-            } else {
-                discovery_client
-                    .list_resources(&cancellation, &NoopNotificationObserver)
-                    .await
-                    .map_err(|_| McpResourceConfigError::Catalog)?
-            };
-            let template_catalog = if server.imports.resources.is_empty() {
-                ResourceTemplateCatalog::empty("resource_templates")
-                    .map_err(|_| McpResourceConfigError::Catalog)?
-            } else {
-                discovery_client
-                    .list_resource_templates(&cancellation, &NoopNotificationObserver)
-                    .await
-                    .map_err(|_| McpResourceConfigError::Catalog)?
-            };
-            let prompt_catalog = if server.imports.prompts.is_empty() {
-                PromptCatalog::empty("prompts").map_err(|_| McpResourceConfigError::Catalog)?
-            } else {
-                discovery_client
-                    .list_prompts(&cancellation, &NoopNotificationObserver)
-                    .await
-                    .map_err(|_| McpResourceConfigError::Catalog)?
-            };
-            let mut context = McpContextProvider::freeze(
-                binding.clone(),
-                Arc::clone(&client),
-                resource_catalog,
-                template_catalog,
-                prompt_catalog,
-                server
-                    .imports
-                    .resources
-                    .iter()
-                    .map(|pattern| McpResourceImportPolicy {
-                        uri_pattern: pattern.clone(),
-                        mime_allowlist: Vec::new(),
-                        max_content_bytes: server.limits.max_response_bytes,
-                    })
-                    .collect(),
-                server
-                    .imports
-                    .prompts
-                    .iter()
-                    .map(|prompt| McpPromptImportPolicy {
-                        remote_name: prompt.remote_name.clone(),
-                        allow_user_invocation: prompt.allow_user_invocation,
-                        allow_definition_snapshot: prompt.definition_arguments.is_some(),
-                        definition_arguments: prompt.definition_arguments.clone(),
-                    })
-                    .collect(),
-            )
-            .map_err(|_| McpResourceConfigError::Context)?;
-            context = context
-                .freeze_definition_prompts(&cancellation, &NoopNotificationObserver)
-                .await
-                .map_err(|_| McpResourceConfigError::Context)?;
-            context = context.with_catalog_invalidation(Arc::clone(&shared_invalidation));
-            if let McpClientAuthorizationConfig::OauthUser {
-                scopes,
-                client_id,
-                redirect_uri,
-            } = &server.authorization
-            {
-                let authority = oauth_runtime
-                    .as_ref()
-                    .cloned()
-                    .ok_or(McpResourceConfigError::Credential)?;
-                let policy = http_policy
-                    .clone()
-                    .ok_or(McpResourceConfigError::Credential)?;
-                context = context.with_principal_client_resolver(Arc::new(
-                    DurableOAuthRuntimeClientResolver {
-                        authority,
-                        server_id: server_id.clone(),
-                        resource: policy.endpoint().to_string(),
-                        client_id: client_id.clone(),
-                        redirect_uri: redirect_uri.clone(),
-                        required_scopes: scopes.clone(),
-                        policy,
-                        limits,
-                        max_message_bytes: server
-                            .limits
-                            .max_request_bytes
-                            .max(server.limits.max_response_bytes),
-                        allow_tasks: tasks_requested,
-                        protocol_version: selected_protocol.to_owned(),
-                    },
-                ));
-            }
-            let context = Arc::new(context);
-            for imported in context.resources().iter().cloned() {
-                retrievals
-                    .register(McpResourceRetrieval::new(
-                        imported,
-                        Arc::clone(&context),
-                        oauth_runtime.as_ref().map(|authority| {
-                            Arc::clone(&authority.interaction_repository)
-                                as Arc<dyn McpInteractionDurableRepository>
-                        }),
-                        interaction_handler.as_ref().map(Arc::clone),
-                    ))
-                    .map_err(|_| McpResourceConfigError::Context)?;
-            }
-            if !matches!(
-                server.authorization,
-                McpClientAuthorizationConfig::OauthUser { .. }
-            ) {
-                let filter = subscription_filter(
-                    &discovery.capabilities,
-                    context.resources(),
-                    !server.imports.tools.is_empty(),
-                    !server.imports.prompts.is_empty(),
-                );
-                if subscription_filter_is_nonempty(&filter) {
-                    subscriptions.push(McpClientSubscription {
-                        server_id: server_id.clone(),
-                        context: Arc::clone(&context),
-                        filter,
-                        invalidation: Arc::clone(&shared_invalidation),
-                    });
-                    catalog_invalidation = Some(shared_invalidation);
-                }
-            }
-            contexts.insert(server_id.clone(), context);
+        let idempotency = match policy.idempotency.as_str() {
+            "idempotent" => IdempotencyClass::Idempotent,
+            "non_idempotent" | "unknown" => IdempotencyClass::NonIdempotent,
+            _ => return Err(McpResourceConfigError::Provider),
+        };
+        let cancellation = match policy.cancellation.as_str() {
+            "cooperative" | "immediate" => CancellationClass::Cooperative,
+            "not_supported" => CancellationClass::NotSupported,
+            _ => return Err(McpResourceConfigError::Provider),
+        };
+        let approval = match policy.approval.as_str() {
+            "never" => McpApprovalPolicy::Never,
+            "model_tool_only" => McpApprovalPolicy::ModelToolOnly,
+            "mutating" => McpApprovalPolicy::Mutating,
+            "always" => McpApprovalPolicy::Always,
+            _ => return Err(McpResourceConfigError::Provider),
+        };
+        let description = match policy.description {
+            McpToolDescriptionPolicy::Remote => McpDescriptionPolicy::Remote,
+            McpToolDescriptionPolicy::Disabled => McpDescriptionPolicy::Disabled,
+            McpToolDescriptionPolicy::Override { text } => McpDescriptionPolicy::Override(text),
+        };
+        let mut required_capabilities = policy
+            .required_capabilities
+            .into_iter()
+            .map(ActionCapability::new)
+            .collect::<BTreeSet<_>>();
+        if !policy.terminal_only_compatible {
+            required_capabilities.insert(ActionCapability::new("runtime.mcp.full_persistence.v1"));
         }
-        if !server.imports.tools.is_empty()
-            || !server.imports.resources.is_empty()
-            || !server.imports.prompts.is_empty()
-        {
-            readiness_clients.push(match (&server.authorization, http_policy.as_ref()) {
-                (
-                    McpClientAuthorizationConfig::OauthUser {
-                        scopes,
-                        client_id,
-                        redirect_uri,
-                    },
-                    Some(policy),
-                ) => RequiredMcpReadiness::OAuthUser {
-                    client: OAuthClient::new(policy.request_timeout())
-                        .map_err(|_| McpResourceConfigError::Credential)?,
-                    resource: policy.endpoint().to_string(),
-                    registration: OAuthClientRegistration::new(
-                        client_id,
-                        redirect_uri,
-                        scopes.iter().cloned().collect(),
-                    )
-                    .map_err(|_| McpResourceConfigError::Credential)?,
-                },
-                (McpClientAuthorizationConfig::OauthUser { .. }, None) => {
-                    return Err(McpResourceConfigError::Credential);
-                }
-                (
-                    McpClientAuthorizationConfig::None
-                    | McpClientAuthorizationConfig::BearerEnv { .. },
-                    _,
-                ) => RequiredMcpReadiness::Service {
-                    client: Arc::clone(&client),
-                    capabilities: Box::new(discovery.capabilities.clone()),
-                },
-            });
+        if policy.input_required == "allowed" || policy.approval != "never" {
+            required_capabilities.insert(ActionCapability::new("runtime.mcp.interaction.v1"));
         }
-        publications.push(McpClientPublication {
-            server_id: server_id.clone(),
-            binding,
-            capabilities: discovery.capabilities,
-            server_info: discovery.server_info,
-            required_scopes: match &server.authorization {
-                McpClientAuthorizationConfig::OauthUser { scopes, .. } => scopes.clone(),
-                McpClientAuthorizationConfig::None
-                | McpClientAuthorizationConfig::BearerEnv { .. } => BTreeSet::new(),
+        if policy.tasks == "allowed" {
+            required_capabilities.insert(ActionCapability::new("runtime.mcp.tasks.v1"));
+        }
+        let tool_binding_hash_suffix = item
+            .get("tool_binding_hash")
+            .and_then(Value::as_str)
+            .and_then(|value| value.strip_prefix("sha256:"))
+            .ok_or(McpResourceConfigError::Provider)?;
+        imports.push(McpToolImport {
+            remote_name: policy.remote,
+            action_id: item
+                .get("action_id")
+                .and_then(Value::as_str)
+                .ok_or(McpResourceConfigError::Provider)?
+                .to_owned(),
+            action_version: format!(
+                "0.0.0+mcp.{version_suffix}.{revision_hash_suffix}.{tool_binding_hash_suffix}"
+            ),
+            model_tool_name: policy.alias,
+            title: None,
+            description,
+            effect,
+            idempotency,
+            cancellation,
+            required_capabilities,
+            approval,
+            allow_input_required: policy.input_required == "allowed",
+            allow_tasks: policy.tasks == "allowed",
+            terminal_only_compatible: policy.terminal_only_compatible,
+            public_policy: {
+                let mut value = ToolPublicPolicy::private();
+                value.call = policy.public.call;
+                value
             },
-            discovery_fingerprint,
-            tool_catalog_fingerprint,
-            tool_bindings,
-            catalog_invalidation,
         });
     }
-    Ok(McpLoadedProviders {
-        publications,
-        contexts,
-        subscriptions,
-        readiness: Arc::new(McpClientReadinessProbe {
-            required: readiness_clients,
-        }),
+    let binding = McpServerBindingIdentity {
+        connection_id: format!("mcp.{}.{}", server.server_id, revision.revision_id),
+        server_id: server.server_id.clone(),
+        protocol_version: selected_protocol.to_owned(),
+        transport: transport_kind,
+        principal_scope: if matches!(
+            draft.authorization,
+            Some(McpDraftAuthorization::OauthUser { .. })
+        ) {
+            PrincipalScope::User("oauth_user".to_owned())
+        } else {
+            PrincipalScope::Service
+        },
+        discovery_fingerprint: revision.catalog_fingerprint.clone(),
+    };
+    let catalog = insight_mcp::ToolCatalog {
+        tools,
+        rejected: Vec::new(),
+        ttl_ms: 0,
+        cache_scope: insight_mcp::CacheScope::Private,
+        descriptor_hash: revision.catalog_fingerprint.clone(),
+    };
+    let mut provider =
+        McpToolProvider::freeze(binding.clone(), Arc::clone(&client), catalog, imports)
+            .map_err(|_| McpResourceConfigError::Provider)?
+            .with_execution_fence(
+                execution_fence,
+                revision.revision_id.clone(),
+                server.disable_fence,
+            );
+    if let Some(handler) = interaction_handler.as_ref() {
+        provider = provider.with_interaction_handler(Arc::clone(handler));
+    }
+    if tasks_requested {
+        provider = provider.with_remote_task_handler(Arc::new(
+            remote_task_runtime
+                .clone()
+                .ok_or(McpResourceConfigError::Capability)?,
+        ));
+    }
+    if let Some(McpDraftAuthorization::OauthUser {
+        scopes,
+        client_id,
+        redirect_uri,
+    }) = &draft.authorization
+    {
+        let authority = oauth_runtime
+            .clone()
+            .ok_or(McpResourceConfigError::Credential)?;
+        let policy = http_policy
+            .clone()
+            .ok_or(McpResourceConfigError::Credential)?;
+        provider =
+            provider.with_runtime_client_resolver(Arc::new(DurableOAuthRuntimeClientResolver {
+                authority,
+                server_id: server.server_id.clone(),
+                resource: policy.endpoint().to_string(),
+                client_id: client_id.clone(),
+                redirect_uri: redirect_uri.clone(),
+                required_scopes: scopes.iter().cloned().collect(),
+                policy,
+                limits: client_limits,
+                max_message_bytes: request_limit.max(response_limit),
+                allow_tasks: tasks_requested,
+                protocol_version: selected_protocol.to_owned(),
+            }));
+    }
+    let identities: Vec<(String, String)> = provider
+        .imports()
+        .iter()
+        .map(|item| {
+            (
+                item.import.action_id.clone(),
+                item.import.action_version.clone(),
+            )
+        })
+        .collect();
+    let tool_bindings = provider
+        .imports()
+        .iter()
+        .map(|item| item.binding.clone())
+        .collect::<Vec<_>>();
+    provider
+        .publish_into(registry)
+        .map_err(|_| McpResourceConfigError::Provider)?;
+
+    let capabilities: insight_mcp::ServerCapabilities = serde_json::from_value(
+        revision
+            .document
+            .pointer("/discovery/capabilities")
+            .cloned()
+            .ok_or(McpResourceConfigError::Provider)?,
+    )
+    .map_err(|_| McpResourceConfigError::Provider)?;
+    let server_info: insight_mcp::ServerInfo = serde_json::from_value(
+        revision
+            .document
+            .pointer("/discovery/server_info")
+            .cloned()
+            .ok_or(McpResourceConfigError::Provider)?,
+    )
+    .map_err(|_| McpResourceConfigError::Provider)?;
+    let resource_items = serde_json::from_value(
+        revision
+            .document
+            .pointer("/bindings/resources/items")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )
+    .map_err(|_| McpResourceConfigError::Provider)?;
+    let resource_templates = serde_json::from_value(
+        revision
+            .document
+            .pointer("/bindings/resources/templates")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )
+    .map_err(|_| McpResourceConfigError::Provider)?;
+    let prompt_items = serde_json::from_value(
+        revision
+            .document
+            .pointer("/bindings/prompts/items")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )
+    .map_err(|_| McpResourceConfigError::Provider)?;
+    let resource_fingerprint = revision
+        .document
+        .pointer("/bindings/resources/catalog_fingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or(&revision.catalog_fingerprint)
+        .to_owned();
+    let prompt_fingerprint = revision
+        .document
+        .pointer("/bindings/prompts/catalog_fingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or(&revision.catalog_fingerprint)
+        .to_owned();
+    let resource_catalog = ResourceCatalog {
+        items: resource_items,
+        rejected: Vec::new(),
+        ttl_ms: 0,
+        cache_scope: insight_mcp::CacheScope::Private,
+        descriptor_hash: resource_fingerprint.clone(),
+    };
+    let template_catalog = ResourceTemplateCatalog {
+        items: resource_templates,
+        rejected: Vec::new(),
+        ttl_ms: 0,
+        cache_scope: insight_mcp::CacheScope::Private,
+        descriptor_hash: resource_fingerprint,
+    };
+    let prompt_catalog = PromptCatalog {
+        items: prompt_items,
+        rejected: Vec::new(),
+        ttl_ms: 0,
+        cache_scope: insight_mcp::CacheScope::Private,
+        descriptor_hash: prompt_fingerprint,
+    };
+    let resource_policies = draft
+        .imports
+        .resources
+        .allow
+        .iter()
+        .map(|rule| McpResourceImportPolicy {
+            uri_pattern: rule.uri_pattern.clone(),
+            mime_allowlist: rule.mime_allowlist.clone(),
+            max_content_bytes: rule.max_content_bytes.unwrap_or(response_limit),
+        })
+        .collect::<Vec<_>>();
+    let prompt_policies = draft
+        .imports
+        .prompts
+        .iter()
+        .map(|prompt| McpPromptImportPolicy {
+            remote_name: prompt.remote.clone(),
+            allow_user_invocation: prompt.allow_user_invocation,
+            allow_definition_snapshot: prompt.definition_arguments.is_some(),
+            definition_arguments: prompt.definition_arguments.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut context = McpContextProvider::freeze(
+        binding.clone(),
+        Arc::clone(&client),
+        resource_catalog,
+        template_catalog,
+        prompt_catalog,
+        resource_policies,
+        prompt_policies,
+    )
+    .map_err(|_| McpResourceConfigError::Context)?;
+    let definition_prompt_results = serde_json::from_value(
+        revision
+            .document
+            .pointer("/bindings/prompts/definition_results")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    )
+    .map_err(|_| McpResourceConfigError::Context)?;
+    context = context
+        .with_definition_prompt_results(definition_prompt_results)
+        .map_err(|_| McpResourceConfigError::Context)?;
+    let oauth_server = if let Some(McpDraftAuthorization::OauthUser {
+        scopes,
+        client_id,
+        redirect_uri,
+    }) = &draft.authorization
+    {
+        let authority = oauth_runtime
+            .clone()
+            .ok_or(McpResourceConfigError::Credential)?;
+        let policy = http_policy.ok_or(McpResourceConfigError::Credential)?;
+        context =
+            context.with_principal_client_resolver(Arc::new(DurableOAuthRuntimeClientResolver {
+                authority,
+                server_id: server.server_id.clone(),
+                resource: policy.endpoint().to_string(),
+                client_id: client_id.clone(),
+                redirect_uri: redirect_uri.clone(),
+                required_scopes: scopes.iter().cloned().collect(),
+                policy: policy.clone(),
+                limits: client_limits,
+                max_message_bytes: request_limit.max(response_limit),
+                allow_tasks: tasks_requested,
+                protocol_version: selected_protocol.to_owned(),
+            }));
+        Some(
+            McpOAuthServer::new(
+                server.server_id.clone(),
+                policy.endpoint().to_string(),
+                client_id.clone(),
+                redirect_uri.clone(),
+                scopes.clone(),
+            )
+            .map_err(|_| McpResourceConfigError::Credential)?,
+        )
+    } else {
+        None
+    };
+    let catalog_invalidation = Arc::new(McpCatalogInvalidation::default());
+    context = context.with_catalog_invalidation(Arc::clone(&catalog_invalidation));
+    let context = Arc::new(context);
+    let subscription_filter = subscription_filter(
+        &capabilities,
+        context.resources(),
+        !identities.is_empty(),
+        context.prompts().next().is_some(),
+    );
+    let subscription = (!matches!(
+        draft.authorization,
+        Some(McpDraftAuthorization::OauthUser { .. })
+    ) && subscription_filter_is_nonempty(&subscription_filter))
+    .then(|| McpClientSubscription {
+        server_id: server.server_id.clone(),
+        context: Arc::clone(&context),
+        filter: subscription_filter,
+        invalidation: catalog_invalidation,
+    });
+    let principal_repository = oauth_runtime.as_ref().map(|authority| {
+        Arc::clone(&authority.interaction_repository) as Arc<dyn McpInteractionDurableRepository>
+    });
+    let mut retrieval_identities = Vec::new();
+    for imported in context.resources().iter().cloned() {
+        let registered = retrievals
+            .publish_revision(McpResourceRetrieval::for_revision(
+                imported,
+                Arc::clone(&context),
+                principal_repository.as_ref().map(Arc::clone),
+                interaction_handler.as_ref().map(Arc::clone),
+                &version_suffix,
+            ))
+            .map_err(|_| McpResourceConfigError::Context)?;
+        retrieval_identities.push((
+            registered.identity().id.clone(),
+            registered.identity().version.to_string(),
+        ));
+    }
+    let required_scopes = match &draft.authorization {
+        Some(McpDraftAuthorization::OauthUser { scopes, .. }) => scopes.iter().cloned().collect(),
+        _ => BTreeSet::new(),
+    };
+    let catalog_server = McpCatalogServer::new(
+        server.server_id.clone(),
+        binding,
+        capabilities,
+        server_info,
+        required_scopes,
+        tool_bindings,
+    )
+    .map_err(|_| McpResourceConfigError::Provider)?
+    .with_context(Some(context), None);
+    Ok(ManagedMcpRevisionProjection {
+        action_identities: identities,
+        retrieval_identities,
+        catalog_server,
+        oauth_server,
+        subscription,
     })
 }
 
@@ -3144,15 +2897,6 @@ fn remote_task_operational_gauge(status: McpRemoteTaskStatus) -> insight_mcp::Mc
     }
 }
 
-fn legacy_fallback_allowed(error: &ClientError) -> bool {
-    matches!(
-        error,
-        ClientError::Protocol(-32601)
-            | ClientError::Transport(TransportError::Remote { code: -32601, .. })
-            | ClientError::Transport(TransportError::Timeout)
-    )
-}
-
 fn capability_flag(capability: Option<&Value>, name: &str) -> bool {
     capability
         .and_then(Value::as_object)
@@ -3166,94 +2910,6 @@ fn subscription_filter_is_nonempty(filter: &SubscriptionFilter) -> bool {
         || filter.resources_list_changed == Some(true)
         || filter.prompts_list_changed == Some(true)
         || !filter.resource_subscriptions.is_empty()
-}
-
-fn resolve_tool_import(
-    server_id: &str,
-    tool: &McpToolImportConfig,
-) -> Result<McpToolImport, McpResourceConfigError> {
-    let description = if let Some(value) = &tool.description_override {
-        McpDescriptionPolicy::Override(value.clone())
-    } else {
-        match tool.description_source {
-            McpDescriptionSourceConfig::Remote => McpDescriptionPolicy::Remote,
-            McpDescriptionSourceConfig::Disabled => McpDescriptionPolicy::Disabled,
-        }
-    };
-    let effect = match tool.effect {
-        McpEffectConfig::Pure => EffectClass::Pure,
-        McpEffectConfig::ReadOnly => EffectClass::ReadOnly,
-        McpEffectConfig::Mutating => EffectClass::Mutating,
-    };
-    let idempotency = match tool.idempotency {
-        McpIdempotencyConfig::Idempotent => IdempotencyClass::Idempotent,
-        McpIdempotencyConfig::NonIdempotent | McpIdempotencyConfig::Unknown => {
-            IdempotencyClass::NonIdempotent
-        }
-    };
-    let cancellation = match tool.cancellation {
-        McpCancellationConfig::NotSupported => CancellationClass::NotSupported,
-        McpCancellationConfig::Cooperative | McpCancellationConfig::Immediate => {
-            CancellationClass::Cooperative
-        }
-    };
-    let approval = match tool.approval {
-        McpApprovalConfig::Never => McpApprovalPolicy::Never,
-        McpApprovalConfig::ModelToolOnly => McpApprovalPolicy::ModelToolOnly,
-        McpApprovalConfig::Mutating => McpApprovalPolicy::Mutating,
-        McpApprovalConfig::Always => McpApprovalPolicy::Always,
-    };
-    let mut public_policy = ToolPublicPolicy::private();
-    public_policy.call = tool.public_call;
-    let mut required_capabilities = tool
-        .required_capabilities
-        .iter()
-        .cloned()
-        .map(ActionCapability::new)
-        .collect::<BTreeSet<_>>();
-    if !tool.terminal_only_compatible {
-        required_capabilities.insert(ActionCapability::new("runtime.mcp.full_persistence.v1"));
-    }
-    if tool.input_required == McpInteractionConfig::Allowed
-        || tool.approval != McpApprovalConfig::Never
-    {
-        required_capabilities.insert(ActionCapability::new("runtime.mcp.interaction.v1"));
-    }
-    if tool.tasks == McpInteractionConfig::Allowed {
-        required_capabilities.insert(ActionCapability::new("runtime.mcp.tasks.v1"));
-    }
-    Ok(McpToolImport {
-        remote_name: tool.remote_name.clone(),
-        action_id: action_id(server_id, &tool.alias),
-        action_version: "0.0.0+mcp".to_owned(),
-        model_tool_name: tool.alias.clone(),
-        title: tool.title.clone(),
-        description,
-        effect,
-        idempotency,
-        cancellation,
-        required_capabilities,
-        approval,
-        allow_input_required: tool.input_required == McpInteractionConfig::Allowed,
-        allow_tasks: tool.tasks == McpInteractionConfig::Allowed,
-        terminal_only_compatible: tool.terminal_only_compatible,
-        public_policy,
-    })
-}
-
-fn action_id(server_id: &str, alias: &str) -> String {
-    let normalized = alias.replace('.', "_");
-    let candidate = format!("mcp.{server_id}.tool_{normalized}");
-    if candidate.len() <= 128 {
-        return candidate;
-    }
-    let digest = Sha256::digest(candidate.as_bytes());
-    let mut suffix = String::with_capacity(16);
-    for byte in &digest[..8] {
-        write!(&mut suffix, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    let prefix_bytes = 128usize.saturating_sub(suffix.len() + 1);
-    format!("{}_{}", &candidate[..prefix_bytes], suffix)
 }
 
 fn remote_task_local_id(
@@ -3342,118 +2998,9 @@ impl std::error::Error for McpResourceConfigError {}
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-    use ring::{
-        rand::SystemRandom,
-        signature::{Ed25519KeyPair, KeyPair},
-    };
-    use serde_json::{json, Value};
-    use tempfile::tempdir;
+    use serde_json::json;
 
     use super::*;
-
-    fn signed_manifest(server_id: &str) -> (Value, String) {
-        let generated_at = Utc::now() - ChronoDuration::minutes(1);
-        let expires_at = generated_at + ChronoDuration::hours(1);
-        let payload = json!({
-            "schema_version": 1,
-            "server_id": server_id,
-            "protocol_version": MCP_PROTOCOL_VERSION,
-            "generated_at": generated_at,
-            "expires_at": expires_at,
-            "discover": {
-                "resultType": "complete",
-                "supportedVersions": [MCP_PROTOCOL_VERSION],
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "manifest-fixture", "version": "1.0.0"},
-                "ttlMs": 1000,
-                "cacheScope": "private"
-            },
-            "tools": [{
-                "resultType": "complete",
-                "tools": [{"name": "search", "inputSchema": {"type": "object"}}],
-                "ttlMs": 1000,
-                "cacheScope": "private"
-            }],
-            "resources": [],
-            "resource_templates": [],
-            "prompts": [],
-            "signer_key_id": "release"
-        });
-        let canonical = serde_jcs::to_vec(&payload).unwrap();
-        let key_document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
-        let key_pair = Ed25519KeyPair::from_pkcs8(key_document.as_ref()).unwrap();
-        let mut manifest = payload;
-        manifest["content_hash"] = json!(canonical_sha256_bytes(&canonical));
-        manifest["signature"] = json!(BASE64_STANDARD.encode(key_pair.sign(&canonical).as_ref()));
-        let trust_keys = json!({
-            "release": BASE64_STANDARD.encode(key_pair.public_key().as_ref())
-        })
-        .to_string();
-        (manifest, trust_keys)
-    }
-
-    #[tokio::test]
-    async fn signed_manifest_is_verified_and_served_as_frozen_discovery() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("manifest.json");
-        let (manifest, trust_keys) = signed_manifest("engineering");
-        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-
-        let transport = signed_manifest_transport(
-            "engineering",
-            &path,
-            &trust_keys,
-            TransportKind::StreamableHttp,
-        )
-        .await
-        .unwrap();
-        let client =
-            build_mcp_client(transport, McpClientLimits::default(), 1024 * 1024, false).unwrap();
-        let cancellation = CancellationToken::new();
-        let discovery = client
-            .discover(&cancellation, &NoopNotificationObserver)
-            .await
-            .unwrap();
-        let tools = client
-            .list_tools(&cancellation, &NoopNotificationObserver)
-            .await
-            .unwrap();
-
-        assert_eq!(discovery.server_info.name, "manifest-fixture");
-        assert_eq!(tools.tools.len(), 1);
-        assert_eq!(tools.tools[0].name, "search");
-    }
-
-    #[tokio::test]
-    async fn signed_manifest_tampering_and_wrong_server_fail_closed() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("manifest.json");
-        let (mut manifest, trust_keys) = signed_manifest("engineering");
-        manifest["discover"]["serverInfo"]["name"] = json!("tampered");
-        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-
-        assert!(matches!(
-            signed_manifest_transport(
-                "engineering",
-                &path,
-                &trust_keys,
-                TransportKind::StreamableHttp
-            )
-            .await,
-            Err(McpResourceConfigError::ManifestInvalid)
-        ));
-
-        let (manifest, trust_keys) = signed_manifest("engineering");
-        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        assert!(matches!(
-            signed_manifest_transport("other", &path, &trust_keys, TransportKind::StreamableHttp)
-                .await,
-            Err(McpResourceConfigError::ManifestInvalid)
-        ));
-    }
 
     #[test]
     fn subscription_filter_only_enables_advertised_imported_capabilities() {

@@ -1,0 +1,310 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://insight-agent.local/schemas/mcp-management-v1.json",
+  "title": "Insight MCP Management API v1",
+  "description": "Closed authoring DTOs for /v1/admin/mcp. Runtime and durable response records are defined by the same named contract in insight-durable.",
+  "anyOf": [
+    { "$ref": "#/$defs/createServerRequest" },
+    { "$ref": "#/$defs/draft" },
+    { "$ref": "#/$defs/manifestUploadRequest" },
+    { "$ref": "#/$defs/toolImportPreviewRequest" },
+    { "$ref": "#/$defs/toolImportsRequest" },
+    { "$ref": "#/$defs/resourceImportsRequest" },
+    { "$ref": "#/$defs/promptImportsRequest" },
+    { "$ref": "#/$defs/validationRequest" },
+    { "$ref": "#/$defs/publishRequest" },
+    { "$ref": "#/$defs/activateRequest" },
+    { "$ref": "#/$defs/retirementRequest" },
+    { "$ref": "#/$defs/successEnvelope" },
+    { "$ref": "#/$defs/errorEnvelope" }
+  ],
+  "$defs": {
+    "serverId": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$",
+      "maxLength": 64
+    },
+    "protocolName": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "maxLength": 128
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "createServerRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["server_id", "display_name"],
+      "properties": {
+        "server_id": { "$ref": "#/$defs/serverId" },
+        "display_name": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "draft": { "$ref": "#/$defs/draft" }
+      }
+    },
+    "draft": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "transport": { "$ref": "#/$defs/transport" },
+        "discovery": { "$ref": "#/$defs/discovery" },
+        "authorization": { "$ref": "#/$defs/authorization" },
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "imports": { "$ref": "#/$defs/imports" },
+        "limits": { "$ref": "#/$defs/limits" },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "operator_note": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "transport": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "endpoint"],
+          "properties": {
+            "type": { "const": "streamable_http" },
+            "endpoint": { "type": "string", "format": "uri", "pattern": "^https://[^/?#@]+(?:/[^?#]*)?$", "maxLength": 2048 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "launch_profile_id"],
+          "properties": {
+            "type": { "const": "stdio" },
+            "launch_profile_id": { "$ref": "#/$defs/protocolName" },
+            "parameters": {
+              "type": "object",
+              "maxProperties": 128,
+              "propertyNames": { "$ref": "#/$defs/protocolName" },
+              "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 16384 }
+            }
+          }
+        }
+      ]
+    },
+    "discovery": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": { "type": { "const": "live_service_account" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "manifest_id", "content_hash"],
+          "properties": {
+            "type": { "const": "signed_manifest" },
+            "manifest_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "content_hash": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      ]
+    },
+    "authorization": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": { "type": { "const": "none" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "secret_ref"],
+          "properties": {
+            "type": { "const": "bearer_secret_ref" },
+            "secret_ref": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$", "maxLength": 256 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "client_id", "redirect_uri", "scopes"],
+          "properties": {
+            "type": { "const": "oauth_user" },
+            "client_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "redirect_uri": { "type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2048 },
+            "scopes": { "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 256 } }
+          }
+        }
+      ]
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preferred": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "legacy_fallback": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 32 } }
+      }
+    },
+    "imports": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tools": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/toolImport" } },
+        "resources": { "$ref": "#/$defs/resourcePolicy" },
+        "prompts": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/promptImport" } }
+      }
+    },
+    "toolImport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["remote", "candidate_schema_hash", "as", "effect", "idempotency", "cancellation", "approval", "input_required", "tasks"],
+      "properties": {
+        "remote": { "$ref": "#/$defs/protocolName" },
+        "candidate_schema_hash": { "$ref": "#/$defs/sha256" },
+        "as": { "$ref": "#/$defs/protocolName" },
+        "description": { "$ref": "#/$defs/descriptionPolicy" },
+        "effect": { "enum": ["pure", "read_only", "mutating"] },
+        "idempotency": { "enum": ["idempotent", "non_idempotent", "unknown"] },
+        "cancellation": { "enum": ["not_supported", "cooperative", "immediate"] },
+        "required_capabilities": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/protocolName" } },
+        "approval": { "enum": ["never", "model_tool_only", "mutating", "always"] },
+        "input_required": { "enum": ["denied", "allowed"] },
+        "tasks": { "enum": ["denied", "allowed"] },
+        "terminal_only_compatible": { "type": "boolean" },
+        "public": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "call": { "type": "boolean" } }
+        }
+      }
+    },
+    "descriptionPolicy": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["mode"], "properties": { "mode": { "const": "remote" } } },
+        { "type": "object", "additionalProperties": false, "required": ["mode"], "properties": { "mode": { "const": "disabled" } } },
+        { "type": "object", "additionalProperties": false, "required": ["mode", "text"], "properties": { "mode": { "const": "override" }, "text": { "type": "string", "minLength": 1, "maxLength": 4096 } } }
+      ]
+    },
+    "resourcePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "allow": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/resourceImport" } } }
+    },
+    "resourceImport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri_pattern"],
+      "properties": {
+        "uri_pattern": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "mime_allowlist": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 127 } },
+        "max_content_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 }
+      }
+    },
+    "promptImport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["remote"],
+      "properties": {
+        "remote": { "$ref": "#/$defs/protocolName" },
+        "allow_user_invocation": { "type": "boolean" },
+        "definition_arguments": { "type": "object", "maxProperties": 128, "propertyNames": { "$ref": "#/$defs/protocolName" }, "additionalProperties": { "type": "string", "maxLength": 8192 } }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_request_bytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "max_response_bytes": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "max_sse_line_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "max_sse_event_bytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "max_content_items": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "max_catalog_items": { "type": "integer", "minimum": 1, "maximum": 100000 }
+      }
+    },
+    "manifestUploadRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "payload", "key_id", "signature"],
+      "properties": {
+        "format": { "const": "jcs-ed25519-v1" },
+        "payload": { "type": "string", "minLength": 1, "maxLength": 2097152 },
+        "key_id": { "$ref": "#/$defs/protocolName" },
+        "signature": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "toolImportPreviewRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["discovery_id", "selection"],
+      "properties": {
+        "discovery_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "selection": {
+          "oneOf": [
+            { "type": "object", "additionalProperties": false, "required": ["mode"], "properties": { "mode": { "const": "all" } } },
+            { "type": "object", "additionalProperties": false, "required": ["mode", "names"], "properties": { "mode": { "const": "names" }, "names": { "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true, "items": { "$ref": "#/$defs/protocolName" } } } }
+          ]
+        },
+        "alias_prefix": { "type": "string", "maxLength": 64 }
+      }
+    },
+    "toolImportsRequest": {
+      "type": "object", "additionalProperties": false, "required": ["discovery_id", "items"],
+      "properties": { "discovery_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "items": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/toolImport" } } }
+    },
+    "resourceImportsRequest": {
+      "type": "object", "additionalProperties": false, "required": ["discovery_id", "items"],
+      "properties": { "discovery_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "items": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/resourceImport" } } }
+    },
+    "promptImportsRequest": {
+      "type": "object", "additionalProperties": false, "required": ["discovery_id", "items"],
+      "properties": { "discovery_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "items": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/promptImport" } } }
+    },
+    "validationRequest": {
+      "type": "object", "additionalProperties": false, "required": ["discovery_id"],
+      "properties": { "discovery_id": { "type": "string", "minLength": 1, "maxLength": 128 } }
+    },
+    "publishRequest": {
+      "type": "object", "additionalProperties": false, "required": ["draft_version", "discovery_id", "validation_id"],
+      "properties": { "draft_version": { "type": "integer", "minimum": 1 }, "discovery_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "validation_id": { "type": "string", "minLength": 1, "maxLength": 128 } }
+    },
+    "activateRequest": {
+      "type": "object", "additionalProperties": false, "required": ["revision_id"],
+      "properties": { "revision_id": { "type": "string", "minLength": 1, "maxLength": 128 } }
+    },
+    "retirementRequest": {
+      "type": "object", "additionalProperties": false, "required": ["reason_code"],
+      "properties": { "reason_code": { "$ref": "#/$defs/protocolName" } }
+    },
+    "closedEmptyRequest": {
+      "type": "object", "additionalProperties": false, "maxProperties": 0
+    },
+    "successEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "data"],
+      "properties": {
+        "code": { "const": "OK" },
+        "message": { "const": "ok" },
+        "data": true
+      }
+    },
+    "errorEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "data"],
+      "properties": {
+        "code": {
+          "enum": [
+            "MCP_MANAGEMENT_INVALID_REQUEST", "MCP_MANAGEMENT_FORBIDDEN",
+            "MCP_SERVER_NOT_FOUND", "MCP_SERVER_STATE_CONFLICT", "MCP_DISCOVERY_STALE",
+            "MCP_IMPORT_CANDIDATE_MISMATCH", "MCP_IDEMPOTENCY_KEY_REUSED",
+            "MCP_MANAGEMENT_PRECONDITION_FAILED", "MCP_VALIDATION_FAILED",
+            "MCP_MANAGEMENT_PRECONDITION_REQUIRED", "MCP_DISCOVERY_CAPACITY_EXCEEDED",
+            "MCP_SERVER_READINESS_FAILED", "MCP_PROMPT_AUTHORING_FAILED", "UNAUTHORIZED", "INTERNAL"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "data": { "type": "null" }
+      }
+    }
+  }
+}

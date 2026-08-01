@@ -3,6 +3,7 @@ mod error;
 mod human_task_adapter;
 mod ingress_adapter;
 mod mcp_interaction_adapter;
+mod mcp_management_adapter;
 mod mcp_oauth_adapter;
 mod mcp_remote_task_adapter;
 mod mcp_server_task_adapter;

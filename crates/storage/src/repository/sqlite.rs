@@ -557,6 +557,30 @@ impl DurableRepository for SqliteDurableRepository {
             }
         }
 
+        // The management adapter uses this repository's writer mutex for
+        // disable/activate transitions. Holding it through this comparison and
+        // Run insertion makes the MCP kill switch and Run admission linearize
+        // in one order even on SQLite.
+        for (server_id, expected_fence) in command.expected_mcp_server_fences() {
+            let current = sqlx::query_as::<_, (String, i64)>(
+                "SELECT server_state,disable_fence
+                 FROM mcp_managed_servers WHERE server_id=?",
+            )
+            .bind(server_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(RepositoryError::storage)?;
+            let expected_fence =
+                i64::try_from(*expected_fence).map_err(|_| RepositoryError::invalid_data())?;
+            if current.as_ref() != Some(&("active".to_owned(), expected_fence)) {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(RepositoryError::storage)?;
+                return Ok(TransitionOutcome::StateConflict);
+            }
+        }
+
         let run_exists: Option<i64> =
             sqlx::query_scalar("SELECT 1 FROM workflow_runs WHERE run_id = ?")
                 .bind(command.run_id().as_str())

@@ -15,6 +15,8 @@ pub mod ingress;
 #[doc(hidden)]
 pub mod mcp_interaction;
 #[doc(hidden)]
+pub mod mcp_management;
+#[doc(hidden)]
 pub mod mcp_oauth;
 #[doc(hidden)]
 pub mod mcp_remote_task;
@@ -129,6 +131,20 @@ pub use mcp_interaction::{
     McpInteractionSecretAuthority, McpInteractionState, McpProtectedSecret, McpSecretCiphertext,
     McpSecretProtector, McpSecretPurpose, McpSecretScope, ResolveMcpInteractionCommand,
     TransitionMcpInteractionCommand,
+};
+pub use mcp_management::{
+    ActivateMcpRevisionCommand, CancelMcpDiscoveryCommand, ClaimMcpDiscoveriesCommand,
+    CompleteMcpDiscoveryCommand, CompleteMcpDiscoveryResult, CreateMcpDiscoveryCommand,
+    CreateMcpManifestCommand, CreateMcpServerCommand, CreateMcpValidationCommand,
+    DeleteMcpServerCommand, DisableMcpServerCommand, MarkMcpDiscoveryStaleCommand,
+    McpDiscoveryClaim, McpDiscoveryFailure, McpDiscoveryOperation, McpDiscoverySnapshot,
+    McpDiscoveryStatus, McpManagedServer, McpManagedServerState, McpManagementConflict,
+    McpManagementDurableRepository, McpManagementPage, McpManagementRuntimeStats,
+    McpManagementWriteError, McpMutationMetadata, McpMutationReceipt, McpServerFence,
+    McpServerRevision, McpSignedManifest, McpStoredDraft, McpValidationReport,
+    PublishMcpRevisionCommand, RecordMcpManagementRejectionCommand, ReplaceMcpDraftCommand,
+    RetireMcpServerCommand, MCP_MANAGEMENT_MAX_OPERATOR_ID_BYTES,
+    MCP_MANAGEMENT_MAX_REQUEST_ID_BYTES,
 };
 pub use mcp_oauth::{
     ClaimMcpOAuthRefreshCommand, CompleteMcpOAuthCallbackCommand,

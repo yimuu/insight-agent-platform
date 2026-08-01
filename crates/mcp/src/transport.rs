@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     path::PathBuf,
     process::Stdio,
     sync::Arc,
@@ -264,6 +264,7 @@ pub fn build_pinned_http_client(
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()
         || endpoint.fragment().is_some()
+        || endpoint.query().is_some()
     {
         return Err(TransportError::Endpoint);
     }
@@ -284,22 +285,31 @@ pub fn build_pinned_http_client(
         .collect::<Vec<_>>();
     addresses.sort_unstable();
     addresses.dedup();
-    if addresses.is_empty()
-        || (loopback_endpoint && addresses.iter().any(|address| !address.ip().is_loopback()))
-        || (!loopback_endpoint
-            && addresses
-                .iter()
-                .any(|address| !is_public_network_address(address.ip())))
-    {
+    if !pinned_addresses_allowed(&addresses, loopback_endpoint) {
         return Err(TransportError::Endpoint);
     }
     Client::builder()
+        // Environment/system proxies would make the proxy, rather than the
+        // policy-checked and DNS-pinned endpoint, the actual connection
+        // authority. MCP endpoint traffic is therefore always direct.
+        .no_proxy()
         .redirect(Policy::none())
         .connect_timeout(connect_timeout)
         .timeout(request_timeout)
         .resolve_to_addrs(&host, &addresses)
         .build()
         .map_err(|_| TransportError::Client)
+}
+
+fn pinned_addresses_allowed(addresses: &[SocketAddr], loopback_endpoint: bool) -> bool {
+    !addresses.is_empty()
+        && if loopback_endpoint {
+            addresses.iter().all(|address| address.ip().is_loopback())
+        } else {
+            addresses
+                .iter()
+                .all(|address| is_public_network_address(address.ip()))
+        }
 }
 
 fn is_public_network_address(address: IpAddr) -> bool {
@@ -2198,6 +2208,9 @@ mod tests {
             "fec0::1",
             "ff02::1",
             "2001:db8::1",
+            "::ffff:10.0.0.1",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
         ] {
             assert!(
                 !is_public_network_address(address.parse().unwrap()),
@@ -2208,6 +2221,38 @@ mod tests {
         assert!(is_public_network_address(
             "2606:4700:4700::1111".parse().unwrap()
         ));
+    }
+
+    #[test]
+    fn dns_pin_requires_every_answer_to_share_the_allowed_network_class() {
+        let public = "8.8.8.8:443".parse().unwrap();
+        let second_public = "1.1.1.1:443".parse().unwrap();
+        let private = "169.254.169.254:443".parse().unwrap();
+        assert!(pinned_addresses_allowed(&[public, second_public], false));
+        assert!(!pinned_addresses_allowed(&[public, private], false));
+        assert!(pinned_addresses_allowed(
+            &[
+                "127.0.0.1:3000".parse().unwrap(),
+                "[::1]:3000".parse().unwrap()
+            ],
+            true
+        ));
+        assert!(!pinned_addresses_allowed(&[public], true));
+        assert!(!pinned_addresses_allowed(&[], false));
+    }
+
+    #[test]
+    fn endpoint_url_canonicalization_is_idna_safe_and_rejects_credential_components() {
+        let international = Url::parse("https://b\u{fc}cher.example/mcp").unwrap();
+        assert_eq!(international.host_str(), Some("xn--bcher-kva.example"));
+        assert!(StreamableHttpPolicy::new(international.as_str()).is_ok());
+        for endpoint in [
+            "https://user@example.com/mcp",
+            "https://example.com/mcp?authorization=secret",
+            "https://example.com/mcp#private",
+        ] {
+            assert!(StreamableHttpPolicy::new(endpoint).is_err());
+        }
     }
 
     #[test]

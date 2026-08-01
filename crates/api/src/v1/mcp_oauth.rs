@@ -1,6 +1,10 @@
 //! Principal-scoped MCP OAuth authorization and connection APIs.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use axum::{
     body::Body,
@@ -83,8 +87,64 @@ pub struct McpOAuthApiState {
     pub auth: ApiAuth,
     pub repository: Arc<dyn McpOAuthDurableRepository>,
     pub protector: Arc<dyn McpSecretProtector>,
-    pub servers: BTreeMap<String, McpOAuthServer>,
+    pub servers: McpOAuthRegistry,
     pub client: OAuthClient,
+}
+
+#[derive(Clone, Default)]
+pub struct McpOAuthRegistry {
+    servers: Arc<RwLock<BTreeMap<String, McpOAuthServer>>>,
+}
+
+impl McpOAuthRegistry {
+    pub fn replace(&self, servers: Vec<McpOAuthServer>) -> Result<(), &'static str> {
+        let mut indexed = BTreeMap::new();
+        for server in servers {
+            if indexed.insert(server.server_id.clone(), server).is_some() {
+                return Err("duplicate MCP OAuth server");
+            }
+        }
+        *self
+            .servers
+            .write()
+            .map_err(|_| "MCP OAuth registry unavailable")? = indexed;
+        Ok(())
+    }
+
+    pub fn upsert(&self, server: McpOAuthServer) -> Result<(), &'static str> {
+        self.servers
+            .write()
+            .map_err(|_| "MCP OAuth registry unavailable")?
+            .insert(server.server_id.clone(), server);
+        Ok(())
+    }
+
+    pub fn remove(&self, server_id: &str) -> Result<(), &'static str> {
+        self.servers
+            .write()
+            .map_err(|_| "MCP OAuth registry unavailable")?
+            .remove(server_id);
+        Ok(())
+    }
+
+    fn get(&self, server_id: &str) -> Result<Option<McpOAuthServer>, ApiError> {
+        Ok(self
+            .servers
+            .read()
+            .map_err(|_| ApiError::internal())?
+            .get(server_id)
+            .cloned())
+    }
+
+    fn snapshot(&self) -> Result<Vec<McpOAuthServer>, ApiError> {
+        Ok(self
+            .servers
+            .read()
+            .map_err(|_| ApiError::internal())?
+            .values()
+            .cloned()
+            .collect())
+    }
 }
 
 impl McpOAuthApiState {
@@ -101,15 +161,31 @@ impl McpOAuthApiState {
                 return Err("duplicate MCP OAuth server");
             }
         }
-        if indexed.is_empty() {
-            return Err("MCP OAuth API requires at least one server");
-        }
+        let registry = McpOAuthRegistry::default();
+        registry.replace(indexed.into_values().collect())?;
         let client = OAuthClient::new(timeout).map_err(|_| "invalid MCP OAuth timeout")?;
         Ok(Self {
             auth,
             repository,
             protector,
-            servers: indexed,
+            servers: registry,
+            client,
+        })
+    }
+
+    pub fn from_registry(
+        auth: ApiAuth,
+        repository: Arc<dyn McpOAuthDurableRepository>,
+        protector: Arc<dyn McpSecretProtector>,
+        servers: McpOAuthRegistry,
+        timeout: Duration,
+    ) -> Result<Self, &'static str> {
+        let client = OAuthClient::new(timeout).map_err(|_| "invalid MCP OAuth timeout")?;
+        Ok(Self {
+            auth,
+            repository,
+            protector,
+            servers,
             client,
         })
     }
@@ -157,7 +233,7 @@ async fn authorize(
     let principal = principal(&headers)?;
     let server = state
         .servers
-        .get(&server_id)
+        .get(&server_id)?
         .ok_or_else(|| oauth_error("MCP_SERVER_NOT_FOUND"))?;
     let protected = state
         .client
@@ -304,7 +380,7 @@ async fn callback(
     }
     let server = state
         .servers
-        .get(transaction.server_id())
+        .get(transaction.server_id())?
         .filter(|server| {
             server.client_id == transaction.client_id()
                 && server.redirect_uri == transaction.redirect_uri()
@@ -488,8 +564,9 @@ async fn list_connections(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let principal = principal(&headers)?;
-    let mut items = Vec::with_capacity(state.servers.len());
-    for server in state.servers.values() {
+    let projected = state.servers.snapshot()?;
+    let mut items = Vec::with_capacity(projected.len());
+    for server in &projected {
         let credential = state
             .repository
             .load_mcp_oauth_credential(&principal, &server.server_id)
@@ -527,7 +604,7 @@ async fn delete_connection(
     let principal = principal(&headers)?;
     let server = state
         .servers
-        .get(&server_id)
+        .get(&server_id)?
         .ok_or_else(|| oauth_error("MCP_SERVER_NOT_FOUND"))?;
     let credential = state
         .repository
@@ -536,7 +613,7 @@ async fn delete_connection(
         .map_err(|_| oauth_error("MCP_OAUTH_UNAVAILABLE"))?
         .ok_or_else(|| oauth_error("MCP_OAUTH_CONNECTION_NOT_FOUND"))?;
     if credential.revoked_at().is_some() {
-        return delete_local_connection(&state, &principal, server, server_id, &request_id).await;
+        return delete_local_connection(&state, &principal, &server, server_id, &request_id).await;
     }
     let secret = state
         .repository
@@ -618,7 +695,7 @@ async fn delete_connection(
             );
         }
     }
-    delete_local_connection(&state, &principal, server, server_id, &request_id).await
+    delete_local_connection(&state, &principal, &server, server_id, &request_id).await
 }
 
 async fn delete_local_connection(

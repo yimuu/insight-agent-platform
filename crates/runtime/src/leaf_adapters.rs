@@ -1720,9 +1720,18 @@ impl LeafTaskExecutor for ActionTaskExecutor {
         if request.task_kind() != SchedulerTaskKind::Action {
             return Err(invariant(ACTION_DESCRIPTOR_INVALID));
         }
+        let descriptor_hash = request
+            .deployment_binding()
+            .get("descriptor_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invariant(ACTION_DESCRIPTOR_INVALID))?;
         let action = self
             .actions
-            .resolve(request.implementation())
+            .resolve_frozen(
+                request.implementation(),
+                request.worker_version().as_str(),
+                descriptor_hash,
+            )
             .map_err(|_| invariant(ACTION_DESCRIPTOR_INVALID))?;
         validate_frozen_action_binding(action.as_ref(), request)?;
         let descriptor = action.descriptor();
@@ -1875,7 +1884,7 @@ fn production_worker_registry_inner(
         }
     }
     for action_id in actions.names() {
-        let action = actions.resolve(action_id)?;
+        let action = actions.resolve(&action_id)?;
         registry
             .register(
                 SchedulerTaskKind::Action,
@@ -1888,6 +1897,9 @@ fn production_worker_registry_inner(
             )
             .map_err(|code| CompileError::new(code, "failed to register Action worker"))?;
     }
+    registry
+        .register_dynamic_action_executor(Arc::new(ActionTaskExecutor::new(actions.clone())))
+        .map_err(|code| CompileError::new(code, "failed to register dynamic Action worker"))?;
     if let Some(external_leaf_adapters) = external_leaf_adapters {
         external_leaf_adapters.install_workers(&mut registry)?;
     }

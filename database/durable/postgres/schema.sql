@@ -3571,6 +3571,257 @@ ALTER TABLE ONLY wait_late_audit_outbox
 ALTER TABLE ONLY wait_late_audit_outbox
     ADD CONSTRAINT wait_late_audit_outbox_event_fkey FOREIGN KEY (run_id, completed_event_id) REFERENCES execution_events(run_id, event_id) ON DELETE RESTRICT;
 
+-- MCP management control-plane authority. These objects are intentionally
+-- installed after the workflow graph so their internal foreign-key topology
+-- remains isolated from Run storage.
+CREATE TABLE mcp_managed_servers (
+    server_id text PRIMARY KEY,
+    display_name text NOT NULL,
+    server_state text NOT NULL CHECK (server_state IN ('draft','active','disabled','retired')),
+    server_version bigint NOT NULL CHECK (server_version >= 1),
+    draft_version bigint NOT NULL CHECK (draft_version >= 1),
+    active_revision_id text,
+    disable_fence bigint NOT NULL DEFAULT 0 CHECK (disable_fence >= 0),
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL,
+    CHECK (server_id ~ '^[a-z0-9][a-z0-9-]{0,63}$'),
+    CHECK (display_name <> '' AND octet_length(display_name) <= 256),
+    CHECK ((server_state='draft' AND active_revision_id IS NULL)
+           OR server_state IN ('active','disabled','retired'))
+);
+
+CREATE TABLE mcp_server_drafts (
+    server_id text PRIMARY KEY REFERENCES mcp_managed_servers(server_id) ON DELETE CASCADE,
+    draft_version bigint NOT NULL CHECK (draft_version >= 1),
+    discovery_input_hash text NOT NULL CHECK (discovery_input_hash ~ '^sha256:[0-9a-f]{64}$'),
+    document jsonb NOT NULL CHECK (octet_length(document::text) <= 16777216),
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL,
+    UNIQUE(server_id,draft_version)
+);
+
+CREATE TABLE mcp_signed_manifests (
+    manifest_id text PRIMARY KEY,
+    server_id text NOT NULL REFERENCES mcp_managed_servers(server_id) ON DELETE CASCADE,
+    manifest_format text NOT NULL CHECK (manifest_format='jcs-ed25519-v1'),
+    key_id text NOT NULL CHECK (key_id<>'' AND octet_length(key_id)<=256),
+    payload text NOT NULL CHECK (payload<>'' AND octet_length(payload)<=22369624),
+    signature text NOT NULL CHECK (signature<>'' AND octet_length(signature)<=1024),
+    content_hash text NOT NULL UNIQUE CHECK (content_hash ~ '^sha256:[0-9a-f]{64}$'),
+    issued_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL,
+    created_by text NOT NULL CHECK (created_by<>'' AND octet_length(created_by)<=256),
+    CHECK (expires_at > issued_at)
+);
+CREATE INDEX idx_mcp_signed_manifests_server
+ON mcp_signed_manifests(server_id,manifest_id);
+
+CREATE TABLE mcp_discovery_operations (
+    discovery_id text PRIMARY KEY,
+    server_id text NOT NULL REFERENCES mcp_managed_servers(server_id) ON DELETE CASCADE,
+    source_draft_version bigint NOT NULL CHECK (source_draft_version>=1),
+    discovery_input_hash text NOT NULL CHECK (discovery_input_hash ~ '^sha256:[0-9a-f]{64}$'),
+    draft_document jsonb NOT NULL CHECK (octet_length(draft_document::text)<=16777216),
+    discovery_status text NOT NULL CHECK (discovery_status IN ('pending','running','succeeded','failed','cancelled')),
+    cancel_requested boolean NOT NULL DEFAULT false,
+    attempts bigint NOT NULL DEFAULT 0 CHECK (attempts>=0),
+    claimed_by text,
+    claim_token text UNIQUE,
+    claim_expires_at timestamptz,
+    failure_code text,
+    failure_stage text,
+    failure_retryable boolean,
+    failure_correlation_id text,
+    stale boolean NOT NULL DEFAULT false,
+    stale_reason text,
+    created_at timestamptz NOT NULL,
+    started_at timestamptz,
+    finished_at timestamptz,
+    CHECK ((claimed_by IS NULL)=(claim_token IS NULL)),
+    CHECK ((claim_token IS NULL)=(claim_expires_at IS NULL)),
+    CHECK (discovery_status='running' OR claim_token IS NULL),
+    CHECK ((discovery_status IN ('succeeded','cancelled') AND failure_code IS NULL)
+           OR discovery_status IN ('pending','running')
+           OR (discovery_status='failed' AND failure_code IS NOT NULL)),
+    CHECK ((NOT stale AND stale_reason IS NULL) OR (stale AND stale_reason IS NOT NULL))
+);
+CREATE INDEX idx_mcp_discovery_claim
+ON mcp_discovery_operations(discovery_status,claim_expires_at,created_at,discovery_id);
+CREATE INDEX idx_mcp_discovery_server
+ON mcp_discovery_operations(server_id,created_at,discovery_id);
+
+CREATE TABLE mcp_discovery_snapshots (
+    discovery_id text PRIMARY KEY REFERENCES mcp_discovery_operations(discovery_id) ON DELETE CASCADE,
+    server_id text NOT NULL REFERENCES mcp_managed_servers(server_id) ON DELETE CASCADE,
+    source_draft_version bigint NOT NULL CHECK (source_draft_version>=1),
+    discovery_input_hash text NOT NULL CHECK (discovery_input_hash ~ '^sha256:[0-9a-f]{64}$'),
+    catalog_fingerprint text NOT NULL CHECK (catalog_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
+    document jsonb NOT NULL CHECK (octet_length(document::text)<=16777216),
+    created_at timestamptz NOT NULL,
+    UNIQUE(server_id,catalog_fingerprint)
+);
+
+-- Normalized immutable candidate indexes make identity uniqueness a database
+-- invariant while the canonical snapshot document remains the read authority.
+CREATE TABLE mcp_discovery_tools (
+    discovery_id text NOT NULL REFERENCES mcp_discovery_snapshots(discovery_id) ON DELETE CASCADE,
+    ordinal bigint NOT NULL CHECK(ordinal>=0),
+    remote_name text NOT NULL CHECK(remote_name<>'' AND octet_length(remote_name)<=128),
+    schema_hash text NOT NULL CHECK(schema_hash ~ '^sha256:[0-9a-f]{64}$'),
+    document jsonb NOT NULL CHECK(octet_length(document::text)<=1048576),
+    PRIMARY KEY(discovery_id,ordinal),
+    UNIQUE(discovery_id,remote_name)
+);
+CREATE TABLE mcp_discovery_resources (
+    discovery_id text NOT NULL REFERENCES mcp_discovery_snapshots(discovery_id) ON DELETE CASCADE,
+    candidate_kind text NOT NULL CHECK(candidate_kind IN('resource','template')),
+    ordinal bigint NOT NULL CHECK(ordinal>=0),
+    resource_identity text NOT NULL CHECK(resource_identity<>'' AND octet_length(resource_identity)<=2048),
+    document jsonb NOT NULL CHECK(octet_length(document::text)<=1048576),
+    PRIMARY KEY(discovery_id,candidate_kind,ordinal),
+    UNIQUE(discovery_id,candidate_kind,resource_identity)
+);
+CREATE TABLE mcp_discovery_prompts (
+    discovery_id text NOT NULL REFERENCES mcp_discovery_snapshots(discovery_id) ON DELETE CASCADE,
+    ordinal bigint NOT NULL CHECK(ordinal>=0),
+    remote_name text NOT NULL CHECK(remote_name<>'' AND octet_length(remote_name)<=128),
+    document jsonb NOT NULL CHECK(octet_length(document::text)<=1048576),
+    PRIMARY KEY(discovery_id,ordinal),
+    UNIQUE(discovery_id,remote_name)
+);
+
+CREATE TABLE mcp_validation_reports (
+    validation_id text PRIMARY KEY,
+    server_id text NOT NULL REFERENCES mcp_managed_servers(server_id) ON DELETE CASCADE,
+    draft_version bigint NOT NULL CHECK (draft_version>=1),
+    discovery_id text NOT NULL REFERENCES mcp_discovery_snapshots(discovery_id) ON DELETE RESTRICT,
+    report_hash text NOT NULL UNIQUE CHECK (report_hash ~ '^sha256:[0-9a-f]{64}$'),
+    valid boolean NOT NULL,
+    document jsonb NOT NULL CHECK (octet_length(document::text)<=1048576),
+    created_at timestamptz NOT NULL,
+    created_by text NOT NULL CHECK (created_by<>'' AND octet_length(created_by)<=256)
+);
+CREATE INDEX idx_mcp_validation_server
+ON mcp_validation_reports(server_id,created_at,validation_id);
+
+CREATE TABLE mcp_server_revisions (
+    revision_id text PRIMARY KEY,
+    server_id text NOT NULL REFERENCES mcp_managed_servers(server_id) ON DELETE RESTRICT,
+    revision_number bigint NOT NULL CHECK (revision_number>=1),
+    source_draft_version bigint NOT NULL CHECK (source_draft_version>=1),
+    discovery_id text NOT NULL REFERENCES mcp_discovery_snapshots(discovery_id) ON DELETE RESTRICT,
+    validation_id text NOT NULL REFERENCES mcp_validation_reports(validation_id) ON DELETE RESTRICT,
+    catalog_fingerprint text NOT NULL CHECK (catalog_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
+    revision_hash text NOT NULL UNIQUE CHECK (revision_hash ~ '^sha256:[0-9a-f]{64}$'),
+    document jsonb NOT NULL CHECK (octet_length(document::text)<=16777216),
+    created_at timestamptz NOT NULL,
+    created_by text NOT NULL CHECK (created_by<>'' AND octet_length(created_by)<=256),
+    UNIQUE(server_id,revision_number),
+    UNIQUE(server_id,revision_id)
+);
+CREATE INDEX idx_mcp_server_revisions_server
+ON mcp_server_revisions(server_id,revision_number,revision_id);
+CREATE TABLE mcp_revision_tools (
+    revision_id text NOT NULL REFERENCES mcp_server_revisions(revision_id) ON DELETE RESTRICT,
+    ordinal bigint NOT NULL CHECK(ordinal>=0),
+    remote_name text NOT NULL CHECK(remote_name<>'' AND octet_length(remote_name)<=128),
+    alias text NOT NULL CHECK(alias<>'' AND octet_length(alias)<=128),
+    action_id text NOT NULL CHECK(action_id<>'' AND octet_length(action_id)<=128),
+    binding_hash text NOT NULL CHECK(binding_hash ~ '^sha256:[0-9a-f]{64}$'),
+    document jsonb NOT NULL CHECK(octet_length(document::text)<=1048576),
+    PRIMARY KEY(revision_id,ordinal),
+    UNIQUE(revision_id,remote_name),
+    UNIQUE(revision_id,alias),
+    UNIQUE(revision_id,action_id)
+);
+CREATE TABLE mcp_revision_resources (
+    revision_id text NOT NULL REFERENCES mcp_server_revisions(revision_id) ON DELETE RESTRICT,
+    binding_kind text NOT NULL CHECK(binding_kind IN('policy','resource','template')),
+    ordinal bigint NOT NULL CHECK(ordinal>=0),
+    resource_identity text NOT NULL CHECK(resource_identity<>'' AND octet_length(resource_identity)<=2048),
+    document jsonb NOT NULL CHECK(octet_length(document::text)<=1048576),
+    PRIMARY KEY(revision_id,binding_kind,ordinal),
+    UNIQUE(revision_id,binding_kind,resource_identity)
+);
+CREATE TABLE mcp_revision_prompts (
+    revision_id text NOT NULL REFERENCES mcp_server_revisions(revision_id) ON DELETE RESTRICT,
+    ordinal bigint NOT NULL CHECK(ordinal>=0),
+    remote_name text NOT NULL CHECK(remote_name<>'' AND octet_length(remote_name)<=128),
+    document jsonb NOT NULL CHECK(octet_length(document::text)<=1048576),
+    PRIMARY KEY(revision_id,ordinal),
+    UNIQUE(revision_id,remote_name)
+);
+ALTER TABLE ONLY mcp_managed_servers
+    ADD CONSTRAINT mcp_managed_servers_active_revision_fkey
+    FOREIGN KEY(server_id,active_revision_id)
+    REFERENCES mcp_server_revisions(server_id,revision_id) ON DELETE RESTRICT;
+
+CREATE TABLE mcp_management_requests (
+    operator_id text NOT NULL,
+    method text NOT NULL,
+    canonical_path text NOT NULL,
+    request_id text NOT NULL,
+    request_hash text NOT NULL CHECK (request_hash ~ '^sha256:[0-9a-f]{64}$'),
+    response_status integer NOT NULL CHECK (response_status BETWEEN 200 AND 599),
+    response_json jsonb NOT NULL CHECK (octet_length(response_json::text)<=16777216),
+    response_etag text,
+    created_at timestamptz NOT NULL,
+    PRIMARY KEY(operator_id,method,canonical_path,request_id),
+    CHECK(operator_id<>'' AND octet_length(operator_id)<=256),
+    CHECK(request_id<>'' AND octet_length(request_id)<=256)
+);
+
+CREATE TABLE mcp_management_audit_events (
+    audit_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    event_kind text NOT NULL,
+    server_id text,
+    subject_id text,
+    actor_id text NOT NULL,
+    request_id_hash text NOT NULL,
+    before_hash text,
+    after_hash text,
+    result_code text NOT NULL,
+    created_at timestamptz NOT NULL,
+    CHECK(event_kind<>'' AND result_code<>''),
+    CHECK(actor_id<>'' AND octet_length(actor_id)<=256)
+);
+CREATE INDEX idx_mcp_management_audit_server
+ON mcp_management_audit_events(server_id,created_at,audit_id);
+
+CREATE TABLE mcp_management_outbox (
+    event_id text PRIMARY KEY,
+    event_kind text NOT NULL,
+    server_id text NOT NULL,
+    subject_id text NOT NULL,
+    safe_payload jsonb NOT NULL CHECK (octet_length(safe_payload::text)<=65536),
+    created_at timestamptz NOT NULL,
+    delivered_at timestamptz
+);
+CREATE INDEX idx_mcp_management_outbox_delivery
+ON mcp_management_outbox(delivered_at,created_at,event_id);
+
+CREATE TRIGGER mcp_signed_manifest_rewrite_forbidden
+BEFORE UPDATE ON mcp_signed_manifests FOR EACH ROW EXECUTE FUNCTION reject_transition_receipt_rewrite();
+CREATE TRIGGER mcp_discovery_snapshot_rewrite_forbidden
+BEFORE UPDATE ON mcp_discovery_snapshots FOR EACH ROW EXECUTE FUNCTION reject_transition_receipt_rewrite();
+CREATE TRIGGER mcp_discovery_tools_rewrite_forbidden
+BEFORE UPDATE ON mcp_discovery_tools FOR EACH ROW EXECUTE FUNCTION reject_transition_receipt_rewrite();
+CREATE TRIGGER mcp_discovery_resources_rewrite_forbidden
+BEFORE UPDATE ON mcp_discovery_resources FOR EACH ROW EXECUTE FUNCTION reject_transition_receipt_rewrite();
+CREATE TRIGGER mcp_discovery_prompts_rewrite_forbidden
+BEFORE UPDATE ON mcp_discovery_prompts FOR EACH ROW EXECUTE FUNCTION reject_transition_receipt_rewrite();
+CREATE TRIGGER mcp_validation_report_rewrite_forbidden
+BEFORE UPDATE ON mcp_validation_reports FOR EACH ROW EXECUTE FUNCTION reject_transition_receipt_rewrite();
+CREATE TRIGGER mcp_server_revision_rewrite_forbidden
+BEFORE DELETE OR UPDATE ON mcp_server_revisions FOR EACH ROW EXECUTE FUNCTION reject_transition_receipt_rewrite();
+CREATE TRIGGER mcp_revision_tools_rewrite_forbidden
+BEFORE DELETE OR UPDATE ON mcp_revision_tools FOR EACH ROW EXECUTE FUNCTION reject_transition_receipt_rewrite();
+CREATE TRIGGER mcp_revision_resources_rewrite_forbidden
+BEFORE DELETE OR UPDATE ON mcp_revision_resources FOR EACH ROW EXECUTE FUNCTION reject_transition_receipt_rewrite();
+CREATE TRIGGER mcp_revision_prompts_rewrite_forbidden
+BEFORE DELETE OR UPDATE ON mcp_revision_prompts FOR EACH ROW EXECUTE FUNCTION reject_transition_receipt_rewrite();
+
 CREATE TABLE durable_schema_contract (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     contract_id TEXT NOT NULL,
@@ -3581,7 +3832,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-8b03b243-1b08-438e-bd21-3a37711e0489',
+    'durable-schema-eb07a629-e22a-4935-9bba-4835c7b027f1',
     'postgres'
 );
 

@@ -49,6 +49,100 @@ tool、URI 或 Prompt 名称。
 PKCE verifier 或 requestState。Context admission 最多选择 16 个属于路径 Server 的导入项，先固定
 快照并执行 Agent input schema 校验，再进入普通 Run admission。
 
+## MCP Operator 管理 API
+
+`/v1/admin/mcp/**` 是 installation-scoped 控制面，只接受独立 Operator Bearer token。它与普通
+`ApiAuth`、tenant/user principal 和 MCP OAuth token 完全隔离。读取返回 `private, no-store`；mutation
+要求 `X-Request-ID`，Draft/Server CAS mutation 还要求对应 `If-Match: "draft-N"` 或
+`"server-N"`。
+
+| 资源组 | 接口 |
+|---|---|
+| Server/Draft | `POST/GET /v1/admin/mcp/servers`；`GET/DELETE /servers/{id}`；`GET/PUT /servers/{id}/draft` |
+| Manifest/Discovery | `/servers/{id}/manifests/**`；`/servers/{id}/discoveries/**` 及候选 `tools/resources/prompts` |
+| 显式导入 | `POST /tool-import-previews`；三个 `PUT /draft/imports/{tools|resources|prompts}` |
+| Validation/Revision | `POST/GET /validations/**`；`POST/GET /revisions/**` |
+| 生命周期 | `PUT/DELETE /active-revision`；`POST /retirement` |
+
+Discovery 是 durable 异步 operation，HTTP 202 后以 GET 状态为权威。publish 不隐式激活；active
+Revision 才投影到用户 Catalog 和 Agent 发布 resolver。完整 endpoint、错误码、DTO 和并发语义见
+[MCP 使用、运行与安全合同](mcp.md)及
+[`schemas/mcp-management-v1.json`](../../schemas/mcp-management-v1.json)。机器可读的 28-operation
+HTTP 合同见
+[`schemas/mcp-management-v1.openapi.json`](../../schemas/mcp-management-v1.openapi.json)。
+
+最小创建与 discovery 请求如下；token 只从本地环境读取，不能写进请求文件：
+
+```bash
+curl -sS -X POST 'https://platform.example/v1/admin/mcp/servers' \
+  -H "Authorization: Bearer ${INSIGHT_MCP_OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: mcp-create-engineering-001' \
+  --data '{"server_id":"engineering","display_name":"Engineering MCP","draft":{"transport":{"type":"streamable_http","endpoint":"https://mcp.example/mcp"},"discovery":{"type":"live_service_account"},"authorization":{"type":"none"}}}'
+
+curl -sS -X POST 'https://platform.example/v1/admin/mcp/servers/engineering/discoveries' \
+  -H "Authorization: Bearer ${INSIGHT_MCP_OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: mcp-discover-engineering-001' \
+  -H 'If-Match: "draft-1"' \
+  --data '{}'
+```
+
+第二个请求返回 `202`；客户端轮询响应中的 discovery ID。候选 `tools/list` 结果不会自动进入 Draft，
+必须先 preview，再把逐项 `candidate_schema_hash` 和 Operator policy 完整 PUT 回 imports。
+
+后续生命周期的最小请求形状如下。示例中的 ID、hash 和 ETag 必须取自上一步响应，不能自行猜测；
+Resource/Prompt 即使为空也分别 PUT，以形成明确的逐项审阅结果：
+
+```bash
+curl -sS -X POST 'https://platform.example/v1/admin/mcp/servers/engineering/tool-import-previews' \
+  -H "Authorization: Bearer ${INSIGHT_MCP_OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  --data '{"discovery_id":"mcpdisc_...","selection":{"mode":"all"},"alias_prefix":"engineering_"}'
+
+curl -sS -X PUT 'https://platform.example/v1/admin/mcp/servers/engineering/draft/imports/tools' \
+  -H "Authorization: Bearer ${INSIGHT_MCP_OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: mcp-import-tools-001' \
+  -H 'If-Match: "draft-1"' \
+  --data '{"discovery_id":"mcpdisc_...","items":[{"remote":"search","candidate_schema_hash":"sha256:...","as":"engineering_search","description":{"mode":"disabled"},"effect":"mutating","idempotency":"unknown","cancellation":"not_supported","required_capabilities":[],"approval":"always","input_required":"denied","tasks":"denied","terminal_only_compatible":false,"public":{"call":false}}]}'
+
+curl -sS -X PUT 'https://platform.example/v1/admin/mcp/servers/engineering/draft/imports/resources' \
+  -H "Authorization: Bearer ${INSIGHT_MCP_OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: mcp-import-resources-001' \
+  -H 'If-Match: "draft-2"' \
+  --data '{"discovery_id":"mcpdisc_...","items":[]}'
+
+curl -sS -X PUT 'https://platform.example/v1/admin/mcp/servers/engineering/draft/imports/prompts' \
+  -H "Authorization: Bearer ${INSIGHT_MCP_OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: mcp-import-prompts-001' \
+  -H 'If-Match: "draft-3"' \
+  --data '{"discovery_id":"mcpdisc_...","items":[]}'
+
+curl -sS -X POST 'https://platform.example/v1/admin/mcp/servers/engineering/validations' \
+  -H "Authorization: Bearer ${INSIGHT_MCP_OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: mcp-validate-001' \
+  -H 'If-Match: "draft-4"' \
+  --data '{"discovery_id":"mcpdisc_..."}'
+
+curl -sS -X POST 'https://platform.example/v1/admin/mcp/servers/engineering/revisions' \
+  -H "Authorization: Bearer ${INSIGHT_MCP_OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: mcp-publish-001' \
+  -H 'If-Match: "draft-4"' \
+  --data '{"draft_version":4,"discovery_id":"mcpdisc_...","validation_id":"mcpval_..."}'
+
+curl -sS -X PUT 'https://platform.example/v1/admin/mcp/servers/engineering/active-revision' \
+  -H "Authorization: Bearer ${INSIGHT_MCP_OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: mcp-activate-001' \
+  -H 'If-Match: "server-1"' \
+  --data '{"revision_id":"mcprev_..."}'
+```
+
 ## Graph 发布
 
 | 方法 | 路径 | 用途 |

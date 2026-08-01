@@ -121,7 +121,7 @@ impl Retrieval for SearchRetrieval {
 }
 
 fn retrieval_registry() -> RetrievalRegistry {
-    let mut registry = RetrievalRegistry::default();
+    let registry = RetrievalRegistry::default();
     registry.register(SearchRetrieval).unwrap();
     registry
 }

@@ -87,7 +87,11 @@ impl LeafTaskExecutor for RetrievalTaskExecutor {
             .map_err(|_| invariant(RETRIEVAL_BINDING_INVALID))?;
         let registered = self
             .retrievals
-            .resolve(request.implementation())
+            .resolve_frozen(
+                request.implementation(),
+                &target.resource_version().to_string(),
+                target.descriptor_hash(),
+            )
             .map_err(|_| invariant(RETRIEVAL_DESCRIPTOR_INVALID))?;
         target
             .validate_registered(registered.as_ref())
@@ -207,7 +211,7 @@ pub fn install_retrieval_workers(
     let descriptor_version = VersionTag::new(RETRIEVAL_DESCRIPTOR_VERSION)
         .map_err(|error| CompileError::new("WORKER_REGISTRY_INVALID", error.to_string()))?;
     for retrieval_id in retrievals.names() {
-        let retrieval = retrievals.resolve(retrieval_id)?;
+        let retrieval = retrievals.resolve(&retrieval_id)?;
         registry
             .register(
                 SchedulerTaskKind::Retrieval,
@@ -220,6 +224,11 @@ pub fn install_retrieval_workers(
             )
             .map_err(|code| CompileError::new(code, "failed to register Retrieval worker"))?;
     }
+    registry
+        .register_dynamic_retrieval_executor(Arc::new(RetrievalTaskExecutor::new(
+            retrievals.clone(),
+        )))
+        .map_err(|code| CompileError::new(code, "failed to register dynamic Retrieval worker"))?;
     Ok(())
 }
 

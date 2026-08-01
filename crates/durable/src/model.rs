@@ -1,6 +1,9 @@
 use super::RepositoryErrorExt as _;
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -558,6 +561,12 @@ pub mod adapter {
         command: &CreateRunCommand,
     ) -> Option<&PublicationHead> {
         command.expected_publication_head()
+    }
+
+    pub fn create_run_expected_mcp_server_fences(
+        command: &CreateRunCommand,
+    ) -> &BTreeMap<String, u64> {
+        command.expected_mcp_server_fences()
     }
 
     pub fn create_run_full_conversation(
@@ -1171,6 +1180,11 @@ pub struct CreateRunCommand {
     /// the same transaction that creates the Run.
     #[serde(skip_serializing_if = "Option::is_none")]
     expected_publication_head: Option<PublicationHead>,
+    /// MCP kill-switch generations that must still be active in the same
+    /// database transaction that admits this Run. The map is ordered so it is
+    /// also part of the canonical idempotency intent.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    expected_mcp_server_fences: BTreeMap<String, u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     full_conversation: Option<FullConversationRunAdmission>,
 }
@@ -1198,6 +1212,7 @@ impl CreateRunCommand {
             run_timeout_ms: None,
             artifact_reference_retention_seconds: 30 * 24 * 60 * 60,
             expected_publication_head: None,
+            expected_mcp_server_fences: BTreeMap::new(),
             full_conversation: None,
         })
     }
@@ -1222,6 +1237,26 @@ impl CreateRunCommand {
             return Err(invalid_command());
         }
         self.run_timeout_ms = Some(milliseconds);
+        Ok(self)
+    }
+
+    /// Freezes the MCP safety-fence evidence used by this admission attempt.
+    /// Repository adapters must compare every entry against an active managed
+    /// Server while holding the same transaction that inserts the Run.
+    pub fn with_expected_mcp_server_fences(
+        mut self,
+        fences: BTreeMap<String, u64>,
+    ) -> Result<Self, RepositoryError> {
+        if fences.keys().any(|server_id| {
+            server_id.is_empty()
+                || server_id.len() > 64
+                || !server_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        }) {
+            return Err(invalid_command());
+        }
+        self.expected_mcp_server_fences = fences;
         Ok(self)
     }
 
@@ -1310,6 +1345,10 @@ impl CreateRunCommand {
 
     pub(crate) fn expected_publication_head(&self) -> Option<&PublicationHead> {
         self.expected_publication_head.as_ref()
+    }
+
+    pub(crate) fn expected_mcp_server_fences(&self) -> &BTreeMap<String, u64> {
+        &self.expected_mcp_server_fences
     }
 
     pub(crate) fn full_conversation(&self) -> Option<&FullConversationRunAdmission> {

@@ -270,6 +270,11 @@ impl From<ServiceError> for ApiError {
                 "MCP_INTERACTION_UNAVAILABLE",
                 "MCP interaction service is unavailable",
             ),
+            "MCP_SERVER_DISABLED" => Self::new(
+                StatusCode::CONFLICT,
+                "MCP_SERVER_DISABLED",
+                "an MCP Server required by this Agent is disabled",
+            ),
             "RUN_SERVICE_STOPPING"
             | "RUN_SERVICE_UNAVAILABLE"
             | "RUN_DEPLOYMENT_UNAVAILABLE"

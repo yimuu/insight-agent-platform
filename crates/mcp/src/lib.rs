@@ -39,7 +39,9 @@ pub use oauth::{
     OAuthPkceTransaction, OAuthProtectedResourceMetadata, OAuthTokenSet,
 };
 pub use observability::{
-    adjust_operational_gauge, prometheus_metrics, record_operational_event, set_operational_gauge,
+    adjust_operational_gauge, prometheus_metrics, record_management_catalog_count,
+    record_management_event, record_management_request, record_operational_event,
+    set_management_gauge, set_operational_gauge, McpManagementEvent, McpManagementGauge,
     McpOperationalEvent, McpOperationalGauge,
 };
 pub use server::{

@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use async_trait::async_trait;
@@ -439,6 +439,12 @@ impl RegisteredAction {
                 || self.public_policy.progress_schema.is_some()
                 || self.public_policy.result_schema.is_some())
         {
+            if self.descriptor.id.starts_with("mcp.") {
+                insight_mcp::record_management_event(
+                    insight_mcp::McpManagementEvent::AgentBindingPolicyInvalid,
+                    std::time::Duration::ZERO,
+                );
+            }
             return Err(CompileError::new(
                 "ACTION_PUBLIC_POLICY_INVALID",
                 format!(
@@ -587,9 +593,12 @@ fn validate_json(
     Ok(())
 }
 
+type RevisionActionMap = BTreeMap<(String, String, String), Arc<RegisteredAction>>;
+
 #[derive(Clone, Default)]
 pub struct ActionRegistry {
-    actions: BTreeMap<String, Arc<RegisteredAction>>,
+    actions: Arc<RwLock<BTreeMap<String, Arc<RegisteredAction>>>>,
+    revisions: Arc<RwLock<RevisionActionMap>>,
 }
 
 impl ActionRegistry {
@@ -608,7 +617,17 @@ impl ActionRegistry {
                 "action id must be a valid qualified identifier",
             ));
         }
-        if self.actions.contains_key(&id) {
+        if self
+            .actions
+            .read()
+            .map_err(|_| {
+                CompileError::new(
+                    "ACTION_REGISTRY_UNAVAILABLE",
+                    "Action registry lock is unavailable",
+                )
+            })?
+            .contains_key(&id)
+        {
             return Err(CompileError::new(
                 "DUPLICATE_ACTION",
                 format!("action '{id}' is already registered"),
@@ -696,38 +715,189 @@ impl ActionRegistry {
         descriptor.output_schema = output_schema;
         let descriptor_hash =
             descriptor_hash(&descriptor, &model_tool, schema_dialect, &public_policy)?;
-        self.actions.insert(
-            id.clone(),
-            Arc::new(RegisteredAction {
-                identity: ActionDescriptorIdentity {
-                    id,
-                    version,
-                    descriptor_hash,
-                },
-                descriptor,
-                model_tool,
-                action: Arc::new(action),
-                input_validator,
-                output_validator,
-                public_policy,
-                public_progress_validator,
-                public_result_validator,
-            }),
-        );
+        let registered = Arc::new(RegisteredAction {
+            identity: ActionDescriptorIdentity {
+                id: id.clone(),
+                version,
+                descriptor_hash,
+            },
+            descriptor,
+            model_tool,
+            action: Arc::new(action),
+            input_validator,
+            output_validator,
+            public_policy,
+            public_progress_validator,
+            public_result_validator,
+        });
+        self.actions
+            .write()
+            .map_err(|_| {
+                CompileError::new(
+                    "ACTION_REGISTRY_UNAVAILABLE",
+                    "Action registry lock is unavailable",
+                )
+            })?
+            .insert(id.clone(), Arc::clone(&registered));
+        let identity = registered.identity();
+        self.revisions
+            .write()
+            .map_err(|_| {
+                CompileError::new(
+                    "ACTION_REGISTRY_UNAVAILABLE",
+                    "Action registry lock is unavailable",
+                )
+            })?
+            .insert(
+                (
+                    identity.id.clone(),
+                    identity.version.to_string(),
+                    identity.descriptor_hash.clone(),
+                ),
+                registered,
+            );
         Ok(())
     }
 
-    pub fn resolve(&self, id: &str) -> Result<Arc<RegisteredAction>, CompileError> {
-        self.actions.get(id).cloned().ok_or_else(|| {
-            CompileError::new(
-                "ACTION_NOT_FOUND",
-                format!("action '{id}' is not registered"),
-            )
-        })
+    /// Atomically publishes a revision-scoped dynamic MCP Action while
+    /// retaining all earlier identities for pinned Run recovery.
+    pub fn publish_revision<A>(&self, action: A) -> Result<Arc<RegisteredAction>, CompileError>
+    where
+        A: Action + 'static,
+    {
+        let mut isolated = ActionRegistry::default();
+        isolated.register(action)?;
+        let registered = isolated
+            .actions
+            .read()
+            .map_err(|_| {
+                CompileError::new(
+                    "ACTION_REGISTRY_UNAVAILABLE",
+                    "Action registry lock is unavailable",
+                )
+            })?
+            .values()
+            .next()
+            .cloned()
+            .ok_or_else(|| {
+                CompileError::new(
+                    "ACTION_REGISTRY_UNAVAILABLE",
+                    "dynamic Action was not compiled",
+                )
+            })?;
+        if !registered.identity().id.starts_with("mcp.") {
+            return Err(CompileError::new(
+                "ACTION_ID_INVALID",
+                "dynamic revision Action must use the mcp namespace",
+            ));
+        }
+        let identity = registered.identity();
+        self.revisions
+            .write()
+            .map_err(|_| {
+                CompileError::new(
+                    "ACTION_REGISTRY_UNAVAILABLE",
+                    "Action registry lock is unavailable",
+                )
+            })?
+            .insert(
+                (
+                    identity.id.clone(),
+                    identity.version.to_string(),
+                    identity.descriptor_hash.clone(),
+                ),
+                Arc::clone(&registered),
+            );
+        self.actions
+            .write()
+            .map_err(|_| {
+                CompileError::new(
+                    "ACTION_REGISTRY_UNAVAILABLE",
+                    "Action registry lock is unavailable",
+                )
+            })?
+            .insert(identity.id.clone(), Arc::clone(&registered));
+        Ok(registered)
     }
 
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.actions.keys().map(String::as_str)
+    pub fn resolve(&self, id: &str) -> Result<Arc<RegisteredAction>, CompileError> {
+        self.actions
+            .read()
+            .map_err(|_| {
+                CompileError::new(
+                    "ACTION_REGISTRY_UNAVAILABLE",
+                    "Action registry lock is unavailable",
+                )
+            })?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| {
+                if id.starts_with("mcp.") {
+                    insight_mcp::record_management_event(
+                        insight_mcp::McpManagementEvent::AgentBindingNotFound,
+                        std::time::Duration::ZERO,
+                    );
+                }
+                CompileError::new(
+                    "ACTION_NOT_FOUND",
+                    format!("action '{id}' is not registered"),
+                )
+            })
+    }
+
+    pub fn resolve_frozen(
+        &self,
+        id: &str,
+        version: &str,
+        descriptor_hash: &str,
+    ) -> Result<Arc<RegisteredAction>, CompileError> {
+        self.revisions
+            .read()
+            .map_err(|_| {
+                CompileError::new(
+                    "ACTION_REGISTRY_UNAVAILABLE",
+                    "Action registry lock is unavailable",
+                )
+            })?
+            .get(&(
+                id.to_owned(),
+                version.to_owned(),
+                descriptor_hash.to_owned(),
+            ))
+            .cloned()
+            .ok_or_else(|| {
+                CompileError::new(
+                    "ACTION_NOT_FOUND",
+                    format!("action '{id}' revision is not registered"),
+                )
+            })
+    }
+
+    /// Removes only the current publication pointer. Exact historical
+    /// revisions remain available for pinned Run recovery.
+    pub fn withdraw_current(&self, id: &str, version: &str) -> Result<bool, CompileError> {
+        let mut actions = self.actions.write().map_err(|_| {
+            CompileError::new(
+                "ACTION_REGISTRY_UNAVAILABLE",
+                "Action registry lock is unavailable",
+            )
+        })?;
+        if actions
+            .get(id)
+            .is_some_and(|action| action.identity().version.to_string() == version)
+        {
+            actions.remove(id);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = String> {
+        self.actions
+            .read()
+            .map(|actions| actions.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
     }
 }
 
@@ -1848,5 +2018,51 @@ mod tests {
                 .unwrap(),
             ActionProgressDisposition::Dropped
         );
+    }
+
+    #[test]
+    fn dynamic_mcp_revisions_replace_only_current_pointer_and_archive_frozen_identity() {
+        let registry = ActionRegistry::default();
+        let first = registry
+            .publish_revision(StaticAction(descriptor(
+                "mcp.engineering.tool_search",
+                "0.0.0+mcp.rev1",
+                closed_input_schema(),
+            )))
+            .unwrap();
+        let first_hash = first.identity().descriptor_hash.clone();
+        let second = registry
+            .publish_revision(StaticAction(descriptor(
+                "mcp.engineering.tool_search",
+                "0.0.0+mcp.rev2",
+                closed_input_schema(),
+            )))
+            .unwrap();
+        assert_eq!(
+            registry
+                .resolve("mcp.engineering.tool_search")
+                .unwrap()
+                .identity()
+                .version,
+            Version::parse("0.0.0+mcp.rev2").unwrap()
+        );
+        assert_eq!(
+            registry
+                .resolve_frozen("mcp.engineering.tool_search", "0.0.0+mcp.rev1", &first_hash)
+                .unwrap()
+                .identity()
+                .version,
+            Version::parse("0.0.0+mcp.rev1").unwrap()
+        );
+        assert!(registry
+            .withdraw_current(
+                "mcp.engineering.tool_search",
+                &second.identity().version.to_string()
+            )
+            .unwrap());
+        assert!(registry.resolve("mcp.engineering.tool_search").is_err());
+        assert!(registry
+            .resolve_frozen("mcp.engineering.tool_search", "0.0.0+mcp.rev1", &first_hash)
+            .is_ok());
     }
 }

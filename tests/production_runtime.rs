@@ -530,7 +530,7 @@ workflow:
     )
     .unwrap();
 
-    let mut retrievals = RetrievalRegistry::default();
+    let retrievals = RetrievalRegistry::default();
     retrievals.register(PublicRetrievalFixture).unwrap();
     let models = ModelRegistry::default();
     let actions = ActionRegistry::default();

@@ -33,9 +33,32 @@ mcp:
   #   secretKey: token
   client:
     enabled: false
-    # Strict platform MCP server entries. Secret values must remain
-    # environment references supplied through separately managed Secrets.
-    servers: {}
+    managementApi:
+      enabled: false
+      discoveryWorkers: 4
+      maxPendingDiscoveries: 128
+      operatorCredentials: []
+      # - identity: mcp-operator
+      #   tokenEnv: INSIGHT_MCP_OPERATOR_TOKEN
+      #   capabilities: [mcp.server.read, mcp.server.write, mcp.server.discover, mcp.server.publish]
+    secretResolverAllowedNames: []
+    signedManifestTrust:
+      maxValidity: 24h
+      trustedSigners: []
+    networkPolicy:
+      allowLoopbackDevelopment: false
+      allowPrivateNetworks: false
+      allowRedirects: false
+    stdioLaunchProfiles: {}
+    defaultLimits:
+      connectTimeout: 5s
+      requestTimeout: 2m
+      maxRequestBytes: 1048576
+      maxResponseBytes: 16777216
+      maxSseLineBytes: 65536
+      maxSseEventBytes: 1048576
+      maxContentItems: 128
+      maxCatalogItems: 4096
   authorization:
     type: bearer_compatible
     resource: ""

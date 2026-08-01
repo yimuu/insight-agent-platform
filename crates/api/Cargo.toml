@@ -20,20 +20,21 @@ insight-engine.workspace = true
 insight-mcp.workspace = true
 insight-resources.workspace = true
 insight-runtime.workspace = true
+base64.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
+ring.workspace = true
 serde.workspace = true
 serde_jcs.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-base64.workspace = true
 chrono.workspace = true
 jsonschema.workspace = true
-ring.workspace = true
 serde_jcs.workspace = true
-tower.workspace = true

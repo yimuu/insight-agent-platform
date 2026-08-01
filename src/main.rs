@@ -18,7 +18,12 @@ use insight_agent_platform::{
     resources::{
         builtin_actions::{builtin_action_registry, RestrictedHttpGetAction},
         config::load_model_registry,
-        mcp::{load_mcp_action_providers, DurableMcpInteractionHandler, McpInteractionHandler},
+        mcp::{DurableMcpInteractionHandler, McpInteractionHandler},
+        mcp_management::{
+            mcp_management_policy_material, DurableMcpRunAdmissionAuthority,
+            ManagedMcpRevisionReadiness, McpDiscoveryRuntime, McpManagementStoreReadiness,
+            McpRevisionRuntime,
+        },
         mcp_server::PlatformMcpServerBackend,
         retrievals::RetrievalRegistry,
     },
@@ -35,16 +40,18 @@ use insight_api::mcp::{
     McpHttpAuthorizer, McpHttpService, OAuthResourceServerAuthorizer,
 };
 use insight_api::v1::{
-    build_mcp_catalog_router, build_router, ApiAuth, ApiState, BearerHumanPrincipalResolver,
-    McpCatalogApiState, McpCatalogServer, McpProfileReport,
+    build_mcp_catalog_router, build_mcp_management_router, build_router, ApiAuth, ApiState,
+    BearerHumanPrincipalResolver, McpCatalogApiState, McpCatalogRegistry, McpManagementApiState,
+    McpManagementPolicy, McpManifestSignerPolicy, McpOAuthRegistry, McpProfileReport, OperatorAuth,
 };
-use insight_api::v1::{build_router_with_mcp, McpOAuthApiState, McpOAuthServer};
+use insight_api::v1::{build_router_with_mcp, McpOAuthApiState};
 use insight_durable::{
-    McpInteractionDurableRepository, McpOAuthDurableRepository, McpRemoteTaskDurableRepository,
-    McpSecretProtector, McpServerTaskDurableRepository,
+    McpInteractionDurableRepository, McpManagementDurableRepository, McpOAuthDurableRepository,
+    McpRemoteTaskDurableRepository, McpSecretProtector, McpServerTaskDurableRepository,
 };
 use insight_mcp::McpServerDispatcher;
 use insight_storage::mcp_secret::McpSecretEncryptionKeyring;
+use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 type MainResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -74,8 +81,14 @@ async fn main() -> MainResult<()> {
         mcp_oauth,
         mcp_remote_tasks,
         mcp_server_tasks,
+        mcp_management,
     ) = initialize_repository_and_live_run_stream(&config.history, config.runtime.run_stream)
         .await?;
+    let mcp_policy_material = mcp_management_policy_material(
+        &config.mcp.client,
+        &config.mcp.protocol.preferred,
+        &config.mcp.protocol.legacy_fallback,
+    )?;
     let mcp_secret_protector = config
         .mcp
         .client
@@ -89,6 +102,11 @@ async fn main() -> MainResult<()> {
             .map(|protector| Arc::new(protector) as Arc<dyn McpSecretProtector>)
         })
         .transpose()?;
+    let mut mcp_discovery_runtime = McpDiscoveryRuntime::start(
+        Arc::clone(&mcp_management),
+        config.mcp.client.clone(),
+        mcp_policy_material.policy_fingerprint.clone(),
+    );
     let mcp_interaction_handler = mcp_secret_protector.as_ref().map(|protector| {
         Arc::new(DurableMcpInteractionHandler::new(
             Arc::clone(&mcp_interactions),
@@ -108,11 +126,11 @@ async fn main() -> MainResult<()> {
             )
         })
         .transpose()?;
-    let mut actions = builtin_action_registry(
+    let actions = builtin_action_registry(
         &config.actions.enabled.iter().cloned().collect::<Vec<_>>(),
         http_get,
     )?;
-    let mut retrievals = RetrievalRegistry::default();
+    let retrievals = RetrievalRegistry::default();
     let mcp_oauth_runtime = mcp_secret_protector.as_ref().map(|protector| {
         insight_agent_platform::resources::mcp::McpOAuthRuntimeAuthority::new(
             Arc::clone(&mcp_interactions),
@@ -127,20 +145,22 @@ async fn main() -> MainResult<()> {
             Arc::clone(protector),
         )
     });
-    let mcp_loaded =
-        load_mcp_action_providers(
-            &config.mcp.client,
-            config.mcp.protocol.legacy_fallback.iter().any(|version| {
-                version == insight_agent_platform::config::MCP_LEGACY_PROTOCOL_VERSION
-            }),
-            &mut actions,
-            &mut retrievals,
-            mcp_interaction_handler,
-            mcp_oauth_runtime,
-            mcp_remote_task_runtime,
-        )
-        .await?;
-    let mut mcp_subscriptions = McpSubscriptionRuntime::start(&mcp_loaded.subscriptions);
+    let mcp_catalog_registry = McpCatalogRegistry::default();
+    let mcp_oauth_registry = McpOAuthRegistry::default();
+    let mut mcp_revision_runtime = McpRevisionRuntime::start(
+        Arc::clone(&mcp_management),
+        config.mcp.client.clone(),
+        mcp_policy_material.clone(),
+        actions.clone(),
+        retrievals.clone(),
+        mcp_catalog_registry.clone(),
+        mcp_oauth_registry.clone(),
+        mcp_interaction_handler.as_ref().map(Arc::clone),
+        mcp_oauth_runtime.clone(),
+        mcp_remote_task_runtime.clone(),
+    )
+    .await
+    .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
 
     let published = compile_enabled_agents(&config.agents.directory, &config.agents.enabled)?;
     let resolver = ProductionLeafDeploymentResolver::new(&models, &actions)
@@ -298,7 +318,15 @@ async fn main() -> MainResult<()> {
         service_config,
     )
     .await?;
-    service.add_readiness_probe(mcp_loaded.readiness.clone())?;
+    service.set_mcp_run_admission_authority(Arc::new(DurableMcpRunAdmissionAuthority::new(
+        Arc::clone(&mcp_management),
+        mcp_policy_material.clone(),
+    )))?;
+    if config.mcp.client.management_api.enabled {
+        service.add_readiness_probe(Arc::new(McpManagementStoreReadiness::new(Arc::clone(
+            &mcp_management,
+        ))))?;
+    }
     let terminal_runtime_config = TerminalOnlyRunConfig {
         owner_lease: config.runtime.terminal_only.owner_lease,
         owner_heartbeat: config.runtime.terminal_only.owner_heartbeat,
@@ -345,73 +373,22 @@ async fn main() -> MainResult<()> {
         sse_keep_alive_interval: config.runtime.sse_keep_alive_interval,
         readiness_probe_timeout: config.runtime.readiness_probe_timeout,
     };
-    let oauth_servers = config
-        .mcp
-        .client
-        .servers
-        .iter()
-        .filter_map(|(server_id, server)| {
-            let insight_agent_platform::config::McpClientAuthorizationConfig::OauthUser {
-                scopes,
-                client_id,
-                redirect_uri,
-            } = &server.authorization
-            else {
-                return None;
-            };
-            let insight_agent_platform::config::McpClientTransportConfig::StreamableHttp {
-                endpoint,
-                request_timeout,
-                ..
-            } = &server.transport
-            else {
-                return Some(Err("MCP OAuth requires Streamable HTTP"));
-            };
-            Some(
-                McpOAuthServer::new(
-                    server_id,
-                    endpoint,
-                    client_id,
-                    redirect_uri,
-                    scopes.iter().cloned().collect(),
-                )
-                .map(|server| (server, *request_timeout)),
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
-    let oauth_timeout = oauth_servers
-        .iter()
-        .map(|(_, timeout)| *timeout)
-        .max()
-        .unwrap_or(std::time::Duration::from_secs(30));
-    let oauth_servers = oauth_servers
-        .into_iter()
-        .map(|(server, _)| server)
-        .collect::<Vec<_>>();
-    let oauth_state = if oauth_servers.is_empty() {
-        None
-    } else {
-        let protector = mcp_secret_protector
-            .as_ref()
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "MCP OAuth requires secret encryption",
-                )
-            })?
-            .clone();
-        Some(
-            McpOAuthApiState::new(
+    // MCP v2 OAuth registrations are a live projection of active durable
+    // revisions. The API can start with an empty projection and is populated
+    // by the reconciler without changing its router contract.
+    let oauth_state = mcp_secret_protector
+        .as_ref()
+        .map(|protector| {
+            McpOAuthApiState::from_registry(
                 api_auth.clone(),
                 Arc::clone(&mcp_oauth),
-                protector,
-                oauth_servers,
-                oauth_timeout,
+                Arc::clone(protector),
+                mcp_oauth_registry.clone(),
+                std::time::Duration::from_secs(30),
             )
-            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?,
-        )
-    };
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))
+        })
+        .transpose()?;
     let mut mcp_oauth_maintenance = McpOAuthMaintenanceRuntime::start(Arc::clone(&mcp_oauth));
     let mut app = match mcp_secret_protector.as_ref() {
         Some(protector) => build_router_with_mcp(
@@ -422,47 +399,119 @@ async fn main() -> MainResult<()> {
         ),
         None => build_router(api_state),
     };
+    if config.mcp.client.management_api.enabled {
+        let operator_auth = OperatorAuth::new(
+            config
+                .mcp
+                .client
+                .management_api
+                .operator_credentials
+                .iter()
+                .map(|credential| {
+                    (
+                        credential.token().expose().to_owned(),
+                        credential.identity().to_owned(),
+                        credential.capabilities().clone(),
+                    )
+                }),
+        )
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "MCP Operator authentication is invalid",
+            )
+        })?;
+        let mut cursor_hasher = Sha256::new();
+        cursor_hasher.update(b"insight-mcp-management-cursor-v1\0");
+        cursor_hasher.update(
+            config
+                .mcp
+                .client
+                .secret_encryption
+                .as_ref()
+                .expect("management configuration requires secret encryption")
+                .keyring
+                .expose()
+                .as_bytes(),
+        );
+        let cursor_signing_key: [u8; 32] = cursor_hasher.finalize().into();
+        let policy = McpManagementPolicy {
+            preferred_protocol: config.mcp.protocol.preferred.clone(),
+            legacy_protocols: config
+                .mcp
+                .protocol
+                .legacy_fallback
+                .iter()
+                .cloned()
+                .collect(),
+            allowed_secret_refs: config.mcp.client.secret_resolver.allowed_names.clone(),
+            resolvable_secret_refs: config
+                .mcp
+                .client
+                .secret_resolver
+                .allowed_names
+                .iter()
+                .filter(|name| std::env::var_os(name).is_some())
+                .cloned()
+                .collect(),
+            stdio_profile_fingerprints: mcp_policy_material.stdio_profile_fingerprints.clone(),
+            stdio_profile_allowed_parameters: mcp_policy_material
+                .stdio_profile_allowed_parameters
+                .clone(),
+            allow_loopback_development: config.mcp.client.network_policy.allow_loopback_development,
+            trusted_manifest_signers: config
+                .mcp
+                .client
+                .signed_manifest_trust
+                .trusted_signers
+                .iter()
+                .map(|(key_id, signer)| {
+                    (
+                        key_id.clone(),
+                        McpManifestSignerPolicy {
+                            public_key: signer.public_key.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            manifest_max_validity: config.mcp.client.signed_manifest_trust.max_validity,
+            max_pending_discoveries: config.mcp.client.management_api.max_pending_discoveries,
+            max_request_bytes: config.mcp.client.default_limits.limits.max_request_bytes,
+            max_response_bytes: config.mcp.client.default_limits.limits.max_response_bytes,
+            max_sse_line_bytes: config.mcp.client.default_limits.limits.max_sse_line_bytes,
+            max_sse_event_bytes: config.mcp.client.default_limits.limits.max_sse_event_bytes,
+            max_content_items: config.mcp.client.default_limits.limits.max_content_items,
+            max_catalog_items: config.mcp.client.default_limits.limits.max_catalog_items,
+            policy_fingerprint: mcp_policy_material.policy_fingerprint.clone(),
+            cursor_signing_key,
+        };
+        let managed_mcp_revision = ManagedMcpRevisionReadiness::new(config.mcp.client.clone());
+        app = app.merge(build_mcp_management_router(McpManagementApiState {
+            auth: operator_auth,
+            repository: Arc::clone(&mcp_management),
+            policy: Arc::new(policy),
+            authoring: Arc::new(managed_mcp_revision.clone()),
+            readiness: Arc::new(managed_mcp_revision),
+        }));
+    }
     let mut mcp_profiles = McpProfileReport::default();
     mcp_profiles.modern_client.enabled = config.mcp.client.enabled;
     mcp_profiles.modern_server.enabled = config.mcp.server.enabled;
-    mcp_profiles.tasks.enabled =
-        config.mcp.client.servers.values().any(|server| {
-            server.imports.tools.iter().any(|tool| {
-                tool.tasks == insight_agent_platform::config::McpInteractionConfig::Allowed
-            })
-        }) || config.mcp.server.exports.agents.iter().any(|agent| {
-            agent.execution != insight_agent_platform::config::McpExportExecutionConfig::Synchronous
-        });
+    mcp_profiles.tasks.enabled = config.mcp.server.exports.agents.iter().any(|agent| {
+        agent.execution != insight_agent_platform::config::McpExportExecutionConfig::Synchronous
+    });
     mcp_profiles.legacy_client.enabled = config
         .mcp
         .protocol
         .legacy_fallback
         .iter()
         .any(|version| version == insight_agent_platform::config::MCP_LEGACY_PROTOCOL_VERSION);
-    let mcp_catalog_servers = mcp_loaded
-        .publications
-        .into_iter()
-        .map(|publication| {
-            let context = mcp_loaded.contexts.get(&publication.server_id).cloned();
-            McpCatalogServer::new(
-                publication.server_id,
-                publication.binding,
-                publication.capabilities,
-                publication.server_info,
-                publication.required_scopes,
-                publication.tool_bindings,
-            )
-            .map(|server| server.with_context(context, publication.catalog_invalidation))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
     app = app.merge(build_mcp_catalog_router(
-        McpCatalogApiState::new(
+        McpCatalogApiState::from_registry(
             api_auth.clone(),
             Arc::clone(&mcp_oauth),
-            mcp_catalog_servers,
+            mcp_catalog_registry,
         )
-        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?
         .with_run_service(service.clone())
         .with_profile_report(mcp_profiles),
     ));
@@ -546,10 +595,11 @@ async fn main() -> MainResult<()> {
 
     tokio::select! {
         result = &mut server => {
-            mcp_oauth_maintenance.shutdown().await;
-            mcp_subscriptions.shutdown().await;
-            mcp_server_task_maintenance.shutdown().await;
             service.begin_shutdown();
+            mcp_discovery_runtime.shutdown().await;
+            mcp_revision_runtime.shutdown().await;
+            mcp_oauth_maintenance.shutdown().await;
+            mcp_server_task_maintenance.shutdown().await;
             service.shutdown(config.runtime.shutdown_grace_period).await?;
             result?;
             Err(io::Error::other("HTTP server stopped before a shutdown signal").into())
@@ -557,11 +607,12 @@ async fn main() -> MainResult<()> {
         signal = wait_for_shutdown_signal() => {
             signal?;
             tracing::info!("shutdown signal received");
-            mcp_oauth_maintenance.shutdown().await;
-            mcp_subscriptions.shutdown().await;
-            mcp_server_task_maintenance.shutdown().await;
             service.begin_shutdown();
             let _ = http_shutdown.send(());
+            mcp_discovery_runtime.shutdown().await;
+            mcp_revision_runtime.shutdown().await;
+            mcp_oauth_maintenance.shutdown().await;
+            mcp_server_task_maintenance.shutdown().await;
             tokio::time::timeout(config.runtime.shutdown_hard_deadline, async {
                 service.shutdown(config.runtime.shutdown_grace_period).await?;
                 (&mut server).await?;
@@ -575,6 +626,8 @@ async fn main() -> MainResult<()> {
             Ok(())
         }
         self_abort = qualification_self_abort.wait() => {
+            mcp_discovery_runtime.shutdown().await;
+            mcp_revision_runtime.shutdown().await;
             self_abort?;
             tracing::error!(
                 code = "QUALIFICATION_SELF_ABORT",
@@ -757,133 +810,6 @@ impl Drop for McpOAuthMaintenanceRuntime {
     }
 }
 
-struct McpSubscriptionRuntime {
-    cancellation: CancellationToken,
-    handles: Vec<tokio::task::JoinHandle<()>>,
-    server_ids: Vec<String>,
-}
-
-impl McpSubscriptionRuntime {
-    fn start(
-        subscriptions: &[insight_agent_platform::resources::mcp::McpClientSubscription],
-    ) -> Self {
-        let cancellation = CancellationToken::new();
-        let server_ids = subscriptions
-            .iter()
-            .map(|subscription| subscription.server_id.clone())
-            .collect::<Vec<_>>();
-        let handles = subscriptions
-            .iter()
-            .map(|subscription| {
-                let subscription = subscription.clone();
-                let cancellation = cancellation.clone();
-                tokio::spawn(async move {
-                    insight_mcp::set_operational_gauge(
-                        &subscription.server_id,
-                        insight_mcp::McpOperationalGauge::ActiveSubscriptions,
-                        1,
-                    );
-                    let mut backoff = std::time::Duration::from_millis(250);
-                    loop {
-                        let attempt_cancellation = cancellation.child_token();
-                        let result = subscription
-                            .context
-                            .listen_with_filter(
-                                subscription.filter.clone(),
-                                subscription.invalidation.as_ref(),
-                                &attempt_cancellation,
-                            )
-                            .await;
-                        if cancellation.is_cancelled() {
-                            insight_mcp::set_operational_gauge(
-                                &subscription.server_id,
-                                insight_mcp::McpOperationalGauge::ActiveSubscriptions,
-                                0,
-                            );
-                            return;
-                        }
-                        insight_mcp::set_operational_gauge(
-                            &subscription.server_id,
-                            insight_mcp::McpOperationalGauge::ActiveSubscriptions,
-                            0,
-                        );
-                        let invalidation = subscription.invalidation.snapshot();
-                        let stale = u64::from(
-                            invalidation.tools_stale
-                                || invalidation.resources_stale
-                                || invalidation.prompts_stale,
-                        );
-                        insight_mcp::set_operational_gauge(
-                            &subscription.server_id,
-                            insight_mcp::McpOperationalGauge::StalePublicationCandidates,
-                            stale,
-                        );
-                        if stale != 0 || !invalidation.updated_resources.is_empty() {
-                            insight_mcp::record_operational_event(
-                                &subscription.server_id,
-                                insight_mcp::McpOperationalEvent::CacheInvalidated,
-                            );
-                        }
-                        tracing::warn!(
-                            server_id = %subscription.server_id,
-                            connected = result.is_ok(),
-                            "MCP catalog subscription disconnected; reconnecting"
-                        );
-                        tokio::select! {
-                            _ = cancellation.cancelled() => return,
-                            _ = tokio::time::sleep(backoff) => {}
-                        }
-                        backoff = backoff
-                            .checked_mul(2)
-                            .unwrap_or(std::time::Duration::from_secs(30))
-                            .min(std::time::Duration::from_secs(30));
-                        insight_mcp::set_operational_gauge(
-                            &subscription.server_id,
-                            insight_mcp::McpOperationalGauge::ActiveSubscriptions,
-                            1,
-                        );
-                    }
-                })
-            })
-            .collect();
-        Self {
-            cancellation,
-            handles,
-            server_ids,
-        }
-    }
-
-    async fn shutdown(&mut self) {
-        self.cancellation.cancel();
-        for handle in self.handles.drain(..) {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
-        }
-        for server_id in &self.server_ids {
-            insight_mcp::set_operational_gauge(
-                server_id,
-                insight_mcp::McpOperationalGauge::ActiveSubscriptions,
-                0,
-            );
-        }
-    }
-}
-
-impl Drop for McpSubscriptionRuntime {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-        for handle in &self.handles {
-            handle.abort();
-        }
-        for server_id in &self.server_ids {
-            insight_mcp::set_operational_gauge(
-                server_id,
-                insight_mcp::McpOperationalGauge::ActiveSubscriptions,
-                0,
-            );
-        }
-    }
-}
-
 struct QualificationSelfAbortControl {
     enabled: bool,
     #[cfg(unix)]
@@ -988,6 +914,7 @@ async fn initialize_repository_and_live_run_stream(
     Arc<dyn McpOAuthDurableRepository>,
     Arc<dyn McpRemoteTaskDurableRepository>,
     Arc<dyn McpServerTaskDurableRepository>,
+    Arc<dyn McpManagementDurableRepository>,
 )> {
     match config {
         HistoryConfig::Sqlite { path } => {
@@ -1004,7 +931,8 @@ async fn initialize_repository_and_live_run_stream(
             let mcp_interactions: Arc<dyn McpInteractionDurableRepository> = concrete.clone();
             let mcp_oauth: Arc<dyn McpOAuthDurableRepository> = concrete.clone();
             let mcp_remote_tasks: Arc<dyn McpRemoteTaskDurableRepository> = concrete.clone();
-            let mcp_server_tasks: Arc<dyn McpServerTaskDurableRepository> = concrete;
+            let mcp_server_tasks: Arc<dyn McpServerTaskDurableRepository> = concrete.clone();
+            let mcp_management: Arc<dyn McpManagementDurableRepository> = concrete;
             let broker = Arc::new(InMemoryLiveRunStreamBroker::new_with_limits(
                 run_stream.body_queue_capacity,
                 run_stream.control_queue_capacity,
@@ -1022,6 +950,7 @@ async fn initialize_repository_and_live_run_stream(
                 mcp_oauth,
                 mcp_remote_tasks,
                 mcp_server_tasks,
+                mcp_management,
             ))
         }
         HistoryConfig::Postgres {
@@ -1068,7 +997,8 @@ async fn initialize_repository_and_live_run_stream(
             let mcp_interactions: Arc<dyn McpInteractionDurableRepository> = concrete.clone();
             let mcp_oauth: Arc<dyn McpOAuthDurableRepository> = concrete.clone();
             let mcp_remote_tasks: Arc<dyn McpRemoteTaskDurableRepository> = concrete.clone();
-            let mcp_server_tasks: Arc<dyn McpServerTaskDurableRepository> = concrete;
+            let mcp_server_tasks: Arc<dyn McpServerTaskDurableRepository> = concrete.clone();
+            let mcp_management: Arc<dyn McpManagementDurableRepository> = concrete;
             Ok((
                 production,
                 terminal_store,
@@ -1077,6 +1007,7 @@ async fn initialize_repository_and_live_run_stream(
                 mcp_oauth,
                 mcp_remote_tasks,
                 mcp_server_tasks,
+                mcp_management,
             ))
         }
     }

@@ -1,0 +1,31 @@
+# Example production overlay for the MCP management API. All credential values
+# remain in pre-existing Kubernetes Secrets; this file contains references only.
+mcp:
+  client:
+    enabled: true
+    managementApi:
+      enabled: true
+      discoveryWorkers: 4
+      maxPendingDiscoveries: 128
+      operatorCredentials:
+        - identity: mcp-platform-operator
+          tokenEnv: INSIGHT_MCP_OPERATOR_TOKEN
+          capabilities:
+            - mcp.server.read
+            - mcp.server.write
+            - mcp.server.discover
+            - mcp.server.publish
+    secretResolverAllowedNames:
+      - ENGINEERING_MCP_TOKEN
+  secretEncryption:
+    enabled: true
+    activeKeyVersion: v1
+    existingSecret: insight-mcp-keyring
+    keyringKey: keyring.json
+  secretEnv:
+    - name: INSIGHT_MCP_OPERATOR_TOKEN
+      secretName: insight-mcp-operator
+      secretKey: token
+    - name: ENGINEERING_MCP_TOKEN
+      secretName: engineering-mcp
+      secretKey: token

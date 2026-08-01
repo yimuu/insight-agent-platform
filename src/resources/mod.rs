@@ -28,6 +28,7 @@ pub mod models {
 }
 
 pub mod mcp;
+pub mod mcp_management;
 pub mod mcp_server;
 
 pub mod openai_chat {

@@ -10,7 +10,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use async_trait::async_trait;
@@ -335,13 +335,16 @@ fn validate_json(
     }
 }
 
+type RevisionRetrievalMap = BTreeMap<(String, String, String), Arc<RegisteredRetrieval>>;
+
 #[derive(Clone, Default)]
 pub struct RetrievalRegistry {
-    retrievals: BTreeMap<String, Arc<RegisteredRetrieval>>,
+    retrievals: Arc<RwLock<BTreeMap<String, Arc<RegisteredRetrieval>>>>,
+    revisions: Arc<RwLock<RevisionRetrievalMap>>,
 }
 
 impl RetrievalRegistry {
-    pub fn register<R>(&mut self, retrieval: R) -> Result<(), CompileError>
+    pub fn register<R>(&self, retrieval: R) -> Result<(), CompileError>
     where
         R: Retrieval + 'static,
     {
@@ -355,7 +358,12 @@ impl RetrievalRegistry {
                 "retrieval id must be a valid qualified identifier",
             ));
         }
-        if self.retrievals.contains_key(&id) {
+        if self
+            .retrievals
+            .read()
+            .map_err(|_| registry_unavailable())?
+            .contains_key(&id)
+        {
             return Err(CompileError::new(
                 "DUPLICATE_RETRIEVAL",
                 format!("retrieval '{id}' is already registered"),
@@ -440,36 +448,150 @@ impl RetrievalRegistry {
         descriptor.input_schema = input_schema;
         descriptor.output_schema = output_schema;
         let descriptor_hash = descriptor_hash(&descriptor, &public_policy)?;
-        self.retrievals.insert(
-            id.clone(),
-            Arc::new(RegisteredRetrieval {
-                identity: RetrievalDescriptorIdentity {
-                    id,
-                    version,
-                    descriptor_hash,
-                },
-                descriptor,
-                retrieval: Arc::new(retrieval),
-                input_validator,
-                output_validator,
-                public_policy,
-            }),
+        let registered = Arc::new(RegisteredRetrieval {
+            identity: RetrievalDescriptorIdentity {
+                id: id.clone(),
+                version,
+                descriptor_hash,
+            },
+            descriptor,
+            retrieval: Arc::new(retrieval),
+            input_validator,
+            output_validator,
+            public_policy,
+        });
+        let identity = registered.identity();
+        let mut revisions = self.revisions.write().map_err(|_| registry_unavailable())?;
+        let mut retrievals = self
+            .retrievals
+            .write()
+            .map_err(|_| registry_unavailable())?;
+        if retrievals.contains_key(&id) {
+            return Err(CompileError::new(
+                "DUPLICATE_RETRIEVAL",
+                format!("retrieval '{id}' is already registered"),
+            ));
+        }
+        revisions.insert(
+            (
+                identity.id.clone(),
+                identity.version.to_string(),
+                identity.descriptor_hash.clone(),
+            ),
+            Arc::clone(&registered),
         );
+        retrievals.insert(id, registered);
         Ok(())
     }
 
-    pub fn resolve(&self, id: &str) -> Result<Arc<RegisteredRetrieval>, CompileError> {
-        self.retrievals.get(id).cloned().ok_or_else(|| {
-            CompileError::new(
-                "RETRIEVAL_NOT_FOUND",
-                format!("retrieval '{id}' is not registered"),
-            )
-        })
+    pub fn publish_revision<R>(
+        &self,
+        retrieval: R,
+    ) -> Result<Arc<RegisteredRetrieval>, CompileError>
+    where
+        R: Retrieval + 'static,
+    {
+        let isolated = RetrievalRegistry::default();
+        isolated.register(retrieval)?;
+        let registered = isolated
+            .retrievals
+            .read()
+            .map_err(|_| registry_unavailable())?
+            .values()
+            .next()
+            .cloned()
+            .ok_or_else(registry_unavailable)?;
+        if !registered.identity().id.starts_with("mcp.") {
+            return Err(CompileError::new(
+                "RETRIEVAL_ID_INVALID",
+                "dynamic revision Retrieval must use the mcp namespace",
+            ));
+        }
+        let identity = registered.identity();
+        self.revisions
+            .write()
+            .map_err(|_| registry_unavailable())?
+            .insert(
+                (
+                    identity.id.clone(),
+                    identity.version.to_string(),
+                    identity.descriptor_hash.clone(),
+                ),
+                Arc::clone(&registered),
+            );
+        self.retrievals
+            .write()
+            .map_err(|_| registry_unavailable())?
+            .insert(identity.id.clone(), Arc::clone(&registered));
+        Ok(registered)
     }
 
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.retrievals.keys().map(String::as_str)
+    pub fn resolve(&self, id: &str) -> Result<Arc<RegisteredRetrieval>, CompileError> {
+        self.retrievals
+            .read()
+            .map_err(|_| registry_unavailable())?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| {
+                CompileError::new(
+                    "RETRIEVAL_NOT_FOUND",
+                    format!("retrieval '{id}' is not registered"),
+                )
+            })
     }
+
+    pub fn resolve_frozen(
+        &self,
+        id: &str,
+        version: &str,
+        descriptor_hash: &str,
+    ) -> Result<Arc<RegisteredRetrieval>, CompileError> {
+        self.revisions
+            .read()
+            .map_err(|_| registry_unavailable())?
+            .get(&(
+                id.to_owned(),
+                version.to_owned(),
+                descriptor_hash.to_owned(),
+            ))
+            .cloned()
+            .ok_or_else(|| {
+                CompileError::new(
+                    "RETRIEVAL_NOT_FOUND",
+                    format!("retrieval '{id}' revision is not registered"),
+                )
+            })
+    }
+
+    pub fn withdraw_current(&self, id: &str, version: &str) -> Result<bool, CompileError> {
+        let mut retrievals = self
+            .retrievals
+            .write()
+            .map_err(|_| registry_unavailable())?;
+        if retrievals
+            .get(id)
+            .is_some_and(|retrieval| retrieval.identity().version.to_string() == version)
+        {
+            retrievals.remove(id);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = String> {
+        self.retrievals
+            .read()
+            .map(|retrievals| retrievals.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+    }
+}
+
+fn registry_unavailable() -> CompileError {
+    CompileError::new(
+        "RETRIEVAL_REGISTRY_UNAVAILABLE",
+        "Retrieval registry lock is unavailable",
+    )
 }
 
 fn validate_required_string_query_field(
@@ -896,7 +1018,7 @@ mod tests {
 
     #[test]
     fn registry_normalizes_contract_and_builds_stable_identity() {
-        let mut first = RetrievalRegistry::default();
+        let first = RetrievalRegistry::default();
         first.register(retrieval("search.documents")).unwrap();
         let registered = first.resolve("search.documents").unwrap();
         assert_eq!(registered.identity().version.to_string(), "1.2.3");
@@ -907,7 +1029,7 @@ mod tests {
         );
         assert_eq!(registered.descriptor().input_schema["$defs"], json!({}));
 
-        let mut second = RetrievalRegistry::default();
+        let second = RetrievalRegistry::default();
         second.register(retrieval("search.documents")).unwrap();
         assert_eq!(
             registered.identity(),
@@ -917,8 +1039,59 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_revision_switch_keeps_exact_frozen_retrieval_available() {
+        let registry = RetrievalRegistry::default();
+        let mut first = retrieval("mcp.engineering.resource_search");
+        first.descriptor.version = "0.0.0+mcp.revision1".to_owned();
+        let first = registry.publish_revision(first).unwrap();
+        let first_identity = first.identity();
+
+        let mut second = retrieval("mcp.engineering.resource_search");
+        second.descriptor.version = "0.0.0+mcp.revision2".to_owned();
+        second.descriptor.output_schema = object_schema(
+            json!({
+                "documents": {"type": "array", "items": {"type": "string"}},
+                "revision": {"type": "string"}
+            }),
+            &["documents", "revision"],
+        );
+        let second = registry.publish_revision(second).unwrap();
+        assert_eq!(
+            registry
+                .resolve("mcp.engineering.resource_search")
+                .unwrap()
+                .identity(),
+            second.identity()
+        );
+        assert_eq!(
+            registry
+                .resolve_frozen(
+                    &first_identity.id,
+                    &first_identity.version.to_string(),
+                    &first_identity.descriptor_hash,
+                )
+                .unwrap()
+                .identity(),
+            first_identity
+        );
+        assert!(registry
+            .withdraw_current(
+                &second.identity().id,
+                &second.identity().version.to_string()
+            )
+            .unwrap());
+        assert!(registry
+            .resolve_frozen(
+                &first_identity.id,
+                &first_identity.version.to_string(),
+                &first_identity.descriptor_hash,
+            )
+            .is_ok());
+    }
+
+    #[test]
     fn registry_rejects_duplicate_invalid_identity_version_and_capability() {
-        let mut registry = RetrievalRegistry::default();
+        let registry = RetrievalRegistry::default();
         registry.register(retrieval("search.documents")).unwrap();
         assert_eq!(
             registry
@@ -1060,7 +1233,7 @@ mod tests {
 
     #[tokio::test]
     async fn execution_validates_model_contracts_without_inspecting_public_candidate() {
-        let mut registry = RetrievalRegistry::default();
+        let registry = RetrievalRegistry::default();
         registry.register(retrieval("search.execute")).unwrap();
         let registered = registry.resolve("search.execute").unwrap();
         let (_, signal) = stop_pair();
@@ -1086,7 +1259,7 @@ mod tests {
 
         let mut bad_output = retrieval("search.bad_output");
         bad_output.result.model_output = json!({"unexpected": true});
-        let mut registry = RetrievalRegistry::default();
+        let registry = RetrievalRegistry::default();
         registry.register(bad_output).unwrap();
         let context = RetrievalContext::for_operation("run_1", "search", 3, control);
         let error = registry
@@ -1101,7 +1274,7 @@ mod tests {
 
     #[test]
     fn descriptor_hash_covers_query_and_public_policy() {
-        let mut baseline = RetrievalRegistry::default();
+        let baseline = RetrievalRegistry::default();
         baseline.register(retrieval("search.hash")).unwrap();
         let baseline_hash = baseline
             .resolve("search.hash")
@@ -1112,7 +1285,7 @@ mod tests {
 
         let mut changed = retrieval("search.hash");
         changed.public.query = true;
-        let mut registry = RetrievalRegistry::default();
+        let registry = RetrievalRegistry::default();
         registry.register(changed).unwrap();
         assert_ne!(
             baseline_hash,

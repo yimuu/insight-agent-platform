@@ -121,7 +121,7 @@ impl Retrieval for FixtureRetrieval {
 }
 
 fn retrieval_registry() -> RetrievalRegistry {
-    let mut retrievals = RetrievalRegistry::default();
+    let retrievals = RetrievalRegistry::default();
     retrievals.register(FixtureRetrieval).unwrap();
     retrievals
 }

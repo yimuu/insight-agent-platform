@@ -6,6 +6,7 @@
 - [架构概览](architecture.md)
 - [DSL v1 指南](dsl.md)
 - [HTTP 与 SSE API](api.md)
+- [平台配置](configuration.md)
 - [MCP 使用、运行与安全合同](mcp.md)
 - [部署与运维](operations.md)
 - [开发指南](development.md)

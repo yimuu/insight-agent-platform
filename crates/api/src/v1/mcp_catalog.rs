@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use axum::{
@@ -92,9 +92,68 @@ impl McpCatalogServer {
 pub struct McpCatalogApiState {
     auth: ApiAuth,
     oauth_repository: Arc<dyn McpOAuthDurableRepository>,
-    servers: BTreeMap<String, McpCatalogServer>,
+    servers: McpCatalogRegistry,
     profiles: McpProfileReport,
     run_service: Option<RunService>,
+}
+
+/// Process-local projection of active immutable MCP Revisions. The durable
+/// active pointer remains authoritative; this registry is replaced by the
+/// revision reconciler and is never a configuration source.
+#[derive(Clone, Default)]
+pub struct McpCatalogRegistry {
+    servers: Arc<RwLock<BTreeMap<String, McpCatalogServer>>>,
+}
+
+impl McpCatalogRegistry {
+    pub fn replace(&self, servers: Vec<McpCatalogServer>) -> Result<(), &'static str> {
+        let mut indexed = BTreeMap::new();
+        for server in servers {
+            if indexed.insert(server.server_id.clone(), server).is_some() {
+                return Err("duplicate MCP catalog server");
+            }
+        }
+        *self
+            .servers
+            .write()
+            .map_err(|_| "MCP catalog registry unavailable")? = indexed;
+        Ok(())
+    }
+
+    pub fn upsert(&self, server: McpCatalogServer) -> Result<(), &'static str> {
+        self.servers
+            .write()
+            .map_err(|_| "MCP catalog registry unavailable")?
+            .insert(server.server_id.clone(), server);
+        Ok(())
+    }
+
+    pub fn remove(&self, server_id: &str) -> Result<(), &'static str> {
+        self.servers
+            .write()
+            .map_err(|_| "MCP catalog registry unavailable")?
+            .remove(server_id);
+        Ok(())
+    }
+
+    fn get(&self, server_id: &str) -> Result<Option<McpCatalogServer>, ApiError> {
+        Ok(self
+            .servers
+            .read()
+            .map_err(|_| ApiError::internal())?
+            .get(server_id)
+            .cloned())
+    }
+
+    fn snapshot(&self) -> Result<Vec<McpCatalogServer>, ApiError> {
+        Ok(self
+            .servers
+            .read()
+            .map_err(|_| ApiError::internal())?
+            .values()
+            .cloned()
+            .collect())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -178,19 +237,29 @@ impl McpCatalogApiState {
         oauth_repository: Arc<dyn McpOAuthDurableRepository>,
         servers: Vec<McpCatalogServer>,
     ) -> Result<Self, &'static str> {
-        let mut indexed = BTreeMap::new();
-        for server in servers {
-            if indexed.insert(server.server_id.clone(), server).is_some() {
-                return Err("duplicate MCP catalog server");
-            }
-        }
+        let registry = McpCatalogRegistry::default();
+        registry.replace(servers)?;
         Ok(Self {
             auth,
             oauth_repository,
-            servers: indexed,
+            servers: registry,
             profiles: McpProfileReport::default(),
             run_service: None,
         })
+    }
+
+    pub fn from_registry(
+        auth: ApiAuth,
+        oauth_repository: Arc<dyn McpOAuthDurableRepository>,
+        registry: McpCatalogRegistry,
+    ) -> Self {
+        Self {
+            auth,
+            oauth_repository,
+            servers: registry,
+            profiles: McpProfileReport::default(),
+            run_service: None,
+        }
     }
 
     pub fn with_run_service(mut self, run_service: RunService) -> Self {
@@ -295,8 +364,9 @@ async fn list_servers(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let principal = principal(&headers)?;
-    let mut servers = Vec::with_capacity(state.servers.len());
-    for server in state.servers.values() {
+    let projected = state.servers.snapshot()?;
+    let mut servers = Vec::with_capacity(projected.len());
+    for server in &projected {
         let (authorization, connection_status) = match &server.binding.principal_scope {
             PrincipalScope::Service => ("service", "authorized"),
             PrincipalScope::Tenant(_) => ("tenant", "authorized"),
@@ -362,7 +432,7 @@ async fn list_tools(
     Path(server_id): Path<String>,
     Query(query): Query<PageQuery>,
 ) -> Result<Response, ApiError> {
-    let server = state.servers.get(&server_id).ok_or_else(not_found)?;
+    let server = state.servers.get(&server_id)?.ok_or_else(not_found)?;
     let (cursor, limit) = query.validate()?;
     let items = server
         .tools
@@ -390,7 +460,7 @@ async fn list_resources(
     Path(server_id): Path<String>,
     Query(query): Query<PageQuery>,
 ) -> Result<Response, ApiError> {
-    let server = state.servers.get(&server_id).ok_or_else(not_found)?;
+    let server = state.servers.get(&server_id)?.ok_or_else(not_found)?;
     let context = server.context.as_ref().ok_or_else(not_found)?;
     let (cursor, limit) = query.validate()?;
     let mut items = context
@@ -414,7 +484,7 @@ async fn list_prompts(
     Path(server_id): Path<String>,
     Query(query): Query<PageQuery>,
 ) -> Result<Response, ApiError> {
-    let server = state.servers.get(&server_id).ok_or_else(not_found)?;
+    let server = state.servers.get(&server_id)?.ok_or_else(not_found)?;
     let context = server.context.as_ref().ok_or_else(not_found)?;
     let (cursor, limit) = query.validate()?;
     let items = context
@@ -452,8 +522,8 @@ async fn read_resource(
     input: Result<Json<ReadResourceRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Response, ApiError> {
     let principal = principal(&headers)?;
-    let server = state.servers.get(&server_id).ok_or_else(not_found)?;
-    require_runtime_authorization(&state, server, &principal).await?;
+    let server = state.servers.get(&server_id)?.ok_or_else(not_found)?;
+    require_runtime_authorization(&state, &server, &principal).await?;
     let context = server.context.as_ref().ok_or_else(not_found)?;
     let Json(input) = input.map_err(ApiError::from)?;
     match context
@@ -491,8 +561,8 @@ async fn preview_prompt(
     input: Result<Json<PromptPreviewRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Response, ApiError> {
     let principal = principal(&headers)?;
-    let server = state.servers.get(&server_id).ok_or_else(not_found)?;
-    require_runtime_authorization(&state, server, &principal).await?;
+    let server = state.servers.get(&server_id)?.ok_or_else(not_found)?;
+    require_runtime_authorization(&state, &server, &principal).await?;
     let context = server.context.as_ref().ok_or_else(not_found)?;
     let Json(input) = input.map_err(ApiError::from)?;
     match context
@@ -535,8 +605,8 @@ async fn complete(
     input: Result<Json<CompletionRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Response, ApiError> {
     let principal = principal(&headers)?;
-    let server = state.servers.get(&server_id).ok_or_else(not_found)?;
-    require_runtime_authorization(&state, server, &principal).await?;
+    let server = state.servers.get(&server_id)?.ok_or_else(not_found)?;
+    require_runtime_authorization(&state, &server, &principal).await?;
     let context = server.context.as_ref().ok_or_else(not_found)?;
     let Json(input) = input.map_err(ApiError::from)?;
     let result = context
@@ -584,8 +654,8 @@ async fn create_run_with_context(
     input: Result<Json<McpContextRunRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Response, ApiError> {
     let principal = principal(&headers)?;
-    let server = state.servers.get(&server_id).ok_or_else(not_found)?;
-    require_runtime_authorization(&state, server, &principal).await?;
+    let server = state.servers.get(&server_id)?.ok_or_else(not_found)?;
+    require_runtime_authorization(&state, &server, &principal).await?;
     let provider = server.context.as_ref().ok_or_else(not_found)?;
     let run_service = state.run_service.as_ref().ok_or_else(unavailable)?;
     let Json(mut request) = input.map_err(ApiError::from)?;

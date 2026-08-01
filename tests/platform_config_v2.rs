@@ -3,9 +3,8 @@ use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 use insight_agent_platform::{
     config::{
         ArtifactStoreProvider, AuthConfig, DeploymentMode, HistoryConfig,
-        LiveRunStreamBrokerProvider, McpClientAuthorizationConfig, McpClientTransportConfig,
-        McpDiscoveryConfig, McpEffectConfig, McpInteractionConfig, ModelInputModality,
-        PlatformConfig, PlatformConfigError, ProviderExtensionSource, ProviderTransportPolicy,
+        LiveRunStreamBrokerProvider, McpInteractionConfig, ModelInputModality, PlatformConfig,
+        PlatformConfigError, ProviderExtensionSource, ProviderTransportPolicy,
     },
     engine::PersistenceMode,
     resources::config::load_model_registry_with_env,
@@ -90,42 +89,32 @@ fn mcp_config_is_strict_bounded_and_secret_backed() {
         base_yaml("  mode: disabled"),
         r#"
 mcp:
-  version: 1
+  version: 2
   protocol:
     preferred: "2026-07-28"
   client:
     enabled: true
-    servers:
-      engineering:
-        transport:
-          type: streamable_http
-          endpoint: http://127.0.0.1:9000/mcp
-          allow_plaintext_loopback: true
-          connect_timeout: 2s
-          request_timeout: 30s
-        discovery:
-          type: live_service_account
-        authorization:
-          type: bearer_env
-          token_env: MCP_ENGINEERING_TOKEN
-        imports:
-          tools:
-            - remote: search_repositories
-              as: engineering_search
-              effect: read_only
-              idempotency: idempotent
-              cancellation: cooperative
-              approval: never
-              input_required: denied
-              tasks: denied
-              terminal_only_compatible: true
-        limits:
-          max_request_bytes: 1048576
-          max_response_bytes: 16777216
-          max_sse_line_bytes: 65536
-          max_sse_event_bytes: 1048576
-          max_content_items: 128
-          max_catalog_items: 4096
+    management_api:
+      enabled: true
+      discovery_workers: 4
+      max_pending_discoveries: 128
+      operator_credentials:
+        - identity: platform-operator
+          token_env: MCP_OPERATOR_TOKEN
+          capabilities: [mcp.server.read, mcp.server.write, mcp.server.discover, mcp.server.publish]
+    secret_encryption:
+      active_key_version: v1
+      keyring_env: MCP_SECRET_KEYRING
+    secret_resolver:
+      type: environment_reference
+      allowed_names: [MCP_ENGINEERING_TOKEN]
+    default_limits:
+      max_request_bytes: 1048576
+      max_response_bytes: 16777216
+      max_sse_line_bytes: 65536
+      max_sse_event_bytes: 1048576
+      max_content_items: 128
+      max_catalog_items: 4096
   server:
     enabled: false
     authorization:
@@ -135,44 +124,51 @@ mcp:
     let (_directory, path) = write_config(&yaml);
     let config = load(
         &path,
-        BTreeMap::from([(
-            "MCP_ENGINEERING_TOKEN".to_owned(),
-            "fixture-secret".to_owned(),
-        )]),
+        BTreeMap::from([
+            (
+                "MCP_OPERATOR_TOKEN".to_owned(),
+                "operator-secret".to_owned(),
+            ),
+            (
+                "MCP_SECRET_KEYRING".to_owned(),
+                format!(r#"{{"v1":"{}"}}"#, "11".repeat(32)),
+            ),
+        ]),
     )
     .unwrap();
-    let server = &config.mcp.client.servers["engineering"];
-    assert!(matches!(
-        server.transport,
-        McpClientTransportConfig::StreamableHttp {
-            allow_plaintext_loopback: true,
-            ..
-        }
-    ));
-    assert_eq!(server.discovery, McpDiscoveryConfig::LiveServiceAccount);
-    assert!(matches!(
-        server.authorization,
-        McpClientAuthorizationConfig::BearerEnv { .. }
-    ));
-    assert!(!format!("{:?}", server.authorization).contains("fixture-secret"));
-    assert_eq!(server.imports.tools[0].effect, McpEffectConfig::ReadOnly);
-    assert_eq!(
-        server.imports.tools[0].input_required,
-        McpInteractionConfig::Denied
-    );
+    assert_eq!(config.mcp.version, 2);
+    assert!(config.mcp.client.management_api.enabled);
+    assert_eq!(config.mcp.client.management_api.discovery_workers, 4);
+    assert!(config
+        .mcp
+        .client
+        .secret_resolver
+        .allowed_names
+        .contains("MCP_ENGINEERING_TOKEN"));
+    assert!(!format!(
+        "{:?}",
+        config.mcp.client.management_api.operator_credentials
+    )
+    .contains("operator-secret"));
 
     let invalid = yaml.replace(
-        "          max_catalog_items: 4096",
-        "          max_catalog_items: 0",
+        "      max_catalog_items: 4096",
+        "      max_catalog_items: 0",
     );
     let (_directory, path) = write_config(&invalid);
     assert_eq!(
         load(
             &path,
-            BTreeMap::from([(
-                "MCP_ENGINEERING_TOKEN".to_owned(),
-                "fixture-secret".to_owned()
-            )])
+            BTreeMap::from([
+                (
+                    "MCP_OPERATOR_TOKEN".to_owned(),
+                    "operator-secret".to_owned()
+                ),
+                (
+                    "MCP_SECRET_KEYRING".to_owned(),
+                    format!(r#"{{"v1":"{}"}}"#, "11".repeat(32))
+                ),
+            ])
         )
         .unwrap_err()
         .code(),
@@ -187,22 +183,14 @@ fn mcp_config_rejects_unknown_fields_and_unsafe_remote_plaintext() {
         base_yaml("  mode: disabled"),
         r#"
 mcp:
-  version: 1
+  version: 2
   protocol:
     preferred: "2026-07-28"
   client:
-    enabled: true
-    servers:
-      remote:
-        transport:
-          type: streamable_http
-          endpoint: http://example.com/mcp
-          allow_plaintext_loopback: true
-        discovery:
-          type: live_service_account
-        authorization:
-          type: none
-        imports: {}
+    enabled: false
+    management_api:
+      enabled: false
+    servers: {}
   server:
     enabled: false
     authorization:
@@ -212,15 +200,10 @@ mcp:
     let (_directory, path) = write_config(&base);
     assert_eq!(
         load(&path, BTreeMap::new()).unwrap_err().code(),
-        "PLATFORM_MCP_INVALID"
+        "PLATFORM_CONFIG_INVALID"
     );
 
-    let unknown = base
-        .replace("http://example.com/mcp", "https://example.com/mcp")
-        .replace(
-            "        imports: {}",
-            "        imports: {}\n        magic: true",
-        );
+    let unknown = base.replace("    servers: {}", "    magic: true");
     let (_directory, path) = write_config(&unknown);
     assert_eq!(
         load(&path, BTreeMap::new()).unwrap_err().code(),
@@ -229,42 +212,20 @@ mcp:
 }
 
 #[test]
-fn oauth_user_mcp_tools_cannot_claim_terminal_only_compatibility() {
+fn enabled_mcp_management_requires_closed_operator_and_secret_policies() {
     let yaml = format!(
         "{}{}",
         base_yaml("  mode: disabled"),
         r#"
 mcp:
-  version: 1
+  version: 2
   protocol:
     preferred: "2026-07-28"
   client:
     enabled: true
-    servers:
-      user-calendar:
-        transport:
-          type: streamable_http
-          endpoint: https://calendar.example.test/mcp
-        discovery:
-          type: signed_manifest
-          path: ../mcp/calendar.json
-          trust_keys_env: MCP_MANIFEST_KEYS
-        authorization:
-          type: oauth_user
-          scopes: [calendar.read]
-          client_id: insight-agent-platform
-          redirect_uri: https://agents.example.test/v1/mcp/oauth/callback
-        imports:
-          tools:
-            - remote: events.list
-              as: calendar_events
-              effect: read_only
-              idempotency: idempotent
-              cancellation: cooperative
-              approval: never
-              input_required: denied
-              tasks: denied
-              terminal_only_compatible: true
+    management_api:
+      enabled: true
+      operator_credentials: []
   server:
     enabled: false
     authorization:
@@ -272,15 +233,9 @@ mcp:
 "#
     );
     let (_directory, path) = write_config(&yaml);
-    let error = load(
-        &path,
-        BTreeMap::from([("MCP_MANIFEST_KEYS".to_owned(), "fixture-keys".to_owned())]),
-    )
-    .unwrap_err();
+    let error = load(&path, BTreeMap::new()).unwrap_err();
     assert_eq!(error.code(), "PLATFORM_MCP_INVALID");
-    assert!(error
-        .to_string()
-        .contains("cannot be terminal-only compatible"));
+    assert!(error.to_string().contains("Operator authentication"));
 }
 
 #[test]
@@ -290,12 +245,11 @@ fn mcp_oauth_resource_server_requires_explicit_scope_authority() {
         base_yaml("  mode: disabled"),
         r#"
 mcp:
-  version: 1
+  version: 2
   protocol:
     preferred: "2026-07-28"
   client:
     enabled: false
-    servers: {}
   server:
     enabled: true
     endpoint: /mcp
@@ -329,12 +283,11 @@ fn mcp_server_public_resources_prompts_and_export_scopes_are_closed() {
         base_yaml("  mode: disabled"),
         r#"
 mcp:
-  version: 1
+  version: 2
   protocol:
     preferred: "2026-07-28"
   client:
     enabled: false
-    servers: {}
   server:
     enabled: true
     endpoint: /mcp

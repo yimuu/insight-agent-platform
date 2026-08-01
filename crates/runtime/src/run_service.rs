@@ -1609,6 +1609,17 @@ pub trait RuntimeReadinessProbe: Send + Sync {
     async fn check_readiness(&self, timeout: Duration) -> Result<(), ServiceError>;
 }
 
+/// Supplies fail-closed MCP kill-switch evidence for one immutable Agent
+/// deployment. The Run repository rechecks this evidence in its admission
+/// transaction; this process-local read is not the final safety boundary.
+#[async_trait]
+pub trait McpRunAdmissionAuthority: Send + Sync {
+    async fn active_fences(
+        &self,
+        server_ids: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, u64>, ServiceError>;
+}
+
 impl fmt::Debug for RunService {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1654,6 +1665,7 @@ struct RunServiceInner {
     full_conversation_summary_jobs: Mutex<BTreeMap<String, bool>>,
     full_conversation_summary_delay: RwLock<Duration>,
     readiness_probes: RwLock<Vec<Arc<dyn RuntimeReadinessProbe>>>,
+    mcp_run_admission_authority: RwLock<Option<Arc<dyn McpRunAdmissionAuthority>>>,
 }
 
 impl RunService {
@@ -1924,6 +1936,7 @@ impl RunService {
                 full_conversation_summary_jobs: Mutex::new(BTreeMap::new()),
                 full_conversation_summary_delay: RwLock::new(Duration::ZERO),
                 readiness_probes: RwLock::new(Vec::new()),
+                mcp_run_admission_authority: RwLock::new(None),
             }),
         };
         if durable_coordinator_enabled {
@@ -1960,6 +1973,36 @@ impl RunService {
                 )
             })?
             .push(probe);
+        Ok(())
+    }
+
+    pub fn set_mcp_run_admission_authority(
+        &self,
+        authority: Arc<dyn McpRunAdmissionAuthority>,
+    ) -> Result<(), ServiceError> {
+        if !self.inner.accepting.load(Ordering::Acquire) {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_STOPPING",
+                "Run service is stopping",
+            ));
+        }
+        let mut installed = self
+            .inner
+            .mcp_run_admission_authority
+            .write()
+            .map_err(|_| {
+                ServiceError::new(
+                    "RUN_SERVICE_UNAVAILABLE",
+                    "MCP Run admission authority is unavailable",
+                )
+            })?;
+        if installed.is_some() {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_CONFIG_INVALID",
+                "MCP Run admission authority is already installed",
+            ));
+        }
+        *installed = Some(authority);
         Ok(())
     }
 
@@ -2995,12 +3038,13 @@ impl RunService {
         input: Value,
         request: RequestMetadata,
     ) -> Result<RunRecord, ServiceError> {
-        if self
+        if let Some(agent) = self
             .inner
             .agents
             .get(agent_id)
-            .is_some_and(|agent| agent.persistence_mode() == PersistenceMode::TerminalOnly)
+            .filter(|agent| agent.persistence_mode() == PersistenceMode::TerminalOnly)
         {
+            self.mcp_run_admission_fences(&agent).await?;
             return self
                 .terminal_engine()
                 .ok_or_else(terminal_only_not_installed)?
@@ -3055,15 +3099,16 @@ impl RunService {
         input: Value,
         request: RequestMetadata,
     ) -> Result<RunRecord, ServiceError> {
-        if self
+        if let Some(agent) = self
             .inner
             .agents
             .get_deployment(deployment_revision_id)
-            .is_some_and(|agent| {
+            .filter(|agent| {
                 agent.published().metadata().id == agent_id
                     && agent.persistence_mode() == PersistenceMode::TerminalOnly
             })
         {
+            self.mcp_run_admission_fences(&agent).await?;
             return self
                 .terminal_engine()
                 .ok_or_else(terminal_only_not_installed)?
@@ -3152,12 +3197,13 @@ impl RunService {
         input: Value,
         request: RequestMetadata,
     ) -> Result<AnyAttachedRun, ServiceError> {
-        if self
+        if let Some(agent) = self
             .inner
             .agents
             .get(agent_id)
-            .is_some_and(|agent| agent.persistence_mode() == PersistenceMode::TerminalOnly)
+            .filter(|agent| agent.persistence_mode() == PersistenceMode::TerminalOnly)
         {
+            self.mcp_run_admission_fences(&agent).await?;
             let attached = self
                 .terminal_engine()
                 .ok_or_else(terminal_only_not_installed)?
@@ -3244,6 +3290,46 @@ impl RunService {
         Ok((deployed, head))
     }
 
+    async fn mcp_run_admission_fences(
+        &self,
+        agent: &DeployedAgent,
+    ) -> Result<BTreeMap<String, u64>, ServiceError> {
+        let Some(summary) = agent.mcp_capability_summary() else {
+            return Ok(BTreeMap::new());
+        };
+        if summary.server_ids.is_empty() {
+            return Err(ServiceError::new(
+                "MCP_SERVER_DISABLED",
+                "MCP Server is not active for Run admission",
+            ));
+        }
+        let authority = self
+            .inner
+            .mcp_run_admission_authority
+            .read()
+            .map_err(|_| {
+                ServiceError::new(
+                    "RUN_SERVICE_UNAVAILABLE",
+                    "MCP Run admission authority is unavailable",
+                )
+            })?
+            .clone()
+            .ok_or_else(|| {
+                ServiceError::new(
+                    "MCP_SERVER_DISABLED",
+                    "MCP Server is not active for Run admission",
+                )
+            })?;
+        let fences = authority.active_fences(&summary.server_ids).await?;
+        if fences.keys().ne(summary.server_ids.iter()) {
+            return Err(ServiceError::new(
+                "MCP_SERVER_DISABLED",
+                "MCP Server is not active for Run admission",
+            ));
+        }
+        Ok(fences)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn create_run_with_agent(
         &self,
@@ -3263,6 +3349,7 @@ impl RunService {
         ),
         ServiceError,
     > {
+        let expected_mcp_server_fences = self.mcp_run_admission_fences(&agent).await?;
         if self.inner.config.deployment_mode == RunServiceDeploymentMode::Production
             && self.inner.live_run_stream_broker.deployment_capability()
                 != LiveRunStreamBrokerCapability::Shared
@@ -3348,6 +3435,8 @@ impl RunService {
             Some(head) => command.with_expected_publication_head(head)?,
             None => command,
         };
+        let command =
+            command.with_expected_mcp_server_fences(expected_mcp_server_fences.clone())?;
         let command = match full_conversation {
             Some(conversation) => command.with_full_conversation(conversation)?,
             None => command,
@@ -3362,6 +3451,14 @@ impl RunService {
             TransitionOutcome::Committed { .. } | TransitionOutcome::ExactReplay { .. } => {}
             TransitionOutcome::StateConflict | TransitionOutcome::StaleLease => {
                 self.inner.remove_live_run(&run_id);
+                if !expected_mcp_server_fences.is_empty()
+                    && self.mcp_run_admission_fences(&agent).await? != expected_mcp_server_fences
+                {
+                    return Err(ServiceError::new(
+                        "MCP_SERVER_DISABLED",
+                        "MCP Server was disabled during Run admission",
+                    ));
+                }
                 return Err(if alias_admission {
                     ServiceError::new(
                         "AGENT_PUBLICATION_CHANGED",
@@ -4314,6 +4411,11 @@ impl RunService {
                 .create_full_conversation_detached_turn(conversation, request_id, content)
                 .await;
         }
+        let agent = self
+            .inner
+            .load_exact_durable_deployment(conversation.deployment_revision_id.as_str())
+            .await?;
+        self.mcp_run_admission_fences(&agent).await?;
         self.terminal_engine()
             .ok_or_else(terminal_only_not_installed)?
             .create_conversation_detached_turn(
@@ -4342,6 +4444,11 @@ impl RunService {
                 .create_full_conversation_attached_turn(conversation, request_id, content)
                 .await;
         }
+        let agent = self
+            .inner
+            .load_exact_durable_deployment(conversation.deployment_revision_id.as_str())
+            .await?;
+        self.mcp_run_admission_fences(&agent).await?;
         let turn: ConversationAttachedTurn = self
             .terminal_engine()
             .ok_or_else(terminal_only_not_installed)?

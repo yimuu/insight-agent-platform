@@ -387,7 +387,7 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(triggers.len(), 30, "all user triggers must be installed");
+    assert_eq!(triggers.len(), 36, "all user triggers must be installed");
     for (trigger, table) in [
         (
             "execution_event_projection_ledger_immutable",
@@ -423,6 +423,11 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
             "public_event_delivery_heads",
         ),
         ("wait_late_audit_work_wakeup", "wait_late_audit_outbox"),
+        (
+            "mcp_discovery_tools_rewrite_forbidden",
+            "mcp_discovery_tools",
+        ),
+        ("mcp_revision_tools_rewrite_forbidden", "mcp_revision_tools"),
     ] {
         assert!(
             triggers.contains(&(trigger.to_owned(), table.to_owned())),

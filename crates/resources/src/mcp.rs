@@ -43,6 +43,11 @@ pub enum McpDescriptionPolicy {
     Disabled,
 }
 
+#[async_trait]
+pub trait McpExecutionFence: Send + Sync {
+    async fn permits(&self, server_id: &str, revision_id: &str, disable_fence: u64) -> bool;
+}
+
 /// Explicit local authority for one remote tool import.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct McpToolImport {
@@ -229,6 +234,7 @@ pub struct McpToolProvider {
     interaction_handler: Option<Arc<dyn McpInteractionHandler>>,
     runtime_client_resolver: Option<Arc<dyn McpRuntimeClientResolver>>,
     remote_task_handler: Option<Arc<dyn McpRemoteTaskHandler>>,
+    execution_fence: Option<(Arc<dyn McpExecutionFence>, String, u64)>,
 }
 
 impl McpToolProvider {
@@ -332,6 +338,7 @@ impl McpToolProvider {
             interaction_handler: None,
             runtime_client_resolver: None,
             remote_task_handler: None,
+            execution_fence: None,
         })
     }
 
@@ -350,6 +357,16 @@ impl McpToolProvider {
 
     pub fn with_remote_task_handler(mut self, handler: Arc<dyn McpRemoteTaskHandler>) -> Self {
         self.remote_task_handler = Some(handler);
+        self
+    }
+
+    pub fn with_execution_fence(
+        mut self,
+        fence: Arc<dyn McpExecutionFence>,
+        revision_id: impl Into<String>,
+        disable_fence: u64,
+    ) -> Self {
+        self.execution_fence = Some((fence, revision_id.into(), disable_fence));
         self
     }
 
@@ -372,6 +389,29 @@ impl McpToolProvider {
                     interaction_handler: self.interaction_handler.clone(),
                     runtime_client_resolver: self.runtime_client_resolver.clone(),
                     remote_task_handler: self.remote_task_handler.clone(),
+                    execution_fence: self.execution_fence.clone(),
+                })
+                .map_err(|_| McpProviderError::Registry)?;
+        }
+        Ok(())
+    }
+
+    pub fn publish_into(self, registry: &ActionRegistry) -> Result<(), McpProviderError> {
+        for imported in self.imports {
+            let tool = self
+                .tools
+                .get(&imported.binding.remote_name)
+                .cloned()
+                .ok_or(McpProviderError::MissingTool)?;
+            registry
+                .publish_revision(McpToolAction {
+                    client: Arc::clone(&self.client),
+                    tool,
+                    imported,
+                    interaction_handler: self.interaction_handler.clone(),
+                    runtime_client_resolver: self.runtime_client_resolver.clone(),
+                    remote_task_handler: self.remote_task_handler.clone(),
+                    execution_fence: self.execution_fence.clone(),
                 })
                 .map_err(|_| McpProviderError::Registry)?;
         }
@@ -396,6 +436,7 @@ struct McpToolAction {
     interaction_handler: Option<Arc<dyn McpInteractionHandler>>,
     runtime_client_resolver: Option<Arc<dyn McpRuntimeClientResolver>>,
     remote_task_handler: Option<Arc<dyn McpRemoteTaskHandler>>,
+    execution_fence: Option<(Arc<dyn McpExecutionFence>, String, u64)>,
 }
 
 #[async_trait]
@@ -497,7 +538,50 @@ impl McpToolAction {
         context: ActionContext,
         model_tool: bool,
     ) -> Result<McpCallOutcome, RunError> {
+        if let Some((fence, revision_id, disable_fence)) = &self.execution_fence {
+            if !fence
+                .permits(
+                    &self.imported.binding.server.server_id,
+                    revision_id,
+                    *disable_fence,
+                )
+                .await
+            {
+                insight_mcp::record_operational_event(
+                    &self.imported.binding.server.server_id,
+                    insight_mcp::McpOperationalEvent::DisableFenceRejected,
+                );
+                return Err(RunError::infrastructure(
+                    "MCP_SERVER_DISABLED",
+                    "MCP Server is disabled",
+                ));
+            }
+        }
         let cancellation = CancellationToken::new();
+        let fence_watcher = self.execution_fence.as_ref().map(
+            |(fence, revision_id, disable_fence)| {
+                let fence = Arc::clone(fence);
+                let revision_id = revision_id.clone();
+                let disable_fence = *disable_fence;
+                let server_id = self.imported.binding.server.server_id.clone();
+                let cancellation = cancellation.clone();
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tokio::select! {
+                            _ = cancellation.cancelled() => return,
+                            _ = interval.tick() => {
+                                if !fence.permits(&server_id, &revision_id, disable_fence).await {
+                                    cancellation.cancel();
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                })
+            },
+        );
         let cancellation_on_stop = cancellation.clone();
         let stop_control = context.control.clone();
         let stop_watcher = tokio::spawn(async move {
@@ -632,6 +716,9 @@ impl McpToolAction {
             }
         }
         stop_watcher.abort();
+        if let Some(watcher) = fence_watcher {
+            watcher.abort();
+        }
         let outcome = result
             .ok_or_else(|| {
                 RunError::infrastructure(
@@ -646,6 +733,25 @@ impl McpToolAction {
                     .complete(&interaction_context, &interaction_ids, outcome.is_ok())
                     .await
                     .map_err(map_interaction_error)?;
+            }
+        }
+        if let Some((fence, revision_id, disable_fence)) = &self.execution_fence {
+            if !fence
+                .permits(
+                    &self.imported.binding.server.server_id,
+                    revision_id,
+                    *disable_fence,
+                )
+                .await
+            {
+                insight_mcp::record_operational_event(
+                    &self.imported.binding.server.server_id,
+                    insight_mcp::McpOperationalEvent::DisableFenceUncertain,
+                );
+                return Err(RunError::infrastructure(
+                    "MCP_SERVER_DISABLED_UNCERTAIN",
+                    "MCP Server was disabled while a remote call was in progress",
+                ));
             }
         }
         outcome
@@ -1248,7 +1354,10 @@ impl std::error::Error for McpProviderError {}
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    };
 
     use insight_engine::execution::{stop_pair, ExecutionControl};
     use insight_mcp::{
@@ -1263,6 +1372,40 @@ mod tests {
     #[derive(Default)]
     struct FixtureTransport {
         response: Mutex<Option<Value>>,
+    }
+
+    struct AtomicFence {
+        permitted: AtomicBool,
+    }
+
+    #[async_trait]
+    impl McpExecutionFence for AtomicFence {
+        async fn permits(&self, _server_id: &str, _revision_id: &str, _disable_fence: u64) -> bool {
+            self.permitted.load(Ordering::SeqCst)
+        }
+    }
+
+    struct BlockingTransport {
+        started: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl McpTransport for BlockingTransport {
+        fn kind(&self) -> TransportKind {
+            TransportKind::StreamableHttp
+        }
+
+        async fn exchange(
+            &self,
+            _request: &Value,
+            _parameter_headers: &BTreeMap<String, String>,
+            cancellation: &CancellationToken,
+            _observer: &dyn McpNotificationObserver,
+        ) -> Result<Value, TransportError> {
+            self.started.notify_one();
+            cancellation.cancelled().await;
+            Err(TransportError::Cancelled)
+        }
     }
 
     #[async_trait]
@@ -1394,6 +1537,92 @@ mod tests {
             .unwrap();
         assert_eq!(output["is_error"], true);
         assert_eq!(output["content"][0]["type"], "text");
+    }
+
+    #[tokio::test]
+    async fn disable_fence_rejects_before_dispatch_and_cancels_in_flight_as_uncertain() {
+        let denied_fence = Arc::new(AtomicFence {
+            permitted: AtomicBool::new(false),
+        });
+        let provider = McpToolProvider::freeze(
+            server(),
+            client(Arc::new(FixtureTransport::default())),
+            catalog(),
+            vec![import()],
+        )
+        .unwrap()
+        .with_execution_fence(denied_fence, "mrev-denied", 1);
+        let mut registry = ActionRegistry::default();
+        provider.register_into(&mut registry).unwrap();
+        let action = registry.resolve("mcp.fixture.remote-search").unwrap();
+        let (_controller, signal) = stop_pair();
+        let error = action
+            .call(
+                json!({"query":"blocked"}),
+                ActionContext::for_operation(
+                    "run-denied",
+                    "tool",
+                    1,
+                    ExecutionControl::new(signal, std::time::Duration::from_secs(30)),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "MCP_SERVER_DISABLED");
+
+        let transport = Arc::new(BlockingTransport {
+            started: tokio::sync::Notify::new(),
+        });
+        let fence = Arc::new(AtomicFence {
+            permitted: AtomicBool::new(true),
+        });
+        let provider = McpToolProvider::freeze(
+            server(),
+            Arc::new(
+                McpClient::new(
+                    transport.clone(),
+                    ClientInfo {
+                        name: "fixture".to_owned(),
+                        version: "1.0.0".to_owned(),
+                        title: None,
+                        description: None,
+                        website_url: None,
+                        icons: Vec::new(),
+                    },
+                    ClientCapabilities::default(),
+                )
+                .unwrap(),
+            ),
+            catalog(),
+            vec![import()],
+        )
+        .unwrap()
+        .with_execution_fence(fence.clone(), "mrev-running", 2);
+        let mut registry = ActionRegistry::default();
+        provider.register_into(&mut registry).unwrap();
+        let action = registry.resolve("mcp.fixture.remote-search").unwrap();
+        let (_controller, signal) = stop_pair();
+        let call = tokio::spawn(async move {
+            action
+                .call(
+                    json!({"query":"running"}),
+                    ActionContext::for_operation(
+                        "run-running",
+                        "tool",
+                        1,
+                        ExecutionControl::new(signal, std::time::Duration::from_secs(30)),
+                    ),
+                )
+                .await
+        });
+        transport.started.notified().await;
+        fence.permitted.store(false, Ordering::SeqCst);
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), call)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code(), "MCP_SERVER_DISABLED_UNCERTAIN");
     }
 
     #[test]

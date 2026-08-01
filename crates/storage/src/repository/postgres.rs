@@ -783,6 +783,30 @@ impl DurableRepository for PostgresDurableRepository {
             }
         }
 
+        // Share-lock every managed Server row through Run insertion. A
+        // concurrent disable/activate requires an update lock, so either its
+        // new fence is observed here and admission fails, or it commits after
+        // this Run has been admitted against the previous active generation.
+        for (server_id, expected_fence) in command.expected_mcp_server_fences() {
+            let current = sqlx::query_as::<_, (String, i64)>(
+                "SELECT server_state,disable_fence
+                 FROM mcp_managed_servers WHERE server_id=$1 FOR SHARE",
+            )
+            .bind(server_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(RepositoryError::storage)?;
+            let expected_fence =
+                i64::try_from(*expected_fence).map_err(|_| RepositoryError::invalid_data())?;
+            if current.as_ref() != Some(&("active".to_owned(), expected_fence)) {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(RepositoryError::storage)?;
+                return Ok(TransitionOutcome::StateConflict);
+            }
+        }
+
         let (input_json, input_hash) = canonical_value(command.input())?;
         let input_payload_id = payload_id(&input_hash);
         let run_deadline_at = if let Some(timeout_ms) = command.run_timeout_ms() {

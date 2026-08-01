@@ -16,12 +16,18 @@ Quickstart 使用 [`config/platform.quickstart.yaml`](../../config/platform.quic
 `action_demo`。生产样例位于 [`config/platform.yaml`](../../config/platform.yaml)。对外暴露服务前，
 必须按部署要求配置认证、数据库凭据、模型凭据和共享 Artifact 挂载。
 
-两份样例都显式关闭 MCP。启用 MCP Client、`/mcp` Server、OAuth/PKCE keyring、stdio isolation、
-Tasks maintenance 和 readiness 的配置及 rollout 顺序见
-[MCP 使用、运行与安全合同](mcp.md)。Helm chart 的 `mcp.client.servers` 与 `mcp.exports.*` 直接生成
-严格平台对象；token、stdio secret env 和 OAuth client secret 通过 `mcp.secretEnv[]` 从现有
-Kubernetes Secret 注入，MCP ciphertext keyring 则通过
-`mcp.secretEncryption.existingSecret` 注入。二者都不会进入平台 ConfigMap。
+两份样例都显式关闭 MCP。启用 MCP Client 管理面、`/mcp` Server、OAuth/PKCE keyring、stdio
+isolation、Tasks maintenance 和 readiness 的配置及 rollout 顺序见
+[MCP 使用、运行与安全合同](mcp.md)。Helm chart 只生成 `mcp.version: 2` 全局策略和 MCP Server
+exports；Client Server 实例通过 durable `/v1/admin/mcp/**` 管理，不进入 ConfigMap。Operator token、
+远端 credential reference 对应值和 stdio secret env 通过 `mcp.secretEnv[]` 从现有 Kubernetes Secret
+注入，MCP ciphertext keyring 通过 `mcp.secretEncryption.existingSecret` 注入。
+
+MCP discovery worker 使用 durable claim/lease，running operation 的取消请求会在 100ms 轮询边界内
+传播到 transport cancellation。失败和取消且超过 30 天的未引用 operation 每 60 秒按最多 1000 条
+清理；成功 snapshot、Validation、Revision 以及被发布对象引用的数据不进入该清理。每个有效批次在
+同一事务写 body-free audit 和 bounded outbox evidence。`list_changed` 只把成功候选快照标记为 stale，
+不会改写 Draft、Revision、Deployment 或 Run。
 
 ## Provider Catalog 与模型配置
 
@@ -371,8 +377,11 @@ token 不应进入配置明文、Debug、错误或日志。
   都不得包含 Run、Conversation、tenant 或 user 标识；
 - MCP 指标覆盖 discovery/list/call/read/get/completion 的计数与 duration、transport event、
   subscription、interaction、remote task、OAuth、stdio restart、cache、body/frame rejection 与
-  stale publication candidate；label 只允许有界 Server ID、primitive、transport 和结果类，不含
-  tool、URI、Prompt、task、Run、tenant 或 user 标识；
+  stale publication candidate；管理面额外暴露 bounded route/result 请求计数与延迟、
+  validation/discovery/publish/activate/disable/retire lifecycle、候选/导入/拒绝 catalog histogram，
+  以及 pending/running/oldest discovery 和 active/disabled/stale Server gauge；label 只允许闭合 route、
+  operation、kind、state、primitive、transport 和结果类，不含 tool、URI、Prompt、task、Run、tenant
+  或 user 标识；
 - work notification listener 断开不会单独使 readiness 失败，安全轮询继续保证最终发现；listener
   状态会在 metrics 中降级；
 - Kubernetes 资格脚本另外保存 PostgreSQL queue oldest age、进程 RSS/PSS、cgroup memory、
@@ -381,6 +390,9 @@ token 不应进入配置明文、Debug、错误或日志。
 - `runtime.public_event_retention` 只清理已发布的非终态 Public Event；
 - terminal Public Event 和 durable Run snapshot 不受该策略影响；
 - `shutdown_grace_period` 与 `shutdown_hard_deadline` 控制停止 admission、drain 与最终退出边界。
+  管理面关闭顺序是：先拒绝新 mutation 和 discovery claim，再取消 worker 并归还/等待 lease，随后
+  停止 revision projection/subscription，最后关闭 HTTP、stdio 与 RunService；未完成 discovery 可在
+  lease 到期后由其他实例安全接管。
 
 Conversation 只保存不可变 user/assistant 最终消息与低频 summary；SSE delta、token 和 provider chunk
 不得落入 message 表。`retention_days` 独立于 Run retention。分页必须使用

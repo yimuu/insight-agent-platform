@@ -35,6 +35,18 @@
 {{- if and .Values.mcp.secretEncryption.enabled (empty .Values.mcp.secretEncryption.existingSecret) }}
 {{- fail "mcp.secretEncryption.existingSecret is required when MCP secret encryption is enabled" }}
 {{- end }}
+{{- if and .Values.mcp.client.managementApi.enabled (not .Values.mcp.client.enabled) }}
+{{- fail "mcp.client.enabled is required when managementApi is enabled" }}
+{{- end }}
+{{- if and .Values.mcp.client.managementApi.enabled (not .Values.mcp.secretEncryption.enabled) }}
+{{- fail "mcp.secretEncryption must be enabled when managementApi is enabled" }}
+{{- end }}
+{{- if and .Values.mcp.client.managementApi.enabled (empty .Values.mcp.client.managementApi.operatorCredentials) }}
+{{- fail "mcp.client.managementApi.operatorCredentials is required when managementApi is enabled" }}
+{{- end }}
+{{- if and .Values.mcp.client.managementApi.enabled (empty .Values.mcp.client.secretResolverAllowedNames) }}
+{{- fail "mcp.client.secretResolverAllowedNames is required when managementApi is enabled" }}
+{{- end }}
 {{- $mcpSecretEnvNames := dict }}
 {{- range $entry := .Values.mcp.secretEnv }}
 {{- if not (regexMatch "^[A-Za-z_][A-Za-z0-9_]*$" (default "" $entry.name)) }}
@@ -50,6 +62,18 @@
 {{- fail "mcp.secretEnv must not override INSIGHT_MCP_SECRET_KEYRING" }}
 {{- end }}
 {{- $_ := set $mcpSecretEnvNames $entry.name true }}
+{{- end }}
+{{- if .Values.mcp.client.managementApi.enabled }}
+{{- range $credential := .Values.mcp.client.managementApi.operatorCredentials }}
+{{- if not (hasKey $mcpSecretEnvNames (default "" $credential.tokenEnv)) }}
+{{- fail "each MCP operator credential tokenEnv must be provided by mcp.secretEnv" }}
+{{- end }}
+{{- end }}
+{{- range $name := .Values.mcp.client.secretResolverAllowedNames }}
+{{- if not (hasKey $mcpSecretEnvNames $name) }}
+{{- fail "each MCP secretResolverAllowedNames entry must be provided by mcp.secretEnv" }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- if and .Values.mcp.enabled (not (has .Values.mcp.authorization.type (list "bearer_compatible" "oauth_resource_server"))) }}
 {{- fail "mcp.authorization.type must be bearer_compatible or oauth_resource_server when MCP Server is enabled" }}
@@ -135,19 +159,66 @@ data:
         {{- end }}
 
     mcp:
-      version: 1
+      version: 2
       protocol:
         preferred: "2026-07-28"
         legacy_fallback: []
       client:
         enabled: {{ .Values.mcp.client.enabled }}
-        servers:
-          {{- toYaml .Values.mcp.client.servers | nindent 10 }}
+        management_api:
+          enabled: {{ .Values.mcp.client.managementApi.enabled }}
+          discovery_workers: {{ .Values.mcp.client.managementApi.discoveryWorkers }}
+          max_pending_discoveries: {{ .Values.mcp.client.managementApi.maxPendingDiscoveries }}
+          {{- if .Values.mcp.client.managementApi.operatorCredentials }}
+          operator_credentials:
+            {{- range .Values.mcp.client.managementApi.operatorCredentials }}
+            - identity: {{ .identity | quote }}
+              token_env: {{ .tokenEnv | quote }}
+              capabilities:
+                {{- toYaml .capabilities | nindent 16 }}
+            {{- end }}
+          {{- else }}
+          operator_credentials: []
+          {{- end }}
         {{- if .Values.mcp.secretEncryption.enabled }}
         secret_encryption:
           active_key_version: {{ .Values.mcp.secretEncryption.activeKeyVersion | quote }}
           keyring_env: INSIGHT_MCP_SECRET_KEYRING
         {{- end }}
+        secret_resolver:
+          {{- if .Values.mcp.client.secretResolverAllowedNames }}
+          type: environment_reference
+          allowed_names:
+            {{- toYaml .Values.mcp.client.secretResolverAllowedNames | nindent 12 }}
+          {{- else }}
+          type: disabled
+          {{- end }}
+        signed_manifest_trust:
+          max_validity: {{ .Values.mcp.client.signedManifestTrust.maxValidity | quote }}
+          {{- if .Values.mcp.client.signedManifestTrust.trustedSigners }}
+          trusted_signers:
+            {{- range .Values.mcp.client.signedManifestTrust.trustedSigners }}
+            - key_id: {{ .keyId | quote }}
+              algorithm: ed25519
+              public_key_file: {{ .publicKeyFile | quote }}
+            {{- end }}
+          {{- else }}
+          trusted_signers: []
+          {{- end }}
+        network_policy:
+          allow_loopback_development: {{ .Values.mcp.client.networkPolicy.allowLoopbackDevelopment }}
+          allow_private_networks: {{ .Values.mcp.client.networkPolicy.allowPrivateNetworks }}
+          allow_redirects: {{ .Values.mcp.client.networkPolicy.allowRedirects }}
+        stdio_launch_profiles: {{ toJson .Values.mcp.client.stdioLaunchProfiles }}
+        default_limits:
+          connect_timeout: {{ .Values.mcp.client.defaultLimits.connectTimeout | quote }}
+          request_timeout: {{ .Values.mcp.client.defaultLimits.requestTimeout | quote }}
+          max_request_bytes: {{ int .Values.mcp.client.defaultLimits.maxRequestBytes }}
+          max_response_bytes: {{ int .Values.mcp.client.defaultLimits.maxResponseBytes }}
+          max_sse_line_bytes: {{ int .Values.mcp.client.defaultLimits.maxSseLineBytes }}
+          max_sse_event_bytes: {{ int .Values.mcp.client.defaultLimits.maxSseEventBytes }}
+          max_content_items: {{ int .Values.mcp.client.defaultLimits.maxContentItems }}
+          max_catalog_items: {{ int .Values.mcp.client.defaultLimits.maxCatalogItems }}
       server:
         enabled: {{ .Values.mcp.enabled }}
         endpoint: {{ .Values.mcp.endpoint | quote }}
@@ -165,14 +236,10 @@ data:
           type: disabled
           {{- end }}
         exports:
-          agents:
-            {{- toYaml .Values.mcp.exports.agents | nindent 10 }}
-          actions:
-            {{- toYaml .Values.mcp.exports.actions | nindent 10 }}
-          resources:
-            {{- toYaml .Values.mcp.exports.resources | nindent 10 }}
-          prompts:
-            {{- toYaml .Values.mcp.exports.prompts | nindent 10 }}
+          agents: {{ toJson .Values.mcp.exports.agents }}
+          actions: {{ toJson .Values.mcp.exports.actions }}
+          resources: {{ toJson .Values.mcp.exports.resources }}
+          prompts: {{ toJson .Values.mcp.exports.prompts }}
 
     history:
       provider: postgres

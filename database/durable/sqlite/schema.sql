@@ -3137,6 +3137,318 @@ CREATE TABLE full_conversation_turns(
 CREATE INDEX idx_full_conversation_turns_conversation
 ON full_conversation_turns(conversation_id, created_at, run_id);
 
+-- MCP management control-plane authority. Mutable Draft/operation rows are
+-- separated from immutable manifests, snapshots, validation reports, and
+-- published revisions.
+CREATE TABLE mcp_managed_servers(
+  server_id TEXT NOT NULL PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  server_state TEXT NOT NULL CHECK(server_state IN('draft','active','disabled','retired')),
+  server_version INTEGER NOT NULL CHECK(server_version >= 1),
+  draft_version INTEGER NOT NULL CHECK(draft_version >= 1),
+  active_revision_id TEXT,
+  disable_fence INTEGER NOT NULL DEFAULT 0 CHECK(disable_fence >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK(server_id GLOB '[a-z0-9]*' AND server_id NOT GLOB '*[^a-z0-9-]*'
+        AND length(server_id) BETWEEN 1 AND 64),
+  CHECK(display_name <> '' AND length(CAST(display_name AS BLOB)) <= 256),
+  CHECK((server_state='draft' AND active_revision_id IS NULL)
+        OR server_state IN('active','disabled','retired'))
+);
+
+CREATE TABLE mcp_server_drafts(
+  server_id TEXT NOT NULL PRIMARY KEY
+    REFERENCES mcp_managed_servers(server_id) ON DELETE CASCADE,
+  draft_version INTEGER NOT NULL CHECK(draft_version >= 1),
+  discovery_input_hash TEXT NOT NULL
+    CHECK(length(discovery_input_hash)=71 AND substr(discovery_input_hash,1,7)='sha256:'),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB)) <= 16777216),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(server_id,draft_version)
+);
+
+CREATE TABLE mcp_signed_manifests(
+  manifest_id TEXT NOT NULL PRIMARY KEY,
+  server_id TEXT NOT NULL REFERENCES mcp_managed_servers(server_id) ON DELETE CASCADE,
+  manifest_format TEXT NOT NULL CHECK(manifest_format='jcs-ed25519-v1'),
+  key_id TEXT NOT NULL CHECK(key_id<>'' AND length(CAST(key_id AS BLOB))<=256),
+  payload TEXT NOT NULL CHECK(payload<>'' AND length(CAST(payload AS BLOB))<=22369624),
+  signature TEXT NOT NULL CHECK(signature<>'' AND length(CAST(signature AS BLOB))<=1024),
+  content_hash TEXT NOT NULL UNIQUE
+    CHECK(length(content_hash)=71 AND substr(content_hash,1,7)='sha256:'),
+  issued_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL CHECK(created_by<>'' AND length(CAST(created_by AS BLOB))<=256),
+  CHECK(expires_at > issued_at)
+);
+CREATE INDEX idx_mcp_signed_manifests_server
+ON mcp_signed_manifests(server_id,manifest_id);
+CREATE TRIGGER mcp_signed_manifest_rewrite_forbidden
+BEFORE UPDATE ON mcp_signed_manifests
+BEGIN
+  SELECT RAISE(ABORT,'immutable MCP signed manifest cannot be rewritten');
+END;
+
+CREATE TABLE mcp_discovery_operations(
+  discovery_id TEXT NOT NULL PRIMARY KEY,
+  server_id TEXT NOT NULL REFERENCES mcp_managed_servers(server_id) ON DELETE CASCADE,
+  source_draft_version INTEGER NOT NULL CHECK(source_draft_version>=1),
+  discovery_input_hash TEXT NOT NULL
+    CHECK(length(discovery_input_hash)=71 AND substr(discovery_input_hash,1,7)='sha256:'),
+  draft_document TEXT NOT NULL CHECK(json_valid(draft_document) AND length(CAST(draft_document AS BLOB))<=16777216),
+  discovery_status TEXT NOT NULL
+    CHECK(discovery_status IN('pending','running','succeeded','failed','cancelled')),
+  cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN(0,1)),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+  claimed_by TEXT,
+  claim_token TEXT UNIQUE,
+  claim_expires_at TEXT,
+  failure_code TEXT,
+  failure_stage TEXT,
+  failure_retryable INTEGER CHECK(failure_retryable IS NULL OR failure_retryable IN(0,1)),
+  failure_correlation_id TEXT,
+  stale INTEGER NOT NULL DEFAULT 0 CHECK(stale IN(0,1)),
+  stale_reason TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  CHECK((claimed_by IS NULL)=(claim_token IS NULL)),
+  CHECK((claim_token IS NULL)=(claim_expires_at IS NULL)),
+  CHECK((discovery_status='running') OR claim_token IS NULL),
+  CHECK((discovery_status IN('succeeded','cancelled') AND failure_code IS NULL)
+        OR discovery_status IN('pending','running')
+        OR (discovery_status='failed' AND failure_code IS NOT NULL)),
+  CHECK((stale=0 AND stale_reason IS NULL) OR (stale=1 AND stale_reason IS NOT NULL))
+);
+CREATE INDEX idx_mcp_discovery_claim
+ON mcp_discovery_operations(discovery_status,claim_expires_at,created_at,discovery_id);
+CREATE INDEX idx_mcp_discovery_server
+ON mcp_discovery_operations(server_id,created_at,discovery_id);
+
+CREATE TABLE mcp_discovery_snapshots(
+  discovery_id TEXT NOT NULL PRIMARY KEY
+    REFERENCES mcp_discovery_operations(discovery_id) ON DELETE CASCADE,
+  server_id TEXT NOT NULL REFERENCES mcp_managed_servers(server_id) ON DELETE CASCADE,
+  source_draft_version INTEGER NOT NULL CHECK(source_draft_version>=1),
+  discovery_input_hash TEXT NOT NULL
+    CHECK(length(discovery_input_hash)=71 AND substr(discovery_input_hash,1,7)='sha256:'),
+  catalog_fingerprint TEXT NOT NULL
+    CHECK(length(catalog_fingerprint)=71 AND substr(catalog_fingerprint,1,7)='sha256:'),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=16777216),
+  created_at TEXT NOT NULL,
+  UNIQUE(server_id,catalog_fingerprint)
+);
+CREATE TRIGGER mcp_discovery_snapshot_rewrite_forbidden
+BEFORE UPDATE ON mcp_discovery_snapshots
+BEGIN
+  SELECT RAISE(ABORT,'immutable MCP discovery snapshot cannot be rewritten');
+END;
+
+-- Normalized immutable candidate indexes make identity uniqueness a database
+-- invariant while the canonical snapshot document remains the read authority.
+CREATE TABLE mcp_discovery_tools(
+  discovery_id TEXT NOT NULL REFERENCES mcp_discovery_snapshots(discovery_id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+  remote_name TEXT NOT NULL CHECK(remote_name<>'' AND length(CAST(remote_name AS BLOB))<=128),
+  schema_hash TEXT NOT NULL
+    CHECK(length(schema_hash)=71 AND substr(schema_hash,1,7)='sha256:'),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=1048576),
+  PRIMARY KEY(discovery_id,ordinal),
+  UNIQUE(discovery_id,remote_name)
+);
+CREATE TABLE mcp_discovery_resources(
+  discovery_id TEXT NOT NULL REFERENCES mcp_discovery_snapshots(discovery_id) ON DELETE CASCADE,
+  candidate_kind TEXT NOT NULL CHECK(candidate_kind IN('resource','template')),
+  ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+  resource_identity TEXT NOT NULL
+    CHECK(resource_identity<>'' AND length(CAST(resource_identity AS BLOB))<=2048),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=1048576),
+  PRIMARY KEY(discovery_id,candidate_kind,ordinal),
+  UNIQUE(discovery_id,candidate_kind,resource_identity)
+);
+CREATE TABLE mcp_discovery_prompts(
+  discovery_id TEXT NOT NULL REFERENCES mcp_discovery_snapshots(discovery_id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+  remote_name TEXT NOT NULL CHECK(remote_name<>'' AND length(CAST(remote_name AS BLOB))<=128),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=1048576),
+  PRIMARY KEY(discovery_id,ordinal),
+  UNIQUE(discovery_id,remote_name)
+);
+CREATE TRIGGER mcp_discovery_tools_rewrite_forbidden
+BEFORE UPDATE ON mcp_discovery_tools BEGIN
+  SELECT RAISE(ABORT,'immutable MCP discovery Tool cannot be rewritten');
+END;
+CREATE TRIGGER mcp_discovery_resources_rewrite_forbidden
+BEFORE UPDATE ON mcp_discovery_resources BEGIN
+  SELECT RAISE(ABORT,'immutable MCP discovery Resource cannot be rewritten');
+END;
+CREATE TRIGGER mcp_discovery_prompts_rewrite_forbidden
+BEFORE UPDATE ON mcp_discovery_prompts BEGIN
+  SELECT RAISE(ABORT,'immutable MCP discovery Prompt cannot be rewritten');
+END;
+
+CREATE TABLE mcp_validation_reports(
+  validation_id TEXT NOT NULL PRIMARY KEY,
+  server_id TEXT NOT NULL REFERENCES mcp_managed_servers(server_id) ON DELETE CASCADE,
+  draft_version INTEGER NOT NULL CHECK(draft_version>=1),
+  discovery_id TEXT NOT NULL REFERENCES mcp_discovery_snapshots(discovery_id) ON DELETE RESTRICT,
+  report_hash TEXT NOT NULL UNIQUE
+    CHECK(length(report_hash)=71 AND substr(report_hash,1,7)='sha256:'),
+  valid INTEGER NOT NULL CHECK(valid IN(0,1)),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=1048576),
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL CHECK(created_by<>'' AND length(CAST(created_by AS BLOB))<=256)
+);
+CREATE INDEX idx_mcp_validation_server
+ON mcp_validation_reports(server_id,created_at,validation_id);
+CREATE TRIGGER mcp_validation_report_rewrite_forbidden
+BEFORE UPDATE ON mcp_validation_reports
+BEGIN
+  SELECT RAISE(ABORT,'immutable MCP validation report cannot be rewritten');
+END;
+
+CREATE TABLE mcp_server_revisions(
+  revision_id TEXT NOT NULL PRIMARY KEY,
+  server_id TEXT NOT NULL REFERENCES mcp_managed_servers(server_id) ON DELETE RESTRICT,
+  revision_number INTEGER NOT NULL CHECK(revision_number>=1),
+  source_draft_version INTEGER NOT NULL CHECK(source_draft_version>=1),
+  discovery_id TEXT NOT NULL REFERENCES mcp_discovery_snapshots(discovery_id) ON DELETE RESTRICT,
+  validation_id TEXT NOT NULL REFERENCES mcp_validation_reports(validation_id) ON DELETE RESTRICT,
+  catalog_fingerprint TEXT NOT NULL
+    CHECK(length(catalog_fingerprint)=71 AND substr(catalog_fingerprint,1,7)='sha256:'),
+  revision_hash TEXT NOT NULL UNIQUE
+    CHECK(length(revision_hash)=71 AND substr(revision_hash,1,7)='sha256:'),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=16777216),
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL CHECK(created_by<>'' AND length(CAST(created_by AS BLOB))<=256),
+  UNIQUE(server_id,revision_number)
+);
+CREATE INDEX idx_mcp_server_revisions_server
+ON mcp_server_revisions(server_id,revision_number,revision_id);
+CREATE TRIGGER mcp_server_revision_rewrite_forbidden
+BEFORE UPDATE ON mcp_server_revisions
+BEGIN
+  SELECT RAISE(ABORT,'immutable MCP Server Revision cannot be rewritten');
+END;
+CREATE TRIGGER mcp_server_revision_delete_forbidden
+BEFORE DELETE ON mcp_server_revisions
+BEGIN
+  SELECT RAISE(ABORT,'immutable MCP Server Revision cannot be deleted');
+END;
+CREATE TABLE mcp_revision_tools(
+  revision_id TEXT NOT NULL REFERENCES mcp_server_revisions(revision_id) ON DELETE RESTRICT,
+  ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+  remote_name TEXT NOT NULL CHECK(remote_name<>'' AND length(CAST(remote_name AS BLOB))<=128),
+  alias TEXT NOT NULL CHECK(alias<>'' AND length(CAST(alias AS BLOB))<=128),
+  action_id TEXT NOT NULL CHECK(action_id<>'' AND length(CAST(action_id AS BLOB))<=128),
+  binding_hash TEXT NOT NULL
+    CHECK(length(binding_hash)=71 AND substr(binding_hash,1,7)='sha256:'),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=1048576),
+  PRIMARY KEY(revision_id,ordinal),
+  UNIQUE(revision_id,remote_name),
+  UNIQUE(revision_id,alias),
+  UNIQUE(revision_id,action_id)
+);
+CREATE TABLE mcp_revision_resources(
+  revision_id TEXT NOT NULL REFERENCES mcp_server_revisions(revision_id) ON DELETE RESTRICT,
+  binding_kind TEXT NOT NULL CHECK(binding_kind IN('policy','resource','template')),
+  ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+  resource_identity TEXT NOT NULL
+    CHECK(resource_identity<>'' AND length(CAST(resource_identity AS BLOB))<=2048),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=1048576),
+  PRIMARY KEY(revision_id,binding_kind,ordinal),
+  UNIQUE(revision_id,binding_kind,resource_identity)
+);
+CREATE TABLE mcp_revision_prompts(
+  revision_id TEXT NOT NULL REFERENCES mcp_server_revisions(revision_id) ON DELETE RESTRICT,
+  ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+  remote_name TEXT NOT NULL CHECK(remote_name<>'' AND length(CAST(remote_name AS BLOB))<=128),
+  document TEXT NOT NULL CHECK(json_valid(document) AND length(CAST(document AS BLOB))<=1048576),
+  PRIMARY KEY(revision_id,ordinal),
+  UNIQUE(revision_id,remote_name)
+);
+CREATE TRIGGER mcp_revision_tools_rewrite_forbidden
+BEFORE UPDATE ON mcp_revision_tools BEGIN
+  SELECT RAISE(ABORT,'immutable MCP revision Tool cannot be rewritten');
+END;
+CREATE TRIGGER mcp_revision_tools_delete_forbidden
+BEFORE DELETE ON mcp_revision_tools BEGIN
+  SELECT RAISE(ABORT,'immutable MCP revision Tool cannot be deleted');
+END;
+CREATE TRIGGER mcp_revision_resources_rewrite_forbidden
+BEFORE UPDATE ON mcp_revision_resources BEGIN
+  SELECT RAISE(ABORT,'immutable MCP revision Resource cannot be rewritten');
+END;
+CREATE TRIGGER mcp_revision_resources_delete_forbidden
+BEFORE DELETE ON mcp_revision_resources BEGIN
+  SELECT RAISE(ABORT,'immutable MCP revision Resource cannot be deleted');
+END;
+CREATE TRIGGER mcp_revision_prompts_rewrite_forbidden
+BEFORE UPDATE ON mcp_revision_prompts BEGIN
+  SELECT RAISE(ABORT,'immutable MCP revision Prompt cannot be rewritten');
+END;
+CREATE TRIGGER mcp_revision_prompts_delete_forbidden
+BEFORE DELETE ON mcp_revision_prompts BEGIN
+  SELECT RAISE(ABORT,'immutable MCP revision Prompt cannot be deleted');
+END;
+CREATE TRIGGER mcp_active_revision_same_server
+BEFORE UPDATE OF active_revision_id ON mcp_managed_servers
+WHEN NEW.active_revision_id IS NOT NULL AND NOT EXISTS(
+  SELECT 1 FROM mcp_server_revisions r
+  WHERE r.revision_id=NEW.active_revision_id AND r.server_id=NEW.server_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'active MCP revision must belong to the same Server');
+END;
+
+CREATE TABLE mcp_management_requests(
+  operator_id TEXT NOT NULL,
+  method TEXT NOT NULL,
+  canonical_path TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL
+    CHECK(length(request_hash)=71 AND substr(request_hash,1,7)='sha256:'),
+  response_status INTEGER NOT NULL CHECK(response_status BETWEEN 200 AND 599),
+  response_json TEXT NOT NULL CHECK(json_valid(response_json) AND length(CAST(response_json AS BLOB))<=16777216),
+  response_etag TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(operator_id,method,canonical_path,request_id),
+  CHECK(operator_id<>'' AND length(CAST(operator_id AS BLOB))<=256),
+  CHECK(request_id<>'' AND length(CAST(request_id AS BLOB))<=256)
+);
+
+CREATE TABLE mcp_management_audit_events(
+  audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_kind TEXT NOT NULL,
+  server_id TEXT,
+  subject_id TEXT,
+  actor_id TEXT NOT NULL,
+  request_id_hash TEXT NOT NULL,
+  before_hash TEXT,
+  after_hash TEXT,
+  result_code TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  CHECK(event_kind<>'' AND result_code<>''),
+  CHECK(actor_id<>'' AND length(CAST(actor_id AS BLOB))<=256)
+);
+CREATE INDEX idx_mcp_management_audit_server
+ON mcp_management_audit_events(server_id,created_at,audit_id);
+
+CREATE TABLE mcp_management_outbox(
+  event_id TEXT NOT NULL PRIMARY KEY,
+  event_kind TEXT NOT NULL,
+  server_id TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  safe_payload TEXT NOT NULL CHECK(json_valid(safe_payload) AND length(CAST(safe_payload AS BLOB))<=65536),
+  created_at TEXT NOT NULL,
+  delivered_at TEXT
+);
+CREATE INDEX idx_mcp_management_outbox_delivery
+ON mcp_management_outbox(delivered_at,created_at,event_id);
+
 CREATE TABLE durable_schema_contract (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     contract_id TEXT NOT NULL,
@@ -3147,7 +3459,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-8b03b243-1b08-438e-bd21-3a37711e0489',
+    'durable-schema-eb07a629-e22a-4935-9bba-4835c7b027f1',
     'sqlite'
 );
 

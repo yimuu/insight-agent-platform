@@ -62,6 +62,9 @@ fail-closed evaluator；已完成的复现命令及正式证据路径保存在
 | `catalog/provider-catalog.yaml` | 平台版本化的内置 Provider route 与最小模型事实 |
 | `src/` | 根 facade、Provider extension/平台配置、Catalog loader、严格 YAML 解码和 binary composition |
 | `database/durable/` | SQLite/PostgreSQL 完整 Schema、安装与权限合同 |
+| `schemas/mcp-management-v1.json` | MCP Operator 管理请求的闭合 JSON Schema |
+| `schemas/mcp-management-v1.openapi.json` | 全部 MCP Operator 管理 endpoint 的 OpenAPI 3.1 合同 |
+| `schemas/mcp-management-v1.samples.json` | MCP 管理合法/非法 checked-in fixtures |
 | `agents/` | 随仓库交付的 Agent |
 | `tests/fixtures/dsl/` | DSL compiler 正向和负向 fixtures |
 | `crates/*/{src,tests}` | owner crate 的单元与合同测试 |
@@ -83,6 +86,13 @@ OpenAI-compatible 行为时，保持 Provider 身份与 adapter 协议分离。
 negotiation、stdio 与 Streamable HTTP tests，以及至少两个固定版本外部 SDK 的 interoperability
 fixture。MCP schema、body、secret、tenant、SSRF、header injection 和 prompt injection 均属于发布
 门禁；不能用 loopback mock 代替 real-process/外部 SDK 证据。
+
+修改 MCP 管理控制面时还必须运行 `cargo test -p insight-api mcp_management`、
+`cargo test --test mcp_management_api` 和
+`cargo test -p insight-storage --test mcp_management`。根级测试验证完整 HTTP 生命周期，后者在
+`TEST_POSTGRES_URL` 存在时对 SQLite 与
+PostgreSQL 16 执行同一 Draft、discovery、publish、activate、disable、retention、CAS、幂等和不可变
+Revision 合同；CI 缺少 PostgreSQL URL 会失败，不能静默降级为 SQLite-only 证据。
 `schemas/run-stream-v1.samples.json` 必须覆盖 `run-stream/v1` 的全部 27 个事件，并由
 `insight-engine` 测试逐条按 `schemas/run-stream-v1.json` 验证；样本不得包含 interaction body、
 credential、requestState 或远程原始错误。

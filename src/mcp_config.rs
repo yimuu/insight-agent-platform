@@ -1,9 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::{Path, PathBuf},
     time::Duration,
 };
 
+use base64::{engine::general_purpose, Engine as _};
 use reqwest::Url;
 use serde::Deserialize;
 
@@ -32,8 +34,96 @@ pub struct McpProtocolConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpClientConfig {
     pub enabled: bool,
-    pub servers: BTreeMap<String, McpClientServerConfig>,
+    pub management_api: McpManagementApiConfig,
     pub secret_encryption: Option<McpSecretEncryptionConfig>,
+    pub secret_resolver: McpSecretResolverConfig,
+    pub signed_manifest_trust: McpSignedManifestTrustConfig,
+    pub network_policy: McpNetworkPolicyConfig,
+    pub stdio_launch_profiles: BTreeMap<String, McpStdioLaunchProfileConfig>,
+    pub default_limits: McpClientDefaultLimitsConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpManagementApiConfig {
+    pub enabled: bool,
+    pub discovery_workers: u32,
+    pub max_pending_discoveries: u32,
+    pub operator_credentials: Vec<McpOperatorCredentialConfig>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct McpOperatorCredentialConfig {
+    identity: String,
+    capabilities: BTreeSet<String>,
+    token: SecretString,
+}
+
+impl McpOperatorCredentialConfig {
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    pub fn capabilities(&self) -> &BTreeSet<String> {
+        &self.capabilities
+    }
+
+    pub fn token(&self) -> &SecretString {
+        &self.token
+    }
+}
+
+impl std::fmt::Debug for McpOperatorCredentialConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpOperatorCredentialConfig")
+            .field("identity", &self.identity)
+            .field("capabilities", &self.capabilities)
+            .field("token", &"REDACTED")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct McpSecretResolverConfig {
+    pub allowed_names: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpSignedManifestTrustConfig {
+    pub max_validity: Duration,
+    pub trusted_signers: BTreeMap<String, McpManifestTrustedSignerConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpManifestTrustedSignerConfig {
+    pub key_id: String,
+    pub algorithm: String,
+    pub public_key_file: PathBuf,
+    pub public_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpNetworkPolicyConfig {
+    pub allow_loopback_development: bool,
+    pub allow_private_networks: bool,
+    pub allow_redirects: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpStdioLaunchProfileConfig {
+    pub executable: PathBuf,
+    pub fixed_args: Vec<String>,
+    pub working_directory: PathBuf,
+    pub allowed_parameters: BTreeSet<String>,
+    pub secret_environment: BTreeMap<String, String>,
+    pub isolation_profile: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpClientDefaultLimitsConfig {
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+    pub limits: McpLimitsConfig,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -52,159 +142,11 @@ impl std::fmt::Debug for McpSecretEncryptionConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpClientServerConfig {
-    pub transport: McpClientTransportConfig,
-    pub discovery: McpDiscoveryConfig,
-    pub authorization: McpClientAuthorizationConfig,
-    pub imports: McpImportConfig,
-    pub limits: McpLimitsConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum McpClientTransportConfig {
-    StreamableHttp {
-        endpoint: String,
-        allow_plaintext_loopback: bool,
-        connect_timeout: Duration,
-        request_timeout: Duration,
-    },
-    Stdio {
-        executable: PathBuf,
-        args: Vec<String>,
-        working_directory: PathBuf,
-        environment: BTreeMap<String, String>,
-        isolation_profile: Option<String>,
-        startup_timeout: Duration,
-        request_timeout: Duration,
-        shutdown_timeout: Duration,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum McpDiscoveryConfig {
-    LiveServiceAccount,
-    SignedManifest {
-        path: PathBuf,
-        trust_keys_environment: String,
-        trust_keys: SecretString,
-    },
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub enum McpClientAuthorizationConfig {
-    None,
-    BearerEnv {
-        environment: String,
-        token: SecretString,
-    },
-    OauthUser {
-        scopes: BTreeSet<String>,
-        client_id: String,
-        redirect_uri: String,
-    },
-}
-
-impl std::fmt::Debug for McpClientAuthorizationConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::None => formatter.write_str("None"),
-            Self::BearerEnv { environment, .. } => formatter
-                .debug_struct("BearerEnv")
-                .field("environment", environment)
-                .field("token", &"REDACTED")
-                .finish(),
-            Self::OauthUser {
-                scopes,
-                client_id,
-                redirect_uri,
-            } => formatter
-                .debug_struct("OauthUser")
-                .field("scopes", scopes)
-                .field("client_id", client_id)
-                .field("redirect_uri", redirect_uri)
-                .finish(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct McpImportConfig {
-    pub tools: Vec<McpToolImportConfig>,
-    pub resources: Vec<String>,
-    pub prompts: Vec<McpPromptImportConfig>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpPromptImportConfig {
-    pub remote_name: String,
-    pub allow_user_invocation: bool,
-    pub definition_arguments: Option<BTreeMap<String, String>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum McpEffectConfig {
-    Pure,
-    ReadOnly,
-    Mutating,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum McpIdempotencyConfig {
-    Idempotent,
-    NonIdempotent,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum McpCancellationConfig {
-    NotSupported,
-    Cooperative,
-    Immediate,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum McpApprovalConfig {
-    Never,
-    ModelToolOnly,
-    Mutating,
-    Always,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpInteractionConfig {
     Denied,
     Allowed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum McpDescriptionSourceConfig {
-    Remote,
-    Disabled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpToolImportConfig {
-    pub remote_name: String,
-    pub alias: String,
-    pub title: Option<String>,
-    pub description_source: McpDescriptionSourceConfig,
-    pub description_override: Option<String>,
-    pub effect: McpEffectConfig,
-    pub idempotency: McpIdempotencyConfig,
-    pub cancellation: McpCancellationConfig,
-    pub required_capabilities: BTreeSet<String>,
-    pub approval: McpApprovalConfig,
-    pub input_required: McpInteractionConfig,
-    pub tasks: McpInteractionConfig,
-    pub terminal_only_compatible: bool,
-    pub public_call: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,9 +275,134 @@ struct McpProtocolYaml {
 struct McpClientYaml {
     enabled: bool,
     #[serde(default)]
-    servers: BTreeMap<String, McpClientServerYaml>,
+    management_api: McpManagementApiYaml,
     #[serde(default)]
     secret_encryption: Option<McpSecretEncryptionYaml>,
+    #[serde(default)]
+    secret_resolver: McpSecretResolverYaml,
+    #[serde(default)]
+    signed_manifest_trust: McpSignedManifestTrustYaml,
+    #[serde(default)]
+    network_policy: McpNetworkPolicyYaml,
+    #[serde(default)]
+    stdio_launch_profiles: BTreeMap<String, McpStdioLaunchProfileYaml>,
+    #[serde(default)]
+    default_limits: McpClientDefaultLimitsYaml,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpManagementApiYaml {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_discovery_workers")]
+    discovery_workers: u32,
+    #[serde(default = "default_max_pending_discoveries")]
+    max_pending_discoveries: u32,
+    #[serde(default)]
+    operator_credentials: Vec<McpOperatorCredentialYaml>,
+}
+
+impl Default for McpManagementApiYaml {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            discovery_workers: default_discovery_workers(),
+            max_pending_discoveries: default_max_pending_discoveries(),
+            operator_credentials: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpOperatorCredentialYaml {
+    identity: String,
+    token_env: String,
+    capabilities: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum McpSecretResolverYaml {
+    #[default]
+    Disabled,
+    EnvironmentReference {
+        #[serde(default)]
+        allowed_names: Vec<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpSignedManifestTrustYaml {
+    #[serde(default = "default_manifest_max_validity")]
+    max_validity: String,
+    #[serde(default)]
+    trusted_signers: Vec<McpManifestTrustedSignerYaml>,
+}
+
+impl Default for McpSignedManifestTrustYaml {
+    fn default() -> Self {
+        Self {
+            max_validity: default_manifest_max_validity(),
+            trusted_signers: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpManifestTrustedSignerYaml {
+    key_id: String,
+    algorithm: String,
+    public_key_file: PathBuf,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpNetworkPolicyYaml {
+    #[serde(default)]
+    allow_loopback_development: bool,
+    #[serde(default)]
+    allow_private_networks: bool,
+    #[serde(default)]
+    allow_redirects: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpStdioLaunchProfileYaml {
+    executable: PathBuf,
+    #[serde(default)]
+    fixed_args: Vec<String>,
+    working_directory: PathBuf,
+    #[serde(default)]
+    allowed_parameters: Vec<String>,
+    #[serde(default)]
+    secret_environment: BTreeMap<String, String>,
+    isolation: McpIsolationYaml,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpClientDefaultLimitsYaml {
+    #[serde(default = "default_connect_timeout")]
+    connect_timeout: String,
+    #[serde(default = "default_request_timeout")]
+    request_timeout: String,
+    #[serde(flatten)]
+    limits: McpLimitsYaml,
+}
+
+impl Default for McpClientDefaultLimitsYaml {
+    fn default() -> Self {
+        Self {
+            connect_timeout: default_connect_timeout(),
+            request_timeout: default_request_timeout(),
+            limits: McpLimitsYaml::default(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -347,160 +414,8 @@ struct McpSecretEncryptionYaml {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct McpClientServerYaml {
-    transport: McpClientTransportYaml,
-    discovery: McpDiscoveryYaml,
-    authorization: McpClientAuthorizationYaml,
-    #[serde(default)]
-    imports: McpImportsYaml,
-    #[serde(default)]
-    limits: McpLimitsYaml,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum McpClientTransportYaml {
-    StreamableHttp {
-        endpoint: String,
-        #[serde(default)]
-        allow_plaintext_loopback: bool,
-        #[serde(default = "default_connect_timeout")]
-        connect_timeout: String,
-        #[serde(default = "default_request_timeout")]
-        request_timeout: String,
-    },
-    Stdio {
-        executable: PathBuf,
-        #[serde(default)]
-        args: Vec<String>,
-        working_directory: PathBuf,
-        #[serde(default)]
-        environment: BTreeMap<String, McpSecretReferenceYaml>,
-        #[serde(default)]
-        isolation: Option<McpIsolationYaml>,
-        #[serde(default = "default_startup_timeout")]
-        startup_timeout: String,
-        #[serde(default = "default_request_timeout")]
-        request_timeout: String,
-        #[serde(default = "default_shutdown_timeout")]
-        shutdown_timeout: String,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum McpDiscoveryYaml {
-    LiveServiceAccount,
-    SignedManifest {
-        path: PathBuf,
-        trust_keys_env: String,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum McpClientAuthorizationYaml {
-    None,
-    BearerEnv {
-        token_env: String,
-    },
-    OauthUser {
-        scopes: Vec<String>,
-        client_id: String,
-        redirect_uri: String,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct McpSecretReferenceYaml {
-    secret_env: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct McpIsolationYaml {
     profile: String,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct McpImportsYaml {
-    #[serde(default)]
-    tools: Vec<McpToolImportYaml>,
-    #[serde(default)]
-    resources: McpAllowYaml,
-    #[serde(default)]
-    prompts: McpPromptAllowYaml,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct McpAllowYaml {
-    #[serde(default)]
-    allow: Vec<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct McpPromptAllowYaml {
-    #[serde(default)]
-    allow: Vec<McpPromptImportYaml>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum McpPromptImportYaml {
-    Name(String),
-    Detailed(McpPromptImportDetailYaml),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct McpPromptImportDetailYaml {
-    remote: String,
-    #[serde(default = "default_true")]
-    user_invocation: bool,
-    #[serde(default)]
-    definition_arguments: Option<BTreeMap<String, String>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct McpToolImportYaml {
-    remote: String,
-    #[serde(rename = "as")]
-    alias: String,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    description: Option<McpDescriptionYaml>,
-    effect: McpEffectConfig,
-    idempotency: McpIdempotencyConfig,
-    cancellation: McpCancellationConfig,
-    #[serde(default)]
-    required_capabilities: Vec<String>,
-    approval: McpApprovalConfig,
-    input_required: McpInteractionConfig,
-    tasks: McpInteractionConfig,
-    #[serde(default)]
-    terminal_only_compatible: bool,
-    #[serde(default)]
-    public: McpPublicToolYaml,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum McpDescriptionYaml {
-    Source(McpDescriptionSourceConfig),
-    Override { r#override: String },
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct McpPublicToolYaml {
-    #[serde(default)]
-    call: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -651,8 +566,8 @@ pub(crate) fn resolve_mcp(
     let Some(raw) = raw else {
         return Ok(disabled_mcp_config());
     };
-    if raw.version != 1 {
-        return Err(mcp_error("mcp.version must be 1"));
+    if raw.version != 2 {
+        return Err(mcp_error("mcp.version must be 2"));
     }
     if raw.protocol.preferred != MCP_MODERN_PROTOCOL_VERSION
         || raw
@@ -664,21 +579,65 @@ pub(crate) fn resolve_mcp(
     {
         return Err(mcp_error("mcp.protocol contains an unsupported version"));
     }
-    if !raw.client.enabled && !raw.client.servers.is_empty() {
+    if !raw.client.enabled && raw.client.management_api.enabled {
         return Err(mcp_error(
-            "mcp.client.servers must be empty when the client is disabled",
+            "mcp.client.management_api must be disabled when the client is disabled",
         ));
     }
-    let servers = raw
+    if raw.client.management_api.discovery_workers == 0
+        || raw.client.management_api.discovery_workers > 64
+        || raw.client.management_api.max_pending_discoveries == 0
+        || raw.client.management_api.max_pending_discoveries > 10_000
+    {
+        return Err(mcp_error("MCP management worker limits are invalid"));
+    }
+    let mut operator_identities = BTreeSet::new();
+    let mut operator_tokens = BTreeSet::new();
+    let allowed_operator_capabilities = BTreeSet::from([
+        "mcp.server.read".to_owned(),
+        "mcp.server.write".to_owned(),
+        "mcp.server.discover".to_owned(),
+        "mcp.server.publish".to_owned(),
+    ]);
+    let operator_credentials = raw
         .client
-        .servers
+        .management_api
+        .operator_credentials
         .into_iter()
-        .map(|(server_id, server)| {
-            validate_server_id(&server_id)?;
-            resolve_client_server(&server_id, server, config_parent, deployment_mode, get_env)
-                .map(|server| (server_id, server))
+        .map(|credential| {
+            let identity = credential.identity.trim().to_owned();
+            let capabilities = unique_nonempty(credential.capabilities, "MCP Operator capability")?;
+            let token = required_secret(&credential.token_env, get_env)?;
+            if !valid_principal_label(&identity)
+                || !operator_identities.insert(identity.clone())
+                || !operator_tokens.insert(token.expose().to_owned())
+                || capabilities.is_empty()
+                || !capabilities.is_subset(&allowed_operator_capabilities)
+            {
+                return Err(mcp_error(
+                    "MCP Operator credential is invalid or duplicated",
+                ));
+            }
+            Ok(McpOperatorCredentialConfig {
+                identity,
+                capabilities,
+                token,
+            })
         })
-        .collect::<Result<BTreeMap<_, _>, PlatformConfigError>>()?;
+        .collect::<Result<Vec<_>, PlatformConfigError>>()?;
+    if raw.client.management_api.enabled && operator_credentials.is_empty() {
+        return Err(mcp_error(
+            "enabled MCP management API requires Operator authentication",
+        ));
+    }
+    if raw.client.management_api.enabled
+        && deployment_mode == DeploymentMode::Production
+        && operator_credentials.is_empty()
+    {
+        return Err(mcp_error(
+            "production MCP management API cannot use disabled authentication",
+        ));
+    }
     let secret_encryption = raw
         .client
         .secret_encryption
@@ -696,317 +655,169 @@ pub(crate) fn resolve_mcp(
             })
         })
         .transpose()?;
-    let requires_secret_encryption = servers.values().any(|server| {
-        matches!(
-            server.authorization,
-            McpClientAuthorizationConfig::OauthUser { .. }
-        ) || server.imports.tools.iter().any(|tool| {
-            tool.input_required == McpInteractionConfig::Allowed
-                || tool.tasks == McpInteractionConfig::Allowed
-                || tool.approval != McpApprovalConfig::Never
-        })
-    });
-    if requires_secret_encryption && secret_encryption.is_none() {
+    if raw.client.management_api.enabled && secret_encryption.is_none() {
         return Err(mcp_error(
-            "MCP OAuth and interactive tools require client.secret_encryption",
+            "enabled MCP management API requires client.secret_encryption",
+        ));
+    }
+
+    let secret_resolver = match raw.client.secret_resolver {
+        McpSecretResolverYaml::Disabled => McpSecretResolverConfig::default(),
+        McpSecretResolverYaml::EnvironmentReference { allowed_names } => {
+            let allowed_names = unique_nonempty(allowed_names, "MCP secret resolver name")?;
+            if allowed_names
+                .iter()
+                .any(|name| !valid_environment_name(name))
+            {
+                return Err(mcp_error("MCP secret resolver name is invalid"));
+            }
+            McpSecretResolverConfig { allowed_names }
+        }
+    };
+    if raw.client.management_api.enabled && secret_resolver.allowed_names.is_empty() {
+        return Err(mcp_error(
+            "enabled MCP management API requires a non-empty secret resolver policy",
+        ));
+    }
+
+    let max_validity = positive_duration(
+        &raw.client.signed_manifest_trust.max_validity,
+        "mcp.client.signed_manifest_trust.max_validity",
+    )?;
+    if max_validity > Duration::from_secs(30 * 24 * 60 * 60) {
+        return Err(mcp_error(
+            "MCP signed manifest maximum validity is unbounded",
+        ));
+    }
+    let mut trusted_signers = BTreeMap::new();
+    for signer in raw.client.signed_manifest_trust.trusted_signers {
+        let key_id = signer.key_id.trim().to_owned();
+        if !valid_protocol_name(&key_id)
+            || signer.algorithm != "ed25519"
+            || trusted_signers.contains_key(&key_id)
+        {
+            return Err(mcp_error(
+                "MCP signed manifest signer is invalid or duplicated",
+            ));
+        }
+        let public_key_file = resolve_path(config_parent, &signer.public_key_file);
+        if deployment_mode == DeploymentMode::Production && !public_key_file.is_absolute() {
+            return Err(mcp_error("production MCP signer key path must be absolute"));
+        }
+        let encoded = fs::read(&public_key_file)
+            .map_err(|_| mcp_error("MCP signed manifest public key cannot be read"))?;
+        let public_key = decode_ed25519_public_key(&encoded)?;
+        trusted_signers.insert(
+            key_id.clone(),
+            McpManifestTrustedSignerConfig {
+                key_id,
+                algorithm: signer.algorithm,
+                public_key_file,
+                public_key,
+            },
+        );
+    }
+
+    let mut stdio_launch_profiles = BTreeMap::new();
+    for (profile_id, profile) in raw.client.stdio_launch_profiles {
+        if !valid_protocol_name(&profile_id)
+            || !profile.executable.is_absolute()
+            || profile.fixed_args.len() > 128
+            || profile.fixed_args.iter().any(|value| !valid_argv(value))
+            || profile.isolation.profile.trim().is_empty()
+        {
+            return Err(mcp_error("MCP stdio launch profile is invalid"));
+        }
+        let allowed_parameters =
+            unique_nonempty(profile.allowed_parameters, "MCP stdio allowed parameter")?;
+        if allowed_parameters
+            .iter()
+            .any(|value| !valid_protocol_name(value))
+        {
+            return Err(mcp_error("MCP stdio allowed parameter is invalid"));
+        }
+        let working_directory = resolve_path(config_parent, &profile.working_directory);
+        if deployment_mode == DeploymentMode::Production && !working_directory.is_absolute() {
+            return Err(mcp_error(
+                "production MCP stdio working directory must be absolute",
+            ));
+        }
+        for (environment, secret_ref) in &profile.secret_environment {
+            if !valid_environment_name(environment)
+                || !valid_environment_name(secret_ref)
+                || !secret_resolver.allowed_names.contains(secret_ref)
+            {
+                return Err(mcp_error(
+                    "MCP stdio secret environment is outside the resolver policy",
+                ));
+            }
+        }
+        stdio_launch_profiles.insert(
+            profile_id,
+            McpStdioLaunchProfileConfig {
+                executable: profile.executable,
+                fixed_args: profile.fixed_args,
+                working_directory,
+                allowed_parameters,
+                secret_environment: profile.secret_environment,
+                isolation_profile: profile.isolation.profile,
+            },
+        );
+    }
+    let default_limits = McpClientDefaultLimitsConfig {
+        connect_timeout: positive_duration(
+            &raw.client.default_limits.connect_timeout,
+            "mcp.client.default_limits.connect_timeout",
+        )?,
+        request_timeout: positive_duration(
+            &raw.client.default_limits.request_timeout,
+            "mcp.client.default_limits.request_timeout",
+        )?,
+        limits: resolve_limits(raw.client.default_limits.limits)?,
+    };
+    if raw.client.network_policy.allow_loopback_development
+        && deployment_mode != DeploymentMode::SingleProcessDevelopment
+    {
+        return Err(mcp_error(
+            "MCP plaintext loopback is limited to single-process development",
+        ));
+    }
+    if raw.client.network_policy.allow_private_networks || raw.client.network_policy.allow_redirects
+    {
+        return Err(mcp_error(
+            "MCP private-network and redirect exceptions are not supported",
         ));
     }
     let server = resolve_server(raw.server, deployment_mode)?;
     Ok(McpConfig {
-        version: 1,
+        version: 2,
         protocol: McpProtocolConfig {
             preferred: raw.protocol.preferred,
             legacy_fallback: raw.protocol.legacy_fallback,
         },
         client: McpClientConfig {
             enabled: raw.client.enabled,
-            servers,
+            management_api: McpManagementApiConfig {
+                enabled: raw.client.management_api.enabled,
+                discovery_workers: raw.client.management_api.discovery_workers,
+                max_pending_discoveries: raw.client.management_api.max_pending_discoveries,
+                operator_credentials,
+            },
             secret_encryption,
+            secret_resolver,
+            signed_manifest_trust: McpSignedManifestTrustConfig {
+                max_validity,
+                trusted_signers,
+            },
+            network_policy: McpNetworkPolicyConfig {
+                allow_loopback_development: raw.client.network_policy.allow_loopback_development,
+                allow_private_networks: raw.client.network_policy.allow_private_networks,
+                allow_redirects: raw.client.network_policy.allow_redirects,
+            },
+            stdio_launch_profiles,
+            default_limits,
         },
         server,
-    })
-}
-
-fn resolve_client_server(
-    server_id: &str,
-    raw: McpClientServerYaml,
-    config_parent: &Path,
-    deployment_mode: DeploymentMode,
-    get_env: &impl Fn(&str) -> Option<String>,
-) -> Result<McpClientServerConfig, PlatformConfigError> {
-    let transport = match raw.transport {
-        McpClientTransportYaml::StreamableHttp {
-            endpoint,
-            allow_plaintext_loopback,
-            connect_timeout,
-            request_timeout,
-        } => {
-            validate_http_endpoint(&endpoint, allow_plaintext_loopback, deployment_mode)?;
-            McpClientTransportConfig::StreamableHttp {
-                endpoint,
-                allow_plaintext_loopback,
-                connect_timeout: positive_duration(
-                    &connect_timeout,
-                    &format!("mcp.client.servers.{server_id}.transport.connect_timeout"),
-                )?,
-                request_timeout: positive_duration(
-                    &request_timeout,
-                    &format!("mcp.client.servers.{server_id}.transport.request_timeout"),
-                )?,
-            }
-        }
-        McpClientTransportYaml::Stdio {
-            executable,
-            args,
-            working_directory,
-            environment,
-            isolation,
-            startup_timeout,
-            request_timeout,
-            shutdown_timeout,
-        } => {
-            if !executable.is_absolute()
-                || args.iter().any(|value| {
-                    value.is_empty()
-                        || value.len() > 16 * 1024
-                        || value.chars().any(char::is_control)
-                })
-                || (deployment_mode == DeploymentMode::Production && isolation.is_none())
-            {
-                return Err(mcp_error(
-                    "MCP stdio requires an absolute executable, safe argv, and production isolation",
-                ));
-            }
-            let environment = environment
-                .into_iter()
-                .map(|(name, reference)| {
-                    if !valid_environment_name(&name) {
-                        return Err(mcp_error("MCP stdio environment variable name is invalid"));
-                    }
-                    required_secret(&reference.secret_env, get_env)?;
-                    Ok((name, reference.secret_env))
-                })
-                .collect::<Result<BTreeMap<_, _>, PlatformConfigError>>()?;
-            McpClientTransportConfig::Stdio {
-                executable,
-                args,
-                working_directory: resolve_path(config_parent, &working_directory),
-                environment,
-                isolation_profile: isolation.map(|value| value.profile),
-                startup_timeout: positive_duration(
-                    &startup_timeout,
-                    &format!("mcp.client.servers.{server_id}.transport.startup_timeout"),
-                )?,
-                request_timeout: positive_duration(
-                    &request_timeout,
-                    &format!("mcp.client.servers.{server_id}.transport.request_timeout"),
-                )?,
-                shutdown_timeout: positive_duration(
-                    &shutdown_timeout,
-                    &format!("mcp.client.servers.{server_id}.transport.shutdown_timeout"),
-                )?,
-            }
-        }
-    };
-    let authorization = match raw.authorization {
-        McpClientAuthorizationYaml::None => McpClientAuthorizationConfig::None,
-        McpClientAuthorizationYaml::BearerEnv { token_env } => {
-            let token = required_secret(&token_env, get_env)?;
-            McpClientAuthorizationConfig::BearerEnv {
-                environment: token_env,
-                token,
-            }
-        }
-        McpClientAuthorizationYaml::OauthUser {
-            scopes,
-            client_id,
-            redirect_uri,
-        } => {
-            let scopes = unique_nonempty(scopes, "MCP OAuth scope")?;
-            insight_mcp::OAuthClientRegistration::new(
-                client_id.clone(),
-                redirect_uri.clone(),
-                scopes.iter().cloned().collect(),
-            )
-            .map_err(|_| mcp_error("MCP OAuth client registration is invalid"))?;
-            McpClientAuthorizationConfig::OauthUser {
-                scopes,
-                client_id,
-                redirect_uri,
-            }
-        }
-    };
-    if matches!(transport, McpClientTransportConfig::Stdio { .. })
-        && matches!(
-            authorization,
-            McpClientAuthorizationConfig::OauthUser { .. }
-        )
-    {
-        return Err(mcp_error(
-            "oauth_user is only valid for Streamable HTTP transports",
-        ));
-    }
-    if matches!(raw.discovery, McpDiscoveryYaml::LiveServiceAccount)
-        && matches!(
-            authorization,
-            McpClientAuthorizationConfig::OauthUser { .. }
-        )
-    {
-        return Err(mcp_error(
-            "oauth_user cannot be used for publication discovery",
-        ));
-    }
-    let discovery = match raw.discovery {
-        McpDiscoveryYaml::LiveServiceAccount => McpDiscoveryConfig::LiveServiceAccount,
-        McpDiscoveryYaml::SignedManifest {
-            path,
-            trust_keys_env,
-        } => McpDiscoveryConfig::SignedManifest {
-            path: resolve_path(config_parent, &path),
-            trust_keys: required_secret(&trust_keys_env, get_env)?,
-            trust_keys_environment: trust_keys_env,
-        },
-    };
-    let imports = resolve_imports(raw.imports)?;
-    if matches!(
-        authorization,
-        McpClientAuthorizationConfig::OauthUser { .. }
-    ) && imports
-        .tools
-        .iter()
-        .any(|tool| tool.terminal_only_compatible)
-    {
-        return Err(mcp_error(
-            "OAuth user MCP tools cannot be terminal-only compatible",
-        ));
-    }
-    if matches!(
-        authorization,
-        McpClientAuthorizationConfig::OauthUser { .. }
-    ) && imports
-        .prompts
-        .iter()
-        .any(|prompt| prompt.definition_arguments.is_some())
-    {
-        return Err(mcp_error(
-            "OAuth user MCP prompts cannot be frozen without an authoring credential",
-        ));
-    }
-    let limits = resolve_limits(raw.limits)?;
-    Ok(McpClientServerConfig {
-        transport,
-        discovery,
-        authorization,
-        imports,
-        limits,
-    })
-}
-
-fn resolve_imports(raw: McpImportsYaml) -> Result<McpImportConfig, PlatformConfigError> {
-    let mut remote_names = BTreeSet::new();
-    let mut aliases = BTreeSet::new();
-    let tools = raw
-        .tools
-        .into_iter()
-        .map(|tool| {
-            if !valid_protocol_name(&tool.remote)
-                || !valid_protocol_name(&tool.alias)
-                || !remote_names.insert(tool.remote.clone())
-                || !aliases.insert(tool.alias.clone())
-                || tool
-                    .title
-                    .as_ref()
-                    .is_some_and(|value| !valid_text(value, 512))
-            {
-                return Err(mcp_error(
-                    "MCP tool import identity is invalid or duplicated",
-                ));
-            }
-            let (description_source, description_override) = match tool.description {
-                None | Some(McpDescriptionYaml::Source(McpDescriptionSourceConfig::Remote)) => {
-                    (McpDescriptionSourceConfig::Remote, None)
-                }
-                Some(McpDescriptionYaml::Source(McpDescriptionSourceConfig::Disabled)) => {
-                    (McpDescriptionSourceConfig::Disabled, None)
-                }
-                Some(McpDescriptionYaml::Override { r#override }) => {
-                    if !valid_text(&r#override, 4 * 1024) {
-                        return Err(mcp_error("MCP tool description override is invalid"));
-                    }
-                    (McpDescriptionSourceConfig::Disabled, Some(r#override))
-                }
-            };
-            if tool.terminal_only_compatible
-                && (tool.input_required == McpInteractionConfig::Allowed
-                    || tool.tasks == McpInteractionConfig::Allowed
-                    || tool.approval != McpApprovalConfig::Never)
-            {
-                return Err(mcp_error(
-                    "terminal-only MCP tools cannot require interaction, approval, or Tasks",
-                ));
-            }
-            Ok(McpToolImportConfig {
-                remote_name: tool.remote,
-                alias: tool.alias,
-                title: tool.title,
-                description_source,
-                description_override,
-                effect: tool.effect,
-                idempotency: tool.idempotency,
-                cancellation: tool.cancellation,
-                required_capabilities: unique_nonempty(
-                    tool.required_capabilities,
-                    "MCP required capability",
-                )?,
-                approval: tool.approval,
-                input_required: tool.input_required,
-                tasks: tool.tasks,
-                terminal_only_compatible: tool.terminal_only_compatible,
-                public_call: tool.public.call,
-            })
-        })
-        .collect::<Result<Vec<_>, PlatformConfigError>>()?;
-    let mut prompt_names = BTreeSet::new();
-    let prompts = raw
-        .prompts
-        .allow
-        .into_iter()
-        .map(|prompt| {
-            let (remote_name, allow_user_invocation, definition_arguments) = match prompt {
-                McpPromptImportYaml::Name(remote_name) => (remote_name, true, None),
-                McpPromptImportYaml::Detailed(detail) => (
-                    detail.remote,
-                    detail.user_invocation,
-                    detail.definition_arguments,
-                ),
-            };
-            if !valid_protocol_name(&remote_name)
-                || !prompt_names.insert(remote_name.clone())
-                || (!allow_user_invocation && definition_arguments.is_none())
-                || definition_arguments.as_ref().is_some_and(|arguments| {
-                    arguments.len() > 128
-                        || arguments.iter().any(|(name, value)| {
-                            !valid_protocol_name(name)
-                                || value.len() > 8 * 1024
-                                || value.chars().any(char::is_control)
-                        })
-                })
-            {
-                return Err(mcp_error("MCP prompt import is invalid or duplicated"));
-            }
-            Ok(McpPromptImportConfig {
-                remote_name,
-                allow_user_invocation,
-                definition_arguments,
-            })
-        })
-        .collect::<Result<Vec<_>, PlatformConfigError>>()?;
-    Ok(McpImportConfig {
-        tools,
-        resources: unique_nonempty(raw.resources.allow, "MCP resource import")?
-            .into_iter()
-            .collect(),
-        prompts,
     })
 }
 
@@ -1263,15 +1074,43 @@ fn resolve_server(
 
 fn disabled_mcp_config() -> McpConfig {
     McpConfig {
-        version: 1,
+        version: 2,
         protocol: McpProtocolConfig {
             preferred: MCP_MODERN_PROTOCOL_VERSION.to_owned(),
             legacy_fallback: Vec::new(),
         },
         client: McpClientConfig {
             enabled: false,
-            servers: BTreeMap::new(),
+            management_api: McpManagementApiConfig {
+                enabled: false,
+                discovery_workers: default_discovery_workers(),
+                max_pending_discoveries: default_max_pending_discoveries(),
+                operator_credentials: Vec::new(),
+            },
             secret_encryption: None,
+            secret_resolver: McpSecretResolverConfig::default(),
+            signed_manifest_trust: McpSignedManifestTrustConfig {
+                max_validity: Duration::from_secs(24 * 60 * 60),
+                trusted_signers: BTreeMap::new(),
+            },
+            network_policy: McpNetworkPolicyConfig {
+                allow_loopback_development: false,
+                allow_private_networks: false,
+                allow_redirects: false,
+            },
+            stdio_launch_profiles: BTreeMap::new(),
+            default_limits: McpClientDefaultLimitsConfig {
+                connect_timeout: Duration::from_secs(5),
+                request_timeout: Duration::from_secs(120),
+                limits: McpLimitsConfig {
+                    max_request_bytes: default_max_request_bytes(),
+                    max_response_bytes: default_max_response_bytes(),
+                    max_sse_line_bytes: default_max_sse_line_bytes(),
+                    max_sse_event_bytes: default_max_sse_event_bytes(),
+                    max_content_items: default_max_content_items(),
+                    max_catalog_items: default_max_catalog_items(),
+                },
+            },
         },
         server: McpServerConfig {
             enabled: false,
@@ -1282,6 +1121,7 @@ fn disabled_mcp_config() -> McpConfig {
     }
 }
 
+#[cfg(any())]
 fn validate_server_id(value: &str) -> Result<(), PlatformConfigError> {
     if value.is_empty()
         || value.len() > 64
@@ -1296,6 +1136,7 @@ fn validate_server_id(value: &str) -> Result<(), PlatformConfigError> {
     Ok(())
 }
 
+#[cfg(any())]
 fn validate_http_endpoint(
     value: &str,
     allow_plaintext_loopback: bool,
@@ -1338,6 +1179,7 @@ fn validate_https_url(value: &str) -> Result<(), PlatformConfigError> {
     Ok(())
 }
 
+#[cfg(any())]
 fn is_loopback_host(value: &str) -> bool {
     value == "localhost"
         || value
@@ -1415,6 +1257,35 @@ fn valid_environment_name(value: &str) -> bool {
         })
 }
 
+fn valid_principal_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+}
+
+fn valid_argv(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 16 * 1024 && !value.chars().any(char::is_control)
+}
+
+fn decode_ed25519_public_key(encoded: &[u8]) -> Result<Vec<u8>, PlatformConfigError> {
+    if encoded.len() == 32 {
+        return Ok(encoded.to_vec());
+    }
+    let text = std::str::from_utf8(encoded)
+        .map_err(|_| mcp_error("MCP Ed25519 public key is not valid UTF-8 or raw bytes"))?
+        .trim();
+    let decoded = general_purpose::STANDARD
+        .decode(text)
+        .or_else(|_| general_purpose::URL_SAFE_NO_PAD.decode(text))
+        .map_err(|_| mcp_error("MCP Ed25519 public key must be raw or base64"))?;
+    if decoded.len() != 32 {
+        return Err(mcp_error("MCP Ed25519 public key must contain 32 bytes"));
+    }
+    Ok(decoded)
+}
+
 fn valid_text(value: &str, max_bytes: usize) -> bool {
     !value.is_empty()
         && value.len() <= max_bytes
@@ -1458,6 +1329,19 @@ fn default_connect_timeout() -> String {
     "5s".to_owned()
 }
 
+const fn default_discovery_workers() -> u32 {
+    4
+}
+
+const fn default_max_pending_discoveries() -> u32 {
+    128
+}
+
+fn default_manifest_max_validity() -> String {
+    "24h".to_owned()
+}
+
+#[cfg(any())]
 fn default_startup_timeout() -> String {
     "10s".to_owned()
 }
@@ -1466,6 +1350,7 @@ fn default_request_timeout() -> String {
     "2m".to_owned()
 }
 
+#[cfg(any())]
 fn default_shutdown_timeout() -> String {
     "10s".to_owned()
 }
@@ -1474,6 +1359,7 @@ fn default_server_endpoint() -> String {
     "/mcp".to_owned()
 }
 
+#[cfg(any())]
 const fn default_true() -> bool {
     true
 }

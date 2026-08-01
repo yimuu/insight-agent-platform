@@ -2018,6 +2018,8 @@ pub trait LeafTaskExecutor: Send + Sync {
 #[derive(Default)]
 pub struct WorkerExecutorRegistry {
     executors: BTreeMap<ExecutorKey, Arc<dyn LeafTaskExecutor>>,
+    dynamic_action_executor: Option<Arc<dyn LeafTaskExecutor>>,
+    dynamic_retrieval_executor: Option<Arc<dyn LeafTaskExecutor>>,
 }
 
 impl WorkerExecutorRegistry {
@@ -2069,6 +2071,31 @@ impl WorkerExecutorRegistry {
         Ok(())
     }
 
+    /// Installs the revision-aware Action resolver used for MCP Actions that
+    /// are published after process startup. The executor must still validate
+    /// the exact frozen version and descriptor hash carried by each task.
+    pub fn register_dynamic_action_executor(
+        &mut self,
+        executor: Arc<dyn LeafTaskExecutor>,
+    ) -> Result<(), &'static str> {
+        if self.dynamic_action_executor.is_some() {
+            return Err(WORKER_IMPLEMENTATION_NOT_FOUND);
+        }
+        self.dynamic_action_executor = Some(executor);
+        Ok(())
+    }
+
+    pub fn register_dynamic_retrieval_executor(
+        &mut self,
+        executor: Arc<dyn LeafTaskExecutor>,
+    ) -> Result<(), &'static str> {
+        if self.dynamic_retrieval_executor.is_some() {
+            return Err(WORKER_IMPLEMENTATION_NOT_FOUND);
+        }
+        self.dynamic_retrieval_executor = Some(executor);
+        Ok(())
+    }
+
     /// Read-only startup capability check for an exact frozen deployment
     /// tuple. Recovery must not discover this by executing user work.
     pub fn contains(
@@ -2083,7 +2110,9 @@ impl WorkerExecutorRegistry {
             implementation: implementation.to_owned(),
             descriptor_version: descriptor_version.clone(),
             worker_version: worker_version.clone(),
-        })
+        }) || (task_kind == SchedulerTaskKind::Action && self.dynamic_action_executor.is_some())
+            || (task_kind == SchedulerTaskKind::Retrieval
+                && self.dynamic_retrieval_executor.is_some())
     }
 
     pub async fn execute(
@@ -2092,14 +2121,27 @@ impl WorkerExecutorRegistry {
         request: &TaskExecutionRequest,
         cancellation: CancellationToken,
     ) -> Result<TaskExecutionResult, WorkerFailure> {
-        let executor = self.executors.get(&request.executor_key()).ok_or_else(|| {
-            WorkerFailure::new(
-                WorkerFailureClass::InvariantCorruption,
-                "WORKER_IMPLEMENTATION_NOT_FOUND",
-                false,
-            )
-            .expect("constant failure is valid")
-        })?;
+        let executor = self
+            .executors
+            .get(&request.executor_key())
+            .or_else(|| {
+                (request.task_kind() == SchedulerTaskKind::Action)
+                    .then_some(self.dynamic_action_executor.as_ref())
+                    .flatten()
+            })
+            .or_else(|| {
+                (request.task_kind() == SchedulerTaskKind::Retrieval)
+                    .then_some(self.dynamic_retrieval_executor.as_ref())
+                    .flatten()
+            })
+            .ok_or_else(|| {
+                WorkerFailure::new(
+                    WorkerFailureClass::InvariantCorruption,
+                    "WORKER_IMPLEMENTATION_NOT_FOUND",
+                    false,
+                )
+                .expect("constant failure is valid")
+            })?;
         let result = executor.execute(context, request, cancellation).await?;
         validate_outputs(request.task_kind(), request.outputs(), &result)?;
         Ok(result)
@@ -2112,14 +2154,27 @@ impl WorkerExecutorRegistry {
         services: &WorkerRuntimeServices,
         cancellation: CancellationToken,
     ) -> Result<TaskExecutionResult, WorkerFailure> {
-        let executor = self.executors.get(&request.executor_key()).ok_or_else(|| {
-            WorkerFailure::new(
-                WorkerFailureClass::InvariantCorruption,
-                "WORKER_IMPLEMENTATION_NOT_FOUND",
-                false,
-            )
-            .expect("constant failure is valid")
-        })?;
+        let executor = self
+            .executors
+            .get(&request.executor_key())
+            .or_else(|| {
+                (request.task_kind() == SchedulerTaskKind::Action)
+                    .then_some(self.dynamic_action_executor.as_ref())
+                    .flatten()
+            })
+            .or_else(|| {
+                (request.task_kind() == SchedulerTaskKind::Retrieval)
+                    .then_some(self.dynamic_retrieval_executor.as_ref())
+                    .flatten()
+            })
+            .ok_or_else(|| {
+                WorkerFailure::new(
+                    WorkerFailureClass::InvariantCorruption,
+                    "WORKER_IMPLEMENTATION_NOT_FOUND",
+                    false,
+                )
+                .expect("constant failure is valid")
+            })?;
         let result = executor
             .execute_with_runtime_services(context, request, services, cancellation)
             .await?;

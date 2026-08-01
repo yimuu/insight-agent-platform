@@ -3,6 +3,12 @@
 use std::{fmt, sync::Arc};
 
 use axum::http::{header::AUTHORIZATION, HeaderMap};
+use std::collections::BTreeSet;
+
+pub const MCP_SERVER_READ: &str = "mcp.server.read";
+pub const MCP_SERVER_WRITE: &str = "mcp.server.write";
+pub const MCP_SERVER_DISCOVER: &str = "mcp.server.discover";
+pub const MCP_SERVER_PUBLISH: &str = "mcp.server.publish";
 
 #[derive(Clone)]
 pub enum ApiAuth {
@@ -52,6 +58,89 @@ pub trait HumanPrincipalResolver: Send + Sync {
 /// set of independent human API credentials. Tokens never appear in Debug.
 pub struct BearerHumanPrincipalResolver {
     entries: Vec<(String, ResolvedHumanPrincipal)>,
+}
+
+/// Installation-scoped Operator identity used exclusively by the MCP
+/// management control plane. It is intentionally independent from ordinary
+/// API and MCP resource-server credentials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorPrincipal {
+    identity: String,
+    capabilities: BTreeSet<String>,
+}
+
+impl OperatorPrincipal {
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.capabilities.contains(capability)
+    }
+
+    pub fn capabilities(&self) -> &BTreeSet<String> {
+        &self.capabilities
+    }
+}
+
+#[derive(Clone)]
+pub struct OperatorAuth {
+    entries: Arc<Vec<(String, OperatorPrincipal)>>,
+}
+
+impl OperatorAuth {
+    pub fn new(
+        entries: impl IntoIterator<Item = (String, String, BTreeSet<String>)>,
+    ) -> Option<Self> {
+        let allowed = BTreeSet::from([
+            MCP_SERVER_READ.to_owned(),
+            MCP_SERVER_WRITE.to_owned(),
+            MCP_SERVER_DISCOVER.to_owned(),
+            MCP_SERVER_PUBLISH.to_owned(),
+        ]);
+        let mut resolved: Vec<(String, OperatorPrincipal)> = Vec::new();
+        let mut identities = BTreeSet::new();
+        for (token, identity, capabilities) in entries {
+            if token.trim().is_empty()
+                || !valid_principal_label(&identity)
+                || capabilities.is_empty()
+                || !capabilities.is_subset(&allowed)
+                || !identities.insert(identity.clone())
+                || resolved
+                    .iter()
+                    .any(|(existing, _)| constant_time_eq(token.as_bytes(), existing.as_bytes()))
+            {
+                return None;
+            }
+            resolved.push((
+                token,
+                OperatorPrincipal {
+                    identity,
+                    capabilities,
+                },
+            ));
+        }
+        (!resolved.is_empty()).then(|| Self {
+            entries: Arc::new(resolved),
+        })
+    }
+
+    pub(crate) fn resolve(&self, headers: &HeaderMap) -> Option<OperatorPrincipal> {
+        let candidate = bearer_candidate(headers)?;
+        self.entries
+            .iter()
+            .find(|(token, _)| constant_time_eq(candidate.as_bytes(), token.as_bytes()))
+            .map(|(_, principal)| principal.clone())
+    }
+}
+
+impl fmt::Debug for OperatorAuth {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OperatorAuth")
+            .field("credential_count", &self.entries.len())
+            .finish()
+    }
 }
 
 impl BearerHumanPrincipalResolver {
