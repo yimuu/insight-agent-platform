@@ -101,7 +101,9 @@ runtime:
   max_llm_tool_rounds: 16
   max_llm_tool_calls: 64
   run_stream:
-    broker: postgres_notify
+    topology: single_runtime
+    broker:
+      type: in_memory
     body_queue_capacity: 256
     control_queue_capacity: 32
     max_frame_bytes: 4096

@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 use insight_agent_platform::{
     config::{
         ArtifactStoreProvider, AuthConfig, DeploymentMode, HistoryConfig,
-        LiveRunStreamBrokerProvider, McpInteractionConfig, ModelInputModality, PlatformConfig,
-        PlatformConfigError, ProviderExtensionSource, ProviderTransportPolicy,
+        LiveRunStreamBrokerConfig, McpInteractionConfig, ModelInputModality, PlatformConfig,
+        PlatformConfigError, ProviderExtensionSource, ProviderTransportPolicy, RunStreamTopology,
     },
     engine::PersistenceMode,
     resources::config::load_model_registry_with_env,
@@ -473,8 +473,12 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
         Duration::from_secs(60)
     );
     assert_eq!(
+        config.runtime.run_stream.topology,
+        RunStreamTopology::SingleRuntime
+    );
+    assert_eq!(
         config.runtime.run_stream.broker,
-        LiveRunStreamBrokerProvider::InProcess
+        LiveRunStreamBrokerConfig::InMemory
     );
     assert_eq!(config.runtime.run_stream.body_queue_capacity, 256);
     assert_eq!(config.runtime.run_stream.control_queue_capacity, 32);
@@ -1083,13 +1087,13 @@ fn lifecycle_durations_are_configurable_and_hard_deadline_exceeds_grace_period()
 
 #[test]
 fn run_stream_transport_and_bounds_are_closed_and_validated() {
-    let run_stream = "  subscriber_capacity: 64\n  max_llm_tool_rounds: 8\n  max_llm_tool_calls: 32\n  run_stream:\n    broker: in_process\n    body_queue_capacity: 17\n    control_queue_capacity: 5\n    max_frame_bytes: 8192\n    max_item_bytes: 65536\n    max_run_bytes: 262144\n    terminal_barrier_timeout: 750ms\n    outbound_write_timeout: 3s";
+    let run_stream = "  subscriber_capacity: 64\n  max_llm_tool_rounds: 8\n  max_llm_tool_calls: 32\n  run_stream:\n    topology: single_runtime\n    broker:\n      type: in_memory\n    body_queue_capacity: 17\n    control_queue_capacity: 5\n    max_frame_bytes: 8192\n    max_item_bytes: 65536\n    max_run_bytes: 262144\n    terminal_barrier_timeout: 750ms\n    outbound_write_timeout: 3s";
     let yaml = base_yaml("  mode: disabled").replace("  subscriber_capacity: 64", run_stream);
     let (_directory, path) = write_config(&yaml);
     let config = load(&path, BTreeMap::new()).unwrap();
     assert_eq!(
         config.runtime.run_stream.broker,
-        LiveRunStreamBrokerProvider::InProcess
+        LiveRunStreamBrokerConfig::InMemory
     );
     assert_eq!(config.runtime.run_stream.body_queue_capacity, 17);
     assert_eq!(config.runtime.run_stream.control_queue_capacity, 5);
@@ -1129,12 +1133,17 @@ fn run_stream_transport_and_bounds_are_closed_and_validated() {
         );
     }
 
-    let postgres_oversized = yaml.replace("    broker: in_process", "    broker: postgres_notify");
-    let (_directory, path) = write_config(&postgres_oversized);
-    assert_eq!(
-        load(&path, BTreeMap::new()).unwrap_err().code(),
-        "PLATFORM_RUNTIME_INVALID"
-    );
+    for legacy_broker in ["in_process", "postgres_notify", "nats_core"] {
+        let legacy_yaml = yaml.replace(
+            "    broker:\n      type: in_memory",
+            &format!("    broker: {legacy_broker}"),
+        );
+        let (_directory, path) = write_config(&legacy_yaml);
+        assert_eq!(
+            load(&path, BTreeMap::new()).unwrap_err().code(),
+            "PLATFORM_CONFIG_INVALID"
+        );
+    }
 
     let legacy = yaml.replace("  run_stream:", "  response_stream:");
     let (_directory, path) = write_config(&legacy);
@@ -1142,6 +1151,207 @@ fn run_stream_transport_and_bounds_are_closed_and_validated() {
         load(&path, BTreeMap::new()).unwrap_err().code(),
         "PLATFORM_CONFIG_INVALID"
     );
+}
+
+#[test]
+fn nats_core_run_stream_config_is_strict_secret_backed_and_topology_aware() {
+    let nats = "  subscriber_capacity: 64\n  run_stream:\n    topology: distributed\n    broker:\n      type: nats_core\n      servers: [tls://nats-a.internal:4222, tls://nats-b.internal:4222]\n      namespace: production_cn1\n      credentials_env: NATS_RUN_STREAM_CREDS\n      tls:\n        required: true\n        root_certificates: [../secrets/nats-ca.pem]\n        client_certificate: ../secrets/nats-client.pem\n        client_private_key: ../secrets/nats-client-key.pem\n      connect_timeout: 3s\n      subscription_ready_timeout: 2s\n      reconnect_min_delay: 100ms\n      reconnect_max_delay: 5s\n      max_pending_messages: 4096\n      max_pending_bytes: 16777216\n      drain_timeout: 10s\n    body_queue_capacity: 256\n    control_queue_capacity: 32\n    max_frame_bytes: 4096\n    max_item_bytes: 4194304\n    max_run_bytes: 16777216\n    terminal_barrier_timeout: 2s\n    outbound_write_timeout: 10s";
+    let yaml = base_yaml("  mode: disabled")
+        .replace(
+            "history:\n  provider: sqlite\n  path: ../data/history.sqlite3",
+            "history:\n  provider: postgres\n  database_url_env: DATABASE_URL",
+        )
+        .replace("  subscriber_capacity: 64", nats);
+    let (directory, path) = write_config(&yaml);
+    let config = load(
+        &path,
+        BTreeMap::from([
+            (
+                "NATS_RUN_STREAM_CREDS".to_owned(),
+                "user-jwt-and-seed".to_owned(),
+            ),
+            (
+                "DATABASE_URL".to_owned(),
+                "postgres://localhost/platform".to_owned(),
+            ),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(
+        config.runtime.run_stream.topology,
+        RunStreamTopology::Distributed
+    );
+    let LiveRunStreamBrokerConfig::NatsCore(nats) = config.runtime.run_stream.broker else {
+        panic!("expected nats_core broker")
+    };
+    assert_eq!(nats.servers.len(), 2);
+    assert_eq!(nats.namespace, "production_cn1");
+    assert_eq!(nats.credentials.unwrap().expose(), "user-jwt-and-seed");
+    assert!(nats.tls.required);
+    assert_eq!(
+        nats.tls.root_certificates,
+        vec![directory.path().join("secrets/nats-ca.pem")]
+    );
+    assert_eq!(nats.connect_timeout, Duration::from_secs(3));
+    assert_eq!(nats.reconnect_min_delay, Duration::from_millis(100));
+    assert_eq!(nats.max_pending_messages, 4096);
+    assert_eq!(nats.max_pending_bytes, 16_777_216);
+
+    let distributed_in_memory = yaml
+        .replace("      type: nats_core", "      type: in_memory")
+        .replace(
+            "      servers: [tls://nats-a.internal:4222, tls://nats-b.internal:4222]\n      namespace: production_cn1\n      credentials_env: NATS_RUN_STREAM_CREDS\n      tls:\n        required: true\n        root_certificates: [../secrets/nats-ca.pem]\n        client_certificate: ../secrets/nats-client.pem\n        client_private_key: ../secrets/nats-client-key.pem\n      connect_timeout: 3s\n      subscription_ready_timeout: 2s\n      reconnect_min_delay: 100ms\n      reconnect_max_delay: 5s\n      max_pending_messages: 4096\n      max_pending_bytes: 16777216\n      drain_timeout: 10s\n",
+            "",
+        );
+    let (_directory, path) = write_config(&distributed_in_memory);
+    assert_eq!(
+        load(
+            &path,
+            BTreeMap::from([(
+                "DATABASE_URL".to_owned(),
+                "postgres://localhost/platform".to_owned(),
+            )]),
+        )
+        .unwrap_err()
+        .code(),
+        "PLATFORM_RUNTIME_INVALID"
+    );
+
+    for invalid in [
+        yaml.replace("tls://nats-a.internal:4222", "http://nats-a.internal:4222"),
+        yaml.replace(
+            "tls://nats-a.internal:4222",
+            "tls://user:password@nats-a.internal:4222",
+        ),
+        yaml.replace(
+            "tls://nats-a.internal:4222",
+            "tls://nats-a.internal:4222?token=secret",
+        ),
+        yaml.replace(
+            "tls://nats-a.internal:4222",
+            "tls://nats-a.internal:4222#fragment",
+        ),
+        yaml.replace("production_cn1", "Production.*"),
+        yaml.replace("tls://nats-b.internal:4222", "tls://nats-a.internal:4222"),
+        yaml.replace("max_pending_messages: 4096", "max_pending_messages: 0"),
+        yaml.replace("reconnect_min_delay: 100ms", "reconnect_min_delay: 6s"),
+        yaml.replace("max_frame_bytes: 4096", "max_frame_bytes: 65537"),
+        yaml.replace(
+            "        client_private_key: ../secrets/nats-client-key.pem\n",
+            "",
+        ),
+    ] {
+        let (_directory, path) = write_config(&invalid);
+        assert_eq!(
+            load(
+                &path,
+                BTreeMap::from([
+                    (
+                        "NATS_RUN_STREAM_CREDS".to_owned(),
+                        "user-jwt-and-seed".to_owned(),
+                    ),
+                    (
+                        "DATABASE_URL".to_owned(),
+                        "postgres://localhost/platform".to_owned(),
+                    ),
+                ]),
+            )
+            .unwrap_err()
+            .code(),
+            "PLATFORM_RUNTIME_INVALID",
+            "{invalid}"
+        );
+    }
+
+    let unknown_backend_field = yaml.replace(
+        "      drain_timeout: 10s",
+        "      drain_timeout: 10s\n      unexpected: true",
+    );
+    let (_directory, path) = write_config(&unknown_backend_field);
+    assert_eq!(
+        load(
+            &path,
+            BTreeMap::from([
+                (
+                    "NATS_RUN_STREAM_CREDS".to_owned(),
+                    "user-jwt-and-seed".to_owned(),
+                ),
+                (
+                    "DATABASE_URL".to_owned(),
+                    "postgres://localhost/platform".to_owned(),
+                ),
+            ]),
+        )
+        .unwrap_err()
+        .code(),
+        "PLATFORM_CONFIG_INVALID"
+    );
+
+    let (_directory, path) = write_config(&yaml);
+    assert_eq!(
+        load(
+            &path,
+            BTreeMap::from([(
+                "DATABASE_URL".to_owned(),
+                "postgres://localhost/platform".to_owned(),
+            )]),
+        )
+        .unwrap_err()
+        .code(),
+        "PLATFORM_SECRET_MISSING"
+    );
+
+    let sqlite_distributed = yaml.replace(
+        "history:\n  provider: postgres\n  database_url_env: DATABASE_URL",
+        "history:\n  provider: sqlite\n  path: ../data/history.sqlite3",
+    );
+    let (_directory, path) = write_config(&sqlite_distributed);
+    assert_eq!(
+        load(
+            &path,
+            BTreeMap::from([(
+                "NATS_RUN_STREAM_CREDS".to_owned(),
+                "user-jwt-and-seed".to_owned(),
+            )]),
+        )
+        .unwrap_err()
+        .code(),
+        "PLATFORM_RUNTIME_INVALID"
+    );
+
+    let production = yaml
+        .replace(
+            "deployment_mode: single_process_development",
+            "deployment_mode: production",
+        )
+        .replace(
+            "runtime:",
+            "artifacts:\n  provider: shared_filesystem\n  namespace: production\n  directory: ../data/artifacts\n  inline_threshold_bytes: 65536\n  max_read_bytes: 67108864\n  orphan_retention: 1h\n  reference_retention: 1d\n  gc_interval: 1m\n  deletion_claim_seconds: 60\nruntime:",
+        );
+    for invalid in [
+        production.replace("      credentials_env: NATS_RUN_STREAM_CREDS\n", ""),
+        production.replace("        required: true", "        required: false"),
+    ] {
+        let (_directory, path) = write_config(&invalid);
+        assert_eq!(
+            load(
+                &path,
+                BTreeMap::from([
+                    (
+                        "NATS_RUN_STREAM_CREDS".to_owned(),
+                        "user-jwt-and-seed".to_owned(),
+                    ),
+                    (
+                        "DATABASE_URL".to_owned(),
+                        "postgres://localhost/platform".to_owned(),
+                    ),
+                ]),
+            )
+            .unwrap_err()
+            .code(),
+            "PLATFORM_RUNTIME_INVALID"
+        );
+    }
 }
 
 #[test]

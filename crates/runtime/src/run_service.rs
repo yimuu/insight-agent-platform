@@ -136,8 +136,8 @@ const PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE: &str =
     "PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE";
 const PLATFORM_ARTIFACT_STORE_AUTHORITY_CONFLICT: &str =
     "PLATFORM_ARTIFACT_STORE_AUTHORITY_CONFLICT";
-const PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER: &str =
-    "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER";
+const PLATFORM_DISTRIBUTED_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER: &str =
+    "PLATFORM_DISTRIBUTED_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER";
 const WORK_SCHEDULER_TASK: u8 = 1 << 0;
 const WORK_MODEL_TOOL_TASK: u8 = 1 << 1;
 const WORK_RUNTIME_INGRESS: u8 = 1 << 2;
@@ -667,6 +667,13 @@ enum RunServiceDeploymentMode {
     SingleProcessDevelopment,
 }
 
+/// Placement contract for live-only Run publishers and Attached subscribers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStreamDeploymentTopology {
+    SingleRuntime,
+    Distributed,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct WorkCoordinatorConfig {
     pub active_poll_interval: Duration,
@@ -693,6 +700,7 @@ impl Default for WorkCoordinatorConfig {
 #[derive(Debug, Clone, Copy)]
 pub struct RunServiceConfig {
     deployment_mode: RunServiceDeploymentMode,
+    pub run_stream_topology: RunStreamDeploymentTopology,
     pub max_concurrent_runs: usize,
     pub max_concurrent_operations: usize,
     pub max_concurrent_operations_per_run: usize,
@@ -731,6 +739,10 @@ impl RunServiceConfig {
     ) -> Self {
         Self {
             deployment_mode: RunServiceDeploymentMode::Production,
+            // Direct production constructors remain fail-closed. The root
+            // composition must explicitly attest a single-runtime topology
+            // before a process-local live broker is accepted.
+            run_stream_topology: RunStreamDeploymentTopology::SingleRuntime,
             max_concurrent_runs,
             max_concurrent_operations,
             max_concurrent_operations_per_run,
@@ -789,6 +801,11 @@ impl RunServiceConfig {
         self.artifact_reference_retention = reference_retention;
         self.artifact_gc_interval = gc_interval;
         self.artifact_deletion_claim_seconds = deletion_claim_seconds;
+        self
+    }
+
+    pub fn with_run_stream_topology(mut self, topology: RunStreamDeploymentTopology) -> Self {
+        self.run_stream_topology = topology;
         self
     }
 
@@ -1918,7 +1935,7 @@ impl RunService {
                 "public streaming Agents require an LLM worker bound to the live Run stream broker",
             ));
         }
-        if config.deployment_mode == RunServiceDeploymentMode::Production
+        if config.run_stream_topology == RunStreamDeploymentTopology::Distributed
             && live_run_stream_broker.deployment_capability()
                 != LiveRunStreamBrokerCapability::Shared
             && agents
@@ -1926,8 +1943,8 @@ impl RunService {
                 .any(|agent| has_public_streaming_source(agent.published()))
         {
             return Err(ServiceError::new(
-                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER,
-                "production Agents with public streaming sources require a shared live Run stream broker",
+                PLATFORM_DISTRIBUTED_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER,
+                "distributed Run stream topology requires a shared live Run stream broker",
             ));
         }
         if config.deployment_mode == RunServiceDeploymentMode::Production {
@@ -2647,6 +2664,7 @@ impl RunService {
         if let Some(terminal) = self.terminal_engine() {
             output.push_str(&terminal.prometheus_metrics());
         }
+        output.push_str(&self.inner.live_run_stream_broker.prometheus_metrics());
         if let Ok(sources) = self.inner.metrics_sources.read() {
             for source in sources.iter() {
                 output.push_str(&source.prometheus_metrics());
@@ -2881,14 +2899,14 @@ impl RunService {
                 )
             })?,
         );
-        if self.inner.config.deployment_mode == RunServiceDeploymentMode::Production
+        if self.inner.config.run_stream_topology == RunStreamDeploymentTopology::Distributed
             && self.inner.live_run_stream_broker.deployment_capability()
                 != LiveRunStreamBrokerCapability::Shared
             && has_public_streaming_source(deployed.published())
         {
             return Err(ServiceError::new(
-                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER,
-                "production managed Agent with public streaming sources requires a shared live Run stream broker",
+                PLATFORM_DISTRIBUTED_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER,
+                "distributed managed Agent publication requires a shared live Run stream broker",
             ));
         }
         if has_public_llm_streaming_source(deployed.published())
@@ -3100,14 +3118,14 @@ impl RunService {
                 )
             })?,
         );
-        if self.inner.config.deployment_mode == RunServiceDeploymentMode::Production
+        if self.inner.config.run_stream_topology == RunStreamDeploymentTopology::Distributed
             && self.inner.live_run_stream_broker.deployment_capability()
                 != LiveRunStreamBrokerCapability::Shared
             && has_public_streaming_source(deployed.published())
         {
             return Err(ServiceError::new(
-                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER,
-                "production Graph publication with public streaming sources requires a shared live Run stream broker",
+                PLATFORM_DISTRIBUTED_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER,
+                "distributed Graph publication requires a shared live Run stream broker",
             ));
         }
         if has_public_llm_streaming_source(deployed.published())
@@ -3826,14 +3844,14 @@ impl RunService {
     > {
         let expected_mcp_server_fences = self.mcp_run_admission_fences(&agent).await?;
         let expected_provider_fences = self.provider_run_admission_fences(&agent).await?;
-        if self.inner.config.deployment_mode == RunServiceDeploymentMode::Production
+        if self.inner.config.run_stream_topology == RunStreamDeploymentTopology::Distributed
             && self.inner.live_run_stream_broker.deployment_capability()
                 != LiveRunStreamBrokerCapability::Shared
             && has_public_streaming_source(agent.published())
         {
             return Err(ServiceError::new(
-                PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER,
-                "public streaming admission requires a shared live Run stream broker",
+                PLATFORM_DISTRIBUTED_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER,
+                "distributed public streaming admission requires a shared live Run stream broker",
             ));
         }
         if has_public_llm_streaming_source(agent.published())

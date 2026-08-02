@@ -6,6 +6,7 @@ WORKDIR /workspace
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY src ./src
+COPY catalog ./catalog
 
 RUN cargo build --locked --release --bin insight-agent-platform
 

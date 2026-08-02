@@ -56,8 +56,8 @@ fail-closed evaluator；已完成的复现命令及正式证据路径保存在
 | `crates/durable/src/` | 后端中立的 repository ports、commands、claims、receipts 与 projection models |
 | `crates/resources/src/` | Model/Action/Retrieval SPI、registry 与 OpenAI-compatible adapter |
 | `crates/mcp/src/` | MCP codec、wire、transport、OAuth、Tasks 与 Server dispatcher |
-| `crates/storage/src/` | SQLite/PostgreSQL、Graph SQL、Artifact store 与 PostgreSQL live broker adapter |
-| `crates/runtime/src/` | catalog/deployment、leaf adapter、scheduler/worker pump、RunService 与 live Run stream |
+| `crates/storage/src/` | SQLite/PostgreSQL、Graph SQL 与 Artifact store；不包含 Run Stream transport |
+| `crates/runtime/src/` | catalog/deployment、leaf adapter、scheduler/worker pump、RunService、in-memory/Core NATS Run Stream |
 | `crates/api/src/v1/` | `/v1` Axum HTTP、认证、错误映射与 SSE transport |
 | `catalog/provider-catalog.yaml` | 平台版本化的内置 Provider route 与最小模型事实 |
 | `src/` | 根 facade、Provider extension/平台配置、Catalog loader、严格 YAML 解码和 binary composition |

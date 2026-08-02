@@ -31,7 +31,7 @@ use insight_agent_platform::{
     history::types::RunStatus,
     runtime::{
         DeployedAgentCatalog, ProductionRunRepository, RequestMetadata, RunService,
-        RunServiceConfig,
+        RunServiceConfig, RunStreamDeploymentTopology,
     },
 };
 use insight_api::v1::{build_router, ApiAuth, ApiState};
@@ -1265,7 +1265,7 @@ async fn postgres_production_graph_publication_rejects_public_streaming_without_
         workers(),
         artifact_store,
         Arc::new(FixtureResolver),
-        config(),
+        config().with_run_stream_topology(RunStreamDeploymentTopology::Distributed),
     )
     .await
     .unwrap();
@@ -1277,7 +1277,7 @@ async fn postgres_production_graph_publication_rejects_public_streaming_without_
         .unwrap_err();
     assert_eq!(
         error.code(),
-        "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER"
+        "PLATFORM_DISTRIBUTED_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER"
     );
     let after = repository.load_versioned_plan_catalog().await.unwrap();
     assert_eq!(after.plans().len(), before.plans().len());

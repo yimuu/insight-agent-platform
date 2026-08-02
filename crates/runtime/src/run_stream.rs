@@ -5,8 +5,11 @@
 
 use std::{
     collections::BTreeMap,
-    fmt,
-    sync::{Arc, Mutex, Weak},
+    fmt::{self, Write as _},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, Weak,
+    },
 };
 
 use async_trait::async_trait;
@@ -19,18 +22,20 @@ pub use insight_engine::run_stream::{
     LiveRunStreamDelivery, LiveRunStreamGap, LiveRunStreamItemIdentity, LiveRunStreamPayload,
     LiveRunStreamPublication, LiveRunStreamPublishOutcome, LiveRunStreamSeal,
     LiveRunStreamSealStatus, LiveRunStreamSourceIdentity, LiveRunStreamSubscriber,
-    RunCompletedSnapshot, RunFailedSnapshot, RunInitialSnapshot, RunInteractionClosedDetails,
-    RunInteractionMode, RunInteractionOutcome, RunInteractionRequiredDetails,
-    RunInteractionSourceKind, RunInteractionState, RunInteractionSummary, RunObjectKind,
-    RunOutputContentPart, RunOutputItem, RunOutputItemStatus, RunOutputRole, RunPublicError,
-    RunPublicResultError, RunRetrieval, RunRetrievalMetadata, RunRetrievalPublicProjection,
-    RunRetrievalResult, RunStatus, RunStoppedSnapshot, RunStreamEvent, RunStreamEventType,
-    RunStreamGapAction, RunToolCompletedArgumentsProjection, RunToolContent,
-    RunToolPublicProjection, RunToolResult, RunUsage, RunUsageInputDetails, RunUsageOutputDetails,
-    RunUsageStatus, MAX_FUNCTION_CALL_ARGUMENT_BYTES, RUN_STREAM_PROTOCOL_VERSION,
+    LiveRunStreamTerminalBarrierOutcome, RunCompletedSnapshot, RunFailedSnapshot,
+    RunInitialSnapshot, RunInteractionClosedDetails, RunInteractionMode, RunInteractionOutcome,
+    RunInteractionRequiredDetails, RunInteractionSourceKind, RunInteractionState,
+    RunInteractionSummary, RunObjectKind, RunOutputContentPart, RunOutputItem, RunOutputItemStatus,
+    RunOutputRole, RunPublicError, RunPublicResultError, RunRetrieval, RunRetrievalMetadata,
+    RunRetrievalPublicProjection, RunRetrievalResult, RunStatus, RunStoppedSnapshot,
+    RunStreamEvent, RunStreamEventType, RunStreamGapAction, RunToolCompletedArgumentsProjection,
+    RunToolContent, RunToolPublicProjection, RunToolResult, RunUsage, RunUsageInputDetails,
+    RunUsageOutputDetails, RunUsageStatus, MAX_FUNCTION_CALL_ARGUMENT_BYTES,
+    RUN_STREAM_PROTOCOL_VERSION,
 };
 
 const LIVE_RUN_STREAM_CONFIG_INVALID: &str = "LIVE_RUN_STREAM_CONFIG_INVALID";
+const LIVE_RUN_STREAM_NOT_READY: &str = "LIVE_RUN_STREAM_NOT_READY";
 const LIVE_RUN_STREAM_SUBSCRIBER_EXISTS: &str = "LIVE_RUN_STREAM_SUBSCRIBER_EXISTS";
 #[cfg(test)]
 const LIVE_RUN_STREAM_STREAM_CLOSED: &str = "LIVE_RUN_STREAM_STREAM_CLOSED";
@@ -44,7 +49,10 @@ struct InMemoryBrokerInner {
     body_capacity: usize,
     control_capacity: usize,
     byte_limits: LiveRunStreamByteLimits,
+    accepting: AtomicBool,
     runs: Mutex<BTreeMap<RunId, Arc<RunQueue>>>,
+    terminal_barriers: Mutex<BTreeMap<&'static str, (u64, u64)>>,
+    counters: Mutex<BTreeMap<(&'static str, &'static str, &'static str), u64>>,
 }
 
 impl InMemoryLiveRunStreamBroker {
@@ -80,7 +88,10 @@ impl InMemoryLiveRunStreamBroker {
                 body_capacity,
                 control_capacity,
                 byte_limits,
+                accepting: AtomicBool::new(true),
                 runs: Mutex::new(BTreeMap::new()),
+                terminal_barriers: Mutex::new(BTreeMap::new()),
+                counters: Mutex::new(BTreeMap::new()),
             }),
         })
     }
@@ -117,7 +128,111 @@ impl LiveRunStreamBroker for InMemoryLiveRunStreamBroker {
         LiveRunStreamBrokerCapability::SingleProcess
     }
 
+    fn prometheus_metrics(&self) -> String {
+        let ready = self.inner.accepting.load(Ordering::Acquire);
+        let active = lock(&self.inner.runs).len();
+        let mut output = format!(
+            concat!(
+                "run_stream_bus_ready{{backend=\"in_memory\"}} {}\n",
+                "run_stream_bus_connections{{backend=\"in_memory\",state=\"connected\"}} {}\n",
+                "run_stream_bus_reconnect_total{{backend=\"in_memory\",outcome=\"connected\"}} 0\n",
+                "run_stream_bus_active_subscriptions{{backend=\"in_memory\"}} {}\n",
+                "run_stream_bus_tasks{{backend=\"in_memory\",state=\"active\"}} 0\n",
+                "run_stream_bus_publish_latency_seconds_count{{backend=\"in_memory\"}} 0\n",
+                "run_stream_bus_publish_latency_seconds_sum{{backend=\"in_memory\"}} 0\n",
+                "run_stream_bus_pending_messages{{backend=\"in_memory\",queue_class=\"all\"}} 0\n",
+                "run_stream_bus_pending_bytes{{backend=\"in_memory\",queue_class=\"all\"}} 0\n",
+                "run_stream_bus_decode_error_total{{backend=\"in_memory\",reason=\"wire\"}} 0\n",
+                "run_stream_bus_slow_consumer_total{{backend=\"in_memory\",scope=\"client\"}} 0\n",
+                "run_stream_bus_subscription_ready_seconds_count{{backend=\"in_memory\"}} 0\n",
+                "run_stream_bus_subscription_ready_seconds_sum{{backend=\"in_memory\"}} 0\n"
+            ),
+            u8::from(ready),
+            u8::from(ready),
+            active
+        );
+        let barriers = lock(&self.inner.terminal_barriers);
+        for outcome in LiveRunStreamTerminalBarrierOutcome::ALL {
+            let label = outcome.label();
+            let (count, nanos) = barriers.get(label).copied().unwrap_or_default();
+            let _ = writeln!(
+                output,
+                "run_stream_bus_terminal_barrier_seconds_count{{backend=\"in_memory\",outcome=\"{label}\"}} {count}"
+            );
+            let _ = writeln!(
+                output,
+                "run_stream_bus_terminal_barrier_seconds_sum{{backend=\"in_memory\",outcome=\"{label}\"}} {:.9}",
+                nanos as f64 / 1_000_000_000.0
+            );
+        }
+        let counters = lock(&self.inner.counters);
+        for (family, zero_sample) in [
+            (
+                "publish",
+                "run_stream_bus_publish_total{backend=\"in_memory\",event_class=\"output\",outcome=\"enqueued\"} 0\n",
+            ),
+            (
+                "drop",
+                "run_stream_bus_dropped_total{backend=\"in_memory\",event_class=\"output\",reason=\"producer_queue_full\"} 0\n",
+            ),
+            (
+                "gap",
+                "run_stream_bus_gap_total{backend=\"in_memory\",gap_kind=\"known\",reason=\"producer_queue\"} 0\n",
+            ),
+        ] {
+            if !counters.keys().any(|(candidate, _, _)| *candidate == family) {
+                output.push_str(zero_sample);
+            }
+        }
+        for ((family, class, outcome), count) in counters.iter() {
+            let name = match *family {
+                "publish" => "run_stream_bus_publish_total",
+                "drop" => "run_stream_bus_dropped_total",
+                "gap" => "run_stream_bus_gap_total",
+                _ => continue,
+            };
+            let labels = if *family == "gap" {
+                format!("backend=\"in_memory\",gap_kind=\"{class}\",reason=\"{outcome}\"")
+            } else if *family == "drop" {
+                format!("backend=\"in_memory\",event_class=\"{class}\",reason=\"{outcome}\"")
+            } else {
+                format!("backend=\"in_memory\",event_class=\"{class}\",outcome=\"{outcome}\"")
+            };
+            let _ = writeln!(output, "{name}{{{labels}}} {count}");
+        }
+        output
+    }
+
+    fn record_terminal_barrier(
+        &self,
+        outcome: LiveRunStreamTerminalBarrierOutcome,
+        duration: std::time::Duration,
+    ) {
+        let nanos = duration.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let mut barriers = lock(&self.inner.terminal_barriers);
+        let (count, total_nanos) = barriers.entry(outcome.label()).or_default();
+        *count = count.saturating_add(1);
+        *total_nanos = total_nanos.saturating_add(nanos);
+    }
+
+    async fn check_readiness(
+        &self,
+        _readiness_timeout: std::time::Duration,
+    ) -> Result<(), LiveRunStreamBrokerError> {
+        self.inner
+            .accepting
+            .load(Ordering::Acquire)
+            .then_some(())
+            .ok_or_else(|| {
+                LiveRunStreamBrokerError::new(
+                    LIVE_RUN_STREAM_NOT_READY,
+                    "in-memory live Run stream broker is not accepting work",
+                )
+            })
+    }
+
     async fn shutdown(&self, _grace: std::time::Duration) -> Result<(), LiveRunStreamBrokerError> {
+        self.inner.accepting.store(false, Ordering::Release);
         let queues = {
             let mut runs = lock(&self.inner.runs);
             std::mem::take(&mut *runs)
@@ -132,7 +247,19 @@ impl LiveRunStreamBroker for InMemoryLiveRunStreamBroker {
         &self,
         run_id: RunId,
     ) -> Result<Box<dyn LiveRunStreamSubscriber>, LiveRunStreamBrokerError> {
+        if !self.inner.accepting.load(Ordering::Acquire) {
+            return Err(LiveRunStreamBrokerError::new(
+                LIVE_RUN_STREAM_NOT_READY,
+                "in-memory live Run stream broker is not accepting work",
+            ));
+        }
         let mut runs = lock(&self.inner.runs);
+        if !self.inner.accepting.load(Ordering::Acquire) {
+            return Err(LiveRunStreamBrokerError::new(
+                LIVE_RUN_STREAM_NOT_READY,
+                "in-memory live Run stream broker is not accepting work",
+            ));
+        }
         if runs.contains_key(&run_id) {
             return Err(LiveRunStreamBrokerError::new(
                 LIVE_RUN_STREAM_SUBSCRIBER_EXISTS,
@@ -154,26 +281,98 @@ impl LiveRunStreamBroker for InMemoryLiveRunStreamBroker {
     }
 
     fn publish(&self, publication: LiveRunStreamPublication) -> LiveRunStreamPublishOutcome {
+        if !self.inner.accepting.load(Ordering::Acquire) {
+            return LiveRunStreamPublishOutcome::RunClosed;
+        }
+        let class = publication_class(&publication);
         let queue = lock(&self.inner.runs).get(publication.run_id()).cloned();
-        match queue {
+        let outcome = match queue {
             Some(queue) => queue.publish(publication),
             None => LiveRunStreamPublishOutcome::NoSubscriber,
-        }
+        };
+        record_in_memory_outcome(&self.inner, class, outcome);
+        outcome
     }
 
     fn seal(&self, seal: LiveRunStreamSeal) -> LiveRunStreamPublishOutcome {
+        if !self.inner.accepting.load(Ordering::Acquire) {
+            return LiveRunStreamPublishOutcome::RunClosed;
+        }
         let queue = lock(&self.inner.runs)
             .get(seal.identity().run_id())
             .cloned();
-        match queue {
+        let outcome = match queue {
             Some(queue) => queue.seal(seal),
             None => LiveRunStreamPublishOutcome::NoSubscriber,
-        }
+        };
+        record_in_memory_outcome(&self.inner, "seal", outcome);
+        outcome
     }
 
     fn close_run(&self, run_id: &RunId) -> LiveRunStreamCloseOutcome {
         let queue = lock(&self.inner.runs).remove(run_id);
-        queue.map_or_else(LiveRunStreamCloseOutcome::default, |queue| queue.close())
+        let outcome = queue.map_or_else(LiveRunStreamCloseOutcome::default, |queue| queue.close());
+        if outcome.unknown_tail_gaps() > 0 {
+            *lock(&self.inner.counters)
+                .entry(("gap", "unknown_tail", "close"))
+                .or_default() += outcome.unknown_tail_gaps() as u64;
+        }
+        outcome
+    }
+}
+
+fn publication_class(publication: &LiveRunStreamPublication) -> &'static str {
+    if publication.output_item_identity().is_some() {
+        "output"
+    } else if publication.payload_type() == RunStreamEventType::RunRetrievalCompleted {
+        "retrieval"
+    } else {
+        "tool"
+    }
+}
+
+fn record_in_memory_outcome(
+    inner: &InMemoryBrokerInner,
+    class: &'static str,
+    outcome: LiveRunStreamPublishOutcome,
+) {
+    let label = match outcome {
+        LiveRunStreamPublishOutcome::Enqueued => "enqueued",
+        LiveRunStreamPublishOutcome::EnqueuedAfterGap => "enqueued_after_gap",
+        LiveRunStreamPublishOutcome::EnqueuedAfterBestEffortLoss => "enqueued_after_loss",
+        LiveRunStreamPublishOutcome::DroppedWithGap => "dropped_with_gap",
+        LiveRunStreamPublishOutcome::DroppedOversizeWithGap => "dropped_oversize_with_gap",
+        LiveRunStreamPublishOutcome::DroppedBestEffort => "dropped_best_effort",
+        LiveRunStreamPublishOutcome::SealEnqueued => "seal_enqueued",
+        LiveRunStreamPublishOutcome::SealExactReplay => "seal_exact_replay",
+        LiveRunStreamPublishOutcome::NoSubscriber => "no_subscriber",
+        LiveRunStreamPublishOutcome::RunClosed => "run_closed",
+        LiveRunStreamPublishOutcome::RejectedOutOfOrder => "rejected_out_of_order",
+        LiveRunStreamPublishOutcome::RejectedAfterSeal => "rejected_after_seal",
+        LiveRunStreamPublishOutcome::SealConflict => "seal_conflict",
+        LiveRunStreamPublishOutcome::ControlQueueFull => "control_full",
+    };
+    let mut counters = lock(&inner.counters);
+    *counters.entry(("publish", class, label)).or_default() += 1;
+    let reason = match outcome {
+        LiveRunStreamPublishOutcome::DroppedWithGap
+        | LiveRunStreamPublishOutcome::DroppedBestEffort => Some("producer_queue_full"),
+        LiveRunStreamPublishOutcome::DroppedOversizeWithGap => Some("oversize"),
+        LiveRunStreamPublishOutcome::ControlQueueFull => Some("control_full"),
+        _ => None,
+    };
+    if let Some(reason) = reason {
+        *counters.entry(("drop", class, reason)).or_default() += 1;
+    }
+    if matches!(
+        outcome,
+        LiveRunStreamPublishOutcome::EnqueuedAfterGap
+            | LiveRunStreamPublishOutcome::DroppedWithGap
+            | LiveRunStreamPublishOutcome::DroppedOversizeWithGap
+    ) {
+        *counters
+            .entry(("gap", "known", "producer_queue"))
+            .or_default() += 1;
     }
 }
 
@@ -291,6 +490,51 @@ mod tests {
         serde_json::to_vec(&publication.clone().into_public_event(u64::MAX))
             .unwrap()
             .len()
+    }
+
+    #[tokio::test]
+    async fn metrics_are_bounded_complete_and_readiness_tracks_shutdown() {
+        let broker = InMemoryLiveRunStreamBroker::new(4, 4).unwrap();
+        broker.record_terminal_barrier(
+            LiveRunStreamTerminalBarrierOutcome::Complete,
+            std::time::Duration::from_millis(5),
+        );
+        let metrics = broker.prometheus_metrics();
+        for family in [
+            "run_stream_bus_ready",
+            "run_stream_bus_connections",
+            "run_stream_bus_reconnect_total",
+            "run_stream_bus_active_subscriptions",
+            "run_stream_bus_tasks",
+            "run_stream_bus_publish_total",
+            "run_stream_bus_publish_latency_seconds",
+            "run_stream_bus_pending_messages",
+            "run_stream_bus_pending_bytes",
+            "run_stream_bus_dropped_total",
+            "run_stream_bus_gap_total",
+            "run_stream_bus_decode_error_total",
+            "run_stream_bus_slow_consumer_total",
+            "run_stream_bus_subscription_ready_seconds",
+            "run_stream_bus_terminal_barrier_seconds",
+        ] {
+            assert!(metrics.contains(family), "missing metric family {family}");
+        }
+        assert!(!metrics.contains("run_private_identity"));
+        assert!(broker
+            .check_readiness(std::time::Duration::from_secs(1))
+            .await
+            .is_ok());
+        broker
+            .shutdown(std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(broker
+            .check_readiness(std::time::Duration::from_secs(1))
+            .await
+            .is_err());
+        assert!(broker
+            .prometheus_metrics()
+            .contains("run_stream_bus_ready{backend=\"in_memory\"} 0"));
     }
 
     #[tokio::test]
@@ -425,17 +669,21 @@ mod tests {
                 LiveRunStreamPublishOutcome::SealEnqueued
             );
 
-            let LiveRunStreamDelivery::Gap(gap) = subscriber.recv().await.unwrap() else {
-                panic!("a missing canonical function-call frame must precede the item seal")
-            };
-            assert_eq!(gap.missing_from(), missing_sequence);
-            assert_eq!(gap.missing_to(), Some(missing_sequence));
-
-            for _ in 0..3 {
-                assert!(matches!(
-                    subscriber.recv().await.unwrap(),
-                    LiveRunStreamDelivery::Publication(_)
-                ));
+            for sequence in 0..=CompletedFunctionCallPublication::LAST_LOCAL_SEQUENCE {
+                if sequence == missing_sequence {
+                    let LiveRunStreamDelivery::Gap(gap) = subscriber.recv().await.unwrap() else {
+                        panic!("the missing canonical frame must be explicit in item order")
+                    };
+                    assert_eq!(gap.missing_from(), missing_sequence);
+                    assert_eq!(gap.missing_to(), Some(missing_sequence));
+                } else {
+                    let LiveRunStreamDelivery::Publication(publication) =
+                        subscriber.recv().await.unwrap()
+                    else {
+                        panic!("retained canonical frames must preserve item order")
+                    };
+                    assert_eq!(publication.local_sequence(), sequence);
+                }
             }
             let LiveRunStreamDelivery::Seal(delivered) = subscriber.recv().await.unwrap() else {
                 panic!("the completed seal must wait for every retained item frame")
@@ -467,15 +715,15 @@ mod tests {
             LiveRunStreamPublishOutcome::SealEnqueued
         );
 
-        let LiveRunStreamDelivery::Gap(gap) = subscriber.recv().await.unwrap() else {
-            panic!("control gap must have priority")
-        };
-        assert_eq!((gap.missing_from(), gap.missing_to()), (1, Some(2)));
         let LiveRunStreamDelivery::Publication(publication) = subscriber.recv().await.unwrap()
         else {
-            panic!("the retained body must precede its seal")
+            panic!("retained body must precede a later gap for the same item")
         };
         assert_eq!(publication.local_sequence(), 0);
+        let LiveRunStreamDelivery::Gap(gap) = subscriber.recv().await.unwrap() else {
+            panic!("dropped body must remain explicit after retained predecessors")
+        };
+        assert_eq!((gap.missing_from(), gap.missing_to()), (1, Some(2)));
         let LiveRunStreamDelivery::Seal(delivered) = subscriber.recv().await.unwrap() else {
             panic!("seal must follow all retained body for its item")
         };
@@ -536,6 +784,11 @@ mod tests {
             item_broker.publish(second),
             LiveRunStreamPublishOutcome::DroppedWithGap
         );
+        let LiveRunStreamDelivery::Publication(first) = item_subscriber.recv().await.unwrap()
+        else {
+            panic!("retained item body must precede its later size gap")
+        };
+        assert_eq!(first.local_sequence(), 0);
         let LiveRunStreamDelivery::Gap(item_gap) = item_subscriber.recv().await.unwrap() else {
             panic!("an exhausted item budget must become a gap")
         };
@@ -622,10 +875,17 @@ mod tests {
         let LiveRunStreamDelivery::Gap(first) = subscriber.recv().await.unwrap() else {
             panic!("the first known gap must be delivered")
         };
+        assert_eq!((first.missing_from(), first.missing_to()), (0, Some(1)));
+        for expected in [2, 3] {
+            let LiveRunStreamDelivery::Publication(publication) = subscriber.recv().await.unwrap()
+            else {
+                panic!("retained bodies before the next gap must remain ordered")
+            };
+            assert_eq!(publication.local_sequence(), expected);
+        }
         let LiveRunStreamDelivery::Gap(second) = subscriber.recv().await.unwrap() else {
             panic!("the disjoint known gap must remain separate")
         };
-        assert_eq!((first.missing_from(), first.missing_to()), (0, Some(1)));
         assert_eq!((second.missing_from(), second.missing_to()), (4, Some(4)));
     }
 
@@ -642,15 +902,15 @@ mod tests {
         assert_eq!(close.unknown_tail_gaps(), 1);
         assert_eq!(close.omitted_unknown_tail_gaps(), 0);
 
-        let LiveRunStreamDelivery::Gap(gap) = subscriber.recv().await.unwrap() else {
-            panic!("unknown tail gap must be delivered before retained body")
-        };
-        assert!(gap.has_unknown_tail());
-        assert_eq!(gap.missing_from(), 1);
         assert!(matches!(
             subscriber.recv().await.unwrap(),
             LiveRunStreamDelivery::Publication(_)
         ));
+        let LiveRunStreamDelivery::Gap(gap) = subscriber.recv().await.unwrap() else {
+            panic!("unknown tail gap must follow retained body for the same item")
+        };
+        assert!(gap.has_unknown_tail());
+        assert_eq!(gap.missing_from(), 1);
         assert_eq!(
             subscriber.recv().await.unwrap_err().code(),
             LIVE_RUN_STREAM_STREAM_CLOSED

@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 async-trait.workspace = true
+async-nats.workspace = true
 chrono.workspace = true
 futures.workspace = true
 insight-dsl.workspace = true
@@ -21,6 +22,9 @@ serde.workspace = true
 serde_jcs.workspace = true
 serde_json.workspace = true
 semver.workspace = true
+sha2.workspace = true
+rustls.workspace = true
+url.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

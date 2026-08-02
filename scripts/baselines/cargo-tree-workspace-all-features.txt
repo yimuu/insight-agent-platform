@@ -3,14 +3,6 @@
 # toolchain: cargo 1.94.1 (29ea6fb6a 2026-03-24); rustc 1.94.1 (e408947bf 2026-03-25)
 insight-agent-platform v0.1.0 (<workspace>)
 ├── jsonschema v0.47.0
-│   ├── itoa feature "default"
-│   │   └── itoa v1.0.18
-│   ├── percent-encoding feature "default"
-│   │   ├── percent-encoding v2.3.2
-│   │   └── percent-encoding feature "std"
-│   │       ├── percent-encoding v2.3.2
-│   │       └── percent-encoding feature "alloc"
-│   │           └── percent-encoding v2.3.2
 │   ├── serde feature "default"
 │   │   ├── serde v1.0.228
 │   │   │   ├── serde_core feature "result"
@@ -48,6 +40,14 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   │   ├── serde v1.0.228 (*)
 │   │   └── serde feature "serde_derive"
 │   │       └── serde v1.0.228 (*)
+│   ├── itoa feature "default"
+│   │   └── itoa v1.0.18
+│   ├── percent-encoding feature "default"
+│   │   ├── percent-encoding v2.3.2
+│   │   └── percent-encoding feature "std"
+│   │       ├── percent-encoding v2.3.2
+│   │       └── percent-encoding feature "alloc"
+│   │           └── percent-encoding v2.3.2
 │   ├── serde_json feature "default"
 │   │   ├── serde_json v1.0.150
 │   │   │   ├── memchr v2.8.2
@@ -67,11 +67,11 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   │   │       └── zmij v1.0.21
 │   │   └── serde_json feature "std"
 │   │       ├── serde_json v1.0.150 (*)
-│   │       ├── memchr feature "std"
-│   │       │   ├── memchr v2.8.2
-│   │       │   └── memchr feature "alloc"
-│   │       │       └── memchr v2.8.2
-│   │       └── serde_core feature "std" (*)
+│   │       ├── serde_core feature "std" (*)
+│   │       └── memchr feature "std"
+│   │           ├── memchr v2.8.2
+│   │           └── memchr feature "alloc"
+│   │               └── memchr v2.8.2
 │   ├── num-traits feature "default"
 │   │   ├── num-traits v0.2.19
 │   │   │   [build-dependencies]
@@ -229,11 +229,11 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   │       └── regex-syntax feature "unicode" (*)
 │   ├── ahash feature "default"
 │   │   ├── ahash v0.8.12
+│   │   │   ├── serde feature "default" (*)
 │   │   │   ├── once_cell feature "alloc"
 │   │   │   │   ├── once_cell v1.21.4
 │   │   │   │   └── once_cell feature "race"
 │   │   │   │       └── once_cell v1.21.4
-│   │   │   ├── serde feature "default" (*)
 │   │   │   ├── cfg-if feature "default"
 │   │   │   │   └── cfg-if v1.0.4
 │   │   │   ├── getrandom feature "default"
@@ -641,8 +641,9 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   │   │       ├── tracing v0.1.44 (*)
 │   │   │       ├── bytes feature "default"
 │   │   │       │   ├── bytes v1.12.1
+│   │   │       │   │   └── serde feature "alloc" (*)
 │   │   │       │   └── bytes feature "std"
-│   │   │       │       └── bytes v1.12.1
+│   │   │       │       └── bytes v1.12.1 (*)
 │   │   │       ├── futures-core feature "default"
 │   │   │       │   ├── futures-core v0.3.32
 │   │   │       │   └── futures-core feature "std"
@@ -677,6 +678,10 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   │   │       └── tower-service feature "default"
 │   │   │           └── tower-service v0.3.3
 │   │   ├── bytes feature "default" (*)
+│   │   ├── serde_core feature "default"
+│   │   │   ├── serde_core v1.0.228
+│   │   │   ├── serde_core feature "result" (*)
+│   │   │   └── serde_core feature "std" (*)
 │   │   ├── http feature "default" (*)
 │   │   ├── itoa feature "default" (*)
 │   │   ├── http-body feature "default" (*)
@@ -784,10 +789,6 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   │   │           └── want v0.3.1
 │   │   │               └── try-lock feature "default"
 │   │   │                   └── try-lock v0.2.5
-│   │   ├── serde_core feature "default"
-│   │   │   ├── serde_core v1.0.228
-│   │   │   ├── serde_core feature "result" (*)
-│   │   │   └── serde_core feature "std" (*)
 │   │   ├── tokio feature "default" (*)
 │   │   ├── tokio feature "time"
 │   │   │   └── tokio v1.52.3 (*)
@@ -841,13 +842,13 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   │   │   └── serde_json v1.0.150 (*)
 │   │   ├── serde_path_to_error feature "default"
 │   │   │   └── serde_path_to_error v0.1.20
-│   │   │       ├── itoa feature "default" (*)
-│   │   │       └── serde_core feature "alloc" (*)
+│   │   │       ├── serde_core feature "alloc" (*)
+│   │   │       └── itoa feature "default" (*)
 │   │   ├── serde_urlencoded feature "default"
 │   │   │   └── serde_urlencoded v0.7.1
+│   │   │       ├── serde feature "default" (*)
 │   │   │       ├── itoa feature "default" (*)
 │   │   │       ├── form_urlencoded feature "default" (*)
-│   │   │       ├── serde feature "default" (*)
 │   │   │       └── ryu feature "default"
 │   │   │           └── ryu v1.0.23
 │   │   └── tower feature "util"
@@ -926,6 +927,8 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       └── axum-core feature "tracing"
 │           └── axum-core v0.5.6 (*)
 ├── bytes feature "default" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
 ├── tracing feature "default"
 │   ├── tracing v0.1.44 (*)
 │   ├── tracing feature "attributes"
@@ -933,10 +936,9 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   │   └── tracing feature "tracing-attributes"
 │   │       └── tracing v0.1.44 (*)
 │   └── tracing feature "std" (*)
-├── serde feature "default" (*)
-├── serde feature "derive" (*)
 ├── tokio feature "default" (*)
 ├── tokio feature "macros" (*)
+├── tokio feature "net" (*)
 ├── tokio feature "rt-multi-thread"
 │   ├── tokio v1.52.3 (*)
 │   └── tokio feature "rt" (*)
@@ -1163,8 +1165,8 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   └── futures feature "std" (*)
 ├── handlebars feature "default"
 │   └── handlebars v6.4.2
-│       ├── log feature "default" (*)
 │       ├── serde feature "default" (*)
+│       ├── log feature "default" (*)
 │       ├── serde_json feature "default" (*)
 │       ├── serde_json feature "preserve_order"
 │       │   ├── serde_json v1.0.150 (*)
@@ -1291,17 +1293,22 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   └── insight-api v0.1.0 (<workspace>/crates/api)
 │       ├── async-trait feature "default" (*)
 │       ├── axum feature "default" (*)
-│       ├── tracing feature "default" (*)
 │       ├── serde feature "default" (*)
 │       ├── serde feature "derive" (*)
+│       ├── tracing feature "default" (*)
 │       ├── tokio feature "default" (*)
 │       ├── tokio feature "macros" (*)
+│       ├── tokio feature "net" (*)
 │       ├── tokio feature "rt-multi-thread" (*)
 │       ├── tokio feature "signal" (*)
 │       ├── tokio feature "sync" (*)
 │       ├── tokio feature "test-util" (*)
 │       ├── tokio feature "time" (*)
+│       ├── base64 feature "default" (*)
 │       ├── serde_json feature "default" (*)
+│       ├── uuid feature "default" (*)
+│       ├── uuid feature "serde" (*)
+│       ├── uuid feature "v4" (*)
 │       ├── chrono feature "default" (*)
 │       ├── chrono feature "serde" (*)
 │       ├── futures feature "default" (*)
@@ -1323,6 +1330,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │       ├── serde feature "derive" (*)
 │       │       │       ├── tokio feature "default" (*)
 │       │       │       ├── tokio feature "macros" (*)
+│       │       │       ├── tokio feature "net" (*)
 │       │       │       ├── tokio feature "rt-multi-thread" (*)
 │       │       │       ├── tokio feature "signal" (*)
 │       │       │       ├── tokio feature "sync" (*)
@@ -1407,14 +1415,15 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       ├── sha2 feature "default" (*)
 │       │       └── yaml_serde feature "default"
 │       │           └── yaml_serde v0.10.4
-│       │               ├── itoa feature "default" (*)
 │       │               ├── serde feature "default" (*)
+│       │               ├── itoa feature "default" (*)
 │       │               ├── indexmap feature "default" (*)
 │       │               ├── ryu feature "default" (*)
 │       │               └── libyaml-rs feature "default"
 │       │                   └── libyaml-rs v0.3.0
 │       ├── insight-engine feature "default" (command-line) (*)
 │       ├── serde_jcs feature "default" (*)
+│       ├── sha2 feature "default" (*)
 │       ├── tokio-util feature "default" (*)
 │       ├── tokio-util feature "rt" (*)
 │       ├── insight-durable feature "default" (command-line)
@@ -1442,6 +1451,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │   └── tokio feature "bytes"
 │       │       │       └── tokio v1.52.3 (*)
 │       │       ├── tokio feature "macros" (*)
+│       │       ├── tokio feature "net" (*)
 │       │       ├── tokio feature "process"
 │       │       │   ├── tokio v1.52.3 (*)
 │       │       │   ├── tokio feature "bytes" (*)
@@ -1470,6 +1480,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │       ├── futures-core v0.3.32
 │       │       │       ├── futures-util v0.3.32 (*)
 │       │       │       ├── bytes feature "default" (*)
+│       │       │       ├── serde feature "default" (*)
 │       │       │       ├── http feature "default" (*)
 │       │       │       ├── http-body feature "default" (*)
 │       │       │       ├── http-body-util feature "default" (*)
@@ -1486,7 +1497,6 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │       │   └── hyper v1.10.1 (*)
 │       │       │       ├── hyper feature "default" (*)
 │       │       │       ├── hyper feature "http1" (*)
-│       │       │       ├── serde feature "default" (*)
 │       │       │       ├── tokio feature "net" (*)
 │       │       │       ├── tokio feature "time" (*)
 │       │       │       ├── hyper-util feature "client"
@@ -1688,7 +1698,8 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │       │   └── rustls feature "aws_lc_rs"
 │       │       │       │       ├── rustls v0.23.41 (*)
 │       │       │       │       ├── rustls feature "aws-lc-rs"
-│       │       │       │       │   └── rustls v0.23.41 (*)
+│       │       │       │       │   ├── rustls v0.23.41 (*)
+│       │       │       │       │   └── rustls feature "aws_lc_rs" (*)
 │       │       │       │       ├── aws-lc-rs feature "aws-lc-sys"
 │       │       │       │       │   └── aws-lc-rs v1.17.1 (*)
 │       │       │       │       ├── aws-lc-rs feature "prebuilt-nasm"
@@ -1729,15 +1740,17 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       ├── reqwest feature "json" (*)
 │       ├── reqwest feature "rustls" (*)
 │       ├── reqwest feature "stream" (*)
+│       ├── ring feature "default" (*)
 │       ├── insight-resources feature "default" (command-line)
 │       │   └── insight-resources v0.1.0 (<workspace>/crates/resources)
 │       │       ├── async-trait feature "default" (*)
 │       │       ├── bytes feature "default" (*)
-│       │       ├── tracing feature "default" (*)
 │       │       ├── serde feature "default" (*)
 │       │       ├── serde feature "derive" (*)
+│       │       ├── tracing feature "default" (*)
 │       │       ├── tokio feature "default" (*)
 │       │       ├── tokio feature "macros" (*)
+│       │       ├── tokio feature "net" (*)
 │       │       ├── tokio feature "rt-multi-thread" (*)
 │       │       ├── tokio feature "signal" (*)
 │       │       ├── tokio feature "sync" (*)
@@ -1763,11 +1776,12 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       ├── insight-runtime feature "default" (command-line)
 │       │   └── insight-runtime v0.1.0 (<workspace>/crates/runtime)
 │       │       ├── async-trait feature "default" (*)
-│       │       ├── tracing feature "default" (*)
 │       │       ├── serde feature "default" (*)
 │       │       ├── serde feature "derive" (*)
+│       │       ├── tracing feature "default" (*)
 │       │       ├── tokio feature "default" (*)
 │       │       ├── tokio feature "macros" (*)
+│       │       ├── tokio feature "net" (*)
 │       │       ├── tokio feature "rt-multi-thread" (*)
 │       │       ├── tokio feature "signal" (*)
 │       │       ├── tokio feature "sync" (*)
@@ -1784,13 +1798,291 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       ├── insight-engine feature "default" (command-line) (*)
 │       │       ├── semver feature "default" (*)
 │       │       ├── serde_jcs feature "default" (*)
+│       │       ├── sha2 feature "default" (*)
 │       │       ├── tokio-util feature "default" (*)
 │       │       ├── tokio-util feature "rt" (*)
 │       │       ├── insight-durable feature "default" (command-line) (*)
-│       │       └── insight-resources feature "default" (command-line) (*)
+│       │       ├── rustls feature "aws_lc_rs" (*)
+│       │       ├── rustls feature "std" (*)
+│       │       ├── rustls feature "tls12" (*)
+│       │       ├── url feature "default" (*)
+│       │       ├── insight-resources feature "default" (command-line) (*)
+│       │       ├── async-nats feature "aws-lc-rs"
+│       │       │   ├── async-nats v0.50.0
+│       │       │   │   ├── rustls-webpki v0.103.13 (*)
+│       │       │   │   ├── tokio-rustls v0.26.4 (*)
+│       │       │   │   ├── bytes feature "default" (*)
+│       │       │   │   ├── bytes feature "serde"
+│       │       │   │   │   └── bytes v1.12.1 (*)
+│       │       │   │   ├── serde feature "default" (*)
+│       │       │   │   ├── serde feature "derive" (*)
+│       │       │   │   ├── tracing feature "default" (*)
+│       │       │   │   ├── futures-util feature "sink" (*)
+│       │       │   │   ├── futures-util feature "std" (*)
+│       │       │   │   ├── memchr feature "default" (*)
+│       │       │   │   ├── tokio feature "default" (*)
+│       │       │   │   ├── tokio feature "fs" (*)
+│       │       │   │   ├── tokio feature "io-util" (*)
+│       │       │   │   ├── tokio feature "macros" (*)
+│       │       │   │   ├── tokio feature "net" (*)
+│       │       │   │   ├── tokio feature "rt" (*)
+│       │       │   │   ├── tokio feature "sync" (*)
+│       │       │   │   ├── tokio feature "time" (*)
+│       │       │   │   ├── base64 feature "default" (*)
+│       │       │   │   ├── serde_json feature "default" (*)
+│       │       │   │   ├── regex feature "default" (*)
+│       │       │   │   ├── thiserror feature "default" (*)
+│       │       │   │   ├── tokio-util feature "default" (*)
+│       │       │   │   ├── aws-lc-rs feature "default"
+│       │       │   │   │   ├── aws-lc-rs v1.17.1 (*)
+│       │       │   │   │   ├── aws-lc-rs feature "alloc"
+│       │       │   │   │   │   └── aws-lc-rs v1.17.1 (*)
+│       │       │   │   │   ├── aws-lc-rs feature "aws-lc-sys" (*)
+│       │       │   │   │   ├── aws-lc-rs feature "ring-io"
+│       │       │   │   │   │   └── aws-lc-rs v1.17.1 (*)
+│       │       │   │   │   └── aws-lc-rs feature "ring-sig-verify"
+│       │       │   │   │       └── aws-lc-rs v1.17.1 (*)
+│       │       │   │   ├── rustls-pki-types feature "default" (*)
+│       │       │   │   ├── url feature "default" (*)
+│       │       │   │   ├── nkeys feature "default"
+│       │       │   │   │   └── nkeys v0.4.5
+│       │       │   │   │       ├── ed25519 v2.2.3
+│       │       │   │   │       │   └── signature v2.2.0
+│       │       │   │   │       │       └── digest v0.10.7
+│       │       │   │   │       │           ├── block-buffer feature "default" (*)
+│       │       │   │   │       │           └── crypto-common feature "default"
+│       │       │   │   │       │               └── crypto-common v0.1.7
+│       │       │   │   │       │                   ├── generic-array feature "default" (*)
+│       │       │   │   │       │                   ├── generic-array feature "more_lengths" (*)
+│       │       │   │   │       │                   └── typenum feature "default" (*)
+│       │       │   │   │       ├── log feature "default" (*)
+│       │       │   │   │       ├── data-encoding feature "default" (*)
+│       │       │   │   │       ├── ed25519-dalek feature "digest"
+│       │       │   │   │       │   ├── ed25519-dalek v2.2.0
+│       │       │   │   │       │   │   ├── ed25519 v2.2.3 (*)
+│       │       │   │   │       │   │   ├── sha2 v0.10.9
+│       │       │   │   │       │   │   │   ├── cfg-if feature "default" (*)
+│       │       │   │   │       │   │   │   ├── cpufeatures feature "default" (*)
+│       │       │   │   │       │   │   │   └── digest feature "default"
+│       │       │   │   │       │   │   │       ├── digest v0.10.7 (*)
+│       │       │   │   │       │   │   │       └── digest feature "core-api"
+│       │       │   │   │       │   │   │           ├── digest v0.10.7 (*)
+│       │       │   │   │       │   │   │           └── digest feature "block-buffer"
+│       │       │   │   │       │   │   │               └── digest v0.10.7 (*)
+│       │       │   │   │       │   │   ├── signature v2.2.0 (*)
+│       │       │   │   │       │   │   ├── subtle v2.6.1
+│       │       │   │   │       │   │   └── curve25519-dalek feature "digest"
+│       │       │   │   │       │   │       └── curve25519-dalek v4.1.3
+│       │       │   │   │       │   │           ├── digest v0.10.7 (*)
+│       │       │   │   │       │   │           ├── subtle v2.6.1
+│       │       │   │   │       │   │           └── cfg-if feature "default" (*)
+│       │       │   │   │       │   │           [build-dependencies]
+│       │       │   │   │       │   │           └── rustc_version feature "default"
+│       │       │   │   │       │   │               └── rustc_version v0.4.1
+│       │       │   │   │       │   │                   └── semver feature "default" (*)
+│       │       │   │   │       │   ├── signature feature "digest"
+│       │       │   │   │       │   │   └── signature v2.2.0 (*)
+│       │       │   │   │       │   └── ed25519-dalek feature "signature"
+│       │       │   │   │       │       └── ed25519-dalek v2.2.0 (*)
+│       │       │   │   │       ├── rand feature "default"
+│       │       │   │   │       │   ├── rand v0.8.7
+│       │       │   │   │       │   │   ├── libc v0.2.186
+│       │       │   │   │       │   │   ├── rand_chacha v0.3.1
+│       │       │   │   │       │   │   │   ├── ppv-lite86 feature "simd"
+│       │       │   │   │       │   │   │   │   └── ppv-lite86 v0.2.21
+│       │       │   │   │       │   │   │   │       ├── zerocopy feature "default"
+│       │       │   │   │       │   │   │   │       │   └── zerocopy v0.8.52
+│       │       │   │   │       │   │   │   │       └── zerocopy feature "simd" (*)
+│       │       │   │   │       │   │   │   └── rand_core feature "default"
+│       │       │   │   │       │   │   │       └── rand_core v0.6.4
+│       │       │   │   │       │   │   │           └── getrandom feature "default" (*)
+│       │       │   │   │       │   │   └── rand_core feature "default" (*)
+│       │       │   │   │       │   ├── rand feature "std"
+│       │       │   │   │       │   │   ├── rand v0.8.7 (*)
+│       │       │   │   │       │   │   ├── rand feature "alloc"
+│       │       │   │   │       │   │   │   ├── rand v0.8.7 (*)
+│       │       │   │   │       │   │   │   └── rand_core feature "alloc"
+│       │       │   │   │       │   │   │       └── rand_core v0.6.4 (*)
+│       │       │   │   │       │   │   ├── rand feature "getrandom"
+│       │       │   │   │       │   │   │   ├── rand v0.8.7 (*)
+│       │       │   │   │       │   │   │   └── rand_core feature "getrandom"
+│       │       │   │   │       │   │   │       └── rand_core v0.6.4 (*)
+│       │       │   │   │       │   │   ├── rand feature "libc"
+│       │       │   │   │       │   │   │   └── rand v0.8.7 (*)
+│       │       │   │   │       │   │   ├── rand feature "rand_chacha"
+│       │       │   │   │       │   │   │   └── rand v0.8.7 (*)
+│       │       │   │   │       │   │   ├── rand_chacha feature "std"
+│       │       │   │   │       │   │   │   ├── rand_chacha v0.3.1 (*)
+│       │       │   │   │       │   │   │   └── ppv-lite86 feature "std"
+│       │       │   │   │       │   │   │       └── ppv-lite86 v0.2.21 (*)
+│       │       │   │   │       │   │   └── rand_core feature "std"
+│       │       │   │   │       │   │       ├── rand_core v0.6.4 (*)
+│       │       │   │   │       │   │       ├── getrandom feature "std"
+│       │       │   │   │       │   │       │   └── getrandom v0.2.17 (*)
+│       │       │   │   │       │   │       ├── rand_core feature "alloc" (*)
+│       │       │   │   │       │   │       └── rand_core feature "getrandom" (*)
+│       │       │   │   │       │   └── rand feature "std_rng"
+│       │       │   │   │       │       ├── rand v0.8.7 (*)
+│       │       │   │   │       │       └── rand feature "rand_chacha" (*)
+│       │       │   │   │       └── signatory feature "default"
+│       │       │   │   │           ├── signatory v0.27.1
+│       │       │   │   │           │   ├── zeroize feature "default" (*)
+│       │       │   │   │           │   ├── signature feature "default"
+│       │       │   │   │           │   │   └── signature v2.2.0 (*)
+│       │       │   │   │           │   ├── rand_core feature "default" (*)
+│       │       │   │   │           │   ├── pkcs8 feature "alloc"
+│       │       │   │   │           │   │   ├── pkcs8 v0.10.2
+│       │       │   │   │           │   │   │   ├── der feature "default"
+│       │       │   │   │           │   │   │   │   └── der v0.7.10
+│       │       │   │   │           │   │   │   │       ├── zeroize v1.9.0 (*)
+│       │       │   │   │           │   │   │   │       ├── const-oid feature "default"
+│       │       │   │   │           │   │   │   │       │   └── const-oid v0.9.6
+│       │       │   │   │           │   │   │   │       ├── pem-rfc7468 feature "alloc"
+│       │       │   │   │           │   │   │   │       │   ├── pem-rfc7468 v0.7.0
+│       │       │   │   │           │   │   │   │       │   │   └── base64ct feature "default"
+│       │       │   │   │           │   │   │   │       │   │       └── base64ct v1.8.3
+│       │       │   │   │           │   │   │   │       │   └── base64ct feature "alloc"
+│       │       │   │   │           │   │   │   │       │       └── base64ct v1.8.3
+│       │       │   │   │           │   │   │   │       └── pem-rfc7468 feature "default"
+│       │       │   │   │           │   │   │   │           └── pem-rfc7468 v0.7.0 (*)
+│       │       │   │   │           │   │   │   ├── der feature "oid"
+│       │       │   │   │           │   │   │   │   └── der v0.7.10 (*)
+│       │       │   │   │           │   │   │   └── spki feature "default"
+│       │       │   │   │           │   │   │       └── spki v0.7.3
+│       │       │   │   │           │   │   │           ├── der feature "default" (*)
+│       │       │   │   │           │   │   │           └── der feature "oid" (*)
+│       │       │   │   │           │   │   ├── der feature "alloc"
+│       │       │   │   │           │   │   │   ├── der v0.7.10 (*)
+│       │       │   │   │           │   │   │   └── zeroize feature "alloc" (*)
+│       │       │   │   │           │   │   ├── der feature "zeroize"
+│       │       │   │   │           │   │   │   └── der v0.7.10 (*)
+│       │       │   │   │           │   │   └── spki feature "alloc"
+│       │       │   │   │           │   │       ├── spki v0.7.3 (*)
+│       │       │   │   │           │   │       └── der feature "alloc" (*)
+│       │       │   │   │           │   ├── pkcs8 feature "default"
+│       │       │   │   │           │   │   └── pkcs8 v0.10.2 (*)
+│       │       │   │   │           │   └── pkcs8 feature "pem"
+│       │       │   │   │           │       ├── pkcs8 v0.10.2 (*)
+│       │       │   │   │           │       ├── pkcs8 feature "alloc" (*)
+│       │       │   │   │           │       ├── der feature "pem"
+│       │       │   │   │           │       │   ├── der v0.7.10 (*)
+│       │       │   │   │           │       │   ├── der feature "alloc" (*)
+│       │       │   │   │           │       │   └── der feature "zeroize" (*)
+│       │       │   │   │           │       └── spki feature "pem"
+│       │       │   │   │           │           ├── spki v0.7.3 (*)
+│       │       │   │   │           │           ├── der feature "pem" (*)
+│       │       │   │   │           │           └── spki feature "alloc" (*)
+│       │       │   │   │           └── signatory feature "std"
+│       │       │   │   │               ├── signatory v0.27.1 (*)
+│       │       │   │   │               ├── signature feature "std"
+│       │       │   │   │               │   ├── signature v2.2.0 (*)
+│       │       │   │   │               │   └── signature feature "alloc"
+│       │       │   │   │               │       └── signature v2.2.0 (*)
+│       │       │   │   │               ├── rand_core feature "std" (*)
+│       │       │   │   │               └── pkcs8 feature "std"
+│       │       │   │   │                   ├── pkcs8 v0.10.2 (*)
+│       │       │   │   │                   ├── pkcs8 feature "alloc" (*)
+│       │       │   │   │                   ├── der feature "std"
+│       │       │   │   │                   │   ├── der v0.7.10 (*)
+│       │       │   │   │                   │   └── der feature "alloc" (*)
+│       │       │   │   │                   └── spki feature "std"
+│       │       │   │   │                       ├── spki v0.7.3 (*)
+│       │       │   │   │                       ├── der feature "std" (*)
+│       │       │   │   │                       └── spki feature "alloc" (*)
+│       │       │   │   ├── pin-project feature "default"
+│       │       │   │   │   └── pin-project v1.1.13
+│       │       │   │   │       └── pin-project-internal feature "default"
+│       │       │   │   │           └── pin-project-internal v1.1.13 (proc-macro)
+│       │       │   │   │               ├── proc-macro2 feature "default" (*)
+│       │       │   │   │               ├── quote feature "default" (*)
+│       │       │   │   │               ├── syn feature "clone-impls" (*)
+│       │       │   │   │               ├── syn feature "full" (*)
+│       │       │   │   │               ├── syn feature "parsing" (*)
+│       │       │   │   │               ├── syn feature "printing" (*)
+│       │       │   │   │               ├── syn feature "proc-macro" (*)
+│       │       │   │   │               └── syn feature "visit-mut" (*)
+│       │       │   │   ├── portable-atomic feature "default"
+│       │       │   │   │   ├── portable-atomic v1.14.0
+│       │       │   │   │   └── portable-atomic feature "fallback"
+│       │       │   │   │       └── portable-atomic v1.14.0
+│       │       │   │   ├── rand feature "default"
+│       │       │   │   │   ├── rand v0.10.2
+│       │       │   │   │   │   ├── rand_core v0.10.1
+│       │       │   │   │   │   ├── getrandom feature "default" (*)
+│       │       │   │   │   │   └── chacha20 feature "rng"
+│       │       │   │   │   │       └── chacha20 v0.10.1
+│       │       │   │   │   │           ├── rand_core v0.10.1
+│       │       │   │   │   │           └── cfg-if feature "default" (*)
+│       │       │   │   │   ├── rand feature "std"
+│       │       │   │   │   │   ├── rand v0.10.2 (*)
+│       │       │   │   │   │   ├── getrandom feature "std"
+│       │       │   │   │   │   │   └── getrandom v0.4.3 (*)
+│       │       │   │   │   │   └── rand feature "alloc"
+│       │       │   │   │   │       └── rand v0.10.2 (*)
+│       │       │   │   │   ├── rand feature "std_rng"
+│       │       │   │   │   │   └── rand v0.10.2 (*)
+│       │       │   │   │   ├── rand feature "sys_rng"
+│       │       │   │   │   │   ├── rand v0.10.2 (*)
+│       │       │   │   │   │   ├── getrandom feature "sys_rng"
+│       │       │   │   │   │   │   └── getrandom v0.4.3 (*)
+│       │       │   │   │   │   └── rand feature "getrandom"
+│       │       │   │   │   │       └── rand v0.10.2 (*)
+│       │       │   │   │   └── rand feature "thread_rng"
+│       │       │   │   │       ├── rand v0.10.2 (*)
+│       │       │   │   │       ├── rand feature "std" (*)
+│       │       │   │   │       ├── rand feature "std_rng" (*)
+│       │       │   │   │       └── rand feature "sys_rng" (*)
+│       │       │   │   ├── rustls-native-certs feature "default"
+│       │       │   │   │   └── rustls-native-certs v0.8.4
+│       │       │   │   │       ├── rustls-pki-types feature "default" (*)
+│       │       │   │   │       ├── rustls-pki-types feature "std" (*)
+│       │       │   │   │       └── security-framework feature "default" (*)
+│       │       │   │   ├── serde_repr feature "default"
+│       │       │   │   │   └── serde_repr v0.1.21 (proc-macro)
+│       │       │   │   │       ├── proc-macro2 feature "default" (*)
+│       │       │   │   │       ├── quote feature "default" (*)
+│       │       │   │   │       └── syn feature "default"
+│       │       │   │   │           ├── syn v3.0.3
+│       │       │   │   │           │   ├── proc-macro2 v1.0.106 (*)
+│       │       │   │   │           │   ├── quote v1.0.46 (*)
+│       │       │   │   │           │   └── unicode-ident feature "default" (*)
+│       │       │   │   │           ├── syn feature "clone-impls"
+│       │       │   │   │           │   └── syn v3.0.3 (*)
+│       │       │   │   │           ├── syn feature "derive"
+│       │       │   │   │           │   └── syn v3.0.3 (*)
+│       │       │   │   │           ├── syn feature "parsing"
+│       │       │   │   │           │   └── syn v3.0.3 (*)
+│       │       │   │   │           ├── syn feature "printing"
+│       │       │   │   │           │   └── syn v3.0.3 (*)
+│       │       │   │   │           └── syn feature "proc-macro"
+│       │       │   │   │               ├── syn v3.0.3 (*)
+│       │       │   │   │               ├── proc-macro2 feature "proc-macro" (*)
+│       │       │   │   │               └── quote feature "proc-macro" (*)
+│       │       │   │   └── tokio-stream feature "default"
+│       │       │   │       ├── tokio-stream v0.1.18
+│       │       │   │       │   ├── futures-core feature "default" (*)
+│       │       │   │       │   ├── pin-project-lite feature "default" (*)
+│       │       │   │       │   ├── tokio feature "default" (*)
+│       │       │   │       │   └── tokio feature "sync" (*)
+│       │       │   │       └── tokio-stream feature "time"
+│       │       │   │           ├── tokio-stream v0.1.18 (*)
+│       │       │   │           └── tokio feature "time" (*)
+│       │       │   ├── rustls-webpki feature "aws-lc-rs" (*)
+│       │       │   └── tokio-rustls feature "aws-lc-rs" (*)
+│       │       ├── async-nats feature "nkeys"
+│       │       │   └── async-nats v0.50.0 (*)
+│       │       ├── async-nats feature "server_2_10"
+│       │       │   └── async-nats v0.50.0 (*)
+│       │       ├── async-nats feature "server_2_11"
+│       │       │   └── async-nats v0.50.0 (*)
+│       │       ├── async-nats feature "server_2_12"
+│       │       │   └── async-nats v0.50.0 (*)
+│       │       └── async-nats feature "server_2_14"
+│       │           └── async-nats v0.50.0 (*)
 │       │       [dev-dependencies]
 │       │       ├── tokio feature "default" (*)
 │       │       ├── tokio feature "macros" (*)
+│       │       ├── tokio feature "net" (*)
 │       │       ├── tokio feature "rt-multi-thread" (*)
 │       │       ├── tokio feature "signal" (*)
 │       │       ├── tokio feature "sync" (*)
@@ -1824,49 +2116,26 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │           │       └── rustix v1.1.4 (*)
 │       │           └── tempfile feature "getrandom"
 │       │               └── tempfile v3.27.0 (*)
-│       ├── jsonwebtoken feature "aws_lc_rs"
-│       │   └── jsonwebtoken v11.0.0
-│       │       ├── serde feature "default" (*)
-│       │       ├── serde feature "derive" (*)
-│       │       ├── base64 feature "default" (*)
-│       │       ├── serde_json feature "default" (*)
-│       │       ├── aws-lc-rs feature "default"
-│       │       │   ├── aws-lc-rs v1.17.1 (*)
-│       │       │   ├── aws-lc-rs feature "alloc"
-│       │       │   │   └── aws-lc-rs v1.17.1 (*)
-│       │       │   ├── aws-lc-rs feature "aws-lc-sys" (*)
-│       │       │   ├── aws-lc-rs feature "ring-io"
-│       │       │   │   └── aws-lc-rs v1.17.1 (*)
-│       │       │   └── aws-lc-rs feature "ring-sig-verify"
-│       │       │       └── aws-lc-rs v1.17.1 (*)
-│       │       ├── zeroize feature "default" (*)
-│       │       ├── zeroize feature "derive"
-│       │       │   ├── zeroize v1.9.0 (*)
-│       │       │   └── zeroize feature "zeroize_derive"
-│       │       │       └── zeroize v1.9.0 (*)
-│       │       ├── signature feature "default"
-│       │       │   └── signature v2.2.0
-│       │       └── signature feature "std"
-│       │           ├── signature v2.2.0
-│       │           └── signature feature "alloc"
-│       │               └── signature v2.2.0
-│       └── tokio-stream feature "default"
-│           ├── tokio-stream v0.1.18
-│           │   ├── futures-core feature "default" (*)
-│           │   ├── pin-project-lite feature "default" (*)
-│           │   ├── tokio feature "default" (*)
-│           │   └── tokio feature "sync" (*)
-│           └── tokio-stream feature "time"
-│               ├── tokio-stream v0.1.18 (*)
-│               └── tokio feature "time" (*)
+│       ├── tokio-stream feature "default" (*)
+│       └── jsonwebtoken feature "aws_lc_rs"
+│           └── jsonwebtoken v11.0.0
+│               ├── serde feature "default" (*)
+│               ├── serde feature "derive" (*)
+│               ├── base64 feature "default" (*)
+│               ├── serde_json feature "default" (*)
+│               ├── aws-lc-rs feature "default" (*)
+│               ├── zeroize feature "default" (*)
+│               ├── zeroize feature "derive"
+│               │   ├── zeroize v1.9.0 (*)
+│               │   └── zeroize feature "zeroize_derive"
+│               │       └── zeroize v1.9.0 (*)
+│               ├── signature feature "default" (*)
+│               └── signature feature "std" (*)
 │       [dev-dependencies]
 │       ├── jsonschema v0.47.0 (*)
-│       ├── base64 feature "default" (*)
-│       ├── tower feature "default" (*)
 │       ├── chrono feature "default" (*)
 │       ├── chrono feature "serde" (*)
-│       ├── serde_jcs feature "default" (*)
-│       └── ring feature "default" (*)
+│       └── serde_jcs feature "default" (*)
 ├── insight-dsl feature "default" (command-line) (*)
 ├── insight-engine feature "default" (command-line) (*)
 ├── semver feature "default" (*)
@@ -1881,21 +2150,26 @@ insight-agent-platform v0.1.0 (<workspace>)
 ├── reqwest feature "json" (*)
 ├── reqwest feature "rustls" (*)
 ├── reqwest feature "stream" (*)
+├── rustls feature "aws_lc_rs" (*)
+├── rustls feature "std" (*)
+├── rustls feature "tls12" (*)
+├── url feature "default" (*)
 ├── ring feature "default" (*)
 ├── insight-resources feature "default" (command-line) (*)
 ├── insight-runtime feature "default" (command-line) (*)
-├── jsonwebtoken feature "aws_lc_rs" (*)
 ├── tokio-stream feature "default" (*)
+├── jsonwebtoken feature "aws_lc_rs" (*)
 ├── insight-storage feature "default" (command-line)
 │   └── insight-storage v0.1.0 (<workspace>/crates/storage)
 │       ├── async-trait feature "default" (*)
-│       ├── log feature "default" (*)
 │       ├── serde feature "default" (*)
 │       ├── serde feature "derive" (*)
+│       ├── log feature "default" (*)
 │       ├── tokio feature "default" (*)
 │       ├── tokio feature "fs" (*)
 │       ├── tokio feature "io-util" (*)
 │       ├── tokio feature "macros" (*)
+│       ├── tokio feature "net" (*)
 │       ├── tokio feature "rt-multi-thread" (*)
 │       ├── tokio feature "signal" (*)
 │       ├── tokio feature "sync" (*)
@@ -1911,6 +2185,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       ├── insight-dsl feature "default" (command-line) (*)
 │       ├── insight-engine feature "default" (command-line) (*)
 │       ├── serde_jcs feature "default" (*)
+│       ├── sha2 feature "default" (*)
 │       ├── tokio-util feature "default" (*)
 │       ├── tokio-util feature "rt" (*)
 │       ├── insight-durable feature "default" (command-line) (*)
@@ -1922,22 +2197,14 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │       ├── futures-core v0.3.32
 │       │   │   │       ├── log v0.4.33
 │       │   │   │       ├── memchr v2.8.2
-│       │   │   │       ├── sha2 v0.10.9
-│       │   │   │       │   ├── cfg-if feature "default" (*)
-│       │   │   │       │   ├── cpufeatures feature "default" (*)
-│       │   │   │       │   └── digest feature "default"
-│       │   │   │       │       ├── digest v0.10.7
-│       │   │   │       │       │   ├── block-buffer feature "default" (*)
-│       │   │   │       │       │   └── crypto-common feature "default"
-│       │   │   │       │       │       └── crypto-common v0.1.7
-│       │   │   │       │       │           ├── generic-array feature "default" (*)
-│       │   │   │       │       │           ├── generic-array feature "more_lengths" (*)
-│       │   │   │       │       │           └── typenum feature "default" (*)
-│       │   │   │       │       └── digest feature "core-api"
-│       │   │   │       │           ├── digest v0.10.7 (*)
-│       │   │   │       │           └── digest feature "block-buffer"
-│       │   │   │       │               └── digest v0.10.7 (*)
+│       │   │   │       ├── sha2 v0.10.9 (*)
 │       │   │   │       ├── bytes feature "default" (*)
+│       │   │   │       ├── serde feature "default" (*)
+│       │   │   │       ├── serde feature "derive" (*)
+│       │   │   │       ├── serde feature "rc"
+│       │   │   │       │   ├── serde v1.0.228 (*)
+│       │   │   │       │   └── serde_core feature "rc"
+│       │   │   │       │       └── serde_core v1.0.228
 │       │   │   │       ├── tracing feature "default" (*)
 │       │   │   │       ├── tracing feature "log" (*)
 │       │   │   │       ├── percent-encoding feature "default" (*)
@@ -1948,12 +2215,6 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │       │   ├── futures-io v0.3.32
 │       │   │   │       │   └── futures-io feature "std" (*)
 │       │   │   │       ├── smallvec feature "default" (*)
-│       │   │   │       ├── serde feature "default" (*)
-│       │   │   │       ├── serde feature "derive" (*)
-│       │   │   │       ├── serde feature "rc"
-│       │   │   │       │   ├── serde v1.0.228 (*)
-│       │   │   │       │   └── serde_core feature "rc"
-│       │   │   │       │       └── serde_core v1.0.228
 │       │   │   │       ├── tokio feature "fs" (*)
 │       │   │   │       ├── tokio feature "io-util" (*)
 │       │   │   │       ├── tokio feature "net" (*)
@@ -2052,14 +2313,13 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │       │       ├── log v0.4.33
 │       │   │   │       │       ├── memchr v2.8.2
 │       │   │   │       │       ├── sha2 v0.10.9 (*)
-│       │   │   │       │       ├── bytes feature "default" (*)
+│       │   │   │       │       ├── serde feature "default" (*)
+│       │   │   │       │       ├── serde feature "derive" (*)
+│       │   │   │       │       ├── serde feature "rc" (*)
 │       │   │   │       │       ├── tracing feature "default" (*)
 │       │   │   │       │       ├── tracing feature "log" (*)
 │       │   │   │       │       ├── percent-encoding feature "default" (*)
 │       │   │   │       │       ├── futures-io feature "default" (*)
-│       │   │   │       │       ├── serde feature "default" (*)
-│       │   │   │       │       ├── serde feature "derive" (*)
-│       │   │   │       │       ├── serde feature "rc" (*)
 │       │   │   │       │       ├── indexmap feature "default" (*)
 │       │   │   │       │       ├── cfg-if feature "default" (*)
 │       │   │   │       │       ├── hashlink feature "default" (*)
@@ -2077,6 +2337,10 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │       │       ├── webpki-roots feature "default" (*)
 │       │   │   │       │       ├── base64 feature "alloc"
 │       │   │   │       │       │   └── base64 v0.22.1
+│       │   │   │       │       ├── bytes feature "default"
+│       │   │   │       │       │   ├── bytes v1.12.1
+│       │   │   │       │       │   └── bytes feature "std"
+│       │   │   │       │       │       └── bytes v1.12.1
 │       │   │   │       │       ├── chrono feature "clock"
 │       │   │   │       │       │   ├── chrono v0.4.45
 │       │   │   │       │       │   │   ├── num-traits v0.2.19
@@ -2149,11 +2413,11 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │       │       ├── tokio feature "fs"
 │       │   │   │       │       │   └── tokio v1.52.3
 │       │   │   │       │       │       ├── mio v1.2.1 (*)
-│       │   │   │       │       │       ├── bytes feature "default" (*)
 │       │   │   │       │       │       ├── pin-project-lite feature "default" (*)
 │       │   │   │       │       │       ├── libc feature "default" (*)
 │       │   │   │       │       │       ├── socket2 feature "all" (*)
-│       │   │   │       │       │       └── socket2 feature "default" (*)
+│       │   │   │       │       │       ├── socket2 feature "default" (*)
+│       │   │   │       │       │       └── bytes feature "default" (*)
 │       │   │   │       │       ├── tokio feature "io-util"
 │       │   │   │       │       │   ├── tokio v1.52.3 (*)
 │       │   │   │       │       │   └── tokio feature "bytes"
@@ -2249,11 +2513,11 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │               │       │   ├── cpufeatures feature "default" (*)
 │       │   │   │               │       │   └── digest feature "default" (*)
 │       │   │   │               │       ├── whoami v2.1.2
+│       │   │   │               │       ├── serde feature "default" (*)
+│       │   │   │               │       ├── serde feature "derive" (*)
 │       │   │   │               │       ├── itoa feature "default" (*)
 │       │   │   │               │       ├── tracing feature "default" (*)
 │       │   │   │               │       ├── tracing feature "log" (*)
-│       │   │   │               │       ├── serde feature "default" (*)
-│       │   │   │               │       ├── serde feature "derive" (*)
 │       │   │   │               │       ├── crc feature "default" (*)
 │       │   │   │               │       ├── sqlx-core feature "default" (*)
 │       │   │   │               │       ├── base64 feature "alloc" (*)
@@ -2299,22 +2563,17 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │               │       │   ├── rand v0.10.2
 │       │   │   │               │       │   │   ├── rand_core v0.10.1
 │       │   │   │               │       │   │   ├── getrandom feature "default" (*)
-│       │   │   │               │       │   │   └── chacha20 feature "rng"
-│       │   │   │               │       │   │       └── chacha20 v0.10.1
-│       │   │   │               │       │   │           ├── rand_core v0.10.1
-│       │   │   │               │       │   │           └── cfg-if feature "default" (*)
+│       │   │   │               │       │   │   └── chacha20 feature "rng" (*)
 │       │   │   │               │       │   ├── rand feature "std"
 │       │   │   │               │       │   │   ├── rand v0.10.2 (*)
-│       │   │   │               │       │   │   ├── getrandom feature "std"
-│       │   │   │               │       │   │   │   └── getrandom v0.4.3 (*)
+│       │   │   │               │       │   │   ├── getrandom feature "std" (*)
 │       │   │   │               │       │   │   └── rand feature "alloc"
 │       │   │   │               │       │   │       └── rand v0.10.2 (*)
 │       │   │   │               │       │   ├── rand feature "std_rng"
 │       │   │   │               │       │   │   └── rand v0.10.2 (*)
 │       │   │   │               │       │   └── rand feature "sys_rng"
 │       │   │   │               │       │       ├── rand v0.10.2 (*)
-│       │   │   │               │       │       ├── getrandom feature "sys_rng"
-│       │   │   │               │       │       │   └── getrandom v0.4.3 (*)
+│       │   │   │               │       │       ├── getrandom feature "sys_rng" (*)
 │       │   │   │               │       │       └── rand feature "getrandom"
 │       │   │   │               │       │           └── rand v0.10.2 (*)
 │       │   │   │               │       └── stringprep feature "default"
@@ -2366,12 +2625,12 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │               ├── sqlx-sqlite feature "default"
 │       │   │   │               │   └── sqlx-sqlite v0.9.0
 │       │   │   │               │       ├── futures-core v0.3.32
+│       │   │   │               │       ├── serde feature "default" (*)
+│       │   │   │               │       ├── serde feature "derive" (*)
 │       │   │   │               │       ├── tracing feature "default" (*)
 │       │   │   │               │       ├── tracing feature "log" (*)
 │       │   │   │               │       ├── form_urlencoded feature "default" (*)
 │       │   │   │               │       ├── percent-encoding feature "default" (*)
-│       │   │   │               │       ├── serde feature "default" (*)
-│       │   │   │               │       ├── serde feature "derive" (*)
 │       │   │   │               │       ├── futures-executor feature "default"
 │       │   │   │               │       │   ├── futures-executor v0.3.32 (*)
 │       │   │   │               │       │   └── futures-executor feature "std" (*)
@@ -2446,6 +2705,8 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │       ├── memchr v2.8.2
 │       │   │   │       ├── sha2 v0.11.0 (*)
 │       │   │   │       ├── whoami v2.1.2
+│       │   │   │       ├── serde feature "default" (*)
+│       │   │   │       ├── serde feature "derive" (*)
 │       │   │   │       ├── itoa feature "default" (*)
 │       │   │   │       ├── tracing feature "default" (*)
 │       │   │   │       ├── tracing feature "log" (*)
@@ -2457,8 +2718,6 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │       ├── futures-channel feature "sink" (*)
 │       │   │   │       ├── futures-channel feature "std" (*)
 │       │   │   │       ├── smallvec feature "default" (*)
-│       │   │   │       ├── serde feature "default" (*)
-│       │   │   │       ├── serde feature "derive" (*)
 │       │   │   │       ├── base64 feature "alloc" (*)
 │       │   │   │       ├── serde_json feature "default" (*)
 │       │   │   │       ├── serde_json feature "raw_value" (*)
@@ -2466,15 +2725,17 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │       ├── chrono feature "clock" (*)
 │       │   │   │       ├── chrono feature "std" (*)
 │       │   │   │       ├── thiserror feature "std" (*)
+│       │   │   │       ├── rand feature "thread_rng" (*)
 │       │   │   │       ├── sqlx-core feature "default" (*)
 │       │   │   │       ├── hex feature "default" (*)
 │       │   │   │       ├── atoi feature "default" (*)
 │       │   │   │       ├── hkdf feature "default" (*)
-│       │   │   │       ├── rand feature "thread_rng" (*)
 │       │   │   │       └── stringprep feature "default" (*)
 │       │   │   └── sqlx-sqlite feature "default"
 │       │   │       └── sqlx-sqlite v0.9.0
 │       │   │           ├── futures-core v0.3.32
+│       │   │           ├── serde feature "default" (*)
+│       │   │           ├── serde feature "derive" (*)
 │       │   │           ├── tracing feature "default" (*)
 │       │   │           ├── tracing feature "log" (*)
 │       │   │           ├── log feature "default" (*)
@@ -2485,8 +2746,6 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │           ├── futures-channel feature "alloc" (*)
 │       │   │           ├── futures-channel feature "sink" (*)
 │       │   │           ├── futures-channel feature "std" (*)
-│       │   │           ├── serde feature "default" (*)
-│       │   │           ├── serde feature "derive" (*)
 │       │   │           ├── chrono feature "clock" (*)
 │       │   │           ├── chrono feature "std" (*)
 │       │   │           ├── futures-executor feature "default" (*)
@@ -2697,6 +2956,13 @@ insight-agent-platform v0.1.0 (<workspace>)
 │                           └── sqlx-core v0.9.0 (*)
 │       [dev-dependencies]
 │       └── tempfile feature "default" (*)
+├── sqlx feature "chrono" (*)
+├── sqlx feature "json" (*)
+├── sqlx feature "macros" (*)
+├── sqlx feature "postgres" (*)
+├── sqlx feature "runtime-tokio" (*)
+├── sqlx feature "sqlite" (*)
+├── sqlx feature "tls-rustls-aws-lc-rs" (*)
 ├── tracing-subscriber feature "default"
 │   ├── tracing-subscriber v0.3.23
 │   │   ├── tracing v0.1.44 (*)

@@ -11,10 +11,14 @@
 
 ## 当前规范
 
-当前没有活动规范。
+当前没有尚未完成的活动设计规范。
 
 最近完成的规范：
 
+- [Run Stream 可插拔实时消息总线与 NATS Core 优化](../archive/specs/2026-08-02-pluggable-run-stream-bus-and-nats-core.md)：
+  已将 PostgreSQL 限定为 durable authority，clean-cut 删除 Run Stream `postgres_notify` backend，
+  为当前单 Runtime 交付 `in_memory`，为跨 Runtime fan-out 交付 Core NATS，并通过零 per-SSE
+  PostgreSQL listener、单 NATS data connection、严格拓扑、安全、30 分钟混合负载与 2 小时 soak；
 - [Agent 与 Provider 管理 Control Plane v1](../archive/specs/2026-08-01-agent-and-provider-management-control-plane.md)：
   已交付 durable Agent Draft/Definition/Deployment/Activate/Debug 与 Provider
   Draft/Discovery/Revision/Activate/Suspension 生命周期、双数据库状态机、exact binding、Operator API、

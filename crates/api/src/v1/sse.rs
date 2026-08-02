@@ -20,10 +20,10 @@ use insight_engine::{
     events::protocol::RunEventType,
     run_stream::{
         DurableRunStreamSnapshot, LiveRunStreamBroker, LiveRunStreamDelivery,
-        LiveRunStreamSubscriber, RunCompletedSnapshot, RunFailedSnapshot, RunInitialSnapshot,
-        RunInteractionClosedDetails, RunInteractionMode, RunInteractionOutcome,
-        RunInteractionRequiredDetails, RunStatus, RunStoppedSnapshot, RunStreamEvent,
-        RunStreamGapAction, RunTerminalKind,
+        LiveRunStreamSubscriber, LiveRunStreamTerminalBarrierOutcome, RunCompletedSnapshot,
+        RunFailedSnapshot, RunInitialSnapshot, RunInteractionClosedDetails, RunInteractionMode,
+        RunInteractionOutcome, RunInteractionRequiredDetails, RunStatus, RunStoppedSnapshot,
+        RunStreamEvent, RunStreamGapAction, RunTerminalKind,
     },
     RunId,
 };
@@ -614,6 +614,8 @@ struct RunStreamDispatcher {
     next_sequence: u64,
     terminal_snapshot: Option<DurableRunStreamSnapshot>,
     terminal_barrier_deadline: Option<Instant>,
+    terminal_barrier_started: Option<Instant>,
+    terminal_barrier_recorded: bool,
     live_open: bool,
     seen_sealed_items: BTreeSet<String>,
     seen_unknown_tail_items: BTreeSet<String>,
@@ -639,6 +641,8 @@ impl RunStreamDispatcher {
             next_sequence: 1,
             terminal_snapshot: None,
             terminal_barrier_deadline: None,
+            terminal_barrier_started: None,
+            terminal_barrier_recorded: false,
             live_open: true,
             seen_sealed_items: BTreeSet::new(),
             seen_unknown_tail_items: BTreeSet::new(),
@@ -676,11 +680,15 @@ impl RunStreamDispatcher {
             }
             if self.terminal_snapshot.is_some() {
                 if self.terminal_barrier_deadline.is_none() {
+                    self.terminal_barrier_started = Some(Instant::now());
                     if let Err(error) = self
                         .terminal_frame_barrier
                         .wait_until_committed(&self.attached.run_id)
                         .await
                     {
+                        self.record_terminal_barrier(
+                            LiveRunStreamTerminalBarrierOutcome::CommitError,
+                        );
                         return Some(self.terminal_barrier_error(error));
                     }
                     if let Ok(run_id) = RunId::new(self.attached.run_id.clone()) {
@@ -702,10 +710,23 @@ impl RunStreamDispatcher {
                             }
                             continue;
                         }
-                        Ok(Err(_)) | Err(_) => self.live_open = false,
+                        Ok(Err(_)) => self.live_open = false,
+                        Err(_) => {
+                            self.live_open = false;
+                            self.record_terminal_barrier(
+                                LiveRunStreamTerminalBarrierOutcome::Timeout,
+                            );
+                        }
                     }
                 }
-                self.enqueue_manifest_unknown_tail_gaps();
+                let reconciled = self.enqueue_manifest_unknown_tail_gaps();
+                if !self.terminal_barrier_recorded {
+                    self.record_terminal_barrier(if reconciled == 0 {
+                        LiveRunStreamTerminalBarrierOutcome::Complete
+                    } else {
+                        LiveRunStreamTerminalBarrierOutcome::GapReconciled
+                    });
+                }
                 if let Some(event) = self.pending.pop_front() {
                     return Some(event);
                 }
@@ -807,6 +828,21 @@ impl RunStreamDispatcher {
     fn install_terminal_snapshot(&mut self, snapshot: DurableRunStreamSnapshot) {
         self.terminal_snapshot = Some(snapshot);
         self.terminal_barrier_deadline = None;
+        self.terminal_barrier_started = None;
+        self.terminal_barrier_recorded = false;
+    }
+
+    fn record_terminal_barrier(&mut self, outcome: LiveRunStreamTerminalBarrierOutcome) {
+        if self.terminal_barrier_recorded {
+            return;
+        }
+        let duration = self
+            .terminal_barrier_started
+            .map_or(Duration::ZERO, |started| started.elapsed());
+        self.attached
+            .live_run_stream_broker
+            .record_terminal_barrier(outcome, duration);
+        self.terminal_barrier_recorded = true;
     }
 
     fn terminal_barrier_error(&mut self, error: TerminalFrameBarrierError) -> RunStreamEvent {
@@ -850,12 +886,12 @@ impl RunStreamDispatcher {
         }
     }
 
-    fn enqueue_manifest_unknown_tail_gaps(&mut self) {
+    fn enqueue_manifest_unknown_tail_gaps(&mut self) -> usize {
         let Some(snapshot) = self.terminal_snapshot.as_ref() else {
-            return;
+            return 0;
         };
         let Some(items) = snapshot.public_item_manifest().as_array() else {
-            return;
+            return 0;
         };
         let pending = manifest_items_without_terminal_evidence(
             items,
@@ -863,6 +899,7 @@ impl RunStreamDispatcher {
             &self.seen_unknown_tail_items,
             &self.seen_item_watermarks,
         );
+        let count = pending.len();
         for (item_id, attempt_no, missing_from) in pending {
             self.seen_unknown_tail_items.insert(item_id.clone());
             let sequence_number = self.allocate_sequence();
@@ -876,6 +913,7 @@ impl RunStreamDispatcher {
                 action: RunStreamGapAction::DiscardProvisionalItem,
             });
         }
+        count
     }
 }
 

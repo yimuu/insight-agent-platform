@@ -170,6 +170,43 @@ terminal-only v1 仍限定单 owner replica。
 有限资源部署和 k6 生命周期压测见
 [`bench/k8s/README.md`](../../bench/k8s/README.md)。
 
+### Core NATS Run Stream
+
+chart 默认是 `runtime.runStream.topology=single_runtime`、`broker=in_memory`。需要跨 Runtime 连接
+Worker 和 SSE 时，叠加
+[`values-nats-core-qualification.yaml`](../../deploy/helm/insight-agent-platform/values-nats-core-qualification.yaml)
+并替换 server、namespace、credentials Secret 和 TLS Secret。chart 不安装 NATS cluster；生产建议
+每个 installation 使用独立 NATS Account，credential 至少限制为：
+
+```text
+publish allow:   insight.<namespace>.run_stream.v1.*
+subscribe allow: insight.<namespace>.run_stream.v1.*
+deny:            其他 subject
+```
+
+每个 Runtime 只建立一个 NATS data connection；每个 Attached Run 建立普通 subscription，不能配置
+queue group，也不能开启 `no_echo`。readiness 要求已认证连接、server `max_payload` 足够且 flush 成功。
+NATS 断连时 liveness 保持成功、readiness 失败，新 Attached admission 在创建 durable Run 前失败；已经
+执行的 durable Run 和 terminal commit 继续。Core NATS 不 replay，恢复后缺失 frame 通过 gap 与 terminal
+snapshot 校准。
+
+排障先看 `run_stream_bus_ready`、connection/reconnect、active subscription、pending bytes、drop/gap、
+slow consumer 和 terminal barrier 指标，再看 NATS server connection/in/out/slow-consumer 指标。常见原因：
+
+- `ready=0` 且持续 reconnect：检查 DNS、CA/server identity、credential 与 ACL；
+- subscription ready timeout：检查 NATS RTT、权限和 server overload，不要放宽 durable admission 顺序；
+- pending/drop 增长：降低 frame 速率或扩容 Runtime/NATS，不能靠增加 PostgreSQL pool 修复；
+- slow consumer 增长：检查共享 client capacity 与 per-Run inbound queue；慢 SSE 应只影响该 Run 并形成 gap；
+- terminal barrier timeout：以 `GET Run`/terminal snapshot 为权威，检查 seal/gap 丢失与 NATS outage。
+
+最小 Run Stream dashboard 应同时展示 `run_stream_bus_ready`、connected connection、active
+subscription/internal task、all/body/control pending message/byte、reconnect/drop/gap/decode/slow-consumer
+rate，以及 terminal barrier 的 outcome 和延迟。告警至少覆盖持续 `ready=0`、connected connection 不等于
+1、pending 持续增长、decode error、terminal barrier timeout；subscription 与 task 应与当前 Attached Run
+规模同向变化，不能仅因一次重连形成单调增长。
+
+指标、日志和告警不得包含 credentials、payload、完整 subject、Run ID 或 subject hash 与 Run ID 的关联。
+
 容量资格使用三个显式 overlay，均应叠加在 `values-benchmark.yaml` 之后：
 
 - `values-benchmark-limited.yaml`：runtime/PostgreSQL 各 `500m / 256Mi`，50 active Run、4 permits；
@@ -211,6 +248,11 @@ readiness 和 LISTEN consumer 都从该有界 pool 获取连接。它必须至�
 permit 数并为监听与控制查询留出余量。Helm 用
 `runtime.databasePoolMaxConnections` 生成该配置：limited/C1/C2 分别使用 6/24/32。盲目增大
 pool 会增加 PostgreSQL backend 私有内存和瞬时竞争，不等价于提高吞吐。
+
+Run Stream 不属于上述数据库连接模型。`in_memory` 与 `nats_core` 的 subscribe/publish/seal 不获取
+pool connection、不创建 per-SSE `PgListener`、也不执行 per-frame `pg_notify`；SSE admission、lifecycle
+和 terminal snapshot 仍使用短事务/短查询。50 条活跃 SSE 不应使 PostgreSQL active connection 基线
+增加 50，NATS 也不能被当作 durable Run、lease、timer 或 terminal authority。
 
 ## 启动前 Schema provisioning
 
@@ -346,6 +388,9 @@ token 不应进入配置明文、Debug、错误或日志。
   `conversation_context_tokens{persistence_mode}` 和
   `conversation_summary_jobs_{active,total}`；功能关闭时 `full` 样本仍以零值存在，且所有 label
   都不得包含 Run、Conversation、tenant 或 user 标识；
+- Run Stream 指标覆盖 backend 连接/重连状态、active subscription、active internal task、publisher
+  pending message/byte、publish/drop/gap、queue delay、slow consumer 与 wire decode error；label 只允许
+  闭合的 backend、state、queue/event/gap class 和 reason，不包含 raw subject、namespace、Run 或 payload；
 - MCP 指标覆盖 discovery/list/call/read/get/completion 的计数与 duration、transport event、
   subscription、interaction、remote task、OAuth、stdio restart、cache、body/frame rejection 与
   stale publication candidate；管理面额外暴露 bounded route/result 请求计数与延迟、

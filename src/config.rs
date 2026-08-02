@@ -11,6 +11,7 @@ use std::{
 use insight_engine::PersistenceMode;
 use insight_storage::postgres_config::PostgresHistoryUrlError;
 use serde::Deserialize;
+use url::Url;
 
 #[path = "mcp_config.rs"]
 mod mcp_config;
@@ -217,20 +218,56 @@ pub enum DeploymentMode {
     SingleProcessDevelopment,
 }
 
-/// Transport used for live-only response publications.
-///
-/// This is deliberately separate from the durable history store: response
-/// deltas are bounded observations and never become recovery authority.
+/// Declares whether live Run publishers and subscribers are guaranteed to
+/// share one process or may be placed in different runtime processes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LiveRunStreamBrokerProvider {
-    InProcess,
-    PostgresNotify,
+pub enum RunStreamTopology {
+    SingleRuntime,
+    Distributed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NatsRunStreamTlsConfig {
+    pub required: bool,
+    pub root_certificates: Vec<PathBuf>,
+    pub client_certificate: Option<PathBuf>,
+    pub client_private_key: Option<PathBuf>,
+}
+
+/// Strict Core NATS connection policy for live-only Run observations.
+///
+/// Credentials remain wrapped in [`SecretString`], so derived configuration
+/// can be inspected without exposing the NATS user seed or JWT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NatsCoreRunStreamConfig {
+    pub servers: Vec<String>,
+    pub namespace: String,
+    pub credentials: Option<SecretString>,
+    pub tls: NatsRunStreamTlsConfig,
+    pub connect_timeout: Duration,
+    pub subscription_ready_timeout: Duration,
+    pub reconnect_min_delay: Duration,
+    pub reconnect_max_delay: Duration,
+    pub max_pending_messages: usize,
+    pub max_pending_bytes: usize,
+    pub drain_timeout: Duration,
+}
+
+/// Transport used for live-only Run publications.
+///
+/// This is deliberately separate from the durable history store: Run deltas
+/// are bounded observations and never become recovery authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveRunStreamBrokerConfig {
+    InMemory,
+    NatsCore(NatsCoreRunStreamConfig),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunStreamConfig {
-    pub broker: LiveRunStreamBrokerProvider,
+    pub topology: RunStreamTopology,
+    pub broker: LiveRunStreamBrokerConfig,
     pub body_queue_capacity: usize,
     pub control_queue_capacity: usize,
     pub max_frame_bytes: usize,
@@ -302,7 +339,7 @@ pub struct TerminalOnlyRuntimeConfig {
     pub max_concurrent_runs: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
     /// Fallback for author documents that do not declare an immutable
     /// Deployment Revision persistence policy. This remains `full` until a
@@ -439,7 +476,15 @@ impl PlatformConfig {
             ));
         }
         let artifacts = resolve_artifacts(parent, raw.artifacts, raw.deployment_mode, &get_env)?;
-        let runtime = resolve_runtime(raw.runtime, raw.deployment_mode)?;
+        let runtime = resolve_runtime(parent, raw.runtime, raw.deployment_mode, &get_env)?;
+        if matches!(history, HistoryConfig::Sqlite { .. })
+            && runtime.run_stream.topology == RunStreamTopology::Distributed
+        {
+            return Err(PlatformConfigError::new(
+                "PLATFORM_RUNTIME_INVALID",
+                "SQLite history does not support runtime.run_stream.topology=distributed",
+            ));
+        }
         let conversations = resolve_conversations(raw.conversations)?;
         let mcp = resolve_mcp(raw.mcp, parent, raw.deployment_mode, &get_env)?;
         if mcp.client.management_api.enabled && !management.enabled {
@@ -1146,7 +1191,8 @@ struct SchedulerYaml {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunStreamYaml {
-    broker: LiveRunStreamBrokerProvider,
+    topology: RunStreamTopology,
+    broker: RunStreamBrokerYaml,
     body_queue_capacity: usize,
     control_queue_capacity: usize,
     max_frame_bytes: usize,
@@ -1154,6 +1200,37 @@ struct RunStreamYaml {
     max_run_bytes: usize,
     terminal_barrier_timeout: String,
     outbound_write_timeout: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum RunStreamBrokerYaml {
+    InMemory,
+    NatsCore {
+        servers: Vec<String>,
+        namespace: String,
+        credentials_env: Option<String>,
+        tls: NatsRunStreamTlsYaml,
+        connect_timeout: String,
+        subscription_ready_timeout: String,
+        reconnect_min_delay: String,
+        reconnect_max_delay: String,
+        max_pending_messages: usize,
+        max_pending_bytes: usize,
+        drain_timeout: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NatsRunStreamTlsYaml {
+    required: bool,
+    #[serde(default)]
+    root_certificates: Vec<PathBuf>,
+    #[serde(default)]
+    client_certificate: Option<PathBuf>,
+    #[serde(default)]
+    client_private_key: Option<PathBuf>,
 }
 
 fn resolve_auth(
@@ -1863,8 +1940,10 @@ fn validate_postgres_history_url(database_url: &str) -> Result<(), PlatformConfi
 }
 
 fn resolve_runtime(
+    parent: &Path,
     raw: RuntimeYaml,
     deployment_mode: DeploymentMode,
+    get_env: &impl Fn(&str) -> Option<String>,
 ) -> Result<RuntimeConfig, PlatformConfigError> {
     let terminal_only = resolve_terminal_only(raw.terminal_only)?;
     let capacities = [
@@ -1913,7 +1992,7 @@ fn resolve_runtime(
             "runtime.shutdown_hard_deadline must be greater than runtime.shutdown_grace_period",
         ));
     }
-    let run_stream = resolve_run_stream(raw.run_stream, deployment_mode)?;
+    let run_stream = resolve_run_stream(parent, raw.run_stream, deployment_mode, get_env)?;
     let scheduler = resolve_scheduler(raw.scheduler)?;
     let max_llm_tool_rounds = raw.max_llm_tool_rounds.unwrap_or(16);
     let max_llm_tool_calls = raw.max_llm_tool_calls.unwrap_or(64);
@@ -2089,19 +2168,17 @@ fn resolve_scheduler(raw: Option<SchedulerYaml>) -> Result<SchedulerConfig, Plat
 }
 
 fn resolve_run_stream(
+    parent: &Path,
     raw: Option<RunStreamYaml>,
     deployment_mode: DeploymentMode,
+    get_env: &impl Fn(&str) -> Option<String>,
 ) -> Result<RunStreamConfig, PlatformConfigError> {
     let Some(raw) = raw else {
         return Ok(RunStreamConfig {
-            broker: match deployment_mode {
-                DeploymentMode::Production => LiveRunStreamBrokerProvider::PostgresNotify,
-                DeploymentMode::SingleProcessDevelopment => LiveRunStreamBrokerProvider::InProcess,
-            },
+            topology: RunStreamTopology::SingleRuntime,
+            broker: LiveRunStreamBrokerConfig::InMemory,
             body_queue_capacity: 256,
             control_queue_capacity: 32,
-            // PostgreSQL NOTIFY has an 8 KiB payload ceiling. Keep enough
-            // headroom for the closed publication envelope.
             max_frame_bytes: 4 * 1_024,
             max_item_bytes: 4 * 1_024 * 1_024,
             max_run_bytes: 16 * 1_024 * 1_024,
@@ -2116,13 +2193,128 @@ fn resolve_run_stream(
         || raw.max_item_bytes < raw.max_frame_bytes
         || raw.max_run_bytes < raw.max_item_bytes
         || raw.max_run_bytes > 256 * 1_024 * 1_024
-        || (raw.broker == LiveRunStreamBrokerProvider::PostgresNotify
-            && raw.max_frame_bytes > 4 * 1_024)
     {
         return Err(runtime_error("runtime.run_stream bounds are invalid"));
     }
+    let broker = match raw.broker {
+        RunStreamBrokerYaml::InMemory => {
+            if raw.topology == RunStreamTopology::Distributed {
+                return Err(runtime_error(
+                    "runtime.run_stream topology=distributed requires broker.type=nats_core",
+                ));
+            }
+            LiveRunStreamBrokerConfig::InMemory
+        }
+        RunStreamBrokerYaml::NatsCore {
+            servers,
+            namespace,
+            credentials_env,
+            tls,
+            connect_timeout,
+            subscription_ready_timeout,
+            reconnect_min_delay,
+            reconnect_max_delay,
+            max_pending_messages,
+            max_pending_bytes,
+            drain_timeout,
+        } => {
+            if servers.is_empty() || servers.len() > 16 {
+                return Err(runtime_error(
+                    "runtime.run_stream.broker.servers must contain between 1 and 16 endpoints",
+                ));
+            }
+            let mut unique_servers = BTreeSet::new();
+            for server in &servers {
+                validate_nats_server_url(server)?;
+                if !unique_servers.insert(server.clone()) {
+                    return Err(runtime_error(
+                        "runtime.run_stream.broker.servers must be unique",
+                    ));
+                }
+            }
+            if !valid_nats_namespace(&namespace) {
+                return Err(runtime_error(
+                    "runtime.run_stream.broker.namespace must be a lowercase 1-64 character NATS token",
+                ));
+            }
+            if (tls.client_certificate.is_some()) != (tls.client_private_key.is_some()) {
+                return Err(runtime_error(
+                    "runtime.run_stream.broker.tls client certificate and private key must be configured together",
+                ));
+            }
+            if deployment_mode == DeploymentMode::Production
+                && (!tls.required || credentials_env.is_none())
+            {
+                return Err(runtime_error(
+                    "production nats_core Run stream requires TLS and credentials_env",
+                ));
+            }
+            let connect_timeout = positive_duration(
+                &connect_timeout,
+                "runtime.run_stream.broker.connect_timeout",
+            )?;
+            let subscription_ready_timeout = positive_duration(
+                &subscription_ready_timeout,
+                "runtime.run_stream.broker.subscription_ready_timeout",
+            )?;
+            let reconnect_min_delay = positive_duration(
+                &reconnect_min_delay,
+                "runtime.run_stream.broker.reconnect_min_delay",
+            )?;
+            let reconnect_max_delay = positive_duration(
+                &reconnect_max_delay,
+                "runtime.run_stream.broker.reconnect_max_delay",
+            )?;
+            let drain_timeout =
+                positive_duration(&drain_timeout, "runtime.run_stream.broker.drain_timeout")?;
+            if reconnect_min_delay > reconnect_max_delay
+                || reconnect_max_delay > Duration::from_secs(30)
+                || !(1..=1_000_000).contains(&max_pending_messages)
+                || max_pending_bytes < raw.max_frame_bytes
+                || max_pending_bytes > 1_024 * 1_024 * 1_024
+            {
+                return Err(runtime_error(
+                    "runtime.run_stream.broker NATS reconnect or pending bounds are invalid",
+                ));
+            }
+            let credentials = credentials_env
+                .as_deref()
+                .map(|name| required_secret(name, get_env))
+                .transpose()?;
+            let root_certificates = tls
+                .root_certificates
+                .iter()
+                .map(|path| resolve_path(parent, path))
+                .collect();
+            LiveRunStreamBrokerConfig::NatsCore(NatsCoreRunStreamConfig {
+                servers,
+                namespace,
+                credentials,
+                tls: NatsRunStreamTlsConfig {
+                    required: tls.required,
+                    root_certificates,
+                    client_certificate: tls
+                        .client_certificate
+                        .as_deref()
+                        .map(|path| resolve_path(parent, path)),
+                    client_private_key: tls
+                        .client_private_key
+                        .as_deref()
+                        .map(|path| resolve_path(parent, path)),
+                },
+                connect_timeout,
+                subscription_ready_timeout,
+                reconnect_min_delay,
+                reconnect_max_delay,
+                max_pending_messages,
+                max_pending_bytes,
+                drain_timeout,
+            })
+        }
+    };
     Ok(RunStreamConfig {
-        broker: raw.broker,
+        topology: raw.topology,
+        broker,
         body_queue_capacity: raw.body_queue_capacity,
         control_queue_capacity: raw.control_queue_capacity,
         max_frame_bytes: raw.max_frame_bytes,
@@ -2137,6 +2329,39 @@ fn resolve_run_stream(
             "runtime.run_stream.outbound_write_timeout",
         )?,
     })
+}
+
+fn validate_nats_server_url(value: &str) -> Result<(), PlatformConfigError> {
+    let url = Url::parse(value)
+        .map_err(|_| runtime_error("runtime.run_stream.broker server URL is invalid"))?;
+    if !matches!(url.scheme(), "nats" | "tls")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.host_str().is_none()
+        || url.port().is_none()
+        || !matches!(url.path(), "" | "/")
+    {
+        return Err(runtime_error(
+            "runtime.run_stream.broker server URL must be nats:// or tls:// with an explicit host and port and no credentials, path, query, or fragment",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_nats_namespace(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && bytes
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && bytes
+            .last()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
 }
 
 fn optional_positive_duration(

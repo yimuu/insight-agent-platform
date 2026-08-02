@@ -3245,6 +3245,32 @@ pub enum LiveRunStreamBrokerCapability {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveRunStreamTerminalBarrierOutcome {
+    Complete,
+    GapReconciled,
+    Timeout,
+    CommitError,
+}
+
+impl LiveRunStreamTerminalBarrierOutcome {
+    pub const ALL: [Self; 4] = [
+        Self::Complete,
+        Self::GapReconciled,
+        Self::Timeout,
+        Self::CommitError,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::GapReconciled => "gap_reconciled",
+            Self::Timeout => "timeout",
+            Self::CommitError => "commit_error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveRunStreamByteLimits {
     pub max_frame_bytes: usize,
     pub max_item_bytes: usize,
@@ -3290,6 +3316,19 @@ impl Default for LiveRunStreamByteLimits {
 #[async_trait]
 pub trait LiveRunStreamBroker: Send + Sync {
     fn deployment_capability(&self) -> LiveRunStreamBrokerCapability;
+
+    /// Renders bounded-cardinality transport metrics. Concrete adapters must
+    /// never include Run identities, subjects, payloads, or credentials.
+    fn prometheus_metrics(&self) -> String {
+        String::new()
+    }
+
+    fn record_terminal_barrier(
+        &self,
+        _outcome: LiveRunStreamTerminalBarrierOutcome,
+        _duration: std::time::Duration,
+    ) {
+    }
 
     async fn check_readiness(
         &self,
@@ -3880,11 +3919,15 @@ pub mod adapter {
     }
 
     fn next_delivery(state: &mut RunQueueState) -> Option<LiveRunStreamDelivery> {
-        if let Some(position) = state
-            .controls
-            .iter()
-            .position(|control| matches!(control, QueueControl::Gap(_)))
-        {
+        if let Some(position) = state.controls.iter().position(|control| {
+            let QueueControl::Gap(gap) = control else {
+                return false;
+            };
+            !state.body.iter().any(|publication| {
+                publication.output_item_identity() == Some(gap.identity())
+                    && publication.local_sequence() < gap.missing_from()
+            })
+        }) {
             let QueueControl::Gap(gap) = state.controls.remove(position)? else {
                 unreachable!("the selected control is a gap")
             };

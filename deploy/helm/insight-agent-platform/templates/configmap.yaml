@@ -124,6 +124,51 @@
 {{- if or (lt (int .Values.conversations.retentionDays) 1) (gt (int .Values.conversations.retentionDays) 3650) }}
 {{- fail "conversations.retentionDays must be between 1 and 3650" }}
 {{- end }}
+{{- if ne (int .Values.replicaCount) 1 }}
+{{- fail "current Run Stream Helm qualification requires replicaCount=1" }}
+{{- end }}
+{{- if not (has .Values.runtime.runStream.topology (list "single_runtime" "distributed")) }}
+{{- fail "runtime.runStream.topology must be single_runtime or distributed" }}
+{{- end }}
+{{- if not (has .Values.runtime.runStream.broker (list "in_memory" "nats_core")) }}
+{{- fail "runtime.runStream.broker must be in_memory or nats_core" }}
+{{- end }}
+{{- if and (eq .Values.runtime.runStream.topology "distributed") (ne .Values.runtime.runStream.broker "nats_core") }}
+{{- fail "runtime.runStream.topology=distributed requires broker=nats_core" }}
+{{- end }}
+{{- if eq .Values.runtime.runStream.broker "nats_core" }}
+{{- if or (empty .Values.runtime.runStream.natsCore.servers) (gt (len .Values.runtime.runStream.natsCore.servers) 16) }}
+{{- fail "runtime.runStream.natsCore.servers must contain between 1 and 16 endpoints" }}
+{{- end }}
+{{- if ne (len .Values.runtime.runStream.natsCore.servers) (len (uniq .Values.runtime.runStream.natsCore.servers)) }}
+{{- fail "runtime.runStream.natsCore.servers must be unique" }}
+{{- end }}
+{{- range $server := .Values.runtime.runStream.natsCore.servers }}
+{{- if not (regexMatch "^(nats|tls)://(\\[[0-9A-Fa-f:]+\\]|[A-Za-z0-9.-]+):[0-9]+/?$" $server) }}
+{{- fail "runtime.runStream.natsCore.servers entries must be explicit nats:// or tls:// host:port URLs" }}
+{{- end }}
+{{- end }}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9_-]{0,62}[a-z0-9])?$" .Values.runtime.runStream.natsCore.namespace) }}
+{{- fail "runtime.runStream.natsCore.namespace must be a lowercase 1-64 character NATS token" }}
+{{- end }}
+{{- if or (empty .Values.runtime.runStream.natsCore.credentials.existingSecret) (empty .Values.runtime.runStream.natsCore.credentials.secretKey) }}
+{{- fail "runtime.runStream.natsCore.credentials existingSecret and secretKey are required" }}
+{{- end }}
+{{- if not .Values.runtime.runStream.natsCore.tls.required }}
+{{- fail "runtime.runStream.natsCore.tls.required must be true for the production Helm deployment" }}
+{{- end }}
+{{- if or (empty .Values.runtime.runStream.natsCore.tls.existingSecret) (empty .Values.runtime.runStream.natsCore.tls.rootCertificateKey) }}
+{{- fail "runtime.runStream.natsCore.tls existingSecret and rootCertificateKey are required" }}
+{{- end }}
+{{- if ne (empty .Values.runtime.runStream.natsCore.tls.clientCertificateKey) (empty .Values.runtime.runStream.natsCore.tls.clientPrivateKeyKey) }}
+{{- fail "runtime.runStream.natsCore.tls clientCertificateKey and clientPrivateKeyKey must be configured together" }}
+{{- end }}
+{{- range $key := list .Values.runtime.runStream.natsCore.credentials.secretKey .Values.runtime.runStream.natsCore.tls.rootCertificateKey .Values.runtime.runStream.natsCore.tls.clientCertificateKey .Values.runtime.runStream.natsCore.tls.clientPrivateKeyKey }}
+{{- if and $key (not (regexMatch "^[A-Za-z0-9._-]+$" $key)) }}
+{{- fail "runtime.runStream NATS Secret keys must be safe single path components" }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -331,14 +376,40 @@ data:
       max_llm_tool_rounds: 16
       max_llm_tool_calls: 64
       run_stream:
-        broker: postgres_notify
-        body_queue_capacity: 128
-        control_queue_capacity: 32
-        max_frame_bytes: 4096
-        max_item_bytes: 4194304
-        max_run_bytes: 16777216
-        terminal_barrier_timeout: 2s
-        outbound_write_timeout: 10s
+        topology: {{ .Values.runtime.runStream.topology }}
+        broker:
+          type: {{ .Values.runtime.runStream.broker }}
+          {{- if eq .Values.runtime.runStream.broker "nats_core" }}
+          servers:
+            {{- toYaml .Values.runtime.runStream.natsCore.servers | nindent 12 }}
+          namespace: {{ .Values.runtime.runStream.natsCore.namespace | quote }}
+          credentials_env: INSIGHT_RUN_STREAM_NATS_CREDENTIALS
+          tls:
+            required: {{ .Values.runtime.runStream.natsCore.tls.required }}
+            root_certificates:
+              - {{ printf "/var/run/secrets/insight-nats/%s" .Values.runtime.runStream.natsCore.tls.rootCertificateKey | quote }}
+            {{- if .Values.runtime.runStream.natsCore.tls.clientCertificateKey }}
+            client_certificate: {{ printf "/var/run/secrets/insight-nats/%s" .Values.runtime.runStream.natsCore.tls.clientCertificateKey | quote }}
+            client_private_key: {{ printf "/var/run/secrets/insight-nats/%s" .Values.runtime.runStream.natsCore.tls.clientPrivateKeyKey | quote }}
+            {{- else }}
+            client_certificate: null
+            client_private_key: null
+            {{- end }}
+          connect_timeout: {{ .Values.runtime.runStream.natsCore.connectTimeout }}
+          subscription_ready_timeout: {{ .Values.runtime.runStream.natsCore.subscriptionReadyTimeout }}
+          reconnect_min_delay: {{ .Values.runtime.runStream.natsCore.reconnectMinDelay }}
+          reconnect_max_delay: {{ .Values.runtime.runStream.natsCore.reconnectMaxDelay }}
+          max_pending_messages: {{ int .Values.runtime.runStream.natsCore.maxPendingMessages }}
+          max_pending_bytes: {{ int .Values.runtime.runStream.natsCore.maxPendingBytes }}
+          drain_timeout: {{ .Values.runtime.runStream.natsCore.drainTimeout }}
+          {{- end }}
+        body_queue_capacity: {{ int .Values.runtime.runStream.bodyQueueCapacity }}
+        control_queue_capacity: {{ int .Values.runtime.runStream.controlQueueCapacity }}
+        max_frame_bytes: {{ int .Values.runtime.runStream.maxFrameBytes }}
+        max_item_bytes: {{ int .Values.runtime.runStream.maxItemBytes }}
+        max_run_bytes: {{ int .Values.runtime.runStream.maxRunBytes }}
+        terminal_barrier_timeout: {{ .Values.runtime.runStream.terminalBarrierTimeout }}
+        outbound_write_timeout: {{ .Values.runtime.runStream.outboundWriteTimeout }}
       public_event_retention: {{ .Values.runtime.publicEventRetention }}
       public_event_prune_interval: {{ .Values.runtime.publicEventPruneInterval }}
       readiness_probe_timeout: {{ .Values.runtime.readinessProbeTimeout }}

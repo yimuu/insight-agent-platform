@@ -89,7 +89,9 @@ runtime:
   max_llm_tool_rounds: 16
   max_llm_tool_calls: 64
   run_stream:
-    broker: in_process
+    topology: single_runtime
+    broker:
+      type: in_memory
     body_queue_capacity: 64
     control_queue_capacity: 16
     max_frame_bytes: 16384

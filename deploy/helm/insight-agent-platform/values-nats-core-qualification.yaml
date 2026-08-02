@@ -1,0 +1,19 @@
+# External Core NATS qualification profile. The chart intentionally does not
+# install NATS; create these Secrets and endpoints in the target environment.
+runtime:
+  runStream:
+    topology: distributed
+    broker: nats_core
+    natsCore:
+      servers:
+        - tls://nats.nats.svc.cluster.local:4222
+      namespace: qualification
+      credentials:
+        existingSecret: insight-run-stream-nats-credentials
+        secretKey: credentials
+      tls:
+        required: true
+        existingSecret: insight-run-stream-nats-tls
+        rootCertificateKey: ca.pem
+        clientCertificateKey: client.pem
+        clientPrivateKeyKey: client-key.pem

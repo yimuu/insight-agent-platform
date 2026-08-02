@@ -126,6 +126,35 @@ resources:
 runtime:
   rustLog: warn
   databasePoolMaxConnections: 10
+  runStream:
+    topology: single_runtime
+    broker: in_memory
+    bodyQueueCapacity: 256
+    controlQueueCapacity: 32
+    maxFrameBytes: 4096
+    maxItemBytes: 4194304
+    maxRunBytes: 16777216
+    terminalBarrierTimeout: 2s
+    outboundWriteTimeout: 10s
+    natsCore:
+      servers: []
+      namespace: ""
+      credentials:
+        existingSecret: ""
+        secretKey: credentials
+      tls:
+        required: true
+        existingSecret: ""
+        rootCertificateKey: ca.pem
+        clientCertificateKey: ""
+        clientPrivateKeyKey: ""
+      connectTimeout: 5s
+      subscriptionReadyTimeout: 2s
+      reconnectMinDelay: 100ms
+      reconnectMaxDelay: 5s
+      maxPendingMessages: 4096
+      maxPendingBytes: 16777216
+      drainTimeout: 5s
   # The first rollout remains full; terminal_only is an explicit opt-in.
   defaultPersistenceMode: full
   terminalOnly:

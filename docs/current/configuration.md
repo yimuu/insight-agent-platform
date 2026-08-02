@@ -93,6 +93,67 @@ Streamable HTTP Draft 只接受无 userinfo/query/fragment 的 HTTPS endpoint；
 可直接 lint/render 的启用示例见
 [`values-mcp-management-example.yaml`](../../deploy/helm/insight-agent-platform/values-mcp-management-example.yaml)。
 
+## Live Run Stream bus
+
+`runtime.run_stream` 与 durable `history` 独立。单 Runtime 默认使用进程内 backend：
+
+```yaml
+runtime:
+  run_stream:
+    topology: single_runtime
+    broker:
+      type: in_memory
+    body_queue_capacity: 256
+    control_queue_capacity: 32
+    max_frame_bytes: 4096
+    max_item_bytes: 4194304
+    max_run_bytes: 16777216
+    terminal_barrier_timeout: 2s
+    outbound_write_timeout: 10s
+```
+
+Worker 与 Attached SSE 可能位于不同 Runtime 时，必须显式选择 `distributed` + Core NATS：
+
+```yaml
+runtime:
+  run_stream:
+    topology: distributed
+    broker:
+      type: nats_core
+      servers: [tls://nats-0.nats.svc:4222]
+      namespace: prod_cn1
+      credentials_env: INSIGHT_RUN_STREAM_NATS_CREDENTIALS
+      tls:
+        required: true
+        root_certificates: [/var/run/secrets/insight-nats/ca.pem]
+        client_certificate: null
+        client_private_key: null
+      connect_timeout: 5s
+      subscription_ready_timeout: 2s
+      reconnect_min_delay: 100ms
+      reconnect_max_delay: 5s
+      max_pending_messages: 4096
+      max_pending_bytes: 16777216
+      drain_timeout: 5s
+    body_queue_capacity: 256
+    control_queue_capacity: 32
+    max_frame_bytes: 65536
+    max_item_bytes: 4194304
+    max_run_bytes: 16777216
+    terminal_barrier_timeout: 2s
+    outbound_write_timeout: 10s
+```
+
+`in_memory` 只允许 `single_runtime`；SQLite 也只允许 `single_runtime`。`nats_core` 可用于两种 topology，
+但 production 必须启用 TLS 并提供 `credentials_env`。server URL 必须是无 userinfo、path、query、
+fragment 的显式 `nats://host:port` 或 `tls://host:port`；namespace 只允许 1～64 个小写字母、数字、
+`_`、`-`。旧字符串 `in_process`、`postgres_notify`、`nats_core` 和 backend object 未知字段都会被拒绝。
+
+Helm 使用 `runtime.runStream.*` 渲染同一合同，默认仍为单副本 `in_memory`。外部 NATS 示例见
+[`values-nats-core-qualification.yaml`](../../deploy/helm/insight-agent-platform/values-nats-core-qualification.yaml)；
+credentials 和 TLS 必须来自两个既有 Kubernetes Secret，chart 不部署 NATS，也不把 secret value
+渲染到 ConfigMap。
+
 ## Secret 与哈希
 
 配置和管理 API 只持久化 secret reference。secret value 不进入 Draft/Revision canonical JSON、

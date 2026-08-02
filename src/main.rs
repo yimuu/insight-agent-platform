@@ -4,7 +4,7 @@ use insight_agent_platform::{
     catalog::{OwnedProductionLeafDeploymentResolver, TerminalOnlyDeploymentConfig},
     config::{
         ArtifactStoreProvider, DebugExecutionProfileMode, DeploymentMode, HistoryConfig,
-        LiveRunStreamBrokerProvider, PlatformConfig, RunStreamConfig,
+        LiveRunStreamBrokerConfig, PlatformConfig, RunStreamConfig, RunStreamTopology,
     },
     engine::{
         production_worker_registry_with_live_run_stream_and_retrievals,
@@ -31,9 +31,10 @@ use insight_agent_platform::{
     },
     runtime::{
         DeployedAgentCatalog, InMemoryLiveRunStreamBroker, LiveRunStreamBroker,
-        LiveRunStreamByteLimits, PostgresLiveRunStreamBroker, PostgresLiveRunStreamBrokerOptions,
-        ProductionRunRepository, RunService, RunServiceConfig, TerminalOnlyRunConfig,
-        TerminalOnlyStore, WorkCoordinatorConfig,
+        LiveRunStreamByteLimits, NatsCoreLiveRunStreamBroker, NatsCoreLiveRunStreamBrokerOptions,
+        NatsCoreTlsOptions, ProductionRunRepository, RunService, RunServiceConfig,
+        RunStreamDeploymentTopology, TerminalOnlyRunConfig, TerminalOnlyStore,
+        WorkCoordinatorConfig,
     },
 };
 use insight_api::mcp::{
@@ -82,7 +83,6 @@ async fn main() -> MainResult<()> {
     let (
         repository,
         terminal_store,
-        live_run_stream_broker,
         mcp_interactions,
         mcp_oauth,
         mcp_remote_tasks,
@@ -90,8 +90,8 @@ async fn main() -> MainResult<()> {
         mcp_management,
         provider_management,
         agent_management,
-    ) = initialize_repository_and_live_run_stream(&config.history, config.runtime.run_stream)
-        .await?;
+    ) = initialize_repository(&config.history).await?;
+    let live_run_stream_broker = initialize_live_run_stream(&config.runtime.run_stream).await?;
     let mcp_policy_material = mcp_management_policy_material(
         &config.mcp.client,
         &config.mcp.protocol.preferred,
@@ -331,6 +331,10 @@ async fn main() -> MainResult<()> {
         config.runtime.run_stream.max_item_bytes,
         config.runtime.run_stream.max_run_bytes,
     )
+    .with_run_stream_topology(match config.runtime.run_stream.topology {
+        RunStreamTopology::SingleRuntime => RunStreamDeploymentTopology::SingleRuntime,
+        RunStreamTopology::Distributed => RunStreamDeploymentTopology::Distributed,
+    })
     .with_graph_persistence_policy(graph_persistence_policy);
     let service = RunService::start_with_artifact_store_graph_publication_and_live_run_stream(
         agents,
@@ -1169,13 +1173,11 @@ fn build_api_auth(config: &PlatformConfig) -> MainResult<ApiAuth> {
     Ok(base.with_human_principal_resolver(Arc::new(resolver)))
 }
 
-async fn initialize_repository_and_live_run_stream(
+async fn initialize_repository(
     config: &HistoryConfig,
-    run_stream: RunStreamConfig,
 ) -> MainResult<(
     Arc<dyn ProductionRunRepository>,
     Arc<dyn TerminalOnlyStore>,
-    Arc<dyn LiveRunStreamBroker>,
     Arc<dyn McpInteractionDurableRepository>,
     Arc<dyn McpOAuthDurableRepository>,
     Arc<dyn McpRemoteTaskDurableRepository>,
@@ -1186,13 +1188,6 @@ async fn initialize_repository_and_live_run_stream(
 )> {
     match config {
         HistoryConfig::Sqlite { path } => {
-            if run_stream.broker != LiveRunStreamBrokerProvider::InProcess {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "SQLite history supports only the in-process live Run stream broker",
-                )
-                .into());
-            }
             let concrete = Arc::new(SqliteDurableRepository::connect_path(path).await?);
             let repository: Arc<dyn ProductionRunRepository> = concrete.clone();
             let terminal_store: Arc<dyn TerminalOnlyStore> = concrete.clone();
@@ -1204,19 +1199,9 @@ async fn initialize_repository_and_live_run_stream(
             let provider_management: Arc<dyn ProviderManagementDurableRepository> =
                 concrete.clone();
             let agent_management: Arc<dyn AgentManagementDurableRepository> = concrete;
-            let broker = Arc::new(InMemoryLiveRunStreamBroker::new_with_limits(
-                run_stream.body_queue_capacity,
-                run_stream.control_queue_capacity,
-                LiveRunStreamByteLimits::new(
-                    run_stream.max_frame_bytes,
-                    run_stream.max_item_bytes,
-                    run_stream.max_run_bytes,
-                )?,
-            )?) as Arc<dyn LiveRunStreamBroker>;
             Ok((
                 repository,
                 terminal_store,
-                broker,
                 mcp_interactions,
                 mcp_oauth,
                 mcp_remote_tasks,
@@ -1236,34 +1221,6 @@ async fn initialize_repository_and_live_run_stream(
                 *max_connections,
             )
             .await?;
-            let broker: Arc<dyn LiveRunStreamBroker> = match run_stream.broker {
-                LiveRunStreamBrokerProvider::InProcess => {
-                    Arc::new(InMemoryLiveRunStreamBroker::new_with_limits(
-                        run_stream.body_queue_capacity,
-                        run_stream.control_queue_capacity,
-                        LiveRunStreamByteLimits::new(
-                            run_stream.max_frame_bytes,
-                            run_stream.max_item_bytes,
-                            run_stream.max_run_bytes,
-                        )?,
-                    )?)
-                }
-                LiveRunStreamBrokerProvider::PostgresNotify => Arc::new(
-                    PostgresLiveRunStreamBroker::start(
-                        repository.connection_pool(),
-                        PostgresLiveRunStreamBrokerOptions::new(
-                            run_stream.body_queue_capacity,
-                            run_stream.control_queue_capacity,
-                            run_stream.max_frame_bytes,
-                        )?
-                        .with_publication_limits(
-                            run_stream.max_item_bytes,
-                            run_stream.max_run_bytes,
-                        )?,
-                    )
-                    .await?,
-                ),
-            };
             let concrete = Arc::new(repository);
             let production: Arc<dyn ProductionRunRepository> = concrete.clone();
             let terminal_store: Arc<dyn TerminalOnlyStore> = concrete.clone();
@@ -1278,7 +1235,6 @@ async fn initialize_repository_and_live_run_stream(
             Ok((
                 production,
                 terminal_store,
-                broker,
                 mcp_interactions,
                 mcp_oauth,
                 mcp_remote_tasks,
@@ -1287,6 +1243,61 @@ async fn initialize_repository_and_live_run_stream(
                 provider_management,
                 agent_management,
             ))
+        }
+    }
+}
+
+/// Builds the transient Run Stream plane independently from durable history.
+///
+/// In particular, the NATS adapter never receives a PostgreSQL pool: live
+/// frames are not durable data and must not consume database connections or
+/// execute SQL on their delivery path.
+async fn initialize_live_run_stream(
+    config: &RunStreamConfig,
+) -> MainResult<Arc<dyn LiveRunStreamBroker>> {
+    let byte_limits = LiveRunStreamByteLimits::new(
+        config.max_frame_bytes,
+        config.max_item_bytes,
+        config.max_run_bytes,
+    )?;
+    match &config.broker {
+        LiveRunStreamBrokerConfig::InMemory => {
+            Ok(Arc::new(InMemoryLiveRunStreamBroker::new_with_limits(
+                config.body_queue_capacity,
+                config.control_queue_capacity,
+                byte_limits,
+            )?))
+        }
+        LiveRunStreamBrokerConfig::NatsCore(nats) => {
+            let broker = NatsCoreLiveRunStreamBroker::connect(NatsCoreLiveRunStreamBrokerOptions {
+                servers: nats.servers.clone(),
+                namespace: nats.namespace.clone(),
+                credentials: nats
+                    .credentials
+                    .as_ref()
+                    .map(|secret| secret.expose().to_owned()),
+                tls: NatsCoreTlsOptions {
+                    required: nats.tls.required,
+                    root_certificates: nats.tls.root_certificates.clone(),
+                    client_certificate: nats.tls.client_certificate.clone(),
+                    client_private_key: nats.tls.client_private_key.clone(),
+                },
+                connect_timeout: nats.connect_timeout,
+                subscription_ready_timeout: nats.subscription_ready_timeout,
+                reconnect_min_delay: nats.reconnect_min_delay,
+                reconnect_max_delay: nats.reconnect_max_delay,
+                max_pending_messages: nats.max_pending_messages,
+                max_pending_bytes: nats.max_pending_bytes,
+                body_queue_capacity: config.body_queue_capacity,
+                control_queue_capacity: config.control_queue_capacity,
+                max_frame_bytes: config.max_frame_bytes,
+                max_item_bytes: config.max_item_bytes,
+                max_run_bytes: config.max_run_bytes,
+                drain_timeout: nats.drain_timeout,
+                outbound_idle_timeout: std::time::Duration::from_secs(60),
+            })
+            .await?;
+            Ok(Arc::new(broker))
         }
     }
 }

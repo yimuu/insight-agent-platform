@@ -49,7 +49,7 @@ use insight_agent_platform::{
     },
     runtime::{
         DeployedAgentCatalog, ProductionRunRepository, RequestMetadata, RunError, RunService,
-        RunServiceConfig,
+        RunServiceConfig, RunStreamDeploymentTopology,
     },
 };
 use insight_api::v1::{build_router, ApiAuth, ApiState};
@@ -823,14 +823,15 @@ async fn production_artifact_store_gate_precedes_publication_and_binds_shared_id
         repository.clone() as Arc<dyn ProductionRunRepository>,
         retrieval_workers,
         shared.clone(),
-        production_config(Duration::from_secs(3_600)),
+        production_config(Duration::from_secs(3_600))
+            .with_run_stream_topology(RunStreamDeploymentTopology::Distributed),
     )
     .await
     .unwrap_err();
     assert_eq!(
         retrieval_broker_error.code(),
-        "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER",
-        "all public sources require a shared production broker, even without an LLM source"
+        "PLATFORM_DISTRIBUTED_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER",
+        "all public sources require a shared broker in distributed topology, even without an LLM source"
     );
     let stored = repository.load_versioned_plan_catalog().await.unwrap();
     assert!(stored.plans().is_empty());
@@ -841,13 +842,14 @@ async fn production_artifact_store_gate_precedes_publication_and_binds_shared_id
         repository.clone() as Arc<dyn ProductionRunRepository>,
         public_streaming_workers(),
         shared.clone(),
-        production_config(Duration::from_secs(3_600)),
+        production_config(Duration::from_secs(3_600))
+            .with_run_stream_topology(RunStreamDeploymentTopology::Distributed),
     )
     .await
     .unwrap_err();
     assert_eq!(
         broker_error.code(),
-        "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER"
+        "PLATFORM_DISTRIBUTED_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER"
     );
     let stored = repository.load_versioned_plan_catalog().await.unwrap();
     assert!(stored.plans().is_empty());
@@ -934,7 +936,8 @@ async fn production_artifact_store_gate_precedes_publication_and_binds_shared_id
         repository.clone() as Arc<dyn ProductionRunRepository>,
         mixed_workers,
         shared,
-        production_config(Duration::from_secs(3_600)),
+        production_config(Duration::from_secs(3_600))
+            .with_run_stream_topology(RunStreamDeploymentTopology::Distributed),
     )
     .await
     .unwrap();
@@ -952,7 +955,7 @@ async fn production_artifact_store_gate_precedes_publication_and_binds_shared_id
         .unwrap_err();
     assert_eq!(
         admission_error.code(),
-        "PLATFORM_PRODUCTION_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER"
+        "PLATFORM_DISTRIBUTED_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER"
     );
     admission_service
         .shutdown(Duration::from_secs(1))

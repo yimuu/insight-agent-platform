@@ -455,10 +455,9 @@ impl PostgresDurableRepository {
         Self::from_pool(pool).await
     }
 
-    /// Shares the configured PostgreSQL endpoint with infrastructure that is
-    /// explicitly non-durable (for example LISTEN/NOTIFY live Run streams).
-    /// Cloning a `PgPool` does not duplicate credentials into application
-    /// payloads and preserves one startup/readiness authority.
+    /// Shares the configured PostgreSQL pool with process-local infrastructure
+    /// that participates in the same startup/readiness authority. Live Run
+    /// Stream transports do not use this pool.
     pub fn connection_pool(&self) -> PgPool {
         self.pool.clone()
     }

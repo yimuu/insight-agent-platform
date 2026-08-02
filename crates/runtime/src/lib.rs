@@ -5,9 +5,11 @@ pub mod control;
 #[doc(hidden)]
 pub mod internal;
 pub mod leaf_adapters;
+pub mod nats_run_stream;
 pub mod retrieval_adapter;
 pub mod run_service;
 pub mod run_stream;
+mod run_stream_wire;
 pub mod scheduler_runtime;
 pub mod terminal_execution;
 pub mod terminal_only;
@@ -18,6 +20,10 @@ pub use insight_durable::terminal_store::{
     ConversationRole, MessageCursor,
 };
 pub use insight_engine::execution::{RunError, RunErrorKind};
+pub use nats_run_stream::{
+    nats_live_run_stream_subject, NatsCoreLiveRunStreamBroker, NatsCoreLiveRunStreamBrokerOptions,
+    NatsCoreTlsOptions,
+};
 pub use run_service::{
     AnyAttachedRun, AttachedRun, ConversationResponseVisibilityGuard, ConversationStreamDelivery,
     ConversationStreamPrivacy, DeployedAgentCatalog, ForkRecoveryOptions,
@@ -25,8 +31,8 @@ pub use run_service::{
     MigrationNodeMappingRequest, ProductionRunRepository, ProviderRunAdmissionAuthority,
     PublicArtifact, RecoveryOperation, RecoveryRequestMetadata, RecoveryReusePolicy,
     RecoveryRunResult, RequestMetadata, RunRepositoryCapability, RunService, RunServiceConfig,
-    RunSubscription, RuntimeMetricsSource, RuntimeReadinessProbe, ServiceError, SubscriptionError,
-    WorkCoordinatorConfig,
+    RunStreamDeploymentTopology, RunSubscription, RuntimeMetricsSource, RuntimeReadinessProbe,
+    ServiceError, SubscriptionError, WorkCoordinatorConfig,
 };
 pub use run_stream::{
     CompletedFunctionCallPublication, CompletedFunctionCallTailPublication,
@@ -35,15 +41,16 @@ pub use run_stream::{
     LiveRunStreamCloseOutcome, LiveRunStreamDelivery, LiveRunStreamGap, LiveRunStreamItemIdentity,
     LiveRunStreamPayload, LiveRunStreamPublication, LiveRunStreamPublishOutcome, LiveRunStreamSeal,
     LiveRunStreamSealStatus, LiveRunStreamSourceIdentity, LiveRunStreamSubscriber,
-    RunCompletedSnapshot, RunFailedSnapshot, RunInitialSnapshot, RunInteractionClosedDetails,
-    RunInteractionMode, RunInteractionOutcome, RunInteractionRequiredDetails,
-    RunInteractionSourceKind, RunInteractionState, RunInteractionSummary, RunObjectKind,
-    RunOutputContentPart, RunOutputItem, RunOutputItemStatus, RunOutputRole, RunPublicError,
-    RunPublicResultError, RunRetrieval, RunRetrievalMetadata, RunRetrievalPublicProjection,
-    RunRetrievalResult, RunStatus, RunStoppedSnapshot, RunStreamEvent, RunStreamEventType,
-    RunStreamGapAction, RunToolCompletedArgumentsProjection, RunToolContent,
-    RunToolPublicProjection, RunToolResult, RunUsage, RunUsageInputDetails, RunUsageOutputDetails,
-    RunUsageStatus, MAX_FUNCTION_CALL_ARGUMENT_BYTES, RUN_STREAM_PROTOCOL_VERSION,
+    LiveRunStreamTerminalBarrierOutcome, RunCompletedSnapshot, RunFailedSnapshot,
+    RunInitialSnapshot, RunInteractionClosedDetails, RunInteractionMode, RunInteractionOutcome,
+    RunInteractionRequiredDetails, RunInteractionSourceKind, RunInteractionState,
+    RunInteractionSummary, RunObjectKind, RunOutputContentPart, RunOutputItem, RunOutputItemStatus,
+    RunOutputRole, RunPublicError, RunPublicResultError, RunRetrieval, RunRetrievalMetadata,
+    RunRetrievalPublicProjection, RunRetrievalResult, RunStatus, RunStoppedSnapshot,
+    RunStreamEvent, RunStreamEventType, RunStreamGapAction, RunToolCompletedArgumentsProjection,
+    RunToolContent, RunToolPublicProjection, RunToolResult, RunUsage, RunUsageInputDetails,
+    RunUsageOutputDetails, RunUsageStatus, MAX_FUNCTION_CALL_ARGUMENT_BYTES,
+    RUN_STREAM_PROTOCOL_VERSION,
 };
 pub use terminal_execution::{
     execute_terminal_plan, TerminalExecutionConfig, TerminalExecutionError,

@@ -67,6 +67,13 @@ spec:
                   key: {{ .Values.externalDatabase.databaseUrlKey }}
             - name: RUST_LOG
               value: {{ .Values.runtime.rustLog | quote }}
+            {{- if eq .Values.runtime.runStream.broker "nats_core" }}
+            - name: INSIGHT_RUN_STREAM_NATS_CREDENTIALS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.runtime.runStream.natsCore.credentials.existingSecret | quote }}
+                  key: {{ .Values.runtime.runStream.natsCore.credentials.secretKey | quote }}
+            {{- end }}
             {{- if .Values.artifacts.tenantEncryption.enabled }}
             - name: INSIGHT_ARTIFACT_TENANT_KEYRING
               valueFrom:
@@ -139,6 +146,11 @@ spec:
               mountPath: /etc/insight/database-tls
               readOnly: true
             {{- end }}
+            {{- if eq .Values.runtime.runStream.broker "nats_core" }}
+            - name: run-stream-nats-tls
+              mountPath: /var/run/secrets/insight-nats
+              readOnly: true
+            {{- end }}
       volumes:
         - name: runtime-config
           configMap:
@@ -159,4 +171,10 @@ spec:
           secret:
             secretName: {{ include "insight-agent-platform.postgresqlName" . }}-tls
             defaultMode: 0444
+        {{- end }}
+        {{- if eq .Values.runtime.runStream.broker "nats_core" }}
+        - name: run-stream-nats-tls
+          secret:
+            secretName: {{ .Values.runtime.runStream.natsCore.tls.existingSecret | quote }}
+            defaultMode: 0440
         {{- end }}
