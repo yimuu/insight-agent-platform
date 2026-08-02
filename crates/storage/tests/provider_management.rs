@@ -661,6 +661,55 @@ async fn sqlite_provider_mutation_fault_rolls_back_state_receipt_audit_and_outbo
 }
 
 #[tokio::test]
+async fn sqlite_provider_management_outbox_is_bounded_inside_the_mutation_transaction() {
+    let (temporary, repository): (_, SqliteDurableRepository) =
+        support::temporary_sqlite_repository().await;
+    let database_url = format!(
+        "sqlite://{}",
+        temporary.path().join("durable.sqlite3").display()
+    );
+    let control = sqlx::SqlitePool::connect(&database_url).await.unwrap();
+    sqlx::query(
+        "WITH RECURSIVE seq(value) AS (
+             SELECT 1 UNION ALL SELECT value + 1 FROM seq WHERE value < 4096
+         )
+         INSERT INTO provider_management_outbox(
+             event_id,event_kind,provider_id,subject_id,safe_payload,created_at,delivered_at
+         )
+         SELECT printf('seed-%05d',value),'provider.seed','seed-provider','seed-subject','{}',
+                '2025-01-01T00:00:00.000Z',NULL FROM seq",
+    )
+    .execute(&control)
+    .await
+    .unwrap();
+    let draft = json!({"models":[]});
+    repository
+        .create_provider(CreateProviderCommand {
+            metadata: metadata("bounded-provider", "POST", "/v1/admin/providers"),
+            provider_id: "bounded-provider".to_owned(),
+            display_name: "Bounded Provider".to_owned(),
+            adapter_type: "open_ai_compatible".to_owned(),
+            provider_input_hash: json_hash(&draft),
+            draft_document: draft,
+        })
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_management_outbox")
+        .fetch_one(&control)
+        .await
+        .unwrap();
+    assert_eq!(count, 4096);
+    let retained_mutation: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM provider_management_outbox WHERE event_kind='provider.created'",
+    )
+    .fetch_one(&control)
+    .await
+    .unwrap();
+    assert_eq!(retained_mutation, 1);
+    control.close().await;
+}
+
+#[tokio::test]
 async fn postgres_provider_lifecycle_is_idempotent_evidence_bound_and_fenced() {
     let Some((repository, control, admin, schema)) = isolated_postgres_repository().await else {
         assert!(
@@ -684,6 +733,65 @@ async fn postgres_provider_lifecycle_is_idempotent_evidence_bound_and_fenced() {
             .expect("Provider management notification was not delivered")
             .unwrap();
     }
+    drop(repository);
+    drop(control);
+    sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+}
+
+#[tokio::test]
+async fn postgres_provider_management_outbox_is_bounded_under_concurrent_mutations() {
+    let Some((repository, control, admin, schema)) = isolated_postgres_repository().await else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must set TEST_POSTGRES_URL for PostgreSQL Provider outbox conformance"
+        );
+        return;
+    };
+    sqlx::query(
+        "INSERT INTO provider_management_outbox(
+             event_id,event_kind,provider_id,subject_id,safe_payload,created_at,delivered_at
+         )
+         SELECT 'seed-' || lpad(value::text,5,'0'),'provider.seed','seed-provider',
+                'seed-subject','{}'::jsonb,'2025-01-01T00:00:00Z'::timestamptz,NULL
+           FROM generate_series(1,4096) AS value",
+    )
+    .execute(&control)
+    .await
+    .unwrap();
+    let make = |suffix: &'static str| {
+        let draft = json!({"models":[]});
+        repository.create_provider(CreateProviderCommand {
+            metadata: metadata(
+                &format!("bounded-provider-{suffix}"),
+                "POST",
+                "/v1/admin/providers",
+            ),
+            provider_id: format!("bounded-provider-{suffix}"),
+            display_name: format!("Bounded Provider {suffix}"),
+            adapter_type: "open_ai_compatible".to_owned(),
+            provider_input_hash: json_hash(&draft),
+            draft_document: draft,
+        })
+    };
+    let (first, second) = tokio::join!(make("a"), make("b"));
+    first.unwrap();
+    second.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_management_outbox")
+        .fetch_one(&control)
+        .await
+        .unwrap();
+    assert_eq!(count, 4096);
+    let retained_mutations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM provider_management_outbox WHERE event_kind='provider.created'",
+    )
+    .fetch_one(&control)
+    .await
+    .unwrap();
+    assert_eq!(retained_mutations, 2);
     drop(repository);
     drop(control);
     sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))

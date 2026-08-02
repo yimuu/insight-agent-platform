@@ -149,6 +149,7 @@ struct ManagementError {
     status: StatusCode,
     code: &'static str,
     message: &'static str,
+    data: Value,
 }
 
 impl ManagementError {
@@ -157,7 +158,12 @@ impl ManagementError {
             status,
             code,
             message,
+            data: Value::Null,
         }
+    }
+    fn with_data(mut self, data: Value) -> Self {
+        self.data = data;
+        self
     }
     fn invalid() -> Self {
         Self::new(
@@ -207,7 +213,7 @@ impl IntoResponse for ManagementError {
     fn into_response(self) -> Response {
         private_no_store((
             self.status,
-            Json(json!({"code":self.code,"message":self.message,"data":null})),
+            Json(json!({"code":self.code,"message":self.message,"data":self.data})),
         ))
     }
 }
@@ -415,6 +421,10 @@ pub fn build_agent_management_router(state: AgentManagementApiState) -> Router {
                         header::CACHE_CONTROL,
                         HeaderValue::from_static("private, no-store"),
                     );
+                    response.headers_mut().insert(
+                        header::HeaderName::from_static("x-content-type-options"),
+                        HeaderValue::from_static("nosniff"),
+                    );
                     response
                 }
             },
@@ -471,6 +481,10 @@ fn private_no_store(response: impl IntoResponse) -> Response {
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-store"),
     );
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
     response
 }
 
@@ -503,6 +517,15 @@ fn canonical_hash(value: &Value) -> Result<String, ManagementError> {
     serde_jcs::to_vec(value)
         .map(|bytes| sha256(&bytes))
         .map_err(|_| ManagementError::invalid())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 71
+        && value.strip_prefix("sha256:").is_some_and(|digest| {
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
 }
 
 fn opaque_encode(value: &str, key: &[u8; 32]) -> String {
@@ -1288,7 +1311,20 @@ async fn create_validation(
         })
         .await
         .map_err(ManagementError::from)?;
-    receipt_response(receipt)
+    let validation_id = receipt
+        .response
+        .get("validation_id")
+        .and_then(Value::as_str)
+        .ok_or_else(ManagementError::internal)?;
+    let mut response = receipt_response(receipt.clone())?;
+    response.headers_mut().insert(
+        header::LOCATION,
+        HeaderValue::from_str(&format!(
+            "/v1/admin/agents/{agent_id}/validations/{validation_id}"
+        ))
+        .map_err(|_| ManagementError::internal())?,
+    );
+    Ok(response)
 }
 
 async fn get_validation(
@@ -1309,6 +1345,7 @@ async fn get_validation(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PublishRevisionRequest {
+    draft_version: u64,
     validation_id: String,
 }
 
@@ -1325,6 +1362,13 @@ async fn publish_revision(
         return Err(ManagementError::invalid());
     }
     let expected_draft_version = parse_etag(&headers, "draft")?;
+    if input.draft_version != expected_draft_version {
+        return Err(ManagementError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "AGENT_MANAGEMENT_PRECONDITION_FAILED",
+            "Agent management precondition failed",
+        ));
+    }
     let draft = state
         .repository
         .get_agent_draft(&agent_id)
@@ -1350,7 +1394,7 @@ async fn publish_revision(
             "Agent definition could not be frozen for publication",
         )
     })?;
-    let body = json!({"validation_id":input.validation_id});
+    let body = json!({"draft_version":input.draft_version,"validation_id":input.validation_id});
     let receipt = state
         .repository
         .publish_agent_definition(PublishAgentDefinitionCommand {
@@ -1520,6 +1564,7 @@ async fn get_resolution(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateDeploymentRequest {
+    definition_revision_id: String,
     resolution_id: String,
 }
 
@@ -1538,6 +1583,13 @@ async fn create_deployment(
         .await
         .map_err(|_| ManagementError::internal())?
         .ok_or_else(ManagementError::not_found)?;
+    if resolution.definition_revision_id != input.definition_revision_id {
+        return Err(ManagementError::new(
+            StatusCode::CONFLICT,
+            "AGENT_DEPLOYMENT_INVALID",
+            "Deployment Resolution does not match the requested Definition",
+        ));
+    }
     if resolution.expires_at <= Utc::now() {
         return Err(ManagementError::new(
             StatusCode::CONFLICT,
@@ -1573,7 +1625,10 @@ async fn create_deployment(
         ));
     }
     let plan = candidate.versioned_plan().clone();
-    let body = json!({"resolution_id":input.resolution_id});
+    let body = json!({
+        "definition_revision_id":input.definition_revision_id,
+        "resolution_id":input.resolution_id
+    });
     let receipt = state
         .repository
         .install_agent_deployment(InstallAgentDeploymentCommand {
@@ -1881,6 +1936,8 @@ struct CreateDebugSessionRequest {
     input: Value,
     #[serde(default)]
     live_confirmation: bool,
+    #[serde(default)]
+    risk_preview_hash: Option<String>,
 }
 
 async fn create_debug_session(
@@ -1892,6 +1949,13 @@ async fn create_debug_session(
 ) -> Result<Response, ManagementError> {
     let Json(input) = input.map_err(|_| ManagementError::invalid())?;
     validate_debug_source(&input.source)?;
+    if input
+        .risk_preview_hash
+        .as_deref()
+        .is_some_and(|hash| !valid_sha256(hash))
+    {
+        return Err(ManagementError::invalid());
+    }
     let profile = state
         .policy
         .debug_profiles
@@ -1905,13 +1969,6 @@ async fn create_debug_session(
         }
         AgentDebugProfileMode::Live => {
             require(&principal, AGENT_DEBUG_LIVE)?;
-            if !input.live_confirmation {
-                return Err(ManagementError::new(
-                    StatusCode::PRECONDITION_REQUIRED,
-                    "AGENT_LIVE_DEBUG_CONFIRMATION_REQUIRED",
-                    "live Debug requires explicit confirmation",
-                ));
-            }
             AGENT_DEBUG_LIVE
         }
     };
@@ -1919,7 +1976,8 @@ async fn create_debug_session(
         "source":input.source,
         "execution_profile_id":input.execution_profile_id,
         "input":input.input,
-        "live_confirmation":input.live_confirmation
+        "live_confirmation":input.live_confirmation,
+        "risk_preview_hash":input.risk_preview_hash
     });
     let metadata = mutation_metadata(
         &principal,
@@ -1937,10 +1995,48 @@ async fn create_debug_session(
     {
         return debug_created_response(&agent_id, receipt);
     }
-    let source = pin_debug_source(&state, &agent_id, input.source, input.input).await?;
+    let mut source = pin_debug_source(&state, &agent_id, input.source, input.input).await?;
     let now = Utc::now();
+    let debug_session_id = format!("agentdebug_{}", Uuid::new_v4().simple());
+    if profile.mode == AgentDebugProfileMode::Live {
+        let provisional = AgentDebugSession {
+            debug_session_id: debug_session_id.clone(),
+            agent_id: agent_id.clone(),
+            source_hash: canonical_hash(&source)?,
+            source: source.clone(),
+            execution_profile_id: input.execution_profile_id.clone(),
+            profile_mode: profile.mode.as_str().to_owned(),
+            status: AgentDebugStatus::Queued,
+            definition_revision_id: None,
+            deployment_revision_id: None,
+            run_id: None,
+            failure_code: None,
+            expires_at: now + profile.session_timeout,
+            created_at: now,
+            finished_at: None,
+            created_by: principal.identity().to_owned(),
+        };
+        let prepared = prepare_debug_deployment(&state, &provisional).await?;
+        let risk_preview = live_debug_risk_preview(&profile, &source, &prepared)?;
+        let expected_hash = risk_preview
+            .get("risk_preview_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(ManagementError::internal)?;
+        if !input.live_confirmation || input.risk_preview_hash.as_deref() != Some(expected_hash) {
+            return Err(ManagementError::new(
+                StatusCode::PRECONDITION_REQUIRED,
+                "AGENT_DEBUG_LIVE_CONFIRMATION_REQUIRED",
+                "live Debug requires confirmation of the exact reviewed risk preview",
+            )
+            .with_data(json!({"risk_preview":risk_preview})));
+        }
+        source
+            .as_object_mut()
+            .ok_or_else(ManagementError::internal)?
+            .insert("reviewed_risk_preview".to_owned(), risk_preview);
+    }
     let session = AgentDebugSession {
-        debug_session_id: format!("agentdebug_{}", Uuid::new_v4().simple()),
+        debug_session_id,
         agent_id: agent_id.clone(),
         source_hash: canonical_hash(&source)?,
         source,
@@ -2131,10 +2227,56 @@ fn published_requires_debug_interaction_authority(published: &PublishedAgent) ->
     })
 }
 
+struct PreparedDebugDeployment {
+    plan: Option<VersionedPlan>,
+    definition_revision_id: String,
+    deployment_revision_id: String,
+    binding_hash: String,
+    bindings: Value,
+    input: Value,
+}
+
+fn live_debug_risk_preview(
+    profile: &AgentDebugProfilePolicy,
+    source: &Value,
+    prepared: &PreparedDebugDeployment,
+) -> Result<Value, ManagementError> {
+    let provider_calls_possible = has_provider_debug_binding(&prepared.bindings);
+    let mcp_calls_possible = has_mcp_debug_binding(&prepared.bindings);
+    let external_actions_possible = has_non_provider_external_debug_binding(&prepared.bindings);
+    let mut preview = json!({
+        "profile_mode":"live",
+        "source_hash":canonical_hash(source)?,
+        "definition_revision_id":prepared.definition_revision_id,
+        "deployment_revision_id":prepared.deployment_revision_id,
+        "binding_hash":prepared.binding_hash,
+        "maximum_duration_seconds":profile.session_timeout.num_seconds().max(0),
+        "cost_risk":{
+            "provider_calls_possible":provider_calls_possible,
+            "billing_possible":provider_calls_possible
+        },
+        "side_effect_risk":{
+            "external_actions_possible":external_actions_possible,
+            "mcp_calls_possible":mcp_calls_possible
+        },
+        "enforced_guards":{
+            "provider_suspension":true,
+            "action_approval":true,
+            "mcp_interaction":true
+        }
+    });
+    let preview_hash = canonical_hash(&preview)?;
+    preview
+        .as_object_mut()
+        .ok_or_else(ManagementError::internal)?
+        .insert("risk_preview_hash".to_owned(), Value::String(preview_hash));
+    Ok(preview)
+}
+
 async fn prepare_debug_deployment(
     state: &AgentManagementApiState,
     session: &AgentDebugSession,
-) -> Result<(Option<VersionedPlan>, String, String, Value), ManagementError> {
+) -> Result<PreparedDebugDeployment, ManagementError> {
     let selection = session
         .source
         .get("selection")
@@ -2148,116 +2290,133 @@ async fn prepare_debug_deployment(
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(ManagementError::internal)?;
-    let (plan, definition_revision_id, deployment_revision_id, bindings, needs_interaction) =
-        match source_type {
-            "draft" => {
-                let author_hash = session
-                    .source
-                    .get("source_author_hash")
-                    .and_then(Value::as_str)
-                    .ok_or_else(ManagementError::internal)?;
-                let snapshot = session
-                    .source
-                    .get("source_snapshot")
-                    .cloned()
-                    .ok_or_else(ManagementError::internal)?;
-                let published =
-                    compile_draft(&session.agent_id, author_hash, &draft_from_value(snapshot)?)?;
-                let candidate = state
-                    .run_service
-                    .resolve_managed_deployment(published)
-                    .await
-                    .map_err(|_| {
-                        ManagementError::new(
-                            StatusCode::UNPROCESSABLE_ENTITY,
-                            "AGENT_DEBUG_DEPENDENCY_RESOLUTION_FAILED",
-                            "Debug dependencies could not be resolved",
-                        )
-                    })?;
-                (
-                    Some(candidate.versioned_plan().clone()),
-                    candidate
-                        .versioned_plan()
-                        .definition_revision_id()
-                        .as_str()
-                        .to_owned(),
-                    candidate
-                        .versioned_plan()
-                        .deployment_revision_id()
-                        .as_str()
-                        .to_owned(),
-                    candidate.resolved_bindings().clone(),
-                    candidate.requires_interaction_authority(),
-                )
-            }
-            "definition" => {
-                let revision_id = selection
-                    .get("definition_revision_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(ManagementError::internal)?;
-                let definition = state
-                    .repository
-                    .get_agent_definition(&session.agent_id, revision_id)
-                    .await
-                    .map_err(|_| ManagementError::internal())?
-                    .ok_or_else(ManagementError::not_found)?;
-                let candidate = state
-                    .run_service
-                    .resolve_managed_deployment(published_from_definition(&definition)?)
-                    .await
-                    .map_err(|_| {
-                        ManagementError::new(
-                            StatusCode::UNPROCESSABLE_ENTITY,
-                            "AGENT_DEBUG_DEPENDENCY_RESOLUTION_FAILED",
-                            "Debug dependencies could not be resolved",
-                        )
-                    })?;
-                (
-                    Some(candidate.versioned_plan().clone()),
-                    candidate
-                        .versioned_plan()
-                        .definition_revision_id()
-                        .as_str()
-                        .to_owned(),
-                    candidate
-                        .versioned_plan()
-                        .deployment_revision_id()
-                        .as_str()
-                        .to_owned(),
-                    candidate.resolved_bindings().clone(),
-                    candidate.requires_interaction_authority(),
-                )
-            }
-            "deployment" => {
-                let revision_id = selection
-                    .get("deployment_revision_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(ManagementError::internal)?;
-                let deployment = state
-                    .repository
-                    .get_agent_deployment(&session.agent_id, revision_id)
-                    .await
-                    .map_err(|_| ManagementError::internal())?
-                    .ok_or_else(ManagementError::not_found)?;
-                let definition = state
-                    .repository
-                    .get_agent_definition(&session.agent_id, &deployment.definition_revision_id)
-                    .await
-                    .map_err(|_| ManagementError::internal())?
-                    .ok_or_else(ManagementError::not_found)?;
-                let needs_interaction = published_requires_debug_interaction_authority(
-                    published_from_definition(&definition)?.as_ref(),
-                );
-                (
-                    None,
-                    deployment.definition_revision_id,
-                    deployment.deployment_revision_id,
-                    deployment.resolved_bindings,
-                    needs_interaction,
-                )
-            }
-            _ => return Err(ManagementError::internal()),
-        };
+    let (
+        plan,
+        definition_revision_id,
+        deployment_revision_id,
+        binding_hash,
+        bindings,
+        needs_interaction,
+    ) = match source_type {
+        "draft" => {
+            let author_hash = session
+                .source
+                .get("source_author_hash")
+                .and_then(Value::as_str)
+                .ok_or_else(ManagementError::internal)?;
+            let snapshot = session
+                .source
+                .get("source_snapshot")
+                .cloned()
+                .ok_or_else(ManagementError::internal)?;
+            let published =
+                compile_draft(&session.agent_id, author_hash, &draft_from_value(snapshot)?)?;
+            let candidate = state
+                .run_service
+                .resolve_managed_deployment(published)
+                .await
+                .map_err(|_| {
+                    ManagementError::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "AGENT_DEBUG_DEPENDENCY_RESOLUTION_FAILED",
+                        "Debug dependencies could not be resolved",
+                    )
+                })?;
+            (
+                Some(candidate.versioned_plan().clone()),
+                candidate
+                    .versioned_plan()
+                    .definition_revision_id()
+                    .as_str()
+                    .to_owned(),
+                candidate
+                    .versioned_plan()
+                    .deployment_revision_id()
+                    .as_str()
+                    .to_owned(),
+                candidate
+                    .versioned_plan()
+                    .binding_hash()
+                    .as_str()
+                    .to_owned(),
+                candidate.resolved_bindings().clone(),
+                candidate.requires_interaction_authority(),
+            )
+        }
+        "definition" => {
+            let revision_id = selection
+                .get("definition_revision_id")
+                .and_then(Value::as_str)
+                .ok_or_else(ManagementError::internal)?;
+            let definition = state
+                .repository
+                .get_agent_definition(&session.agent_id, revision_id)
+                .await
+                .map_err(|_| ManagementError::internal())?
+                .ok_or_else(ManagementError::not_found)?;
+            let candidate = state
+                .run_service
+                .resolve_managed_deployment(published_from_definition(&definition)?)
+                .await
+                .map_err(|_| {
+                    ManagementError::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "AGENT_DEBUG_DEPENDENCY_RESOLUTION_FAILED",
+                        "Debug dependencies could not be resolved",
+                    )
+                })?;
+            (
+                Some(candidate.versioned_plan().clone()),
+                candidate
+                    .versioned_plan()
+                    .definition_revision_id()
+                    .as_str()
+                    .to_owned(),
+                candidate
+                    .versioned_plan()
+                    .deployment_revision_id()
+                    .as_str()
+                    .to_owned(),
+                candidate
+                    .versioned_plan()
+                    .binding_hash()
+                    .as_str()
+                    .to_owned(),
+                candidate.resolved_bindings().clone(),
+                candidate.requires_interaction_authority(),
+            )
+        }
+        "deployment" => {
+            let revision_id = selection
+                .get("deployment_revision_id")
+                .and_then(Value::as_str)
+                .ok_or_else(ManagementError::internal)?;
+            let deployment = state
+                .repository
+                .get_agent_deployment(&session.agent_id, revision_id)
+                .await
+                .map_err(|_| ManagementError::internal())?
+                .ok_or_else(ManagementError::not_found)?;
+            let definition = state
+                .repository
+                .get_agent_definition(&session.agent_id, &deployment.definition_revision_id)
+                .await
+                .map_err(|_| ManagementError::internal())?
+                .ok_or_else(ManagementError::not_found)?;
+            let needs_interaction = published_requires_debug_interaction_authority(
+                published_from_definition(&definition)?.as_ref(),
+            );
+            (
+                None,
+                deployment.definition_revision_id,
+                deployment.deployment_revision_id,
+                deployment.binding_hash,
+                deployment.resolved_bindings,
+                needs_interaction,
+            )
+        }
+        _ => return Err(ManagementError::internal()),
+    };
     if needs_interaction {
         return Err(ManagementError::new(
             StatusCode::FORBIDDEN,
@@ -2299,8 +2458,34 @@ async fn prepare_debug_deployment(
                 "external actions are disabled for this Debug profile",
             ));
         }
+        if let Some(reviewed) = session.source.get("reviewed_risk_preview") {
+            let same_definition = reviewed
+                .get("definition_revision_id")
+                .and_then(Value::as_str)
+                == Some(definition_revision_id.as_str());
+            let same_deployment = reviewed
+                .get("deployment_revision_id")
+                .and_then(Value::as_str)
+                == Some(deployment_revision_id.as_str());
+            let same_binding =
+                reviewed.get("binding_hash").and_then(Value::as_str) == Some(binding_hash.as_str());
+            if !(same_definition && same_deployment && same_binding) {
+                return Err(ManagementError::new(
+                    StatusCode::CONFLICT,
+                    "AGENT_DEBUG_LIVE_REVIEW_STALE",
+                    "live Debug dependencies changed after risk review",
+                ));
+            }
+        }
     }
-    Ok((plan, definition_revision_id, deployment_revision_id, input))
+    Ok(PreparedDebugDeployment {
+        plan,
+        definition_revision_id,
+        deployment_revision_id,
+        binding_hash,
+        bindings,
+        input,
+    })
 }
 
 async fn finish_debug_session(
@@ -2332,15 +2517,20 @@ async fn finish_debug_session(
 }
 
 async fn drive_debug_session(state: Arc<AgentManagementApiState>, session: AgentDebugSession) {
-    let (plan, definition_revision_id, deployment_revision_id, input) =
-        match prepare_debug_deployment(&state, &session).await {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                finish_debug_session(&state, &session, AgentDebugStatus::Failed, Some(error.code))
-                    .await;
-                return;
-            }
-        };
+    let PreparedDebugDeployment {
+        plan,
+        definition_revision_id,
+        deployment_revision_id,
+        input,
+        ..
+    } = match prepare_debug_deployment(&state, &session).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            finish_debug_session(&state, &session, AgentDebugStatus::Failed, Some(error.code))
+                .await;
+            return;
+        }
+    };
     let debug_run_id = format!(
         "debugrun_{}",
         session
@@ -2643,6 +2833,20 @@ mod contract_tests {
         assert!(validator_for("createDeploymentRequest").is_valid(&samples["valid"]["deployment"]));
         assert!(validator_for("activateRequest").is_valid(&samples["valid"]["activate"]));
         assert!(validator_for("createDebugSessionRequest").is_valid(&samples["valid"]["debug"]));
+        assert!(validator_for("createDebugSessionRequest")
+            .is_valid(&samples["valid"]["debug_live_confirmed"]));
+        assert!(
+            !validator_for("publishRequest").is_valid(&json!({"validation_id":"agentval_example"}))
+        );
+        assert!(!validator_for("createDeploymentRequest")
+            .is_valid(&json!({"resolution_id":"agentres_example"})));
+        assert!(
+            !validator_for("createDebugSessionRequest").is_valid(&json!({
+                "source":{"type":"draft","draft_version":1},
+                "execution_profile_id":"author-live","input":{},
+                "live_confirmation":true,"risk_preview_hash":"not-a-hash"
+            }))
+        );
         assert!(!validator_for("createAgentRequest").is_valid(&samples["invalid"]["wildcard_tool"]));
         assert!(!validator_for("draft").is_valid(&samples["invalid"]["path_escape"]));
         assert!(!validator_for("createDebugSessionRequest")
@@ -2654,16 +2858,89 @@ mod contract_tests {
         let openapi: Value = serde_json::from_str(MANAGEMENT_OPENAPI).unwrap();
         assert_eq!(openapi["openapi"], "3.1.0");
         let paths = openapi["paths"].as_object().unwrap();
-        let operations = paths
-            .values()
-            .flat_map(|item| item.as_object().unwrap().keys())
-            .filter(|method| *method != "parameters")
-            .count();
-        assert_eq!(operations, 30);
-        for item in paths.values() {
-            if let Some(delete) = item.get("delete") {
-                assert!(delete.get("requestBody").is_none());
+        let expected = BTreeSet::from([
+            ("get", "/v1/admin/agents"),
+            ("post", "/v1/admin/agents"),
+            ("get", "/v1/admin/agents/{agent_id}"),
+            ("patch", "/v1/admin/agents/{agent_id}"),
+            ("delete", "/v1/admin/agents/{agent_id}"),
+            ("get", "/v1/admin/agents/{agent_id}/draft"),
+            ("put", "/v1/admin/agents/{agent_id}/draft"),
+            ("post", "/v1/admin/agents/{agent_id}/draft/semantic-edits"),
+            ("get", "/v1/admin/agents/{agent_id}/draft/view"),
+            ("put", "/v1/admin/agents/{agent_id}/draft/view"),
+            ("post", "/v1/admin/agents/{agent_id}/validations"),
+            (
+                "get",
+                "/v1/admin/agents/{agent_id}/validations/{validation_id}",
+            ),
+            ("get", "/v1/admin/agents/{agent_id}/revisions"),
+            ("post", "/v1/admin/agents/{agent_id}/revisions"),
+            (
+                "get",
+                "/v1/admin/agents/{agent_id}/revisions/{definition_revision_id}",
+            ),
+            ("post", "/v1/admin/agents/{agent_id}/deployment-resolutions"),
+            (
+                "get",
+                "/v1/admin/agents/{agent_id}/deployment-resolutions/{resolution_id}",
+            ),
+            ("get", "/v1/admin/agents/{agent_id}/deployments"),
+            ("post", "/v1/admin/agents/{agent_id}/deployments"),
+            (
+                "get",
+                "/v1/admin/agents/{agent_id}/deployments/{deployment_revision_id}",
+            ),
+            ("get", "/v1/admin/agents/{agent_id}/active-deployment"),
+            ("put", "/v1/admin/agents/{agent_id}/active-deployment"),
+            ("delete", "/v1/admin/agents/{agent_id}/active-deployment"),
+            ("post", "/v1/admin/agents/{agent_id}/archive"),
+            ("post", "/v1/admin/agents/{agent_id}/restore"),
+            ("get", "/v1/admin/agents/{agent_id}/debug-sessions"),
+            ("post", "/v1/admin/agents/{agent_id}/debug-sessions"),
+            (
+                "get",
+                "/v1/admin/agents/{agent_id}/debug-sessions/{debug_session_id}",
+            ),
+            (
+                "delete",
+                "/v1/admin/agents/{agent_id}/debug-sessions/{debug_session_id}",
+            ),
+            (
+                "get",
+                "/v1/admin/agents/{agent_id}/debug-sessions/{debug_session_id}/stream",
+            ),
+        ]);
+        let mut actual = BTreeSet::new();
+        for (path, item) in paths {
+            for (method, operation) in item.as_object().unwrap() {
+                if method == "parameters" {
+                    continue;
+                }
+                actual.insert((method.as_str(), path.as_str()));
+                assert_eq!(
+                    operation["responses"]["default"]["$ref"],
+                    "#/components/responses/Error"
+                );
+                if method == "delete" {
+                    assert!(operation.get("requestBody").is_none());
+                }
             }
+        }
+        assert_eq!(actual, expected);
+        for response in openapi["components"]["responses"]
+            .as_object()
+            .unwrap()
+            .values()
+        {
+            assert_eq!(
+                response["headers"]["X-Content-Type-Options"]["$ref"],
+                "#/components/headers/NoSniff"
+            );
+            assert_eq!(
+                response["headers"]["Cache-Control"]["$ref"],
+                "#/components/headers/CacheControl"
+            );
         }
     }
 }

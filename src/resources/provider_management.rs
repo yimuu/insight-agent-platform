@@ -38,7 +38,7 @@ use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProviderManagementRuntimeConfig {
     pub enabled: bool,
     pub workers: usize,
@@ -47,6 +47,49 @@ pub struct ProviderManagementRuntimeConfig {
     pub retention: chrono::Duration,
     pub max_response_bytes: usize,
     pub allow_loopback_development: bool,
+    /// Environment variable names that the managed Provider resolver may
+    /// dereference. Values are deliberately absent from this configuration.
+    pub allowed_secret_names: BTreeSet<String>,
+}
+
+impl fmt::Debug for ProviderManagementRuntimeConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderManagementRuntimeConfig")
+            .field("enabled", &self.enabled)
+            .field("workers", &self.workers)
+            .field("poll_interval", &self.poll_interval)
+            .field("lease_duration", &self.lease_duration)
+            .field("retention", &self.retention)
+            .field("max_response_bytes", &self.max_response_bytes)
+            .field(
+                "allow_loopback_development",
+                &self.allow_loopback_development,
+            )
+            .field("allowed_secret_names", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Trusted manifest for the built-in managed OpenAI-compatible adapter.
+/// Provider Revisions freeze its digest so runtimes with different adapter
+/// contracts fail closed before activation or projection.
+pub fn managed_openai_adapter_manifest() -> Value {
+    json!({
+        "adapter":{
+            "type":"open_ai_compatible",
+            "version":insight_resources::openai_chat::OPENAI_CHAT_ADAPTER_VERSION
+        },
+        "worker":{"version":insight_resources::openai_chat::OPENAI_CHAT_WORKER_VERSION},
+        "transport":{"tls":"required","redirects":"deny"},
+        "credential_slots":["bearer","api_key"],
+        "model_discovery":"models_endpoint"
+    })
+}
+
+pub fn managed_openai_adapter_manifest_digest() -> String {
+    canonical_hash(&managed_openai_adapter_manifest())
+        .expect("the built-in Provider adapter manifest is canonicalizable")
 }
 
 #[derive(Debug)]
@@ -333,10 +376,13 @@ fn failure(code: &str, stage: &str, retryable: bool) -> ProviderOperationFailure
     }
 }
 
-fn environment_secret(reference: &str) -> Option<(&str, Option<String>)> {
+fn environment_secret<'a>(
+    reference: &'a str,
+    config: &ProviderManagementRuntimeConfig,
+) -> Option<(&'a str, Option<String>)> {
     reference
         .strip_prefix("secret://environment/")
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty() && config.allowed_secret_names.contains(*name))
         .map(|name| (name, std::env::var(name).ok()))
 }
 
@@ -395,11 +441,12 @@ fn completions_url(endpoint: &str) -> Result<reqwest::Url, ProviderOperationFail
 fn authorize(
     request: reqwest::RequestBuilder,
     credential: &RuntimeCredential,
+    config: &ProviderManagementRuntimeConfig,
 ) -> Result<reqwest::RequestBuilder, ProviderOperationFailure> {
     match credential {
         RuntimeCredential::None => Ok(request),
         RuntimeCredential::Bearer { reference } => {
-            let (_, value) = environment_secret(reference)
+            let (_, value) = environment_secret(reference, config)
                 .ok_or_else(|| failure("credential_reference_denied", "authentication", false))?;
             value
                 .filter(|value| !value.trim().is_empty())
@@ -407,7 +454,7 @@ fn authorize(
                 .ok_or_else(|| failure("credential_missing", "authentication", false))
         }
         RuntimeCredential::ApiKey { reference } => {
-            let (_, value) = environment_secret(reference)
+            let (_, value) = environment_secret(reference, config)
                 .ok_or_else(|| failure("credential_reference_denied", "authentication", false))?;
             value
                 .filter(|value| !value.trim().is_empty())
@@ -457,7 +504,11 @@ async fn process_discovery(
             return Err(failure("discovery_not_supported", "adapter", false));
         }
         let client = provider_client(&draft, &config)?;
-        let request = authorize(client.get(models_url(&draft.endpoint)?), &draft.credential)?;
+        let request = authorize(
+            client.get(models_url(&draft.endpoint)?),
+            &draft.credential,
+            &config,
+        )?;
         let response = request
             .send()
             .await
@@ -538,7 +589,11 @@ async fn process_connection_test(
         let started = std::time::Instant::now();
         let (request, fixture) = match claim.operation.mode {
             ProviderConnectionTestMode::Metadata => (
-                authorize(client.get(models_url(&draft.endpoint)?), &draft.credential)?,
+                authorize(
+                    client.get(models_url(&draft.endpoint)?),
+                    &draft.credential,
+                    &config,
+                )?,
                 "metadata",
             ),
             ProviderConnectionTestMode::Canary | ProviderConnectionTestMode::CapabilityProbe => {
@@ -548,7 +603,7 @@ async fn process_connection_test(
                 } else {
                     json!({"model":model.id,"messages":[{"role":"user","content":"Return JSON null."}],"max_tokens":2,"stream":false,"response_format":{"type":"json_object"}})
                 };
-                (authorize(client.post(completions_url(&draft.endpoint)?).json(&payload), &draft.credential)?, if claim.operation.mode == ProviderConnectionTestMode::Canary { "canary" } else { "capability_probe" })
+                (authorize(client.post(completions_url(&draft.endpoint)?).json(&payload), &draft.credential, &config)?, if claim.operation.mode == ProviderConnectionTestMode::Canary { "canary" } else { "capability_probe" })
             }
         };
         let response = request.send().await.map_err(|_| failure("provider_unreachable", "network", true))?;
@@ -603,6 +658,8 @@ struct RuntimeRevisionAdapter {
     #[serde(rename = "type")]
     adapter_type: String,
     version: String,
+    worker_version: String,
+    manifest_digest: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -813,6 +870,9 @@ fn build_provider_revision(
     if document.provider_id != provider.provider_id
         || document.adapter.adapter_type != "open_ai_compatible"
         || document.adapter.version != insight_resources::openai_chat::OPENAI_CHAT_ADAPTER_VERSION
+        || document.adapter.worker_version
+            != insight_resources::openai_chat::OPENAI_CHAT_WORKER_VERSION
+        || document.adapter.manifest_digest != managed_openai_adapter_manifest_digest()
         || document.models.is_empty()
     {
         return Err(CompileError::new(
@@ -838,7 +898,7 @@ fn build_provider_revision(
                         "Provider credential reference hash is invalid",
                     ));
                 }
-                let (name, value) = environment_secret(reference).ok_or_else(|| {
+                let (name, value) = environment_secret(reference, config).ok_or_else(|| {
                     CompileError::new(
                         "PROVIDER_SECRET_REFERENCE_DENIED",
                         "Provider credential reference is unsupported",
@@ -883,10 +943,12 @@ fn build_provider_revision(
             transport,
         )?;
         let deployment = ModelDeploymentIdentity::new(
-            insight_resources::openai_chat::OPENAI_CHAT_WORKER_VERSION,
+            document.adapter.worker_version.clone(),
             json!({"provider_id":provider.provider_id,"provider_revision_id":revision.revision_id,
-                "provider_revision_hash":revision.revision_hash,"adapter_type":document.adapter.adapter_type,
-                "adapter_version":document.adapter.version,"model_id":model.id,"input":model.input,
+            "provider_revision_hash":revision.revision_hash,"adapter_type":document.adapter.adapter_type,
+                "adapter_version":document.adapter.version,"worker_version":document.adapter.worker_version,
+                "adapter_manifest_digest":document.adapter.manifest_digest,
+                "model_id":model.id,"input":model.input,
                 "capabilities":model.capabilities,"provenance":model.provenance,
                 "policy_fingerprint":document.policy_fingerprint,"source":document.source}),
         )?;
@@ -949,16 +1011,25 @@ async fn reconcile_active_revisions(
     archived.retain(|identity, _| archive_ids.contains(identity));
     for (provider, revision) in archive {
         let credential_hash =
-            revision_credential_value_hash(&revision).map_err(|_| "projection")?;
+            revision_credential_value_hash(&revision, config).map_err(|_| "projection")?;
         let identity = (provider.provider_id.clone(), revision.revision_id.clone());
-        let built = build_provider_revision_with_legacy(
+        let built = match build_provider_revision_with_legacy(
             Arc::clone(repository),
             &provider,
             &revision,
             config,
         )
         .await
-        .map_err(|_| "projection")?;
+        {
+            Ok(built) => built,
+            Err(_) => {
+                let _ = models.withdraw_provider_all(&provider.provider_id);
+                installed.remove(&provider.provider_id);
+                archived.retain(|(provider_id, _), _| provider_id != &provider.provider_id);
+                tracing::warn!(code="PROVIDER_REVISION_ARCHIVE_INVALID", provider_id=%provider.provider_id, revision_id=%revision.revision_id, "Provider Revision archive projection was rejected");
+                return Err("projection");
+            }
+        };
         if archived
             .get(&identity)
             .is_some_and(|(fence, hash, legacy)| {
@@ -1014,7 +1085,7 @@ async fn reconcile_active_revisions(
         {
             Ok(built) => built,
             Err(_) => {
-                let _ = models.withdraw_provider(&provider.provider_id);
+                let _ = models.withdraw_provider_all(&provider.provider_id);
                 installed.remove(&provider.provider_id);
                 tracing::warn!(code="PROVIDER_REVISION_PROJECTION_INVALID", provider_id=%provider.provider_id, revision_id=%revision.revision_id, "Provider Revision projection was rejected");
                 return Err("projection");
@@ -1047,14 +1118,17 @@ async fn reconcile_active_revisions(
     Ok(())
 }
 
-fn revision_credential_value_hash(revision: &ProviderRevision) -> Result<Option<String>, ()> {
+fn revision_credential_value_hash(
+    revision: &ProviderRevision,
+    config: &ProviderManagementRuntimeConfig,
+) -> Result<Option<String>, ()> {
     let document: RuntimeRevision =
         serde_json::from_value(revision.document.clone()).map_err(|_| ())?;
     Ok(document
         .credential
         .reference
         .as_deref()
-        .and_then(environment_secret)
+        .and_then(|reference| environment_secret(reference, config))
         .and_then(|(_, value)| value)
         .as_deref()
         .map(sha256_string))
@@ -1078,6 +1152,11 @@ impl ProviderRevisionReadiness for ManagedProviderRevisionReadiness {
             serde_json::from_value(revision.document.clone()).map_err(|_| ())?;
         if document.provider_id != revision.provider_id
             || document.adapter.adapter_type != "open_ai_compatible"
+            || document.adapter.version
+                != insight_resources::openai_chat::OPENAI_CHAT_ADAPTER_VERSION
+            || document.adapter.worker_version
+                != insight_resources::openai_chat::OPENAI_CHAT_WORKER_VERSION
+            || document.adapter.manifest_digest != managed_openai_adapter_manifest_digest()
             || document.models.is_empty()
             || document.transport.tls != "required"
             || document.transport.redirects != "deny"
@@ -1087,8 +1166,23 @@ impl ProviderRevisionReadiness for ManagedProviderRevisionReadiness {
         {
             return Err(());
         }
+        match (
+            document.credential.credential_type.as_str(),
+            document.credential.reference.as_deref(),
+        ) {
+            ("none", None) => {}
+            ("bearer" | "api_key", Some(reference)) => {
+                let (_, value) = environment_secret(reference, &self.config).ok_or(())?;
+                if value.is_none_or(|value| value.trim().is_empty()) {
+                    return Err(());
+                }
+            }
+            _ => return Err(()),
+        }
         canonical_hash(
-            &json!({"revision_id":revision.revision_id,"revision_hash":revision.revision_hash,"adapter_version":document.adapter.version}),
+            &json!({"revision_id":revision.revision_id,"revision_hash":revision.revision_hash,
+                    "adapter_version":document.adapter.version,"worker_version":document.adapter.worker_version,
+                    "adapter_manifest_digest":document.adapter.manifest_digest}),
         )
     }
 }
@@ -1142,6 +1236,88 @@ mod tests {
             tools: Vec::new(),
             tool_choice: ChatToolChoice::Auto,
         }
+    }
+
+    fn runtime_config() -> ProviderManagementRuntimeConfig {
+        ProviderManagementRuntimeConfig {
+            enabled: true,
+            workers: 1,
+            poll_interval: Duration::from_millis(10),
+            lease_duration: Duration::from_secs(1),
+            retention: chrono::Duration::hours(1),
+            max_response_bytes: 64 * 1024,
+            allow_loopback_development: false,
+            allowed_secret_names: BTreeSet::new(),
+        }
+    }
+
+    fn revision(document: Value) -> ProviderRevision {
+        ProviderRevision {
+            revision_id: "prev_exact_adapter".to_owned(),
+            provider_id: "provider-exact".to_owned(),
+            revision_number: 1,
+            source_draft_version: 1,
+            validation_id: "pval_exact".to_owned(),
+            discovery_id: None,
+            connection_test_id: None,
+            revision_hash: sha256_string("revision"),
+            document,
+            created_at: Utc::now(),
+            created_by: "operator".to_owned(),
+        }
+    }
+
+    fn valid_revision_document() -> Value {
+        json!({
+            "provider_id":"provider-exact",
+            "adapter":{
+                "type":"open_ai_compatible",
+                "version":insight_resources::openai_chat::OPENAI_CHAT_ADAPTER_VERSION,
+                "worker_version":insight_resources::openai_chat::OPENAI_CHAT_WORKER_VERSION,
+                "manifest_digest":managed_openai_adapter_manifest_digest()
+            },
+            "endpoint":"https://models.example.test/v1",
+            "credential":{"type":"none","reference":null,"reference_hash":null},
+            "transport":{
+                "tls":"required","redirects":"deny",
+                "connect_timeout_ms":1000,"request_timeout_ms":5000
+            },
+            "models":[{
+                "id":"model-a","input":["text"],"capabilities":[],
+                "provenance":{"type":"manual"}
+            }],
+            "policy_fingerprint":sha256_string("policy"),
+            "source":{"draft_version":1}
+        })
+    }
+
+    #[tokio::test]
+    async fn readiness_requires_exact_adapter_manifest_and_allowlisted_available_secret() {
+        let readiness = ManagedProviderRevisionReadiness::new(runtime_config());
+        assert!(readiness
+            .probe(&revision(valid_revision_document()))
+            .await
+            .is_ok());
+
+        let mut wrong_version = valid_revision_document();
+        wrong_version["adapter"]["version"] = json!("mixed-runtime-version");
+        assert!(readiness.probe(&revision(wrong_version)).await.is_err());
+
+        let mut wrong_manifest = valid_revision_document();
+        wrong_manifest["adapter"]["manifest_digest"] = json!(sha256_string("mixed-manifest"));
+        assert!(readiness.probe(&revision(wrong_manifest)).await.is_err());
+
+        let mut wrong_worker = valid_revision_document();
+        wrong_worker["adapter"]["worker_version"] = json!("mixed-worker-version");
+        assert!(readiness.probe(&revision(wrong_worker)).await.is_err());
+
+        let mut denied_secret = valid_revision_document();
+        denied_secret["credential"] = json!({
+            "type":"bearer",
+            "reference":"secret://environment/UNLISTED_PROVIDER_SECRET",
+            "reference_hash":sha256_string("secret://environment/UNLISTED_PROVIDER_SECRET")
+        });
+        assert!(readiness.probe(&revision(denied_secret)).await.is_err());
     }
 
     #[tokio::test]

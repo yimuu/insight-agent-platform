@@ -1,33 +1,960 @@
 {
-  "openapi":"3.1.0",
-  "info":{"title":"Insight Agent Management API","version":"1.0.0"},
-  "servers":[{"url":"/"}],
-  "security":[{"operatorBearer":[]}],
-  "paths":{
-    "/v1/admin/agents":{"get":{"operationId":"listAgents","parameters":[{"$ref":"#/components/parameters/Cursor"},{"$ref":"#/components/parameters/Limit"}],"responses":{"200":{"$ref":"#/components/responses/Ok"}}},"post":{"operationId":"createAgent","parameters":[{"$ref":"#/components/parameters/RequestId"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/createAgentRequest"}}}},"responses":{"201":{"$ref":"#/components/responses/Created"}}}},
-    "/v1/admin/agents/{agent_id}":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"get":{"operationId":"getAgent","responses":{"200":{"$ref":"#/components/responses/OkWithEtag"}}},"patch":{"operationId":"updateAgent","parameters":[{"$ref":"#/components/parameters/RequestId"},{"$ref":"#/components/parameters/AgentIfMatch"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/updateAgentRequest"}}}},"responses":{"200":{"$ref":"#/components/responses/OkWithEtag"}}},"delete":{"operationId":"deleteAgent","parameters":[{"$ref":"#/components/parameters/RequestId"},{"$ref":"#/components/parameters/AgentIfMatch"}],"responses":{"200":{"$ref":"#/components/responses/Ok"}}}},
-    "/v1/admin/agents/{agent_id}/draft":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"get":{"operationId":"getAgentDraft","responses":{"200":{"$ref":"#/components/responses/OkWithEtag"}}},"put":{"operationId":"replaceAgentDraft","parameters":[{"$ref":"#/components/parameters/RequestId"},{"$ref":"#/components/parameters/DraftIfMatch"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/draft"}}}},"responses":{"200":{"$ref":"#/components/responses/OkWithEtag"}}}},
-    "/v1/admin/agents/{agent_id}/draft/semantic-edits":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"post":{"operationId":"applyAgentSemanticEdits","parameters":[{"$ref":"#/components/parameters/RequestId"},{"$ref":"#/components/parameters/DraftIfMatch"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/graphSemanticEditBatch"}}}},"responses":{"200":{"$ref":"#/components/responses/OkWithEtag"}}}},
-    "/v1/admin/agents/{agent_id}/draft/view":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"get":{"operationId":"getAgentDraftView","responses":{"200":{"$ref":"#/components/responses/OkWithEtag"}}},"put":{"operationId":"replaceAgentDraftView","parameters":[{"$ref":"#/components/parameters/RequestId"},{"$ref":"#/components/parameters/ViewIfMatch"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/viewDocument"}}}},"responses":{"200":{"$ref":"#/components/responses/OkWithEtag"}}}},
-    "/v1/admin/agents/{agent_id}/validations":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"post":{"operationId":"createAgentValidation","parameters":[{"$ref":"#/components/parameters/RequestId"},{"$ref":"#/components/parameters/DraftIfMatch"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/closedEmptyRequest"}}}},"responses":{"202":{"$ref":"#/components/responses/Accepted"}}}},
-    "/v1/admin/agents/{agent_id}/validations/{validation_id}":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"get":{"operationId":"getAgentValidation","responses":{"200":{"$ref":"#/components/responses/Ok"}}}},
-    "/v1/admin/agents/{agent_id}/revisions":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"get":{"operationId":"listAgentRevisions","parameters":[{"$ref":"#/components/parameters/Cursor"},{"$ref":"#/components/parameters/Limit"}],"responses":{"200":{"$ref":"#/components/responses/Ok"}}},"post":{"operationId":"publishAgentRevision","parameters":[{"$ref":"#/components/parameters/RequestId"},{"$ref":"#/components/parameters/DraftIfMatch"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/publishRequest"}}}},"responses":{"201":{"$ref":"#/components/responses/Created"}}}},
-    "/v1/admin/agents/{agent_id}/revisions/{definition_revision_id}":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"get":{"operationId":"getAgentRevision","responses":{"200":{"$ref":"#/components/responses/Ok"}}}},
-    "/v1/admin/agents/{agent_id}/deployment-resolutions":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"post":{"operationId":"createAgentDeploymentResolution","parameters":[{"$ref":"#/components/parameters/RequestId"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/createResolutionRequest"}}}},"responses":{"202":{"$ref":"#/components/responses/Accepted"}}}},
-    "/v1/admin/agents/{agent_id}/deployment-resolutions/{resolution_id}":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"get":{"operationId":"getAgentDeploymentResolution","responses":{"200":{"$ref":"#/components/responses/Ok"}}}},
-    "/v1/admin/agents/{agent_id}/deployments":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"get":{"operationId":"listAgentDeployments","parameters":[{"$ref":"#/components/parameters/Cursor"},{"$ref":"#/components/parameters/Limit"}],"responses":{"200":{"$ref":"#/components/responses/Ok"}}},"post":{"operationId":"createAgentDeployment","parameters":[{"$ref":"#/components/parameters/RequestId"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/createDeploymentRequest"}}}},"responses":{"201":{"$ref":"#/components/responses/Created"}}}},
-    "/v1/admin/agents/{agent_id}/deployments/{deployment_revision_id}":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"get":{"operationId":"getAgentDeployment","responses":{"200":{"$ref":"#/components/responses/Ok"}}}},
-    "/v1/admin/agents/{agent_id}/active-deployment":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"get":{"operationId":"getActiveAgentDeployment","responses":{"200":{"$ref":"#/components/responses/OkWithEtag"}}},"put":{"operationId":"activateAgentDeployment","parameters":[{"$ref":"#/components/parameters/RequestId"},{"$ref":"#/components/parameters/AgentIfMatch"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/activateRequest"}}}},"responses":{"200":{"$ref":"#/components/responses/OkWithEtag"}}},"delete":{"operationId":"deactivateAgent","parameters":[{"$ref":"#/components/parameters/RequestId"},{"$ref":"#/components/parameters/AgentIfMatch"}],"responses":{"200":{"$ref":"#/components/responses/OkWithEtag"}}}},
-    "/v1/admin/agents/{agent_id}/archive":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"post":{"operationId":"archiveAgent","parameters":[{"$ref":"#/components/parameters/RequestId"},{"$ref":"#/components/parameters/AgentIfMatch"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/closedEmptyRequest"}}}},"responses":{"200":{"$ref":"#/components/responses/OkWithEtag"}}}},
-    "/v1/admin/agents/{agent_id}/restore":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"post":{"operationId":"restoreAgent","parameters":[{"$ref":"#/components/parameters/RequestId"},{"$ref":"#/components/parameters/AgentIfMatch"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/closedEmptyRequest"}}}},"responses":{"200":{"$ref":"#/components/responses/OkWithEtag"}}}},
-    "/v1/admin/agents/{agent_id}/debug-sessions":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"get":{"operationId":"listAgentDebugSessions","parameters":[{"$ref":"#/components/parameters/Cursor"},{"$ref":"#/components/parameters/Limit"}],"responses":{"200":{"$ref":"#/components/responses/Ok"}}},"post":{"operationId":"createAgentDebugSession","parameters":[{"$ref":"#/components/parameters/RequestId"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/createDebugSessionRequest"}}}},"responses":{"202":{"$ref":"#/components/responses/Accepted"}}}},
-    "/v1/admin/agents/{agent_id}/debug-sessions/{debug_session_id}":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"get":{"operationId":"getAgentDebugSession","responses":{"200":{"$ref":"#/components/responses/Ok"}}},"delete":{"operationId":"cancelAgentDebugSession","parameters":[{"$ref":"#/components/parameters/RequestId"}],"responses":{"200":{"$ref":"#/components/responses/Ok"}}}},
-    "/v1/admin/agents/{agent_id}/debug-sessions/{debug_session_id}/stream":{"parameters":[{"$ref":"#/components/parameters/AgentId"}],"get":{"operationId":"streamAgentDebugSession","responses":{"200":{"description":"Admin-only run-stream/v1 SSE","content":{"text/event-stream":{"schema":{"type":"string"}}}}}}}
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Insight Agent Management API",
+    "version": "1.0.0"
   },
-  "components":{
-    "securitySchemes":{"operatorBearer":{"type":"http","scheme":"bearer"}},
-    "parameters":{"AgentId":{"name":"agent_id","in":"path","required":true,"schema":{"$ref":"agent-management-v1.json#/$defs/agentId"}},"RequestId":{"name":"X-Request-ID","in":"header","required":true,"schema":{"type":"string","minLength":1,"maxLength":256}},"AgentIfMatch":{"name":"If-Match","in":"header","required":true,"schema":{"type":"string","pattern":"^\\\"agent-[0-9]+\\\"$"}},"DraftIfMatch":{"name":"If-Match","in":"header","required":true,"schema":{"type":"string","pattern":"^\\\"draft-[0-9]+\\\"$"}},"ViewIfMatch":{"name":"If-Match","in":"header","required":true,"schema":{"type":"string","pattern":"^\\\"view-[0-9]+\\\"$"}},"Cursor":{"name":"cursor","in":"query","required":false,"schema":{"type":"string"}},"Limit":{"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":200}}},
-    "headers":{"CacheControl":{"schema":{"type":"string","const":"private, no-store"}},"Etag":{"schema":{"type":"string"}},"Location":{"schema":{"type":"string"}}},
-    "responses":{"Ok":{"description":"Successful safe projection","headers":{"Cache-Control":{"$ref":"#/components/headers/CacheControl"}},"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/successEnvelope"}}}},"OkWithEtag":{"description":"Successful versioned projection","headers":{"Cache-Control":{"$ref":"#/components/headers/CacheControl"},"ETag":{"$ref":"#/components/headers/Etag"}},"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/successEnvelope"}}}},"Created":{"description":"Created resource","headers":{"Cache-Control":{"$ref":"#/components/headers/CacheControl"},"Location":{"$ref":"#/components/headers/Location"}},"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/successEnvelope"}}}},"Accepted":{"description":"Accepted operation","headers":{"Cache-Control":{"$ref":"#/components/headers/CacheControl"},"Location":{"$ref":"#/components/headers/Location"}},"content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/successEnvelope"}}}},"Error":{"description":"Stable safe error","content":{"application/json":{"schema":{"$ref":"agent-management-v1.json#/$defs/errorEnvelope"}}}}}
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [
+    {
+      "operatorBearer": []
+    }
+  ],
+  "paths": {
+    "/v1/admin/agents": {
+      "get": {
+        "operationId": "listAgents",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAgent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "agent-management-v1.json#/$defs/createAgentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "get": {
+        "operationId": "getAgent",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithEtag"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "updateAgent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/AgentIfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "agent-management-v1.json#/$defs/updateAgentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithEtag"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAgent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/AgentIfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/draft": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "get": {
+        "operationId": "getAgentDraft",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithEtag"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "operationId": "replaceAgentDraft",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/DraftIfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "agent-management-v1.json#/$defs/draft"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithEtag"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/draft/semantic-edits": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "post": {
+        "operationId": "applyAgentSemanticEdits",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/DraftIfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "agent-management-v1.json#/$defs/graphSemanticEditBatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithEtag"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/draft/view": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "get": {
+        "operationId": "getAgentDraftView",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithEtag"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "operationId": "replaceAgentDraftView",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/ViewIfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "agent-management-v1.json#/$defs/viewDocument"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithEtag"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/validations": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "post": {
+        "operationId": "createAgentValidation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/DraftIfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "agent-management-v1.json#/$defs/closedEmptyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "$ref": "#/components/responses/Accepted"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/validations/{validation_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "get": {
+        "operationId": "getAgentValidation",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/revisions": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "get": {
+        "operationId": "listAgentRevisions",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "publishAgentRevision",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/DraftIfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "agent-management-v1.json#/$defs/publishRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/revisions/{definition_revision_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "get": {
+        "operationId": "getAgentRevision",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/deployment-resolutions": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "post": {
+        "operationId": "createAgentDeploymentResolution",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "agent-management-v1.json#/$defs/createResolutionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "$ref": "#/components/responses/Accepted"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/deployment-resolutions/{resolution_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "get": {
+        "operationId": "getAgentDeploymentResolution",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/deployments": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "get": {
+        "operationId": "listAgentDeployments",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAgentDeployment",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "agent-management-v1.json#/$defs/createDeploymentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/Created"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/deployments/{deployment_revision_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "get": {
+        "operationId": "getAgentDeployment",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/active-deployment": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "get": {
+        "operationId": "getActiveAgentDeployment",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithEtag"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "operationId": "activateAgentDeployment",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/AgentIfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "agent-management-v1.json#/$defs/activateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithEtag"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deactivateAgent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/AgentIfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithEtag"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/archive": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "post": {
+        "operationId": "archiveAgent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/AgentIfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "agent-management-v1.json#/$defs/closedEmptyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithEtag"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/restore": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "post": {
+        "operationId": "restoreAgent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/AgentIfMatch"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "agent-management-v1.json#/$defs/closedEmptyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithEtag"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/debug-sessions": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "get": {
+        "operationId": "listAgentDebugSessions",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAgentDebugSession",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "agent-management-v1.json#/$defs/createDebugSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "$ref": "#/components/responses/Accepted"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/debug-sessions/{debug_session_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "get": {
+        "operationId": "getAgentDebugSession",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "cancelAgentDebugSession",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/agents/{agent_id}/debug-sessions/{debug_session_id}/stream": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentId"
+        }
+      ],
+      "get": {
+        "operationId": "streamAgentDebugSession",
+        "responses": {
+          "200": {
+            "description": "Admin-only run-stream/v1 SSE",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "operatorBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "parameters": {
+      "AgentId": {
+        "name": "agent_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "agent-management-v1.json#/$defs/agentId"
+        }
+      },
+      "RequestId": {
+        "name": "X-Request-ID",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "AgentIfMatch": {
+        "name": "If-Match",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^\\\"agent-[0-9]+\\\"$"
+        }
+      },
+      "DraftIfMatch": {
+        "name": "If-Match",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^\\\"draft-[0-9]+\\\"$"
+        }
+      },
+      "ViewIfMatch": {
+        "name": "If-Match",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^\\\"view-[0-9]+\\\"$"
+        }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      }
+    },
+    "headers": {
+      "CacheControl": {
+        "schema": {
+          "type": "string",
+          "const": "private, no-store"
+        }
+      },
+      "Etag": {
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Location": {
+        "schema": {
+          "type": "string"
+        }
+      },
+      "NoSniff": {
+        "schema": {
+          "type": "string",
+          "const": "nosniff"
+        }
+      }
+    },
+    "responses": {
+      "Ok": {
+        "description": "Successful safe projection",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControl"
+          },
+          "X-Content-Type-Options": {
+            "$ref": "#/components/headers/NoSniff"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "agent-management-v1.json#/$defs/successEnvelope"
+            }
+          }
+        }
+      },
+      "OkWithEtag": {
+        "description": "Successful versioned projection",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControl"
+          },
+          "ETag": {
+            "$ref": "#/components/headers/Etag"
+          },
+          "X-Content-Type-Options": {
+            "$ref": "#/components/headers/NoSniff"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "agent-management-v1.json#/$defs/successEnvelope"
+            }
+          }
+        }
+      },
+      "Created": {
+        "description": "Created resource",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControl"
+          },
+          "Location": {
+            "$ref": "#/components/headers/Location"
+          },
+          "X-Content-Type-Options": {
+            "$ref": "#/components/headers/NoSniff"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "agent-management-v1.json#/$defs/successEnvelope"
+            }
+          }
+        }
+      },
+      "Accepted": {
+        "description": "Accepted operation",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControl"
+          },
+          "Location": {
+            "$ref": "#/components/headers/Location"
+          },
+          "X-Content-Type-Options": {
+            "$ref": "#/components/headers/NoSniff"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "agent-management-v1.json#/$defs/successEnvelope"
+            }
+          }
+        }
+      },
+      "Error": {
+        "description": "Stable safe error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "agent-management-v1.json#/$defs/errorEnvelope"
+            }
+          }
+        },
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControl"
+          },
+          "X-Content-Type-Options": {
+            "$ref": "#/components/headers/NoSniff"
+          }
+        }
+      }
+    }
   }
 }

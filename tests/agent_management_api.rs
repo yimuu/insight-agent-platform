@@ -17,9 +17,14 @@ use insight_api::v1::{
     AGENT_ACTIVATE, AGENT_ARCHIVE, AGENT_DEBUG_LIVE, AGENT_DEBUG_SANDBOX, AGENT_DEPLOY,
     AGENT_PUBLISH, AGENT_READ, AGENT_VALIDATE, AGENT_WRITE,
 };
-use insight_dsl::CompileError;
+use insight_dsl::{
+    CompileError, CompileOptions, GraphAuthorDocument, GraphDocumentId, GraphSemanticEdit,
+    GraphSemanticEditBatch, NodeView, ViewDocument,
+};
 use insight_durable::AgentManagementDurableRepository;
-use insight_engine::{plan::LeafTaskDescriptor, worker::WorkerExecutorRegistry, LeafTaskKind};
+use insight_engine::{
+    plan::LeafTaskDescriptor, worker::WorkerExecutorRegistry, DefinitionRevisionId, LeafTaskKind,
+};
 use insight_runtime::{
     catalog::{LeafDeploymentResolver, ResolvedLeafDeployment},
     DeployedAgentCatalog, ProductionRunRepository, RunService, RunServiceConfig,
@@ -32,6 +37,7 @@ use tower::ServiceExt;
 
 const SQLITE_SCHEMA: &str = include_str!("../database/durable/sqlite/schema.sql");
 const OPERATOR_TOKEN: &str = "agent-operator-token";
+const SANDBOX_ONLY_TOKEN: &str = "agent-sandbox-only-token";
 const PUBLIC_TOKEN: &str = "agent-public-token";
 
 const SOURCE: &str = r#"api_version: insight.agent/v1
@@ -80,6 +86,12 @@ fn capabilities() -> BTreeSet<String> {
     )
 }
 
+fn sandbox_only_capabilities() -> BTreeSet<String> {
+    let mut capabilities = capabilities();
+    capabilities.remove(AGENT_DEBUG_LIVE);
+    capabilities
+}
+
 async fn fixture() -> (
     tempfile::TempDir,
     Arc<SqliteDurableRepository>,
@@ -113,11 +125,18 @@ async fn fixture() -> (
     .await
     .unwrap();
     let management = build_agent_management_router(AgentManagementApiState {
-        auth: OperatorAuth::new([(
-            OPERATOR_TOKEN.to_owned(),
-            "operator-a".to_owned(),
-            capabilities(),
-        )])
+        auth: OperatorAuth::new([
+            (
+                OPERATOR_TOKEN.to_owned(),
+                "operator-a".to_owned(),
+                capabilities(),
+            ),
+            (
+                SANDBOX_ONLY_TOKEN.to_owned(),
+                "operator-sandbox".to_owned(),
+                sandbox_only_capabilities(),
+            ),
+        ])
         .unwrap(),
         repository: repository.clone(),
         run_service: service.clone(),
@@ -172,6 +191,45 @@ fn hash(bytes: &[u8]) -> String {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     )
+}
+
+fn graph_draft_fixture() -> GraphAuthorDocument {
+    let source = include_str!("fixtures/dsl/linear.yaml");
+    GraphAuthorDocument::from_structured_source(
+        GraphDocumentId::new("managed_graph_canvas").unwrap(),
+        source,
+        CompileOptions::new(
+            DefinitionRevisionId::new("managed_graph_draft_definition").unwrap(),
+            "managed-graph/agent.yaml",
+            source,
+        ),
+    )
+    .unwrap()
+}
+
+fn graph_publish_fixture() -> GraphAuthorDocument {
+    let source = r#"api_version: insight.agent/v1
+kind: agent
+metadata:
+  id: managed-graph
+  name: Managed Graph
+inputs:
+  question: string
+output: string
+workflow:
+  steps:
+    - return: graph-fixed
+"#;
+    GraphAuthorDocument::from_structured_source(
+        GraphDocumentId::new("managed_graph_publish_canvas").unwrap(),
+        source,
+        CompileOptions::new(
+            DefinitionRevisionId::new("managed_graph_publish_definition").unwrap(),
+            "managed-graph/publish.yaml",
+            source,
+        ),
+    )
+    .unwrap()
 }
 
 fn request(
@@ -255,6 +313,7 @@ async fn agent_management_separates_author_publish_deploy_activate_and_debug_vis
         .await
         .unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(unauthorized.headers()["x-content-type-options"], "nosniff");
 
     let duplicate_key = app
         .clone()
@@ -297,6 +356,7 @@ async fn agent_management_separates_author_publish_deploy_activate_and_debug_vis
         created.headers()[header::CACHE_CONTROL],
         "private, no-store"
     );
+    assert_eq!(created.headers()["x-content-type-options"], "nosniff");
 
     let replayed = app
         .clone()
@@ -331,6 +391,24 @@ async fn agent_management_separates_author_publish_deploy_activate_and_debug_vis
         .unwrap();
     assert_eq!(public_before_activation.status(), StatusCode::NOT_FOUND);
 
+    let live_without_capability = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/agents/managed-api/debug-sessions",
+            SANDBOX_ONLY_TOKEN,
+            Some("debug-live-forbidden"),
+            None,
+            Some(json!({
+                "source":{"type":"draft","draft_version":1},
+                "execution_profile_id":"author-live",
+                "input":{"question":"test"}
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(live_without_capability.status(), StatusCode::FORBIDDEN);
+
     let live_without_confirmation = app
         .clone()
         .oneshot(request(
@@ -351,6 +429,68 @@ async fn agent_management_separates_author_publish_deploy_activate_and_debug_vis
         live_without_confirmation.status(),
         StatusCode::PRECONDITION_REQUIRED
     );
+    let live_preview = json_body(live_without_confirmation).await;
+    assert_eq!(
+        live_preview["code"],
+        "AGENT_DEBUG_LIVE_CONFIRMATION_REQUIRED"
+    );
+    assert_eq!(live_preview["data"]["risk_preview"]["profile_mode"], "live");
+    assert_eq!(
+        live_preview["data"]["risk_preview"]["cost_risk"]["billing_possible"],
+        false
+    );
+    let serialized_live_preview = serde_json::to_string(&live_preview).unwrap();
+    for private_body in ["question", "api_version", "graph-fixed"] {
+        assert!(!serialized_live_preview.contains(private_body));
+    }
+    let risk_preview_hash = live_preview["data"]["risk_preview"]["risk_preview_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let stale_preview = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/agents/managed-api/debug-sessions",
+            OPERATOR_TOKEN,
+            Some("debug-live-stale-preview"),
+            None,
+            Some(json!({
+                "source":{"type":"draft","draft_version":1},
+                "execution_profile_id":"author-live",
+                "input":{"question":"test"},
+                "live_confirmation":true,
+                "risk_preview_hash":hash(b"different-preview")
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale_preview.status(), StatusCode::PRECONDITION_REQUIRED);
+    let live_debug = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/agents/managed-api/debug-sessions",
+            OPERATOR_TOKEN,
+            Some("debug-live-confirmed"),
+            None,
+            Some(json!({
+                "source":{"type":"draft","draft_version":1},
+                "execution_profile_id":"author-live",
+                "input":{"question":"test"},
+                "live_confirmation":true,
+                "risk_preview_hash":risk_preview_hash
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(live_debug.status(), StatusCode::ACCEPTED);
+    let live_session_id = json_body(live_debug).await["data"]["debug_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let live_terminal = wait_for_debug_terminal(&app, &live_session_id).await;
+    assert_eq!(live_terminal["status"], "succeeded");
 
     let debug = app
         .clone()
@@ -419,7 +559,7 @@ async fn agent_management_separates_author_publish_deploy_activate_and_debug_vis
             )
             .await
             .unwrap(),
-        1
+        2
     );
     let retained = app
         .clone()
@@ -465,10 +605,19 @@ async fn agent_management_separates_author_publish_deploy_activate_and_debug_vis
         .await
         .unwrap();
     assert_eq!(validation.status(), StatusCode::ACCEPTED);
-    let validation_id = json_body(validation).await["data"]["validation_id"]
+    let validation_location = validation.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let validation_body = json_body(validation).await;
+    let validation_id = validation_body["data"]["validation_id"]
         .as_str()
         .unwrap()
         .to_owned();
+    assert_eq!(
+        validation_location,
+        format!("/v1/admin/agents/managed-api/validations/{validation_id}")
+    );
 
     let published = app
         .clone()
@@ -478,7 +627,7 @@ async fn agent_management_separates_author_publish_deploy_activate_and_debug_vis
             OPERATOR_TOKEN,
             Some("publish-1"),
             Some("\"draft-1\""),
-            Some(json!({"validation_id":validation_id})),
+            Some(json!({"draft_version":1,"validation_id":validation_id})),
         ))
         .await
         .unwrap();
@@ -530,7 +679,7 @@ async fn agent_management_separates_author_publish_deploy_activate_and_debug_vis
             OPERATOR_TOKEN,
             Some("deploy-1"),
             None,
-            Some(json!({"resolution_id":resolution_id})),
+            Some(json!({"definition_revision_id":definition_revision_id,"resolution_id":resolution_id})),
         ))
         .await
         .unwrap();
@@ -717,5 +866,321 @@ async fn agent_management_separates_author_publish_deploy_activate_and_debug_vis
     assert!(rejected >= 2);
     audit_pool.close().await;
 
+    service.shutdown(Duration::from_secs(5)).await.unwrap();
+}
+
+#[tokio::test]
+async fn graph_management_keeps_view_and_semantic_edits_inside_the_draft_boundary() {
+    let (_temporary, _repository, service, app) = fixture().await;
+    let graph = graph_draft_fixture();
+    let graph_document: Value = serde_json::from_slice(&graph.encode_json().unwrap()).unwrap();
+    let created = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/agents",
+            OPERATOR_TOKEN,
+            Some("graph-agent-create"),
+            None,
+            Some(json!({
+                "agent_id":"managed-graph",
+                "authoring_mode":"graph",
+                "labels":{"team":"canvas"},
+                "draft":{"source":{"type":"graph","document":graph_document}}
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    let original_draft = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/admin/agents/managed-graph/draft",
+            OPERATOR_TOKEN,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(original_draft.headers()[header::ETAG], "\"draft-1\"");
+    let original_draft = json_body(original_draft).await["data"].clone();
+
+    let initial_view = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/admin/agents/managed-graph/draft/view",
+            OPERATOR_TOKEN,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(initial_view.headers()[header::ETAG], "\"view-0\"");
+    let mut view = ViewDocument::new(graph.document_id().clone());
+    view.set_node(graph.nodes()[0].id().clone(), NodeView::at(12.0, 34.0))
+        .unwrap();
+    let view_document: Value = serde_json::from_slice(&view.encode_json().unwrap()).unwrap();
+    let saved_view = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            "/v1/admin/agents/managed-graph/draft/view",
+            OPERATOR_TOKEN,
+            Some("graph-view-save"),
+            Some("\"view-0\""),
+            Some(view_document),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(saved_view.status(), StatusCode::OK);
+
+    let after_view = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/admin/agents/managed-graph/draft",
+            OPERATOR_TOKEN,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(after_view.headers()[header::ETAG], "\"draft-1\"");
+    assert_eq!(json_body(after_view).await["data"], original_draft);
+
+    let edit_batch = GraphSemanticEditBatch::new(
+        graph.semantic_hash().clone(),
+        DefinitionRevisionId::new("managed_graph_edit_target").unwrap(),
+        vec![GraphSemanticEdit::UpsertNode {
+            node: graph.nodes()[0].clone(),
+        }],
+    )
+    .unwrap();
+    let edit_document: Value = serde_json::from_slice(&edit_batch.encode_json().unwrap()).unwrap();
+    let edited = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/agents/managed-graph/draft/semantic-edits",
+            OPERATOR_TOKEN,
+            Some("graph-semantic-edit"),
+            Some("\"draft-1\""),
+            Some(edit_document.clone()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(edited.status(), StatusCode::OK);
+
+    let edited_draft = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/admin/agents/managed-graph/draft",
+            OPERATOR_TOKEN,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(edited_draft.headers()[header::ETAG], "\"draft-2\"");
+    assert_ne!(json_body(edited_draft).await["data"], original_draft);
+
+    let revisions = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/admin/agents/managed-graph/revisions",
+            OPERATOR_TOKEN,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(json_body(revisions).await["data"]["items"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/v1/agents/managed-graph",
+                PUBLIC_TOKEN,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let stale_edit = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/agents/managed-graph/draft/semantic-edits",
+            OPERATOR_TOKEN,
+            Some("graph-semantic-edit-stale"),
+            Some("\"draft-1\""),
+            Some(edit_document),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale_edit.status(), StatusCode::PRECONDITION_FAILED);
+
+    let publish_graph = graph_publish_fixture();
+    let publish_graph_document: Value =
+        serde_json::from_slice(&publish_graph.encode_json().unwrap()).unwrap();
+    let replaced = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            "/v1/admin/agents/managed-graph/draft",
+            OPERATOR_TOKEN,
+            Some("graph-draft-replace"),
+            Some("\"draft-2\""),
+            Some(json!({"source":{"type":"graph","document":publish_graph_document}})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replaced.status(), StatusCode::OK);
+    let validation = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/agents/managed-graph/validations",
+            OPERATOR_TOKEN,
+            Some("graph-validate"),
+            Some("\"draft-3\""),
+            Some(json!({})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(validation.status(), StatusCode::ACCEPTED);
+    let validation_id = json_body(validation).await["data"]["validation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let published = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/agents/managed-graph/revisions",
+            OPERATOR_TOKEN,
+            Some("graph-publish"),
+            Some("\"draft-3\""),
+            Some(json!({"draft_version":3,"validation_id":validation_id})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(published.status(), StatusCode::CREATED);
+    let definition_revision_id = json_body(published).await["data"]["definition_revision_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/v1/agents/managed-graph",
+                PUBLIC_TOKEN,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let resolution = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/agents/managed-graph/deployment-resolutions",
+            OPERATOR_TOKEN,
+            Some("graph-resolve"),
+            None,
+            Some(json!({"definition_revision_id":definition_revision_id})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resolution.status(), StatusCode::ACCEPTED);
+    let resolution_id = json_body(resolution).await["data"]["resolution_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let deployment = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/agents/managed-graph/deployments",
+            OPERATOR_TOKEN,
+            Some("graph-deploy"),
+            None,
+            Some(json!({
+                "definition_revision_id":definition_revision_id,
+                "resolution_id":resolution_id
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(deployment.status(), StatusCode::CREATED);
+    let deployment_revision_id = json_body(deployment).await["data"]["deployment_revision_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/v1/agents/managed-graph",
+                PUBLIC_TOKEN,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let activated = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            "/v1/admin/agents/managed-graph/active-deployment",
+            OPERATOR_TOKEN,
+            Some("graph-activate"),
+            Some("\"agent-1\""),
+            Some(json!({"deployment_revision_id":deployment_revision_id})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(activated.status(), StatusCode::OK);
+    assert_eq!(
+        app.oneshot(request(
+            "GET",
+            "/v1/agents/managed-graph",
+            PUBLIC_TOKEN,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
     service.shutdown(Duration::from_secs(5)).await.unwrap();
 }

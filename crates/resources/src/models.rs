@@ -1442,6 +1442,23 @@ impl ModelRegistry {
             .retain(|selector, _| selector.provider() != provider_id);
         Ok(())
     }
+
+    /// Fail-closed removal used when a managed Provider's frozen adapter or
+    /// secret policy can no longer be verified. Ordinary deactivation uses
+    /// [`Self::withdraw_provider`] so exact historical bindings remain usable.
+    #[doc(hidden)]
+    pub fn withdraw_provider_all(&self, provider_id: &str) -> Result<(), CompileError> {
+        let mut state = self.state.write().map_err(|_| {
+            CompileError::new("MODEL_REGISTRY_POISONED", "model registry lock is poisoned")
+        })?;
+        state
+            .current
+            .retain(|selector, _| selector.provider() != provider_id);
+        state
+            .archive
+            .retain(|(selector, _), _| selector.provider() != provider_id);
+        Ok(())
+    }
 }
 
 /// Workspace-internal entry points consumed by runtime adapters.
@@ -1521,6 +1538,44 @@ mod tests {
         assert_eq!(clone.deployment_identity(&second).unwrap(), deployment("b"));
         clone.withdraw_provider("managed").unwrap();
         assert!(registry.resolve(&second).is_err());
+        assert!(registry
+            .resolve_versioned(&first, &first_binding_hash)
+            .is_ok());
+        clone.withdraw_provider_all("managed").unwrap();
+        assert!(registry
+            .resolve_versioned(&first, &first_binding_hash)
+            .is_err());
+    }
+
+    #[test]
+    fn missing_managed_provider_secret_blocks_current_and_exact_resolution() {
+        let registry = ModelRegistry::default();
+        let selector = ModelSelector::new("managed-secret", "model-a").unwrap();
+        let identity = deployment("secret-missing");
+        let binding_hash = identity.binding_hash().to_owned();
+        registry
+            .replace_provider_models(
+                "managed-secret",
+                vec![(
+                    selector.clone(),
+                    identity,
+                    Some("MISSING_MANAGED_PROVIDER_SECRET".to_owned()),
+                    None,
+                    registry_model("model-a"),
+                )],
+            )
+            .unwrap();
+        assert_eq!(
+            registry.resolve(&selector).unwrap_err().code(),
+            "MODEL_SECRET_MISSING"
+        );
+        assert_eq!(
+            registry
+                .resolve_versioned(&selector, &binding_hash)
+                .unwrap_err()
+                .code(),
+            "MODEL_SECRET_MISSING"
+        );
     }
 
     #[test]

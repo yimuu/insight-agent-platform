@@ -6,6 +6,9 @@ Schema：
 - `postgres/schema.sql`：在空的 PostgreSQL 16 数据库或 Schema 中完成结构部署。
 - `sqlite/schema.sql`：在一个全新、空白的 SQLite 数据库文件中完成结构部署。
 
+PostgreSQL 完整安装会在事务内获取一个数据库级 advisory lock，以串行化针对不同目标 Schema 的
+并发安装。该锁只保护 DDL provisioning，事务结束自动释放，运行时 repository 不会获取它。
+
 这些文件描述的是当前版本的最终数据库结构。它们不是 migration，也不支持升级、
 接管或修复已有数据库。在 1.0 版本之前，如果发生不兼容的结构变更，需要同时修改
 两个 Schema 文件、分配一个新的共享契约 ID，并基于空目标重新部署开发环境和 CI

@@ -642,6 +642,55 @@ async fn sqlite_agent_mutation_fault_rolls_back_state_receipt_audit_and_outbox()
 }
 
 #[tokio::test]
+async fn sqlite_agent_management_outbox_is_bounded_inside_the_mutation_transaction() {
+    let (temporary, repository): (_, SqliteDurableRepository) =
+        support::temporary_sqlite_repository().await;
+    let database_url = format!(
+        "sqlite://{}",
+        temporary.path().join("durable.sqlite3").display()
+    );
+    let control = sqlx::SqlitePool::connect(&database_url).await.unwrap();
+    sqlx::query(
+        "WITH RECURSIVE seq(value) AS (
+             SELECT 1 UNION ALL SELECT value + 1 FROM seq WHERE value < 4096
+         )
+         INSERT INTO agent_management_outbox(
+             event_id,event_kind,agent_id,subject_id,safe_payload,created_at,delivered_at
+         )
+         SELECT printf('seed-%05d',value),'agent.seed','seed-agent','seed-subject','{}',
+                '2025-01-01T00:00:00.000Z',NULL FROM seq",
+    )
+    .execute(&control)
+    .await
+    .unwrap();
+    let draft = json!({"source":{"type":"graph","document":{}}});
+    repository
+        .create_agent(CreateAgentCommand {
+            metadata: metadata("bounded-agent", "POST", "/v1/admin/agents"),
+            agent_id: "bounded-agent".to_owned(),
+            authoring_mode: AgentAuthoringMode::Graph,
+            labels: json!({}),
+            author_hash: json_hash(&draft),
+            draft_document: draft,
+        })
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_management_outbox")
+        .fetch_one(&control)
+        .await
+        .unwrap();
+    assert_eq!(count, 4096);
+    let retained_mutation: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_management_outbox WHERE event_kind='agent.created'",
+    )
+    .fetch_one(&control)
+    .await
+    .unwrap();
+    assert_eq!(retained_mutation, 1);
+    control.close().await;
+}
+
+#[tokio::test]
 async fn postgres_agent_management_separates_author_publish_deploy_and_activation() {
     let Some((repository, control, admin, schema)) = isolated_postgres_repository().await else {
         assert!(
@@ -651,6 +700,65 @@ async fn postgres_agent_management_separates_author_publish_deploy_and_activatio
         return;
     };
     exercise_agent_management(&repository).await;
+    drop(repository);
+    drop(control);
+    sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+}
+
+#[tokio::test]
+async fn postgres_agent_management_outbox_is_bounded_under_concurrent_mutations() {
+    let Some((repository, control, admin, schema)) = isolated_postgres_repository().await else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must set TEST_POSTGRES_URL for PostgreSQL Agent outbox conformance"
+        );
+        return;
+    };
+    sqlx::query(
+        "INSERT INTO agent_management_outbox(
+             event_id,event_kind,agent_id,subject_id,safe_payload,created_at,delivered_at
+         )
+         SELECT 'seed-' || lpad(value::text,5,'0'),'agent.seed','seed-agent',
+                'seed-subject','{}'::jsonb,'2025-01-01T00:00:00Z'::timestamptz,NULL
+           FROM generate_series(1,4096) AS value",
+    )
+    .execute(&control)
+    .await
+    .unwrap();
+    let make = |suffix: &'static str| {
+        let draft = json!({"source":{"type":"graph","document":{}}});
+        repository.create_agent(CreateAgentCommand {
+            metadata: metadata(
+                &format!("bounded-agent-{suffix}"),
+                "POST",
+                "/v1/admin/agents",
+            ),
+            agent_id: format!("bounded-agent-{suffix}"),
+            authoring_mode: AgentAuthoringMode::Graph,
+            labels: json!({}),
+            author_hash: json_hash(&draft),
+            draft_document: draft,
+        })
+    };
+    let (first, second) = tokio::join!(make("a"), make("b"));
+    first.unwrap();
+    second.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_management_outbox")
+        .fetch_one(&control)
+        .await
+        .unwrap();
+    assert_eq!(count, 4096);
+    let retained_mutations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_management_outbox WHERE event_kind='agent.created'",
+    )
+    .fetch_one(&control)
+    .await
+    .unwrap();
+    assert_eq!(retained_mutations, 2);
     drop(repository);
     drop(control);
     sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))

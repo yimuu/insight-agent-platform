@@ -66,6 +66,8 @@ pub struct ProviderTemplate {
 #[derive(Clone)]
 pub struct ProviderManagementPolicy {
     pub installed_adapters: BTreeMap<String, String>,
+    pub adapter_worker_versions: BTreeMap<String, String>,
+    pub adapter_manifest_digests: BTreeMap<String, String>,
     pub allowed_secret_refs: BTreeSet<String>,
     pub resolvable_secret_refs: BTreeSet<String>,
     pub templates: Vec<ProviderTemplate>,
@@ -84,6 +86,8 @@ impl std::fmt::Debug for ProviderManagementPolicy {
         formatter
             .debug_struct("ProviderManagementPolicy")
             .field("installed_adapters", &self.installed_adapters)
+            .field("adapter_worker_versions", &self.adapter_worker_versions)
+            .field("adapter_manifest_digests", &self.adapter_manifest_digests)
             .field("templates", &self.templates)
             .field(
                 "allow_loopback_development",
@@ -467,6 +471,10 @@ pub fn build_provider_management_router(state: ProviderManagementApiState) -> Ro
                         header::CACHE_CONTROL,
                         HeaderValue::from_static("private, no-store"),
                     );
+                    response.headers_mut().insert(
+                        header::HeaderName::from_static("x-content-type-options"),
+                        HeaderValue::from_static("nosniff"),
+                    );
                     response
                 }
             },
@@ -514,6 +522,10 @@ fn private_no_store(response: impl IntoResponse) -> Response {
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-store"),
+    );
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
     );
     response
 }
@@ -1560,6 +1572,21 @@ async fn publish_revision(
         .ok_or_else(ManagementError::not_found)?;
     let draft: ProviderDraftDocument =
         serde_json::from_value(stored.document).map_err(|_| ManagementError::internal())?;
+    let adapter_version = state
+        .policy
+        .installed_adapters
+        .get(&provider.adapter_type)
+        .ok_or_else(ManagementError::internal)?;
+    let adapter_manifest_digest = state
+        .policy
+        .adapter_manifest_digests
+        .get(&provider.adapter_type)
+        .ok_or_else(ManagementError::internal)?;
+    let worker_version = state
+        .policy
+        .adapter_worker_versions
+        .get(&provider.adapter_type)
+        .ok_or_else(ManagementError::internal)?;
     let credential_reference = draft.credential.reference().map(str::to_owned);
     let credential_reference_hash = draft
         .credential
@@ -1567,7 +1594,7 @@ async fn publish_revision(
         .map(|reference| sha256(reference.as_bytes()));
     let document = json!({
         "provider_id":provider_id,
-        "adapter":{"type":draft.adapter.adapter_type,"version":state.policy.installed_adapters.get(&provider.adapter_type)},
+        "adapter":{"type":draft.adapter.adapter_type,"version":adapter_version,"worker_version":worker_version,"manifest_digest":adapter_manifest_digest},
         "endpoint":draft.endpoint,
         "credential":{"type":match draft.credential { ProviderDraftCredential::Bearer{..}=>"bearer", ProviderDraftCredential::ApiKey{..}=>"api_key", ProviderDraftCredential::None=>"none" },"reference":credential_reference,"reference_hash":credential_reference_hash},
         "transport":draft.transport,
@@ -1922,16 +1949,92 @@ mod contract_tests {
         let openapi: Value = serde_json::from_str(MANAGEMENT_OPENAPI).unwrap();
         assert_eq!(openapi["openapi"], "3.1.0");
         let paths = openapi["paths"].as_object().unwrap();
-        let operations = paths
-            .values()
-            .flat_map(|item| item.as_object().unwrap().keys())
-            .filter(|method| *method != "parameters")
-            .count();
-        assert_eq!(operations, 27);
-        for item in paths.values() {
-            if let Some(delete) = item.get("delete") {
-                assert!(delete.get("requestBody").is_none());
+        let expected = BTreeSet::from([
+            ("get", "/v1/admin/provider-templates"),
+            ("get", "/v1/admin/providers"),
+            ("post", "/v1/admin/providers"),
+            ("get", "/v1/admin/providers/{provider_id}"),
+            ("delete", "/v1/admin/providers/{provider_id}"),
+            ("get", "/v1/admin/providers/{provider_id}/draft"),
+            ("put", "/v1/admin/providers/{provider_id}/draft"),
+            ("post", "/v1/admin/providers/{provider_id}/discoveries"),
+            (
+                "get",
+                "/v1/admin/providers/{provider_id}/discoveries/{discovery_id}",
+            ),
+            (
+                "delete",
+                "/v1/admin/providers/{provider_id}/discoveries/{discovery_id}",
+            ),
+            (
+                "get",
+                "/v1/admin/providers/{provider_id}/discoveries/{discovery_id}/model-candidates",
+            ),
+            (
+                "post",
+                "/v1/admin/providers/{provider_id}/model-import-previews",
+            ),
+            ("put", "/v1/admin/providers/{provider_id}/draft/models"),
+            ("post", "/v1/admin/providers/{provider_id}/validations"),
+            (
+                "get",
+                "/v1/admin/providers/{provider_id}/validations/{validation_id}",
+            ),
+            ("post", "/v1/admin/providers/{provider_id}/connection-tests"),
+            (
+                "get",
+                "/v1/admin/providers/{provider_id}/connection-tests/{test_id}",
+            ),
+            (
+                "delete",
+                "/v1/admin/providers/{provider_id}/connection-tests/{test_id}",
+            ),
+            ("get", "/v1/admin/providers/{provider_id}/revisions"),
+            ("post", "/v1/admin/providers/{provider_id}/revisions"),
+            (
+                "get",
+                "/v1/admin/providers/{provider_id}/revisions/{revision_id}",
+            ),
+            ("get", "/v1/admin/providers/{provider_id}/active-revision"),
+            ("put", "/v1/admin/providers/{provider_id}/active-revision"),
+            (
+                "delete",
+                "/v1/admin/providers/{provider_id}/active-revision",
+            ),
+            ("post", "/v1/admin/providers/{provider_id}/suspension"),
+            ("delete", "/v1/admin/providers/{provider_id}/suspension"),
+            ("post", "/v1/admin/providers/{provider_id}/retirement"),
+        ]);
+        let mut actual = BTreeSet::new();
+        for (path, item) in paths {
+            for (method, operation) in item.as_object().unwrap() {
+                if method == "parameters" {
+                    continue;
+                }
+                actual.insert((method.as_str(), path.as_str()));
+                assert_eq!(
+                    operation["responses"]["default"]["$ref"],
+                    "#/components/responses/Error"
+                );
+                if method == "delete" {
+                    assert!(operation.get("requestBody").is_none());
+                }
             }
+        }
+        assert_eq!(actual, expected);
+        for response in openapi["components"]["responses"]
+            .as_object()
+            .unwrap()
+            .values()
+        {
+            assert_eq!(
+                response["headers"]["X-Content-Type-Options"]["$ref"],
+                "#/components/headers/NoSniff"
+            );
+            assert_eq!(
+                response["headers"]["Cache-Control"]["$ref"],
+                "#/components/headers/CacheControl"
+            );
         }
     }
 
@@ -1941,6 +2044,14 @@ mod contract_tests {
             installed_adapters: BTreeMap::from([(
                 "open_ai_compatible".to_owned(),
                 "2.1.0".to_owned(),
+            )]),
+            adapter_worker_versions: BTreeMap::from([(
+                "open_ai_compatible".to_owned(),
+                "openai-chat-worker-test".to_owned(),
+            )]),
+            adapter_manifest_digests: BTreeMap::from([(
+                "open_ai_compatible".to_owned(),
+                "sha256:adapter-manifest".to_owned(),
             )]),
             allowed_secret_refs: BTreeSet::from(["secret://environment/LLM_TOKEN".to_owned()]),
             resolvable_secret_refs: BTreeSet::new(),

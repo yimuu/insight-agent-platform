@@ -23,6 +23,7 @@ use insight_agent_platform::{
         mcp_server::PlatformMcpServerBackend,
         models::ModelRegistry,
         provider_management::{
+            managed_openai_adapter_manifest, managed_openai_adapter_manifest_digest,
             DurableProviderRunAdmissionAuthority, ManagedProviderRevisionReadiness,
             ProviderManagementRuntime, ProviderManagementRuntimeConfig,
         },
@@ -138,6 +139,10 @@ async fn main() -> MainResult<()> {
         )),
         max_response_bytes: config.mcp.client.default_limits.limits.max_response_bytes,
         allow_loopback_development: config.mcp.client.network_policy.allow_loopback_development,
+        allowed_secret_names: config
+            .management
+            .provider_secret_resolver_allowed_names
+            .clone(),
     };
     let mut provider_management_runtime = ProviderManagementRuntime::start(
         Arc::clone(&provider_management),
@@ -540,9 +545,12 @@ async fn main() -> MainResult<()> {
             .filter(|name| std::env::var_os(name).is_some())
             .map(|name| format!("secret://environment/{name}"))
             .collect::<std::collections::BTreeSet<_>>();
+        let provider_template_document = managed_openai_adapter_manifest();
+        let provider_template_digest = managed_openai_adapter_manifest_digest();
         let provider_policy_document = serde_json::json!({
             "adapter":"open_ai_compatible",
-            "adapter_version":"2.1.0",
+            "adapter_version":insight_agent_platform::resources::openai_chat::OPENAI_CHAT_ADAPTER_VERSION,
+            "adapter_manifest_digest":provider_template_digest,
             "allowed_secret_refs":provider_secret_refs,
             "max_models":config.management.limits.max_provider_models,
             "transport":{"tls":"required","redirects":"deny"}
@@ -562,26 +570,6 @@ async fn main() -> MainResult<()> {
         provider_cursor_hasher.update(b"insight-provider-management-cursor-v1\0");
         provider_cursor_hasher.update(cursor_signing_key);
         let provider_cursor_signing_key: [u8; 32] = provider_cursor_hasher.finalize().into();
-        let provider_template_document = serde_json::json!({
-            "adapter":{"type":"open_ai_compatible","version":"2.1.0"},
-            "transport":{"tls":"required","redirects":"deny"},
-            "credential_slots":["bearer","api_key"],
-            "model_discovery":"models_endpoint"
-        });
-        let provider_template_digest = {
-            let bytes = serde_jcs::to_vec(&provider_template_document).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Provider template is not canonicalizable",
-                )
-            })?;
-            let mut value = String::from("sha256:");
-            for byte in Sha256::digest(bytes) {
-                use std::fmt::Write as _;
-                write!(&mut value, "{byte:02x}")?;
-            }
-            value
-        };
         app = app.merge(build_provider_management_router(
             ProviderManagementApiState {
                 auth: operator_auth.clone(),
@@ -589,14 +577,24 @@ async fn main() -> MainResult<()> {
                 policy: Arc::new(ProviderManagementPolicy {
                     installed_adapters: std::collections::BTreeMap::from([(
                         "open_ai_compatible".to_owned(),
-                        "2.1.0".to_owned(),
+                        insight_agent_platform::resources::openai_chat::OPENAI_CHAT_ADAPTER_VERSION
+                            .to_owned(),
+                    )]),
+                    adapter_worker_versions: std::collections::BTreeMap::from([(
+                        "open_ai_compatible".to_owned(),
+                        insight_agent_platform::resources::openai_chat::OPENAI_CHAT_WORKER_VERSION
+                            .to_owned(),
+                    )]),
+                    adapter_manifest_digests: std::collections::BTreeMap::from([(
+                        "open_ai_compatible".to_owned(),
+                        provider_template_digest.clone(),
                     )]),
                     allowed_secret_refs: provider_secret_refs,
                     resolvable_secret_refs: provider_resolvable_secret_refs,
                     templates: vec![ProviderTemplate {
                         template_id: "open-ai-compatible".to_owned(),
                         adapter_type: "open_ai_compatible".to_owned(),
-                        adapter_version: "2.1.0".to_owned(),
+                        adapter_version: insight_agent_platform::resources::openai_chat::OPENAI_CHAT_ADAPTER_VERSION.to_owned(),
                         manifest_digest: provider_template_digest,
                         document: provider_template_document,
                     }],

@@ -120,7 +120,7 @@ async fn run() -> Result<()> {
             &format!("{request_prefix}-publish"),
             Some(&format!("\"draft-{draft_version}\"")),
             None,
-            json!({"validation_id":validation_id}),
+            json!({"draft_version":draft_version,"validation_id":validation_id}),
             &[StatusCode::CREATED],
         )
         .await?;
@@ -153,7 +153,7 @@ async fn run() -> Result<()> {
             &format!("{request_prefix}-deploy"),
             None,
             None,
-            json!({"resolution_id":resolution_id}),
+            json!({"definition_revision_id":definition_revision_id,"resolution_id":resolution_id}),
             &[StatusCode::CREATED],
         )
         .await?;

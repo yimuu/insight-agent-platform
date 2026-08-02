@@ -1,3 +1,6 @@
+#[path = "support/database.rs"]
+mod database;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
@@ -12,20 +15,26 @@ use axum::{
     Router,
 };
 use insight_agent_platform::resources::provider_management::{
+    managed_openai_adapter_manifest_digest, ManagedProviderRevisionReadiness,
     ProviderManagementRuntime, ProviderManagementRuntimeConfig,
 };
 use insight_api::v1::{
-    build_provider_management_router, LocalProviderRevisionReadiness, OperatorAuth,
-    ProviderManagementApiState, ProviderManagementPolicy, PROVIDER_ACTIVATE, PROVIDER_DISCOVER,
-    PROVIDER_PUBLISH, PROVIDER_READ, PROVIDER_RETIRE, PROVIDER_SUSPEND, PROVIDER_TEST,
-    PROVIDER_WRITE,
+    build_provider_management_router, OperatorAuth, ProviderManagementApiState,
+    ProviderManagementPolicy, PROVIDER_ACTIVATE, PROVIDER_DISCOVER, PROVIDER_PUBLISH,
+    PROVIDER_READ, PROVIDER_RETIRE, PROVIDER_SUSPEND, PROVIDER_TEST, PROVIDER_WRITE,
 };
+use insight_durable::ProviderManagementDurableRepository;
 use insight_resources::models::{ModelRegistry, ModelSelector};
-use insight_storage::SqliteDurableRepository;
+use insight_storage::{PostgresDurableRepository, SqliteDurableRepository};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{
+    postgres::PgPoolOptions,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    AssertSqlSafe,
+};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 const SQLITE_SCHEMA: &str = include_str!("../database/durable/sqlite/schema.sql");
 
@@ -55,22 +64,7 @@ fn capabilities() -> BTreeSet<String> {
     )
 }
 
-async fn fixture() -> (tempfile::TempDir, Arc<SqliteDurableRepository>, Router) {
-    let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path().join("provider-management.sqlite3");
-    File::create(&path).unwrap();
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            SqliteConnectOptions::from_str(path.to_str().unwrap())
-                .unwrap()
-                .foreign_keys(true),
-        )
-        .await
-        .unwrap();
-    sqlx::raw_sql(SQLITE_SCHEMA).execute(&pool).await.unwrap();
-    pool.close().await;
-    let repository = Arc::new(SqliteDurableRepository::connect_path(&path).await.unwrap());
+fn management_router(repository: Arc<dyn ProviderManagementDurableRepository>) -> Router {
     let auth = OperatorAuth::new([(
         "operator-token".to_owned(),
         "operator-a".to_owned(),
@@ -79,6 +73,14 @@ async fn fixture() -> (tempfile::TempDir, Arc<SqliteDurableRepository>, Router) 
     .unwrap();
     let policy = ProviderManagementPolicy {
         installed_adapters: BTreeMap::from([("open_ai_compatible".to_owned(), "2.1.0".to_owned())]),
+        adapter_worker_versions: BTreeMap::from([(
+            "open_ai_compatible".to_owned(),
+            insight_resources::openai_chat::OPENAI_CHAT_WORKER_VERSION.to_owned(),
+        )]),
+        adapter_manifest_digests: BTreeMap::from([(
+            "open_ai_compatible".to_owned(),
+            managed_openai_adapter_manifest_digest(),
+        )]),
         allowed_secret_refs: BTreeSet::from(["secret://environment/COMPANY_LLM_TOKEN".to_owned()]),
         resolvable_secret_refs: BTreeSet::from([
             "secret://environment/COMPANY_LLM_TOKEN".to_owned()
@@ -95,10 +97,41 @@ async fn fixture() -> (tempfile::TempDir, Arc<SqliteDurableRepository>, Router) 
     };
     let app = build_provider_management_router(ProviderManagementApiState {
         auth,
-        repository: repository.clone(),
+        repository,
         policy: Arc::new(policy),
-        readiness: Arc::new(LocalProviderRevisionReadiness),
+        readiness: Arc::new(ManagedProviderRevisionReadiness::new(
+            ProviderManagementRuntimeConfig {
+                enabled: true,
+                workers: 1,
+                poll_interval: Duration::from_secs(1),
+                lease_duration: Duration::from_secs(30),
+                retention: chrono::Duration::days(1),
+                max_response_bytes: 1024 * 1024,
+                allow_loopback_development: false,
+                allowed_secret_names: BTreeSet::new(),
+            },
+        )),
     });
+    app
+}
+
+async fn fixture() -> (tempfile::TempDir, Arc<SqliteDurableRepository>, Router) {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("provider-management.sqlite3");
+    File::create(&path).unwrap();
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::from_str(path.to_str().unwrap())
+                .unwrap()
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    sqlx::raw_sql(SQLITE_SCHEMA).execute(&pool).await.unwrap();
+    pool.close().await;
+    let repository = Arc::new(SqliteDurableRepository::connect_path(&path).await.unwrap());
+    let app = management_router(repository.clone());
     (temporary, repository, app)
 }
 
@@ -165,6 +198,7 @@ async fn provider_http_lifecycle_is_authenticated_cas_idempotent_and_body_free()
         .await
         .unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(unauthorized.headers()["x-content-type-options"], "nosniff");
 
     let created = app
         .clone()
@@ -183,6 +217,7 @@ async fn provider_http_lifecycle_is_authenticated_cas_idempotent_and_body_free()
         created.headers()[header::CACHE_CONTROL],
         "private, no-store"
     );
+    assert_eq!(created.headers()["x-content-type-options"], "nosniff");
     let replayed = app
         .clone()
         .oneshot(request(
@@ -244,24 +279,47 @@ async fn provider_http_lifecycle_is_authenticated_cas_idempotent_and_body_free()
         .unwrap();
     assert_eq!(activated.status(), StatusCode::OK);
     assert_eq!(activated.headers()[header::ETAG], "\"provider-2\"");
-    let models = ModelRegistry::default();
-    let mut provider_runtime = ProviderManagementRuntime::start(
+    let runtime_config = ProviderManagementRuntimeConfig {
+        enabled: true,
+        workers: 1,
+        poll_interval: Duration::from_millis(20),
+        lease_duration: Duration::from_secs(30),
+        retention: chrono::Duration::days(1),
+        max_response_bytes: 1024 * 1024,
+        allow_loopback_development: false,
+        allowed_secret_names: BTreeSet::new(),
+    };
+    let models_a = ModelRegistry::default();
+    let models_b = ModelRegistry::default();
+    let mut provider_runtime_a = ProviderManagementRuntime::start(
         repository.clone(),
-        models.clone(),
-        ProviderManagementRuntimeConfig {
-            enabled: true,
-            workers: 1,
-            poll_interval: Duration::from_millis(20),
-            lease_duration: Duration::from_secs(30),
-            retention: chrono::Duration::days(1),
-            max_response_bytes: 1024 * 1024,
-            allow_loopback_development: false,
-        },
+        models_a.clone(),
+        runtime_config.clone(),
+    )
+    .await
+    .unwrap();
+    let mut provider_runtime_b = ProviderManagementRuntime::start(
+        repository.clone(),
+        models_b.clone(),
+        runtime_config.clone(),
     )
     .await
     .unwrap();
     let selector = ModelSelector::new("company-llm", "chat-v1").unwrap();
-    assert!(models.resolve(&selector).is_ok());
+    assert!(models_a.resolve(&selector).is_ok());
+    assert!(models_b.resolve(&selector).is_ok());
+    let binding_hash = models_a
+        .deployment_identity(&selector)
+        .unwrap()
+        .binding_hash()
+        .to_owned();
+    assert_eq!(
+        models_b
+            .deployment_identity(&selector)
+            .unwrap()
+            .binding_hash(),
+        binding_hash
+    );
 
     let nonempty_delete = app
         .clone()
@@ -290,13 +348,18 @@ async fn provider_http_lifecycle_is_authenticated_cas_idempotent_and_body_free()
     assert_eq!(suspended.status(), StatusCode::OK);
     assert_eq!(suspended.headers()[header::ETAG], "\"provider-3\"");
     let deadline = Instant::now() + Duration::from_secs(2);
-    while models.resolve(&selector).is_ok() && Instant::now() < deadline {
+    while (models_a.resolve(&selector).is_ok() || models_b.resolve(&selector).is_ok())
+        && Instant::now() < deadline
+    {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
-        models.resolve(&selector).is_err(),
-        "generation polling must converge even when no outbox notification is consumed"
+        models_a.resolve(&selector).is_err() && models_b.resolve(&selector).is_err(),
+        "every runtime must converge by generation polling even without notifications"
     );
+    assert!(models_a.resolve_versioned(&selector, &binding_hash).is_ok());
+    assert!(models_b.resolve_versioned(&selector, &binding_hash).is_ok());
+    provider_runtime_b.shutdown().await;
     let resumed = app
         .clone()
         .oneshot(request(
@@ -311,11 +374,24 @@ async fn provider_http_lifecycle_is_authenticated_cas_idempotent_and_body_free()
     assert_eq!(resumed.status(), StatusCode::OK);
     assert_eq!(resumed.headers()[header::ETAG], "\"provider-4\"");
     let deadline = Instant::now() + Duration::from_secs(2);
-    while models.resolve(&selector).is_err() && Instant::now() < deadline {
+    while models_a.resolve(&selector).is_err() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(models.resolve(&selector).is_ok());
-    provider_runtime.shutdown().await;
+    assert!(models_a.resolve(&selector).is_ok());
+    let models_restarted = ModelRegistry::default();
+    let mut provider_runtime_restarted = ProviderManagementRuntime::start(
+        repository.clone(),
+        models_restarted.clone(),
+        runtime_config,
+    )
+    .await
+    .unwrap();
+    assert!(models_restarted.resolve(&selector).is_ok());
+    assert!(models_restarted
+        .resolve_versioned(&selector, &binding_hash)
+        .is_ok());
+    provider_runtime_a.shutdown().await;
+    provider_runtime_restarted.shutdown().await;
 
     let audit_pool = SqlitePoolOptions::new()
         .max_connections(1)
@@ -364,6 +440,197 @@ async fn provider_http_lifecycle_is_authenticated_cas_idempotent_and_body_free()
         assert!(safe_evidence.contains(expected));
     }
     audit_pool.close().await;
+}
+
+#[tokio::test]
+async fn postgres_notifications_converge_two_provider_runtimes_and_restart_recovers_exact_archive()
+{
+    let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must set TEST_POSTGRES_URL for Provider multi-runtime conformance"
+        );
+        return;
+    };
+    let schema = format!("provider_runtime_{}", Uuid::new_v4().simple());
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    let control = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&scoped_url)
+        .await
+        .unwrap();
+    database::provision_postgres_schema(&control).await;
+    let repository = Arc::new(
+        PostgresDurableRepository::connect(&scoped_url)
+            .await
+            .unwrap(),
+    );
+    let app = management_router(repository.clone());
+
+    let created = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/providers",
+            Some("pg-create"),
+            None,
+            Some(create_body()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let validation = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/providers/company-llm/validations",
+            Some("pg-validate"),
+            None,
+            Some(json!({"draft_version":1})),
+        ))
+        .await
+        .unwrap();
+    let validation_id = json_body(validation).await["data"]["validation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let published = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/providers/company-llm/revisions",
+            Some("pg-publish"),
+            None,
+            Some(json!({"draft_version":1,"validation_id":validation_id})),
+        ))
+        .await
+        .unwrap();
+    let revision_id = json_body(published).await["data"]["revision_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let activated = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            "/v1/admin/providers/company-llm/active-revision",
+            Some("pg-activate"),
+            Some("\"provider-1\""),
+            Some(json!({"revision_id":revision_id})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(activated.status(), StatusCode::OK);
+
+    let runtime_config = ProviderManagementRuntimeConfig {
+        enabled: true,
+        workers: 1,
+        poll_interval: Duration::from_secs(30),
+        lease_duration: Duration::from_secs(30),
+        retention: chrono::Duration::days(1),
+        max_response_bytes: 1024 * 1024,
+        allow_loopback_development: false,
+        allowed_secret_names: BTreeSet::new(),
+    };
+    let selector = ModelSelector::new("company-llm", "chat-v1").unwrap();
+    let models_a = ModelRegistry::default();
+    let models_b = ModelRegistry::default();
+    let mut runtime_a = ProviderManagementRuntime::start(
+        repository.clone(),
+        models_a.clone(),
+        runtime_config.clone(),
+    )
+    .await
+    .unwrap();
+    let mut runtime_b = ProviderManagementRuntime::start(
+        repository.clone(),
+        models_b.clone(),
+        runtime_config.clone(),
+    )
+    .await
+    .unwrap();
+    let exact_binding_hash = models_a
+        .deployment_identity(&selector)
+        .unwrap()
+        .binding_hash()
+        .to_owned();
+    assert!(models_b
+        .resolve_versioned(&selector, &exact_binding_hash)
+        .is_ok());
+
+    let suspended = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/admin/providers/company-llm/suspension",
+            Some("pg-suspend"),
+            Some("\"provider-2\""),
+            Some(json!({"reason_code":"notification-test"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(suspended.status(), StatusCode::OK);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while (models_a.resolve(&selector).is_ok() || models_b.resolve(&selector).is_ok())
+        && Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(models_a.resolve(&selector).is_err());
+    assert!(models_b.resolve(&selector).is_err());
+    assert!(models_a
+        .resolve_versioned(&selector, &exact_binding_hash)
+        .is_ok());
+    runtime_b.shutdown().await;
+
+    let resumed = app
+        .oneshot(request(
+            "DELETE",
+            "/v1/admin/providers/company-llm/suspension",
+            Some("pg-resume"),
+            Some("\"provider-3\""),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resumed.status(), StatusCode::OK);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while models_a.resolve(&selector).is_err() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(models_a.resolve(&selector).is_ok());
+
+    let restarted_models = ModelRegistry::default();
+    let mut restarted = ProviderManagementRuntime::start(
+        repository.clone(),
+        restarted_models.clone(),
+        runtime_config,
+    )
+    .await
+    .unwrap();
+    assert!(restarted_models.resolve(&selector).is_ok());
+    assert!(restarted_models
+        .resolve_versioned(&selector, &exact_binding_hash)
+        .is_ok());
+    runtime_a.shutdown().await;
+    restarted.shutdown().await;
+    drop(repository);
+    drop(control);
+    sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
 }
 
 #[tokio::test]

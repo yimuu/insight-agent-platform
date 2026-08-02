@@ -55,13 +55,16 @@ management:
       allow_live_provider_credentials: false
 ```
 
-Sandbox profile 不能允许外部 action 或 live credential。Live profile 还要求 `agent.debug.live` 和每次
-请求的显式确认。token value、debug input 和 secret value都不能写入配置文件。
+Sandbox profile 不能允许外部 action 或 live credential。Live profile 还要求 `agent.debug.live`；首次
+请求只返回费用/副作用风险预览，创建请求必须带回 exact `risk_preview_hash` 和
+`live_confirmation: true`。token value、debug input 和 secret value 都不能写入配置文件。
 
 `management.provider_secret_resolver` 是 managed Provider credential reference 的唯一白名单；
 `environment_reference.allowed_names` 只列环境变量名，Draft 中对应
 `secret://environment/<NAME>`。Provider validation/publish 要求该名称在服务进程环境中可解析，但 API、
 `providerctl`、Revision、hash 与审计都不读取或保存 value。它不再从旧 `providers.extensions` 推导。
+activation readiness 和 runtime projection 都使用同一白名单；已发布 reference 后续被移出白名单或
+value 不可用时，current/exact model resolution 均 fail closed。
 
 ## MCP v2 权威边界
 

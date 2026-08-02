@@ -9,12 +9,12 @@
 `/v1/admin/agents/**`、`/v1/admin/providers/**` 和 `/v1/admin/mcp/**` 是 installation-scoped
 Operator 控制面。它们共用顶层 `management.operator_credentials`，但 capability 不互相隐含：read、
 write、validate/test、publish、deploy、activate、archive/suspend/retire 和 debug 分别授权。所有响应都
-是 `Cache-Control: private, no-store`；mutation 要求稳定 `X-Request-ID`，Draft/entity/current pointer
-mutation 还要求强 `If-Match`。
+是 `Cache-Control: private, no-store` 和 `X-Content-Type-Options: nosniff`；mutation 要求稳定
+`X-Request-ID`，Draft/entity/current pointer mutation 还要求强 `If-Match`。
 
 Durable store 是 managed Agent、Provider 和 MCP 的唯一运行权威。API 不修改平台 YAML 或工作区文件；
 进程 catalog/registry 是可重建投影。每个成功 mutation 在同一事务提交状态、version、幂等 receipt、
-body-free audit 与 bounded outbox。相同 request ID + 相同 canonical body replay 原结果；不同 body 返回
+body-free audit 与最多 4096 条的 bounded outbox。相同 request ID + 相同 canonical body replay 原结果；不同 body 返回
 idempotency conflict。
 
 ## Agent 生命周期
@@ -73,9 +73,13 @@ immutable Definition/Deployment archive，不修改 `agent_publication_heads`。
 
 状态为 `queued | running | succeeded | failed | cancelled | expired`。Sandbox 当前对无法由受信任 mock
 完整替换的任何 Provider、Action、Retrieval 或 Subflow fail closed；请求不能提交 endpoint、credential、
-executable 或任意 mock response。Live 要求 `agent.debug.live` 和 `live_confirmation: true`，并继续受
-Provider suspension、MCP disable、approval/interaction 与 exact binding fence 约束。普通 `agent.read`
-只获得 body-free summary；读取 source/input 和 SSE 至少要求对应 debug capability。
+executable 或任意 mock response。Live 要求 `agent.debug.live`，并采用两阶段确认：首次创建请求返回
+`428 AGENT_DEBUG_LIVE_CONFIRMATION_REQUIRED` 以及不含正文/secret 的费用、外部副作用、最大时长、
+Definition/Deployment/binding hash 风险预览；客户端只有带回同一 `risk_preview_hash` 和
+`live_confirmation: true` 才会创建 Session。worker 执行前再次核对已审阅的 exact hashes，变化时以
+`AGENT_DEBUG_LIVE_REVIEW_STALE` fail closed。Provider suspension、MCP disable、approval/interaction 与
+exact binding fence 仍然生效。普通 `agent.read` 只获得 body-free summary；读取 source/input 和 SSE
+至少要求对应 debug capability。
 
 Debug profile 的 content retention 到期后，maintenance transaction 会把 Session 和幂等 receipt 中的
 source/input 改成只含 `content_deleted` 的 tombstone，同时保留 immutable ID、source hash、状态、计数和
@@ -100,7 +104,7 @@ Provider Entity
 | Discovery | `POST/GET /discoveries/**`、`GET /model-candidates` | 外部列表是 immutable untrusted evidence，不自动导入 |
 | Import | `POST /model-import-previews`、`PUT /draft/models` | “本次全部”立即展开为逐项 ID/fingerprint/policy |
 | Evidence | `POST/GET /validations/**`、`POST/GET /connection-tests/**` | validation 无网络；test 只用 adapter 固定 fixture |
-| Revision | `POST/GET /revisions`、`GET /revisions/{id}` | publish 冻结 adapter/worker、endpoint、credential ref、models |
+| Revision | `POST/GET /revisions`、`GET /revisions/{id}` | publish 冻结 adapter/worker、adapter manifest digest、endpoint、credential ref、models |
 | Route | `GET/PUT/DELETE /active-revision` | 只影响新的 Agent resolution，不改历史 Deployment |
 | Safety | `POST/DELETE /suspension`、`POST /retirement` | suspension 可恢复并增加 fence；retirement 不可逆 |
 
@@ -113,7 +117,9 @@ Provider Revision。
 带 credential 的 Provider 必须先由平台配置在 `management.provider_secret_resolver.allowed_names` 中
 允许对应环境变量名，并把 value 只注入服务进程。管理 Draft 使用
 `secret://environment/<NAME>`；`providerctl` 只迁移名称，既不需要也不读取 value。旧
-`providers.extensions` 不能隐式扩大 managed Provider 的 secret 白名单。
+`providers.extensions` 不能隐式扩大 managed Provider 的 secret 白名单。activation readiness 和每次
+runtime 投影都会复验 exact adapter/worker version、manifest digest、secret allowlist 与可用性；不匹配时同时
+撤下 current 与不再可信的 exact archive projection，不会继续使用旧 credential/adapter 实例。
 
 ## 组合与安全门
 

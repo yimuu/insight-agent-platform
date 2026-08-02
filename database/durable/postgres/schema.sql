@@ -3,6 +3,12 @@
 
 BEGIN;
 
+-- A complete install owns hundreds of catalog locks until COMMIT. Serialize
+-- installers across target schemas so concurrent CI fixtures remain within
+-- PostgreSQL's default shared-lock budget. This lock is transaction-scoped and
+-- is never acquired by the runtime repository.
+SELECT pg_advisory_xact_lock(7319542860463190227::bigint);
+
 -- Refuse to adopt a schema that already owns user objects, even when none of
 -- their names collide with the durable repository. The target schema itself
 -- must be created before this file is executed.

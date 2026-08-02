@@ -33,6 +33,8 @@ use super::{
     database_time, PostgresDurableRepository, RepositoryErrorExt as _, SqliteDurableRepository,
 };
 
+const MANAGEMENT_OUTBOX_MAX_ROWS: i64 = 4_096;
+
 fn storage(error: sqlx::Error) -> ProviderManagementWriteError {
     ProviderManagementWriteError::Repository(RepositoryError::storage(error))
 }
@@ -601,6 +603,16 @@ async fn sqlite_finalize(
             "result_code": finalization.result_code,
         }))?)
         .bind(database_time(metadata.now))
+        .execute(&mut **transaction)
+        .await
+        .map_err(storage)?;
+        sqlx::query(
+            "DELETE FROM provider_management_outbox WHERE event_id IN (
+               SELECT event_id FROM provider_management_outbox
+               ORDER BY created_at DESC,event_id DESC LIMIT -1 OFFSET ?
+             )",
+        )
+        .bind(MANAGEMENT_OUTBOX_MAX_ROWS)
         .execute(&mut **transaction)
         .await
         .map_err(storage)?;
@@ -3126,6 +3138,14 @@ async fn postgres_finalize(
         (finalization.provider_id, finalization.subject_id)
     {
         sqlx::query(
+            "SELECT pg_advisory_xact_lock(
+               hashtextextended(current_schema() || ':provider_management_outbox',0)
+             )",
+        )
+        .execute(&mut **transaction)
+        .await
+        .map_err(storage)?;
+        sqlx::query(
             "INSERT INTO provider_management_outbox(
                event_id,event_kind,provider_id,subject_id,safe_payload,created_at,delivered_at
              ) VALUES($1,$2,$3,$4,$5,$6,NULL)",
@@ -3134,6 +3154,16 @@ async fn postgres_finalize(
         .bind(provider_id).bind(subject_id)
         .bind(json!({"provider_id":provider_id,"subject_id":subject_id,"result_code":finalization.result_code}))
         .bind(database_time(metadata.now)).execute(&mut **transaction).await.map_err(storage)?;
+        sqlx::query(
+            "DELETE FROM provider_management_outbox WHERE event_id IN (
+               SELECT event_id FROM provider_management_outbox
+               ORDER BY created_at DESC,event_id DESC OFFSET $1
+             )",
+        )
+        .bind(MANAGEMENT_OUTBOX_MAX_ROWS)
+        .execute(&mut **transaction)
+        .await
+        .map_err(storage)?;
     }
     Ok(ProviderMutationReceipt {
         replayed: false,

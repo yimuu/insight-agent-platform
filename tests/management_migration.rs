@@ -104,7 +104,9 @@ async fn sqlite_provider_history_mapping_preserves_deployment_and_installs_immut
     let provider_hash = hash_value(&json!({"provider":"legacy"}));
     let revision_document = json!({
         "provider_id":provider_id,
-        "adapter":{"type":"open_ai_compatible","version":insight_resources::openai_chat::OPENAI_CHAT_ADAPTER_VERSION},
+        "adapter":{"type":"open_ai_compatible","version":insight_resources::openai_chat::OPENAI_CHAT_ADAPTER_VERSION,
+                   "worker_version":insight_resources::openai_chat::OPENAI_CHAT_WORKER_VERSION,
+                   "manifest_digest":insight_agent_platform::resources::provider_management::managed_openai_adapter_manifest_digest()},
         "endpoint":"https://legacy.example.test/v1",
         "credential":{"type":"none","reference":null,"reference_hash":null},
         "transport":{"tls":"required","redirects":"deny","connect_timeout_ms":1000,"request_timeout_ms":1000},
@@ -249,6 +251,7 @@ async fn sqlite_provider_history_mapping_preserves_deployment_and_installs_immut
             retention: chrono::Duration::days(1),
             max_response_bytes: 1024 * 1024,
             allow_loopback_development: false,
+            allowed_secret_names: std::collections::BTreeSet::new(),
         },
     )
     .await
@@ -487,7 +490,9 @@ async fn exercise_postgres_provider_history_mapping(
     let provider_hash = hash_value(&json!({"provider":"legacy"}));
     let model_document = json!({"id":model_id,"input":["text"],"capabilities":["complete","streaming"],"provenance":{"type":"operator_asserted"}});
     let revision_document = json!({
-        "provider_id":provider_id,"adapter":{"type":"open_ai_compatible","version":insight_resources::openai_chat::OPENAI_CHAT_ADAPTER_VERSION},
+        "provider_id":provider_id,"adapter":{"type":"open_ai_compatible","version":insight_resources::openai_chat::OPENAI_CHAT_ADAPTER_VERSION,
+                                               "worker_version":insight_resources::openai_chat::OPENAI_CHAT_WORKER_VERSION,
+                                               "manifest_digest":insight_agent_platform::resources::provider_management::managed_openai_adapter_manifest_digest()},
         "endpoint":"https://legacy.example.test/v1",
         "credential":{"type":"none","reference":null,"reference_hash":null},
         "transport":{"tls":"required","redirects":"deny","connect_timeout_ms":1000,"request_timeout_ms":1000},

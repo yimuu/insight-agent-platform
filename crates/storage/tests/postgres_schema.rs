@@ -146,7 +146,11 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(tables.len(), 74, "the complete table contract must install");
+    assert_eq!(
+        tables.len(),
+        115,
+        "the complete table contract must install"
+    );
     for table in [
         "durable_schema_contract",
         "workflow_runs",
@@ -181,6 +185,30 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
         "mcp_remote_tasks",
         "mcp_remote_task_receipts",
         "mcp_server_tasks",
+        "agent_drafts",
+        "agent_draft_views",
+        "agent_validations",
+        "agent_definition_publications",
+        "agent_deployment_resolutions",
+        "agent_deployment_publications",
+        "agent_publication_heads",
+        "agent_debug_sessions",
+        "agent_debug_content_retention",
+        "agent_management_requests",
+        "agent_management_audit_events",
+        "agent_management_outbox",
+        "provider_drafts",
+        "provider_connection_tests",
+        "provider_discovery_operations",
+        "provider_discovery_snapshots",
+        "provider_model_candidates",
+        "provider_validation_reports",
+        "provider_revisions",
+        "provider_revision_models",
+        "provider_revision_legacy_model_bindings",
+        "provider_management_requests",
+        "provider_management_audit_events",
+        "provider_management_outbox",
     ] {
         assert!(
             tables.contains(table),
@@ -200,7 +228,7 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .collect::<BTreeSet<_>>();
     assert_eq!(
         indexes.len(),
-        216,
+        308,
         "all explicit and constraint-backed indexes must be installed"
     );
     for (index, table) in [
@@ -240,6 +268,52 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
         ("idx_mcp_remote_tasks_claim", "mcp_remote_tasks"),
         ("idx_mcp_remote_tasks_expiry", "mcp_remote_tasks"),
         ("idx_mcp_server_tasks_expiry", "mcp_server_tasks"),
+        ("idx_agent_validations_agent", "agent_validations"),
+        (
+            "idx_agent_definitions_agent",
+            "agent_definition_publications",
+        ),
+        (
+            "idx_agent_resolutions_agent",
+            "agent_deployment_resolutions",
+        ),
+        (
+            "idx_agent_deployments_agent",
+            "agent_deployment_publications",
+        ),
+        ("idx_agent_debug_sessions_agent", "agent_debug_sessions"),
+        ("idx_agent_debug_sessions_expiry", "agent_debug_sessions"),
+        (
+            "idx_agent_management_audit_agent",
+            "agent_management_audit_events",
+        ),
+        (
+            "idx_agent_management_outbox_delivery",
+            "agent_management_outbox",
+        ),
+        ("idx_provider_test_claim", "provider_connection_tests"),
+        ("idx_provider_test_provider", "provider_connection_tests"),
+        (
+            "idx_provider_discovery_claim",
+            "provider_discovery_operations",
+        ),
+        (
+            "idx_provider_discovery_provider",
+            "provider_discovery_operations",
+        ),
+        (
+            "idx_provider_validation_provider",
+            "provider_validation_reports",
+        ),
+        ("idx_provider_revisions_provider", "provider_revisions"),
+        (
+            "idx_provider_management_audit_provider",
+            "provider_management_audit_events",
+        ),
+        (
+            "idx_provider_management_outbox_delivery",
+            "provider_management_outbox",
+        ),
     ] {
         assert!(
             indexes.contains(&(index.to_owned(), table.to_owned())),
@@ -387,7 +461,7 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(triggers.len(), 36, "all user triggers must be installed");
+    assert_eq!(triggers.len(), 52, "all user triggers must be installed");
     for (trigger, table) in [
         (
             "execution_event_projection_ledger_immutable",
@@ -428,6 +502,52 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
             "mcp_discovery_tools",
         ),
         ("mcp_revision_tools_rewrite_forbidden", "mcp_revision_tools"),
+        ("agent_validation_rewrite_forbidden", "agent_validations"),
+        (
+            "agent_definition_publication_rewrite_forbidden",
+            "agent_definition_publications",
+        ),
+        (
+            "agent_resolution_rewrite_forbidden",
+            "agent_deployment_resolutions",
+        ),
+        (
+            "agent_deployment_publication_rewrite_forbidden",
+            "agent_deployment_publications",
+        ),
+        (
+            "trg_publication_head_agent_matches_definition",
+            "agent_publication_heads",
+        ),
+        (
+            "provider_discovery_snapshot_rewrite_forbidden",
+            "provider_discovery_snapshots",
+        ),
+        (
+            "provider_model_candidate_rewrite_forbidden",
+            "provider_model_candidates",
+        ),
+        (
+            "provider_validation_report_rewrite_forbidden",
+            "provider_validation_reports",
+        ),
+        ("provider_revision_rewrite_forbidden", "provider_revisions"),
+        (
+            "provider_revision_model_rewrite_forbidden",
+            "provider_revision_models",
+        ),
+        (
+            "provider_revision_legacy_binding_rewrite_forbidden",
+            "provider_revision_legacy_model_bindings",
+        ),
+        (
+            "provider_revision_legacy_binding_delete_forbidden",
+            "provider_revision_legacy_model_bindings",
+        ),
+        (
+            "provider_management_outbox_notify",
+            "provider_management_outbox",
+        ),
     ] {
         assert!(
             triggers.contains(&(trigger.to_owned(), table.to_owned())),
@@ -471,7 +591,7 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .collect::<BTreeSet<_>>();
     assert_eq!(
         functions.len(),
-        22,
+        24,
         "all schema functions must be installed"
     );
     for function in [
@@ -479,6 +599,8 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
         "establish_public_event_authority",
         "guard_public_event_receipt_provenance",
         "notify_durable_work",
+        "durable_validate_publication_head",
+        "notify_provider_management_change",
         "reject_execution_event_projection_ledger_rewrite",
         "synchronize_public_event_delivery_head",
     ] {

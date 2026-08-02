@@ -35,6 +35,8 @@ use super::{
     PostgresDurableRepository, RepositoryErrorExt as _, SqliteDurableRepository,
 };
 
+const MANAGEMENT_OUTBOX_MAX_ROWS: i64 = 4_096;
+
 fn storage(error: sqlx::Error) -> AgentManagementWriteError {
     AgentManagementWriteError::Repository(RepositoryError::storage(error))
 }
@@ -585,6 +587,16 @@ async fn sqlite_finalize(
         "result_code": if value.status < 300 { "accepted" } else { "rejected" }
     }))?)
     .bind(database_time(metadata.now))
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage)?;
+    sqlx::query(
+        "DELETE FROM agent_management_outbox WHERE event_id IN (
+           SELECT event_id FROM agent_management_outbox
+           ORDER BY created_at DESC,event_id DESC LIMIT -1 OFFSET ?
+         )",
+    )
+    .bind(MANAGEMENT_OUTBOX_MAX_ROWS)
     .execute(&mut **transaction)
     .await
     .map_err(storage)?;
@@ -1146,6 +1158,14 @@ async fn postgres_finalize(
     value: PostgresFinalize<'_>,
 ) -> Result<AgentMutationReceipt, AgentManagementWriteError> {
     sqlx::query(
+        "SELECT pg_advisory_xact_lock(
+           hashtextextended(current_schema() || ':agent_management_outbox',0)
+         )",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage)?;
+    sqlx::query(
         "INSERT INTO agent_management_requests(
            operator_id,method,canonical_path,request_id,request_hash,response_status,
            response_json,response_etag,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",
@@ -1199,6 +1219,16 @@ async fn postgres_finalize(
         "result_code":if value.status < 300 { "accepted" } else { "rejected" }
     }))
     .bind(metadata.now)
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage)?;
+    sqlx::query(
+        "DELETE FROM agent_management_outbox WHERE event_id IN (
+           SELECT event_id FROM agent_management_outbox
+           ORDER BY created_at DESC,event_id DESC OFFSET $1
+         )",
+    )
+    .bind(MANAGEMENT_OUTBOX_MAX_ROWS)
     .execute(&mut **transaction)
     .await
     .map_err(storage)?;

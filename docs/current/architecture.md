@@ -78,8 +78,9 @@ Deployment Revision 必须具有不同 identity。旧 revision 未携带该字�
 
 平台根层从 durable active Provider Revision 重建 `insight-resources` 模型 registry，并把 Agent 的
 结构化 `{provider, id}` selector 解析为精确实现。只读 Provider Catalog 是 template/import 输入，
-不是 live route。Provider Revision 冻结 endpoint identity、adapter/worker 和非秘密 credential
-reference；模型 ID 保持 Provider 原始身份。`insight-runtime` 在 Agent Deployment resolution 时把
+不是 live route。Provider Revision 冻结 endpoint identity、adapter/worker、受信任 adapter manifest
+digest 和非秘密 credential reference；模型 ID 保持 Provider 原始身份。activation readiness 与每次
+投影都复验这组 exact evidence 和 secret allowlist。`insight-runtime` 在 Agent Deployment resolution 时把
 解析证据写入 Deployment Revision，scheduler 不在执行时重新路由，也不会跨区域或跨 Provider 自动
 故障转移。
 

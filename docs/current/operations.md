@@ -43,7 +43,9 @@ Deployment 并显式 activate Agent。不得期待 Provider active 切换自动�
 Provider suspension 是紧急开关：保留 active pointer 和历史证据，但阻止新 admission 与尚未开始的
 外部调用；resume 不改变 pointer。DELETE active revision 只阻止新 binding。Retirement 不可逆并清除
 active route。credential value 在相同 `secret://` reference 下轮换不改变 revision hash；reference、
-slot 或 type 变化需要新 Revision。
+slot 或 type 变化需要新 Revision。Revision 还冻结受信任 adapter manifest digest；runtime 缺少 exact
+adapter version、manifest digest 不同、secret reference 不在管理白名单或 value 不可用时必须撤下
+current route，并禁止使用不再可信的 exact archive projection。
 
 Agent rollout 顺序必须是：Draft → validation → Definition publish → Deployment resolution →
 Deployment create → CAS activate。publish/deploy 后先审阅 immutable evidence，再切 route。回滚是把
@@ -53,7 +55,7 @@ active pointer PUT 到历史 Deployment；deactivate 删除 pointer；archive �
 
 多 runtime 中数据库 head/fence 是权威；outbox/notification 只是加速。告警应关注 Provider registry
 projection lag、pending operation、debug session、suspension/retirement 以及 runtime 缺少 exact
-adapter/worker version 的 readiness 失败。Operator token、Draft/Prompt、debug input/output、Provider
+adapter/worker version 或 adapter manifest digest 的 readiness 失败。Operator token、Draft/Prompt、debug input/output、Provider
 response body 和 secret value不得进入日志、metric label、audit 或 outbox。
 
 PostgreSQL 在 Provider management outbox 成功插入后发送 schema-scoped opaque `NOTIFY`；payload 不含

@@ -1,11 +1,12 @@
 {
   "valid":{
     "create_yaml":{"agent_id":"support-agent","authoring_mode":"yaml_package","labels":{"team":"support"},"draft":{"source":{"type":"yaml_package","agent_yaml":"api_version: insight.agent/v1\nkind: agent\n","prompt_files":[{"path":"prompts/system.md","content":"You help."}]}}},
-    "publish":{"validation_id":"agentval_example"},
+    "publish":{"draft_version":1,"validation_id":"agentval_example"},
     "resolution":{"definition_revision_id":"defrev_example"},
-    "deployment":{"resolution_id":"agentres_example"},
+    "deployment":{"definition_revision_id":"defrev_example","resolution_id":"agentres_example"},
     "activate":{"deployment_revision_id":"deployrev_example"},
-    "debug":{"source":{"type":"draft","draft_version":1},"execution_profile_id":"author-sandbox","input":{"query":"test"}}
+    "debug":{"source":{"type":"draft","draft_version":1},"execution_profile_id":"author-sandbox","input":{"query":"test"}},
+    "debug_live_confirmed":{"source":{"type":"draft","draft_version":1},"execution_profile_id":"author-live","input":{"query":"test"},"live_confirmation":true,"risk_preview_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}
   },
   "invalid":{
     "wildcard_tool":{"agent_id":"support-agent","authoring_mode":"yaml_package","draft":{"source":{"type":"yaml_package","agent_yaml":"tools: [\"*\"]"}},"auto_import":true},

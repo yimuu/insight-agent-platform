@@ -70,9 +70,9 @@
       "properties":{"agent_id":{"$ref":"#/$defs/agentId"},"authoring_mode":{"enum":["yaml_package","graph"]},"labels":{"$ref":"#/$defs/labels"},"draft":{"$ref":"#/$defs/draft"}}
     },
     "updateAgentRequest":{"type":"object","additionalProperties":false,"required":["labels"],"properties":{"labels":{"$ref":"#/$defs/labels"}}},
-    "publishRequest":{"type":"object","additionalProperties":false,"required":["validation_id"],"properties":{"validation_id":{"type":"string","pattern":"^agentval_[A-Za-z0-9_-]{1,120}$"}}},
+    "publishRequest":{"type":"object","additionalProperties":false,"required":["draft_version","validation_id"],"properties":{"draft_version":{"type":"integer","minimum":1},"validation_id":{"type":"string","pattern":"^agentval_[A-Za-z0-9_-]{1,120}$"}}},
     "createResolutionRequest":{"type":"object","additionalProperties":false,"required":["definition_revision_id"],"properties":{"definition_revision_id":{"type":"string","pattern":"^defrev_[A-Za-z0-9_-]{1,120}$"}}},
-    "createDeploymentRequest":{"type":"object","additionalProperties":false,"required":["resolution_id"],"properties":{"resolution_id":{"type":"string","pattern":"^agentres_[A-Za-z0-9_-]{1,120}$"}}},
+    "createDeploymentRequest":{"type":"object","additionalProperties":false,"required":["definition_revision_id","resolution_id"],"properties":{"definition_revision_id":{"type":"string","pattern":"^defrev_[A-Za-z0-9_-]{1,120}$"},"resolution_id":{"type":"string","pattern":"^agentres_[A-Za-z0-9_-]{1,120}$"}}},
     "activateRequest":{"type":"object","additionalProperties":false,"required":["deployment_revision_id"],"properties":{"deployment_revision_id":{"type":"string","pattern":"^deployrev_[A-Za-z0-9_-]{1,120}$"}}},
     "debugSource":{
       "oneOf":[
@@ -83,9 +83,25 @@
     },
     "createDebugSessionRequest":{
       "type":"object","additionalProperties":false,"required":["source","execution_profile_id","input"],
-      "properties":{"source":{"$ref":"#/$defs/debugSource"},"execution_profile_id":{"type":"string","pattern":"^[A-Za-z0-9_.-]{1,128}$"},"input":true,"live_confirmation":{"type":"boolean"}}
+      "properties":{"source":{"$ref":"#/$defs/debugSource"},"execution_profile_id":{"type":"string","pattern":"^[A-Za-z0-9_.-]{1,128}$"},"input":true,"live_confirmation":{"type":"boolean"},"risk_preview_hash":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"}}
+    },
+    "liveDebugRiskPreview":{
+      "type":"object","additionalProperties":false,
+      "required":["profile_mode","source_hash","definition_revision_id","deployment_revision_id","binding_hash","maximum_duration_seconds","cost_risk","side_effect_risk","enforced_guards","risk_preview_hash"],
+      "properties":{
+        "profile_mode":{"const":"live"},
+        "source_hash":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+        "definition_revision_id":{"type":"string","minLength":1,"maxLength":128},
+        "deployment_revision_id":{"type":"string","minLength":1,"maxLength":128},
+        "binding_hash":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+        "maximum_duration_seconds":{"type":"integer","minimum":0},
+        "cost_risk":{"type":"object","additionalProperties":false,"required":["provider_calls_possible","billing_possible"],"properties":{"provider_calls_possible":{"type":"boolean"},"billing_possible":{"type":"boolean"}}},
+        "side_effect_risk":{"type":"object","additionalProperties":false,"required":["external_actions_possible","mcp_calls_possible"],"properties":{"external_actions_possible":{"type":"boolean"},"mcp_calls_possible":{"type":"boolean"}}},
+        "enforced_guards":{"type":"object","additionalProperties":false,"required":["provider_suspension","action_approval","mcp_interaction"],"properties":{"provider_suspension":{"const":true},"action_approval":{"const":true},"mcp_interaction":{"const":true}}},
+        "risk_preview_hash":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"}
+      }
     },
     "successEnvelope":{"type":"object","additionalProperties":false,"required":["code","message","data"],"properties":{"code":{"const":"OK"},"message":{"const":"ok"},"data":true}},
-    "errorEnvelope":{"type":"object","additionalProperties":false,"required":["code","message","data"],"properties":{"code":{"type":"string","pattern":"^[A-Z0-9_]+$"},"message":{"type":"string","maxLength":512},"data":{"type":"null"}}}
+    "errorEnvelope":{"type":"object","additionalProperties":false,"required":["code","message","data"],"properties":{"code":{"type":"string","pattern":"^[A-Z0-9_]+$"},"message":{"type":"string","maxLength":512},"data":{"oneOf":[{"type":"null"},{"type":"object","additionalProperties":false,"required":["risk_preview"],"properties":{"risk_preview":{"$ref":"#/$defs/liveDebugRiskPreview"}}}]}}}
   }
 }

@@ -158,6 +158,10 @@ suspension/resume 与 retirement。完整列表和请求合同见 [Agent 与 Pro
 [`agent-management-v1.openapi.json`](../../schemas/agent-management-v1.openapi.json) 与
 [`provider-management-v1.openapi.json`](../../schemas/provider-management-v1.openapi.json)。
 
+Agent publish body 必须同时提交 `draft_version` 与 `validation_id`，Deployment create 必须同时提交
+`definition_revision_id` 与 `resolution_id`；服务端会把它们与 ETag/durable evidence 逐项核对。Live Debug
+首次返回 `428` 风险预览，只有带回同一 `risk_preview_hash` 的显式确认才返回 `202` 并创建 Session。
+
 旧 `/v1/graph-agents/**` 已删除。Graph 和 YAML 都先编辑 Agent Draft；ViewDocument 不改变 Draft
 version、`author_hash` 或执行语义。旧 public historical Deployment admission 也已删除。
 
