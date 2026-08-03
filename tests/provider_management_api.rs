@@ -95,7 +95,7 @@ fn management_router(repository: Arc<dyn ProviderManagementDurableRepository>) -
         policy_fingerprint: hash(b"provider-policy"),
         cursor_signing_key: [8; 32],
     };
-    let app = build_provider_management_router(ProviderManagementApiState {
+    build_provider_management_router(ProviderManagementApiState {
         auth,
         repository,
         policy: Arc::new(policy),
@@ -111,8 +111,7 @@ fn management_router(repository: Arc<dyn ProviderManagementDurableRepository>) -
                 allowed_secret_names: BTreeSet::new(),
             },
         )),
-    });
-    app
+    })
 }
 
 async fn fixture() -> (tempfile::TempDir, Arc<SqliteDurableRepository>, Router) {

@@ -616,6 +616,101 @@ enum WirePayload {
     },
 }
 
+impl WirePayload {
+    fn into_live(self) -> LiveRunStreamPayload {
+        match self {
+            Self::OutputItemAdded { item } => LiveRunStreamPayload::OutputItemAdded { item },
+            Self::ContentPartAdded {
+                content_index,
+                part,
+            } => LiveRunStreamPayload::ContentPartAdded {
+                content_index,
+                part,
+            },
+            Self::OutputTextDelta {
+                content_index,
+                delta,
+            } => LiveRunStreamPayload::OutputTextDelta {
+                content_index,
+                delta,
+            },
+            Self::OutputTextDone {
+                content_index,
+                text,
+            } => LiveRunStreamPayload::OutputTextDone {
+                content_index,
+                text,
+            },
+            Self::ContentPartDone {
+                content_index,
+                part,
+            } => LiveRunStreamPayload::ContentPartDone {
+                content_index,
+                part,
+            },
+            Self::FunctionCallArgumentsDelta { delta } => {
+                LiveRunStreamPayload::FunctionCallArgumentsDelta { delta }
+            }
+            Self::FunctionCallArgumentsDone { name, arguments } => {
+                LiveRunStreamPayload::FunctionCallArgumentsDone { name, arguments }
+            }
+            Self::OutputItemDone { item } => LiveRunStreamPayload::OutputItemDone { item },
+            Self::FileSearchCallInProgress => LiveRunStreamPayload::FileSearchCallInProgress,
+            Self::FileSearchCallSearching => LiveRunStreamPayload::FileSearchCallSearching,
+            Self::FileSearchCallCompleted => LiveRunStreamPayload::FileSearchCallCompleted,
+            Self::ToolStarted {
+                call_id,
+                tool_name,
+                arguments,
+            } => LiveRunStreamPayload::ToolStarted {
+                call_id,
+                tool_name,
+                arguments,
+            },
+            Self::ToolProgress {
+                call_id,
+                tool_name,
+                content,
+            } => LiveRunStreamPayload::ToolProgress {
+                call_id,
+                tool_name,
+                content,
+            },
+            Self::ToolCompleted {
+                call_id,
+                tool_name,
+                duration_ms,
+                content,
+            } => LiveRunStreamPayload::ToolCompleted {
+                call_id,
+                tool_name,
+                duration_ms,
+                content,
+            },
+            Self::ToolFailed {
+                call_id,
+                tool_name,
+                duration_ms,
+                error,
+            } => LiveRunStreamPayload::ToolFailed {
+                call_id,
+                tool_name,
+                duration_ms,
+                error,
+            },
+            Self::RetrievalCompleted {
+                retrieval_id,
+                query,
+                results,
+            } => LiveRunStreamPayload::RetrievalCompleted {
+                retrieval_id,
+                query,
+                results,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
@@ -782,100 +877,5 @@ mod tests {
             4 * 1_024
         )
         .is_err());
-    }
-}
-
-impl WirePayload {
-    fn into_live(self) -> LiveRunStreamPayload {
-        match self {
-            Self::OutputItemAdded { item } => LiveRunStreamPayload::OutputItemAdded { item },
-            Self::ContentPartAdded {
-                content_index,
-                part,
-            } => LiveRunStreamPayload::ContentPartAdded {
-                content_index,
-                part,
-            },
-            Self::OutputTextDelta {
-                content_index,
-                delta,
-            } => LiveRunStreamPayload::OutputTextDelta {
-                content_index,
-                delta,
-            },
-            Self::OutputTextDone {
-                content_index,
-                text,
-            } => LiveRunStreamPayload::OutputTextDone {
-                content_index,
-                text,
-            },
-            Self::ContentPartDone {
-                content_index,
-                part,
-            } => LiveRunStreamPayload::ContentPartDone {
-                content_index,
-                part,
-            },
-            Self::FunctionCallArgumentsDelta { delta } => {
-                LiveRunStreamPayload::FunctionCallArgumentsDelta { delta }
-            }
-            Self::FunctionCallArgumentsDone { name, arguments } => {
-                LiveRunStreamPayload::FunctionCallArgumentsDone { name, arguments }
-            }
-            Self::OutputItemDone { item } => LiveRunStreamPayload::OutputItemDone { item },
-            Self::FileSearchCallInProgress => LiveRunStreamPayload::FileSearchCallInProgress,
-            Self::FileSearchCallSearching => LiveRunStreamPayload::FileSearchCallSearching,
-            Self::FileSearchCallCompleted => LiveRunStreamPayload::FileSearchCallCompleted,
-            Self::ToolStarted {
-                call_id,
-                tool_name,
-                arguments,
-            } => LiveRunStreamPayload::ToolStarted {
-                call_id,
-                tool_name,
-                arguments,
-            },
-            Self::ToolProgress {
-                call_id,
-                tool_name,
-                content,
-            } => LiveRunStreamPayload::ToolProgress {
-                call_id,
-                tool_name,
-                content,
-            },
-            Self::ToolCompleted {
-                call_id,
-                tool_name,
-                duration_ms,
-                content,
-            } => LiveRunStreamPayload::ToolCompleted {
-                call_id,
-                tool_name,
-                duration_ms,
-                content,
-            },
-            Self::ToolFailed {
-                call_id,
-                tool_name,
-                duration_ms,
-                error,
-            } => LiveRunStreamPayload::ToolFailed {
-                call_id,
-                tool_name,
-                duration_ms,
-                error,
-            },
-            Self::RetrievalCompleted {
-                retrieval_id,
-                query,
-                results,
-            } => LiveRunStreamPayload::RetrievalCompleted {
-                retrieval_id,
-                query,
-                results,
-            },
-        }
     }
 }

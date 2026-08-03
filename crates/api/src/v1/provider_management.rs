@@ -1162,7 +1162,7 @@ async fn preview_model_imports(
     let Json(mut input) = input.map_err(|_| ManagementError::invalid())?;
     input.model_ids.sort();
     input.model_ids.dedup();
-    if input.select_all == !input.model_ids.is_empty() {
+    if input.select_all != input.model_ids.is_empty() {
         return Err(ManagementError::invalid());
     }
     let operation = state

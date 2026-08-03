@@ -261,7 +261,7 @@ pub struct NatsCoreRunStreamConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveRunStreamBrokerConfig {
     InMemory,
-    NatsCore(NatsCoreRunStreamConfig),
+    NatsCore(Box<NatsCoreRunStreamConfig>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1206,19 +1206,23 @@ struct RunStreamYaml {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum RunStreamBrokerYaml {
     InMemory,
-    NatsCore {
-        servers: Vec<String>,
-        namespace: String,
-        credentials_env: Option<String>,
-        tls: NatsRunStreamTlsYaml,
-        connect_timeout: String,
-        subscription_ready_timeout: String,
-        reconnect_min_delay: String,
-        reconnect_max_delay: String,
-        max_pending_messages: usize,
-        max_pending_bytes: usize,
-        drain_timeout: String,
-    },
+    NatsCore(Box<NatsCoreRunStreamYaml>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NatsCoreRunStreamYaml {
+    servers: Vec<String>,
+    namespace: String,
+    credentials_env: Option<String>,
+    tls: NatsRunStreamTlsYaml,
+    connect_timeout: String,
+    subscription_ready_timeout: String,
+    reconnect_min_delay: String,
+    reconnect_max_delay: String,
+    max_pending_messages: usize,
+    max_pending_bytes: usize,
+    drain_timeout: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2205,19 +2209,20 @@ fn resolve_run_stream(
             }
             LiveRunStreamBrokerConfig::InMemory
         }
-        RunStreamBrokerYaml::NatsCore {
-            servers,
-            namespace,
-            credentials_env,
-            tls,
-            connect_timeout,
-            subscription_ready_timeout,
-            reconnect_min_delay,
-            reconnect_max_delay,
-            max_pending_messages,
-            max_pending_bytes,
-            drain_timeout,
-        } => {
+        RunStreamBrokerYaml::NatsCore(nats) => {
+            let NatsCoreRunStreamYaml {
+                servers,
+                namespace,
+                credentials_env,
+                tls,
+                connect_timeout,
+                subscription_ready_timeout,
+                reconnect_min_delay,
+                reconnect_max_delay,
+                max_pending_messages,
+                max_pending_bytes,
+                drain_timeout,
+            } = *nats;
             if servers.is_empty() || servers.len() > 16 {
                 return Err(runtime_error(
                     "runtime.run_stream.broker.servers must contain between 1 and 16 endpoints",
@@ -2286,7 +2291,7 @@ fn resolve_run_stream(
                 .iter()
                 .map(|path| resolve_path(parent, path))
                 .collect();
-            LiveRunStreamBrokerConfig::NatsCore(NatsCoreRunStreamConfig {
+            LiveRunStreamBrokerConfig::NatsCore(Box::new(NatsCoreRunStreamConfig {
                 servers,
                 namespace,
                 credentials,
@@ -2309,7 +2314,7 @@ fn resolve_run_stream(
                 max_pending_messages,
                 max_pending_bytes,
                 drain_timeout,
-            })
+            }))
         }
     };
     Ok(RunStreamConfig {

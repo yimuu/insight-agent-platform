@@ -23,7 +23,7 @@ use insight_resources::{
     models::{
         ChatEventStream, ChatModel, ChatRequest, ChatRequestMode, ChatResponse, ChatStream,
         ModelCapability, ModelDeploymentIdentity, ModelRegistry, ModelRequestCapability,
-        ModelSelector,
+        ModelSelector, ProviderModelRegistration,
     },
     openai_chat::{
         client_builder_with_transport_policy, OpenAiChatLimits, OpenAiChatModel,
@@ -779,21 +779,11 @@ impl ChatModel for FencedChatModel {
     }
 }
 
+type FencedProviderModelRegistration = ProviderModelRegistration<FencedChatModel>;
+
 struct BuiltProviderRevision {
-    registrations: Vec<(
-        ModelSelector,
-        ModelDeploymentIdentity,
-        Option<String>,
-        Option<String>,
-        FencedChatModel,
-    )>,
-    legacy_registrations: Vec<(
-        ModelSelector,
-        ModelDeploymentIdentity,
-        Option<String>,
-        Option<String>,
-        FencedChatModel,
-    )>,
+    registrations: Vec<FencedProviderModelRegistration>,
+    legacy_registrations: Vec<FencedProviderModelRegistration>,
     legacy_binding_hashes: Vec<String>,
     credential_value_hash: Option<String>,
 }
@@ -913,9 +903,7 @@ fn build_provider_revision(
                 ))
             }
         };
-    let credential_value_hash = credential_value
-        .as_deref()
-        .map(|value| sha256_string(value));
+    let credential_value_hash = credential_value.as_deref().map(sha256_string);
     let mut registrations = Vec::with_capacity(document.models.len());
     for model in document.models {
         let selector = ModelSelector::new(provider.provider_id.clone(), model.id.clone())?;
@@ -993,12 +981,20 @@ struct InstalledRevision {
     legacy_binding_hashes: Vec<String>,
 }
 
+struct ArchivedRevision {
+    suspension_fence: u64,
+    credential_value_hash: Option<String>,
+    legacy_binding_hashes: Vec<String>,
+}
+
+type ArchivedProviderRevisions = BTreeMap<(String, String), ArchivedRevision>;
+
 async fn reconcile_active_revisions(
     repository: &Arc<dyn ProviderManagementDurableRepository>,
     models: &ModelRegistry,
     config: &ProviderManagementRuntimeConfig,
     installed: &mut BTreeMap<String, InstalledRevision>,
-    archived: &mut BTreeMap<(String, String), (u64, Option<String>, Vec<String>)>,
+    archived: &mut ArchivedProviderRevisions,
 ) -> Result<(), &'static str> {
     let archive = repository
         .load_provider_revision_archive()
@@ -1030,14 +1026,11 @@ async fn reconcile_active_revisions(
                 return Err("projection");
             }
         };
-        if archived
-            .get(&identity)
-            .is_some_and(|(fence, hash, legacy)| {
-                *fence == provider.suspension_fence
-                    && *hash == credential_hash
-                    && *legacy == built.legacy_binding_hashes
-            })
-        {
+        if archived.get(&identity).is_some_and(|current| {
+            current.suspension_fence == provider.suspension_fence
+                && current.credential_value_hash == credential_hash
+                && current.legacy_binding_hashes == built.legacy_binding_hashes
+        }) {
             continue;
         }
         models
@@ -1048,11 +1041,11 @@ async fn reconcile_active_revisions(
             .map_err(|_| "registry")?;
         archived.insert(
             identity,
-            (
-                provider.suspension_fence,
-                built.credential_value_hash,
-                built.legacy_binding_hashes,
-            ),
+            ArchivedRevision {
+                suspension_fence: provider.suspension_fence,
+                credential_value_hash: built.credential_value_hash,
+                legacy_binding_hashes: built.legacy_binding_hashes,
+            },
         );
     }
     let active = repository

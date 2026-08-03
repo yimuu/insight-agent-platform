@@ -1099,6 +1099,19 @@ impl ModelDeploymentIdentity {
     }
 }
 
+/// One model registration projected from a managed Provider revision.
+///
+/// The optional strings carry the credential environment-variable name and
+/// its process-local value respectively. Registry state stores only the
+/// resulting credential state, never the secret value.
+pub type ProviderModelRegistration<M> = (
+    ModelSelector,
+    ModelDeploymentIdentity,
+    Option<String>,
+    Option<String>,
+    M,
+);
+
 #[derive(Clone)]
 struct RegisteredModel {
     model: Arc<dyn ChatModel>,
@@ -1317,13 +1330,7 @@ impl ModelRegistry {
     pub fn replace_provider_models<M>(
         &self,
         provider_id: &str,
-        registrations: Vec<(
-            ModelSelector,
-            ModelDeploymentIdentity,
-            Option<String>,
-            Option<String>,
-            M,
-        )>,
+        registrations: Vec<ProviderModelRegistration<M>>,
     ) -> Result<(), CompileError>
     where
         M: ChatModel + 'static,
@@ -1381,13 +1388,7 @@ impl ModelRegistry {
     pub fn archive_provider_models<M>(
         &self,
         provider_id: &str,
-        registrations: Vec<(
-            ModelSelector,
-            ModelDeploymentIdentity,
-            Option<String>,
-            Option<String>,
-            M,
-        )>,
+        registrations: Vec<ProviderModelRegistration<M>>,
     ) -> Result<(), CompileError>
     where
         M: ChatModel + 'static,
