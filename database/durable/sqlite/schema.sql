@@ -218,6 +218,15 @@ ON workflow_runs(
 )
 WHERE lifecycle = 'terminating'
 OR(lifecycle IN('created', 'active', 'waiting') AND admission_state = 'open');
+CREATE TABLE run_principals(
+  run_id TEXT NOT NULL PRIMARY KEY,
+  tenant_id TEXT NOT NULL CHECK(tenant_id <> '' AND length(CAST(tenant_id AS BLOB)) <= 256),
+  user_id TEXT CHECK(user_id IS NULL OR(user_id <> '' AND length(CAST(user_id AS BLOB)) <= 256)),
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES workflow_runs(run_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_run_principals_tenant_user
+ON run_principals(tenant_id, user_id, run_id);
 CREATE TABLE payloads(
   run_id TEXT NOT NULL,
   payload_id TEXT NOT NULL,
@@ -2537,7 +2546,7 @@ BEGIN
 END;
 CREATE TABLE artifact_store_authority(
   singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-  backend TEXT NOT NULL CHECK(backend = 'shared_filesystem'),
+  backend TEXT NOT NULL CHECK(backend IN('shared_filesystem','s3')),
   namespace TEXT NOT NULL CHECK(length(namespace) BETWEEN 1 AND 128
 AND namespace NOT GLOB '*[^A-Za-z0-9._-]*'),
 store_id TEXT NOT NULL CHECK(length(store_id) = 47
@@ -2878,6 +2887,7 @@ CREATE TABLE terminal_runtime_instances(
 CREATE TABLE terminal_run_admissions(
   run_id TEXT NOT NULL PRIMARY KEY,
   tenant_id TEXT NOT NULL,
+  admission_id TEXT NOT NULL,
   request_id TEXT NOT NULL,
   agent_id TEXT NOT NULL,
   definition_revision_id TEXT NOT NULL,
@@ -2890,9 +2900,10 @@ CREATE TABLE terminal_run_admissions(
   owner_instance_id TEXT NOT NULL,
   owner_epoch INTEGER NOT NULL CHECK(owner_epoch >= 1),
   accepted_at TEXT NOT NULL,
-  UNIQUE(tenant_id, request_id),
+  UNIQUE(tenant_id, admission_id),
   CHECK(run_id <> '' AND length(CAST(run_id AS BLOB)) <= 256),
   CHECK(tenant_id <> '' AND length(CAST(tenant_id AS BLOB)) <= 256),
+  CHECK(admission_id <> '' AND length(CAST(admission_id AS BLOB)) <= 256),
   CHECK(request_id <> '' AND length(CAST(request_id AS BLOB)) <= 256),
   CHECK(agent_id <> '' AND length(CAST(agent_id AS BLOB)) <= 256),
   CHECK(definition_revision_id <> '' AND
@@ -3109,7 +3120,7 @@ CREATE TABLE conversation_summary_jobs(
 
 CREATE TABLE full_conversation_turns(
   tenant_id TEXT NOT NULL,
-  request_id TEXT NOT NULL,
+  admission_id TEXT NOT NULL,
   conversation_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
   run_id TEXT NOT NULL
@@ -3125,10 +3136,10 @@ CREATE TABLE full_conversation_turns(
           substr(selected_context_hash, 1, 7) = 'sha256:' AND
           substr(selected_context_hash, 8) NOT GLOB '*[^0-9a-f]*'),
   created_at TEXT NOT NULL,
-  PRIMARY KEY(tenant_id, request_id),
+  PRIMARY KEY(tenant_id, admission_id),
   UNIQUE(run_id),
   CHECK(tenant_id <> '' AND length(CAST(tenant_id AS BLOB)) <= 256),
-  CHECK(request_id <> '' AND length(CAST(request_id AS BLOB)) <= 256),
+  CHECK(admission_id <> '' AND length(CAST(admission_id AS BLOB)) <= 256),
   CHECK(user_id <> '' AND length(CAST(user_id AS BLOB)) <= 256),
   CHECK(user_message_id <> '' AND length(CAST(user_message_id AS BLOB)) <= 256),
   CHECK(assistant_message_id <> '' AND length(CAST(assistant_message_id AS BLOB)) <= 256)
@@ -3867,6 +3878,59 @@ BEFORE UPDATE ON agent_deployment_publications BEGIN SELECT RAISE(ABORT,'immutab
 CREATE TRIGGER agent_deployment_publication_delete_forbidden
 BEFORE DELETE ON agent_deployment_publications BEGIN SELECT RAISE(ABORT,'immutable Agent Deployment publication'); END;
 
+CREATE TABLE files(
+  file_id TEXT NOT NULL PRIMARY KEY,
+  tenant_id TEXT NOT NULL CHECK(tenant_id<>'' AND length(CAST(tenant_id AS BLOB))<=256),
+  user_id TEXT NOT NULL CHECK(user_id<>'' AND length(CAST(user_id AS BLOB))<=256),
+  filename TEXT NOT NULL CHECK(filename<>'' AND length(CAST(filename AS BLOB))<=1024),
+  media_type TEXT NOT NULL CHECK(media_type<>'' AND length(CAST(media_type AS BLOB))<=255),
+  expected_size_bytes INTEGER NOT NULL CHECK(expected_size_bytes>=0),
+  actual_size_bytes INTEGER CHECK(actual_size_bytes>=0),
+  checksum_sha256 TEXT CHECK(checksum_sha256 IS NULL OR length(checksum_sha256)=64 AND checksum_sha256 NOT GLOB '*[^0-9a-f]*'),
+  object_key TEXT NOT NULL UNIQUE CHECK(object_key<>'' AND length(CAST(object_key AS BLOB))<=1024),
+  object_etag TEXT,
+  object_version_id TEXT,
+  status TEXT NOT NULL CHECK(status IN('pending_upload','ready','expired','failed','deleting','deleted')),
+  idempotency_key TEXT,
+  request_hash TEXT NOT NULL CHECK(length(request_hash)=71 AND substr(request_hash,1,7)='sha256:'),
+  created_at TEXT NOT NULL,
+  upload_expires_at TEXT NOT NULL,
+  ready_at TEXT,
+  deleted_at TEXT,
+  deletion_fence INTEGER NOT NULL DEFAULT 0 CHECK(deletion_fence>=0),
+  deletion_claim_token TEXT,
+  deletion_claim_expires_at TEXT,
+  CHECK((deletion_claim_token IS NULL)=(deletion_claim_expires_at IS NULL)),
+  CHECK((status='ready')=(actual_size_bytes IS NOT NULL AND object_etag IS NOT NULL AND ready_at IS NOT NULL)
+        OR status IN('deleting','deleted'))
+);
+CREATE UNIQUE INDEX idx_files_idempotency
+ON files(tenant_id,user_id,idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX idx_files_owner
+ON files(tenant_id,user_id,created_at,file_id);
+CREATE INDEX idx_files_pending_expiry
+ON files(status,upload_expires_at,file_id);
+CREATE INDEX idx_files_deletion_claim
+ON files(status,deletion_claim_expires_at,file_id);
+CREATE TABLE file_bindings(
+  file_id TEXT NOT NULL REFERENCES files(file_id) ON DELETE RESTRICT,
+  target_kind TEXT NOT NULL CHECK(target_kind IN('run','conversation','artifact')),
+  target_id TEXT NOT NULL CHECK(target_id<>'' AND length(CAST(target_id AS BLOB))<=256),
+  tenant_id TEXT NOT NULL CHECK(tenant_id<>'' AND length(CAST(tenant_id AS BLOB))<=256),
+  user_id TEXT NOT NULL CHECK(user_id<>'' AND length(CAST(user_id AS BLOB))<=256),
+  filename TEXT NOT NULL CHECK(filename<>'' AND length(CAST(filename AS BLOB))<=1024),
+  media_type TEXT NOT NULL CHECK(media_type<>'' AND length(CAST(media_type AS BLOB))<=255),
+  size_bytes INTEGER NOT NULL CHECK(size_bytes>=0),
+  object_etag TEXT NOT NULL CHECK(object_etag<>''),
+  object_version_id TEXT,
+  created_at TEXT NOT NULL,
+  retain_until TEXT,
+  released_at TEXT,
+  PRIMARY KEY(file_id,target_kind,target_id)
+);
+CREATE INDEX idx_file_bindings_target
+ON file_bindings(target_kind,target_id,file_id);
+
 CREATE TABLE durable_schema_contract (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     contract_id TEXT NOT NULL,
@@ -3877,7 +3941,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-a7d26783-48d3-4bce-b337-8e634fda99a3',
+    'durable-schema-bc893e0d-33b5-4a90-9aa3-1db4f6d17c87',
     'sqlite'
 );
 

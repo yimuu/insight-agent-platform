@@ -11,7 +11,8 @@ use insight_durable::{
     ActivateAgentDeploymentCommand, AgentDeploymentActivationOutcome, AgentDeploymentTarget,
     ContinueAsNewCommand, CreateRunCommand, DurableRepository, PlanInstallOutcome,
     PlanPublicationOutcome, ProjectionAudit, ProjectionDurableRepository, ProjectionSubject,
-    PublicationOrigin, PublishVersionedPlanCommand, RecoveryDurableRepository, VersionedPlan,
+    PublicationOrigin, PublishVersionedPlanCommand, RecoveryDurableRepository, RunPrincipal,
+    VersionedPlan,
 };
 use insight_engine::{
     plan::{
@@ -238,6 +239,45 @@ async fn create_run(
         .unwrap();
     assert!(matches!(outcome, TransitionOutcome::Committed { .. }));
     run_id
+}
+
+#[tokio::test]
+async fn run_principal_is_durable_and_part_of_exact_admission_intent() {
+    let (_directory, repository, _inspection) = file_repository().await;
+    let plan = plan_with_binding(json!([]));
+    repository.install_versioned_plan(&plan).await.unwrap();
+    let run_id = RunId::new("run_principal_contract").unwrap();
+    let transition = key("run.principal.create");
+    let command = CreateRunCommand::new(run_id.clone(), &plan, json!({"question":"safe"}))
+        .unwrap()
+        .with_principal(RunPrincipal::new("tenant-a", Some("user-a")).unwrap());
+    assert!(matches!(
+        repository
+            .create_run(transition.clone(), command.clone())
+            .await
+            .unwrap(),
+        TransitionOutcome::Committed { .. }
+    ));
+    assert_eq!(
+        repository.load_run_principal(&run_id).await.unwrap(),
+        Some(RunPrincipal::new("tenant-a", Some("user-a")).unwrap())
+    );
+    assert!(matches!(
+        repository
+            .create_run(transition.clone(), command)
+            .await
+            .unwrap(),
+        TransitionOutcome::ExactReplay { .. }
+    ));
+
+    let conflicting = CreateRunCommand::new(run_id, &plan, json!({"question":"safe"}))
+        .unwrap()
+        .with_principal(RunPrincipal::new("tenant-b", Some("user-a")).unwrap());
+    let error = repository
+        .create_run(transition, conflicting)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), REPOSITORY_INTENT_CONFLICT);
 }
 
 fn normalized_input_plan() -> (insight_engine::Plan, VersionedPlan) {

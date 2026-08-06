@@ -19,7 +19,7 @@ use sqlx::{
 use tempfile::TempDir;
 
 pub(crate) const DURABLE_SCHEMA_CONTRACT_ID: &str =
-    "durable-schema-a7d26783-48d3-4bce-b337-8e634fda99a3";
+    "durable-schema-bc893e0d-33b5-4a90-9aa3-1db4f6d17c87";
 pub(crate) const POSTGRES_SCHEMA: &str =
     workspace_asset_str!("database/durable/postgres/schema.sql");
 pub(crate) const SQLITE_SCHEMA: &str = workspace_asset_str!("database/durable/sqlite/schema.sql");

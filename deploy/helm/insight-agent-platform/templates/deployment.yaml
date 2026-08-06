@@ -67,19 +67,22 @@ spec:
                   key: {{ .Values.externalDatabase.databaseUrlKey }}
             - name: RUST_LOG
               value: {{ .Values.runtime.rustLog | quote }}
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.objectStorage.credentials.existingSecret | quote }}
+                  key: {{ .Values.objectStorage.credentials.accessKeyKey | quote }}
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.objectStorage.credentials.existingSecret | quote }}
+                  key: {{ .Values.objectStorage.credentials.secretKeyKey | quote }}
             {{- if eq .Values.runtime.runStream.broker "nats_core" }}
             - name: INSIGHT_RUN_STREAM_NATS_CREDENTIALS
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.runtime.runStream.natsCore.credentials.existingSecret | quote }}
                   key: {{ .Values.runtime.runStream.natsCore.credentials.secretKey | quote }}
-            {{- end }}
-            {{- if .Values.artifacts.tenantEncryption.enabled }}
-            - name: INSIGHT_ARTIFACT_TENANT_KEYRING
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.artifacts.tenantEncryption.existingSecret | quote }}
-                  key: {{ .Values.artifacts.tenantEncryption.keyringKey | quote }}
             {{- end }}
             {{- if .Values.mcp.secretEncryption.enabled }}
             - name: INSIGHT_MCP_SECRET_KEYRING
@@ -101,7 +104,7 @@ spec:
             - name: TERMINAL_STREAM_FIXTURE_API_KEY
               value: "qualification-fixture"
             - name: TERMINAL_QUALIFICATION_EFFECT_LEDGER
-              value: {{ printf "%s/qualification-effects" .Values.artifacts.mountPath | quote }}
+              value: /tmp/qualification-effects
             - name: INSIGHT_TERMINAL_QUALIFICATION_ADMISSION_DELAY_MS
               value: {{ .Values.runtime.qualificationFaults.admissionDelayMs | quote }}
             - name: INSIGHT_TERMINAL_QUALIFICATION_POST_COMMIT_DELAY_MS
@@ -137,8 +140,6 @@ spec:
             - name: runtime-config
               mountPath: /app/config-runtime
               readOnly: true
-            - name: artifacts
-              mountPath: {{ .Values.artifacts.mountPath }}
             - name: tmp
               mountPath: /tmp
             {{- if and .Values.postgresql.enabled .Values.postgresql.tls.enabled }}
@@ -155,14 +156,6 @@ spec:
         - name: runtime-config
           configMap:
             name: {{ include "insight-agent-platform.fullname" . }}-config
-        - name: artifacts
-          {{- if .Values.artifacts.persistence.enabled }}
-          persistentVolumeClaim:
-            claimName: {{ include "insight-agent-platform.artifactClaimName" . }}
-          {{- else }}
-          emptyDir:
-            sizeLimit: {{ .Values.artifacts.persistence.size }}
-          {{- end }}
         - name: tmp
           emptyDir:
             sizeLimit: 64Mi

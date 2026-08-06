@@ -23,16 +23,6 @@ runtime:
     allowVolatileWaits: true
     maxConcurrentRuns: 50
 
-artifacts:
-  tenantEncryption:
-    enabled: true
-    activeKeyVersion: qualification-v1
-    existingSecret: terminal-tenant-keyring
-    keyringKey: keyring.json
-  persistence:
-    enabled: true
-    size: 2Gi
-
 postgresql:
   persistence:
     enabled: true

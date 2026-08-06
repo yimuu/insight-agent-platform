@@ -26,5 +26,5 @@
 当前问题：
 
 <current_question>
-{{ question }}
+{{ query }}
 </current_question>

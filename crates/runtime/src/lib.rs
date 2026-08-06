@@ -1,9 +1,15 @@
 //! Runtime orchestration and production adapters.
 
+#[cfg(test)]
+#[macro_use]
+#[path = "../../../tests/support/workspace_assets.rs"]
+mod workspace_assets;
+
 pub mod catalog;
 pub mod control;
 #[doc(hidden)]
 pub mod internal;
+pub mod invocation;
 pub mod leaf_adapters;
 pub mod nats_run_stream;
 pub mod retrieval_adapter;
@@ -20,6 +26,9 @@ pub use insight_durable::terminal_store::{
     ConversationRole, MessageCursor,
 };
 pub use insight_engine::execution::{RunError, RunErrorKind};
+pub use invocation::{
+    AgentInvocation, FileRef, InvocationFile, Message, MessageContentPart, MessageRole,
+};
 pub use nats_run_stream::{
     nats_live_run_stream_subject, NatsCoreLiveRunStreamBroker, NatsCoreLiveRunStreamBrokerOptions,
     NatsCoreTlsOptions,

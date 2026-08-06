@@ -38,3 +38,4 @@ uuid.workspace = true
 chrono.workspace = true
 jsonschema.workspace = true
 serde_jcs.workspace = true
+tower.workspace = true

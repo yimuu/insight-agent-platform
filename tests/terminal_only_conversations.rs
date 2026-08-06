@@ -3,7 +3,10 @@ mod database;
 
 use std::{
     collections::BTreeSet,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -34,8 +37,14 @@ use insight_agent_platform::{
         TerminalOnlyRunConfig, TerminalOnlyStore,
     },
 };
+use insight_durable::{CompleteFileCommand, CreateFileCommand, FileDurableRepository, FileQuery};
+use insight_engine::{
+    file_store::{AuthorizedFile, AuthorizedFileUrl, FileAdmissionAuthority, FileAuthorityError},
+    RunId,
+};
 use insight_storage::{
-    terminal_artifact_staging_id, TerminalArtifactSourceKind, TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE,
+    terminal_artifact_staging_id, ScopedArtifactReference, TerminalArtifactSourceKind,
+    TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE,
 };
 use serde_json::{json, Value};
 use sqlx::{
@@ -53,6 +62,22 @@ const TENANT_ID: &str = "tenant-terminal-e2e";
 const USER_ID: &str = "user-terminal-e2e";
 const MAX_HTTP_BODY_BYTES: usize = 2 * 1024 * 1024;
 
+fn text_content(text: &str) -> Value {
+    json!([{"text": text}])
+}
+
+fn decode_artifact_reference(
+    store: &dyn WorkerArtifactStore,
+    reference: &str,
+) -> (ArtifactRef, StorageLocator) {
+    if let Ok(reference) = ScopedArtifactReference::parse(reference) {
+        return (reference.artifact().clone(), reference.locator().unwrap());
+    }
+    let artifact: ArtifactRef = serde_json::from_str(reference).unwrap();
+    let locator = store.storage_locator(&artifact).unwrap();
+    (artifact, locator)
+}
+
 const TERMINAL_NATIVE_PASSTHROUGH: &str = r#"api_version: insight.agent/v1
 kind: agent
 metadata:
@@ -62,12 +87,13 @@ metadata:
 execution:
   persistence_mode: terminal_only
 inputs:
-  message: string
-  conversation_context: any
+  query: string
+  messages: {type: "Message[]", default: []}
+  files: {type: "File[]", default: []}
 output: string
 workflow:
   steps:
-    - return: $message
+    - return: $query
 "#;
 
 const FULL_NATIVE_PASSTHROUGH: &str = r#"api_version: insight.agent/v1
@@ -79,12 +105,13 @@ metadata:
 execution:
   persistence_mode: full
 inputs:
-  message: string
-  conversation_context: any
+  query: string
+  messages: {type: "Message[]", default: []}
+  files: {type: "File[]", default: []}
 output: string
 workflow:
   steps:
-    - return: $message
+    - return: $query
 "#;
 
 struct NativeOnlyResolver;
@@ -105,6 +132,103 @@ impl LeafDeploymentResolver for NativeOnlyResolver {
 struct DelayedSummaryArtifactStore {
     inner: Arc<dyn WorkerArtifactStore>,
     delay: Duration,
+}
+
+struct ConversationFileAuthority {
+    public_ready: AtomicBool,
+}
+
+impl ConversationFileAuthority {
+    fn new() -> Self {
+        Self {
+            public_ready: AtomicBool::new(true),
+        }
+    }
+
+    fn tombstone_public_file(&self) {
+        self.public_ready.store(false, Ordering::Release);
+    }
+
+    fn authorized(file_id: &str) -> AuthorizedFile {
+        AuthorizedFile::from_storage_adapter(
+            file_id.to_owned(),
+            "scan.png".to_owned(),
+            "image/png".to_owned(),
+            8,
+            format!("conversation-test/{file_id}"),
+            "etag-conversation-file".to_owned(),
+            Some("version-conversation-file".to_owned()),
+        )
+    }
+
+    fn public_not_found() -> FileAuthorityError {
+        FileAuthorityError::from_storage_adapter(
+            "FILE_NOT_FOUND",
+            "File was not found for this principal",
+        )
+    }
+}
+
+#[async_trait]
+impl FileAdmissionAuthority for ConversationFileAuthority {
+    async fn resolve_files(
+        &self,
+        _tenant_id: &str,
+        _user_id: &str,
+        file_ids: &[String],
+    ) -> Result<Vec<AuthorizedFile>, FileAuthorityError> {
+        if !self.public_ready.load(Ordering::Acquire) && !file_ids.is_empty() {
+            return Err(Self::public_not_found());
+        }
+        Ok(file_ids
+            .iter()
+            .map(|file_id| Self::authorized(file_id))
+            .collect())
+    }
+
+    async fn resolve_conversation_files(
+        &self,
+        _conversation_id: &str,
+        _tenant_id: &str,
+        _user_id: &str,
+        current_file_ids: &[String],
+        history_file_ids: &[String],
+    ) -> Result<Vec<AuthorizedFile>, FileAuthorityError> {
+        if !self.public_ready.load(Ordering::Acquire) && !current_file_ids.is_empty() {
+            return Err(Self::public_not_found());
+        }
+        Ok(current_file_ids
+            .iter()
+            .chain(history_file_ids)
+            .map(|file_id| Self::authorized(file_id))
+            .collect())
+    }
+
+    async fn resolve_run_files(
+        &self,
+        _run_id: &RunId,
+        file_ids: &[String],
+    ) -> Result<Vec<AuthorizedFile>, FileAuthorityError> {
+        Ok(file_ids
+            .iter()
+            .map(|file_id| Self::authorized(file_id))
+            .collect())
+    }
+
+    async fn read_file(
+        &self,
+        _file: &AuthorizedFile,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, FileAuthorityError> {
+        unreachable!("the passthrough fixture does not dispatch file bytes")
+    }
+
+    async fn presign_file_read(
+        &self,
+        _file: &AuthorizedFile,
+    ) -> Result<AuthorizedFileUrl, FileAuthorityError> {
+        unreachable!("the passthrough fixture does not dispatch file URLs")
+    }
 }
 
 #[async_trait]
@@ -164,6 +288,8 @@ impl WorkerArtifactStore for DelayedSummaryArtifactStore {
 struct TerminalHttpFixture {
     app: Router,
     service: RunService,
+    repository: Arc<SqliteDurableRepository>,
+    file_authority: Arc<ConversationFileAuthority>,
     inspection: SqlitePool,
     artifact_store: Arc<dyn WorkerArtifactStore>,
     _root: TempDir,
@@ -255,11 +381,11 @@ metadata:
   description: Child used to prove full Conversation subflow rejection.
 execution:
   persistence_mode: full
-inputs: {{message: string}}
+inputs: {{query: string}}
 output: string
 workflow:
   steps:
-    - return: $message
+    - return: $query
 "#
             ),
         )
@@ -279,8 +405,8 @@ metadata:
 execution:
   persistence_mode: full
 inputs:
-  message: string
-  conversation_context: any
+  query: string
+  messages: {{type: "Message[]", default: []}}
 output: string
 workflow:
   steps:
@@ -288,7 +414,7 @@ workflow:
       type: call
       definition_revision: {}
       interface_version: child-v1
-      input: {{message: $message}}
+      input: {{query: $query}}
       response: string
     - return: $child_answer
 "#,
@@ -314,7 +440,7 @@ workflow:
                 .unwrap(),
         );
         let production_repository: Arc<dyn ProductionRunRepository> = repository.clone();
-        let terminal_store: Arc<dyn TerminalOnlyStore> = repository;
+        let terminal_store: Arc<dyn TerminalOnlyStore> = repository.clone();
         let base_artifact_store: Arc<dyn WorkerArtifactStore> = Arc::new(
             LocalContentAddressedArtifactStore::open(root.path().join("objects"), 4)
                 .await
@@ -345,6 +471,10 @@ workflow:
         )
         .await
         .unwrap();
+        let file_authority = Arc::new(ConversationFileAuthority::new());
+        service
+            .set_file_admission_authority(file_authority.clone())
+            .unwrap();
         let conversation_config = TerminalOnlyRunConfig {
             owner_lease: Duration::from_secs(30),
             owner_heartbeat: Duration::from_secs(5),
@@ -397,6 +527,8 @@ workflow:
         Self {
             app,
             service,
+            repository,
+            file_authority,
             inspection,
             artifact_store,
             _root: root,
@@ -432,6 +564,7 @@ fn conversation_write(
         .header("x-tenant-id", tenant_id)
         .header("x-user-id", user_id)
         .header("x-request-id", request_id)
+        .header("idempotency-key", request_id)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap()
 }
@@ -570,7 +703,7 @@ async fn active_terminal_admission_is_tenant_scoped_and_historical_routes_fail_c
         .deployment_revision_id()
         .as_str()
         .to_owned();
-    let pinned_body = json!({"message": "pinned", "conversation_context": []});
+    let pinned_body = json!({"query": "pinned"});
     let pinned_path = format!("/v1/agents/{AGENT_ID}/deployments/{terminal_revision}/runs");
 
     // Historical Deployment admission was removed by the managed-Agent
@@ -595,6 +728,7 @@ async fn active_terminal_admission_is_tenant_scoped_and_historical_routes_fail_c
             .header(header::CONTENT_TYPE, "application/json")
             .header("x-tenant-id", "tenant-pinned-a")
             .header("x-request-id", "same-pinned-request")
+            .header("idempotency-key", "same-pinned-operation")
             .body(Body::from(serde_json::to_vec(&pinned_body).unwrap()))
             .unwrap(),
     )
@@ -607,13 +741,14 @@ async fn active_terminal_admission_is_tenant_scoped_and_historical_routes_fail_c
             .header(header::CONTENT_TYPE, "application/json")
             .header("x-tenant-id", "tenant-pinned-b")
             .header("x-request-id", "same-pinned-request")
+            .header("idempotency-key", "same-pinned-operation")
             .body(Body::from(serde_json::to_vec(&pinned_body).unwrap()))
             .unwrap(),
     )
     .await;
     assert_eq!(tenant_b.status(), StatusCode::ACCEPTED);
     let run_b = tenant_b.headers()["x-run-id"].to_str().unwrap().to_owned();
-    assert_ne!(run_a, run_b, "request idempotency is tenant-scoped");
+    assert_ne!(run_a, run_b, "idempotency key is tenant-scoped");
     assert_eq!(
         send(
             &fixture.app,
@@ -639,11 +774,17 @@ async fn active_terminal_admission_is_tenant_scoped_and_historical_routes_fail_c
     )
     .await;
     assert_eq!(rejected_full.status(), StatusCode::NOT_FOUND);
-    for path in [
-        format!("/v1/agents/{FULL_AGENT_ID}/runs"),
-        format!("/v1/agents/{FULL_AGENT_ID}/runs/stream"),
+    for (path, expected_status) in [
+        (
+            format!("/v1/agents/{FULL_AGENT_ID}/runs"),
+            StatusCode::ACCEPTED,
+        ),
+        (
+            format!("/v1/agents/{FULL_AGENT_ID}/runs/stream"),
+            StatusCode::OK,
+        ),
     ] {
-        let rejected = send(
+        let admitted = send(
             &fixture.app,
             Request::post(path)
                 .header(header::CONTENT_TYPE, "application/json")
@@ -653,7 +794,35 @@ async fn active_terminal_admission_is_tenant_scoped_and_historical_routes_fail_c
                 .unwrap(),
         )
         .await;
-        assert_eq!(rejected.status(), StatusCode::NOT_FOUND);
+        assert_eq!(admitted.status(), expected_status);
+        let admitted_run_id = admitted.headers()["x-run-id"].to_str().unwrap().to_owned();
+        assert_eq!(
+            send(
+                &fixture.app,
+                Request::get(format!("/v1/runs/{admitted_run_id}"))
+                    .header("x-tenant-id", "tenant-unbound")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                &fixture.app,
+                Request::get(format!("/v1/runs/{admitted_run_id}"))
+                    .header("x-tenant-id", "another-tenant")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        let _ = to_bytes(admitted.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
     }
 
     let default_full = send(
@@ -739,7 +908,7 @@ async fn privacy_delete_cancels_unconsumed_terminal_and_full_attached_streams() 
                 &tenant_id,
                 &user_id,
                 &format!("turn-stream-delete-{suffix}"),
-                json!({"content": marker}),
+                json!({"query": marker}),
             ),
         )
         .await;
@@ -809,7 +978,7 @@ async fn privacy_delete_cancels_unconsumed_finite_bodies_and_redacts_future_read
                 TENANT_ID,
                 USER_ID,
                 &format!("turn-finite-response-{suffix}"),
-                json!({"content": marker}),
+                json!({"query": marker}),
             ),
         )
         .await;
@@ -939,7 +1108,8 @@ async fn full_conversation_visibility_guard_fences_privacy_delete_and_checks_pri
             "tenant-full-guard",
             "user-full-guard",
             "turn-full-guard",
-            json!("private full terminal"),
+            "request-full-guard",
+            serde_json::from_value(json!({"query": "private full terminal"})).unwrap(),
         )
         .await
         .unwrap();
@@ -1041,11 +1211,7 @@ async fn terminal_only_http_conversation_lifecycle_is_isolated_idempotent_and_cu
             .header(header::CONTENT_TYPE, "application/json")
             .header("x-request-id", "standalone-terminal-run")
             .body(Body::from(
-                serde_json::to_vec(&json!({
-                    "message": "standalone",
-                    "conversation_context": []
-                }))
-                .unwrap(),
+                serde_json::to_vec(&json!({"query": "standalone"})).unwrap(),
             ))
             .unwrap(),
     )
@@ -1058,7 +1224,10 @@ async fn terminal_only_http_conversation_lifecycle_is_isolated_idempotent_and_cu
     let standalone_body = json_body(standalone).await;
     assert_terminal_capability(&standalone_body["data"]);
     let terminal_standalone = wait_for_terminal_run(&fixture.app, &standalone_run_id).await;
-    assert_eq!(terminal_standalone["status"], "completed");
+    assert_eq!(
+        terminal_standalone["status"], "completed",
+        "{terminal_standalone}"
+    );
     assert_terminal_capability(&terminal_standalone);
 
     let tenant_standalone = send(
@@ -1068,11 +1237,7 @@ async fn terminal_only_http_conversation_lifecycle_is_isolated_idempotent_and_cu
             .header("x-request-id", "standalone-terminal-run-tenant")
             .header("x-tenant-id", TENANT_ID)
             .body(Body::from(
-                serde_json::to_vec(&json!({
-                    "message": "tenant standalone",
-                    "conversation_context": []
-                }))
-                .unwrap(),
+                serde_json::to_vec(&json!({"query": "tenant standalone"})).unwrap(),
             ))
             .unwrap(),
     )
@@ -1197,7 +1362,7 @@ async fn terminal_only_http_conversation_lifecycle_is_isolated_idempotent_and_cu
             TENANT_ID,
             USER_ID,
             "conversation-turn-1",
-            json!({"content": large_message}),
+            json!({"query": large_message}),
         ),
     )
     .await;
@@ -1213,7 +1378,7 @@ async fn terminal_only_http_conversation_lifecycle_is_isolated_idempotent_and_cu
     let first_turn_body = json_body(first_turn).await;
     assert_eq!(
         first_turn_body["data"]["user_message"]["content"],
-        large_message
+        text_content(&large_message)
     );
     assert_eq!(
         first_turn_body["data"]["user_message"]["message_id"],
@@ -1233,8 +1398,8 @@ async fn terminal_only_http_conversation_lifecycle_is_isolated_idempotent_and_cu
         .iter()
         .find(|message| message["role"] == "assistant")
         .unwrap();
-    assert_eq!(first_user["content"], large_message);
-    assert_eq!(first_assistant["content"], large_message);
+    assert_eq!(first_user["content"], text_content(&large_message));
+    assert_eq!(first_assistant["content"], text_content(&large_message));
     assert!(first_user.get("storage").is_none());
     assert!(first_assistant.get("storage").is_none());
     assert!(
@@ -1341,7 +1506,7 @@ async fn terminal_only_http_conversation_lifecycle_is_isolated_idempotent_and_cu
             TENANT_ID,
             USER_ID,
             "conversation-turn-1",
-            json!({"content": large_message}),
+            json!({"query": large_message}),
         ),
     )
     .await;
@@ -1369,7 +1534,7 @@ async fn terminal_only_http_conversation_lifecycle_is_isolated_idempotent_and_cu
             TENANT_ID,
             USER_ID,
             "conversation-turn-2",
-            json!({"content": "second turn"}),
+            json!({"query": "second turn"}),
         ),
     )
     .await;
@@ -1443,7 +1608,7 @@ async fn terminal_only_http_conversation_lifecycle_is_isolated_idempotent_and_cu
             TENANT_ID,
             USER_ID,
             "conversation-turn-after-archive",
-            json!({"content": "must be rejected"}),
+            json!({"query": "must be rejected"}),
         ),
     )
     .await;
@@ -1509,6 +1674,162 @@ async fn terminal_only_http_conversation_lifecycle_is_isolated_idempotent_and_cu
     fixture.shutdown().await;
 }
 
+async fn exercise_conversation_history_file_binding_after_public_tombstone(
+    agent_id: &str,
+    label: &str,
+) {
+    let fixture = TerminalHttpFixture::start().await;
+    let file_id = format!("file_conversation_history_{label}");
+    let now = chrono::Utc::now();
+    let file_query = FileQuery {
+        file_id: file_id.clone(),
+        tenant_id: TENANT_ID.to_owned(),
+        user_id: USER_ID.to_owned(),
+    };
+    fixture
+        .repository
+        .create_file(CreateFileCommand {
+            file_id: file_id.clone(),
+            tenant_id: TENANT_ID.to_owned(),
+            user_id: USER_ID.to_owned(),
+            filename: "scan.png".to_owned(),
+            media_type: "image/png".to_owned(),
+            expected_size_bytes: 8,
+            checksum_sha256: None,
+            object_key: format!("conversation-test/{file_id}"),
+            idempotency_key: Some(format!("conversation-history-file-{label}")),
+            request_hash: format!("sha256:{}", "a".repeat(64)),
+            created_at: now,
+            upload_expires_at: now + chrono::Duration::hours(1),
+        })
+        .await
+        .unwrap();
+    fixture
+        .repository
+        .complete_file(CompleteFileCommand {
+            query: file_query.clone(),
+            actual_size_bytes: 8,
+            object_etag: "etag-conversation-file".to_owned(),
+            object_version_id: Some("version-conversation-file".to_owned()),
+            ready_at: now,
+        })
+        .await
+        .unwrap();
+
+    let created = send(
+        &fixture.app,
+        conversation_write(
+            Method::POST,
+            "/v1/conversations",
+            TENANT_ID,
+            USER_ID,
+            &format!("conversation-file-create-{label}"),
+            json!({"agent_id": agent_id}),
+        ),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let conversation_id = json_body(created).await["data"]["conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let first = send(
+        &fixture.app,
+        conversation_write(
+            Method::POST,
+            format!("/v1/conversations/{conversation_id}/messages"),
+            TENANT_ID,
+            USER_ID,
+            &format!("conversation-file-turn-1-{label}"),
+            json!({"query":"inspect", "files":[{"file_id":&file_id}]}),
+        ),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    let first_run_id = first.headers()["x-run-id"].to_str().unwrap().to_owned();
+    let first_body = json_body(first).await;
+    assert_eq!(
+        first_body["data"]["user_message"]["content"],
+        json!([{"text":"inspect"},{"file":{"file_id":&file_id}}])
+    );
+    wait_for_assistant(&fixture.app, &conversation_id, &first_run_id).await;
+
+    fixture
+        .repository
+        .begin_file_delete(file_query, chrono::Utc::now())
+        .await
+        .unwrap();
+    fixture.file_authority.tombstone_public_file();
+
+    let second = send(
+        &fixture.app,
+        conversation_write(
+            Method::POST,
+            format!("/v1/conversations/{conversation_id}/messages"),
+            TENANT_ID,
+            USER_ID,
+            &format!("conversation-file-turn-2-{label}"),
+            json!({"query":"follow up"}),
+        ),
+    )
+    .await;
+    if second.status() != StatusCode::ACCEPTED {
+        panic!(
+            "unexpected second-turn response: {}",
+            json_body(second).await
+        );
+    }
+    let second_run_id = second.headers()["x-run-id"].to_str().unwrap().to_owned();
+    wait_for_assistant(&fixture.app, &conversation_id, &second_run_id).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM file_bindings
+             WHERE file_id=? AND target_kind='run' AND released_at IS NULL"
+        )
+        .bind(&file_id)
+        .fetch_one(&fixture.inspection)
+        .await
+        .unwrap(),
+        2,
+        "the replayed history File must be frozen into the second Run"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM file_bindings
+             WHERE file_id=? AND target_kind='conversation' AND released_at IS NULL"
+        )
+        .bind(&file_id)
+        .fetch_one(&fixture.inspection)
+        .await
+        .unwrap(),
+        1
+    );
+
+    let explicit_reattach = send(
+        &fixture.app,
+        conversation_write(
+            Method::POST,
+            format!("/v1/conversations/{conversation_id}/messages"),
+            TENANT_ID,
+            USER_ID,
+            &format!("conversation-file-turn-3-{label}"),
+            json!({"query":"reattach", "files":[{"file_id":&file_id}]}),
+        ),
+    )
+    .await;
+    assert_eq!(explicit_reattach.status(), StatusCode::NOT_FOUND);
+    assert_eq!(json_body(explicit_reattach).await["code"], "FILE_NOT_FOUND");
+
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn conversation_history_reuses_immutable_file_binding_after_public_tombstone() {
+    exercise_conversation_history_file_binding_after_public_tombstone(AGENT_ID, "terminal").await;
+    exercise_conversation_history_file_binding_after_public_tombstone(FULL_AGENT_ID, "full").await;
+}
+
 #[tokio::test]
 async fn attached_terminal_sse_is_emitted_only_after_result_and_assistant_commit() {
     let fixture = TerminalHttpFixture::start().await;
@@ -1538,7 +1859,7 @@ async fn attached_terminal_sse_is_emitted_only_after_result_and_assistant_commit
             TENANT_ID,
             USER_ID,
             "conversation-stream-turn",
-            json!({"content": streamed_message}),
+            json!({"query": streamed_message}),
         ),
     )
     .await;
@@ -1622,8 +1943,8 @@ async fn attached_terminal_sse_is_emitted_only_after_result_and_assistant_commit
         .find(|message| message["role"] == "assistant")
         .unwrap();
     assert_eq!(user["message_id"], message_id);
-    assert_eq!(user["content"], streamed_message);
-    assert_eq!(assistant["content"], streamed_message);
+    assert_eq!(user["content"], text_content(&streamed_message));
+    assert_eq!(assistant["content"], text_content(&streamed_message));
 
     fixture.shutdown().await;
 }
@@ -1667,10 +1988,13 @@ async fn full_persistence_conversation_is_atomic_idempotent_streamable_and_tenan
             TENANT_ID,
             USER_ID,
             "full-turn-1",
-            json!({"content": "durable hello"}),
+            json!({"query": "durable hello"}),
         ),
     )
     .await;
+    if first.status() != StatusCode::ACCEPTED {
+        panic!("unexpected first-turn response: {}", json_body(first).await);
+    }
     assert_eq!(first.status(), StatusCode::ACCEPTED);
     let run_id = first.headers()["x-run-id"].to_str().unwrap().to_owned();
     let message_id = first.headers()["x-message-id"].to_str().unwrap().to_owned();
@@ -1700,15 +2024,14 @@ async fn full_persistence_conversation_is_atomic_idempotent_streamable_and_tenan
             .iter()
             .find(|message| message["role"] == "assistant")
             .unwrap()["content"],
-        "durable hello"
+        text_content("durable hello")
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM full_conversation_turns
-             WHERE tenant_id=? AND request_id=? AND run_id=?"
+             WHERE tenant_id=? AND admission_id LIKE 'idem_%' AND run_id=?"
         )
         .bind(TENANT_ID)
-        .bind("full-turn-1")
         .bind(&run_id)
         .fetch_one(&fixture.inspection)
         .await
@@ -1745,7 +2068,7 @@ async fn full_persistence_conversation_is_atomic_idempotent_streamable_and_tenan
             TENANT_ID,
             USER_ID,
             "full-turn-1",
-            json!({"content": "durable hello"}),
+            json!({"query": "durable hello"}),
         ),
     )
     .await;
@@ -1754,7 +2077,10 @@ async fn full_persistence_conversation_is_atomic_idempotent_streamable_and_tenan
     assert_eq!(replay.headers()["x-message-id"], message_id);
     let replay = json_body(replay).await;
     assert_eq!(replay["data"]["replayed"], true);
-    assert_eq!(replay["data"]["user_message"]["content"], "durable hello");
+    assert_eq!(
+        replay["data"]["user_message"]["content"],
+        text_content("durable hello")
+    );
     assert_eq!(replay["data"]["run"]["recovery_capability"], "restart_only");
     assert_eq!(replay["data"]["run"]["event_replay"], true);
     let conflicting_replay = send(
@@ -1765,7 +2091,7 @@ async fn full_persistence_conversation_is_atomic_idempotent_streamable_and_tenan
             TENANT_ID,
             USER_ID,
             "full-turn-1",
-            json!({"content": "must conflict"}),
+            json!({"query": "must conflict"}),
         ),
     )
     .await;
@@ -1966,7 +2292,7 @@ async fn full_persistence_conversation_is_atomic_idempotent_streamable_and_tenan
             TENANT_ID,
             USER_ID,
             "full-turn-large",
-            json!({"content": large_message}),
+            json!({"query": large_message}),
         ),
     )
     .await;
@@ -1977,7 +2303,9 @@ async fn full_persistence_conversation_is_atomic_idempotent_streamable_and_tenan
         .as_array()
         .unwrap()
         .iter()
-        .any(|message| message["role"] == "user" && message["content"] == large_message));
+        .any(|message| {
+            message["role"] == "user" && message["content"] == text_content(&large_message)
+        }));
     let (inline, reference) = sqlx::query_as::<_, (Option<String>, Option<String>)>(
         "SELECT content_inline,content_ref
          FROM conversation_messages
@@ -2005,14 +2333,11 @@ async fn full_persistence_conversation_is_atomic_idempotent_streamable_and_tenan
     let assistant_reference = assistant_reference.expect("large assistant output was not scoped");
     assert_eq!(
         assistant_hash,
-        ContentHash::from_bytes(&serde_jcs::to_vec(&json!(large_message)).unwrap()).as_str()
+        ContentHash::from_bytes(&serde_jcs::to_vec(&text_content(&large_message)).unwrap())
+            .as_str()
     );
-    let assistant_artifact: ArtifactRef =
-        serde_json::from_str(&assistant_reference).expect("assistant content_ref was invalid");
-    let assistant_locator = fixture
-        .artifact_store
-        .storage_locator(&assistant_artifact)
-        .unwrap();
+    let (assistant_artifact, assistant_locator) =
+        decode_artifact_reference(fixture.artifact_store.as_ref(), &assistant_reference);
     fixture
         .artifact_store
         .read_and_verify(&assistant_artifact, &assistant_locator, 2 * 1024 * 1024)
@@ -2053,7 +2378,7 @@ async fn full_persistence_conversation_is_atomic_idempotent_streamable_and_tenan
             TENANT_ID,
             USER_ID,
             "full-turn-stream",
-            json!({"content": "durable stream"}),
+            json!({"query": "durable stream"}),
         ),
     )
     .await;
@@ -2096,7 +2421,7 @@ async fn full_persistence_conversation_is_atomic_idempotent_streamable_and_tenan
             TENANT_ID,
             USER_ID,
             "full-turn-stream",
-            json!({"content": "durable stream"}),
+            json!({"query": "durable stream"}),
         ),
     )
     .await;
@@ -2224,13 +2549,14 @@ async fn full_conversation_retention_drains_multiple_bounded_batches_per_cycle()
         let run_id = format!("full-retention-run-{index}");
         sqlx::query(
             "INSERT INTO terminal_run_admissions (
-                 run_id,tenant_id,request_id,agent_id,definition_revision_id,
+                 run_id,tenant_id,admission_id,request_id,agent_id,definition_revision_id,
                  deployment_revision_id,conversation_id,user_message_id,input_ref,
                  input_hash,selected_context_hash,owner_instance_id,owner_epoch,accepted_at
-             ) VALUES (?,?,?,?,?,?,NULL,NULL,NULL,?,NULL,?,1,?)",
+             ) VALUES (?,?,?,?,?,?,?,NULL,NULL,NULL,?,NULL,?,1,?)",
         )
         .bind(&run_id)
         .bind(TENANT_ID)
+        .bind(format!("full-retention-admission-{index}"))
         .bind(format!("full-retention-request-{index}"))
         .bind(AGENT_ID)
         .bind("full-retention-definition")
@@ -2529,7 +2855,7 @@ async fn full_conversation_summary_worker_is_non_blocking_and_locally_coalesced(
                 TENANT_ID,
                 USER_ID,
                 &format!("full-background-summary-turn-{turn}"),
-                json!({"content": format!("background summary message {turn}")}),
+                json!({"query": format!("background summary message {turn}")}),
             ),
         )
         .await;
@@ -2676,7 +3002,7 @@ async fn below_threshold_full_turns_do_not_mutate_durable_summary_claims() {
                 TENANT_ID,
                 USER_ID,
                 &format!("full-summary-preflight-turn-{turn}"),
-                json!({"content": format!("small message {turn}")}),
+                json!({"query": format!("small message {turn}")}),
             ),
         )
         .await;
@@ -2808,13 +3134,14 @@ async fn full_conversation_surface_works_when_terminal_only_runtime_is_disabled(
     let expired_terminal_run = "run-full-only-retention";
     sqlx::query(
         "INSERT INTO terminal_run_admissions (
-             run_id,tenant_id,request_id,agent_id,definition_revision_id,
+             run_id,tenant_id,admission_id,request_id,agent_id,definition_revision_id,
              deployment_revision_id,conversation_id,user_message_id,input_ref,
              input_hash,selected_context_hash,owner_instance_id,owner_epoch,accepted_at
-         ) VALUES (?,?,?,?,?,?,NULL,NULL,NULL,?,NULL,?,1,?)",
+         ) VALUES (?,?,?,?,?,?,?,NULL,NULL,NULL,?,NULL,?,1,?)",
     )
     .bind(expired_terminal_run)
     .bind(TENANT_ID)
+    .bind("admission-full-only-retention")
     .bind("request-full-only-retention")
     .bind(AGENT_ID)
     .bind("definition-full-only-retention")
@@ -2921,7 +3248,7 @@ async fn full_conversation_surface_works_when_terminal_only_runtime_is_disabled(
             TENANT_ID,
             USER_ID,
             "full-only-turn",
-            json!({"content": large_content}),
+            json!({"query": large_content}),
         ),
     )
     .await;
@@ -2966,7 +3293,8 @@ async fn full_conversation_surface_works_when_terminal_only_runtime_is_disabled(
     assert!(assistant_ref.is_some());
     assert_eq!(
         assistant_hash,
-        ContentHash::from_bytes(&serde_jcs::to_vec(&json!(large_content)).unwrap()).as_str()
+        ContentHash::from_bytes(&serde_jcs::to_vec(&text_content(&large_content)).unwrap())
+            .as_str()
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -2981,11 +3309,7 @@ async fn full_conversation_surface_works_when_terminal_only_runtime_is_disabled(
     );
     let referenced_artifacts = refs
         .iter()
-        .map(|reference| {
-            let artifact: ArtifactRef = serde_json::from_str(reference).unwrap();
-            let locator = fixture.artifact_store.storage_locator(&artifact).unwrap();
-            (artifact, locator)
-        })
+        .map(|reference| decode_artifact_reference(fixture.artifact_store.as_ref(), reference))
         .collect::<Vec<_>>();
 
     let orphan_envelope = json!({
@@ -3292,7 +3616,7 @@ async fn full_conversation_large_assistant_stage_and_terminal_result_commit_atom
             TENANT_ID,
             USER_ID,
             "full-atomic-stage-turn",
-            json!({"content": large_content.clone()}),
+            json!({"query": large_content.clone()}),
         ),
     )
     .await;
@@ -3315,7 +3639,7 @@ async fn full_conversation_large_assistant_stage_and_terminal_result_commit_atom
             TENANT_ID,
             USER_ID,
             "full-atomic-stage-turn",
-            json!({"content": large_content}),
+            json!({"query": large_content}),
         ),
     )
     .await;
@@ -3332,10 +3656,10 @@ async fn full_conversation_large_assistant_stage_and_terminal_result_commit_atom
 
     let (run_id, message_id) = sqlx::query_as::<_, (String, String)>(
         "SELECT run_id,user_message_id FROM full_conversation_turns
-         WHERE tenant_id=? AND request_id=? AND conversation_id=?",
+         WHERE tenant_id=? AND admission_id LIKE 'idem_%' AND run_id=? AND conversation_id=?",
     )
     .bind(TENANT_ID)
-    .bind("full-atomic-stage-turn")
+    .bind(&accepted_run_id)
     .bind(&conversation_id)
     .fetch_one(&fixture.inspection)
     .await
@@ -3476,7 +3800,7 @@ async fn full_conversation_rejects_subflow_lineage_before_durable_turn_admission
             TENANT_ID,
             USER_ID,
             "full-subflow-turn",
-            json!({"content": "must not create a child lineage"}),
+            json!({"query": "must not create a child lineage"}),
         ),
     )
     .await;
@@ -3540,7 +3864,7 @@ async fn full_persistence_conversation_uses_latest_summary_and_only_post_boundar
                 TENANT_ID,
                 USER_ID,
                 &format!("full-summary-turn-{turn}"),
-                json!({"content": format!("summary message {turn}")}),
+                json!({"query": format!("summary message {turn}")}),
             ),
         )
         .await;
@@ -3589,7 +3913,7 @@ async fn full_persistence_conversation_uses_latest_summary_and_only_post_boundar
             TENANT_ID,
             USER_ID,
             "full-summary-turn-4",
-            json!({"content": "summary message 4"}),
+            json!({"query": "summary message 4"}),
         ),
     )
     .await;
@@ -3606,17 +3930,18 @@ async fn full_persistence_conversation_uses_latest_summary_and_only_post_boundar
     .await
     .unwrap();
     let input: Value = serde_json::from_str(&input).unwrap();
-    assert_eq!(
-        input["conversation_context"]["summary"]["through_message_order"],
-        4
-    );
-    let recent = input["conversation_context"]["messages"]
-        .as_array()
-        .unwrap();
-    assert_eq!(recent.len(), 2);
-    assert!(recent
-        .iter()
-        .all(|message| message["message_order"].as_i64().unwrap() > 4));
+    let messages = input["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["role"], "assistant");
+    assert!(messages[0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("Conversation summary: "));
+    assert!(messages[1..].iter().all(|message| {
+        message["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("summary message 3"))
+    }));
     wait_for_assistant(&fixture.app, &conversation_id, &fourth_run_id).await;
 
     let (latest_boundary, latest_ref, latest_hash) = sqlx::query_as::<_, (i64, String, String)>(
@@ -3629,11 +3954,8 @@ async fn full_persistence_conversation_uses_latest_summary_and_only_post_boundar
     .fetch_one(&fixture.inspection)
     .await
     .unwrap();
-    let latest_artifact: ArtifactRef = serde_json::from_str(&latest_ref).unwrap();
-    let latest_locator = fixture
-        .artifact_store
-        .storage_locator(&latest_artifact)
-        .unwrap();
+    let (latest_artifact, latest_locator) =
+        decode_artifact_reference(fixture.artifact_store.as_ref(), &latest_ref);
     fixture
         .artifact_store
         .delete(&latest_artifact, &latest_locator)
@@ -3681,7 +4003,7 @@ async fn full_persistence_conversation_uses_latest_summary_and_only_post_boundar
             TENANT_ID,
             USER_ID,
             "full-summary-turn-missing-object",
-            json!({"content": "summary missing fallback"}),
+            json!({"query": "summary missing fallback"}),
         ),
     )
     .await;
@@ -3698,17 +4020,14 @@ async fn full_persistence_conversation_uses_latest_summary_and_only_post_boundar
     .await
     .unwrap();
     let input: Value = serde_json::from_str(&input).unwrap();
-    assert!(input["conversation_context"]["summary"].is_null());
-    let fallback_orders = input["conversation_context"]["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|message| message["message_order"].as_i64().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        fallback_orders, expected_fallback_orders,
-        "full Conversation missing-summary fallback must use the exact full-history recent tail"
-    );
+    let fallback = input["messages"].as_array().unwrap();
+    assert_eq!(fallback.len(), expected_fallback_orders.len());
+    assert!(fallback.iter().all(|message| {
+        matches!(message["role"].as_str(), Some("user" | "assistant"))
+            && message["content"]
+                .as_array()
+                .is_some_and(|content| !content.is_empty())
+    }));
     wait_for_assistant(&fixture.app, &conversation_id, &fifth_run_id).await;
 
     fixture.shutdown().await;

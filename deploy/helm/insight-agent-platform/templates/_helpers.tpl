@@ -35,7 +35,3 @@ app.kubernetes.io/component: runtime
 {{- printf "%s-database" (include "insight-agent-platform.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 {{- end }}
-
-{{- define "insight-agent-platform.artifactClaimName" -}}
-{{- printf "%s-artifacts" (include "insight-agent-platform.fullname" .) | trunc 63 | trimSuffix "-" }}
-{{- end }}

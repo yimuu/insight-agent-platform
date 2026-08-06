@@ -26,6 +26,7 @@ use insight_dsl::{
 use insight_durable::model::adapter as durable_model_adapter;
 use insight_durable::production::adapter as production_contract_adapter;
 use insight_durable::recovery_repository::adapter as recovery_contract_adapter;
+use insight_durable::terminal_store::ScopedArtifactReference;
 use insight_durable::{
     AcknowledgeArtifactDeletionCommand, BeginMigrationCommand, BindArtifactStoreAuthorityCommand,
     ClaimHumanWorkItemCommand, ClaimSchedulerRunCommand, CompleteHumanWorkItemCommand,
@@ -36,17 +37,19 @@ use insight_durable::{
     OrphanSweepCommand, PlanPublicationOutcome, PublicEventPosition, PublicRunAttachment,
     PublicationHead, PublicationOrigin, PublishVersionedPlanCommand, ReceiveSignalCommand,
     RecoveryRevisionSpec, RecoveryRunReceipt, RedriveRunCommand, RepositoryError,
-    ResolveSignalCommand, RunProjection, SchedulerDurableRepository, SchedulerTaskClaim,
-    SignalInboxState, VersionedPlan, VersionedPlanCatalog, WorkClass,
+    ResolveSignalCommand, RunFileBinding, RunPrincipal, RunProjection, SchedulerDurableRepository,
+    SchedulerTaskClaim, SignalInboxState, VersionedPlan, VersionedPlanCatalog, WorkClass,
     REPOSITORY_ARTIFACT_STORE_CONFLICT, REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_INTENT_CONFLICT,
     REPOSITORY_REDRIVE_REQUIRES_FORK,
 };
 use insight_engine::{
     artifact_store::{ArtifactStoreDeploymentCapability, WorkerArtifactStore},
     events::protocol::{RunEvent, RunEventScope, RunEventType},
+    file_store::{AuthorizedFile, FileAdmissionAuthority},
     history::types::{summarize_input, RunAttachment, RunLifecycle, RunRecord, StopError},
     outcome::{FailureKind, RunFailure, RunOutput},
     plan::{DataPort, DataPortId, NodeKind, PlanIndex, PortDirection},
+    repository::StorageLocator,
     run_stream::public_failure_message,
     worker::{
         adapter as worker_adapter, WorkerExecutorRegistry, WorkerOperationPermit,
@@ -61,6 +64,7 @@ use insight_engine::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::{
     sync::{
         broadcast, Mutex as AsyncMutex, Notify, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore,
@@ -122,6 +126,38 @@ const FULL_CONVERSATION_CONTENT_DELETION_BATCH_BUDGET: usize = 21;
 const FULL_CONVERSATION_STAGING_BATCH_BUDGET: usize = 21;
 const FULL_CONVERSATION_RETENTION_CYCLE_BUDGET: Duration = Duration::from_secs(45);
 const FULL_CONVERSATION_MAINTENANCE_CLAIM_LEASE: chrono::Duration = chrono::Duration::seconds(60);
+
+fn encode_full_conversation_artifact_reference(
+    artifact: &ArtifactRef,
+    locator: &StorageLocator,
+) -> Result<String, ServiceError> {
+    serde_json::to_string(&ScopedArtifactReference::new(artifact.clone(), locator)).map_err(|_| {
+        ServiceError::new(
+            "CONVERSATION_CONTENT_UNAVAILABLE",
+            "conversation artifact reference is invalid",
+        )
+    })
+}
+
+fn decode_full_conversation_artifact_reference(
+    store: &dyn WorkerArtifactStore,
+    reference: &str,
+) -> Result<(ArtifactRef, StorageLocator), ServiceError> {
+    if let Ok(reference) = ScopedArtifactReference::parse(reference) {
+        let locator = reference.locator().map_err(ServiceError::from)?;
+        return Ok((reference.artifact().clone(), locator));
+    }
+    let artifact: ArtifactRef = serde_json::from_str(reference).map_err(|_| {
+        ServiceError::new(
+            "CONVERSATION_CONTENT_UNAVAILABLE",
+            "conversation artifact reference is invalid",
+        )
+    })?;
+    let locator = store
+        .storage_locator(&artifact)
+        .map_err(ServiceError::from)?;
+    Ok((artifact, locator))
+}
 const MAX_HUMAN_TASK_LIST: u32 = 1_024;
 const MAX_SIGNAL_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_PUBLIC_ARTIFACT_SNAPSHOT_VALUES: usize = 100_000;
@@ -132,8 +168,8 @@ const MAX_PUBLICATION_ADMISSION_ATTEMPTS: usize = 16;
 const PLATFORM_PRODUCTION_REQUIRES_POSTGRES: &str = "PLATFORM_PRODUCTION_REQUIRES_POSTGRES";
 const PLATFORM_PRODUCTION_REQUIRES_ARTIFACT_STORE: &str =
     "PLATFORM_PRODUCTION_REQUIRES_ARTIFACT_STORE";
-const PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE: &str =
-    "PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE";
+const PLATFORM_PRODUCTION_REQUIRES_S3_ARTIFACT_STORE: &str =
+    "PLATFORM_PRODUCTION_REQUIRES_S3_ARTIFACT_STORE";
 const PLATFORM_ARTIFACT_STORE_AUTHORITY_CONFLICT: &str =
     "PLATFORM_ARTIFACT_STORE_AUTHORITY_CONFLICT";
 const PLATFORM_DISTRIBUTED_REQUIRES_SHARED_LIVE_RUN_STREAM_BROKER: &str =
@@ -148,6 +184,36 @@ const WORK_ALL: u8 = WORK_SCHEDULER_TASK
     | WORK_RUNTIME_INGRESS
     | WORK_PUBLIC_EVENT
     | WORK_RECOVERY;
+
+struct PreparedInvocation {
+    input: Value,
+    file_bindings: Vec<RunFileBinding>,
+}
+
+fn run_file_binding(tenant_id: &str, user_id: &str, file: &AuthorizedFile) -> RunFileBinding {
+    RunFileBinding {
+        file_id: file.file_id().to_owned(),
+        tenant_id: tenant_id.to_owned(),
+        user_id: user_id.to_owned(),
+        filename: file.filename().to_owned(),
+        media_type: file.media_type().to_owned(),
+        size_bytes: file.size_bytes(),
+        object_etag: file.object_etag_for_storage_adapter().to_owned(),
+        object_version_id: file
+            .object_version_id_for_storage_adapter()
+            .map(str::to_owned),
+    }
+}
+
+fn run_id_from_admission_id(admission_id: &str) -> Result<RunId, ServiceError> {
+    let digest = Sha256::digest(admission_id.as_bytes());
+    let encoded = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    RunId::new(format!("run_{encoded}"))
+        .map_err(|_| ServiceError::new("RUN_CONFLICT", "failed to derive idempotent Run identity"))
+}
 
 #[derive(Default)]
 struct RunServiceMetrics {
@@ -1790,6 +1856,7 @@ struct RunServiceInner {
     metrics_sources: RwLock<Vec<Arc<dyn RuntimeMetricsSource>>>,
     mcp_run_admission_authority: RwLock<Option<Arc<dyn McpRunAdmissionAuthority>>>,
     provider_run_admission_authority: RwLock<Option<Arc<dyn ProviderRunAdmissionAuthority>>>,
+    file_admission_authority: RwLock<Option<Arc<dyn FileAdmissionAuthority>>>,
 }
 
 impl RunService {
@@ -1955,32 +2022,31 @@ impl RunService {
                 )
             })?;
             let contract = store.deployment_contract();
-            if contract.capability() != ArtifactStoreDeploymentCapability::SharedFilesystem {
+            if contract.capability() != ArtifactStoreDeploymentCapability::S3 {
                 return Err(ServiceError::new(
-                    PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE,
-                    "production Run service requires a shared-filesystem Artifact store",
+                    PLATFORM_PRODUCTION_REQUIRES_S3_ARTIFACT_STORE,
+                    "production Run service requires an S3 Artifact store",
                 ));
             }
-            let command = BindArtifactStoreAuthorityCommand::shared_filesystem(
-                contract.namespace().ok_or_else(|| {
-                    ServiceError::new(
-                        PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE,
-                        "shared Artifact store deployment contract is incomplete",
-                    )
-                })?,
-                contract.store_id().ok_or_else(|| {
-                    ServiceError::new(
-                        PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE,
-                        "shared Artifact store deployment contract is incomplete",
-                    )
-                })?,
-            )
-            .map_err(|_| {
+            let namespace = contract.namespace().ok_or_else(|| {
                 ServiceError::new(
-                    PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE,
-                    "shared Artifact store deployment contract is invalid",
+                    PLATFORM_PRODUCTION_REQUIRES_S3_ARTIFACT_STORE,
+                    "S3 Artifact store deployment contract is incomplete",
                 )
             })?;
+            let store_id = contract.store_id().ok_or_else(|| {
+                ServiceError::new(
+                    PLATFORM_PRODUCTION_REQUIRES_S3_ARTIFACT_STORE,
+                    "S3 Artifact store deployment contract is incomplete",
+                )
+            })?;
+            let command =
+                BindArtifactStoreAuthorityCommand::s3(namespace, store_id).map_err(|_| {
+                    ServiceError::new(
+                        PLATFORM_PRODUCTION_REQUIRES_S3_ARTIFACT_STORE,
+                        "S3 Artifact store deployment contract is invalid",
+                    )
+                })?;
             repository
                 .bind_artifact_store_authority(command)
                 .await
@@ -2063,6 +2129,7 @@ impl RunService {
                 metrics_sources: RwLock::new(Vec::new()),
                 mcp_run_admission_authority: RwLock::new(None),
                 provider_run_admission_authority: RwLock::new(None),
+                file_admission_authority: RwLock::new(None),
             }),
         };
         if durable_coordinator_enabled {
@@ -2185,6 +2252,32 @@ impl RunService {
         Ok(())
     }
 
+    pub fn set_file_admission_authority(
+        &self,
+        authority: Arc<dyn FileAdmissionAuthority>,
+    ) -> Result<(), ServiceError> {
+        if !self.inner.accepting.load(Ordering::Acquire) {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_STOPPING",
+                "Run service is stopping",
+            ));
+        }
+        let mut installed = self.inner.file_admission_authority.write().map_err(|_| {
+            ServiceError::new(
+                "RUN_SERVICE_UNAVAILABLE",
+                "File admission authority is unavailable",
+            )
+        })?;
+        if installed.is_some() {
+            return Err(ServiceError::new(
+                "RUN_SERVICE_CONFIG_INVALID",
+                "File admission authority is already installed",
+            ));
+        }
+        *installed = Some(authority);
+        Ok(())
+    }
+
     /// Installs the process-local terminal-only runtime alongside the durable
     /// coordinator. The reader/Conversation surface remains installed even
     /// when the startup catalog has no current terminal-only revision: graph
@@ -2210,7 +2303,18 @@ impl RunService {
             )
         })?;
         let conversation_store = Arc::clone(&store);
-        let engine = TerminalOnlyRunEngine::start(
+        let file_admission_authority = self
+            .inner
+            .file_admission_authority
+            .read()
+            .map_err(|_| {
+                ServiceError::new(
+                    "RUN_SERVICE_UNAVAILABLE",
+                    "File admission authority is unavailable",
+                )
+            })?
+            .clone();
+        let engine = TerminalOnlyRunEngine::start_with_file_admission_authority(
             store,
             self.inner.agents.clone(),
             Arc::clone(&self.inner.workers),
@@ -2218,6 +2322,7 @@ impl RunService {
             Arc::clone(&self.inner.live_run_stream_broker),
             endpoint,
             config,
+            file_admission_authority,
         )
         .await?;
         let rejected_engine = {
@@ -2717,6 +2822,163 @@ impl RunService {
             &stored,
             head,
         )
+    }
+
+    /// Normalizes the public invocation envelope against the current durable
+    /// Agent route. File-bearing invocations are completed by the File Service
+    /// admission path, which supplies authorized immutable metadata.
+    pub async fn normalize_current_invocation(
+        &self,
+        agent_id: &str,
+        invocation: crate::invocation::AgentInvocation,
+    ) -> Result<Value, ServiceError> {
+        self.normalize_current_invocation_for_principal("default", None, agent_id, invocation)
+            .await
+    }
+
+    pub async fn normalize_current_invocation_for_principal(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        agent_id: &str,
+        invocation: crate::invocation::AgentInvocation,
+    ) -> Result<Value, ServiceError> {
+        let agent = self.get_current_agent(agent_id).await?;
+        self.normalize_invocation_for_agent(tenant_id, user_id, &agent, invocation, None, None)
+            .await
+    }
+
+    async fn normalize_invocation_for_agent(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        agent: &DeployedAgent,
+        invocation: crate::invocation::AgentInvocation,
+        managed_messages: Option<Vec<Value>>,
+        managed_conversation_id: Option<&str>,
+    ) -> Result<Value, ServiceError> {
+        self.prepare_invocation_for_agent(
+            tenant_id,
+            user_id,
+            agent,
+            invocation,
+            managed_messages,
+            managed_conversation_id,
+        )
+        .await
+        .map(|prepared| prepared.input)
+    }
+
+    async fn prepare_invocation_for_agent(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        agent: &DeployedAgent,
+        invocation: crate::invocation::AgentInvocation,
+        managed_messages: Option<Vec<Value>>,
+        managed_conversation_id: Option<&str>,
+    ) -> Result<PreparedInvocation, ServiceError> {
+        let current_file_ids = invocation.referenced_file_ids();
+        let mut history_file_ids = Vec::new();
+        if let Some(messages) = managed_messages.as_deref() {
+            for file_id in crate::invocation::referenced_file_ids_in_messages(messages) {
+                if !current_file_ids.contains(&file_id) && !history_file_ids.contains(&file_id) {
+                    history_file_ids.push(file_id);
+                }
+            }
+        }
+        let file_ids = current_file_ids
+            .iter()
+            .chain(&history_file_ids)
+            .cloned()
+            .collect::<Vec<_>>();
+        let authorized_files = if file_ids.is_empty() {
+            BTreeMap::new()
+        } else {
+            let user_id = user_id.ok_or_else(|| {
+                ServiceError::new(
+                    "FILE_PRINCIPAL_REQUIRED",
+                    "File-bearing invocations require a user principal",
+                )
+            })?;
+            let authority = self
+                .inner
+                .file_admission_authority
+                .read()
+                .map_err(|_| {
+                    ServiceError::new(
+                        "FILE_SERVICE_UNAVAILABLE",
+                        "File admission authority is unavailable",
+                    )
+                })?
+                .clone()
+                .ok_or_else(|| {
+                    ServiceError::new(
+                        "FILE_SERVICE_UNAVAILABLE",
+                        "File admission authority is not installed",
+                    )
+                })?;
+            let authorized = if managed_messages.is_some() {
+                let conversation_id = managed_conversation_id.ok_or_else(|| {
+                    ServiceError::new(
+                        "CONVERSATION_CONTEXT_INVALID",
+                        "Managed Conversation history has no authority identity",
+                    )
+                })?;
+                authority
+                    .resolve_conversation_files(
+                        conversation_id,
+                        tenant_id,
+                        user_id,
+                        &current_file_ids,
+                        &history_file_ids,
+                    )
+                    .await
+            } else {
+                authority
+                    .resolve_files(tenant_id, user_id, &current_file_ids)
+                    .await
+            }
+            .map_err(|error| ServiceError::new(error.code(), error.message()))?;
+            authorized
+                .into_iter()
+                .map(|file| (file.file_id().to_owned(), file))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let resolved_files = invocation
+            .file_refs()
+            .iter()
+            .map(|requested| {
+                let file = authorized_files.get(&requested.file_id).ok_or_else(|| {
+                    ServiceError::new("FILE_NOT_FOUND", "File was not authorized")
+                })?;
+                Ok(crate::invocation::InvocationFile {
+                    file_id: file.file_id().to_owned(),
+                    filename: file.filename().to_owned(),
+                    media_type: file.media_type().to_owned(),
+                    size_bytes: file.size_bytes(),
+                })
+            })
+            .collect::<Result<Vec<_>, ServiceError>>()?;
+        let input = agent
+            .published()
+            .normalize_invocation(invocation, managed_messages, resolved_files)
+            .map(|value| value.value().clone())
+            .map_err(|error| ServiceError::new(error.code(), error.message()))?;
+        let principal_user_id = user_id.unwrap_or_default();
+        let file_bindings = file_ids
+            .iter()
+            .map(|file_id| {
+                authorized_files
+                    .get(file_id)
+                    .ok_or_else(|| ServiceError::new("FILE_NOT_FOUND", "File was not authorized"))
+                    .map(|file| run_file_binding(tenant_id, principal_user_id, file))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PreparedInvocation {
+            input,
+            file_bindings,
+        })
     }
 
     pub fn begin_shutdown(&self) {
@@ -3368,6 +3630,9 @@ impl RunService {
         let (current, head) = self.resolve_durable_alias(agent_id).await?;
         if current.persistence_mode() == PersistenceMode::TerminalOnly {
             let agent = current;
+            let request_id = request
+                .request_id
+                .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple()));
             let authority = self
                 .terminal_admission_authority(&agent, Some(head))
                 .await?;
@@ -3378,14 +3643,14 @@ impl RunService {
                     tenant_id,
                     agent,
                     input,
-                    request
-                        .request_id
-                        .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
+                    format!("adm_{}", Uuid::new_v4().simple()),
+                    request_id,
+                    Vec::new(),
                     authority,
                 )
                 .await;
         }
-        require_default_full_tenant(tenant_id)?;
+        let principal = RunPrincipal::new(tenant_id, None::<String>)?;
         let (projection, _, _) = self
             .create_run(
                 agent_id,
@@ -3393,6 +3658,60 @@ impl RunService {
                 request,
                 PublicRunAttachment::Detached,
                 false,
+                principal,
+            )
+            .await?;
+        self.inner.record(&projection).await
+    }
+
+    /// Resolves, normalizes, and admits one public invocation against the same
+    /// immutable publication head. This closes the route-switch race between
+    /// HTTP schema validation and Run admission.
+    pub async fn create_detached_invocation_for_principal(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        agent_id: &str,
+        invocation: crate::invocation::AgentInvocation,
+        admission_id: String,
+        request: RequestMetadata,
+    ) -> Result<RunRecord, ServiceError> {
+        let (agent, head) = self.resolve_durable_alias(agent_id).await?;
+        let prepared = self
+            .prepare_invocation_for_agent(tenant_id, user_id, &agent, invocation, None, None)
+            .await?;
+        if agent.persistence_mode() == PersistenceMode::TerminalOnly {
+            let authority = self
+                .terminal_admission_authority(&agent, Some(head))
+                .await?;
+            return self
+                .terminal_engine()
+                .ok_or_else(terminal_only_not_installed)?
+                .create_detached_for_tenant_with_authority(
+                    tenant_id,
+                    agent,
+                    prepared.input,
+                    admission_id,
+                    request
+                        .request_id
+                        .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
+                    prepared.file_bindings,
+                    authority,
+                )
+                .await;
+        }
+        let (projection, _, _) = self
+            .create_run_with_agent(
+                agent,
+                prepared.input,
+                request,
+                PublicRunAttachment::Detached,
+                false,
+                Some(head),
+                Some(run_id_from_admission_id(&admission_id)?),
+                prepared.file_bindings,
+                None,
+                Some(RunPrincipal::new(tenant_id, user_id)?),
             )
             .await?;
         self.inner.record(&projection).await
@@ -3435,6 +3754,9 @@ impl RunService {
                     && agent.persistence_mode() == PersistenceMode::TerminalOnly
             })
         {
+            let request_id = request
+                .request_id
+                .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple()));
             let authority = self.terminal_admission_authority(&agent, None).await?;
             return self
                 .terminal_engine()
@@ -3443,14 +3765,13 @@ impl RunService {
                     tenant_id,
                     agent,
                     input,
-                    request
-                        .request_id
-                        .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
+                    format!("adm_{}", Uuid::new_v4().simple()),
+                    request_id,
+                    Vec::new(),
                     authority,
                 )
                 .await;
         }
-        require_default_full_tenant(tenant_id)?;
         let agent = self
             .inner
             .load_exact_durable_deployment(deployment_revision_id)
@@ -3470,7 +3791,9 @@ impl RunService {
                 false,
                 None,
                 None,
+                Vec::new(),
                 None,
+                Some(RunPrincipal::new(tenant_id, None::<String>)?),
             )
             .await?;
         self.inner.record(&projection).await
@@ -3524,6 +3847,8 @@ impl RunService {
                 false,
                 None,
                 Some(run_id),
+                Vec::new(),
+                None,
                 None,
             )
             .await?;
@@ -3602,6 +3927,18 @@ impl RunService {
         input: Value,
         request: RequestMetadata,
     ) -> Result<AttachedRun, ServiceError> {
+        self.create_attached_full_for_principal("default", None, agent_id, input, request)
+            .await
+    }
+
+    async fn create_attached_full_for_principal(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        agent_id: &str,
+        input: Value,
+        request: RequestMetadata,
+    ) -> Result<AttachedRun, ServiceError> {
         let (projection, receiver, live_run_stream) = self
             .create_run(
                 agent_id,
@@ -3609,6 +3946,7 @@ impl RunService {
                 request,
                 PublicRunAttachment::Attached,
                 true,
+                RunPrincipal::new(tenant_id, user_id)?,
             )
             .await?;
         let receiver = receiver.expect("attached creation opens a live receiver");
@@ -3646,6 +3984,9 @@ impl RunService {
     ) -> Result<AnyAttachedRun, ServiceError> {
         let (agent, head) = self.resolve_durable_alias(agent_id).await?;
         if agent.persistence_mode() == PersistenceMode::TerminalOnly {
+            let request_id = request
+                .request_id
+                .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple()));
             let authority = self
                 .terminal_admission_authority(&agent, Some(head))
                 .await?;
@@ -3656,18 +3997,89 @@ impl RunService {
                     tenant_id,
                     agent,
                     input,
-                    request
-                        .request_id
-                        .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
+                    format!("adm_{}", Uuid::new_v4().simple()),
+                    request_id,
+                    Vec::new(),
                     authority,
                 )
                 .await?;
             return Ok(AnyAttachedRun::TerminalOnly(attached));
         }
-        require_default_full_tenant(tenant_id)?;
-        self.create_attached(agent_id, input, request)
+        self.create_attached_full_for_principal(tenant_id, None, agent_id, input, request)
             .await
             .map(AnyAttachedRun::Full)
+    }
+
+    pub async fn create_attached_invocation_for_principal(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        agent_id: &str,
+        invocation: crate::invocation::AgentInvocation,
+        admission_id: String,
+        request: RequestMetadata,
+    ) -> Result<AnyAttachedRun, ServiceError> {
+        let (agent, head) = self.resolve_durable_alias(agent_id).await?;
+        let prepared = self
+            .prepare_invocation_for_agent(tenant_id, user_id, &agent, invocation, None, None)
+            .await?;
+        if agent.persistence_mode() == PersistenceMode::TerminalOnly {
+            let authority = self
+                .terminal_admission_authority(&agent, Some(head))
+                .await?;
+            let attached = self
+                .terminal_engine()
+                .ok_or_else(terminal_only_not_installed)?
+                .create_attached_with_authority(
+                    tenant_id,
+                    agent,
+                    prepared.input,
+                    admission_id,
+                    request
+                        .request_id
+                        .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
+                    prepared.file_bindings,
+                    authority,
+                )
+                .await?;
+            return Ok(AnyAttachedRun::TerminalOnly(attached));
+        }
+        let (projection, receiver, live_run_stream) = self
+            .create_run_with_agent(
+                agent,
+                prepared.input,
+                request,
+                PublicRunAttachment::Attached,
+                true,
+                Some(head),
+                Some(run_id_from_admission_id(&admission_id)?),
+                prepared.file_bindings,
+                None,
+                Some(RunPrincipal::new(tenant_id, user_id)?),
+            )
+            .await?;
+        let receiver = receiver.expect("attached invocation opens a live receiver");
+        let live_run_stream =
+            live_run_stream.expect("attached invocation opens a live Run stream receiver");
+        Ok(AnyAttachedRun::Full(AttachedRun {
+            run_id: projection.run_id().as_str().to_owned(),
+            response_id: projection.response_id().to_owned(),
+            request_id: projection.request_id().to_owned(),
+            subscription: RunSubscription {
+                run_id: projection.run_id().as_str().to_owned(),
+                run_id_model: projection.run_id().clone(),
+                receiver,
+                owner: Arc::downgrade(&self.inner),
+                position: None,
+                last_seq: 0,
+                terminal: false,
+            },
+            live_run_stream,
+            live_run_stream_broker: Arc::clone(&self.inner.live_run_stream_broker),
+            terminal_barrier_timeout: self.inner.config.terminal_barrier_timeout,
+            outbound_write_timeout: self.inner.config.outbound_write_timeout,
+            conversation_privacy: None,
+        }))
     }
 
     async fn create_run(
@@ -3677,6 +4089,7 @@ impl RunService {
         request: RequestMetadata,
         attachment: PublicRunAttachment,
         subscribe: bool,
+        principal: RunPrincipal,
     ) -> Result<
         (
             RunProjection,
@@ -3702,7 +4115,9 @@ impl RunService {
                     subscribe,
                     Some(head),
                     None,
+                    Vec::new(),
                     None,
+                    Some(principal.clone()),
                 )
                 .await
             {
@@ -3833,7 +4248,9 @@ impl RunService {
         subscribe: bool,
         expected_publication_head: Option<PublicationHead>,
         run_id_override: Option<RunId>,
+        file_bindings: Vec<RunFileBinding>,
         full_conversation: Option<FullConversationRunAdmission>,
+        principal: Option<RunPrincipal>,
     ) -> Result<
         (
             RunProjection,
@@ -3866,14 +4283,16 @@ impl RunService {
             .published()
             .normalize_input(input)
             .map_err(|_| ServiceError::new("INPUT_INVALID", "agent input is invalid"))?;
+        let replay_capable = run_id_override.is_some() && expected_publication_head.is_some();
         let run_id = match run_id_override {
             Some(run_id) => run_id,
             None => RunId::new(format!("run_{}", Uuid::new_v4().simple())).map_err(|_| {
                 ServiceError::new("RUN_CONFLICT", "failed to allocate Run identity")
             })?,
         };
-        match self.inner.reserve_active_run(&run_id, false) {
-            ActiveRunReservation::NewlyReserved => {}
+        let newly_reserved = match self.inner.reserve_active_run(&run_id, false) {
+            ActiveRunReservation::NewlyReserved => true,
+            ActiveRunReservation::Existing if replay_capable => false,
             ActiveRunReservation::Existing => {
                 return Err(ServiceError::new(
                     "RUN_CONFLICT",
@@ -3890,8 +4309,8 @@ impl RunService {
                     "Run capacity is exhausted",
                 ));
             }
-        }
-        let mut active_run = ActiveRunGuard::new(&self.inner, &run_id);
+        };
+        let mut active_run = newly_reserved.then(|| ActiveRunGuard::new(&self.inner, &run_id));
         let request_id = request
             .request_id
             .filter(|value| {
@@ -3915,7 +4334,8 @@ impl RunService {
         } else {
             None
         };
-        let mut live_run = subscribe.then(|| LiveRunGuard::new(&self.inner, &run_id));
+        let mut live_run =
+            (subscribe && newly_reserved).then(|| LiveRunGuard::new(&self.inner, &run_id));
         let alias_admission = expected_publication_head.is_some();
         let command = CreateRunCommand::new(
             run_id.clone(),
@@ -3932,20 +4352,38 @@ impl RunService {
         let command =
             command.with_expected_mcp_server_fences(expected_mcp_server_fences.clone())?;
         let command = command.with_expected_provider_fences(expected_provider_fences.clone())?;
+        let command = command.with_file_bindings(file_bindings)?;
         let command = match full_conversation {
             Some(conversation) => command.with_full_conversation(conversation)?,
             None => command,
         };
+        let command = match principal {
+            Some(principal) => command.with_principal(principal),
+            None => command,
+        };
         let create_key = transition_key("create", &[run_id.as_str()])?;
-        match self
+        let outcome = self
             .inner
             .repository
             .create_run(create_key, command)
-            .await?
-        {
-            TransitionOutcome::Committed { .. } | TransitionOutcome::ExactReplay { .. } => {}
+            .await
+            .map_err(|error| {
+                if replay_capable && error.code() == REPOSITORY_INTENT_CONFLICT {
+                    ServiceError::new(
+                        "IDEMPOTENCY_KEY_REUSED",
+                        "Idempotency-Key was already used with different input",
+                    )
+                } else {
+                    ServiceError::from(error)
+                }
+            })?;
+        let replayed = match outcome {
+            TransitionOutcome::Committed { .. } => false,
+            TransitionOutcome::ExactReplay { .. } => true,
             TransitionOutcome::StateConflict | TransitionOutcome::StaleLease => {
-                self.inner.remove_live_run(&run_id);
+                if newly_reserved {
+                    self.inner.remove_live_run(&run_id);
+                }
                 if !expected_mcp_server_fences.is_empty()
                     && self.mcp_run_admission_fences(&agent).await? != expected_mcp_server_fences
                 {
@@ -3963,19 +4401,28 @@ impl RunService {
                     ));
                 }
                 return Err(if alias_admission {
-                    ServiceError::new(
-                        "AGENT_PUBLICATION_CHANGED",
-                        "agent publication changed during Run admission",
-                    )
+                    if replay_capable {
+                        ServiceError::new(
+                            "IDEMPOTENCY_KEY_REUSED",
+                            "Idempotency-Key was already used with different input",
+                        )
+                    } else {
+                        ServiceError::new(
+                            "AGENT_PUBLICATION_CHANGED",
+                            "agent publication changed during Run admission",
+                        )
+                    }
                 } else {
                     ServiceError::new("RUN_CONFLICT", "Run creation conflicted")
                 });
             }
+        };
+        if !replayed {
+            self.inner
+                .metrics
+                .admission_accepted
+                .fetch_add(1, Ordering::Relaxed);
         }
-        self.inner
-            .metrics
-            .admission_accepted
-            .fetch_add(1, Ordering::Relaxed);
         if attachment == PublicRunAttachment::Detached {
             // A detached request acknowledges the durable admission boundary.
             // Execution belongs to the supervised WorkCoordinator after that
@@ -3983,11 +4430,13 @@ impl RunService {
             // shutdown, and is backed by durable safety discovery. Keeping
             // resume out of this request future also prevents a fast terminal
             // failure from racing the HTTP 202 response.
-            active_run.retain();
-            self.inner.wake_work(
-                WORK_RECOVERY | WORK_PUBLIC_EVENT,
-                CoordinatorWakeupSource::Completion,
-            );
+            if let Some(active_run) = &mut active_run {
+                active_run.retain();
+                self.inner.wake_work(
+                    WORK_RECOVERY | WORK_PUBLIC_EVENT,
+                    CoordinatorWakeupSource::Completion,
+                );
+            }
             let projection = self
                 .inner
                 .repository
@@ -4008,9 +4457,11 @@ impl RunService {
         // its receiver is already open, before Run start can produce a later
         // sequence. This makes `run.created` the observable first event
         // without introducing a replay API.
-        self.inner.flush_public_events().await?;
-        self.inner.resume_run(&run_id, false).await?;
-        self.inner.flush_public_events().await?;
+        if newly_reserved {
+            self.inner.flush_public_events().await?;
+            self.inner.resume_run(&run_id, false).await?;
+            self.inner.flush_public_events().await?;
+        }
         let projection = self
             .inner
             .repository
@@ -4018,7 +4469,9 @@ impl RunService {
             .await?
             .ok_or_else(|| ServiceError::new("RUN_NOT_FOUND", "Run disappeared after creation"))?;
         if !projection.lifecycle().is_terminal() {
-            active_run.retain();
+            if let Some(active_run) = &mut active_run {
+                active_run.retain();
+            }
         }
         if let Some(live_run) = &mut live_run {
             live_run.retain();
@@ -4770,19 +5223,25 @@ impl RunService {
         tenant_id: &str,
         user_id: &str,
         agent_id: &str,
-        request_id: &str,
+        admission_id: &str,
     ) -> Result<insight_durable::terminal_store::Conversation, ServiceError> {
         let (agent, _) = self.resolve_durable_alias(agent_id).await?;
+        if !agent.published().supports_conversations() {
+            return Err(ServiceError::new(
+                "AGENT_CONVERSATION_UNSUPPORTED",
+                "Agent does not declare query and managed messages inputs",
+            ));
+        }
         if agent.persistence_mode() == PersistenceMode::TerminalOnly {
             return self
                 .terminal_engine()
                 .ok_or_else(terminal_only_not_installed)?
-                .create_conversation(tenant_id, user_id, agent_id, request_id)
+                .create_conversation(tenant_id, user_id, agent_id, admission_id)
                 .await;
         }
         validate_full_conversation_identity(tenant_id)?;
         validate_full_conversation_identity(user_id)?;
-        validate_full_conversation_identity(request_id)?;
+        validate_full_conversation_identity(admission_id)?;
         let (store, config) = self.conversation_components()?;
         if !config.conversations_enabled {
             return Err(ServiceError::new(
@@ -4794,7 +5253,7 @@ impl RunService {
             .create_conversation(insight_durable::terminal_store::NewConversation {
                 conversation_id: full_conversation_public_id(
                     "conv",
-                    &[tenant_id, user_id, request_id],
+                    &[tenant_id, user_id, admission_id],
                 ),
                 tenant_id: tenant_id.to_owned(),
                 user_id: user_id.to_owned(),
@@ -4902,15 +5361,21 @@ impl RunService {
         conversation_id: &str,
         tenant_id: &str,
         user_id: &str,
+        admission_id: &str,
         request_id: &str,
-        content: Value,
+        invocation: crate::invocation::AgentInvocation,
     ) -> Result<ConversationDetachedTurn, ServiceError> {
         let conversation = self
             .get_conversation(conversation_id, tenant_id, user_id)
             .await?;
         if conversation.persistence_mode == PersistenceMode::Full {
             return self
-                .create_full_conversation_detached_turn(conversation, request_id, content)
+                .create_full_conversation_detached_turn(
+                    conversation,
+                    admission_id,
+                    request_id,
+                    invocation,
+                )
                 .await;
         }
         let agent = self
@@ -4929,12 +5394,13 @@ impl RunService {
             .await?;
         self.terminal_engine()
             .ok_or_else(terminal_only_not_installed)?
-            .create_conversation_detached_turn_with_authority(
+            .create_conversation_detached_invocation_with_authority(
                 conversation_id,
                 tenant_id,
                 user_id,
+                admission_id,
                 request_id,
-                content,
+                invocation,
                 authority,
             )
             .await
@@ -4945,15 +5411,21 @@ impl RunService {
         conversation_id: &str,
         tenant_id: &str,
         user_id: &str,
+        admission_id: &str,
         request_id: &str,
-        content: Value,
+        invocation: crate::invocation::AgentInvocation,
     ) -> Result<AnyConversationAttachedTurn, ServiceError> {
         let conversation = self
             .get_conversation(conversation_id, tenant_id, user_id)
             .await?;
         if conversation.persistence_mode == PersistenceMode::Full {
             return self
-                .create_full_conversation_attached_turn(conversation, request_id, content)
+                .create_full_conversation_attached_turn(
+                    conversation,
+                    admission_id,
+                    request_id,
+                    invocation,
+                )
                 .await;
         }
         let agent = self
@@ -4973,12 +5445,13 @@ impl RunService {
         let turn: ConversationAttachedTurn = self
             .terminal_engine()
             .ok_or_else(terminal_only_not_installed)?
-            .create_conversation_attached_turn_with_authority(
+            .create_conversation_attached_invocation_with_authority(
                 conversation_id,
                 tenant_id,
                 user_id,
+                admission_id,
                 request_id,
-                content,
+                invocation,
                 authority,
             )
             .await?;
@@ -4992,15 +5465,17 @@ impl RunService {
     async fn create_full_conversation_detached_turn(
         &self,
         conversation: insight_durable::terminal_store::Conversation,
+        admission_id: &str,
         request_id: &str,
-        content: Value,
+        invocation: crate::invocation::AgentInvocation,
     ) -> Result<ConversationDetachedTurn, ServiceError> {
         let summary_conversation = conversation.clone();
         let admitted = self
             .admit_full_conversation_turn(
                 conversation,
+                admission_id,
                 request_id,
-                content,
+                invocation,
                 PublicRunAttachment::Detached,
                 false,
             )
@@ -5021,15 +5496,17 @@ impl RunService {
     async fn create_full_conversation_attached_turn(
         &self,
         conversation: insight_durable::terminal_store::Conversation,
+        admission_id: &str,
         request_id: &str,
-        content: Value,
+        invocation: crate::invocation::AgentInvocation,
     ) -> Result<AnyConversationAttachedTurn, ServiceError> {
         let summary_conversation = conversation.clone();
         let admitted = self
             .admit_full_conversation_turn(
                 conversation,
+                admission_id,
                 request_id,
-                content,
+                invocation,
                 PublicRunAttachment::Attached,
                 true,
             )
@@ -5069,12 +5546,14 @@ impl RunService {
     async fn admit_full_conversation_turn(
         &self,
         conversation: insight_durable::terminal_store::Conversation,
+        admission_id: &str,
         request_id: &str,
-        content: Value,
+        invocation: crate::invocation::AgentInvocation,
         attachment: PublicRunAttachment,
         subscribe: bool,
     ) -> Result<FullConversationAdmissionResult, ServiceError> {
         validate_full_conversation_identity(request_id)?;
+        validate_full_conversation_identity(admission_id)?;
         let (store, config) = self.conversation_components()?;
         if !config.conversations_enabled {
             return Err(ServiceError::new(
@@ -5082,6 +5561,14 @@ impl RunService {
                 "Conversation API is disabled",
             ));
         }
+        let content = invocation
+            .canonical_user_content()
+            .map_err(|error| ServiceError::new(error.code(), error.message()))?;
+        let conversation_file_ids = invocation
+            .file_refs()
+            .iter()
+            .map(|file| file.file_id.clone())
+            .collect::<Vec<_>>();
         let user_content_hash = canonical_full_conversation_hash(&content)?;
         let mutation = full_conversation_mutation_index(
             &conversation.conversation_id,
@@ -5092,7 +5579,7 @@ impl RunService {
             .await;
         let turn_query = insight_durable::terminal_store::FullConversationTurnQuery {
             tenant_id: conversation.tenant_id.clone(),
-            request_id: request_id.to_owned(),
+            admission_id: admission_id.to_owned(),
             conversation_id: conversation.conversation_id.clone(),
             user_id: conversation.user_id.clone(),
         };
@@ -5166,7 +5653,7 @@ impl RunService {
             &[
                 &conversation.tenant_id,
                 &conversation.conversation_id,
-                request_id,
+                admission_id,
             ],
         ))
         .map_err(|_| ServiceError::new("RUN_CONFLICT", "failed to allocate Run identity"))?;
@@ -5175,7 +5662,7 @@ impl RunService {
             &[
                 &conversation.conversation_id,
                 &conversation.user_id,
-                request_id,
+                admission_id,
                 "user",
             ],
         );
@@ -5184,7 +5671,7 @@ impl RunService {
             &[
                 &conversation.conversation_id,
                 &conversation.user_id,
-                request_id,
+                admission_id,
                 "assistant",
             ],
         );
@@ -5247,11 +5734,15 @@ impl RunService {
                     config.summary_trigger_tokens,
                 )
                 .await?;
-            let selected_context_hash = canonical_full_conversation_hash(&context_value)?;
+            let managed_messages =
+                crate::terminal_only::managed_messages_from_context(&context_value)?;
+            let selected_context_hash =
+                canonical_full_conversation_hash(&Value::Array(managed_messages.clone()))?;
             let full_conversation = FullConversationRunAdmission::new(
                 conversation.conversation_id.clone(),
                 conversation.tenant_id.clone(),
                 conversation.user_id.clone(),
+                admission_id,
                 conversation.agent_id.clone(),
                 user_message_id.clone(),
                 assistant_message_id.clone(),
@@ -5260,12 +5751,9 @@ impl RunService {
                 user_content_hash.clone(),
                 selected_context_hash,
                 context_message_order,
+                conversation_file_ids.clone(),
                 chrono::Utc::now(),
             )?;
-            let input = json!({
-                "message": content.clone(),
-                "conversation_context": context_value,
-            });
             let agent = self
                 .inner
                 .load_exact_durable_deployment(conversation.deployment_revision_id.as_str())
@@ -5297,10 +5785,20 @@ impl RunService {
                     "conversation deployment is no longer the active Agent route",
                 ));
             }
+            let prepared = self
+                .prepare_invocation_for_agent(
+                    &conversation.tenant_id,
+                    Some(&conversation.user_id),
+                    &agent,
+                    invocation.clone(),
+                    Some(managed_messages),
+                    Some(&conversation.conversation_id),
+                )
+                .await?;
             match self
                 .create_run_with_agent(
                     agent,
-                    input.clone(),
+                    prepared.input,
                     RequestMetadata {
                         request_id: Some(request_id.to_owned()),
                     },
@@ -5308,7 +5806,12 @@ impl RunService {
                     subscribe,
                     Some(head),
                     Some(run_id.clone()),
+                    prepared.file_bindings,
                     Some(full_conversation.clone()),
+                    Some(RunPrincipal::new(
+                        &conversation.tenant_id,
+                        Some(&conversation.user_id),
+                    )?),
                 )
                 .await
             {
@@ -5565,21 +6068,14 @@ impl RunService {
         &self,
         reference: &str,
     ) -> Result<Value, ServiceError> {
-        let artifact: ArtifactRef = serde_json::from_str(reference).map_err(|_| {
-            ServiceError::new(
-                "CONVERSATION_CONTENT_UNAVAILABLE",
-                "conversation content ref is invalid",
-            )
-        })?;
         let store = self.inner.artifact_store.as_ref().ok_or_else(|| {
             ServiceError::new(
                 "CONVERSATION_CONTENT_UNAVAILABLE",
                 "conversation content store is unavailable",
             )
         })?;
-        let locator = store
-            .storage_locator(&artifact)
-            .map_err(ServiceError::from)?;
+        let (artifact, locator) =
+            decode_full_conversation_artifact_reference(store.as_ref(), reference)?;
         let bytes = store
             .read_and_verify(&artifact, &locator, 64 * 1024 * 1024)
             .await
@@ -6862,6 +7358,8 @@ impl RunService {
         user_id: Option<&str>,
         run_id: &RunId,
     ) -> Result<FullConversationRunAuthorization, ServiceError> {
+        self.authorize_full_run_principal_binding(tenant_id, user_id, run_id)
+            .await?;
         let store = self
             .inner
             .conversation_store
@@ -6869,8 +7367,7 @@ impl RunService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let Some(store) = store else {
-            return require_default_full_tenant(tenant_id)
-                .map(|()| FullConversationRunAuthorization::Standalone);
+            return Ok(FullConversationRunAuthorization::Standalone);
         };
         let bound_tenant = store
             .full_conversation_run_tenant(run_id)
@@ -6882,7 +7379,6 @@ impl RunService {
             }
             Some(_) => {}
             None => {
-                require_default_full_tenant(tenant_id)?;
                 return Ok(FullConversationRunAuthorization::Standalone);
             }
         }
@@ -6903,6 +7399,25 @@ impl RunService {
             .map(|deleted| deleted.unwrap_or(false))
             .map_err(full_conversation_store_error)?;
         Ok(FullConversationRunAuthorization::Bound { deleted })
+    }
+
+    async fn authorize_full_run_principal_binding(
+        &self,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        run_id: &RunId,
+    ) -> Result<(), ServiceError> {
+        let Some(principal) = self.inner.repository.load_run_principal(run_id).await? else {
+            return require_default_full_tenant(tenant_id);
+        };
+        if principal.tenant_id() != tenant_id
+            || principal
+                .user_id()
+                .is_some_and(|expected| Some(expected) != user_id)
+        {
+            return Err(ServiceError::new("RUN_NOT_FOUND", "Run not found"));
+        }
+        Ok(())
     }
 
     /// Acquires the same content-free mutation fence used by full
@@ -7054,6 +7569,8 @@ impl RunService {
         user_id: Option<&str>,
         run_id: &RunId,
     ) -> Result<FullRunResponseVisibility, ServiceError> {
+        self.authorize_full_run_principal_binding(tenant_id, user_id, run_id)
+            .await?;
         let store = self
             .inner
             .conversation_store
@@ -7061,7 +7578,6 @@ impl RunService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let Some(store) = store else {
-            require_default_full_tenant(tenant_id)?;
             return Ok(FullRunResponseVisibility::Standalone);
         };
         let Some(conversation_id) = store
@@ -7069,7 +7585,6 @@ impl RunService {
             .await
             .map_err(full_conversation_store_error)?
         else {
-            require_default_full_tenant(tenant_id)?;
             return Ok(FullRunResponseVisibility::Standalone);
         };
         let mutation = full_conversation_mutation_index(
@@ -7306,12 +7821,10 @@ async fn stage_full_conversation_artifact(
                 "conversation artifact is invalid",
             )
         })?;
-    let reference = serde_json::to_string(&artifact).map_err(|_| {
-        ServiceError::new(
-            "CONVERSATION_CONTENT_UNAVAILABLE",
-            "conversation artifact reference is invalid",
-        )
-    })?;
+    let locator = artifact_store
+        .storage_locator_for_tenant("conversation-content", tenant_id, &artifact)
+        .map_err(ServiceError::from)?;
+    let reference = encode_full_conversation_artifact_reference(&artifact, &locator)?;
     let config = inner
         .conversation_config
         .read()
@@ -7364,7 +7877,7 @@ async fn stage_full_conversation_artifact(
         .await
         .map_err(full_conversation_store_error)?;
     let (hash, size) = artifact_store
-        .put_and_verify(&artifact, &bytes)
+        .put_and_verify_at(&artifact, &locator, &bytes)
         .await
         .map_err(|_| {
             ServiceError::new(
@@ -7419,7 +7932,9 @@ impl SchedulerActionPreparer for RunServiceInner {
             .load_run(action.intent().run_id())
             .await?
             .ok_or_else(full_conversation_terminal_staging_error)?;
-        let bytes = serde_jcs::to_vec(output.value())
+        let assistant_content =
+            insight_durable::terminal_store::canonical_assistant_message_content(output.value())?;
+        let bytes = serde_jcs::to_vec(&assistant_content)
             .map_err(|_| full_conversation_terminal_staging_error())?;
         if bytes.len() <= config.inline_content_max_bytes {
             return Ok(());
@@ -7441,7 +7956,7 @@ impl SchedulerActionPreparer for RunServiceInner {
                 "conversation-assistant:{}",
                 action.intent().run_id().as_str()
             ),
-            output.value(),
+            &assistant_content,
             Some((projection.created_at(), deadline_at)),
         )
         .await
@@ -7659,15 +8174,8 @@ impl RunServiceInner {
         artifact_store: &dyn WorkerArtifactStore,
         reference: &str,
     ) -> Result<(), ServiceError> {
-        let artifact: ArtifactRef = serde_json::from_str(reference).map_err(|_| {
-            ServiceError::new(
-                "CONVERSATION_CONTENT_UNAVAILABLE",
-                "conversation artifact reference is invalid",
-            )
-        })?;
-        let locator = artifact_store
-            .storage_locator(&artifact)
-            .map_err(ServiceError::from)?;
+        let (artifact, locator) =
+            decode_full_conversation_artifact_reference(artifact_store, reference)?;
         artifact_store
             .delete(&artifact, &locator)
             .await
@@ -7876,8 +8384,11 @@ impl RunServiceInner {
                     | insight_durable::terminal_store::TerminalArtifactStageDisposition::Lost => {}
                     insight_durable::terminal_store::TerminalArtifactStageDisposition::DeleteOrphan => {
                         let artifact =
-                            match serde_json::from_str::<ArtifactRef>(&claim.stage.content_ref) {
-                                Ok(artifact) => artifact,
+                            match decode_full_conversation_artifact_reference(
+                                artifact_store.as_ref(),
+                                &claim.stage.content_ref,
+                            ) {
+                                Ok((artifact, _)) => artifact,
                                 Err(_) => {
                                     failed = true;
                                     break;

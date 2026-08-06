@@ -27,20 +27,24 @@ use insight_durable::terminal_store::{
     HeartbeatRuntimeInstance, MessageCursor, MessagePageQuery, NewConversation,
     NewConversationMessage, NewConversationTurn, NewTerminalArtifactStage, NewTerminalRunAdmission,
     NewTerminalRunResult, OwnerLeaseHeartbeat, PrivacyDeleteOutcome, RegisterRuntimeInstance,
-    ResolveTerminalArtifactStage, RuntimeOwner, TerminalArtifactSourceKind,
-    TerminalArtifactStageDisposition, TerminalArtifactStagingStore, TerminalContentDeletionStore,
-    TerminalRunDerivedState, TerminalRunQuery, TerminalRunRequestQuery, TerminalRunStore,
-    TerminalRunView, TerminalState, CONVERSATION_ARCHIVED,
-    CONVERSATION_NOT_FOUND as STORE_CONVERSATION_NOT_FOUND, CONVERSATION_OWNERSHIP_MISMATCH,
-    TERMINAL_RUN_OWNER_LEASE_LOST, TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE,
+    ResolveTerminalArtifactStage, RuntimeOwner, ScopedArtifactReference,
+    TerminalArtifactSourceKind, TerminalArtifactStageDisposition, TerminalArtifactStagingStore,
+    TerminalContentDeletionStore, TerminalRunDerivedState, TerminalRunQuery,
+    TerminalRunRequestQuery, TerminalRunStore, TerminalRunView, TerminalState,
+    CONVERSATION_ARCHIVED, CONVERSATION_NOT_FOUND as STORE_CONVERSATION_NOT_FOUND,
+    CONVERSATION_OWNERSHIP_MISMATCH, TERMINAL_RUN_OWNER_LEASE_LOST,
+    TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE,
 };
 use insight_durable::PublicationHead;
+use insight_durable::RunFileBinding;
 use insight_engine::{
     artifact_store::WorkerArtifactStore,
+    file_store::{AuthorizedFile, FileAdmissionAuthority},
     history::types::{RunAttachment, RunLifecycle as PublicRunLifecycle, RunRecord, StopError},
     outcome::{FailureKind, RunFailure, RunOutput},
     repository::{
-        REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_INTENT_CONFLICT, REPOSITORY_STORAGE_FAILURE,
+        StorageLocator, REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_INTENT_CONFLICT,
+        REPOSITORY_STORAGE_FAILURE,
     },
     run_stream::{
         adapter::durable_run_stream_snapshot_new, DurableRunStreamSnapshot, LiveRunStreamBroker,
@@ -70,7 +74,40 @@ use crate::{
     },
 };
 
-const DEFAULT_TENANT_ID: &str = "default";
+fn artifact_namespace(source_kind: TerminalArtifactSourceKind) -> &'static str {
+    match source_kind {
+        TerminalArtifactSourceKind::RunOutput => "run-artifacts",
+        TerminalArtifactSourceKind::UserMessage
+        | TerminalArtifactSourceKind::AssistantMessage
+        | TerminalArtifactSourceKind::ConversationSummary => "conversation-content",
+    }
+}
+
+fn encode_private_artifact_reference(
+    artifact: &insight_engine::ArtifactRef,
+    locator: &StorageLocator,
+) -> Result<String, ServiceError> {
+    serde_json::to_string(&ScopedArtifactReference::new(artifact.clone(), locator))
+        .map_err(|_| terminal_unavailable())
+}
+
+fn decode_private_artifact_reference(
+    store: &dyn WorkerArtifactStore,
+    reference: &str,
+) -> Result<(insight_engine::ArtifactRef, StorageLocator), ServiceError> {
+    if let Ok(reference) = ScopedArtifactReference::parse(reference) {
+        let locator = reference.locator().map_err(|_| terminal_unavailable())?;
+        return Ok((reference.artifact().clone(), locator));
+    }
+    // Legacy references carried only the ArtifactRef and are kept readable
+    // until their existing retention window expires.
+    let artifact: insight_engine::ArtifactRef =
+        serde_json::from_str(reference).map_err(|_| terminal_unavailable())?;
+    let locator = store
+        .storage_locator(&artifact)
+        .map_err(|_| terminal_unavailable())?;
+    Ok((artifact, locator))
+}
 pub(crate) const ADMIN_DEBUG_TENANT_ID: &str = "__admin_debug";
 const TERMINAL_ONLY_UNAVAILABLE: &str = "TERMINAL_ONLY_UNAVAILABLE";
 const TERMINAL_ONLY_OWNER_LOST: &str = "TERMINAL_ONLY_OWNER_LOST";
@@ -368,6 +405,7 @@ struct TerminalOnlyRunEngineInner {
     agents: DeployedAgentCatalog,
     workers: Arc<insight_engine::worker::WorkerExecutorRegistry>,
     artifact_store: Arc<dyn WorkerArtifactStore>,
+    file_admission_authority: Option<Arc<dyn FileAdmissionAuthority>>,
     live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
     owner: RwLock<RuntimeOwner>,
     endpoint: String,
@@ -411,6 +449,30 @@ impl TerminalOnlyRunEngine {
         endpoint: String,
         config: TerminalOnlyRunConfig,
     ) -> Result<Self, ServiceError> {
+        Self::start_with_file_admission_authority(
+            store,
+            agents,
+            workers,
+            artifact_store,
+            live_run_stream_broker,
+            endpoint,
+            config,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_with_file_admission_authority(
+        store: Arc<dyn TerminalOnlyStore>,
+        agents: DeployedAgentCatalog,
+        workers: Arc<insight_engine::worker::WorkerExecutorRegistry>,
+        artifact_store: Arc<dyn WorkerArtifactStore>,
+        live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
+        endpoint: String,
+        config: TerminalOnlyRunConfig,
+        file_admission_authority: Option<Arc<dyn FileAdmissionAuthority>>,
+    ) -> Result<Self, ServiceError> {
         let config = config.validate()?;
         let qualification_enabled = qualification_enabled_from_environment()?;
         let qualification_admission_delay = qualification_delay_from_environment(
@@ -451,6 +513,7 @@ impl TerminalOnlyRunEngine {
                 agents,
                 workers,
                 artifact_store,
+                file_admission_authority,
                 live_run_stream_broker,
                 owner: RwLock::new(owner),
                 endpoint,
@@ -516,29 +579,26 @@ impl TerminalOnlyRunEngine {
         agent.persistence_mode() == PersistenceMode::TerminalOnly
     }
 
-    pub async fn create_detached(
-        &self,
-        agent_id: &str,
-        input: Value,
-        request_id: String,
-    ) -> Result<RunRecord, ServiceError> {
-        self.create_detached_for_tenant(DEFAULT_TENANT_ID, agent_id, input, request_id)
-            .await
-    }
-
-    pub async fn create_detached_for_tenant(
+    pub async fn create_detached_invocation(
         &self,
         tenant_id: &str,
         agent_id: &str,
-        input: Value,
+        invocation: crate::invocation::AgentInvocation,
+        admission_id: String,
         request_id: String,
     ) -> Result<RunRecord, ServiceError> {
         let agent = self.terminal_agent(agent_id)?;
+        let normalized = agent
+            .published()
+            .normalize_invocation(invocation, None, Vec::new())
+            .map_err(|error| ServiceError::new(error.code(), error.message()))?;
         self.create_detached_with_agent(
             tenant_id,
             agent,
-            input,
+            normalized.value().clone(),
+            admission_id,
             request_id,
+            Vec::new(),
             TerminalAdmissionAuthority::default(),
         )
         .await
@@ -549,11 +609,21 @@ impl TerminalOnlyRunEngine {
         tenant_id: &str,
         agent: Arc<DeployedAgent>,
         input: Value,
+        admission_id: String,
         request_id: String,
+        file_bindings: Vec<RunFileBinding>,
         authority: TerminalAdmissionAuthority,
     ) -> Result<RunRecord, ServiceError> {
-        self.create_detached_with_agent(tenant_id, agent, input, request_id, authority)
-            .await
+        self.create_detached_with_agent(
+            tenant_id,
+            agent,
+            input,
+            admission_id,
+            request_id,
+            file_bindings,
+            authority,
+        )
+        .await
     }
 
     pub async fn create_detached_from_deployment(
@@ -582,7 +652,9 @@ impl TerminalOnlyRunEngine {
             tenant_id,
             agent,
             input,
+            format!("adm_{}", Uuid::new_v4().simple()),
             request_id,
+            Vec::new(),
             TerminalAdmissionAuthority::default(),
         )
         .await
@@ -617,6 +689,7 @@ impl TerminalOnlyRunEngine {
         let admission = self
             .admit(
                 ADMIN_DEBUG_TENANT_ID.to_owned(),
+                format!("adm_{}", Uuid::new_v4().simple()),
                 request_id,
                 agent,
                 normalized,
@@ -624,6 +697,8 @@ impl TerminalOnlyRunEngine {
                 RunAttachment::Detached,
                 None,
                 Some(run_id),
+                Vec::new(),
+                Vec::new(),
                 TerminalAdmissionAuthority::default(),
             )
             .await?;
@@ -706,7 +781,9 @@ impl TerminalOnlyRunEngine {
         tenant_id: &str,
         agent: Arc<DeployedAgent>,
         input: Value,
+        admission_id: String,
         request_id: String,
+        file_bindings: Vec<RunFileBinding>,
         authority: TerminalAdmissionAuthority,
     ) -> Result<RunRecord, ServiceError> {
         let normalized = agent
@@ -716,6 +793,7 @@ impl TerminalOnlyRunEngine {
         let admission = self
             .admit(
                 tenant_id.to_owned(),
+                admission_id,
                 request_id,
                 agent,
                 normalized,
@@ -723,28 +801,46 @@ impl TerminalOnlyRunEngine {
                 RunAttachment::Detached,
                 None,
                 None,
+                file_bindings,
+                Vec::new(),
                 authority,
             )
             .await?;
         Ok(admission.run)
     }
 
-    pub async fn create_attached(
+    pub async fn create_attached_invocation(
         &self,
         tenant_id: &str,
         agent_id: &str,
-        input: Value,
+        invocation: crate::invocation::AgentInvocation,
+        admission_id: String,
         request_id: String,
     ) -> Result<TerminalAttachedRun, ServiceError> {
         let agent = self.terminal_agent(agent_id)?;
-        self.create_attached_with_authority(
-            tenant_id,
-            agent,
-            input,
-            request_id,
-            TerminalAdmissionAuthority::default(),
-        )
-        .await
+        let normalized = agent
+            .published()
+            .normalize_invocation(invocation, None, Vec::new())
+            .map_err(|error| ServiceError::new(error.code(), error.message()))?;
+        let admission = self
+            .admit(
+                tenant_id.to_owned(),
+                admission_id,
+                request_id,
+                agent,
+                normalized,
+                None,
+                RunAttachment::Attached,
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                TerminalAdmissionAuthority::default(),
+            )
+            .await?;
+        admission
+            .attached
+            .ok_or_else(|| ServiceError::new("RUN_CONFLICT", "attached Run replay is unavailable"))
     }
 
     pub(crate) async fn create_attached_with_authority(
@@ -752,7 +848,9 @@ impl TerminalOnlyRunEngine {
         tenant_id: &str,
         agent: Arc<DeployedAgent>,
         input: Value,
+        admission_id: String,
         request_id: String,
+        file_bindings: Vec<RunFileBinding>,
         authority: TerminalAdmissionAuthority,
     ) -> Result<TerminalAttachedRun, ServiceError> {
         let normalized = agent
@@ -762,6 +860,7 @@ impl TerminalOnlyRunEngine {
         let admission = self
             .admit(
                 tenant_id.to_owned(),
+                admission_id,
                 request_id,
                 agent,
                 normalized,
@@ -769,6 +868,8 @@ impl TerminalOnlyRunEngine {
                 RunAttachment::Attached,
                 None,
                 None,
+                file_bindings,
+                Vec::new(),
                 authority,
             )
             .await?;
@@ -1101,43 +1202,72 @@ impl TerminalOnlyRunEngine {
         })
     }
 
-    pub async fn create_conversation_detached_turn(
+    pub async fn create_conversation_detached_invocation(
         &self,
         conversation_id: &str,
         tenant_id: &str,
         user_id: &str,
+        admission_id: &str,
         request_id: &str,
-        content: Value,
+        invocation: crate::invocation::AgentInvocation,
     ) -> Result<ConversationDetachedTurn, ServiceError> {
-        self.create_conversation_detached_turn_with_authority(
+        self.create_conversation_detached_invocation_with_authority(
             conversation_id,
             tenant_id,
             user_id,
+            admission_id,
             request_id,
-            content,
+            invocation,
             TerminalAdmissionAuthority::default(),
         )
         .await
     }
 
-    pub(crate) async fn create_conversation_detached_turn_with_authority(
+    pub async fn create_conversation_attached_invocation(
         &self,
         conversation_id: &str,
         tenant_id: &str,
         user_id: &str,
+        admission_id: &str,
         request_id: &str,
-        content: Value,
+        invocation: crate::invocation::AgentInvocation,
+    ) -> Result<ConversationAttachedTurn, ServiceError> {
+        self.create_conversation_attached_invocation_with_authority(
+            conversation_id,
+            tenant_id,
+            user_id,
+            admission_id,
+            request_id,
+            invocation,
+            TerminalAdmissionAuthority::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_conversation_detached_invocation_with_authority(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+        admission_id: &str,
+        request_id: &str,
+        invocation: crate::invocation::AgentInvocation,
         authority: TerminalAdmissionAuthority,
     ) -> Result<ConversationDetachedTurn, ServiceError> {
         self.ensure_conversations_enabled()?;
+        let content = invocation
+            .canonical_user_content()
+            .map_err(|error| ServiceError::new(error.code(), error.message()))?;
         let conversation = self
             .get_conversation(conversation_id, tenant_id, user_id)
             .await?;
         let admitted = self
             .admit_conversation_turn(
                 conversation,
+                admission_id,
                 request_id,
                 content,
+                invocation,
                 RunAttachment::Detached,
                 authority,
             )
@@ -1151,43 +1281,30 @@ impl TerminalOnlyRunEngine {
         })
     }
 
-    pub async fn create_conversation_attached_turn(
+    pub(crate) async fn create_conversation_attached_invocation_with_authority(
         &self,
         conversation_id: &str,
         tenant_id: &str,
         user_id: &str,
+        admission_id: &str,
         request_id: &str,
-        content: Value,
-    ) -> Result<ConversationAttachedTurn, ServiceError> {
-        self.create_conversation_attached_turn_with_authority(
-            conversation_id,
-            tenant_id,
-            user_id,
-            request_id,
-            content,
-            TerminalAdmissionAuthority::default(),
-        )
-        .await
-    }
-
-    pub(crate) async fn create_conversation_attached_turn_with_authority(
-        &self,
-        conversation_id: &str,
-        tenant_id: &str,
-        user_id: &str,
-        request_id: &str,
-        content: Value,
+        invocation: crate::invocation::AgentInvocation,
         authority: TerminalAdmissionAuthority,
     ) -> Result<ConversationAttachedTurn, ServiceError> {
         self.ensure_conversations_enabled()?;
+        let content = invocation
+            .canonical_user_content()
+            .map_err(|error| ServiceError::new(error.code(), error.message()))?;
         let conversation = self
             .get_conversation(conversation_id, tenant_id, user_id)
             .await?;
         let admitted = self
             .admit_conversation_turn(
                 conversation,
+                admission_id,
                 request_id,
                 content,
+                invocation,
                 RunAttachment::Attached,
                 authority,
             )
@@ -1495,8 +1612,10 @@ impl TerminalOnlyRunEngine {
     async fn admit_conversation_turn(
         &self,
         conversation: Conversation,
+        admission_id: &str,
         request_id: &str,
         content: Value,
+        invocation: crate::invocation::AgentInvocation,
         attachment: RunAttachment,
         authority: TerminalAdmissionAuthority,
     ) -> Result<ConversationAdmission, ServiceError> {
@@ -1556,7 +1675,7 @@ impl TerminalOnlyRunEngine {
             .store
             .get_terminal_conversation_turn(FullConversationTurnQuery {
                 tenant_id: conversation.tenant_id.clone(),
-                request_id: request_id.to_owned(),
+                admission_id: admission_id.to_owned(),
                 conversation_id: conversation.conversation_id.clone(),
                 user_id: conversation.user_id.clone(),
             })
@@ -1613,27 +1732,98 @@ impl TerminalOnlyRunEngine {
             .await
             .map_err(conversation_store_error)?;
         let context_value = self.context_value(context, &context_query).await?;
-        let input_value = json!({
-            "message": content,
-            "conversation_context": context_value,
-        });
-        let normalized = agent
-            .published()
-            .normalize_input(input_value)
-            .map_err(|_| {
-                ServiceError::new(
-                    CONVERSATION_INPUT_INVALID,
-                    "agent does not accept the terminal Conversation input contract",
-                )
-            })?;
-        let selected_context_hash = canonical_hash(&context_value)?;
+        let conversation_file_ids = invocation
+            .file_refs()
+            .iter()
+            .map(|file| file.file_id.clone())
+            .collect::<Vec<_>>();
+        let (normalized, file_bindings, selected_context_hash) = {
+            let managed_messages = managed_messages_from_context(&context_value)?;
+            let current_file_ids = invocation.referenced_file_ids();
+            let mut history_file_ids = Vec::new();
+            for file_id in crate::invocation::referenced_file_ids_in_messages(&managed_messages) {
+                if !current_file_ids.contains(&file_id) && !history_file_ids.contains(&file_id) {
+                    history_file_ids.push(file_id);
+                }
+            }
+            let file_ids = current_file_ids
+                .iter()
+                .chain(&history_file_ids)
+                .cloned()
+                .collect::<Vec<_>>();
+            let authorized = if file_ids.is_empty() {
+                BTreeMap::new()
+            } else {
+                let file_authority =
+                    self.inner
+                        .file_admission_authority
+                        .as_ref()
+                        .ok_or_else(|| {
+                            ServiceError::new(
+                                "FILE_SERVICE_UNAVAILABLE",
+                                "File admission authority is not installed",
+                            )
+                        })?;
+                file_authority
+                    .resolve_conversation_files(
+                        &conversation.conversation_id,
+                        &conversation.tenant_id,
+                        &conversation.user_id,
+                        &current_file_ids,
+                        &history_file_ids,
+                    )
+                    .await
+                    .map_err(|error| ServiceError::new(error.code(), error.message()))?
+                    .into_iter()
+                    .map(|file| (file.file_id().to_owned(), file))
+                    .collect::<BTreeMap<_, _>>()
+            };
+            let resolved_files = invocation
+                .file_refs()
+                .iter()
+                .map(|requested| {
+                    let file = authorized.get(&requested.file_id).ok_or_else(|| {
+                        ServiceError::new("FILE_NOT_FOUND", "File was not authorized")
+                    })?;
+                    Ok(crate::invocation::InvocationFile {
+                        file_id: file.file_id().to_owned(),
+                        filename: file.filename().to_owned(),
+                        media_type: file.media_type().to_owned(),
+                        size_bytes: file.size_bytes(),
+                    })
+                })
+                .collect::<Result<Vec<_>, ServiceError>>()?;
+            let selected_context_hash = canonical_hash(&Value::Array(managed_messages.clone()))?;
+            let normalized = agent
+                .published()
+                .normalize_invocation(invocation, Some(managed_messages), resolved_files)
+                .map_err(|error| ServiceError::new(error.code(), error.message()))?;
+            let file_bindings = file_ids
+                .iter()
+                .map(|file_id| {
+                    authorized
+                        .get(file_id)
+                        .ok_or_else(|| {
+                            ServiceError::new("FILE_NOT_FOUND", "File was not authorized")
+                        })
+                        .map(|file| {
+                            terminal_run_file_binding(
+                                &conversation.tenant_id,
+                                &conversation.user_id,
+                                file,
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            (normalized, file_bindings, selected_context_hash)
+        };
         let run_id = RunId::random();
         let user_message_id = deterministic_public_id(
             "msg",
             &[
                 &conversation.conversation_id,
                 &conversation.user_id,
-                request_id,
+                admission_id,
                 "user",
             ],
         );
@@ -1652,6 +1842,7 @@ impl TerminalOnlyRunEngine {
             admission: self.new_admission(
                 run_id,
                 conversation.tenant_id.clone(),
+                admission_id.to_owned(),
                 request_id.to_owned(),
                 agent.as_ref(),
                 &normalized,
@@ -1661,6 +1852,8 @@ impl TerminalOnlyRunEngine {
                 }),
                 Some(selected_context_hash),
                 slot.owner.clone(),
+                file_bindings,
+                conversation_file_ids,
                 authority,
             )?,
         };
@@ -1715,7 +1908,7 @@ impl TerminalOnlyRunEngine {
                 &[
                     &conversation.conversation_id,
                     &conversation.user_id,
-                    request_id,
+                    admission_id,
                     "assistant",
                 ],
             ),
@@ -1747,6 +1940,7 @@ impl TerminalOnlyRunEngine {
     async fn admit(
         &self,
         tenant_id: String,
+        admission_id: String,
         request_id: String,
         agent: Arc<DeployedAgent>,
         normalized: RuntimeValue,
@@ -1754,6 +1948,8 @@ impl TerminalOnlyRunEngine {
         attachment: RunAttachment,
         pending_conversation: Option<PendingConversationCommit>,
         run_id_override: Option<RunId>,
+        file_bindings: Vec<RunFileBinding>,
+        conversation_file_ids: Vec<String>,
         authority: TerminalAdmissionAuthority,
     ) -> Result<AdmittedRun, ServiceError> {
         let expected_input_hash = canonical_hash(normalized.value())?;
@@ -1762,7 +1958,7 @@ impl TerminalOnlyRunEngine {
             .store
             .get_terminal_run_by_request(TerminalRunRequestQuery {
                 tenant_id: tenant_id.clone(),
-                request_id: request_id.clone(),
+                admission_id: admission_id.clone(),
                 observed_at: Utc::now(),
             })
             .await
@@ -1803,12 +1999,15 @@ impl TerminalOnlyRunEngine {
         let command = self.new_admission(
             run_id_override.unwrap_or_else(RunId::random),
             tenant_id,
+            admission_id,
             request_id,
             agent.as_ref(),
             &normalized,
             conversation,
             None,
             slot.owner.clone(),
+            file_bindings,
+            conversation_file_ids,
             authority,
         )?;
         let candidate_run_id = command.run_id.clone();
@@ -2222,22 +2421,29 @@ impl TerminalOnlyRunEngine {
         assistant_output: Option<Value>,
     ) -> Result<insight_durable::terminal_store::TerminalRunResult, ServiceError> {
         let assistant = match conversation {
-            Some(conversation) => match self
-                .new_message(
-                    tenant_id,
-                    TerminalArtifactSourceKind::AssistantMessage,
-                    conversation.assistant_message_id.clone(),
-                    assistant_output.unwrap_or(Value::Null),
-                    command.terminal_at,
-                )
-                .await
-            {
-                Ok(message) => Some(message),
-                Err(error) => {
-                    self.lose_owner(&command.owner);
-                    return Err(error);
+            Some(conversation) => {
+                let assistant_content =
+                    insight_durable::terminal_store::canonical_assistant_message_content(
+                        &assistant_output.unwrap_or(Value::Null),
+                    )
+                    .map_err(ServiceError::from)?;
+                match self
+                    .new_message(
+                        tenant_id,
+                        TerminalArtifactSourceKind::AssistantMessage,
+                        conversation.assistant_message_id.clone(),
+                        assistant_content,
+                        command.terminal_at,
+                    )
+                    .await
+                {
+                    Ok(message) => Some(message),
+                    Err(error) => {
+                        self.lose_owner(&command.owner);
+                        return Err(error);
+                    }
                 }
-            },
+            }
             None => None,
         };
         let deadline = tokio::time::Instant::now() + self.inner.config.terminal_commit_retry;
@@ -2431,15 +2637,19 @@ impl TerminalOnlyRunEngine {
         &self,
         run_id: RunId,
         tenant_id: String,
+        admission_id: String,
         request_id: String,
         agent: &DeployedAgent,
         input: &RuntimeValue,
         conversation: Option<AdmissionConversation>,
         selected_context_hash: Option<ContentHash>,
         owner: RuntimeOwner,
+        file_bindings: Vec<RunFileBinding>,
+        conversation_file_ids: Vec<String>,
         authority: TerminalAdmissionAuthority,
     ) -> Result<NewTerminalRunAdmission, ServiceError> {
         if !valid_request_identity_component(&tenant_id)
+            || !valid_request_identity_component(&admission_id)
             || !valid_request_identity_component(&request_id)
         {
             return Err(ServiceError::new(
@@ -2450,6 +2660,7 @@ impl TerminalOnlyRunEngine {
         Ok(NewTerminalRunAdmission {
             run_id,
             tenant_id,
+            admission_id,
             request_id,
             agent_id: agent.published().metadata().id.clone(),
             definition_revision_id: agent.published().definition_revision_id().clone(),
@@ -2458,6 +2669,8 @@ impl TerminalOnlyRunEngine {
             input_ref: None,
             input_hash: canonical_hash(input.value())?,
             selected_context_hash,
+            file_bindings,
+            conversation_file_ids,
             expected_publication_head: authority.publication_head,
             expected_mcp_server_fences: authority.mcp_server_fences,
             expected_provider_fences: authority.provider_fences,
@@ -2681,7 +2894,12 @@ impl TerminalOnlyRunEngine {
             .artifact_store
             .artifact_for_bytes(bytes, Some(media_type.to_owned()))
             .map_err(|_| terminal_unavailable())?;
-        let reference = serde_json::to_string(&artifact).map_err(|_| terminal_unavailable())?;
+        let locator = self
+            .inner
+            .artifact_store
+            .storage_locator_for_tenant(artifact_namespace(source_kind), tenant_id, &artifact)
+            .map_err(|_| terminal_unavailable())?;
+        let reference = encode_private_artifact_reference(&artifact, &locator)?;
         let now = Utc::now();
         let grace = self
             .inner
@@ -2705,7 +2923,7 @@ impl TerminalOnlyRunEngine {
         let (hash, size) = self
             .inner
             .artifact_store
-            .put_and_verify(&artifact, bytes)
+            .put_and_verify_at(&artifact, &locator, bytes)
             .await
             .map_err(|_| terminal_unavailable())?;
         if hash != *artifact.content_hash() || size != artifact.size_bytes() {
@@ -2715,15 +2933,11 @@ impl TerminalOnlyRunEngine {
     }
 
     async fn read_artifact_value(&self, reference: &str) -> Result<Value, ServiceError> {
-        let artifact: insight_engine::ArtifactRef =
-            serde_json::from_str(reference).map_err(|_| {
-                ServiceError::new(CONVERSATION_CONTENT_UNAVAILABLE, "content ref invalid")
-            })?;
-        let locator = self
-            .inner
-            .artifact_store
-            .storage_locator(&artifact)
-            .map_err(|_| terminal_unavailable())?;
+        let (artifact, locator) =
+            decode_private_artifact_reference(self.inner.artifact_store.as_ref(), reference)
+                .map_err(|_| {
+                    ServiceError::new(CONVERSATION_CONTENT_UNAVAILABLE, "content ref invalid")
+                })?;
         let bytes = self
             .inner
             .artifact_store
@@ -2750,13 +2964,8 @@ impl TerminalOnlyRunEngine {
     }
 
     async fn delete_artifact_reference(&self, reference: &str) -> Result<(), ServiceError> {
-        let artifact: insight_engine::ArtifactRef =
-            serde_json::from_str(reference).map_err(|_| terminal_unavailable())?;
-        let locator = self
-            .inner
-            .artifact_store
-            .storage_locator(&artifact)
-            .map_err(|_| terminal_unavailable())?;
+        let (artifact, locator) =
+            decode_private_artifact_reference(self.inner.artifact_store.as_ref(), reference)?;
         self.inner
             .artifact_store
             .delete(&artifact, &locator)
@@ -3179,9 +3388,10 @@ impl TerminalOnlyRunEngine {
                 }
                 TerminalArtifactStageDisposition::Lost => {}
                 TerminalArtifactStageDisposition::DeleteOrphan => {
-                    let artifact: insight_engine::ArtifactRef =
-                        serde_json::from_str(&claim.stage.content_ref)
-                            .map_err(|_| terminal_unavailable())?;
+                    let (artifact, _) = decode_private_artifact_reference(
+                        self.inner.artifact_store.as_ref(),
+                        &claim.stage.content_ref,
+                    )?;
                     if artifact.media_type() != Some(TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE) {
                         // Registration validates this invariant. Corrupt
                         // staging state fails closed instead of deleting a
@@ -3849,6 +4059,82 @@ pub(crate) fn flat_summary_value(
         "through_message_order": through_message_order,
         "entries": entries,
     })
+}
+
+pub(crate) fn managed_messages_from_context(context: &Value) -> Result<Vec<Value>, ServiceError> {
+    let object = context.as_object().ok_or_else(|| {
+        ServiceError::new(
+            CONVERSATION_INPUT_INVALID,
+            "Conversation context is invalid",
+        )
+    })?;
+    let mut messages = Vec::new();
+    if let Some(summary) = object.get("summary").filter(|value| !value.is_null()) {
+        let text = serde_json::to_string(summary).map_err(|_| {
+            ServiceError::new(
+                CONVERSATION_INPUT_INVALID,
+                "Conversation summary is invalid",
+            )
+        })?;
+        messages.push(json!({
+            "role":"assistant",
+            "content":[{"text":format!("Conversation summary: {text}")}]
+        }));
+    }
+    let historical = object
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ServiceError::new(
+                CONVERSATION_INPUT_INVALID,
+                "Conversation message context is invalid",
+            )
+        })?;
+    for message in historical {
+        let role = message.get("role").and_then(Value::as_str).ok_or_else(|| {
+            ServiceError::new(
+                CONVERSATION_INPUT_INVALID,
+                "Conversation message role is invalid",
+            )
+        })?;
+        if !matches!(role, "user" | "assistant") {
+            return Err(ServiceError::new(
+                CONVERSATION_INPUT_INVALID,
+                "Conversation message role is invalid",
+            ));
+        }
+        let content = message
+            .get("content")
+            .filter(|value| value.is_array())
+            .cloned()
+            .ok_or_else(|| {
+                ServiceError::new(
+                    CONVERSATION_INPUT_INVALID,
+                    "Conversation message content is invalid",
+                )
+            })?;
+        messages.push(json!({"role":role,"content":content}));
+    }
+    Ok(messages)
+}
+
+fn terminal_run_file_binding(
+    tenant_id: &str,
+    user_id: &str,
+    file: &AuthorizedFile,
+) -> RunFileBinding {
+    RunFileBinding {
+        file_id: file.file_id().to_owned(),
+        tenant_id: tenant_id.to_owned(),
+        user_id: user_id.to_owned(),
+        filename: file.filename().to_owned(),
+        media_type: file.media_type().to_owned(),
+        size_bytes: file.size_bytes(),
+        object_etag: file.object_etag_for_storage_adapter().to_owned(),
+        object_version_id: file
+            .object_version_id_for_storage_adapter()
+            .map(str::to_owned),
+    }
 }
 
 fn compact_summary_for_context(summary: &Value) -> Value {

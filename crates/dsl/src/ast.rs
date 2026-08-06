@@ -261,6 +261,7 @@ pub enum MessageRole {
 pub enum ContentPart {
     Text(TextContent),
     ImageUrl(ImageUrlContent),
+    Attachments(ValuePath),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -543,6 +544,7 @@ pub fn validate(raw: RawDocument) -> Result<StructuredAuthorDocument, CompileErr
     let mut input_constraints = BTreeMap::new();
     for (name, wire) in raw.inputs {
         validate_identifier(&name, "input name")?;
+        validate_reserved_input_type(&name, &wire)?;
         let declaration = parse_input(&wire, &resolver).map_err(|value| {
             value.with_path(DslPath::root().child_key("inputs").child_key(&name))
         })?;
@@ -658,6 +660,26 @@ fn parse_input(
         optional,
         default,
     })
+}
+
+fn validate_reserved_input_type(name: &str, value: &Value) -> Result<(), CompileError> {
+    let expected = match name {
+        "query" => "string",
+        "messages" => "Message[]",
+        "files" => "File[]",
+        _ => return Ok(()),
+    };
+    let declared = value
+        .as_str()
+        .or_else(|| value.as_object()?.get("type")?.as_str());
+    if declared != Some(expected) {
+        return Err(CompileError::new(
+            INVALID_TYPE,
+            format!("reserved input '{name}' must declare type {expected}"),
+        )
+        .with_path(DslPath::root().child_key("inputs").child_key(name)));
+    }
+    Ok(())
 }
 
 fn parse_step(
@@ -1304,18 +1326,19 @@ fn message_contract() -> AuthorTypeContract {
         )]),
         additional_properties: None,
     };
-    let image = PlanType::Object {
+    let file = PlanType::Object {
         properties: BTreeMap::from([(
-            "image_url".to_owned(),
-            PlanProperty::new(PlanType::String, true).expect("built-in Message image URL is valid"),
+            "file".to_owned(),
+            PlanProperty::new(file_ref_shape(), true)
+                .expect("built-in Message file reference is valid"),
         )]),
         additional_properties: None,
     };
     let content = PlanType::Array {
         items: Box::new(
-            PlanType::union([text, image]).expect("built-in Message content union is valid"),
+            PlanType::union([text, file]).expect("built-in Message content union is valid"),
         ),
-        min_items: 0,
+        min_items: 1,
     };
     let variants = ["user", "assistant"].map(|role| PlanType::Object {
         properties: BTreeMap::from([
@@ -1340,6 +1363,42 @@ fn message_contract() -> AuthorTypeContract {
         shape: PlanType::union(variants).expect("built-in Message union is valid"),
         constraints: BTreeMap::new(),
         nominal: Some("Message".to_owned()),
+    }
+}
+
+fn file_ref_shape() -> PlanType {
+    PlanType::Object {
+        properties: BTreeMap::from([(
+            "file_id".to_owned(),
+            PlanProperty::new(PlanType::String, true).expect("built-in FileRef file_id is valid"),
+        )]),
+        additional_properties: None,
+    }
+}
+
+fn file_contract() -> AuthorTypeContract {
+    let string = |name: &str| {
+        (
+            name.to_owned(),
+            PlanProperty::new(PlanType::String, true).expect("built-in File string is valid"),
+        )
+    };
+    AuthorTypeContract {
+        shape: PlanType::Object {
+            properties: BTreeMap::from([
+                string("file_id"),
+                string("filename"),
+                string("media_type"),
+                (
+                    "size_bytes".to_owned(),
+                    PlanProperty::new(PlanType::Integer, true)
+                        .expect("built-in File size is valid"),
+                ),
+            ]),
+            additional_properties: None,
+        },
+        constraints: BTreeMap::new(),
+        nominal: Some("File".to_owned()),
     }
 }
 
@@ -1623,7 +1682,7 @@ fn parse_messages(
             if part.len() != 1 {
                 return Err(CompileError::new(
                     INVALID_STEP,
-                    "content part must contain exactly one text or image_url field",
+                    "content part must contain exactly one text, image_url, or attachments field",
                 ));
             }
             if let Some(text) = part.get("text") {
@@ -1657,10 +1716,25 @@ fn parse_messages(
                         image.to_owned(),
                     )));
                 }
+            } else if let Some(attachments) = part.get("attachments") {
+                if role != MessageRole::User {
+                    return Err(CompileError::new(
+                        INVALID_STEP,
+                        "attachments are allowed only in authored user messages",
+                    ));
+                }
+                let attachments = string(attachments, "attachments content")?;
+                let Some(reference) = attachments.strip_prefix('$') else {
+                    return Err(CompileError::new(
+                        INVALID_STEP,
+                        "attachments must be a File[] $reference",
+                    ));
+                };
+                parsed_content.push(ContentPart::Attachments(ValuePath::parse(reference)?));
             } else {
                 return Err(CompileError::new(
                     INVALID_STEP,
-                    "content part must contain text or image_url",
+                    "content part must contain text, image_url, or attachments",
                 ));
             }
         }
@@ -1776,10 +1850,10 @@ impl<'a> TypeResolver<'a> {
     fn new(declarations: &'a BTreeMap<String, Value>) -> Result<Self, CompileError> {
         for name in declarations.keys() {
             validate_identifier(name, "type name")?;
-            if name == "Message" {
+            if matches!(name.as_str(), "Message" | "File") {
                 return Err(CompileError::new(
                     INVALID_TYPE,
-                    "Message is a platform type and must not be redefined by an Agent",
+                    "Message and File are platform types and must not be redefined by an Agent",
                 ));
             }
             if !name
@@ -1848,6 +1922,7 @@ impl<'a> TypeResolver<'a> {
             "null" => Ok(contract(PlanType::Null)),
             "any" => Ok(contract(PlanType::Any)),
             "Message" => Ok(message_contract()),
+            "File" => Ok(file_contract()),
             name => self.resolve_named(name, stack),
         }
     }
@@ -1865,6 +1940,9 @@ impl<'a> TypeResolver<'a> {
         }
         if name == "Message" {
             return Ok(message_contract());
+        }
+        if name == "File" {
+            return Ok(file_contract());
         }
         let declaration = self.declarations.get(name).ok_or_else(|| {
             CompileError::new(INVALID_TYPE, format!("unknown named type '{name}'"))

@@ -12,6 +12,7 @@ use crate::{
 pub enum ArtifactStoreDeploymentCapability {
     SingleProcessLocal,
     SharedFilesystem,
+    S3,
 }
 
 /// Stable storage identity used by deployment validation. Local stores have no
@@ -36,6 +37,14 @@ impl ArtifactStoreDeploymentContract {
     fn shared(store_id: String, namespace: String) -> Self {
         Self {
             capability: ArtifactStoreDeploymentCapability::SharedFilesystem,
+            store_id: Some(store_id),
+            namespace: Some(namespace),
+        }
+    }
+
+    fn s3(store_id: String, namespace: String) -> Self {
+        Self {
+            capability: ArtifactStoreDeploymentCapability::S3,
             store_id: Some(store_id),
             namespace: Some(namespace),
         }
@@ -97,6 +106,18 @@ pub trait WorkerArtifactStore: Send + Sync {
     /// row can be committed first and recover an upload-time process crash.
     fn storage_locator(&self, artifact: &ArtifactRef) -> Result<StorageLocator, RepositoryError>;
 
+    /// Returns a private locator in one of the closed product namespaces.
+    /// The tenant value is hashed by concrete stores and must never appear in
+    /// an object key. Legacy/test stores may retain their existing locator.
+    fn storage_locator_for_tenant(
+        &self,
+        _namespace: &str,
+        _tenant_id: &str,
+        artifact: &ArtifactRef,
+    ) -> Result<StorageLocator, RepositoryError> {
+        self.storage_locator(artifact)
+    }
+
     /// Idempotently writes and then re-reads the complete object. Returned
     /// metadata is derived from the stored bytes, never trusted from input.
     async fn put_and_verify(
@@ -104,6 +125,21 @@ pub trait WorkerArtifactStore: Send + Sync {
         artifact: &ArtifactRef,
         bytes: &[u8],
     ) -> Result<(ContentHash, u64), RepositoryError>;
+
+    /// Scoped counterpart used when the durable caller has already frozen the
+    /// private locator. The default preserves existing test adapters while S3
+    /// verifies and writes the exact tenant-scoped key.
+    async fn put_and_verify_at(
+        &self,
+        artifact: &ArtifactRef,
+        locator: &StorageLocator,
+        bytes: &[u8],
+    ) -> Result<(ContentHash, u64), RepositoryError> {
+        if &self.storage_locator(artifact)? != locator {
+            return Err(RepositoryError::invalid_data());
+        }
+        self.put_and_verify(artifact, bytes).await
+    }
 
     /// Reads one repository-authorized object under an explicit caller bound
     /// and verifies the complete byte identity before returning any content.
@@ -139,5 +175,12 @@ pub mod adapter {
         namespace: String,
     ) -> ArtifactStoreDeploymentContract {
         ArtifactStoreDeploymentContract::shared(store_id, namespace)
+    }
+
+    pub fn s3_deployment_contract(
+        store_id: String,
+        namespace: String,
+    ) -> ArtifactStoreDeploymentContract {
+        ArtifactStoreDeploymentContract::s3(store_id, namespace)
     }
 }

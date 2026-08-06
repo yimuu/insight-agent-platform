@@ -83,6 +83,7 @@ fn validate_lease(lease: &RuntimeInstanceLease) -> Result<(), RepositoryError> {
 
 fn validate_admission(command: &NewTerminalRunAdmission) -> Result<(), RepositoryError> {
     validate_text(&command.tenant_id, 256)?;
+    validate_text(&command.admission_id, 256)?;
     validate_text(&command.request_id, 256)?;
     validate_text(&command.agent_id, 256)?;
     validate_owner(&command.owner)?;
@@ -92,6 +93,115 @@ fn validate_admission(command: &NewTerminalRunAdmission) -> Result<(), Repositor
     }
     if let Some(input_ref) = &command.input_ref {
         validate_text(input_ref, 16 * 1024)?;
+    }
+    let mut file_ids = std::collections::BTreeSet::new();
+    for binding in &command.file_bindings {
+        binding.validate()?;
+        if binding.tenant_id != command.tenant_id || !file_ids.insert(binding.file_id.as_str()) {
+            return Err(invalid_data());
+        }
+    }
+    let mut conversation_file_ids = std::collections::BTreeSet::new();
+    if command.conversation_file_ids.iter().any(|file_id| {
+        !file_ids.contains(file_id.as_str()) || !conversation_file_ids.insert(file_id.as_str())
+    }) || (command.conversation.is_none() && !command.conversation_file_ids.is_empty())
+    {
+        return Err(invalid_data());
+    }
+    Ok(())
+}
+
+async fn insert_terminal_file_bindings(
+    transaction: &mut Transaction<'_, Sqlite>,
+    command: &NewTerminalRunAdmission,
+) -> Result<(), RepositoryError> {
+    for binding in &command.file_bindings {
+        let history_conversation = command
+            .conversation
+            .as_ref()
+            .filter(|_| !command.conversation_file_ids.contains(&binding.file_id));
+        let stored = if let Some(conversation) = history_conversation {
+            sqlx::query_as::<_, (String, String, i64, String, Option<String>)>(
+                "SELECT filename,media_type,size_bytes,object_etag,object_version_id
+                 FROM file_bindings
+                 WHERE file_id=? AND target_kind='conversation' AND target_id=?
+                   AND tenant_id=? AND user_id=? AND released_at IS NULL
+                   AND (retain_until IS NULL OR retain_until>CURRENT_TIMESTAMP)",
+            )
+            .bind(&binding.file_id)
+            .bind(&conversation.conversation_id)
+            .bind(&binding.tenant_id)
+            .bind(&binding.user_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(RepositoryError::storage)?
+        } else {
+            sqlx::query_as::<_, (String, String, i64, String, Option<String>)>(
+                "SELECT filename,media_type,actual_size_bytes,object_etag,object_version_id
+                 FROM files WHERE file_id=? AND tenant_id=? AND user_id=? AND status='ready'",
+            )
+            .bind(&binding.file_id)
+            .bind(&binding.tenant_id)
+            .bind(&binding.user_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(RepositoryError::storage)?
+        }
+        .ok_or_else(constraint_conflict)?;
+        if stored.0 != binding.filename
+            || stored.1 != binding.media_type
+            || u64::try_from(stored.2).ok() != Some(binding.size_bytes)
+            || stored.3 != binding.object_etag
+            || stored.4 != binding.object_version_id
+        {
+            return Err(constraint_conflict());
+        }
+        sqlx::query(
+            "INSERT INTO file_bindings(
+                file_id,target_kind,target_id,tenant_id,user_id,filename,media_type,size_bytes,
+                object_etag,object_version_id,created_at,retain_until,released_at
+             ) VALUES(?, 'run', ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, NULL, NULL)",
+        )
+        .bind(&binding.file_id)
+        .bind(command.run_id.as_str())
+        .bind(&binding.tenant_id)
+        .bind(&binding.user_id)
+        .bind(&binding.filename)
+        .bind(&binding.media_type)
+        .bind(i64::try_from(binding.size_bytes).map_err(|_| invalid_data())?)
+        .bind(&binding.object_etag)
+        .bind(&binding.object_version_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
+    }
+    if let Some(conversation) = &command.conversation {
+        for file_id in &command.conversation_file_ids {
+            let binding = command
+                .file_bindings
+                .iter()
+                .find(|binding| &binding.file_id == file_id)
+                .ok_or_else(invalid_data)?;
+            sqlx::query(
+                "INSERT INTO file_bindings(
+                    file_id,target_kind,target_id,tenant_id,user_id,filename,media_type,size_bytes,
+                    object_etag,object_version_id,created_at,retain_until,released_at
+                 ) VALUES(?, 'conversation', ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, NULL, NULL)
+                 ON CONFLICT(file_id,target_kind,target_id) DO NOTHING",
+            )
+            .bind(&binding.file_id)
+            .bind(&conversation.conversation_id)
+            .bind(&binding.tenant_id)
+            .bind(&binding.user_id)
+            .bind(&binding.filename)
+            .bind(&binding.media_type)
+            .bind(i64::try_from(binding.size_bytes).map_err(|_| invalid_data())?)
+            .bind(&binding.object_etag)
+            .bind(&binding.object_version_id)
+            .execute(&mut **transaction)
+            .await
+            .map_err(RepositoryError::storage)?;
+        }
     }
     Ok(())
 }
@@ -223,6 +333,7 @@ fn decode_admission(
         )
         .map_err(|_| invalid_data())?,
         tenant_id: row.try_get("tenant_id").map_err(|_| invalid_data())?,
+        admission_id: row.try_get("admission_id").map_err(|_| invalid_data())?,
         request_id: row.try_get("request_id").map_err(|_| invalid_data())?,
         agent_id: row.try_get("agent_id").map_err(|_| invalid_data())?,
         definition_revision_id: DefinitionRevisionId::new(
@@ -459,7 +570,7 @@ fn admission_intent_matches(
     command: &NewTerminalRunAdmission,
 ) -> bool {
     stored.tenant_id == command.tenant_id
-        && stored.request_id == command.request_id
+        && stored.admission_id == command.admission_id
         && stored.agent_id == command.agent_id
         && stored.definition_revision_id == command.definition_revision_id
         && stored.deployment_revision_id == command.deployment_revision_id
@@ -481,7 +592,7 @@ fn conversation_admission_intent_matches(
     command: &NewTerminalRunAdmission,
 ) -> bool {
     stored.tenant_id == command.tenant_id
-        && stored.request_id == command.request_id
+        && stored.admission_id == command.admission_id
         && stored.agent_id == command.agent_id
         && stored.definition_revision_id == command.definition_revision_id
         && stored.deployment_revision_id == command.deployment_revision_id
@@ -521,17 +632,17 @@ pub(super) async fn begin_immediate(
 async fn load_admission_by_request(
     executor: &mut Transaction<'_, Sqlite>,
     tenant_id: &str,
-    request_id: &str,
+    admission_id: &str,
 ) -> Result<Option<TerminalRunAdmission>, RepositoryError> {
     sqlx::query(
-        "SELECT run_id,tenant_id,request_id,agent_id,definition_revision_id,
+        "SELECT run_id,tenant_id,admission_id,request_id,agent_id,definition_revision_id,
                 deployment_revision_id,conversation_id,user_message_id,input_ref,input_hash,
                 selected_context_hash,owner_instance_id,owner_epoch,accepted_at
          FROM terminal_run_admissions
-         WHERE tenant_id=? AND request_id=?",
+         WHERE tenant_id=? AND admission_id=?",
     )
     .bind(tenant_id)
-    .bind(request_id)
+    .bind(admission_id)
     .fetch_optional(&mut **executor)
     .await
     .map_err(RepositoryError::storage)?
@@ -593,14 +704,15 @@ async fn insert_admission(
         .unwrap_or((None, None));
     let inserted = sqlx::query(
         "INSERT INTO terminal_run_admissions (
-             run_id,tenant_id,request_id,agent_id,definition_revision_id,
+             run_id,tenant_id,admission_id,request_id,agent_id,definition_revision_id,
              deployment_revision_id,conversation_id,user_message_id,input_ref,input_hash,
              selected_context_hash,owner_instance_id,owner_epoch,accepted_at
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT DO NOTHING",
     )
     .bind(command.run_id.as_str())
     .bind(&command.tenant_id)
+    .bind(&command.admission_id)
     .bind(&command.request_id)
     .bind(&command.agent_id)
     .bind(command.definition_revision_id.as_str())
@@ -994,7 +1106,7 @@ impl TerminalRunStore for SqliteDurableRepository {
         let _writer = self.writer.lock().await;
         let mut transaction = begin_immediate(&self.pool).await?;
         if let Some(admission) =
-            load_admission_by_request(&mut transaction, &command.tenant_id, &command.request_id)
+            load_admission_by_request(&mut transaction, &command.tenant_id, &command.admission_id)
                 .await?
         {
             if !admission_intent_matches(&admission, &command) {
@@ -1012,8 +1124,9 @@ impl TerminalRunStore for SqliteDurableRepository {
         require_admission_authority(&mut transaction, &command).await?;
         require_active_owner(&mut transaction, &command.owner, database_time(Utc::now())).await?;
         let inserted = insert_admission(&mut transaction, &command).await?;
+        insert_terminal_file_bindings(&mut transaction, &command).await?;
         let admission =
-            load_admission_by_request(&mut transaction, &command.tenant_id, &command.request_id)
+            load_admission_by_request(&mut transaction, &command.tenant_id, &command.admission_id)
                 .await?
                 .ok_or_else(constraint_conflict)?;
         transaction
@@ -1034,7 +1147,7 @@ impl TerminalRunStore for SqliteDurableRepository {
         let _writer = self.writer.lock().await;
         let row = sqlx::query(
             "SELECT
-                 a.run_id,a.tenant_id,a.request_id,a.agent_id,a.definition_revision_id,
+                 a.run_id,a.tenant_id,a.admission_id,a.request_id,a.agent_id,a.definition_revision_id,
                  a.deployment_revision_id,a.conversation_id,a.user_message_id,a.input_ref,
                  a.input_hash,a.selected_context_hash,a.owner_instance_id,a.owner_epoch,
                  a.accepted_at,
@@ -1106,13 +1219,13 @@ impl TerminalRunStore for SqliteDurableRepository {
         query: TerminalRunRequestQuery,
     ) -> Result<Option<TerminalRunView>, RepositoryError> {
         validate_text(&query.tenant_id, 256)?;
-        validate_text(&query.request_id, 256)?;
+        validate_text(&query.admission_id, 256)?;
         let run_id = sqlx::query_scalar::<_, String>(
             "SELECT run_id FROM terminal_run_admissions
-             WHERE tenant_id=? AND request_id=?",
+             WHERE tenant_id=? AND admission_id=?",
         )
         .bind(&query.tenant_id)
-        .bind(&query.request_id)
+        .bind(&query.admission_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(RepositoryError::storage)?;
@@ -1265,6 +1378,15 @@ impl TerminalRunStore for SqliteDurableRepository {
                     source_id: run_id.clone(),
                 });
             }
+            sqlx::query(
+                "UPDATE file_bindings SET released_at=?
+                 WHERE target_kind='run' AND target_id=? AND released_at IS NULL",
+            )
+            .bind(database_time(Utc::now()))
+            .bind(&run_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::storage)?;
             sqlx::query("DELETE FROM terminal_run_admissions WHERE run_id=?")
                 .bind(run_id)
                 .execute(&mut *transaction)
@@ -1539,12 +1661,12 @@ impl ConversationStore for SqliteDurableRepository {
         query: FullConversationTurnQuery,
     ) -> Result<Option<ConversationTurnOutcome>, RepositoryError> {
         validate_text(&query.tenant_id, 256)?;
-        validate_text(&query.request_id, 256)?;
+        validate_text(&query.admission_id, 256)?;
         validate_text(&query.conversation_id, 256)?;
         validate_text(&query.user_id, 256)?;
         let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
         let Some(admission) =
-            load_admission_by_request(&mut transaction, &query.tenant_id, &query.request_id)
+            load_admission_by_request(&mut transaction, &query.tenant_id, &query.admission_id)
                 .await?
         else {
             transaction
@@ -1598,7 +1720,7 @@ impl ConversationStore for SqliteDurableRepository {
         query: FullConversationTurnQuery,
     ) -> Result<Option<FullConversationTurn>, RepositoryError> {
         validate_text(&query.tenant_id, 256)?;
-        validate_text(&query.request_id, 256)?;
+        validate_text(&query.admission_id, 256)?;
         validate_text(&query.conversation_id, 256)?;
         validate_text(&query.user_id, 256)?;
         let row = sqlx::query(
@@ -1608,11 +1730,11 @@ impl ConversationStore for SqliteDurableRepository {
              JOIN conversation_messages m
                ON m.conversation_id=t.conversation_id
               AND m.message_id=t.user_message_id
-             WHERE t.tenant_id=? AND t.request_id=?
+             WHERE t.tenant_id=? AND t.admission_id=?
                AND t.conversation_id=? AND t.user_id=?",
         )
         .bind(&query.tenant_id)
-        .bind(&query.request_id)
+        .bind(&query.admission_id)
         .bind(&query.conversation_id)
         .bind(&query.user_id)
         .fetch_optional(&self.pool)
@@ -1778,7 +1900,7 @@ impl ConversationStore for SqliteDurableRepository {
         if let Some(admission) = load_admission_by_request(
             &mut transaction,
             &command.admission.tenant_id,
-            &command.admission.request_id,
+            &command.admission.admission_id,
         )
         .await?
         {
@@ -1846,6 +1968,7 @@ impl ConversationStore for SqliteDurableRepository {
         if !inserted {
             return Err(constraint_conflict());
         }
+        insert_terminal_file_bindings(&mut transaction, &command.admission).await?;
         if requested_conversation.user_message_id != command.message.message_id {
             return Err(invalid_data());
         }
@@ -1860,7 +1983,7 @@ impl ConversationStore for SqliteDurableRepository {
         let admission = load_admission_by_request(
             &mut transaction,
             &command.admission.tenant_id,
-            &command.admission.request_id,
+            &command.admission.admission_id,
         )
         .await?
         .ok_or_else(constraint_conflict)?;
@@ -2244,6 +2367,15 @@ impl ConversationStore for SqliteDurableRepository {
         .execute(&mut *transaction)
         .await
         .map_err(RepositoryError::storage)?;
+        sqlx::query(
+            "UPDATE file_bindings SET released_at=?
+             WHERE target_kind='conversation' AND target_id=? AND released_at IS NULL",
+        )
+        .bind(database_time(Utc::now()))
+        .bind(&query.conversation_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
         sqlx::query("DELETE FROM conversations WHERE conversation_id=?")
             .bind(&query.conversation_id)
             .execute(&mut *transaction)
@@ -2623,6 +2755,15 @@ impl ConversationStore for SqliteDurableRepository {
             )
             .bind(id)
             .bind(database_time(Utc::now()))
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::storage)?;
+            sqlx::query(
+                "UPDATE file_bindings SET released_at=?
+                 WHERE target_kind='conversation' AND target_id=? AND released_at IS NULL",
+            )
+            .bind(database_time(Utc::now()))
+            .bind(id)
             .execute(&mut *transaction)
             .await
             .map_err(RepositoryError::storage)?;

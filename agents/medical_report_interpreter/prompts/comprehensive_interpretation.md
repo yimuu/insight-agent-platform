@@ -22,7 +22,7 @@
 当前问题：
 
 <current_question>
-{{ question }}
+{{ query }}
 </current_question>
 
 已完成的异常指标解读：

@@ -52,9 +52,9 @@ use super::{
     ActivateAgentDeploymentCommand, AgentDeploymentActivationOutcome, AgentDeploymentTarget,
     CommitReceipt, CreateRunCommand, DurableRepository, DurableRunStreamSnapshot,
     FullConversationRunAdmission, PlanInstallOutcome, PlanPublicationOutcome, PublicationHead,
-    PublicationOrigin, PublishVersionedPlanCommand, RepositoryError, RunProjection,
-    RunTransitionCommand, VersionedPlan, VersionedPlanCatalog, REPOSITORY_CONSTRAINT_CONFLICT,
-    REPOSITORY_PLAN_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
+    PublicationOrigin, PublishVersionedPlanCommand, RepositoryError, RunFileBinding, RunPrincipal,
+    RunProjection, RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
+    REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_PLAN_CONFLICT, REPOSITORY_RUN_NOT_FOUND,
 };
 
 fn plan_conflict() -> RepositoryError {
@@ -78,10 +78,114 @@ fn conversation_conflict() -> RepositoryError {
     )
 }
 
+async fn insert_run_file_bindings(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    retention_seconds: u32,
+    conversation: Option<&FullConversationRunAdmission>,
+    bindings: &[RunFileBinding],
+) -> Result<(), RepositoryError> {
+    for binding in bindings {
+        binding.validate()?;
+        let history_conversation = conversation.filter(|conversation| {
+            !conversation
+                .conversation_file_ids()
+                .contains(&binding.file_id)
+        });
+        let stored = if let Some(conversation) = history_conversation {
+            sqlx::query_as::<_, (String, String, i64, String, Option<String>)>(
+                "SELECT filename,media_type,size_bytes,object_etag,object_version_id
+                 FROM file_bindings
+                 WHERE file_id=$1 AND target_kind='conversation' AND target_id=$2
+                   AND tenant_id=$3 AND user_id=$4 AND released_at IS NULL
+                   AND (retain_until IS NULL OR retain_until>CURRENT_TIMESTAMP)
+                 FOR SHARE",
+            )
+            .bind(&binding.file_id)
+            .bind(conversation.conversation_id())
+            .bind(&binding.tenant_id)
+            .bind(&binding.user_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(RepositoryError::storage)?
+        } else {
+            sqlx::query_as::<_, (String, String, i64, String, Option<String>)>(
+                "SELECT filename,media_type,actual_size_bytes,object_etag,object_version_id
+                 FROM files
+                 WHERE file_id=$1 AND tenant_id=$2 AND user_id=$3 AND status='ready'
+                 FOR SHARE",
+            )
+            .bind(&binding.file_id)
+            .bind(&binding.tenant_id)
+            .bind(&binding.user_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(RepositoryError::storage)?
+        }
+        .ok_or_else(conversation_conflict)?;
+        if stored.0 != binding.filename
+            || stored.1 != binding.media_type
+            || u64::try_from(stored.2).ok() != Some(binding.size_bytes)
+            || stored.3 != binding.object_etag
+            || stored.4 != binding.object_version_id
+        {
+            return Err(conversation_conflict());
+        }
+        sqlx::query(
+            "INSERT INTO file_bindings(
+                file_id,target_kind,target_id,tenant_id,user_id,filename,media_type,size_bytes,
+                object_etag,object_version_id,created_at,retain_until,released_at
+             ) VALUES($1, 'run', $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP + ($10::double precision * interval '1 second'), NULL)",
+        )
+        .bind(&binding.file_id)
+        .bind(run_id.as_str())
+        .bind(&binding.tenant_id)
+        .bind(&binding.user_id)
+        .bind(&binding.filename)
+        .bind(&binding.media_type)
+        .bind(i64::try_from(binding.size_bytes).map_err(|_| RepositoryError::invalid_data())?)
+        .bind(&binding.object_etag)
+        .bind(&binding.object_version_id)
+        .bind(f64::from(retention_seconds))
+        .execute(&mut **transaction)
+        .await
+        .map_err(RepositoryError::storage)?;
+    }
+    if let Some(conversation) = conversation {
+        for file_id in conversation.conversation_file_ids() {
+            let binding = bindings
+                .iter()
+                .find(|binding| &binding.file_id == file_id)
+                .ok_or_else(RepositoryError::invalid_data)?;
+            sqlx::query(
+                "INSERT INTO file_bindings(
+                    file_id,target_kind,target_id,tenant_id,user_id,filename,media_type,size_bytes,
+                    object_etag,object_version_id,created_at,retain_until,released_at
+                 ) VALUES($1, 'conversation', $2, $3, $4, $5, $6, $7, $8, $9,
+                    CURRENT_TIMESTAMP, NULL, NULL)
+                 ON CONFLICT(file_id,target_kind,target_id) DO NOTHING",
+            )
+            .bind(&binding.file_id)
+            .bind(conversation.conversation_id())
+            .bind(&binding.tenant_id)
+            .bind(&binding.user_id)
+            .bind(&binding.filename)
+            .bind(&binding.media_type)
+            .bind(i64::try_from(binding.size_bytes).map_err(|_| RepositoryError::invalid_data())?)
+            .bind(&binding.object_etag)
+            .bind(&binding.object_version_id)
+            .execute(&mut **transaction)
+            .await
+            .map_err(RepositoryError::storage)?;
+        }
+    }
+    Ok(())
+}
+
 async fn insert_full_conversation_admission(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
-    request_id: &str,
     definition_id: &str,
     deployment_revision_id: &DeploymentRevisionId,
     input: &Value,
@@ -93,17 +197,11 @@ async fn insert_full_conversation_admission(
             return Err(RepositoryError::invalid_data());
         }
     }
-    let input_message = input
-        .get("message")
+    let selected_messages = input
+        .get("messages")
         .ok_or_else(RepositoryError::invalid_data)?;
-    let input_context = input
-        .get("conversation_context")
-        .ok_or_else(RepositoryError::invalid_data)?;
-    let (_, input_message_hash) = canonical_value(input_message)?;
-    let (_, input_context_hash) = canonical_value(input_context)?;
-    if &input_message_hash != admission.user_content_hash()
-        || &input_context_hash != admission.selected_context_hash()
-    {
+    let (_, selected_messages_hash) = canonical_value(selected_messages)?;
+    if &selected_messages_hash != admission.selected_context_hash() {
         return Err(RepositoryError::invalid_data());
     }
     sqlx::query(
@@ -185,12 +283,12 @@ async fn insert_full_conversation_admission(
     .map_err(RepositoryError::storage)?;
     sqlx::query(
         "INSERT INTO full_conversation_turns (
-             tenant_id,request_id,conversation_id,user_id,run_id,user_message_id,
+             tenant_id,admission_id,conversation_id,user_id,run_id,user_message_id,
              assistant_message_id,user_content_hash,selected_context_hash,created_at
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
     )
     .bind(admission.tenant_id())
-    .bind(request_id)
+    .bind(admission.admission_id())
     .bind(admission.conversation_id())
     .bind(admission.user_id())
     .bind(run_id.as_str())
@@ -210,7 +308,8 @@ pub(crate) async fn insert_full_conversation_terminal_message(
     run_id: &RunId,
     output: Option<&Value>,
 ) -> Result<(), RepositoryError> {
-    let output = output.cloned().unwrap_or(Value::Null);
+    let output =
+        crate::terminal_store::canonical_assistant_message_content(output.unwrap_or(&Value::Null))?;
     let binding = sqlx::query_as::<_, (String, String, String)>(
         "SELECT conversation_id,assistant_message_id,tenant_id
          FROM full_conversation_turns WHERE run_id=$1",
@@ -992,6 +1091,19 @@ impl DurableRepository for PostgresDurableRepository {
             });
         }
 
+        if let Some(principal) = command.principal() {
+            sqlx::query(
+                "INSERT INTO run_principals(run_id,tenant_id,user_id,created_at)
+                 VALUES ($1,$2,$3,CURRENT_TIMESTAMP)",
+            )
+            .bind(command.run_id().as_str())
+            .bind(principal.tenant_id())
+            .bind(principal.user_id())
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::storage)?;
+        }
+
         let input_value: Value =
             serde_json::from_str(&input_json).map_err(|_| RepositoryError::canonicalization())?;
         sqlx::query(
@@ -1077,7 +1189,6 @@ impl DurableRepository for PostgresDurableRepository {
             insert_full_conversation_admission(
                 &mut transaction,
                 command.run_id(),
-                command.request_id(),
                 command.definition_id(),
                 command.deployment_revision_id(),
                 command.input(),
@@ -1085,6 +1196,14 @@ impl DurableRepository for PostgresDurableRepository {
             )
             .await?;
         }
+        insert_run_file_bindings(
+            &mut transaction,
+            command.run_id(),
+            command.artifact_reference_retention_seconds(),
+            command.full_conversation(),
+            command.file_bindings(),
+        )
+        .await?;
         finalize_projection_checkpoints(&mut transaction, command.run_id(), &event_id).await?;
         transaction
             .commit()
@@ -1319,6 +1438,39 @@ impl DurableRepository for PostgresDurableRepository {
         .await
         .map_err(RepositoryError::storage)?;
         row.map(|row| projection_from_row(run_id, &row)).transpose()
+    }
+
+    async fn load_run_principal(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<RunPrincipal>, RepositoryError> {
+        let row = sqlx::query(
+            "WITH RECURSIVE ancestry(run_id,parent_run_id,depth) AS (
+                 SELECT run_id,parent_run_id,0 FROM workflow_runs WHERE run_id=$1
+                 UNION ALL
+                 SELECT parent.run_id,parent.parent_run_id,child.depth+1
+                 FROM workflow_runs parent
+                 JOIN ancestry child ON parent.run_id=child.parent_run_id
+                 WHERE child.depth<64
+             )
+             SELECT principal.tenant_id,principal.user_id
+             FROM ancestry
+             JOIN run_principals principal ON principal.run_id=ancestry.run_id
+             ORDER BY ancestry.depth ASC LIMIT 1",
+        )
+        .bind(run_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::storage)?;
+        row.map(|row| {
+            RunPrincipal::new(
+                row.try_get::<String, _>("tenant_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+                row.try_get::<Option<String>, _>("user_id")
+                    .map_err(|_| RepositoryError::invalid_data())?,
+            )
+        })
+        .transpose()
     }
 
     async fn load_run_stream_snapshot(

@@ -22,6 +22,8 @@ use axum::{
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use insight_dsl::GraphAuthorDocument;
 use insight_durable::McpInteractionDurableRepository;
@@ -56,6 +58,7 @@ use super::{
 };
 
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
+const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
 const X_TENANT_ID: HeaderName = HeaderName::from_static("x-tenant-id");
 const X_USER_ID: HeaderName = HeaderName::from_static("x-user-id");
 const X_RUN_ID: HeaderName = HeaderName::from_static("x-run-id");
@@ -348,6 +351,10 @@ struct AgentMetadata {
     description: String,
     version: String,
     input_schema: Value,
+    invocation_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversation_message_schema: Option<Value>,
+    capabilities: AgentInvocationCapabilities,
     output_schema: Value,
     streaming: AgentStreamingContract,
     #[serde(flatten)]
@@ -358,6 +365,13 @@ struct AgentMetadata {
     wait_recovery: RecoveryCapability,
     #[serde(skip_serializing_if = "Option::is_none")]
     mcp: Option<AgentMcpCapabilitySummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentInvocationCapabilities {
+    conversations: bool,
+    client_supplied_history: bool,
+    files: bool,
 }
 
 impl From<&DeployedAgent> for AgentMetadata {
@@ -376,6 +390,13 @@ impl AgentMetadata {
             description: metadata.description.clone(),
             version: agent.deployment_revision_id().as_str().to_owned(),
             input_schema: published.public_input_schema(),
+            invocation_schema: published.public_invocation_schema(),
+            conversation_message_schema: published.public_conversation_message_schema(),
+            capabilities: AgentInvocationCapabilities {
+                conversations: published.supports_conversations(),
+                client_supplied_history: published.accepts_client_history(),
+                files: published.accepts_files(),
+            },
             output_schema: published.public_output_schema(),
             streaming: published.public_streaming_contract(),
             persistence: run_persistence_capability_for_mode(agent.persistence_mode()),
@@ -464,38 +485,44 @@ async fn create_attached_run(
     authority: Option<Extension<McpInteractionStreamAuthority>>,
     Path(agent_id): Path<String>,
     headers: HeaderMap,
-    input: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<insight_runtime::AgentInvocation>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let Json(input) = input.map_err(ApiError::from)?;
+    let Json(input) = input.map_err(|_| invocation_invalid())?;
     let principal = run_principal(&headers)?;
+    let request_id = creation_request_id(&headers)?;
+    let admission_id = creation_admission_id(
+        &headers,
+        &principal.tenant_id,
+        principal.user_id.as_deref(),
+        &format!("POST:/v1/agents/{agent_id}/runs/stream"),
+    )?;
     let interaction_repository = authority.map(|Extension(authority)| authority.repository);
     let attached = state
         .service
-        .create_attached_any(
+        .create_attached_invocation_for_principal(
             &principal.tenant_id,
+            principal.user_id.as_deref(),
             &agent_id,
             input,
+            admission_id,
             RequestMetadata {
-                request_id: request_id(&headers),
+                request_id: Some(request_id.clone()),
             },
         )
         .await
         .map_err(ApiError::from)?;
-    let (run_id, request_id, mut response) = match (attached, interaction_repository) {
+    let (run_id, mut response) = match (attached, interaction_repository) {
         (AnyAttachedRun::Full(attached), Some(repository)) => (
             attached.run_id.clone(),
-            attached.request_id.clone(),
             run_stream_with_interactions(attached, state.sse_keep_alive_interval, repository)
                 .into_response(),
         ),
         (AnyAttachedRun::Full(attached), None) => (
             attached.run_id.clone(),
-            attached.request_id.clone(),
             run_stream(attached, state.sse_keep_alive_interval).into_response(),
         ),
         (AnyAttachedRun::TerminalOnly(attached), Some(repository)) => (
             attached.run_id.clone(),
-            attached.request_id.clone(),
             terminal_run_stream_with_interactions(
                 attached,
                 state.sse_keep_alive_interval,
@@ -505,7 +532,6 @@ async fn create_attached_run(
         ),
         (AnyAttachedRun::TerminalOnly(attached), None) => (
             attached.run_id.clone(),
-            attached.request_id.clone(),
             terminal_run_stream(attached, state.sse_keep_alive_interval).into_response(),
         ),
     };
@@ -524,23 +550,31 @@ async fn create_detached_run(
     State(state): State<Arc<ApiState>>,
     Path(agent_id): Path<String>,
     headers: HeaderMap,
-    input: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<insight_runtime::AgentInvocation>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let Json(input) = input.map_err(ApiError::from)?;
+    let Json(input) = input.map_err(|_| invocation_invalid())?;
     let principal = run_principal(&headers)?;
+    let request_id = creation_request_id(&headers)?;
+    let admission_id = creation_admission_id(
+        &headers,
+        &principal.tenant_id,
+        principal.user_id.as_deref(),
+        &format!("POST:/v1/agents/{agent_id}/runs"),
+    )?;
     let record = state
         .service
-        .create_detached_for_tenant(
+        .create_detached_invocation_for_principal(
             &principal.tenant_id,
+            principal.user_id.as_deref(),
             &agent_id,
             input,
+            admission_id,
             RequestMetadata {
-                request_id: request_id(&headers),
+                request_id: Some(request_id.clone()),
             },
         )
         .await
         .map_err(ApiError::from)?;
-    let request_id = record.request_id.clone();
     let run_id = record.run_id.clone();
     let dto = run_dto(
         &state,
@@ -552,7 +586,7 @@ async fn create_detached_run(
     let mut response = (StatusCode::ACCEPTED, Json(ApiResponse::ok(dto))).into_response();
     insert_header(&mut response, X_RUN_ID, &run_id)?;
     insert_header(&mut response, X_REQUEST_ID, &request_id)?;
-    Ok(response)
+    Ok(no_store(response))
 }
 
 async fn get_run(
@@ -897,15 +931,22 @@ async fn create_conversation(
     input: Result<Json<CreateConversationRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let principal = conversation_principal(&headers)?;
-    let request_id = required_conversation_request_id(&headers)?;
+    let request_id = creation_request_id(&headers).map_err(|_| conversation_request_invalid())?;
     let Json(input) = input.map_err(|_| conversation_request_invalid())?;
+    let admission_id = creation_admission_id(
+        &headers,
+        &principal.tenant_id,
+        Some(&principal.user_id),
+        "POST:/v1/conversations",
+    )
+    .map_err(|_| conversation_request_invalid())?;
     let conversation = state
         .service
         .create_conversation(
             &principal.tenant_id,
             &principal.user_id,
             &input.agent_id,
-            &request_id,
+            &admission_id,
         )
         .await
         .map_err(ApiError::from)?;
@@ -1000,16 +1041,28 @@ async fn create_conversation_detached_turn(
     input: Result<Json<AppendConversationMessageRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let principal = conversation_principal(&headers)?;
-    let request_id = required_conversation_request_id(&headers)?;
+    let request_id = creation_request_id(&headers).map_err(|_| conversation_request_invalid())?;
+    let admission_id = creation_admission_id(
+        &headers,
+        &principal.tenant_id,
+        Some(&principal.user_id),
+        &format!("POST:/v1/conversations/{conversation_id}/messages"),
+    )
+    .map_err(|_| conversation_request_invalid())?;
     let Json(input) = input.map_err(|_| conversation_request_invalid())?;
+    if input.has_client_history() {
+        return Err(conversation_history_managed());
+    }
+    let invocation = input.into_invocation();
     let turn = state
         .service
         .create_conversation_detached_turn(
             &conversation_id,
             &principal.tenant_id,
             &principal.user_id,
+            &admission_id,
             &request_id,
-            input.content,
+            invocation,
         )
         .await
         .map_err(ApiError::from)?;
@@ -1055,25 +1108,35 @@ async fn create_conversation_attached_turn(
 ) -> Result<Response, ApiError> {
     let principal = conversation_principal(&headers)?;
     let interaction_repository = authority.map(|Extension(authority)| authority.repository);
-    let request_id = required_conversation_request_id(&headers)?;
+    let request_id = creation_request_id(&headers).map_err(|_| conversation_request_invalid())?;
+    let admission_id = creation_admission_id(
+        &headers,
+        &principal.tenant_id,
+        Some(&principal.user_id),
+        &format!("POST:/v1/conversations/{conversation_id}/messages/stream"),
+    )
+    .map_err(|_| conversation_request_invalid())?;
     let Json(input) = input.map_err(|_| conversation_request_invalid())?;
+    if input.has_client_history() {
+        return Err(conversation_history_managed());
+    }
+    let invocation = input.into_invocation();
     let turn = state
         .service
         .create_conversation_attached_turn(
             &conversation_id,
             &principal.tenant_id,
             &principal.user_id,
+            &admission_id,
             &request_id,
-            input.content,
+            invocation,
         )
         .await
         .map_err(ApiError::from)?;
     let message_id = turn.user_message.message_id;
-    let (run_id, admitted_request_id, mut response) = match (turn.attached, interaction_repository)
-    {
+    let (run_id, mut response) = match (turn.attached, interaction_repository) {
         (AnyAttachedRun::Full(attached), Some(repository)) => (
             attached.run_id.clone(),
-            attached.request_id.clone(),
             full_conversation_run_stream_with_interactions(
                 attached,
                 state.sse_keep_alive_interval,
@@ -1087,7 +1150,6 @@ async fn create_conversation_attached_turn(
         ),
         (AnyAttachedRun::Full(attached), None) => (
             attached.run_id.clone(),
-            attached.request_id.clone(),
             full_conversation_run_stream(
                 attached,
                 state.sse_keep_alive_interval,
@@ -1100,7 +1162,6 @@ async fn create_conversation_attached_turn(
         ),
         (AnyAttachedRun::TerminalOnly(attached), Some(repository)) => (
             attached.run_id.clone(),
-            attached.request_id.clone(),
             terminal_conversation_run_stream_with_interactions(
                 attached,
                 state.sse_keep_alive_interval,
@@ -1113,7 +1174,6 @@ async fn create_conversation_attached_turn(
         ),
         (AnyAttachedRun::TerminalOnly(attached), None) => (
             attached.run_id.clone(),
-            attached.request_id.clone(),
             terminal_conversation_run_stream(
                 attached,
                 state.sse_keep_alive_interval,
@@ -1125,7 +1185,7 @@ async fn create_conversation_attached_turn(
         ),
     };
     insert_header(&mut response, X_RUN_ID, &run_id)?;
-    insert_header(&mut response, X_REQUEST_ID, &admitted_request_id)?;
+    insert_header(&mut response, X_REQUEST_ID, &request_id)?;
     insert_header(&mut response, X_MESSAGE_ID, &message_id)?;
     insert_header(
         &mut response,
@@ -1143,7 +1203,7 @@ async fn archive_conversation(
     input: Result<Json<ArchiveConversationRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let principal = conversation_principal(&headers)?;
-    let request_id = required_conversation_request_id(&headers)?;
+    let request_id = creation_request_id(&headers).map_err(|_| conversation_request_invalid())?;
     let Json(_input) = input.map_err(|_| conversation_request_invalid())?;
     let conversation = state
         .service
@@ -1159,7 +1219,7 @@ async fn delete_conversation(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let principal = conversation_principal(&headers)?;
-    let request_id = required_conversation_request_id(&headers)?;
+    let request_id = creation_request_id(&headers).map_err(|_| conversation_request_invalid())?;
     let deleted = state
         .service
         .delete_conversation(&conversation_id, &principal.tenant_id, &principal.user_id)
@@ -1271,6 +1331,43 @@ fn request_id(headers: &HeaderMap) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn creation_request_id(headers: &HeaderMap) -> Result<String, ApiError> {
+    if !headers.contains_key(&X_REQUEST_ID) {
+        return Ok(format!("req_{}", Uuid::new_v4().simple()));
+    }
+    bounded_identity_header(headers, &X_REQUEST_ID).ok_or_else(ApiError::input_invalid)
+}
+
+fn creation_admission_id(
+    headers: &HeaderMap,
+    tenant_id: &str,
+    user_id: Option<&str>,
+    route: &str,
+) -> Result<String, ApiError> {
+    if !headers.contains_key(&IDEMPOTENCY_KEY) {
+        return Ok(format!("adm_{}", Uuid::new_v4().simple()));
+    }
+    let key =
+        bounded_identity_header(headers, &IDEMPOTENCY_KEY).ok_or_else(ApiError::input_invalid)?;
+    let mut digest = Sha256::new();
+    for component in [
+        "http-idempotency-v1",
+        tenant_id,
+        user_id.unwrap_or(""),
+        route,
+        key.as_str(),
+    ] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component.as_bytes());
+    }
+    let encoded = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("idem_{encoded}"))
+}
+
 async fn run_dto(
     state: &ApiState,
     tenant_id: &str,
@@ -1330,18 +1427,6 @@ fn run_tenant_id(headers: &HeaderMap) -> Result<String, ApiError> {
     bounded_identity_header(headers, &X_TENANT_ID).ok_or_else(ApiError::input_invalid)
 }
 
-fn required_conversation_request_id(headers: &HeaderMap) -> Result<String, ApiError> {
-    request_id(headers)
-        .filter(|value| {
-            value.len() <= 256
-                && !value.contains(',')
-                && !value
-                    .chars()
-                    .any(|character| character.is_control() || character.is_whitespace())
-        })
-        .ok_or_else(conversation_request_invalid)
-}
-
 fn conversation_identity_header(
     headers: &HeaderMap,
     name: &HeaderName,
@@ -1371,7 +1456,7 @@ fn exactly_one_header<'a>(headers: &'a HeaderMap, name: &HeaderName) -> Option<&
 }
 
 fn has_ambiguous_principal_headers(headers: &HeaderMap) -> bool {
-    [&X_TENANT_ID, &X_USER_ID, &X_REQUEST_ID]
+    [&X_TENANT_ID, &X_USER_ID, &X_REQUEST_ID, &IDEMPOTENCY_KEY]
         .into_iter()
         .any(|name| {
             let values = headers.get_all(name);
@@ -1387,6 +1472,20 @@ fn conversation_request_invalid() -> ApiError {
     ApiError::from(ServiceError::new(
         "CONVERSATION_REQUEST_INVALID",
         "conversation request is invalid",
+    ))
+}
+
+fn invocation_invalid() -> ApiError {
+    ApiError::from(ServiceError::new(
+        "INVOCATION_INVALID",
+        "invocation envelope is invalid",
+    ))
+}
+
+fn conversation_history_managed() -> ApiError {
+    ApiError::from(ServiceError::new(
+        "CONVERSATION_HISTORY_MANAGED",
+        "conversation history is managed by the server",
     ))
 }
 
@@ -1419,8 +1518,9 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue};
 
     use super::{
-        conversation_principal, has_ambiguous_principal_headers, required_conversation_request_id,
-        run_tenant_id, X_REQUEST_ID, X_TENANT_ID, X_USER_ID,
+        conversation_principal, creation_admission_id, creation_request_id,
+        has_ambiguous_principal_headers, run_tenant_id, IDEMPOTENCY_KEY, X_REQUEST_ID, X_TENANT_ID,
+        X_USER_ID,
     };
 
     #[test]
@@ -1446,27 +1546,58 @@ mod tests {
     }
 
     #[test]
-    fn conversation_mutation_requires_a_nonempty_request_id() {
+    fn creation_request_id_is_optional_but_rejects_an_invalid_explicit_value() {
         let mut headers = HeaderMap::new();
-        assert!(required_conversation_request_id(&headers).is_err());
+        assert!(creation_request_id(&headers).unwrap().starts_with("req_"));
         headers.insert(X_REQUEST_ID, HeaderValue::from_static("   "));
-        assert!(required_conversation_request_id(&headers).is_err());
+        assert!(creation_request_id(&headers).is_err());
         headers.insert(X_REQUEST_ID, HeaderValue::from_static("not stable"));
-        assert!(required_conversation_request_id(&headers).is_err());
+        assert!(creation_request_id(&headers).is_err());
         headers.insert(X_REQUEST_ID, HeaderValue::from_static("request-1"));
-        assert_eq!(
-            required_conversation_request_id(&headers).unwrap(),
-            "request-1"
-        );
+        assert_eq!(creation_request_id(&headers).unwrap(), "request-1");
         headers.append(X_REQUEST_ID, HeaderValue::from_static("request-2"));
-        assert!(required_conversation_request_id(&headers).is_err());
+        assert!(creation_request_id(&headers).is_err());
 
         headers.remove(X_REQUEST_ID);
         headers.insert(
             X_REQUEST_ID,
             HeaderValue::from_static("request-1,request-2"),
         );
-        assert!(required_conversation_request_id(&headers).is_err());
+        assert!(creation_request_id(&headers).is_err());
+    }
+
+    #[test]
+    fn idempotency_key_is_stable_and_scoped_to_principal_and_route() {
+        let mut headers = HeaderMap::new();
+        headers.insert(IDEMPOTENCY_KEY, HeaderValue::from_static("operation-1"));
+        let first = creation_admission_id(
+            &headers,
+            "tenant-a",
+            Some("user-a"),
+            "POST:/v1/agents/a/runs",
+        )
+        .unwrap();
+        assert!(first.starts_with("idem_"));
+        assert_eq!(
+            first,
+            creation_admission_id(
+                &headers,
+                "tenant-a",
+                Some("user-a"),
+                "POST:/v1/agents/a/runs",
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            first,
+            creation_admission_id(
+                &headers,
+                "tenant-a",
+                Some("user-a"),
+                "POST:/v1/agents/a/runs/stream",
+            )
+            .unwrap()
+        );
     }
 
     #[test]

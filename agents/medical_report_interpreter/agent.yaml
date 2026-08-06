@@ -39,15 +39,21 @@ prompts:
     file: prompts/follow_up.md
 
 inputs:
-  report_text: string
-  image_url:
+  query:
     type: string
-    optional: true
-    pattern: "^(http://|https://|data:image/|$)"
+    min_length: 1
   messages:
     type: Message[]
     default: []
-  question: string
+  files:
+    type: File[]
+    default: []
+    max_items: 10
+  report_text: string
+  response_style:
+    type: string
+    enum: [patient_friendly, clinical]
+    default: patient_friendly
 
 output: MedicalResult
 
@@ -71,7 +77,7 @@ workflow:
             - role: user
               content:
                 - text: follow_up
-                - image_url: $image_url
+                - attachments: $files
           parameters: {temperature: 0.2}
           response: NonEmptyText
 
@@ -98,7 +104,7 @@ workflow:
             - role: user
               content:
                 - text: abnormal_indicators
-                - image_url: $image_url
+                - attachments: $files
           parameters: {temperature: 0.2}
           response: NonEmptyText
 
@@ -117,7 +123,7 @@ workflow:
             - role: user
               content:
                 - text: comprehensive_interpretation
-                - image_url: $image_url
+                - attachments: $files
           parameters: {temperature: 0.2}
           response: NonEmptyText
 
@@ -136,7 +142,7 @@ workflow:
             - role: user
               content:
                 - text: health_advice
-                - image_url: $image_url
+                - attachments: $files
           parameters: {temperature: 0.2}
           response: NonEmptyText
 

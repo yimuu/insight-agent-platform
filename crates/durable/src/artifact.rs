@@ -24,6 +24,7 @@ const MAX_CLAIMANT_BYTES: usize = 256;
 const MAX_CLAIM_SECONDS: u32 = 3_600;
 const MAX_RETENTION_SECONDS: u32 = 10 * 365 * 24 * 60 * 60;
 const SHARED_FILESYSTEM_BACKEND: &str = "shared_filesystem";
+const S3_BACKEND: &str = "s3";
 const MAX_ARTIFACT_STORE_NAMESPACE_BYTES: usize = 128;
 
 fn invalid_command() -> RepositoryError {
@@ -731,6 +732,23 @@ impl BindArtifactStoreAuthorityCommand {
         Ok(command)
     }
 
+    pub fn s3(
+        namespace: impl Into<String>,
+        store_id: impl Into<String>,
+    ) -> Result<Self, RepositoryError> {
+        let command = Self {
+            backend: S3_BACKEND.to_owned(),
+            namespace: namespace.into(),
+            store_id: store_id.into(),
+        };
+        if !valid_artifact_store_namespace(&command.namespace)
+            || !valid_artifact_store_id(&command.store_id)
+        {
+            return Err(RepositoryError::invalid_configuration());
+        }
+        Ok(command)
+    }
+
     pub fn backend(&self) -> &str {
         &self.backend
     }
@@ -759,7 +777,7 @@ impl ArtifactStoreAuthority {
         store_id: String,
         bound_at: DateTime<Utc>,
     ) -> Result<Self, RepositoryError> {
-        if backend != SHARED_FILESYSTEM_BACKEND
+        if !matches!(backend.as_str(), SHARED_FILESYSTEM_BACKEND | S3_BACKEND)
             || !valid_artifact_store_namespace(&namespace)
             || !valid_artifact_store_id(&store_id)
         {

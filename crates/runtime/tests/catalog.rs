@@ -446,35 +446,35 @@ fn public_input_is_normalized_before_scheduler_admission() {
     let value = agent
         .normalize_input(json!({
             "report_text": "report",
-            "question": "what does this mean?"
+            "query": "what does this mean?"
         }))
         .unwrap();
     let object = value.value().as_object().unwrap();
-    assert!(!object.contains_key("image_url"));
+    assert_eq!(object.get("files"), Some(&json!([])));
     assert_eq!(object.get("messages"), Some(&json!([])));
     assert!(value.matches(&agent.plan().metadata().input_contract().run_type().unwrap()));
 
     let schema = agent.public_input_schema();
     assert_eq!(schema.get("$schema"), None);
     assert_eq!(schema["$defs"], json!({}));
-    assert_eq!(schema["required"], json!(["question", "report_text"]));
+    assert_eq!(schema["required"], json!(["query", "report_text"]));
+    assert_eq!(schema["properties"]["files"]["default"], json!([]));
     assert_eq!(schema["properties"]["messages"]["default"], json!([]));
-    assert!(schema["properties"]["image_url"].get("default").is_none());
 
     let error = agent
         .normalize_input(json!({
             "report_text": "report",
             "image_url": null,
-            "question": "question"
+            "query": "question"
         }))
         .unwrap_err();
-    assert_eq!(error.code(), "AGENT_INPUT_CONTRACT_INVALID");
+    assert_eq!(error.code(), "AGENT_INPUT_UNKNOWN_FIELD");
 
     let error = agent
         .normalize_input(json!({
             "report_text": "report",
             "messages": [],
-            "question": "question",
+            "query": "question",
             "unexpected": true
         }))
         .unwrap_err();
@@ -501,21 +501,21 @@ fn graph_publication_uses_the_same_frozen_input_normalization_contract() {
     let value = graph
         .normalize_input(json!({
             "report_text": "report",
-            "question": "what does this mean?"
+            "query": "what does this mean?"
         }))
         .unwrap();
     let object = value.value().as_object().unwrap();
-    assert!(!object.contains_key("image_url"));
+    assert_eq!(object.get("files"), Some(&json!([])));
     assert_eq!(object.get("messages"), Some(&json!([])));
 
     let error = graph
         .normalize_input(json!({
             "report_text": "report",
             "image_url": null,
-            "question": "question"
+            "query": "question"
         }))
         .unwrap_err();
-    assert_eq!(error.code(), "AGENT_INPUT_CONTRACT_INVALID");
+    assert_eq!(error.code(), "AGENT_INPUT_UNKNOWN_FIELD");
 }
 
 #[test]

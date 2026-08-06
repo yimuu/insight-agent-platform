@@ -236,12 +236,16 @@ pub struct AgentInputError {
 }
 
 impl AgentInputError {
-    fn new(code: &'static str, message: &'static str) -> Self {
+    pub(crate) fn new(code: &'static str, message: &'static str) -> Self {
         Self { code, message }
     }
 
     pub fn code(&self) -> &'static str {
         self.code
+    }
+
+    pub(crate) fn message(&self) -> &'static str {
+        self.message
     }
 }
 
@@ -1201,6 +1205,30 @@ pub struct ProductionLeafDeploymentResolver<'a> {
     max_llm_tool_rounds: u32,
     max_llm_tool_calls: u32,
     llm_tool_continuation: bool,
+    llm_attachments: Option<LlmAttachmentPolicy>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LlmAttachmentPolicy {
+    mode: LlmAttachmentDeliveryMode,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+    max_images: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LlmAttachmentDeliveryMode {
+    InlineData,
+    PresignedUrl,
+}
+
+impl LlmAttachmentDeliveryMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::InlineData => "inline_data",
+            Self::PresignedUrl => "presigned_url",
+        }
+    }
 }
 
 impl<'a> ProductionLeafDeploymentResolver<'a> {
@@ -1214,6 +1242,7 @@ impl<'a> ProductionLeafDeploymentResolver<'a> {
             max_llm_tool_rounds: u32::MAX,
             max_llm_tool_calls: u32::MAX,
             llm_tool_continuation: false,
+            llm_attachments: None,
         }
     }
 
@@ -1270,6 +1299,64 @@ impl<'a> ProductionLeafDeploymentResolver<'a> {
     pub fn with_llm_tool_continuation_capability(mut self) -> Self {
         self.llm_tool_continuation = true;
         self
+    }
+
+    pub fn with_inline_llm_attachments(
+        mut self,
+        max_file_bytes: u64,
+        max_total_bytes: u64,
+        max_images: u32,
+    ) -> Result<Self, CompileError> {
+        self.set_llm_attachment_policy(
+            LlmAttachmentDeliveryMode::InlineData,
+            max_file_bytes,
+            max_total_bytes,
+            max_images,
+        )?;
+        Ok(self)
+    }
+
+    /// Freezes URL delivery only when the operator has explicitly established
+    /// that the model provider can reach the configured public S3 endpoint.
+    pub fn with_presigned_llm_attachments(
+        mut self,
+        max_file_bytes: u64,
+        max_total_bytes: u64,
+        max_images: u32,
+    ) -> Result<Self, CompileError> {
+        self.set_llm_attachment_policy(
+            LlmAttachmentDeliveryMode::PresignedUrl,
+            max_file_bytes,
+            max_total_bytes,
+            max_images,
+        )?;
+        Ok(self)
+    }
+
+    fn set_llm_attachment_policy(
+        &mut self,
+        mode: LlmAttachmentDeliveryMode,
+        max_file_bytes: u64,
+        max_total_bytes: u64,
+        max_images: u32,
+    ) -> Result<(), CompileError> {
+        if max_file_bytes == 0
+            || max_total_bytes < max_file_bytes
+            || max_images == 0
+            || max_images > 100
+        {
+            return Err(CompileError::new(
+                "LLM_ATTACHMENT_POLICY_INVALID",
+                "LLM attachment policy is invalid",
+            ));
+        }
+        self.llm_attachments = Some(LlmAttachmentPolicy {
+            mode,
+            max_file_bytes,
+            max_total_bytes,
+            max_images,
+        });
+        Ok(())
     }
 }
 
@@ -1331,16 +1418,41 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                     .transpose()?
                     .unwrap_or_else(|| serde_json::json!({}));
                 model.validate_parameters(&parameters)?;
-                if descriptor_contains_key(
+                let contains_legacy_image_url = descriptor_contains_key(
                     &DescriptorValue::Object(descriptor.public_configuration.clone()),
                     "image_url",
-                ) && !model.capabilities().contains(&ModelCapability::Vision)
+                );
+                let contains_attachments = descriptor_contains_key(
+                    &DescriptorValue::Object(descriptor.public_configuration.clone()),
+                    "attachments",
+                );
+                if (contains_legacy_image_url || contains_attachments)
+                    && !model.capabilities().contains(&ModelCapability::Vision)
                 {
                     return Err(CompileError::new(
                         "LLM_VISION_BINDING_REQUIRED",
                         "llm descriptor contains image content but its frozen model is not vision-capable",
                     ));
                 }
+                let attachment_delivery = if contains_attachments {
+                    let policy = self.llm_attachments.ok_or_else(|| {
+                        CompileError::new(
+                            "LLM_ATTACHMENT_CAPABILITY_UNAVAILABLE",
+                            "llm attachments require an explicitly configured frozen delivery policy",
+                        )
+                    })?;
+                    Some(serde_json::json!({
+                        "mode":policy.mode.as_str(),
+                        "media_types":["image/gif","image/jpeg","image/png"],
+                        "max_file_bytes":policy.max_file_bytes,
+                        "max_total_bytes":policy.max_total_bytes,
+                        "max_images":policy.max_images,
+                        "max_dimension_pixels":16384,
+                        "max_image_pixels":40000000
+                    }))
+                } else {
+                    None
+                };
                 let publish = match descriptor.public_configuration.get("publish") {
                     Some(DescriptorValue::Boolean(publish)) => *publish,
                     _ => {
@@ -1535,6 +1647,12 @@ impl LeafDeploymentResolver for ProductionLeafDeploymentResolver<'_> {
                     "tool_limits": {"max_rounds": max_rounds, "max_calls": max_calls},
                     "tools": tool_bindings,
                 });
+                if let Some(attachment_delivery) = attachment_delivery {
+                    binding_evidence
+                        .as_object_mut()
+                        .expect("LLM deployment binding is constructed as an object")
+                        .insert("attachment_delivery".to_owned(), attachment_delivery);
+                }
                 if !linked_tool_names.is_empty() {
                     binding_evidence
                         .as_object_mut()
@@ -1761,6 +1879,7 @@ pub struct OwnedProductionLeafDeploymentResolver {
     max_llm_tool_rounds: u32,
     max_llm_tool_calls: u32,
     llm_tool_continuation: bool,
+    llm_attachments: Option<LlmAttachmentPolicy>,
 }
 
 impl OwnedProductionLeafDeploymentResolver {
@@ -1774,6 +1893,7 @@ impl OwnedProductionLeafDeploymentResolver {
             max_llm_tool_rounds: u32::MAX,
             max_llm_tool_calls: u32::MAX,
             llm_tool_continuation: false,
+            llm_attachments: None,
         }
     }
 
@@ -1822,6 +1942,30 @@ impl OwnedProductionLeafDeploymentResolver {
         self.llm_tool_continuation = true;
         self
     }
+
+    pub fn with_inline_llm_attachments(
+        mut self,
+        max_file_bytes: u64,
+        max_total_bytes: u64,
+        max_images: u32,
+    ) -> Result<Self, CompileError> {
+        let resolver = ProductionLeafDeploymentResolver::new(&self.models, &self.actions)
+            .with_inline_llm_attachments(max_file_bytes, max_total_bytes, max_images)?;
+        self.llm_attachments = resolver.llm_attachments;
+        Ok(self)
+    }
+
+    pub fn with_presigned_llm_attachments(
+        mut self,
+        max_file_bytes: u64,
+        max_total_bytes: u64,
+        max_images: u32,
+    ) -> Result<Self, CompileError> {
+        let resolver = ProductionLeafDeploymentResolver::new(&self.models, &self.actions)
+            .with_presigned_llm_attachments(max_file_bytes, max_total_bytes, max_images)?;
+        self.llm_attachments = resolver.llm_attachments;
+        Ok(self)
+    }
 }
 
 impl LeafDeploymentResolver for OwnedProductionLeafDeploymentResolver {
@@ -1841,6 +1985,7 @@ impl LeafDeploymentResolver for OwnedProductionLeafDeploymentResolver {
         resolver.max_llm_tool_rounds = self.max_llm_tool_rounds;
         resolver.max_llm_tool_calls = self.max_llm_tool_calls;
         resolver.llm_tool_continuation = self.llm_tool_continuation;
+        resolver.llm_attachments = self.llm_attachments;
         resolver.resolve_leaf(kind, descriptor)
     }
 }
@@ -3660,5 +3805,28 @@ mod mcp_capability_summary_tests {
         assert!(capabilities.contains("runtime.mcp.interaction.v1"));
         assert!(capabilities.contains("runtime.mcp.tasks.v1"));
         assert!(!server_ids.contains("customer/private/tool"));
+    }
+}
+
+#[cfg(test)]
+mod attachment_delivery_policy_tests {
+    use super::*;
+
+    #[test]
+    fn attachment_delivery_mode_is_explicit_and_frozen() {
+        let models = ModelRegistry::default();
+        let actions = ActionRegistry::default();
+        let inline = ProductionLeafDeploymentResolver::new(&models, &actions)
+            .with_inline_llm_attachments(1024, 2048, 2)
+            .unwrap();
+        assert_eq!(inline.llm_attachments.unwrap().mode.as_str(), "inline_data");
+
+        let presigned = ProductionLeafDeploymentResolver::new(&models, &actions)
+            .with_presigned_llm_attachments(1024, 2048, 2)
+            .unwrap();
+        assert_eq!(
+            presigned.llm_attachments.unwrap().mode.as_str(),
+            "presigned_url"
+        );
     }
 }

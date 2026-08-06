@@ -9,6 +9,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use futures::StreamExt;
 use serde_json::{Map, Value};
 use tokio::sync::broadcast;
@@ -18,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use insight_dsl::{template::compile_template, CompileError};
 use insight_engine::{
     execution::{stop_pair, ExecutionControl, RunError, RunErrorKind, StopReason},
+    file_store::FileAdmissionAuthority,
     plan::{DescriptorValue, VersionTag},
     run_stream::{
         LiveRunStreamBroker, LiveRunStreamItemIdentity, LiveRunStreamPayload,
@@ -82,6 +84,9 @@ const LLM_TOOL_CONTINUATION_INVARIANT: &str = "LLM_TOOL_CONTINUATION_INVARIANT";
 const LLM_TOOL_CONTINUATION_CAPABILITY: &str = "runtime.llm_tool_continuation.v1";
 const LLM_TOOL_ROUND_LIMIT: &str = "LLM_TOOL_ROUND_LIMIT";
 const LLM_TOOL_CALL_LIMIT: &str = "LLM_TOOL_CALL_LIMIT";
+const FILE_PROVIDER_UNSUPPORTED: &str = "FILE_PROVIDER_UNSUPPORTED";
+const FILE_CONTENT_INVALID: &str = "FILE_CONTENT_INVALID";
+const FILE_CONTENT_UNAVAILABLE: &str = "FILE_CONTENT_UNAVAILABLE";
 const LLM_PUBLICATION_AUTHORITY_LOST: &str = "LLM_PUBLICATION_AUTHORITY_LOST";
 const MAX_FROZEN_LLM_TOOL_CALLS: u32 = 1_024;
 const ACTION_DESCRIPTOR_INVALID: &str = "ACTION_DESCRIPTOR_INVALID";
@@ -95,6 +100,7 @@ pub struct LlmTaskExecutor {
     models: ModelRegistry,
     token_observer: Option<broadcast::Sender<LlmTokenObservation>>,
     live_run_stream_broker: Option<Arc<dyn LiveRunStreamBroker>>,
+    file_authority: Option<Arc<dyn FileAdmissionAuthority>>,
 }
 
 impl LlmTaskExecutor {
@@ -103,7 +109,13 @@ impl LlmTaskExecutor {
             models,
             token_observer: None,
             live_run_stream_broker: None,
+            file_authority: None,
         }
+    }
+
+    pub fn with_file_authority(mut self, file_authority: Arc<dyn FileAdmissionAuthority>) -> Self {
+        self.file_authority = Some(file_authority);
+        self
     }
 
     pub fn with_live_run_stream_broker(
@@ -182,6 +194,20 @@ struct FrozenLlmDeploymentBinding {
     tools: Vec<FrozenLlmToolBinding>,
     #[serde(default)]
     runtime_capabilities: Vec<String>,
+    #[serde(default)]
+    attachment_delivery: Option<FrozenAttachmentDelivery>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrozenAttachmentDelivery {
+    mode: String,
+    media_types: Vec<String>,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+    max_images: u32,
+    max_dimension_pixels: u32,
+    max_image_pixels: u64,
 }
 
 #[derive(Clone, Copy, serde::Deserialize, PartialEq, Eq)]
@@ -678,7 +704,15 @@ impl LeafTaskExecutor for LlmTaskExecutor {
             .map_err(|_| invariant(LLM_DESCRIPTOR_INVALID))?;
 
         let bindings = RuntimeBindings::new(configuration, request)?;
-        let mut messages = render_messages(configuration, &bindings)?;
+        let attachment_images = prepare_attachment_images(
+            self.file_authority.as_ref(),
+            request,
+            configuration,
+            &bindings,
+            frozen_binding.attachment_delivery.as_ref(),
+        )
+        .await?;
+        let mut messages = render_messages(configuration, &bindings, &attachment_images)?;
         append_model_continuation(&mut messages, context)?;
         let output = only_output(request)?;
         if output.value_type().string_constraints().is_none() {
@@ -1839,7 +1873,7 @@ pub fn production_worker_registry(
     models: &ModelRegistry,
     actions: &ActionRegistry,
 ) -> Result<WorkerExecutorRegistry, CompileError> {
-    production_worker_registry_inner(models, actions, None, None)
+    production_worker_registry_inner(models, actions, None, None, None)
 }
 
 pub fn production_worker_registry_with_live_run_stream(
@@ -1847,7 +1881,22 @@ pub fn production_worker_registry_with_live_run_stream(
     actions: &ActionRegistry,
     live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
 ) -> Result<WorkerExecutorRegistry, CompileError> {
-    production_worker_registry_inner(models, actions, None, Some(live_run_stream_broker))
+    production_worker_registry_inner(models, actions, None, Some(live_run_stream_broker), None)
+}
+
+pub fn production_worker_registry_with_live_run_stream_and_files(
+    models: &ModelRegistry,
+    actions: &ActionRegistry,
+    live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
+    file_authority: Arc<dyn FileAdmissionAuthority>,
+) -> Result<WorkerExecutorRegistry, CompileError> {
+    production_worker_registry_inner(
+        models,
+        actions,
+        None,
+        Some(live_run_stream_broker),
+        Some(file_authority),
+    )
 }
 
 /// Registers built-in model/Action workers plus every exact versioned HTTP or
@@ -1857,7 +1906,7 @@ pub fn production_worker_registry_with_leaf_adapters(
     actions: &ActionRegistry,
     external_leaf_adapters: &VersionedLeafAdapterRegistry,
 ) -> Result<WorkerExecutorRegistry, CompileError> {
-    production_worker_registry_inner(models, actions, Some(external_leaf_adapters), None)
+    production_worker_registry_inner(models, actions, Some(external_leaf_adapters), None, None)
 }
 
 fn production_worker_registry_inner(
@@ -1865,6 +1914,7 @@ fn production_worker_registry_inner(
     actions: &ActionRegistry,
     external_leaf_adapters: Option<&VersionedLeafAdapterRegistry>,
     live_run_stream_broker: Option<Arc<dyn LiveRunStreamBroker>>,
+    file_authority: Option<Arc<dyn FileAdmissionAuthority>>,
 ) -> Result<WorkerExecutorRegistry, CompileError> {
     let llm_descriptor_version = VersionTag::new(LLM_DESCRIPTOR_VERSION)
         .map_err(|error| CompileError::new("WORKER_REGISTRY_INVALID", error.to_string()))?;
@@ -1876,6 +1926,10 @@ fn production_worker_registry_inner(
     let managed_executor = LlmTaskExecutor::new(models.clone());
     let managed_executor = match &live_run_stream_broker {
         Some(broker) => managed_executor.with_live_run_stream_broker(Arc::clone(broker)),
+        None => managed_executor,
+    };
+    let managed_executor = match &file_authority {
+        Some(authority) => managed_executor.with_file_authority(Arc::clone(authority)),
         None => managed_executor,
     };
     registry
@@ -1894,6 +1948,10 @@ fn production_worker_registry_inner(
             let executor = LlmTaskExecutor::new(models.clone());
             let executor = match &live_run_stream_broker {
                 Some(broker) => executor.with_live_run_stream_broker(Arc::clone(broker)),
+                None => executor,
+            };
+            let executor = match &file_authority {
+                Some(authority) => executor.with_file_authority(Arc::clone(authority)),
                 None => executor,
             };
             registry
@@ -2025,9 +2083,269 @@ impl RuntimeBindings {
     }
 }
 
+async fn prepare_attachment_images(
+    file_authority: Option<&Arc<dyn FileAdmissionAuthority>>,
+    request: &TaskExecutionRequest,
+    configuration: &BTreeMap<String, DescriptorValue>,
+    bindings: &RuntimeBindings,
+    policy: Option<&FrozenAttachmentDelivery>,
+) -> Result<BTreeMap<String, String>, WorkerFailure> {
+    let file_ids = attachment_file_ids(configuration, bindings)?;
+    if file_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let policy = policy.ok_or_else(|| invariant(FILE_PROVIDER_UNSUPPORTED))?;
+    if !matches!(policy.mode.as_str(), "inline_data" | "presigned_url")
+        || policy.max_file_bytes == 0
+        || policy.max_total_bytes < policy.max_file_bytes
+        || policy.max_images == 0
+        || policy.max_dimension_pixels == 0
+        || policy.max_image_pixels == 0
+        || policy.media_types.is_empty()
+        || policy.media_types.iter().any(|media_type| {
+            !matches!(
+                media_type.as_str(),
+                "image/gif" | "image/jpeg" | "image/png"
+            )
+        })
+        || usize::try_from(policy.max_images)
+            .ok()
+            .is_none_or(|max| file_ids.len() > max)
+    {
+        return Err(invariant(FILE_PROVIDER_UNSUPPORTED));
+    }
+    let authority = file_authority.ok_or_else(|| infrastructure(FILE_CONTENT_UNAVAILABLE, true))?;
+    let files = authority
+        .resolve_run_files(request.run_id(), &file_ids)
+        .await
+        .map_err(|_| infrastructure(FILE_CONTENT_UNAVAILABLE, true))?;
+    if files.len() != file_ids.len() {
+        return Err(invariant(FILE_CONTENT_INVALID));
+    }
+    let mut total_bytes = 0_u64;
+    let mut images = BTreeMap::new();
+    for (file_id, file) in file_ids.iter().zip(files) {
+        if file.file_id() != file_id {
+            return Err(invariant(FILE_CONTENT_INVALID));
+        }
+        if !attachment_metadata_is_supported(&file, policy) {
+            return Err(invariant(FILE_PROVIDER_UNSUPPORTED));
+        }
+        total_bytes = total_bytes
+            .checked_add(file.size_bytes())
+            .filter(|total| *total <= policy.max_total_bytes)
+            .ok_or_else(|| invariant(FILE_PROVIDER_UNSUPPORTED))?;
+        let max_bytes = usize::try_from(policy.max_file_bytes)
+            .map_err(|_| invariant(FILE_PROVIDER_UNSUPPORTED))?;
+        let bytes = authority
+            .read_file(&file, max_bytes)
+            .await
+            .map_err(|_| infrastructure(FILE_CONTENT_UNAVAILABLE, true))?;
+        if u64::try_from(bytes.len()).ok() != Some(file.size_bytes()) {
+            return Err(invariant(FILE_CONTENT_INVALID));
+        }
+        validate_image_dimensions(
+            file.media_type(),
+            &bytes,
+            policy.max_dimension_pixels,
+            policy.max_image_pixels,
+        )?;
+        let image = match policy.mode.as_str() {
+            "inline_data" => format!(
+                "data:{};base64,{}",
+                file.media_type(),
+                BASE64_STANDARD.encode(bytes)
+            ),
+            "presigned_url" => authority
+                .presign_file_read(&file)
+                .await
+                .map_err(|_| infrastructure(FILE_CONTENT_UNAVAILABLE, true))?
+                .expose_to_provider_adapter()
+                .to_owned(),
+            _ => return Err(invariant(FILE_PROVIDER_UNSUPPORTED)),
+        };
+        images.insert(file_id.clone(), image);
+    }
+    Ok(images)
+}
+
+fn attachment_metadata_is_supported(
+    file: &insight_engine::file_store::AuthorizedFile,
+    policy: &FrozenAttachmentDelivery,
+) -> bool {
+    policy
+        .media_types
+        .iter()
+        .any(|media_type| media_type == file.media_type())
+        && file.size_bytes() <= policy.max_file_bytes
+}
+
+fn attachment_file_ids(
+    configuration: &BTreeMap<String, DescriptorValue>,
+    bindings: &RuntimeBindings,
+) -> Result<Vec<String>, WorkerFailure> {
+    let program = match required(configuration, "message_program")? {
+        DescriptorValue::Array(program) => program,
+        _ => return Err(invariant(LLM_DESCRIPTOR_INVALID)),
+    };
+    let mut ids = Vec::new();
+    let mut seen = BTreeSet::new();
+    for instruction in program {
+        let instruction = descriptor_object(instruction)?;
+        match descriptor_string(required(instruction, "kind")?)? {
+            "message_splice" => {
+                let path = descriptor_string(required(instruction, "path")?)?;
+                let Value::Array(messages) = bindings.resolve(path)? else {
+                    return Err(invariant(LLM_MESSAGE_INVALID));
+                };
+                for message in messages {
+                    let content = message
+                        .as_object()
+                        .and_then(|message| message.get("content"))
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| invariant(LLM_MESSAGE_INVALID))?;
+                    for part in content {
+                        if let Some(file) = part.as_object().and_then(|part| part.get("file")) {
+                            push_attachment_file_id(file, &mut ids, &mut seen)?;
+                        }
+                    }
+                }
+            }
+            "message" => {
+                let DescriptorValue::Array(content) = required(instruction, "content")? else {
+                    return Err(invariant(LLM_DESCRIPTOR_INVALID));
+                };
+                for part in content {
+                    let part = descriptor_object(part)?;
+                    if descriptor_string(required(part, "kind")?)? != "attachments_ref" {
+                        continue;
+                    }
+                    let path = descriptor_string(required(part, "attachments")?)?;
+                    let Value::Array(files) = bindings.resolve(path)? else {
+                        return Err(invariant(LLM_BINDING_INVALID));
+                    };
+                    for file in files {
+                        push_attachment_file_id(&file, &mut ids, &mut seen)?;
+                    }
+                }
+            }
+            _ => return Err(invariant(LLM_DESCRIPTOR_INVALID)),
+        }
+    }
+    Ok(ids)
+}
+
+fn push_attachment_file_id(
+    value: &Value,
+    ids: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+) -> Result<(), WorkerFailure> {
+    let file_id = value
+        .as_object()
+        .and_then(|file| file.get("file_id"))
+        .and_then(Value::as_str)
+        .filter(|file_id| !file_id.is_empty() && file_id.len() <= 256)
+        .ok_or_else(|| invariant(LLM_MESSAGE_INVALID))?;
+    if seen.insert(file_id.to_owned()) {
+        ids.push(file_id.to_owned());
+    }
+    Ok(())
+}
+
+fn validate_image_dimensions(
+    media_type: &str,
+    bytes: &[u8],
+    max_dimension: u32,
+    max_pixels: u64,
+) -> Result<(), WorkerFailure> {
+    let dimensions = match media_type {
+        "image/png" if bytes.len() >= 24 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" => Some((
+            u32::from_be_bytes(bytes[16..20].try_into().expect("four bytes")),
+            u32::from_be_bytes(bytes[20..24].try_into().expect("four bytes")),
+        )),
+        "image/gif"
+            if bytes.len() >= 10
+                && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) =>
+        {
+            Some((
+                u32::from(u16::from_le_bytes([bytes[6], bytes[7]])),
+                u32::from(u16::from_le_bytes([bytes[8], bytes[9]])),
+            ))
+        }
+        "image/jpeg" if bytes.starts_with(&[0xff, 0xd8]) => jpeg_dimensions(bytes),
+        _ => None,
+    }
+    .ok_or_else(|| invariant(FILE_CONTENT_INVALID))?;
+    let (width, height) = dimensions;
+    if width == 0
+        || height == 0
+        || width > max_dimension
+        || height > max_dimension
+        || u64::from(width)
+            .checked_mul(u64::from(height))
+            .is_none_or(|pixels| pixels > max_pixels)
+    {
+        return Err(invariant(FILE_CONTENT_INVALID));
+    }
+    Ok(())
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let mut offset = 2_usize;
+    while offset + 4 <= bytes.len() {
+        while offset < bytes.len() && bytes[offset] == 0xff {
+            offset += 1;
+        }
+        let marker = *bytes.get(offset)?;
+        offset += 1;
+        if matches!(marker, 0xd8 | 0xd9) {
+            continue;
+        }
+        let length = usize::from(u16::from_be_bytes([
+            *bytes.get(offset)?,
+            *bytes.get(offset + 1)?,
+        ]));
+        if length < 2 || offset.checked_add(length)? > bytes.len() {
+            return None;
+        }
+        if matches!(
+            marker,
+            0xc0 | 0xc1
+                | 0xc2
+                | 0xc3
+                | 0xc5
+                | 0xc6
+                | 0xc7
+                | 0xc9
+                | 0xca
+                | 0xcb
+                | 0xcd
+                | 0xce
+                | 0xcf
+        ) {
+            if length < 7 {
+                return None;
+            }
+            return Some((
+                u32::from(u16::from_be_bytes([
+                    *bytes.get(offset + 5)?,
+                    *bytes.get(offset + 6)?,
+                ])),
+                u32::from(u16::from_be_bytes([
+                    *bytes.get(offset + 3)?,
+                    *bytes.get(offset + 4)?,
+                ])),
+            ));
+        }
+        offset += length;
+    }
+    None
+}
+
 fn render_messages(
     configuration: &BTreeMap<String, DescriptorValue>,
     bindings: &RuntimeBindings,
+    attachment_images: &BTreeMap<String, String>,
 ) -> Result<Vec<ChatMessage>, WorkerFailure> {
     let program = match required(configuration, "message_program")? {
         DescriptorValue::Array(program) => program,
@@ -2048,7 +2366,7 @@ fn render_messages(
                     return Err(invariant(LLM_MESSAGE_INVALID));
                 };
                 for message in dynamic {
-                    messages.push(dynamic_message(message)?);
+                    messages.push(dynamic_message(message, attachment_images)?);
                 }
             }
             "message" => {
@@ -2105,6 +2423,26 @@ fn render_messages(
                             _ => return Err(invariant(LLM_MESSAGE_INVALID)),
                         };
                         parts.push(ChatContentPart::Image { image });
+                    } else if let Some(attachments) = part.get("attachments") {
+                        if kind != "attachments_ref" || role != ChatRole::User {
+                            return Err(invariant(LLM_MESSAGE_INVALID));
+                        }
+                        let path = descriptor_string(attachments)?;
+                        let Value::Array(files) = bindings.resolve(path)? else {
+                            return Err(invariant(LLM_BINDING_INVALID));
+                        };
+                        for file in files {
+                            let file_id = file
+                                .as_object()
+                                .and_then(|file| file.get("file_id"))
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| invariant(LLM_BINDING_INVALID))?;
+                            let image = attachment_images
+                                .get(file_id)
+                                .cloned()
+                                .ok_or_else(|| invariant(FILE_CONTENT_INVALID))?;
+                            parts.push(ChatContentPart::Image { image });
+                        }
                     } else {
                         return Err(invariant(LLM_MESSAGE_INVALID));
                     }
@@ -2150,7 +2488,10 @@ fn render_template(source: &str, bindings: &RuntimeBindings) -> Result<String, W
         .map_err(|_| infrastructure(LLM_REQUEST_TOO_LARGE, false))
 }
 
-fn dynamic_message(value: Value) -> Result<ChatMessage, WorkerFailure> {
+fn dynamic_message(
+    value: Value,
+    attachment_images: &BTreeMap<String, String>,
+) -> Result<ChatMessage, WorkerFailure> {
     let Value::Object(mut value) = value else {
         return Err(invariant(LLM_MESSAGE_INVALID));
     };
@@ -2182,12 +2523,17 @@ fn dynamic_message(value: Value) -> Result<ChatMessage, WorkerFailure> {
         if let Some(Value::String(text)) = part.get("text") {
             parts.push(ChatContentPart::Text { text: text.clone() });
         } else if role == ChatRole::User {
-            let Some(Value::String(image)) = part.get("image_url") else {
-                return Err(invariant(LLM_MESSAGE_INVALID));
-            };
-            parts.push(ChatContentPart::Image {
-                image: image.clone(),
-            });
+            let file_id = part
+                .get("file")
+                .and_then(Value::as_object)
+                .and_then(|file| file.get("file_id"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| invariant(LLM_MESSAGE_INVALID))?;
+            let image = attachment_images
+                .get(file_id)
+                .cloned()
+                .ok_or_else(|| invariant(FILE_CONTENT_INVALID))?;
+            parts.push(ChatContentPart::Image { image });
         } else {
             return Err(invariant(LLM_MESSAGE_INVALID));
         }
@@ -2237,6 +2583,26 @@ fn descriptor_object(
     match value {
         DescriptorValue::Object(value) => Ok(value),
         _ => Err(invariant(LLM_DESCRIPTOR_INVALID)),
+    }
+}
+
+#[cfg(test)]
+fn descriptor_contains_key(value: &DescriptorValue, expected: &str) -> bool {
+    match value {
+        DescriptorValue::Object(values) => {
+            values.contains_key(expected)
+                || values
+                    .values()
+                    .any(|value| descriptor_contains_key(value, expected))
+        }
+        DescriptorValue::Array(values) => values
+            .iter()
+            .any(|value| descriptor_contains_key(value, expected)),
+        DescriptorValue::Null
+        | DescriptorValue::Boolean(_)
+        | DescriptorValue::Integer(_)
+        | DescriptorValue::Number(_)
+        | DescriptorValue::String(_) => false,
     }
 }
 
@@ -2581,6 +2947,91 @@ mod tests {
                 finish_reason: Some("stop".to_owned()),
                 usage: None,
             })])))
+        }
+    }
+
+    #[derive(Clone)]
+    struct FixtureFileAuthority {
+        media_type: &'static str,
+    }
+
+    #[async_trait]
+    impl FileAdmissionAuthority for FixtureFileAuthority {
+        async fn resolve_files(
+            &self,
+            _tenant_id: &str,
+            _user_id: &str,
+            _file_ids: &[String],
+        ) -> Result<
+            Vec<insight_engine::file_store::AuthorizedFile>,
+            insight_engine::file_store::FileAuthorityError,
+        > {
+            unreachable!("LLM execution resolves only Run-bound files")
+        }
+
+        async fn resolve_conversation_files(
+            &self,
+            _conversation_id: &str,
+            _tenant_id: &str,
+            _user_id: &str,
+            _current_file_ids: &[String],
+            _history_file_ids: &[String],
+        ) -> Result<
+            Vec<insight_engine::file_store::AuthorizedFile>,
+            insight_engine::file_store::FileAuthorityError,
+        > {
+            unreachable!("LLM execution resolves only Run-bound files")
+        }
+
+        async fn resolve_run_files(
+            &self,
+            _run_id: &RunId,
+            file_ids: &[String],
+        ) -> Result<
+            Vec<insight_engine::file_store::AuthorizedFile>,
+            insight_engine::file_store::FileAuthorityError,
+        > {
+            Ok(file_ids
+                .iter()
+                .map(|file_id| {
+                    insight_engine::file_store::AuthorizedFile::from_storage_adapter(
+                        file_id.clone(),
+                        format!("{file_id}.png"),
+                        self.media_type.to_owned(),
+                        24,
+                        format!("private/{file_id}"),
+                        format!("etag-{file_id}"),
+                        None,
+                    )
+                })
+                .collect())
+        }
+
+        async fn read_file(
+            &self,
+            file: &insight_engine::file_store::AuthorizedFile,
+            _max_bytes: usize,
+        ) -> Result<Vec<u8>, insight_engine::file_store::FileAuthorityError> {
+            let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+            let width: u32 = if file.file_id().ends_with('b') { 3 } else { 2 };
+            png.extend_from_slice(&width.to_be_bytes());
+            png.extend_from_slice(&3_u32.to_be_bytes());
+            Ok(png)
+        }
+
+        async fn presign_file_read(
+            &self,
+            file: &insight_engine::file_store::AuthorizedFile,
+        ) -> Result<
+            insight_engine::file_store::AuthorizedFileUrl,
+            insight_engine::file_store::FileAuthorityError,
+        > {
+            Ok(
+                insight_engine::file_store::AuthorizedFileUrl::from_storage_adapter(format!(
+                    "https://files.example.test/private/{}?X-Amz-Signature=redacted",
+                    file.file_id()
+                )),
+            )
         }
     }
 
@@ -3109,6 +3560,20 @@ mod tests {
             .is_some_and(|tools| !tools.is_empty())
         {
             binding["runtime_capabilities"] = json!([LLM_TOOL_CONTINUATION_CAPABILITY]);
+        }
+        if descriptor_contains_key(
+            &DescriptorValue::Object(configuration.clone()),
+            "attachments",
+        ) {
+            binding["attachment_delivery"] = json!({
+                "mode":"inline_data",
+                "media_types":["image/gif","image/jpeg","image/png"],
+                "max_file_bytes":1024,
+                "max_total_bytes":2048,
+                "max_images":10,
+                "max_dimension_pixels":1024,
+                "max_image_pixels":1048576
+            });
         }
         binding
     }
@@ -4148,6 +4613,387 @@ mod tests {
         assert_eq!(requests[0].messages[1].text(), Some("earlier question"));
         assert_eq!(requests[0].messages[2].text(), Some("prior"));
         assert_eq!(requests[0].messages[3].text(), Some("Question: What now?"));
+    }
+
+    #[tokio::test]
+    async fn llm_history_file_parts_reuse_the_run_bound_file() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut models = ModelRegistry::default();
+        models
+            .register_versioned(
+                ModelSelector::new("fixture", "chat").unwrap(),
+                test_model_deployment_identity(),
+                CapturingModel {
+                    requests: Arc::clone(&requests),
+                    response: "answer".to_owned(),
+                    capabilities: BTreeSet::from([ModelCapability::Vision]),
+                },
+            )
+            .unwrap();
+        let configuration = BTreeMap::from([
+            (
+                "model".to_owned(),
+                object([("provider", string("fixture")), ("id", string("chat"))]),
+            ),
+            ("parameters".to_owned(), object([])),
+            (
+                "runtime_bindings".to_owned(),
+                object([
+                    ("history", string("input_history")),
+                    ("files", string("input_files")),
+                ]),
+            ),
+            (
+                "message_program".to_owned(),
+                DescriptorValue::Array(vec![
+                    object([
+                        ("kind", string("message_splice")),
+                        ("path", string("history")),
+                    ]),
+                    object([
+                        ("kind", string("message")),
+                        ("role", string("user")),
+                        (
+                            "content",
+                            DescriptorValue::Array(vec![
+                                object([
+                                    ("kind", string("literal")),
+                                    ("references", DescriptorValue::Array(Vec::new())),
+                                    ("text", string("continue")),
+                                ]),
+                                object([
+                                    ("kind", string("attachments_ref")),
+                                    ("attachments", string("files")),
+                                ]),
+                            ]),
+                        ),
+                    ]),
+                ]),
+            ),
+        ]);
+        let request = dispatch_request(
+            SchedulerTaskKind::Llm,
+            "core.llm",
+            "model-worker-1",
+            configuration,
+            vec![
+                insight_engine::internal::bound_task_input(
+                    DataPortId::new("input_history").unwrap(),
+                    PortName::new("history").unwrap(),
+                    RuntimeValue::new(json!([{
+                        "role":"user",
+                        "content":[
+                            {"text":"earlier image"},
+                            {"file":{"file_id":"file_a"}}
+                        ]
+                    }]))
+                    .unwrap(),
+                ),
+                insight_engine::internal::bound_task_input(
+                    DataPortId::new("input_files").unwrap(),
+                    PortName::new("files").unwrap(),
+                    RuntimeValue::new(json!([])).unwrap(),
+                ),
+            ],
+            PlanType::String,
+        );
+        LlmTaskExecutor::new(models)
+            .with_file_authority(Arc::new(FixtureFileAuthority {
+                media_type: "image/png",
+            }))
+            .execute(&worker_context(1), &request, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests[0].messages[0].text(), Some("earlier image"));
+        assert_eq!(requests[0].messages[0].image_urls().len(), 1);
+        assert!(requests[0].messages[0].image_urls()[0].starts_with("data:image/png;base64,"));
+        assert_eq!(requests[0].messages[1].text(), Some("continue"));
+        assert!(requests[0].messages[1].image_urls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn llm_attachments_resolve_run_bindings_and_preserve_image_order() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut models = ModelRegistry::default();
+        models
+            .register_versioned(
+                ModelSelector::new("fixture", "chat").unwrap(),
+                test_model_deployment_identity(),
+                CapturingModel {
+                    requests: Arc::clone(&requests),
+                    response: "described".to_owned(),
+                    capabilities: BTreeSet::from([ModelCapability::Vision]),
+                },
+            )
+            .unwrap();
+        let configuration = BTreeMap::from([
+            (
+                "model".to_owned(),
+                object([("provider", string("fixture")), ("id", string("chat"))]),
+            ),
+            ("parameters".to_owned(), object([])),
+            (
+                "runtime_bindings".to_owned(),
+                object([("files", string("input_files"))]),
+            ),
+            (
+                "message_program".to_owned(),
+                DescriptorValue::Array(vec![object([
+                    ("kind", string("message")),
+                    ("role", string("user")),
+                    (
+                        "content",
+                        DescriptorValue::Array(vec![
+                            object([
+                                ("kind", string("literal")),
+                                ("references", DescriptorValue::Array(Vec::new())),
+                                ("text", string("compare")),
+                            ]),
+                            object([
+                                ("kind", string("attachments_ref")),
+                                ("attachments", string("files")),
+                            ]),
+                        ]),
+                    ),
+                ])]),
+            ),
+        ]);
+        let files = json!([
+            {"file_id":"file_a","filename":"a.png","media_type":"image/png","size_bytes":24},
+            {"file_id":"file_b","filename":"b.png","media_type":"image/png","size_bytes":24}
+        ]);
+        let request = dispatch_request(
+            SchedulerTaskKind::Llm,
+            "core.llm",
+            "model-worker-1",
+            configuration,
+            vec![insight_engine::internal::bound_task_input(
+                DataPortId::new("input_files").unwrap(),
+                PortName::new("files").unwrap(),
+                RuntimeValue::new(files).unwrap(),
+            )],
+            PlanType::String,
+        );
+        let result = LlmTaskExecutor::new(models)
+            .with_file_authority(Arc::new(FixtureFileAuthority {
+                media_type: "image/png",
+            }))
+            .execute(&worker_context(1), &request, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            result.outputs().values().next().unwrap().value(),
+            &json!("described")
+        );
+        let requests = requests.lock().unwrap();
+        let images = requests[0].messages[0].image_urls();
+        assert_eq!(images.len(), 2);
+        assert!(images
+            .iter()
+            .all(|image| image.starts_with("data:image/png;base64,")));
+        assert_ne!(images[0], images[1]);
+    }
+
+    #[tokio::test]
+    async fn llm_presigned_attachments_are_ephemeral_provider_urls() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut models = ModelRegistry::default();
+        models
+            .register_versioned(
+                ModelSelector::new("fixture", "chat").unwrap(),
+                test_model_deployment_identity(),
+                CapturingModel {
+                    requests: Arc::clone(&requests),
+                    response: "described".to_owned(),
+                    capabilities: BTreeSet::from([ModelCapability::Vision]),
+                },
+            )
+            .unwrap();
+        let mut configuration = BTreeMap::from([
+            (
+                "model".to_owned(),
+                object([("provider", string("fixture")), ("id", string("chat"))]),
+            ),
+            ("parameters".to_owned(), object([])),
+            (
+                "runtime_bindings".to_owned(),
+                object([("files", string("input_files"))]),
+            ),
+            (
+                "message_program".to_owned(),
+                DescriptorValue::Array(vec![object([
+                    ("kind", string("message")),
+                    ("role", string("user")),
+                    (
+                        "content",
+                        DescriptorValue::Array(vec![object([
+                            ("kind", string("attachments_ref")),
+                            ("attachments", string("files")),
+                        ])]),
+                    ),
+                ])]),
+            ),
+        ]);
+        configuration.insert("stream".to_owned(), DescriptorValue::Boolean(true));
+        configuration.insert("publish".to_owned(), DescriptorValue::Boolean(false));
+        configuration.insert("tools".to_owned(), DescriptorValue::Array(Vec::new()));
+        configuration.insert("tool_choice".to_owned(), string("auto"));
+        configuration.insert(
+            "tool_limits".to_owned(),
+            object([
+                ("max_calls", DescriptorValue::Integer(32)),
+                ("max_rounds", DescriptorValue::Integer(8)),
+            ]),
+        );
+        let mut deployment_binding = test_llm_deployment_binding(&configuration, Vec::new());
+        deployment_binding["attachment_delivery"]["mode"] = json!("presigned_url");
+        let request = dispatch_request_with_frozen_bindings(
+            SchedulerTaskKind::Llm,
+            "core.llm",
+            "model-worker-1",
+            configuration,
+            vec![insight_engine::internal::bound_task_input(
+                DataPortId::new("input_files").unwrap(),
+                PortName::new("files").unwrap(),
+                RuntimeValue::new(json!([
+                    {"file_id":"file_a","filename":"a.png","media_type":"image/png","size_bytes":24}
+                ]))
+                .unwrap(),
+            )],
+            PlanType::String,
+            Vec::new(),
+            Some(deployment_binding),
+        );
+        LlmTaskExecutor::new(models)
+            .with_file_authority(Arc::new(FixtureFileAuthority {
+                media_type: "image/png",
+            }))
+            .execute(&worker_context(1), &request, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests[0].messages[0].image_urls(),
+            &["https://files.example.test/private/file_a?X-Amz-Signature=redacted"]
+        );
+        assert!(!serde_json::to_string(request.deployment_binding())
+            .unwrap()
+            .contains("X-Amz-Signature"));
+    }
+
+    #[tokio::test]
+    async fn llm_attachments_fail_before_provider_call_for_unsupported_media() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut models = ModelRegistry::default();
+        models
+            .register_versioned(
+                ModelSelector::new("fixture", "chat").unwrap(),
+                test_model_deployment_identity(),
+                CapturingModel {
+                    requests: Arc::clone(&requests),
+                    response: "must not run".to_owned(),
+                    capabilities: BTreeSet::from([ModelCapability::Vision]),
+                },
+            )
+            .unwrap();
+        let configuration = BTreeMap::from([
+            (
+                "model".to_owned(),
+                object([("provider", string("fixture")), ("id", string("chat"))]),
+            ),
+            ("parameters".to_owned(), object([])),
+            (
+                "runtime_bindings".to_owned(),
+                object([("files", string("input_files"))]),
+            ),
+            (
+                "message_program".to_owned(),
+                DescriptorValue::Array(vec![object([
+                    ("kind", string("message")),
+                    ("role", string("user")),
+                    (
+                        "content",
+                        DescriptorValue::Array(vec![object([
+                            ("kind", string("attachments_ref")),
+                            ("attachments", string("files")),
+                        ])]),
+                    ),
+                ])]),
+            ),
+        ]);
+        let request = dispatch_request(
+            SchedulerTaskKind::Llm,
+            "core.llm",
+            "model-worker-1",
+            configuration,
+            vec![insight_engine::internal::bound_task_input(
+                DataPortId::new("input_files").unwrap(),
+                PortName::new("files").unwrap(),
+                RuntimeValue::new(json!([{
+                    "file_id":"file_pdf","filename":"x.pdf","media_type":"application/pdf","size_bytes":24
+                }]))
+                .unwrap(),
+            )],
+            PlanType::String,
+        );
+        let failure = LlmTaskExecutor::new(models)
+            .with_file_authority(Arc::new(FixtureFileAuthority {
+                media_type: "application/pdf",
+            }))
+            .execute(&worker_context(1), &request, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code(), FILE_PROVIDER_UNSUPPORTED);
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn attachment_image_admission_rejects_spoofed_oversized_pixel_bomb_and_decode_failure() {
+        let policy = FrozenAttachmentDelivery {
+            mode: "inline_data".to_owned(),
+            media_types: vec!["image/png".to_owned()],
+            max_file_bytes: 8,
+            max_total_bytes: 16,
+            max_images: 2,
+            max_dimension_pixels: 1024,
+            max_image_pixels: 1_048_576,
+        };
+        let oversized = insight_engine::file_store::AuthorizedFile::from_storage_adapter(
+            "file_oversized".to_owned(),
+            "oversized.png".to_owned(),
+            "image/png".to_owned(),
+            9,
+            "private/file_oversized".to_owned(),
+            "etag-oversized".to_owned(),
+            None,
+        );
+        assert!(!attachment_metadata_is_supported(&oversized, &policy));
+
+        let png = |width: u32, height: u32| {
+            let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+            bytes.extend_from_slice(&width.to_be_bytes());
+            bytes.extend_from_slice(&height.to_be_bytes());
+            bytes
+        };
+        assert!(validate_image_dimensions("image/png", &png(2, 3), 1024, 1_048_576).is_ok());
+        assert!(
+            validate_image_dimensions("image/png", b"GIF89a\x02\0\x03\0", 1024, 1_048_576).is_err()
+        );
+        assert!(
+            validate_image_dimensions("image/png", b"\x89PNG\r\n\x1a\n", 1024, 1_048_576).is_err()
+        );
+        assert!(validate_image_dimensions("image/png", &png(2048, 1), 1024, 1_048_576).is_err());
+        assert!(validate_image_dimensions("image/png", &png(1024, 1024), 2048, 100).is_err());
+        assert!(validate_image_dimensions(
+            "image/jpeg",
+            &[0xff, 0xd8, 0xff, 0xc0, 0x00, 0x01],
+            1024,
+            1_048_576,
+        )
+        .is_err());
     }
 
     #[tokio::test]

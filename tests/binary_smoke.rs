@@ -10,6 +10,7 @@ use std::{
     panic::{resume_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
+    sync::OnceLock,
     thread,
     time::{Duration, Instant},
 };
@@ -31,6 +32,7 @@ const BINARY_MANAGEMENT_TOKEN_ENV: &str = "BINARY_MANAGEMENT_TOKEN";
 const BINARY_MANAGEMENT_TOKEN: &str = "binary-management-secret";
 const BINARY_PROVIDER_SECRET_ENV: &str = "BINARY_PROVIDER_SECRET_MUST_NOT_BE_READ";
 static BINARY_STARTUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static BINARY_FAKE_S3: OnceLock<SocketAddr> = OnceLock::new();
 
 #[tokio::test]
 async fn binary_rejects_missing_sqlite_before_bind_without_creating_the_file() {
@@ -573,7 +575,7 @@ async fn create_attached_action_and_read_response(
     let response = client
         .post(&stream_url)
         .header("x-request-id", "postgres-no-ddl-action-1")
-        .json(&json!({"text":"hello rust world"}))
+        .json(&json!({"inputs":{"text":"hello rust world"}}))
         .send()
         .await
         .unwrap_or_else(|error| panic!("POST {stream_url}: {error}"));
@@ -944,8 +946,8 @@ async fn postgres_artifact_store_authority(
     )
     .fetch_one(pool)
     .await
-    .expect("stock binary must bind one shared Artifact-store authority");
-    assert_eq!(artifact_store.0, "shared_filesystem");
+    .expect("stock binary must bind one S3 Artifact-store authority");
+    assert_eq!(artifact_store.0, "s3");
     assert_eq!(artifact_store.1, BINARY_POSTGRES_ARTIFACT_NAMESPACE);
     assert!(artifact_store.2.starts_with("artifact_store_"));
     artifact_store
@@ -956,10 +958,31 @@ fn reserve_loopback_addr() -> SocketAddr {
     listener.local_addr().unwrap()
 }
 
+fn fake_s3_endpoint() -> String {
+    let address = BINARY_FAKE_S3.get_or_init(|| {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = [0_u8; 8192];
+                let _ = stream.read(&mut request);
+                let _ = std::io::Write::write_all(
+                    &mut stream,
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nx-amz-request-id: binary-fake\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        address
+    });
+    format!("http://{address}")
+}
+
 fn write_temp_configs(root: &Path, bind_addr: SocketAddr) -> PathBuf {
     let platform_config = root.join("platform.yaml");
     let history_path = root.join("history.sqlite3");
     let agents_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("agents");
+    let s3_endpoint = fake_s3_endpoint();
 
     fs::write(
         &platform_config,
@@ -1005,6 +1028,25 @@ history:
   provider: sqlite
   path: {}
 
+object_storage:
+  s3:
+    endpoint: {s3_endpoint}
+    public_endpoint: {s3_endpoint}
+    region: us-east-1
+    bucket: binary-smoke
+    force_path_style: true
+    access_key_env: S3_ACCESS_KEY
+    secret_key_env: S3_SECRET_KEY
+    allow_insecure_internal_endpoint: true
+
+artifacts:
+  namespace: binary-smoke
+  inline_threshold_bytes: 65536
+  orphan_retention: 24h
+  reference_retention: 30d
+  gc_interval: 1m
+  deletion_claim_seconds: 60
+
 runtime:
   max_concurrent_runs: 4
   max_concurrent_operations: 4
@@ -1043,6 +1085,7 @@ fn write_restart_configs(root: &Path, bind_addr: SocketAddr) -> PathBuf {
     let history_path = root.join("restart.sqlite3");
     let agents_dir = root.join("agents");
     let agent_dir = agents_dir.join("restart_waiter");
+    let s3_endpoint = fake_s3_endpoint();
     fs::create_dir_all(&agent_dir).unwrap();
     fs::write(
         agent_dir.join("agent.yaml"),
@@ -1108,6 +1151,25 @@ history:
   provider: sqlite
   path: {}
 
+object_storage:
+  s3:
+    endpoint: {s3_endpoint}
+    public_endpoint: {s3_endpoint}
+    region: us-east-1
+    bucket: binary-smoke
+    force_path_style: true
+    access_key_env: S3_ACCESS_KEY
+    secret_key_env: S3_SECRET_KEY
+    allow_insecure_internal_endpoint: true
+
+artifacts:
+  namespace: binary-smoke-restart
+  inline_threshold_bytes: 65536
+  orphan_retention: 24h
+  reference_retention: 30d
+  gc_interval: 1m
+  deletion_claim_seconds: 60
+
 runtime:
   max_concurrent_runs: 4
   max_concurrent_operations: 4
@@ -1130,7 +1192,7 @@ runtime:
 fn write_postgres_action_configs(root: &Path, bind_addr: SocketAddr) -> PathBuf {
     let platform_config = root.join("postgres-platform.yaml");
     let agents_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("agents");
-    let artifact_root = root.join("shared-artifacts");
+    let s3_endpoint = fake_s3_endpoint();
     fs::write(
         &platform_config,
         format!(
@@ -1172,10 +1234,19 @@ history:
   provider: postgres
   database_url_env: {}
 
+object_storage:
+  s3:
+    endpoint: {s3_endpoint}
+    public_endpoint: {s3_endpoint}
+    region: us-east-1
+    bucket: binary-smoke
+    force_path_style: true
+    access_key_env: S3_ACCESS_KEY
+    secret_key_env: S3_SECRET_KEY
+    allow_insecure_internal_endpoint: true
+
 artifacts:
-  provider: shared_filesystem
   namespace: {}
-  directory: {}
   inline_threshold_bytes: 65536
   orphan_retention: 24h
   reference_retention: 30d
@@ -1197,7 +1268,6 @@ runtime:
             agents_dir.display(),
             BINARY_POSTGRES_URL_ENV,
             BINARY_POSTGRES_ARTIFACT_NAMESPACE,
-            artifact_root.display(),
         ),
     )
     .unwrap();
@@ -1333,6 +1403,8 @@ impl ChildGuard<CapturedChild> {
             .env("PLATFORM_CONFIG", platform_config)
             .env(BINARY_MANAGEMENT_TOKEN_ENV, BINARY_MANAGEMENT_TOKEN)
             .env(BINARY_PROVIDER_SECRET_ENV, "server-only-provider-secret")
+            .env("S3_ACCESS_KEY", "binary-smoke-access")
+            .env("S3_SECRET_KEY", "binary-smoke-secret")
             .envs(environment.iter().copied())
             .env_remove("DASHSCOPE_API_KEY")
             .stdout(Stdio::piped())
@@ -1648,7 +1720,7 @@ async fn create_and_wait(client: &Client, base_url: &str, agent_id: &str, input:
     let create_run_url = format!("{base_url}/v1/agents/{agent_id}/runs");
     let created = expect_json(
         format!("POST {create_run_url}"),
-        client.post(create_run_url).json(&input),
+        client.post(create_run_url).json(&json!({"inputs": input})),
         StatusCode::ACCEPTED,
     )
     .await;

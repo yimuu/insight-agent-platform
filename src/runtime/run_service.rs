@@ -20,7 +20,6 @@ mod public_event_multiruntime_tests {
             VersionedPlan,
         },
         ContentHash, DefinitionRevisionId, DeploymentRevisionId,
-        LocalContentAddressedArtifactStore,
     };
     use insight_durable::model::adapter as durable_model_adapter;
     use insight_durable::{CreateRunCommand, PublicRunAttachment};
@@ -361,15 +360,12 @@ mod public_event_multiruntime_tests {
         );
 
         let artifact_directory = tempfile::tempdir().unwrap();
-        let artifact_store = Arc::new(
-            LocalContentAddressedArtifactStore::open_shared(
-                artifact_directory.path().join("objects"),
-                1,
-                "public_listener",
-            )
-            .await
-            .unwrap(),
-        );
+        let artifact_store = crate::test_database::test_s3_artifact_store(
+            artifact_directory.path().join("objects"),
+            1,
+            "public_listener",
+        )
+        .await;
         let service_a = RunService::start_with_artifact_store(
             DeployedAgentCatalog::new(Vec::new()).unwrap(),
             repository_a.clone() as Arc<dyn ProductionRunRepository>,

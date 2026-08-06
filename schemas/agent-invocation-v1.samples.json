@@ -1,0 +1,21 @@
+{
+  "query_only": {"query": "什么是对象存储？"},
+  "business_only": {"inputs": {"text": "hello world"}},
+  "history": {
+    "query": "再简短一点",
+    "messages": [
+      {"role": "user", "content": [{"text": "介绍一下对象存储"}]},
+      {"role": "assistant", "content": [{"text": "对象存储使用 key 管理数据。"}]}
+    ]
+  },
+  "multiple_files": {
+    "query": "比较这两张图片",
+    "files": [{"file_id": "file_a"}, {"file_id": "file_b"}],
+    "inputs": {"response_style": "concise"}
+  },
+  "conversation_message": {
+    "query": "再解释得简单一点",
+    "files": [{"file_id": "file_a"}],
+    "inputs": {"response_style": "concise"}
+  }
+}

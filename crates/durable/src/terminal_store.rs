@@ -7,14 +7,15 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_engine::{
-    repository::RepositoryError, run_stream::RunToolResult, ContentHash, DefinitionRevisionId,
-    DeploymentRevisionId, PersistenceMode, RunId,
+    repository::{RepositoryError, StorageLocator},
+    run_stream::RunToolResult,
+    ArtifactRef, ContentHash, DefinitionRevisionId, DeploymentRevisionId, PersistenceMode, RunId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use crate::PublicationHead;
+use crate::{PublicationHead, RepositoryErrorExt as _};
 
 pub const TERMINAL_RUN_OWNER_LEASE_LOST: &str = "TERMINAL_RUN_OWNER_LEASE_LOST";
 pub const TERMINAL_RUN_NOT_FOUND: &str = "TERMINAL_RUN_NOT_FOUND";
@@ -23,6 +24,73 @@ pub const CONVERSATION_ARCHIVED: &str = "CONVERSATION_ARCHIVED";
 pub const CONVERSATION_OWNERSHIP_MISMATCH: &str = "CONVERSATION_OWNERSHIP_MISMATCH";
 pub const TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE: &str =
     "application/vnd.insight.terminal-object.v1+json";
+
+/// Durable, private object reference used by terminal and Conversation
+/// metadata. The locator is frozen at write time so tenant-scoped S3 keys are
+/// never reconstructed from an HTTP parameter during reads or deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopedArtifactReference {
+    artifact: ArtifactRef,
+    locator: String,
+}
+
+impl ScopedArtifactReference {
+    pub fn new(artifact: ArtifactRef, locator: &StorageLocator) -> Self {
+        Self {
+            artifact,
+            locator: locator.expose_to_storage_adapter().to_owned(),
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, RepositoryError> {
+        let reference: Self =
+            serde_json::from_str(value).map_err(|_| RepositoryError::invalid_data())?;
+        StorageLocator::new(reference.locator.clone())?;
+        Ok(reference)
+    }
+
+    pub fn artifact(&self) -> &ArtifactRef {
+        &self.artifact
+    }
+
+    pub fn locator(&self) -> Result<StorageLocator, RepositoryError> {
+        StorageLocator::new(self.locator.clone())
+    }
+}
+
+/// Converts a Run result into the canonical assistant Message content shape.
+/// Provider/business outputs may be scalars or objects, while Conversation
+/// history always remains a list of protocol content parts.
+pub fn canonical_assistant_message_content(output: &Value) -> Result<Value, RepositoryError> {
+    if let Value::Array(parts) = output {
+        let canonical = !parts.is_empty()
+            && parts.iter().all(|part| {
+                part.as_object().is_some_and(|part| {
+                    part.len() == 1 && part.get("text").is_some_and(Value::is_string)
+                })
+            });
+        if canonical {
+            return Ok(output.clone());
+        }
+    }
+    let text = output
+        .as_str()
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            output.as_object().and_then(|object| {
+                (object.len() == 1)
+                    .then(|| object.get("text").and_then(Value::as_str))
+                    .flatten()
+                    .map(ToOwned::to_owned)
+            })
+        })
+        .map(Ok)
+        .unwrap_or_else(|| {
+            serde_jcs::to_string(output).map_err(|_| RepositoryError::invalid_data())
+        })?;
+    Ok(serde_json::json!([{"text": text}]))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeOwner {
@@ -77,6 +145,7 @@ pub struct AdmissionConversation {
 pub struct NewTerminalRunAdmission {
     pub run_id: RunId,
     pub tenant_id: String,
+    pub admission_id: String,
     pub request_id: String,
     pub agent_id: String,
     pub definition_revision_id: DefinitionRevisionId,
@@ -85,6 +154,10 @@ pub struct NewTerminalRunAdmission {
     pub input_ref: Option<String>,
     pub input_hash: ContentHash,
     pub selected_context_hash: Option<ContentHash>,
+    pub file_bindings: Vec<crate::RunFileBinding>,
+    /// Current user-message files. This is a subset of `file_bindings`; the
+    /// remainder may originate from platform-managed Conversation history.
+    pub conversation_file_ids: Vec<String>,
     /// Mutable public-route evidence frozen by the runtime and rechecked in
     /// the same transaction that admits a terminal-only Run. Exact admin or
     /// recovery admissions leave this absent intentionally.
@@ -101,6 +174,7 @@ pub struct NewTerminalRunAdmission {
 pub struct TerminalRunAdmission {
     pub run_id: RunId,
     pub tenant_id: String,
+    pub admission_id: String,
     pub request_id: String,
     pub agent_id: String,
     pub definition_revision_id: DefinitionRevisionId,
@@ -226,7 +300,7 @@ pub struct TerminalRunQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalRunRequestQuery {
     pub tenant_id: String,
-    pub request_id: String,
+    pub admission_id: String,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -359,7 +433,7 @@ pub struct ConversationTurnOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FullConversationTurnQuery {
     pub tenant_id: String,
-    pub request_id: String,
+    pub admission_id: String,
     pub conversation_id: String,
     pub user_id: String,
 }
@@ -813,7 +887,7 @@ pub trait ConversationStore: Send + Sync {
     ) -> Result<Option<ConversationTurnOutcome>, RepositoryError>;
 
     /// Loads an idempotent full-persistence Conversation turn by its
-    /// tenant-scoped request identity.
+    /// tenant-scoped idempotency identity.
     async fn get_full_conversation_turn(
         &self,
         query: FullConversationTurnQuery,

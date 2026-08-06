@@ -729,6 +729,9 @@ impl GraphCompiler {
                             ContentPart::ImageUrl(ImageUrlContent::ValueRef(path)) => {
                                 image.insert(path.source());
                             }
+                            ContentPart::Attachments(path) => {
+                                required.insert(path.source());
+                            }
                             ContentPart::Text(TextContent::Template(template)) => {
                                 let template = compile_template(&template.source).map_err(|_| {
                                     CompileError::new(
@@ -829,6 +832,16 @@ impl GraphCompiler {
                                     return Err(CompileError::new(
                                         INVALID_TYPE,
                                         "image_url reference must have string or string|null type",
+                                    ));
+                                }
+                            }
+                            ContentPart::Attachments(reference) => {
+                                let resolved =
+                                    self.resolve_reference(&reference.source(), environment)?;
+                                if !is_file_array(&resolved.value_type)? {
+                                    return Err(CompileError::new(
+                                        INVALID_TYPE,
+                                        "attachments reference must have File[] type",
                                     ));
                                 }
                             }
@@ -3568,20 +3581,20 @@ fn message_plan_type() -> Result<PlanType, CompileError> {
         )]),
         additional_properties: None,
     };
-    let image = PlanType::Object {
+    let file = PlanType::Object {
         properties: BTreeMap::from([(
-            "image_url".to_owned(),
-            PlanProperty::new(PlanType::String, true)
+            "file".to_owned(),
+            PlanProperty::new(file_ref_plan_type()?, true)
                 .map_err(|failure| CompileError::new(INVALID_TYPE, failure.to_string()))?,
         )]),
         additional_properties: None,
     };
     let content = PlanType::Array {
         items: Box::new(
-            PlanType::union([text, image])
+            PlanType::union([text, file])
                 .map_err(|failure| CompileError::new(INVALID_TYPE, failure.to_string()))?,
         ),
-        min_items: 0,
+        min_items: 1,
     };
     let variants = ["user", "assistant"].map(|role| -> Result<PlanType, CompileError> {
         Ok(PlanType::Object {
@@ -3604,11 +3617,52 @@ fn message_plan_type() -> Result<PlanType, CompileError> {
         .map_err(|failure| CompileError::new(INVALID_TYPE, failure.to_string()))
 }
 
+fn file_ref_plan_type() -> Result<PlanType, CompileError> {
+    Ok(PlanType::Object {
+        properties: BTreeMap::from([(
+            "file_id".to_owned(),
+            PlanProperty::new(PlanType::String, true)
+                .map_err(|failure| CompileError::new(INVALID_TYPE, failure.to_string()))?,
+        )]),
+        additional_properties: None,
+    })
+}
+
+fn file_plan_type() -> Result<PlanType, CompileError> {
+    let required_string = |name: &str| -> Result<(String, PlanProperty), CompileError> {
+        Ok((
+            name.to_owned(),
+            PlanProperty::new(PlanType::String, true)
+                .map_err(|failure| CompileError::new(INVALID_TYPE, failure.to_string()))?,
+        ))
+    };
+    Ok(PlanType::Object {
+        properties: BTreeMap::from([
+            required_string("file_id")?,
+            required_string("filename")?,
+            required_string("media_type")?,
+            (
+                "size_bytes".to_owned(),
+                PlanProperty::new(PlanType::Integer, true)
+                    .map_err(|failure| CompileError::new(INVALID_TYPE, failure.to_string()))?,
+            ),
+        ]),
+        additional_properties: None,
+    })
+}
+
 fn is_message_array(value_type: &PlanType) -> Result<bool, CompileError> {
     let Some((items, _, _)) = value_type.array_constraints() else {
         return Ok(false);
     };
     Ok(items == &message_plan_type()?)
+}
+
+fn is_file_array(value_type: &PlanType) -> Result<bool, CompileError> {
+    let Some((items, _, _)) = value_type.array_constraints() else {
+        return Ok(false);
+    };
+    Ok(items == &file_plan_type()?)
 }
 
 fn string_or_nullable_string(value_type: &PlanType) -> bool {
@@ -3784,6 +3838,20 @@ fn compile_message_program(contract: &LlmContract) -> DescriptorValue {
                                                 (
                                                     "kind".to_owned(),
                                                     DescriptorValue::String(kind.to_owned()),
+                                                ),
+                                            ]))
+                                        }
+                                        ContentPart::Attachments(value) => {
+                                            DescriptorValue::Object(BTreeMap::from([
+                                                (
+                                                    "attachments".to_owned(),
+                                                    DescriptorValue::String(value.source()),
+                                                ),
+                                                (
+                                                    "kind".to_owned(),
+                                                    DescriptorValue::String(
+                                                        "attachments_ref".to_owned(),
+                                                    ),
                                                 ),
                                             ]))
                                         }

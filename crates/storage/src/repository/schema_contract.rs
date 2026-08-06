@@ -9,7 +9,7 @@ use insight_engine::repository::RepositoryError;
 use super::RepositoryErrorExt as _;
 
 /// Opaque identity shared by the PostgreSQL and SQLite durable Schemas.
-pub const DURABLE_SCHEMA_CONTRACT_ID: &str = "durable-schema-a7d26783-48d3-4bce-b337-8e634fda99a3";
+pub const DURABLE_SCHEMA_CONTRACT_ID: &str = "durable-schema-bc893e0d-33b5-4a90-9aa3-1db4f6d17c87";
 
 pub const POSTGRES_SCHEMA_BACKEND: &str = "postgres";
 pub const SQLITE_SCHEMA_BACKEND: &str = "sqlite";

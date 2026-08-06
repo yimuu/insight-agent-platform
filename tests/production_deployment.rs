@@ -22,10 +22,10 @@ use insight_agent_platform::{
     engine::{
         plan::DescriptorValue, production_worker_registry_with_leaf_adapters,
         repository::PostgresDurableRepository, EffectEvidence, EffectIdempotency, LeafTaskExecutor,
-        LeafTaskKind, LlmTaskExecutor, LocalContentAddressedArtifactStore, PersistenceMode,
-        RuntimeValue, SchedulerTaskKind, SubflowContractRegistry, TaskExecutionRequest,
-        TaskExecutionResult, VersionTag, WorkerCancellation, WorkerEffectClass, WorkerEffectPolicy,
-        WorkerExecutionContext, WorkerExecutorRegistry, WorkerFailure,
+        LeafTaskKind, LlmTaskExecutor, PersistenceMode, RuntimeValue, SchedulerTaskKind,
+        SubflowContractRegistry, TaskExecutionRequest, TaskExecutionResult, VersionTag,
+        WorkerCancellation, WorkerEffectClass, WorkerEffectPolicy, WorkerExecutionContext,
+        WorkerExecutorRegistry, WorkerFailure,
     },
     history::types::{RunLifecycle, RunStatus},
     resources::{
@@ -79,12 +79,8 @@ fn service_config(pump_interval: Duration) -> RunServiceConfig {
 async fn shared_artifact_store(
     root: std::path::PathBuf,
     namespace: &str,
-) -> Arc<LocalContentAddressedArtifactStore> {
-    Arc::new(
-        LocalContentAddressedArtifactStore::open_shared(root, 64 * 1024, namespace)
-            .await
-            .unwrap(),
-    )
+) -> Arc<database::TestS3ArtifactStore> {
+    database::test_s3_artifact_store(root, 64 * 1024, namespace).await
 }
 
 async fn postgres_repository(

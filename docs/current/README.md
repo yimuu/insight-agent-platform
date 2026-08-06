@@ -10,6 +10,7 @@
 - [MCP 使用、运行与安全合同](mcp.md)
 - [Agent 与 Provider 管理面](management.md)
 - [部署与运维](operations.md)
+- [AgentInvocation 与 S3 clean-cut 迁移](migration-agent-invocation-s3.md)
 - [开发指南](development.md)
 
 当前行为由这些文档、公开 schema、compiler/verifier、数据库约束和测试共同定义。已完成的详细

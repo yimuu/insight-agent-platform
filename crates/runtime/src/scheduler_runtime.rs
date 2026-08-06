@@ -75,6 +75,7 @@ const MODEL_TOOL_RESULT_SCHEMA_INVALID: &str = "MODEL_TOOL_RESULT_SCHEMA_INVALID
 const MODEL_TOOL_PUBLIC_RESULT_INVALID: &str = "MODEL_TOOL_PUBLIC_RESULT_INVALID";
 const MODEL_TOOL_DEADLINE_EXCEEDED: &str = "WORKER_DEADLINE_EXCEEDED";
 const ARTIFACT_STAGING_GRACE_SECONDS: i64 = 3_600;
+const RUN_ARTIFACT_NAMESPACE: &str = "run-artifacts";
 const MODEL_TOOL_PROGRESS_QUEUE_CAPACITY: usize = 16;
 const MODEL_TOOL_PROGRESS_BURST: u32 = 8;
 const MODEL_TOOL_PROGRESS_WINDOW: StdDuration = StdDuration::from_secs(1);
@@ -2537,6 +2538,11 @@ async fn materialize_worker_success<R>(
 where
     R: SchedulerDurableRepository + ?Sized,
 {
+    let artifact_tenant = repository
+        .load_run_principal(claim.run_id())
+        .await?
+        .map(|principal| principal.tenant_id().to_owned())
+        .unwrap_or_else(|| "default".to_owned());
     let artifact_payloads = result.take_artifact_payloads();
     let mut referenced_artifacts = Vec::with_capacity(artifact_payloads.len());
     for payload in artifact_payloads {
@@ -2548,7 +2554,11 @@ where
             return Err(repository_invalid_data());
         }
         let artifact = payload.artifact().clone();
-        let locator = artifact_store.storage_locator(&artifact)?;
+        let locator = artifact_store.storage_locator_for_tenant(
+            RUN_ARTIFACT_NAMESPACE,
+            &artifact_tenant,
+            &artifact,
+        )?;
         let retain_until = claim
             .claim_expires_at()
             .checked_add_signed(chrono::Duration::seconds(ARTIFACT_STAGING_GRACE_SECONDS))
@@ -2562,7 +2572,7 @@ where
             repository.stage_artifact(StageArtifactCommand::new(
                 claim.run_id().clone(),
                 artifact.clone(),
-                locator,
+                locator.clone(),
                 Some(retain_until),
             )),
         )
@@ -2585,7 +2595,7 @@ where
             claim_seconds,
             heartbeat,
             deadline.as_mut(),
-            artifact_store.put_and_verify(&artifact, payload.bytes()),
+            artifact_store.put_and_verify_at(&artifact, &locator, payload.bytes()),
         )
         .await?
         {
@@ -2642,7 +2652,11 @@ where
             {
                 cached.clone()
             } else {
-                let locator = artifact_store.storage_locator(&artifact)?;
+                let locator = artifact_store.storage_locator_for_tenant(
+                    RUN_ARTIFACT_NAMESPACE,
+                    &artifact_tenant,
+                    &artifact,
+                )?;
                 let retain_until = claim
                     .claim_expires_at()
                     .checked_add_signed(chrono::Duration::seconds(ARTIFACT_STAGING_GRACE_SECONDS))
@@ -2650,7 +2664,7 @@ where
                 let stage = repository.stage_artifact(StageArtifactCommand::new(
                     claim.run_id().clone(),
                     artifact.clone(),
-                    locator,
+                    locator.clone(),
                     Some(retain_until),
                 ));
                 match await_worker_step(
@@ -2682,7 +2696,7 @@ where
                     claim_seconds,
                     heartbeat,
                     deadline.as_mut(),
-                    artifact_store.put_and_verify(&artifact, &bytes),
+                    artifact_store.put_and_verify_at(&artifact, &locator, &bytes),
                 )
                 .await?
                 {

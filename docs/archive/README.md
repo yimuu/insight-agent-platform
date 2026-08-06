@@ -18,6 +18,8 @@
 
 | 记录 | 状态 | 当前入口 |
 |---|---|---|
+| [Agent 调用、Conversation 与 S3 文件合同规范](specs/2026-08-05-agent-invocation-conversation-and-s3-files.md) | Implemented / qualified（2026-08-06） | [API](../current/api.md) / [DSL](../current/dsl.md) / [部署与运维](../current/operations.md) |
+| [AgentInvocation、Conversation 与 RustFS/S3 资格验收](qualifications/2026-08-06-agent-invocation-rustfs-s3-qualification.md) | Qualified（2026-08-06） | [资格记录](qualifications/2026-08-06-agent-invocation-rustfs-s3-qualification.md) |
 | [Agent 与 Provider 管理 Control Plane v1](specs/2026-08-01-agent-and-provider-management-control-plane.md) | Implemented / verified（2026-08-01） | [Agent 与 Provider 管理面](../current/management.md) |
 | [Agent 与 Provider 管理 Control Plane v1 资格验收](qualifications/2026-08-01-agent-provider-management-v1-qualification.md) | Qualified（2026-08-02 复验） | [Agent 与 Provider 管理面](../current/management.md) |
 | [MCP 管理 API v1 与显式导入规范](specs/2026-07-31-mcp-management-api-v1.md) | Implemented / verified（2026-07-31） | [MCP 当前合同](../current/mcp.md) |

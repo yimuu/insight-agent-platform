@@ -3,6 +3,11 @@ mod support;
 use std::{collections::BTreeSet, time::Duration as StdDuration};
 
 use chrono::{Duration, Utc};
+use insight_durable::{
+    AcknowledgeFileDeletionCommand, BoundConversationFilesQuery, BoundRunFilesQuery,
+    ClaimFileDeletionsCommand, CompleteFileCommand, CreateFileCommand, FileDurableRepository,
+    FileQuery, RunFileBinding,
+};
 use insight_engine::{
     repository::{REPOSITORY_CONSTRAINT_CONFLICT, REPOSITORY_DATA_INVALID},
     ContentHash, DefinitionRevisionId, DeploymentRevisionId, PersistenceMode, RunId,
@@ -107,6 +112,7 @@ fn admission(
     NewTerminalRunAdmission {
         run_id: run_id(label),
         tenant_id: tenant_id.to_owned(),
+        admission_id: request_id.to_owned(),
         request_id: request_id.to_owned(),
         agent_id: agent_id.to_owned(),
         definition_revision_id: DefinitionRevisionId::new(format!("definition_{label}")).unwrap(),
@@ -117,6 +123,8 @@ fn admission(
         selected_context_hash: Some(ContentHash::from_bytes(
             format!("context:{label}").as_bytes(),
         )),
+        file_bindings: Vec::new(),
+        conversation_file_ids: Vec::new(),
         expected_publication_head: None,
         expected_mcp_server_fences: Default::default(),
         expected_provider_fences: Default::default(),
@@ -180,7 +188,8 @@ where
     S: TerminalRunStore
         + ConversationStore
         + TerminalContentDeletionStore
-        + TerminalArtifactStagingStore,
+        + TerminalArtifactStagingStore
+        + FileDurableRepository,
 {
     let now = Utc::now();
     let tenant = format!("tenant_{label}");
@@ -557,12 +566,111 @@ where
         .await
         .unwrap());
 
+    let file_id = format!("file_{label}_conversation");
+    let file_query = FileQuery {
+        file_id: file_id.clone(),
+        tenant_id: tenant.clone(),
+        user_id: user.clone(),
+    };
+    store
+        .create_file(CreateFileCommand {
+            file_id: file_id.clone(),
+            tenant_id: tenant.clone(),
+            user_id: user.clone(),
+            filename: "scan.png".to_owned(),
+            media_type: "image/png".to_owned(),
+            expected_size_bytes: 8,
+            checksum_sha256: None,
+            object_key: format!("conversation-content/{label}/scan"),
+            idempotency_key: Some(format!("create_conversation_file_{label}")),
+            request_hash: format!("sha256:{}", "a".repeat(64)),
+            created_at: now,
+            upload_expires_at: now + Duration::hours(1),
+        })
+        .await
+        .unwrap();
+    store
+        .complete_file(CompleteFileCommand {
+            query: file_query.clone(),
+            actual_size_bytes: 8,
+            object_etag: format!("etag-{label}"),
+            object_version_id: Some(format!("version-{label}")),
+            ready_at: now,
+        })
+        .await
+        .unwrap();
+    let file_binding = RunFileBinding {
+        file_id: file_id.clone(),
+        tenant_id: tenant.clone(),
+        user_id: user.clone(),
+        filename: "scan.png".to_owned(),
+        media_type: "image/png".to_owned(),
+        size_bytes: 8,
+        object_etag: format!("etag-{label}"),
+        object_version_id: Some(format!("version-{label}")),
+    };
+
+    let rejected_user = message_inline(
+        &format!("{label}_rejected_file_identity"),
+        json!("must roll back"),
+        now,
+    );
+    let mut rejected_admission = admission(
+        &format!("{label}_rejected_file_identity"),
+        &tenant,
+        &format!("request_{label}_rejected_file_identity"),
+        &agent,
+        &owner,
+        now,
+        Some(AdmissionConversation {
+            conversation_id: conversation_id.clone(),
+            user_message_id: rejected_user.message_id.clone(),
+        }),
+    );
+    let mut wrong_binding = file_binding.clone();
+    wrong_binding.object_etag = "wrong-etag".to_owned();
+    rejected_admission.file_bindings = vec![wrong_binding];
+    rejected_admission.conversation_file_ids = vec![file_id.clone()];
+    let rejected_run_id = rejected_admission.run_id.clone();
+    assert_eq!(
+        store
+            .create_conversation_turn(NewConversationTurn {
+                user_id: user.clone(),
+                message: rejected_user,
+                admission: rejected_admission,
+            })
+            .await
+            .unwrap_err()
+            .code(),
+        REPOSITORY_CONSTRAINT_CONFLICT
+    );
+    assert!(store
+        .get_terminal_run(TerminalRunQuery {
+            tenant_id: tenant.clone(),
+            run_id: rejected_run_id,
+            observed_at: now,
+        })
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .page_conversation_messages(MessagePageQuery {
+            conversation: query.clone(),
+            before: None,
+            limit: 20,
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .messages
+        .is_empty());
+
     let first_user = message_ref(
         &format!("{label}_user_1"),
         &format!("object://messages/{label}/user-1"),
         now,
     );
-    let first_admission = admission(
+    let mut first_admission = admission(
         &format!("{label}_turn_1"),
         &tenant,
         &format!("request_{label}_turn_1"),
@@ -574,6 +682,8 @@ where
             user_message_id: first_user.message_id.clone(),
         }),
     );
+    first_admission.file_bindings = vec![file_binding.clone()];
+    first_admission.conversation_file_ids = vec![file_id.clone()];
     let first_turn = NewConversationTurn {
         user_id: user.clone(),
         message: first_user.clone(),
@@ -585,6 +695,45 @@ where
         .unwrap();
     assert!(!first_turn_outcome.replayed);
     assert_eq!(first_turn_outcome.user_message.role, ConversationRole::User);
+    assert_eq!(
+        store
+            .resolve_bound_run_files(BoundRunFilesQuery {
+                run_id: first_admission.run_id.as_str().to_owned(),
+                file_ids: vec![file_id.clone()],
+                observed_at: now,
+            })
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .resolve_bound_conversation_files(BoundConversationFilesQuery {
+                conversation_id: conversation_id.clone(),
+                tenant_id: tenant.clone(),
+                user_id: user.clone(),
+                file_ids: vec![file_id.clone()],
+                observed_at: now,
+            })
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    store
+        .begin_file_delete(file_query.clone(), now + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert!(store
+        .claim_file_deletions(ClaimFileDeletionsCommand {
+            observed_at: now + Duration::seconds(2),
+            claim_expires_at: now + Duration::minutes(1),
+            limit: 10,
+        })
+        .await
+        .unwrap()
+        .is_empty());
 
     let mut replay_turn = first_turn.clone();
     replay_turn.message.message_id = format!("message_{label}_retry_generated");
@@ -919,6 +1068,38 @@ where
             .is_none(),
         "privacy deletion must physically remove Conversation ownership metadata"
     );
+    assert!(store
+        .resolve_bound_conversation_files(BoundConversationFilesQuery {
+            conversation_id: conversation_id.clone(),
+            tenant_id: tenant.clone(),
+            user_id: user.clone(),
+            file_ids: vec![file_id.clone()],
+            observed_at: now + Duration::hours(1),
+        })
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .resolve_bound_run_files(BoundRunFilesQuery {
+                run_id: first_admission.run_id.as_str().to_owned(),
+                file_ids: vec![file_id.clone()],
+                observed_at: now + Duration::hours(1),
+            })
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "Conversation privacy deletion must not break the retained Run binding"
+    );
+    assert!(store
+        .claim_file_deletions(ClaimFileDeletionsCommand {
+            observed_at: now + Duration::hours(1),
+            claim_expires_at: now + Duration::hours(2),
+            limit: 10,
+        })
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(
         content.content_refs,
         vec![
@@ -1435,6 +1616,26 @@ where
         .collect(),
         "object-store output refs must be returned before bounded row deletion"
     );
+    let file_claim = store
+        .claim_file_deletions(ClaimFileDeletionsCommand {
+            observed_at: now + Duration::hours(7),
+            claim_expires_at: now + Duration::hours(8),
+            limit: 10,
+        })
+        .await
+        .unwrap()
+        .pop()
+        .expect("Run retention must release the final File binding");
+    assert_eq!(file_claim.file.file_id, file_id);
+    assert!(store
+        .acknowledge_file_deletion(AcknowledgeFileDeletionCommand {
+            file_id: file_claim.file.file_id,
+            claim_token: file_claim.claim_token,
+            deletion_fence: file_claim.deletion_fence,
+            deleted_at: now + Duration::hours(7),
+        })
+        .await
+        .unwrap());
     let run_retention_claims = store
         .claim_content_deletion_jobs(ClaimContentDeletionJobs {
             claimed_by: format!("run_retention_worker_{label}"),

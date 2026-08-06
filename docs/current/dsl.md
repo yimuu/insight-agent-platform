@@ -61,7 +61,7 @@ execution:
 
 ## 类型与输入
 
-内建基础类型包括 `string`、`integer`、`number`、`boolean`、`any` 和 `Message`。数组写成
+内建基础类型包括 `string`、`integer`、`number`、`boolean`、`any`、`Message` 和 `File`。数组写成
 `Type[]`，对象类型使用 `fields`：
 
 ```yaml
@@ -76,16 +76,29 @@ types:
         min_length: 1
 
 inputs:
+  query:
+    type: string
+    min_length: 1
   messages:
     type: Message[]
     default: []
-  image_url:
+  files:
+    type: File[]
+    default: []
+    max_items: 10
+  response_style:
     type: string
-    optional: true
+    enum: [concise, detailed]
+    default: concise
 ```
 
 字段可以使用 `enum`、`min_length`、`max_length`、`pattern`、`min_items` 等约束。作者不需要手写
 JSON Schema；compiler 会生成并执行输入、节点响应和最终输出校验。
+
+`query`、`messages`、`files` 是平台保留输入名，类型必须分别为 `string`、`Message[]`、`File[]`。
+HTTP 调用信封中的同名字段自动映射到它们；其余 DSL 输入从 `inputs` 对象按名称映射。作者不配置
+JSONPath、JSON Pointer 或 source mapping。`Message` 只允许 `user`/`assistant` role 以及有序的
+`{text}`/`{file:{file_id}}` part；`File` 只暴露安全 metadata，不包含 S3 key、credential 或 URL。
 
 ## 值与表达式
 
@@ -127,15 +140,18 @@ JSON Schema；compiler 会生成并执行输入、节点响应和最终输出校
     - $messages
     - role: user
       content:
-        - text: "Question: {{ question }}"
-        - image_url: $image_url
+        - text: $query
+        - attachments: $files
   parameters: {temperature: 0.2}
   response: Answer
 ```
 
 `stream` 控制 Provider 请求模式，`publish` 控制 provisional 内容是否进入 Attached 响应流；二者
 互相独立，最终结果始终按 `response` 类型验证。Prompt 可以用 `inline` 或相对 Agent 文件的 `file`
-声明，message 中的文本槽引用 Prompt 名称。
+声明，message 中的文本槽引用 Prompt 名称。`attachments` 只能出现在 user message，且必须引用
+`File[]`；运行时按数组顺序解析 Run 已冻结的 file binding，并依据 Deployment Revision 中的图片
+delivery policy 生成 Provider input。policy 是显式冻结的 `inline_data` 或 `presigned_url`；后者只适用于
+Provider 网络能够访问公开 S3 endpoint 的部署。模型不会收到 `file_id` 并自行访问 S3。
 
 `model` 必须是只包含 `provider` 与 `id` 的对象。`provider` 是小写 Provider route；`id` 是原样
 发送给该 Provider 的不透明模型 ID，可以包含 `/`。字符串形式的 `model: general_chat` 和

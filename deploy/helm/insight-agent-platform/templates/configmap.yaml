@@ -29,8 +29,8 @@
 {{- if le (int .Values.runtime.terminationGracePeriodSeconds) $shutdownHardSeconds }}
 {{- fail "runtime.terminationGracePeriodSeconds must exceed runtime.shutdownHardDeadline" }}
 {{- end }}
-{{- if and .Values.artifacts.tenantEncryption.enabled (empty .Values.artifacts.tenantEncryption.existingSecret) }}
-{{- fail "artifacts.tenantEncryption.existingSecret is required when tenant encryption is enabled" }}
+{{- if empty .Values.objectStorage.credentials.existingSecret }}
+{{- fail "objectStorage.credentials.existingSecret is required" }}
 {{- end }}
 {{- if and .Values.mcp.secretEncryption.enabled (empty .Values.mcp.secretEncryption.existingSecret) }}
 {{- fail "mcp.secretEncryption.existingSecret is required when MCP secret encryption is enabled" }}
@@ -102,6 +102,9 @@
 {{- end }}
 {{- if and (not .Values.qualification.enabled) (or (ne (int .Values.runtime.qualificationFaults.admissionDelayMs) 0) (ne (int .Values.runtime.qualificationFaults.postCommitDelayMs) 0) (ne (int .Values.runtime.qualificationFaults.summaryDelayMs) 0)) }}
 {{- fail "runtime.qualificationFaults require qualification.enabled=true" }}
+{{- end }}
+{{- if not (has .Values.objectStorage.llmAttachmentDelivery (list "inline_data" "presigned_url")) }}
+{{- fail "objectStorage.llmAttachmentDelivery must be inline_data or presigned_url" }}
 {{- end }}
 {{- if or (lt (int .Values.conversations.inlineContentMaxBytes) 256) (gt (int .Values.conversations.inlineContentMaxBytes) 1048576) }}
 {{- fail "conversations.inlineContentMaxBytes must be between 256 and 1048576" }}
@@ -333,16 +336,33 @@ data:
       database_url_env: RUN_HISTORY_POSTGRES_URL
       max_connections: {{ .Values.runtime.databasePoolMaxConnections }}
 
+    object_storage:
+      llm_attachment_delivery: {{ .Values.objectStorage.llmAttachmentDelivery | quote }}
+      s3:
+        endpoint: {{ .Values.objectStorage.endpoint | quote }}
+        public_endpoint: {{ .Values.objectStorage.publicEndpoint | quote }}
+        region: {{ .Values.objectStorage.region | quote }}
+        bucket: {{ .Values.objectStorage.bucket | quote }}
+        force_path_style: {{ .Values.objectStorage.forcePathStyle }}
+        access_key_env: S3_ACCESS_KEY
+        secret_key_env: S3_SECRET_KEY
+        connect_timeout: {{ .Values.objectStorage.connectTimeout | quote }}
+        request_timeout: {{ .Values.objectStorage.requestTimeout | quote }}
+        presign_upload_ttl: {{ .Values.objectStorage.presignUploadTtl | quote }}
+        presign_download_ttl: {{ .Values.objectStorage.presignDownloadTtl | quote }}
+        allow_insecure_internal_endpoint: {{ .Values.objectStorage.allowInsecureInternalEndpoint }}
+      limits:
+        max_file_bytes: {{ int .Values.objectStorage.limits.maxFileBytes }}
+        max_files_per_invocation: {{ int .Values.objectStorage.limits.maxFilesPerInvocation }}
+        max_total_file_bytes_per_invocation: {{ int .Values.objectStorage.limits.maxTotalFileBytesPerInvocation }}
+        pending_upload_ttl: {{ .Values.objectStorage.limits.pendingUploadTtl | quote }}
+      gc:
+        interval: {{ .Values.objectStorage.gc.interval | quote }}
+        deletion_claim_seconds: {{ int .Values.objectStorage.gc.deletionClaimSeconds }}
+
     artifacts:
-      provider: shared_filesystem
       namespace: {{ .Values.artifacts.namespace | quote }}
-      directory: {{ .Values.artifacts.mountPath | quote }}
       inline_threshold_bytes: 65536
-      {{- if .Values.artifacts.tenantEncryption.enabled }}
-      tenant_encryption:
-        active_key_version: {{ .Values.artifacts.tenantEncryption.activeKeyVersion | quote }}
-        keyring_env: INSIGHT_ARTIFACT_TENANT_KEYRING
-      {{- end }}
       max_read_bytes: 67108864
       orphan_retention: 1h
       reference_retention: 1d

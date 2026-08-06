@@ -1424,7 +1424,13 @@ fn decode_content_part(value: &Value) -> ReductionResult<Value> {
         };
         return Ok(json!({"image_url": image}));
     }
-    Err("message content part has no text or image_url".to_owned())
+    if let Some(attachments) = object.get("attachments").and_then(Value::as_str) {
+        if kind != "attachments_ref" {
+            return Err(format!("unsupported attachments content kind '{kind}'"));
+        }
+        return Ok(json!({"attachments": format!("${attachments}")}));
+    }
+    Err("message content part has no text, image_url, or attachments".to_owned())
 }
 
 fn exactly_one<T>(values: impl IntoIterator<Item = T>, label: &str) -> ReductionResult<T> {

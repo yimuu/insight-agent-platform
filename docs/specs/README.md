@@ -15,6 +15,10 @@
 
 最近完成的规范：
 
+- [Agent 调用、Conversation 与 S3 文件合同规范](../archive/specs/2026-08-05-agent-invocation-conversation-and-s3-files.md)：
+  已交付 `query/messages/files/inputs` 调用信封、无会话 Run、平台托管 Conversation、File Service、
+  S3-only Artifact、图片附件、引用生命周期，并通过
+  [真实 RustFS/S3 资格验收](../archive/qualifications/2026-08-06-agent-invocation-rustfs-s3-qualification.md)；
 - [Run Stream 可插拔实时消息总线与 NATS Core 优化](../archive/specs/2026-08-02-pluggable-run-stream-bus-and-nats-core.md)：
   已将 PostgreSQL 限定为 durable authority，clean-cut 删除 Run Stream `postgres_notify` backend，
   为当前单 Runtime 交付 `in_memory`，为跨 Runtime fan-out 交付 Core NATS，并通过零 per-SSE

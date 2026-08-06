@@ -460,9 +460,12 @@ fn linker_rejects_image_messages_for_a_text_only_model() {
                 },
             )
             .unwrap();
+        let resolver = ProductionLeafDeploymentResolver::new(&models, &actions)
+            .with_inline_llm_attachments(1024 * 1024, 2 * 1024 * 1024, 10)
+            .unwrap();
         let result = DeployedAgent::publish(
             Arc::clone(&published),
-            &ProductionLeafDeploymentResolver::new(&models, &actions),
+            &resolver,
             SubflowContractRegistry::new(),
         );
         match expected_error {

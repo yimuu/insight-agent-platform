@@ -148,7 +148,7 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .collect::<BTreeSet<_>>();
     assert_eq!(
         tables.len(),
-        115,
+        118,
         "the complete table contract must install"
     );
     for table in [
@@ -164,6 +164,9 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
         "wait_late_audit_outbox",
         "workflow_retrieval_publications",
         "full_conversation_turns",
+        "run_principals",
+        "files",
+        "file_bindings",
         "terminal_runtime_instances",
         "terminal_artifact_staging",
         "terminal_content_deletion_jobs",

@@ -1,15 +1,15 @@
-use std::{error::Error, ffi::OsStr, future::IntoFuture, io, sync::Arc};
+use std::{error::Error, ffi::OsStr, future::IntoFuture, io, sync::Arc, time::Duration};
 
 use insight_agent_platform::{
     catalog::{OwnedProductionLeafDeploymentResolver, TerminalOnlyDeploymentConfig},
     config::{
-        ArtifactStoreProvider, DebugExecutionProfileMode, DeploymentMode, HistoryConfig,
-        LiveRunStreamBrokerConfig, PlatformConfig, RunStreamConfig, RunStreamTopology,
+        DebugExecutionProfileMode, DeploymentMode, HistoryConfig, LiveRunStreamBrokerConfig,
+        LlmAttachmentDeliveryConfig, PlatformConfig, RunStreamConfig, RunStreamTopology,
     },
     engine::{
-        production_worker_registry_with_live_run_stream_and_retrievals,
+        production_worker_registry_with_live_run_stream_retrievals_and_files,
         repository::{PostgresDurableRepository, SqliteDurableRepository},
-        LocalContentAddressedArtifactStore, TenantArtifactEncryptionKeyring, WorkerArtifactStore,
+        WorkerArtifactStore,
     },
     resources::{
         builtin_actions::{builtin_action_registry, RestrictedHttpGetAction},
@@ -43,21 +43,27 @@ use insight_api::mcp::{
     McpHttpAuthorizer, McpHttpService, OAuthResourceServerAuthorizer,
 };
 use insight_api::v1::{
-    build_agent_management_router, build_mcp_catalog_router, build_mcp_management_router,
-    build_provider_management_router, build_router, AgentDebugProfileMode, AgentDebugProfilePolicy,
-    AgentManagementApiState, AgentManagementPolicy, ApiAuth, ApiState,
-    BearerHumanPrincipalResolver, McpCatalogApiState, McpCatalogRegistry, McpManagementApiState,
-    McpManagementPolicy, McpManifestSignerPolicy, McpOAuthRegistry, McpProfileReport, OperatorAuth,
-    ProviderManagementApiState, ProviderManagementPolicy, ProviderTemplate,
+    build_agent_management_router, build_file_router, build_mcp_catalog_router,
+    build_mcp_management_router, build_provider_management_router, build_router,
+    AgentDebugProfileMode, AgentDebugProfilePolicy, AgentManagementApiState, AgentManagementPolicy,
+    ApiAuth, ApiState, BearerHumanPrincipalResolver, FileApiState, McpCatalogApiState,
+    McpCatalogRegistry, McpManagementApiState, McpManagementPolicy, McpManifestSignerPolicy,
+    McpOAuthRegistry, McpProfileReport, OperatorAuth, ProviderManagementApiState,
+    ProviderManagementPolicy, ProviderTemplate,
 };
 use insight_api::v1::{build_router_with_mcp, McpOAuthApiState};
 use insight_durable::{
-    AgentManagementDurableRepository, McpInteractionDurableRepository,
+    AgentManagementDurableRepository, FileDurableRepository, McpInteractionDurableRepository,
     McpManagementDurableRepository, McpOAuthDurableRepository, McpRemoteTaskDurableRepository,
     McpSecretProtector, McpServerTaskDurableRepository, ProviderManagementDurableRepository,
 };
 use insight_mcp::McpServerDispatcher;
+use insight_runtime::{RuntimeReadinessProbe, ServiceError};
 use insight_storage::mcp_secret::McpSecretEncryptionKeyring;
+use insight_storage::{
+    file_service::{FileService, FileServiceConfig},
+    s3_storage::{S3Storage, S3StorageConfig},
+};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
@@ -69,6 +75,30 @@ const RUNTIME_POSTGRES_APPLICATION_NAME: &str = "insight-agent-platform-runtime"
 const QUALIFICATION_ENABLED_ENV: &str = "INSIGHT_QUALIFICATION_ENABLED";
 const QUALIFICATION_SELF_ABORT_HANDOFF_DELAY: std::time::Duration =
     std::time::Duration::from_millis(250);
+
+struct S3RuntimeReadiness {
+    storage: Arc<S3Storage>,
+}
+
+#[async_trait::async_trait]
+impl RuntimeReadinessProbe for S3RuntimeReadiness {
+    async fn check_readiness(&self, timeout: std::time::Duration) -> Result<(), ServiceError> {
+        tokio::time::timeout(timeout, self.storage.check_readiness())
+            .await
+            .map_err(|_| {
+                ServiceError::new(
+                    "OBJECT_STORAGE_UNAVAILABLE",
+                    "object storage readiness timed out",
+                )
+            })?
+            .map_err(|_| {
+                ServiceError::new(
+                    "OBJECT_STORAGE_UNAVAILABLE",
+                    "object storage is unavailable",
+                )
+            })
+    }
+}
 
 #[tokio::main]
 async fn main() -> MainResult<()> {
@@ -90,6 +120,7 @@ async fn main() -> MainResult<()> {
         mcp_management,
         provider_management,
         agent_management,
+        file_repository,
     ) = initialize_repository(&config.history).await?;
     let live_run_stream_broker = initialize_live_run_stream(&config.runtime.run_stream).await?;
     let mcp_policy_material = mcp_management_policy_material(
@@ -199,16 +230,38 @@ async fn main() -> MainResult<()> {
     .await
     .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
 
-    let graph_publication_resolver = Arc::new(
-        OwnedProductionLeafDeploymentResolver::new(&models, &actions)
-            .with_retrievals(&retrievals)
-            .with_llm_tool_continuation_capability()
-            .with_operation_timeout(config.runtime.operation_timeout)?
-            .with_llm_tool_limits(
-                config.runtime.max_llm_tool_rounds,
-                config.runtime.max_llm_tool_calls,
-            )?,
-    );
+    let resolver = OwnedProductionLeafDeploymentResolver::new(&models, &actions)
+        .with_retrievals(&retrievals)
+        .with_llm_tool_continuation_capability()
+        .with_operation_timeout(config.runtime.operation_timeout)?
+        .with_llm_tool_limits(
+            config.runtime.max_llm_tool_rounds,
+            config.runtime.max_llm_tool_calls,
+        )?;
+    let max_images =
+        u32::try_from(config.object_storage.limits.max_files_per_invocation).unwrap_or(100);
+    let resolver = match config.object_storage.llm_attachment_delivery {
+        LlmAttachmentDeliveryConfig::InlineData => resolver.with_inline_llm_attachments(
+            config.object_storage.limits.max_file_bytes.min(512 * 1_024),
+            config
+                .object_storage
+                .limits
+                .max_total_file_bytes_per_invocation
+                // Base64 expands by 4/3 and the Provider request also carries
+                // prompts/schema. Keep the frozen payload under 1 MiB.
+                .min(640 * 1_024),
+            max_images,
+        )?,
+        LlmAttachmentDeliveryConfig::PresignedUrl => resolver.with_presigned_llm_attachments(
+            config.object_storage.limits.max_file_bytes,
+            config
+                .object_storage
+                .limits
+                .max_total_file_bytes_per_invocation,
+            max_images,
+        )?,
+    };
+    let graph_publication_resolver = Arc::new(resolver);
     let terminal_execution_budget = config
         .runtime
         .terminal_only
@@ -224,68 +277,50 @@ async fn main() -> MainResult<()> {
     // RunService restores exact durable Deployment archives and current heads
     // during startup. File Agents no longer create process-local public routes.
     let agents = DeployedAgentCatalog::new(Vec::new())?;
-    let workers = production_worker_registry_with_live_run_stream_and_retrievals(
+    let access_key = required_process_secret(&config.object_storage.s3.access_key_env)?;
+    let secret_key = required_process_secret(&config.object_storage.s3.secret_key_env)?;
+    let s3_storage = Arc::new(S3Storage::new(S3StorageConfig {
+        endpoint: config.object_storage.s3.endpoint.clone(),
+        public_endpoint: config.object_storage.s3.public_endpoint.clone(),
+        region: config.object_storage.s3.region.clone(),
+        bucket: config.object_storage.s3.bucket.clone(),
+        force_path_style: config.object_storage.s3.force_path_style,
+        access_key,
+        secret_key,
+        connect_timeout: config.object_storage.s3.connect_timeout,
+        request_timeout: config.object_storage.s3.request_timeout,
+        presign_upload_ttl: config.object_storage.s3.presign_upload_ttl,
+        presign_download_ttl: config.object_storage.s3.presign_download_ttl,
+        artifact_namespace: config.artifacts.namespace.clone(),
+        artifact_inline_threshold_bytes: config.artifacts.inline_threshold_bytes,
+    })?);
+    s3_storage.check_readiness().await?;
+    let artifact_store: Arc<dyn WorkerArtifactStore> = s3_storage.clone();
+    let file_service = Arc::new(FileService::new(
+        file_repository,
+        Arc::clone(&s3_storage),
+        FileServiceConfig {
+            max_file_bytes: config.object_storage.limits.max_file_bytes,
+            max_files_per_invocation: config.object_storage.limits.max_files_per_invocation,
+            max_total_file_bytes_per_invocation: config
+                .object_storage
+                .limits
+                .max_total_file_bytes_per_invocation,
+            pending_upload_ttl: config.object_storage.limits.pending_upload_ttl,
+            deletion_claim_ttl: Duration::from_secs(u64::from(
+                config.object_storage.gc.deletion_claim_seconds,
+            )),
+        },
+    )?);
+    let workers = production_worker_registry_with_live_run_stream_retrievals_and_files(
         &models,
         &actions,
         &retrievals,
         Arc::clone(&live_run_stream_broker),
+        file_service.clone(),
     )?;
-    let tenant_encryption = config
-        .artifacts
-        .tenant_encryption
-        .as_ref()
-        .map(|encryption| {
-            TenantArtifactEncryptionKeyring::from_secret_json(
-                encryption.active_key_version.clone(),
-                encryption.keyring.expose(),
-            )
-        })
-        .transpose()?;
-    let artifact_store: Arc<dyn WorkerArtifactStore> =
-        Arc::new(match (config.artifacts.provider, tenant_encryption) {
-            (ArtifactStoreProvider::LocalFilesystem, None) => {
-                LocalContentAddressedArtifactStore::open(
-                    config.artifacts.directory.clone(),
-                    config.artifacts.inline_threshold_bytes,
-                )
-                .await?
-            }
-            (ArtifactStoreProvider::LocalFilesystem, Some(encryption)) => {
-                LocalContentAddressedArtifactStore::open_with_tenant_encryption(
-                    config.artifacts.directory.clone(),
-                    config.artifacts.inline_threshold_bytes,
-                    encryption,
-                )
-                .await?
-            }
-            (ArtifactStoreProvider::SharedFilesystem, encryption) => {
-                let namespace = config.artifacts.namespace.clone().ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "shared Artifact namespace is missing",
-                    )
-                })?;
-                match encryption {
-                    Some(encryption) => {
-                        LocalContentAddressedArtifactStore::open_shared_with_tenant_encryption(
-                            config.artifacts.directory.clone(),
-                            config.artifacts.inline_threshold_bytes,
-                            namespace,
-                            encryption,
-                        )
-                        .await?
-                    }
-                    None => {
-                        LocalContentAddressedArtifactStore::open_shared(
-                            config.artifacts.directory.clone(),
-                            config.artifacts.inline_threshold_bytes,
-                            namespace,
-                        )
-                        .await?
-                    }
-                }
-            }
-        });
+    let mut file_gc =
+        FileGcRuntime::start(Arc::clone(&file_service), config.object_storage.gc.interval);
     let service_config = match config.deployment_mode {
         DeploymentMode::Production => RunServiceConfig::production(
             config.runtime.max_concurrent_runs,
@@ -346,6 +381,10 @@ async fn main() -> MainResult<()> {
         service_config,
     )
     .await?;
+    service.add_readiness_probe(Arc::new(S3RuntimeReadiness {
+        storage: Arc::clone(&s3_storage),
+    }))?;
+    service.set_file_admission_authority(file_service.clone())?;
     service.set_mcp_run_admission_authority(Arc::new(DurableMcpRunAdmissionAuthority::new(
         Arc::clone(&mcp_management),
         mcp_policy_material.clone(),
@@ -446,6 +485,10 @@ async fn main() -> MainResult<()> {
         ),
         None => build_router(api_state),
     };
+    app = app.merge(build_file_router(FileApiState {
+        auth: api_auth.clone(),
+        service: file_service,
+    }));
     if config.management.enabled {
         let operator_auth = OperatorAuth::new(config.management.operator_credentials.iter().map(
             |credential| {
@@ -806,6 +849,7 @@ async fn main() -> MainResult<()> {
             management_observability.shutdown().await;
             mcp_oauth_maintenance.shutdown().await;
             mcp_server_task_maintenance.shutdown().await;
+            file_gc.shutdown().await;
             service.shutdown(config.runtime.shutdown_grace_period).await?;
             result?;
             Err(io::Error::other("HTTP server stopped before a shutdown signal").into())
@@ -822,6 +866,7 @@ async fn main() -> MainResult<()> {
             management_observability.shutdown().await;
             mcp_oauth_maintenance.shutdown().await;
             mcp_server_task_maintenance.shutdown().await;
+            file_gc.shutdown().await;
             tokio::time::timeout(config.runtime.shutdown_hard_deadline, async {
                 service.shutdown(config.runtime.shutdown_grace_period).await?;
                 (&mut server).await?;
@@ -840,6 +885,7 @@ async fn main() -> MainResult<()> {
             provider_management_runtime.shutdown().await;
             agent_debug_maintenance.shutdown().await;
             management_observability.shutdown().await;
+            file_gc.shutdown().await;
             self_abort?;
             tracing::error!(
                 code = "QUALIFICATION_SELF_ABORT",
@@ -851,6 +897,43 @@ async fn main() -> MainResult<()> {
             // the previous-container log marker.
             tokio::time::sleep(QUALIFICATION_SELF_ABORT_HANDOFF_DELAY).await;
             std::process::abort();
+        }
+    }
+}
+
+struct FileGcRuntime {
+    cancellation: CancellationToken,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl FileGcRuntime {
+    fn start(service: Arc<FileService>, interval: Duration) -> Self {
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = task_cancellation.cancelled() => break,
+                    _ = ticker.tick() => {
+                        if let Err(error) = service.gc_once(100).await {
+                            tracing::warn!(code = error.code(), "file garbage collection cycle failed");
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            cancellation,
+            handle: Some(handle),
+        }
+    }
+
+    async fn shutdown(&mut self) {
+        self.cancellation.cancel();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
         }
     }
 }
@@ -1185,6 +1268,7 @@ async fn initialize_repository(
     Arc<dyn McpManagementDurableRepository>,
     Arc<dyn ProviderManagementDurableRepository>,
     Arc<dyn AgentManagementDurableRepository>,
+    Arc<dyn FileDurableRepository>,
 )> {
     match config {
         HistoryConfig::Sqlite { path } => {
@@ -1198,7 +1282,8 @@ async fn initialize_repository(
             let mcp_management: Arc<dyn McpManagementDurableRepository> = concrete.clone();
             let provider_management: Arc<dyn ProviderManagementDurableRepository> =
                 concrete.clone();
-            let agent_management: Arc<dyn AgentManagementDurableRepository> = concrete;
+            let agent_management: Arc<dyn AgentManagementDurableRepository> = concrete.clone();
+            let file_repository: Arc<dyn FileDurableRepository> = concrete;
             Ok((
                 repository,
                 terminal_store,
@@ -1209,6 +1294,7 @@ async fn initialize_repository(
                 mcp_management,
                 provider_management,
                 agent_management,
+                file_repository,
             ))
         }
         HistoryConfig::Postgres {
@@ -1231,7 +1317,8 @@ async fn initialize_repository(
             let mcp_management: Arc<dyn McpManagementDurableRepository> = concrete.clone();
             let provider_management: Arc<dyn ProviderManagementDurableRepository> =
                 concrete.clone();
-            let agent_management: Arc<dyn AgentManagementDurableRepository> = concrete;
+            let agent_management: Arc<dyn AgentManagementDurableRepository> = concrete.clone();
+            let file_repository: Arc<dyn FileDurableRepository> = concrete;
             Ok((
                 production,
                 terminal_store,
@@ -1242,6 +1329,7 @@ async fn initialize_repository(
                 mcp_management,
                 provider_management,
                 agent_management,
+                file_repository,
             ))
         }
     }
@@ -1305,6 +1393,23 @@ async fn initialize_live_run_stream(
 fn runtime_postgres_url(database_url: &str) -> String {
     let separator = if database_url.contains('?') { '&' } else { '?' };
     format!("{database_url}{separator}application_name={RUNTIME_POSTGRES_APPLICATION_NAME}")
+}
+
+fn required_process_secret(name: &str) -> MainResult<String> {
+    let value = std::env::var(name).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("required object storage secret environment variable '{name}' is missing"),
+        )
+    })?;
+    if value.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("required object storage secret environment variable '{name}' is empty"),
+        )
+        .into());
+    }
+    Ok(value)
 }
 
 fn init_tracing() {

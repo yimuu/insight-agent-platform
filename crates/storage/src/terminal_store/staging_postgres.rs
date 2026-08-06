@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use insight_engine::{
     repository::{RepositoryError, REPOSITORY_CONSTRAINT_CONFLICT},
-    ArtifactRef, ContentHash,
+    ContentHash,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
@@ -31,8 +31,7 @@ fn validate_stage(command: &NewTerminalArtifactStage) -> Result<ArtifactRef, Rep
     if command.available_at < command.created_at {
         return Err(invalid_data());
     }
-    let artifact: ArtifactRef =
-        serde_json::from_str(&command.content_ref).map_err(|_| invalid_data())?;
+    let artifact = artifact_from_content_ref(&command.content_ref)?;
     if artifact.content_hash() != &command.content_hash
         || artifact.media_type() != Some(TERMINAL_SCOPED_ARTIFACT_MEDIA_TYPE)
     {
@@ -116,7 +115,7 @@ pub(crate) async fn consume_terminal_artifact_stage(
     source_kind: TerminalArtifactSourceKind,
     source_id: &str,
 ) -> Result<(), RepositoryError> {
-    let Ok(artifact) = serde_json::from_str::<ArtifactRef>(content_ref) else {
+    let Ok(artifact) = artifact_from_content_ref(content_ref) else {
         // Pre-staging terminal metadata used opaque adapter-specific refs.
         // Only the closed scoped ArtifactRef contract requires staging.
         return Ok(());

@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 
 use insight_agent_platform::{
     config::{
-        ArtifactStoreProvider, AuthConfig, DeploymentMode, HistoryConfig,
-        LiveRunStreamBrokerConfig, McpInteractionConfig, ModelInputModality, PlatformConfig,
+        AuthConfig, DeploymentMode, HistoryConfig, LiveRunStreamBrokerConfig,
+        LlmAttachmentDeliveryConfig, McpInteractionConfig, ModelInputModality, PlatformConfig,
         PlatformConfigError, ProviderExtensionSource, ProviderTransportPolicy, RunStreamTopology,
     },
     engine::PersistenceMode,
@@ -504,17 +504,9 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
             path: directory.path().join("data/history.sqlite3")
         }
     );
-    assert_eq!(
-        config.artifacts.directory,
-        directory.path().join("data/artifacts")
-    );
     assert_eq!(config.artifacts.inline_threshold_bytes, 64 * 1024);
     assert_eq!(config.artifacts.max_read_bytes, 64 * 1024 * 1024);
-    assert_eq!(
-        config.artifacts.provider,
-        ArtifactStoreProvider::LocalFilesystem
-    );
-    assert_eq!(config.artifacts.namespace, None);
+    assert_eq!(config.artifacts.namespace, "development");
     assert_eq!(
         config.artifacts.orphan_retention,
         Duration::from_secs(86_400)
@@ -525,6 +517,10 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
     );
     assert_eq!(config.artifacts.gc_interval, Duration::from_secs(60));
     assert_eq!(config.artifacts.deletion_claim_seconds, 60);
+    assert_eq!(
+        config.object_storage.llm_attachment_delivery,
+        LlmAttachmentDeliveryConfig::InlineData
+    );
     assert!(config.conversations.enabled);
     assert_eq!(config.conversations.inline_content_max_bytes, 8_192);
     assert_eq!(config.conversations.message_page_size_default, 50);
@@ -534,6 +530,27 @@ fn relative_agent_model_and_history_paths_resolve_from_platform_parent() {
     assert_eq!(config.conversations.recent_context_messages, 20);
     assert_eq!(config.conversations.retention_days, 90);
     assert_eq!(config.runtime.terminal_only.run_retention_days, 30);
+}
+
+#[test]
+fn llm_attachment_delivery_is_explicit_closed_and_defaults_to_inline() {
+    let object_storage = "object_storage:\n  llm_attachment_delivery: presigned_url\n  s3:\n    endpoint: http://127.0.0.1:9000\n    public_endpoint: https://files.example.com\n    region: us-east-1\n    bucket: platform\n    force_path_style: true\n    access_key_env: S3_ACCESS_KEY\n    secret_key_env: S3_SECRET_KEY\nruntime:";
+    let yaml = base_yaml("  mode: disabled").replace("runtime:", object_storage);
+    let (_directory, path) = write_config(&yaml);
+    assert_eq!(
+        load(&path, BTreeMap::new())
+            .unwrap()
+            .object_storage
+            .llm_attachment_delivery,
+        LlmAttachmentDeliveryConfig::PresignedUrl
+    );
+
+    let invalid = yaml.replace("presigned_url", "automatic");
+    let (_directory, path) = write_config(&invalid);
+    assert_eq!(
+        load(&path, BTreeMap::new()).unwrap_err().code(),
+        "PLATFORM_CONFIG_INVALID"
+    );
 }
 
 #[test]
@@ -838,14 +855,11 @@ fn persistence_environment_values_are_strict_and_share_yaml_bounds() {
 fn artifact_store_policy_is_strict_resolved_and_bounded() {
     let explicit = base_yaml("  mode: disabled").replace(
         "runtime:",
-        "artifacts:\n  provider: local_filesystem\n  directory: objects\n  inline_threshold_bytes: 1024\n  max_read_bytes: 4096\n  orphan_retention: 2h\n  reference_retention: 7d\n  gc_interval: 15s\n  deletion_claim_seconds: 30\nruntime:",
+        "artifacts:\n  namespace: test\n  inline_threshold_bytes: 1024\n  max_read_bytes: 4096\n  orphan_retention: 2h\n  reference_retention: 7d\n  gc_interval: 15s\n  deletion_claim_seconds: 30\nruntime:",
     );
-    let (directory, path) = write_config(&explicit);
+    let (_directory, path) = write_config(&explicit);
     let config = load(&path, BTreeMap::new()).unwrap();
-    assert_eq!(
-        config.artifacts.directory,
-        directory.path().join("config/objects")
-    );
+    assert_eq!(config.artifacts.namespace, "test");
     assert_eq!(config.artifacts.inline_threshold_bytes, 1024);
     assert_eq!(config.artifacts.max_read_bytes, 4096);
     assert_eq!(
@@ -889,57 +903,36 @@ fn artifact_store_policy_is_strict_resolved_and_bounded() {
 }
 
 #[test]
-fn artifact_provider_contract_is_explicit_and_production_requires_shared_namespace() {
-    let explicit_local = base_yaml("  mode: disabled").replace(
+fn artifact_product_contract_is_s3_only_and_rejects_filesystem_fields() {
+    let explicit = base_yaml("  mode: disabled").replace(
         "runtime:",
-        "artifacts:\n  provider: local_filesystem\n  directory: objects\n  inline_threshold_bytes: 1024\n  orphan_retention: 2h\n  gc_interval: 15s\n  deletion_claim_seconds: 30\nruntime:",
+        "artifacts:\n  namespace: development\n  inline_threshold_bytes: 1024\n  orphan_retention: 2h\n  gc_interval: 15s\n  deletion_claim_seconds: 30\nruntime:",
     );
-    let (_directory, path) = write_config(&explicit_local);
-    let local = load(&path, BTreeMap::new()).unwrap();
-    assert_eq!(
-        local.artifacts.provider,
-        ArtifactStoreProvider::LocalFilesystem
-    );
-    assert_eq!(local.artifacts.namespace, None);
+    for retired in [
+        "  provider: local_filesystem\n",
+        "  provider: shared_filesystem\n",
+        "  directory: /data/artifacts\n",
+        "  tenant_encryption: {}\n",
+    ] {
+        let retired = explicit.replace(
+            "  namespace: development\n",
+            &format!("  namespace: development\n{retired}"),
+        );
+        let (_directory, path) = write_config(&retired);
+        assert_eq!(
+            load(&path, BTreeMap::new()).unwrap_err().code(),
+            "PLATFORM_CONFIG_INVALID"
+        );
+    }
 
-    let missing_provider = explicit_local.replace("  provider: local_filesystem\n", "");
-    let (_directory, path) = write_config(&missing_provider);
-    assert_eq!(
-        load(&path, BTreeMap::new()).unwrap_err().code(),
-        "PLATFORM_CONFIG_INVALID"
-    );
-
-    let local_with_namespace = explicit_local.replace(
-        "  provider: local_filesystem",
-        "  provider: local_filesystem\n  namespace: forbidden",
-    );
-    let (_directory, path) = write_config(&local_with_namespace);
-    assert_eq!(
-        load(&path, BTreeMap::new()).unwrap_err().code(),
-        "PLATFORM_ARTIFACTS_INVALID"
-    );
-
-    let shared_without_namespace = explicit_local.replace(
-        "  provider: local_filesystem",
-        "  provider: shared_filesystem",
-    );
-    let (_directory, path) = write_config(&shared_without_namespace);
+    let invalid_namespace = explicit.replace("namespace: development", "namespace: ../forged");
+    let (_directory, path) = write_config(&invalid_namespace);
     assert_eq!(
         load(&path, BTreeMap::new()).unwrap_err().code(),
         "PLATFORM_ARTIFACTS_INVALID"
     );
 
-    let shared_with_invalid_namespace = shared_without_namespace.replace(
-        "  provider: shared_filesystem",
-        "  provider: shared_filesystem\n  namespace: ../forged",
-    );
-    let (_directory, path) = write_config(&shared_with_invalid_namespace);
-    assert_eq!(
-        load(&path, BTreeMap::new()).unwrap_err().code(),
-        "PLATFORM_ARTIFACTS_INVALID"
-    );
-
-    let production_local = explicit_local
+    let production = explicit
         .replace(
             "deployment_mode: single_process_development",
             "deployment_mode: production",
@@ -947,27 +940,14 @@ fn artifact_provider_contract_is_explicit_and_production_requires_shared_namespa
         .replace(
             "history:\n  provider: sqlite\n  path: ../data/history.sqlite3",
             "history:\n  provider: postgres\n  database_url_env: DATABASE_URL",
-        );
-    let (_directory, path) = write_config(&production_local);
-    assert_eq!(
-        load(
-            &path,
-            BTreeMap::from([(
-                "DATABASE_URL".to_owned(),
-                "postgres://localhost/platform".to_owned(),
-            )]),
         )
-        .unwrap_err()
-        .code(),
-        "PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE"
-    );
-
-    let production_shared = production_local.replace(
-        "  provider: local_filesystem",
-        "  provider: shared_filesystem\n  namespace: production",
-    );
-    let (_directory, path) = write_config(&production_shared);
-    let shared = load(
+        .replace(
+            "artifacts:",
+            "object_storage:\n  s3:\n    endpoint: https://rustfs.internal\n    public_endpoint: https://files.example.com\n    region: us-east-1\n    bucket: platform\n    force_path_style: true\n    access_key_env: S3_ACCESS_KEY\n    secret_key_env: S3_SECRET_KEY\nartifacts:",
+        )
+        .replace("namespace: development", "namespace: production");
+    let (_directory, path) = write_config(&production);
+    let config = load(
         &path,
         BTreeMap::from([(
             "DATABASE_URL".to_owned(),
@@ -975,77 +955,18 @@ fn artifact_provider_contract_is_explicit_and_production_requires_shared_namespa
         )]),
     )
     .unwrap();
-    assert_eq!(
-        shared.artifacts.provider,
-        ArtifactStoreProvider::SharedFilesystem
-    );
-    assert_eq!(shared.artifacts.namespace.as_deref(), Some("production"));
+    assert_eq!(config.artifacts.namespace, "production");
 }
 
 #[test]
-fn tenant_artifact_encryption_uses_a_strict_secret_backed_versioned_keyring() {
+fn retired_artifact_encryption_is_rejected() {
     let yaml = base_yaml("  mode: disabled").replace(
         "runtime:",
-        "artifacts:\n  provider: local_filesystem\n  directory: objects\n  inline_threshold_bytes: 1024\n  tenant_encryption:\n    active_key_version: v2\n    keyring_env: TENANT_KEYRING\n  orphan_retention: 2h\n  gc_interval: 15s\n  deletion_claim_seconds: 30\nruntime:",
+        "artifacts:\n  namespace: development\n  inline_threshold_bytes: 1024\n  tenant_encryption:\n    active_key_version: v2\n    keyring_env: TENANT_KEYRING\n  orphan_retention: 2h\n  gc_interval: 15s\n  deletion_claim_seconds: 30\nruntime:",
     );
     let (_directory, path) = write_config(&yaml);
     assert_eq!(
         load(&path, BTreeMap::new()).unwrap_err().code(),
-        "PLATFORM_SECRET_MISSING"
-    );
-
-    let valid_secret = r#"{"v1":"1111111111111111111111111111111111111111111111111111111111111111","v2":"2222222222222222222222222222222222222222222222222222222222222222"}"#;
-    let config = load(
-        &path,
-        BTreeMap::from([("TENANT_KEYRING".to_owned(), valid_secret.to_owned())]),
-    )
-    .unwrap();
-    let encryption = config.artifacts.tenant_encryption.as_ref().unwrap();
-    assert_eq!(encryption.active_key_version, "v2");
-    let debug = format!("{encryption:?}");
-    assert!(debug.contains("REDACTED"));
-    assert!(!debug.contains("2222222222222222"));
-
-    for invalid_secret in [
-        "{}",
-        r#"{"v1":"1111"}"#,
-        r#"{"v1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
-    ] {
-        assert_eq!(
-            load(
-                &path,
-                BTreeMap::from([("TENANT_KEYRING".to_owned(), invalid_secret.to_owned())]),
-            )
-            .unwrap_err()
-            .code(),
-            "PLATFORM_ARTIFACTS_INVALID"
-        );
-    }
-
-    let missing_active = yaml.replace("active_key_version: v2", "active_key_version: v3");
-    let (_directory, path) = write_config(&missing_active);
-    assert_eq!(
-        load(
-            &path,
-            BTreeMap::from([("TENANT_KEYRING".to_owned(), valid_secret.to_owned())]),
-        )
-        .unwrap_err()
-        .code(),
-        "PLATFORM_ARTIFACTS_INVALID"
-    );
-
-    let unknown = yaml.replace(
-        "    keyring_env: TENANT_KEYRING",
-        "    keyring_env: TENANT_KEYRING\n    plaintext_fallback: true",
-    );
-    let (_directory, path) = write_config(&unknown);
-    assert_eq!(
-        load(
-            &path,
-            BTreeMap::from([("TENANT_KEYRING".to_owned(), valid_secret.to_owned())]),
-        )
-        .unwrap_err()
-        .code(),
         "PLATFORM_CONFIG_INVALID"
     );
 }
@@ -1326,7 +1247,7 @@ fn nats_core_run_stream_config_is_strict_secret_backed_and_topology_aware() {
         )
         .replace(
             "runtime:",
-            "artifacts:\n  provider: shared_filesystem\n  namespace: production\n  directory: ../data/artifacts\n  inline_threshold_bytes: 65536\n  max_read_bytes: 67108864\n  orphan_retention: 1h\n  reference_retention: 1d\n  gc_interval: 1m\n  deletion_claim_seconds: 60\nruntime:",
+            "object_storage:\n  s3:\n    endpoint: https://rustfs.internal\n    public_endpoint: https://files.example.com\n    region: us-east-1\n    bucket: platform\n    force_path_style: true\n    access_key_env: S3_ACCESS_KEY\n    secret_key_env: S3_SECRET_KEY\nartifacts:\n  namespace: production\n  inline_threshold_bytes: 65536\n  max_read_bytes: 67108864\n  orphan_retention: 1h\n  reference_retention: 1d\n  gc_interval: 1m\n  deletion_claim_seconds: 60\nruntime:",
         );
     for invalid in [
         production.replace("      credentials_env: NATS_RUN_STREAM_CREDS\n", ""),

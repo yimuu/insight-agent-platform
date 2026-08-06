@@ -23,9 +23,9 @@ use insight_agent_platform::{
     dsl::CompileError,
     engine::{
         plan::LeafTaskDescriptor, repository::PostgresDurableRepository, EffectEvidence,
-        LeafTaskExecutor, LeafTaskKind, LocalContentAddressedArtifactStore, RuntimeValue,
-        SchedulerTaskKind, TaskExecutionRequest, TaskExecutionResult, VersionTag,
-        WorkerExecutionContext, WorkerExecutorRegistry, WorkerFailure,
+        LeafTaskExecutor, LeafTaskKind, RuntimeValue, SchedulerTaskKind, TaskExecutionRequest,
+        TaskExecutionResult, VersionTag, WorkerExecutionContext, WorkerExecutorRegistry,
+        WorkerFailure,
     },
     history::types::RunStatus,
     runtime::{
@@ -51,12 +51,8 @@ struct NoLeafResolver;
 async fn shared_artifact_store(
     root: std::path::PathBuf,
     namespace: &str,
-) -> Arc<LocalContentAddressedArtifactStore> {
-    Arc::new(
-        LocalContentAddressedArtifactStore::open_shared(root, 64 * 1024, namespace)
-            .await
-            .unwrap(),
-    )
+) -> Arc<database::TestS3ArtifactStore> {
+    database::test_s3_artifact_store(root, 64 * 1024, namespace).await
 }
 
 impl LeafDeploymentResolver for NoLeafResolver {

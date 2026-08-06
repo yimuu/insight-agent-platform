@@ -63,10 +63,32 @@ history:
   database_url_env: RUN_HISTORY_POSTGRES_URL
   max_connections: 10
 
+object_storage:
+  llm_attachment_delivery: inline_data
+  s3:
+    endpoint: http://rustfs:9000
+    public_endpoint: https://files.example.com
+    region: us-east-1
+    bucket: insight-agent-platform
+    force_path_style: true
+    access_key_env: S3_ACCESS_KEY
+    secret_key_env: S3_SECRET_KEY
+    connect_timeout: 5s
+    request_timeout: 30s
+    presign_upload_ttl: 15m
+    presign_download_ttl: 5m
+    allow_insecure_internal_endpoint: true
+  limits:
+    max_file_bytes: 26214400
+    max_files_per_invocation: 10
+    max_total_file_bytes_per_invocation: 52428800
+    pending_upload_ttl: 1h
+  gc:
+    interval: 1m
+    deletion_claim_seconds: 60
+
 artifacts:
-  provider: shared_filesystem
   namespace: production
-  directory: ../data/artifacts
   inline_threshold_bytes: 65536
   max_read_bytes: 67108864
   orphan_retention: 24h

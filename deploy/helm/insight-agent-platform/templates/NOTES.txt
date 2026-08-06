@@ -9,5 +9,5 @@ Check readiness:
 The embedded PostgreSQL instance is intended for local evaluation and benchmarks.
 Use postgresql.enabled=false with an external managed PostgreSQL service for production.
 {{- end }}
-The Artifact store is backed by PVC {{ include "insight-agent-platform.artifactClaimName" . }};
-do not replace it with emptyDir while retaining the durable PostgreSQL database.
+Artifact and File content use the configured S3/RustFS bucket. Preserve that
+bucket together with the durable PostgreSQL database.

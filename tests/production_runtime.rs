@@ -683,7 +683,7 @@ async fn retrieval_only_public_streaming_needs_no_llm_worker_at_start_or_admissi
                 "/v1/agents/{PUBLIC_RETRIEVAL_AGENT_ID}/runs/stream"
             ))
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"question":"WBC"}"#))
+            .body(Body::from(r#"{"inputs":{"question":"WBC"}}"#))
             .unwrap(),
         )
         .await
@@ -805,18 +805,32 @@ async fn production_artifact_store_gate_precedes_publication_and_binds_shared_id
     .unwrap_err();
     assert_eq!(
         local_error.code(),
-        "PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE"
+        "PLATFORM_PRODUCTION_REQUIRES_S3_ARTIFACT_STORE"
     );
     let stored = repository.load_versioned_plan_catalog().await.unwrap();
     assert!(stored.plans().is_empty());
     assert!(stored.heads().is_empty());
 
     let shared_root = artifact_directory.path().join("shared");
-    let shared = Arc::new(
+    let shared_filesystem = Arc::new(
         LocalContentAddressedArtifactStore::open_shared(shared_root.clone(), 1, "production")
             .await
             .unwrap(),
     );
+    let shared_error = RunService::start_with_artifact_store(
+        deployed_catalog().0,
+        repository.clone() as Arc<dyn ProductionRunRepository>,
+        workers(),
+        shared_filesystem,
+        production_config(Duration::from_secs(3_600)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        shared_error.code(),
+        "PLATFORM_PRODUCTION_REQUIRES_S3_ARTIFACT_STORE"
+    );
+    let shared = database::test_s3_artifact_store(&shared_root, 1, "production").await;
     let (retrieval_agents, retrieval_workers) = public_retrieval_streaming_fixture();
     let retrieval_broker_error = RunService::start_with_artifact_store(
         retrieval_agents,
@@ -864,15 +878,9 @@ async fn production_artifact_store_gate_precedes_publication_and_binds_shared_id
     )
     .await
     .unwrap();
-    let same_root = Arc::new(
-        LocalContentAddressedArtifactStore::open_shared(
-            shared_root.join("..").join("shared"),
-            1,
-            "production",
-        )
-        .await
-        .unwrap(),
-    );
+    let same_root =
+        database::test_s3_artifact_store(shared_root.join("..").join("shared"), 1, "production")
+            .await;
     let second = RunService::start_with_artifact_store(
         deployed_catalog().0,
         repository.clone() as Arc<dyn ProductionRunRepository>,
@@ -884,15 +892,12 @@ async fn production_artifact_store_gate_precedes_publication_and_binds_shared_id
     .unwrap();
     let before_conflict = repository.load_versioned_plan_catalog().await.unwrap();
 
-    let different_root = Arc::new(
-        LocalContentAddressedArtifactStore::open_shared(
-            artifact_directory.path().join("different"),
-            1,
-            "production",
-        )
-        .await
-        .unwrap(),
-    );
+    let different_root = database::test_s3_artifact_store(
+        artifact_directory.path().join("different"),
+        1,
+        "production",
+    )
+    .await;
     assert_ne!(
         shared.deployment_contract().store_id(),
         different_root.deployment_contract().store_id()
@@ -1493,15 +1498,12 @@ async fn postgres_attached_public_lifecycle_is_ordered_private_and_replay_idempo
 
     let (agents, revision) = deployed_catalog();
     let artifact_directory = tempfile::tempdir().unwrap();
-    let artifact_store = Arc::new(
-        LocalContentAddressedArtifactStore::open_shared(
-            artifact_directory.path().join("objects"),
-            1,
-            "public_lifecycle",
-        )
-        .await
-        .unwrap(),
-    );
+    let artifact_store = database::test_s3_artifact_store(
+        artifact_directory.path().join("objects"),
+        1,
+        "public_lifecycle",
+    )
+    .await;
     let service = RunService::start_with_artifact_store(
         agents,
         repository.clone() as Arc<dyn ProductionRunRepository>,
@@ -2522,15 +2524,7 @@ async fn postgres_background_pumps_externalize_prune_and_gc_across_shared_store_
 
     let artifact_directory = tempfile::tempdir().unwrap();
     let object_root = artifact_directory.path().join("objects");
-    let store = Arc::new(
-        LocalContentAddressedArtifactStore::open_shared(
-            object_root.clone(),
-            1,
-            "pg_background_pumps",
-        )
-        .await
-        .unwrap(),
-    );
+    let store = database::test_s3_artifact_store(&object_root, 1, "pg_background_pumps").await;
     let mut first_config = production_config(Duration::from_millis(5));
     first_config.artifact_gc_interval = Duration::from_millis(5);
     first_config.public_event_nonterminal_retention = Duration::from_secs(1);
@@ -2627,15 +2621,12 @@ async fn postgres_background_pumps_externalize_prune_and_gc_across_shared_store_
             .await
             .unwrap(),
     );
-    let restarted_store = Arc::new(
-        LocalContentAddressedArtifactStore::open_shared(
-            object_root.join("..").join("objects"),
-            1,
-            "pg_background_pumps",
-        )
-        .await
-        .unwrap(),
-    );
+    let restarted_store = database::test_s3_artifact_store(
+        object_root.join("..").join("objects"),
+        1,
+        "pg_background_pumps",
+    )
+    .await;
     assert_eq!(
         store.deployment_contract(),
         restarted_store.deployment_contract()

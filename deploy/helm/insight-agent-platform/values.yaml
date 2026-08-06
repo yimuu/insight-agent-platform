@@ -202,18 +202,34 @@ conversations:
 
 artifacts:
   namespace: benchmark
-  mountPath: /data/artifacts
-  tenantEncryption:
-    enabled: false
-    activeKeyVersion: v1
-    existingSecret: ""
-    keyringKey: keyring.json
-  persistence:
-    # Shared artifact authority must survive runtime Pod replacement.
-    enabled: true
-    size: 1Gi
-    storageClass: ""
-    accessModes: ["ReadWriteOnce"]
+
+# RustFS and compatible targets are accessed exclusively through S3. The
+# bucket and credential Secret are provisioned outside this chart.
+objectStorage:
+  # presigned_url is explicit opt-in and requires provider reachability to publicEndpoint.
+  llmAttachmentDelivery: inline_data
+  endpoint: http://rustfs:9000
+  publicEndpoint: https://files.example.com
+  region: us-east-1
+  bucket: insight-agent-platform
+  forcePathStyle: true
+  connectTimeout: 5s
+  requestTimeout: 30s
+  presignUploadTtl: 15m
+  presignDownloadTtl: 5m
+  allowInsecureInternalEndpoint: true
+  credentials:
+    existingSecret: rustfs-s3-credentials
+    accessKeyKey: access-key
+    secretKeyKey: secret-key
+  limits:
+    maxFileBytes: 26214400
+    maxFilesPerInvocation: 10
+    maxTotalFileBytesPerInvocation: 52428800
+    pendingUploadTtl: 1h
+  gc:
+    interval: 1m
+    deletionClaimSeconds: 60
 
 externalDatabase:
   existingSecret: ""

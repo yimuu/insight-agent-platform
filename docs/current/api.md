@@ -184,7 +184,30 @@ version、`author_hash` 或执行语义。旧 public historical Deployment admis
 | `POST` | `/v1/runs/{run_id}/migrate` | 两阶段迁移到已部署 revision |
 | `POST` | `/v1/runs/{run_id}/continue-as-new` | 闭合当前 generation 并开启下一代 |
 
-创建和控制类请求应携带稳定的 `X-Request-ID`。恢复类接口还要求
+两个创建 Run 的 POST body 都是封闭的 `AgentInvocation`，不是直接的 DSL input：
+
+```json
+{
+  "query": "比较这两张图片",
+  "messages": [],
+  "files": [{"file_id":"file_..."}, {"file_id":"file_..."}],
+  "inputs": {"response_style":"concise"}
+}
+```
+
+`messages` 只用于无会话 Run 的调用方历史，只允许 user/assistant；`files` 只接受平台签发且属于当前
+principal 的 ready file；其余业务字段放在 `inputs`。四个字段均只在 Agent 声明对应输入时可用，顶层
+未知字段以及旧 `message/content/input/payload` alias 都返回 `400 INVOCATION_INVALID`。
+Discovery 同时返回规范化 `input_schema`、HTTP `invocation_schema`、可选的
+`conversation_message_schema` 和 Conversation/history/files capability。
+平台级基础 wire 形状与 SDK 示例见
+[`agent-invocation-v1.json`](../../schemas/agent-invocation-v1.json) 和
+[`agent-invocation-v1.samples.json`](../../schemas/agent-invocation-v1.samples.json)；真正 admission 仍以
+当前 Agent discovery 返回的 exact schema 为准。
+
+创建类请求可携带稳定的 `Idempotency-Key`；它按 tenant、user、方法和 route 隔离，负责资源幂等。
+`X-Request-ID` 只做 trace，可省略，服务端会生成并回显。相同幂等键和相同 canonical 请求 replay
+首次资源；相同键对应不同请求返回 `409 IDEMPOTENCY_KEY_REUSED`。恢复类接口还要求
 `expected_projection_version`；checkpoint hash、effect proof 和 revision/schema 兼容证据由服务端
 从 durable authority 推导，客户端不能注入。
 
@@ -195,8 +218,8 @@ admin Debug Session；公共客户端不能自行选择 inactive history，从�
 Detached 创建接口以 durable admission commit 为成功边界，成功响应统一为 `202 Accepted`。
 响应中的 Run 可以仍是 `created`，也可以已经被后台 coordinator 推进为 `running` 或终态。
 admission 后的调度、worker 或 terminal commit 故障不会反向改写本次 HTTP 响应；客户端必须使用
-`GET /v1/runs/{run_id}` 查询最终结果。对于具备 admission 幂等契约的 Terminal-only 和
-Conversation 写接口，客户端遇到传输失败或 5xx 时必须使用相同 `X-Request-ID` 重试，因为响应
+`GET /v1/runs/{run_id}` 查询最终结果。对于具备 admission 幂等契约的 Run 和 Conversation 写接口，
+客户端遇到传输失败或 5xx 时应使用相同 `Idempotency-Key` 重试，因为响应
 生成失败前 admission 可能已经提交；服务端 replay 不得重复创建 Run 或 Conversation user
 message。
 
@@ -410,9 +433,11 @@ Conversation 的活动 SSE dispatcher；之后不再入队 live 内容，尚未�
 
 当前 HTTP principal carrier 是必填的 `X-Tenant-ID` 与 `X-User-ID`。它们必须由可信认证层注入或
 覆盖，不能直接信任公网客户端提供的值；后续 IdP principal resolver 可以替换 carrier，但不得改变
-repository 的 tenant/user ownership 校验。所有 Conversation 写请求还要求非空 `X-Request-ID`。
+repository 的 tenant/user ownership 校验。所有 Conversation 响应都回显 `X-Request-ID`；请求未提供
+时由服务端生成。
 
-创建 body 为 `{"agent_id":"..."}`，追加消息 body 为 `{"content":...}`，archive body 为 `{}`；
+创建 body 为 `{"agent_id":"..."}`，追加消息 body 为
+`{"query":"...","files":[{"file_id":"..."}],"inputs":{...}}`，archive body 为 `{}`；
 这些 body 都 strict reject 未知字段。消息列表使用
 `?cursor=<opaque>&limit=<configured-max>`；默认部署为 `limit=50`、最大 200，实际边界取运行时
 Conversation 配置。cursor 是无 padding 的 canonical base64url，
@@ -420,8 +445,40 @@ Conversation 配置。cursor 是无 padding 的 canonical base64url，
 `message_order DESC` 返回，并以 `next_cursor` 继续读取更旧消息。
 
 Conversation 只返回不可变 user/assistant message；最终 assistant message 绑定唯一 `run_id`。
+Conversation message body 禁止 `messages`，历史只由 repository 的 summary + contiguous recent suffix
+生成。业务 `inputs` 只属于当前 Run，不会写入 message 或在下一轮自动继承。canonical user message
+始终先保存 query text，再按请求顺序保存 file part。
 archive 不删除内容，`DELETE` 才进入 retention/privacy 删除语义。跨 tenant/user 读取统一表现为
 `404 CONVERSATION_NOT_FOUND`，不会泄漏资源是否存在。
+
+## File
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| `POST` | `/v1/files` | 创建 pending file 和短期预签名 PUT |
+| `POST` | `/v1/files/{file_id}/complete` | 用 S3 HEAD 校验并转为 ready |
+| `GET` | `/v1/files/{file_id}` | 读取安全 metadata |
+| `POST` | `/v1/files/{file_id}/download-url` | 创建短期预签名 GET |
+| `DELETE` | `/v1/files/{file_id}` | tombstone 并进入引用感知 GC |
+
+所有 File 路由要求可信的 `X-Tenant-ID` 与 `X-User-ID`，跨 principal 统一返回 404；响应使用
+`Cache-Control: private, no-store`。创建请求示例：
+
+```json
+{
+  "filename":"report-a.png",
+  "media_type":"image/png",
+  "size_bytes":182736,
+  "sha256":"可选的 64 位小写十六进制"
+}
+```
+
+客户端按响应中的 method、URL 和全部 signed headers 把本地 bytes 直接 PUT 到 RustFS，再用 `{}` 调用
+`complete`。只有 size、content type、checksum/metadata 和 ETag identity 全部通过的 ready file 才能
+进入 Run。ready 内容不可覆盖；新内容必须创建新的 `file_id`。下载 URL 和上传 URL 都是短期 secret，
+不会写入 Run、Conversation、日志或数据库。`complete` 时对象不存在返回
+`409 FILE_UPLOAD_INCOMPLETE`；S3 超时、连接失败或服务端错误返回 `503 OBJECT_STORAGE_UNAVAILABLE`，
+不会被误报为未上传。
 
 ## 人工任务
 

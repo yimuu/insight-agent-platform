@@ -3,6 +3,7 @@
 mod agent_management;
 mod auth;
 mod conversation;
+mod files;
 mod mcp_catalog;
 mod mcp_interactions;
 mod mcp_management;
@@ -32,6 +33,7 @@ pub use conversation::{
     ConversationMessageCursor, ConversationMessagePageDto, ConversationMessagesQuery,
     ConversationTurnDto, CreateConversationRequest,
 };
+pub use files::{build_file_router, FileApiState};
 pub use mcp_catalog::{
     build_mcp_catalog_router, McpCatalogApiState, McpCatalogRegistry, McpCatalogServer,
     McpProfileReport, McpProfileState,

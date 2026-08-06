@@ -29,8 +29,8 @@ use insight_runtime::{
         DeployedAgent, DeploymentPersistencePolicy, LeafDeploymentResolver, PublishedAgent,
         ResolvedLeafDeployment,
     },
-    DeployedAgentCatalog, InMemoryLiveRunStreamBroker, LiveRunStreamBroker, TerminalOnlyRunConfig,
-    TerminalOnlyRunEngine, TerminalOnlyStore,
+    AgentInvocation, DeployedAgentCatalog, InMemoryLiveRunStreamBroker, LiveRunStreamBroker,
+    TerminalOnlyRunConfig, TerminalOnlyRunEngine, TerminalOnlyStore,
 };
 use insight_storage::{artifact_store::LocalContentAddressedArtifactStore, *};
 use serde_json::{json, Value};
@@ -669,25 +669,70 @@ const PASSTHROUGH_AGENT: &str = r#"
 api_version: insight.agent/v1
 kind: agent
 inputs:
-  message: any
-  conversation_context: any
-output: any
+  query: string
+  messages: {type: "Message[]", default: []}
+output: string
 workflow:
   steps:
-    - return: $message
+    - return: $query
 "#;
 
 const CONTEXT_AGENT: &str = r#"
 api_version: insight.agent/v1
 kind: agent
 inputs:
-  message: any
-  conversation_context: any
-output: any
+  query: string
+  messages: {type: "Message[]", default: []}
+output: "Message[]"
 workflow:
   steps:
-    - return: $conversation_context
+    - return: $messages
 "#;
+
+fn invocation(value: Value) -> AgentInvocation {
+    let query = value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| serde_jcs::to_string(&value).unwrap());
+    AgentInvocation {
+        query: Some(query),
+        messages: None,
+        files: None,
+        inputs: None,
+    }
+}
+
+fn empty_invocation() -> AgentInvocation {
+    AgentInvocation {
+        query: None,
+        messages: None,
+        files: None,
+        inputs: None,
+    }
+}
+
+fn invocation_query(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| serde_jcs::to_string(value).unwrap())
+}
+
+fn text_content(value: &Value) -> Value {
+    json!([{"text": invocation_query(value)}])
+}
+
+fn decode_artifact_reference(
+    store: &dyn WorkerArtifactStore,
+    reference: &str,
+) -> (ArtifactRef, StorageLocator) {
+    if let Ok(reference) = ScopedArtifactReference::parse(reference) {
+        return (reference.artifact().clone(), reference.locator().unwrap());
+    }
+    let artifact: ArtifactRef = serde_json::from_str(reference).unwrap();
+    let locator = store.storage_locator(&artifact).unwrap();
+    (artifact, locator)
+}
 
 #[test]
 fn terminal_run_timeout_must_fit_inside_owner_lease() {
@@ -715,12 +760,13 @@ async fn conversation_turns_are_atomic_idempotent_ordered_and_private() {
     let large_content = json!({"text": "x".repeat(512)});
     let turn = fixture
         .engine
-        .create_conversation_detached_turn(
+        .create_conversation_detached_invocation(
             &conversation.conversation_id,
             "tenant-a",
             "user-a",
             "request-turn-1",
-            large_content.clone(),
+            "request-trace-turn-1",
+            invocation(large_content.clone()),
         )
         .await
         .unwrap();
@@ -728,18 +774,21 @@ async fn conversation_turns_are_atomic_idempotent_ordered_and_private() {
         .wait_terminal("tenant-a", Some("user-a"), &turn.run.run_id)
         .await;
     match terminal.lifecycle {
-        RunLifecycle::Completed { output } => assert_eq!(output.data, large_content),
+        RunLifecycle::Completed { output } => {
+            assert_eq!(output.data, invocation_query(&large_content))
+        }
         lifecycle => panic!("unexpected lifecycle: {lifecycle:?}"),
     }
 
     let replayed = fixture
         .engine
-        .create_conversation_detached_turn(
+        .create_conversation_detached_invocation(
             &conversation.conversation_id,
             "tenant-a",
             "user-a",
             "request-turn-1",
-            large_content.clone(),
+            "another-request-trace",
+            invocation(large_content.clone()),
         )
         .await
         .unwrap();
@@ -749,7 +798,7 @@ async fn conversation_turns_are_atomic_idempotent_ordered_and_private() {
         replayed.user_message.message_id,
         turn.user_message.message_id
     );
-    assert_eq!(replayed.user_message.content, large_content);
+    assert_eq!(replayed.user_message.content, text_content(&large_content));
 
     let page = fixture
         .engine
@@ -771,8 +820,8 @@ async fn conversation_turns_are_atomic_idempotent_ordered_and_private() {
         page.messages[1].role,
         insight_storage::ConversationRole::User
     );
-    assert_eq!(page.messages[0].content, large_content);
-    assert_eq!(page.messages[1].content, large_content);
+    assert_eq!(page.messages[0].content, text_content(&large_content));
+    assert_eq!(page.messages[1].content, text_content(&large_content));
     let metrics = fixture.engine.prometheus_metrics();
     for required in [
         "terminal_run_active ",
@@ -809,12 +858,13 @@ async fn conversation_turns_are_atomic_idempotent_ordered_and_private() {
         .unwrap();
     let archived = fixture
         .engine
-        .create_conversation_detached_turn(
+        .create_conversation_detached_invocation(
             &conversation.conversation_id,
             "tenant-a",
             "user-a",
             "request-turn-after-archive",
-            json!("blocked"),
+            "request-trace-after-archive",
+            invocation(json!("blocked")),
         )
         .await
         .unwrap_err();
@@ -853,7 +903,13 @@ workflow:
     let fixture = Fixture::new(source, true).await;
     let completed = fixture
         .engine
-        .create_detached("terminal_fixture", json!({}), "request-timer".to_owned())
+        .create_detached_invocation(
+            "default",
+            "terminal_fixture",
+            empty_invocation(),
+            "timer-admission".to_owned(),
+            "request-timer".to_owned(),
+        )
         .await
         .unwrap();
     let terminal = fixture
@@ -865,9 +921,11 @@ workflow:
     let long = Fixture::new(&long_source, true).await;
     let admitted = long
         .engine
-        .create_detached(
+        .create_detached_invocation(
+            "default",
             "terminal_fixture",
-            json!({}),
+            empty_invocation(),
+            "interrupted-admission".to_owned(),
             "request-interrupted".to_owned(),
         )
         .await
@@ -920,19 +978,37 @@ workflow:
     .await;
     let first = fixture
         .engine
-        .create_detached("terminal_fixture", json!({}), "capacity-replay".to_owned())
+        .create_detached_invocation(
+            "default",
+            "terminal_fixture",
+            empty_invocation(),
+            "capacity-replay".to_owned(),
+            "capacity-request-1".to_owned(),
+        )
         .await
         .unwrap();
     assert_eq!(fixture.engine.active_run_count(), 1);
     let replay = fixture
         .engine
-        .create_detached("terminal_fixture", json!({}), "capacity-replay".to_owned())
+        .create_detached_invocation(
+            "default",
+            "terminal_fixture",
+            empty_invocation(),
+            "capacity-replay".to_owned(),
+            "capacity-request-2".to_owned(),
+        )
         .await
         .unwrap();
     assert_eq!(replay.run_id, first.run_id);
     let capacity = fixture
         .engine
-        .create_detached("terminal_fixture", json!({}), "capacity-new".to_owned())
+        .create_detached_invocation(
+            "default",
+            "terminal_fixture",
+            empty_invocation(),
+            "capacity-new".to_owned(),
+            "capacity-request-3".to_owned(),
+        )
         .await
         .unwrap_err();
     assert_eq!(capacity.code(), "RUN_CAPACITY_EXCEEDED");
@@ -972,10 +1048,12 @@ workflow:
 
     let admitted = fixture
         .engine
-        .create_detached(
+        .create_detached_invocation(
+            "default",
             "terminal_fixture",
-            json!({}),
+            empty_invocation(),
             "ambiguous-then-replay".to_owned(),
+            "ambiguous-trace-1".to_owned(),
         )
         .await
         .unwrap();
@@ -988,10 +1066,12 @@ workflow:
 
     let replay = fixture
         .engine
-        .create_detached(
+        .create_detached_invocation(
+            "default",
             "terminal_fixture",
-            json!({}),
+            empty_invocation(),
             "ambiguous-then-replay".to_owned(),
+            "ambiguous-trace-2".to_owned(),
         )
         .await
         .unwrap();
@@ -1034,7 +1114,13 @@ workflow:
     let retired_owner = fixture.engine.owner();
     let error = fixture
         .engine
-        .create_detached("terminal_fixture", json!({}), "ambiguous-twice".to_owned())
+        .create_detached_invocation(
+            "default",
+            "terminal_fixture",
+            empty_invocation(),
+            "ambiguous-twice".to_owned(),
+            "ambiguous-twice-trace".to_owned(),
+        )
         .await
         .unwrap_err();
     assert_eq!(error.code(), "TERMINAL_ONLY_UNAVAILABLE");
@@ -1048,7 +1134,7 @@ workflow:
                 .repository
                 .get_terminal_run_by_request(TerminalRunRequestQuery {
                     tenant_id: "default".to_owned(),
-                    request_id: "ambiguous-twice".to_owned(),
+                    admission_id: "ambiguous-twice".to_owned(),
                     observed_at: chrono::Utc::now(),
                 })
                 .await
@@ -1114,7 +1200,13 @@ workflow:
     }
     fixture
         .engine
-        .create_detached("terminal_fixture", json!({}), "heartbeat-hangs".to_owned())
+        .create_detached_invocation(
+            "default",
+            "terminal_fixture",
+            empty_invocation(),
+            "heartbeat-hangs".to_owned(),
+            "heartbeat-hangs-trace".to_owned(),
+        )
         .await
         .unwrap();
     assert_eq!(fixture.engine.active_run_count(), 1);
@@ -1136,10 +1228,12 @@ workflow:
     assert!(metrics.contains("terminal_run_interrupted_total{reason=\"owner_lost\"} 1"));
     let rejected = fixture
         .engine
-        .create_detached(
+        .create_detached_invocation(
+            "default",
             "terminal_fixture",
-            json!({}),
+            empty_invocation(),
             "heartbeat-hangs-new".to_owned(),
+            "heartbeat-hangs-new-trace".to_owned(),
         )
         .await
         .unwrap_err();
@@ -1177,10 +1271,12 @@ workflow:
     let old_owner = fixture.engine.owner();
     let admitted = fixture
         .engine
-        .create_detached(
+        .create_detached_invocation(
+            "default",
             "terminal_fixture",
-            json!({}),
+            empty_invocation(),
             "request-owner-loss".to_owned(),
+            "request-owner-loss-trace".to_owned(),
         )
         .await
         .unwrap();
@@ -1236,11 +1332,12 @@ workflow:
 
     let mut replay = fixture
         .engine
-        .create_attached(
+        .create_attached_invocation(
             "default",
             "terminal_fixture",
-            json!({}),
+            empty_invocation(),
             "request-owner-loss".to_owned(),
+            "request-owner-loss-replay-trace".to_owned(),
         )
         .await
         .unwrap();
@@ -1249,10 +1346,12 @@ workflow:
 
     let fresh = fixture
         .engine
-        .create_detached(
+        .create_detached_invocation(
+            "default",
             "terminal_fixture",
-            json!({}),
+            empty_invocation(),
             "request-after-owner-loss".to_owned(),
+            "request-after-owner-loss-trace".to_owned(),
         )
         .await
         .unwrap();
@@ -1277,10 +1376,11 @@ async fn subscribe_failure_still_executes_and_releases_active_capacity() {
     .await;
     let error = fixture
         .engine
-        .create_attached(
+        .create_attached_invocation(
             "default",
             "terminal_fixture",
-            json!({"message": "first", "conversation_context": null}),
+            invocation(json!("first")),
+            "subscribe-failure".to_owned(),
             "request-subscribe-failure".to_owned(),
         )
         .await;
@@ -1299,10 +1399,12 @@ async fn subscribe_failure_still_executes_and_releases_active_capacity() {
 
     let replay = fixture
         .engine
-        .create_detached(
+        .create_detached_invocation(
+            "default",
             "terminal_fixture",
-            json!({"message": "first", "conversation_context": null}),
-            "request-subscribe-failure".to_owned(),
+            invocation(json!("first")),
+            "subscribe-failure".to_owned(),
+            "request-subscribe-failure-replay".to_owned(),
         )
         .await
         .unwrap();
@@ -1310,9 +1412,11 @@ async fn subscribe_failure_still_executes_and_releases_active_capacity() {
     assert!(matches!(replay.lifecycle, RunLifecycle::Completed { .. }));
     let next = fixture
         .engine
-        .create_detached(
+        .create_detached_invocation(
+            "default",
             "terminal_fixture",
-            json!({"message": "second", "conversation_context": null}),
+            invocation(json!("second")),
+            "after-subscribe-failure".to_owned(),
             "request-after-subscribe-failure".to_owned(),
         )
         .await
@@ -1347,34 +1451,37 @@ async fn identical_private_content_uses_distinct_scoped_objects() {
     let content = json!({"private": "same".repeat(256)});
     let first_turn = fixture
         .engine
-        .create_conversation_detached_turn(
+        .create_conversation_detached_invocation(
             &first.conversation_id,
             "tenant-a",
             "user-a",
             "turn-first",
-            content.clone(),
+            "trace-first",
+            invocation(content.clone()),
         )
         .await
         .unwrap();
     let second_turn = fixture
         .engine
-        .create_conversation_detached_turn(
+        .create_conversation_detached_invocation(
             &second.conversation_id,
             "tenant-a",
             "user-a",
             "turn-second",
-            content.clone(),
+            "trace-second",
+            invocation(content.clone()),
         )
         .await
         .unwrap();
     let third_turn = fixture
         .engine
-        .create_conversation_detached_turn(
+        .create_conversation_detached_invocation(
             &third.conversation_id,
             "tenant-b",
             "user-b",
             "turn-third",
-            content.clone(),
+            "trace-third",
+            invocation(content.clone()),
         )
         .await
         .unwrap();
@@ -1470,7 +1577,7 @@ async fn identical_private_content_uses_distinct_scoped_objects() {
         .chain(second_refs.iter())
         .chain(third_refs.iter())
     {
-        let artifact: ArtifactRef = serde_json::from_str(reference).unwrap();
+        let (artifact, _) = decode_artifact_reference(fixture.artifact_store.as_ref(), reference);
         assert_ne!(
             artifact.content_hash(),
             &raw_hash,
@@ -1492,7 +1599,7 @@ async fn identical_private_content_uses_distinct_scoped_objects() {
     assert!(surviving
         .messages
         .iter()
-        .all(|message| message.content == content));
+        .all(|message| message.content == text_content(&content)));
     fixture
         .engine
         .shutdown(Duration::from_secs(1))
@@ -1525,12 +1632,13 @@ async fn rolling_summary_is_flat_bounded_and_missing_summary_falls_back_to_recen
     for index in 0..18 {
         let turn = fixture
             .engine
-            .create_conversation_detached_turn(
+            .create_conversation_detached_invocation(
                 &conversation.conversation_id,
                 "tenant-summary",
                 "user-summary",
                 &format!("turn-summary-{index}"),
-                json!(format!("message-{index}-{}", "x".repeat(32))),
+                &format!("trace-summary-{index}"),
+                invocation(json!(format!("message-{index}-{}", "x".repeat(32)))),
             )
             .await
             .unwrap();
@@ -1597,10 +1705,17 @@ async fn rolling_summary_is_flat_bounded_and_missing_summary_falls_back_to_recen
     })
     .await
     .expect("rolling summary worker did not quiesce before missing-object injection");
-    let summary_value = last_context
-        .get("summary")
-        .filter(|value| !value.is_null())
+    let summary_text = last_context
+        .as_array()
+        .and_then(|messages| {
+            messages.iter().find_map(|message| {
+                message["content"][0]["text"]
+                    .as_str()
+                    .and_then(|text| text.strip_prefix("Conversation summary: "))
+            })
+        })
         .expect("context did not contain the rolling summary");
+    let summary_value: Value = serde_json::from_str(summary_text).unwrap();
     assert_eq!(
         summary_value.get("kind").and_then(Value::as_str),
         Some("conversation_summary")
@@ -1617,8 +1732,8 @@ async fn rolling_summary_is_flat_bounded_and_missing_summary_falls_back_to_recen
         .await
         .unwrap()
         .expect("latest rolling summary disappeared");
-    let artifact: ArtifactRef = serde_json::from_str(&summary.summary_ref).unwrap();
-    let locator = fixture.artifact_store.storage_locator(&artifact).unwrap();
+    let (artifact, locator) =
+        decode_artifact_reference(fixture.artifact_store.as_ref(), &summary.summary_ref);
     fixture
         .artifact_store
         .delete(&artifact, &locator)
@@ -1667,29 +1782,39 @@ async fn rolling_summary_is_flat_bounded_and_missing_summary_falls_back_to_recen
     .await
     .unwrap();
     inspection.close().await;
-    let mut expected_orders = fixture
-        .repository
-        .page_conversation_messages(MessagePageQuery {
-            conversation: query.clone(),
-            before: None,
-            limit: config.recent_context_messages,
-        })
+    let mut expected_messages = fixture
+        .engine
+        .list_conversation_messages(
+            &conversation.conversation_id,
+            "tenant-summary",
+            "user-summary",
+            None,
+            config.recent_context_messages,
+        )
         .await
-        .unwrap()
         .unwrap()
         .messages
         .into_iter()
-        .map(|message| message.message_order)
+        .map(|message| {
+            json!({
+                "role": match message.role {
+                    ConversationRole::User => "user",
+                    ConversationRole::Assistant => "assistant",
+                },
+                "content": message.content,
+            })
+        })
         .collect::<Vec<_>>();
-    expected_orders.reverse();
+    expected_messages.reverse();
     let fallback = fixture
         .engine
-        .create_conversation_detached_turn(
+        .create_conversation_detached_invocation(
             &conversation.conversation_id,
             "tenant-summary",
             "user-summary",
             "turn-after-missing-summary",
-            json!("still-available"),
+            "trace-after-missing-summary",
+            invocation(json!("still-available")),
         )
         .await
         .unwrap();
@@ -1700,16 +1825,14 @@ async fn rolling_summary_is_flat_bounded_and_missing_summary_falls_back_to_recen
         RunLifecycle::Completed { output } => output.data,
         lifecycle => panic!("summary failure blocked turn: {lifecycle:?}"),
     };
-    let fallback_orders = fallback_context["messages"]
+    let fallback_messages = fallback_context
         .as_array()
         .expect("missing summary fallback did not include messages")
-        .iter()
-        .map(|message| message["message_order"].as_i64().unwrap())
-        .collect::<Vec<_>>();
+        .clone();
     assert!(
-        !fallback_orders.is_empty()
-            && fallback_orders
-                == expected_orders[expected_orders.len() - fallback_orders.len()..],
+        !fallback_messages.is_empty()
+            && fallback_messages
+                == expected_messages[expected_messages.len() - fallback_messages.len()..],
         "missing latest summary must reload the full-history recent page and retain its exact contiguous suffix after token budgeting"
     );
     assert!(fixture
@@ -1763,12 +1886,13 @@ async fn context_token_budget_selects_a_contiguous_recent_message_suffix() {
     ] {
         let turn = fixture
             .engine
-            .create_conversation_detached_turn(
+            .create_conversation_detached_invocation(
                 &conversation.conversation_id,
                 "tenant-context-suffix",
                 "user-context-suffix",
                 request_id,
-                content,
+                request_id,
+                invocation(content),
             )
             .await
             .unwrap();
@@ -1780,34 +1904,39 @@ async fn context_token_budget_selects_a_contiguous_recent_message_suffix() {
             )
             .await;
     }
-    let query = ConversationQuery {
-        conversation_id: conversation.conversation_id.clone(),
-        tenant_id: "tenant-context-suffix".to_owned(),
-        user_id: "user-context-suffix".to_owned(),
-    };
-    let mut durable_orders = fixture
-        .repository
-        .page_conversation_messages(MessagePageQuery {
-            conversation: query,
-            before: None,
-            limit: config.recent_context_messages,
-        })
+    let mut durable_messages = fixture
+        .engine
+        .list_conversation_messages(
+            &conversation.conversation_id,
+            "tenant-context-suffix",
+            "user-context-suffix",
+            None,
+            config.recent_context_messages,
+        )
         .await
-        .unwrap()
         .unwrap()
         .messages
         .into_iter()
-        .map(|message| message.message_order)
+        .map(|message| {
+            json!({
+                "role": match message.role {
+                    ConversationRole::User => "user",
+                    ConversationRole::Assistant => "assistant",
+                },
+                "content": message.content,
+            })
+        })
         .collect::<Vec<_>>();
-    durable_orders.reverse();
+    durable_messages.reverse();
     let probe = fixture
         .engine
-        .create_conversation_detached_turn(
+        .create_conversation_detached_invocation(
             &conversation.conversation_id,
             "tenant-context-suffix",
             "user-context-suffix",
             "context-suffix-probe",
-            json!("probe"),
+            "context-suffix-probe-trace",
+            invocation(json!("probe")),
         )
         .await
         .unwrap();
@@ -1822,15 +1951,10 @@ async fn context_token_budget_selects_a_contiguous_recent_message_suffix() {
         RunLifecycle::Completed { output } => output.data,
         lifecycle => panic!("unexpected lifecycle: {lifecycle:?}"),
     };
-    let selected_orders = context["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|message| message["message_order"].as_i64().unwrap())
-        .collect::<Vec<_>>();
+    let selected_messages = context.as_array().unwrap().clone();
     assert_eq!(
-        selected_orders,
-        durable_orders[durable_orders.len() - selected_orders.len()..],
+        selected_messages,
+        durable_messages[durable_messages.len() - selected_messages.len()..],
         "context budgeting must stop at the first oversized newer message"
     );
     fixture
@@ -1846,9 +1970,11 @@ async fn completed_runs_do_not_accumulate_background_join_handles() {
     for index in 0..128 {
         let run = fixture
             .engine
-            .create_detached(
+            .create_detached_invocation(
+                "default",
                 "terminal_fixture",
-                json!({"message": index, "conversation_context": null}),
+                invocation(json!(index.to_string())),
+                format!("fast-admission-{index}"),
                 format!("request-fast-{index}"),
             )
             .await
@@ -1888,9 +2014,11 @@ async fn crash_after_object_put_before_metadata_commit_is_durably_collected() {
     .await;
     let admitted = fixture
         .engine
-        .create_detached(
+        .create_detached_invocation(
+            "default",
             "terminal_fixture",
-            json!({"message": "put-then-crash", "conversation_context": null}),
+            invocation(json!("put-then-crash")),
+            "put-then-crash".to_owned(),
             "request-put-then-crash".to_owned(),
         )
         .await
@@ -2045,14 +2173,14 @@ async fn privacy_delete_quiesces_an_active_conversation_before_removal() {
 api_version: insight.agent/v1
 kind: agent
 inputs:
-  message: any
-  conversation_context: any
-output: any
+  query: string
+  messages: {type: "Message[]", default: []}
+output: string
 workflow:
   steps:
     - id: delay
       wait: {duration_ms: 1000}
-    - return: $message
+    - return: $query
 "#;
     let fixture = Fixture::new(source, true).await;
     let conversation = fixture
@@ -2067,12 +2195,13 @@ workflow:
         .unwrap();
     let _turn = fixture
         .engine
-        .create_conversation_detached_turn(
+        .create_conversation_detached_invocation(
             &conversation.conversation_id,
             "tenant-delete",
             "user-delete",
             "turn-delete",
-            json!({"private": "delete while active"}),
+            "trace-delete",
+            invocation(json!({"private": "delete while active"})),
         )
         .await
         .unwrap();
@@ -2120,14 +2249,14 @@ async fn retention_skips_an_active_conversation_until_terminal_commit() {
 api_version: insight.agent/v1
 kind: agent
 inputs:
-  message: any
-  conversation_context: any
-output: any
+  query: string
+  messages: {type: "Message[]", default: []}
+output: string
 workflow:
   steps:
     - id: delay
       wait: {duration_ms: 1000}
-    - return: $message
+    - return: $query
 "#;
     let fixture = Fixture::new(source, true).await;
     let conversation = fixture
@@ -2142,12 +2271,13 @@ workflow:
         .unwrap();
     let turn = fixture
         .engine
-        .create_conversation_detached_turn(
+        .create_conversation_detached_invocation(
             &conversation.conversation_id,
             "tenant-retention",
             "user-retention",
             "turn-retention",
-            json!({"private": "retain while active"}),
+            "trace-retention",
+            invocation(json!({"private": "retain while active"})),
         )
         .await
         .unwrap();
@@ -2204,12 +2334,13 @@ async fn terminal_conversation_visibility_guard_fences_delete_and_checks_princip
         .unwrap();
     let turn = fixture
         .engine
-        .create_conversation_detached_turn(
+        .create_conversation_detached_invocation(
             &conversation.conversation_id,
             "tenant-guard",
             "user-guard",
             "turn-guard",
-            json!({"private": "terminal visibility"}),
+            "trace-guard",
+            invocation(json!({"private": "terminal visibility"})),
         )
         .await
         .unwrap();

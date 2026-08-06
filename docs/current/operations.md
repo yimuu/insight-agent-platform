@@ -9,12 +9,12 @@
 
 | 模式 | Repository | Artifact store | 适用范围 |
 |---|---|---|---|
-| `single_process_development` | SQLite | `local_filesystem` | Quickstart、单进程开发 |
-| `production` | PostgreSQL 16 | `shared_filesystem` | `full` 多 runtime/恢复，或 terminal-only 单 owner 生产部署 |
+| `single_process_development` | SQLite | S3（单节点 RustFS） | Quickstart、单进程开发 |
+| `production` | PostgreSQL 16 | S3（RustFS） | `full` 多 runtime/恢复，或 terminal-only 单 owner 生产部署 |
 
 Quickstart 使用 [`config/platform.quickstart.yaml`](../../config/platform.quickstart.yaml)，只启用
 `action_demo`。生产样例位于 [`config/platform.yaml`](../../config/platform.yaml)。对外暴露服务前，
-必须按部署要求配置认证、数据库凭据、模型凭据和共享 Artifact 挂载。
+必须按部署要求配置认证、数据库凭据、模型凭据、RustFS endpoint、预创建 bucket 和 S3 credential。
 
 两份样例都显式关闭 MCP。启用 MCP Client 管理面、`/mcp` Server、OAuth/PKCE keyring、stdio
 isolation、Tasks maintenance 和 readiness 的配置及 rollout 顺序见
@@ -304,12 +304,11 @@ PostgreSQL healthcheck 通过前完成 provisioning；它只是本地开发样�
 `DATABASE_SCHEMA_CONTRACT_MISMATCH` 和 `DATABASE_SCHEMA_BACKEND_MISMATCH`。它们只表达部署合同
 不成立，不包含连接凭据或数据库路径。
 
-生产模式强制使用 PostgreSQL 和显式的 `artifacts.provider: shared_filesystem`。共享存储必须声明
-`namespace`，连接同一数据库的所有 runtime 必须挂载同一个物理目录。首次启动生成的 store marker
-会与数据库中的 Artifact-store authority 绑定；identity 不一致时 runtime fail-closed。
-
-`local_filesystem` 不接受 namespace，只允许单进程开发。SQLite 不承诺多进程所有权、HA、lease
-fencing 或生产恢复。
+生产模式强制使用 PostgreSQL、显式 `object_storage.s3` 和 Artifact `namespace`。所有 runtime 必须
+访问同一 endpoint/bucket authority；endpoint、bucket 与 namespace 派生出的 S3 store identity 会与
+数据库中的 Artifact-store authority 绑定，identity 不一致时 runtime fail-closed。产品配置不再接受
+`local_filesystem`、`shared_filesystem`、Artifact `directory` 或持久卷挂载作为对象后端。SQLite 仍不
+承诺多进程所有权、HA、lease fencing 或生产恢复。
 
 ## PostgreSQL 权限边界
 
@@ -322,38 +321,91 @@ contract 校验 → Ready”。不得先启动服务再等待它补齐 Schema。
 
 ## Artifact 生命周期
 
-小值按 `inline_threshold_bytes` 内联保存；大值写入内容寻址 Artifact store，并在结果事务中提交引用。
+小值按 `inline_threshold_bytes` 内联保存；大值通过 S3 写入内容寻址 Artifact store，并在结果事务中提交引用。
 读取接口还会检查 Run 归属、公开终包引用、`max_read_bytes` 和 retention。`orphan_retention`、
 `reference_retention`、`gc_interval` 与 `deletion_claim_seconds` 控制回收，不应在多个 runtime 间配置
-不一致的物理 store。
+不一致的 S3 authority。
 
-Conversation、summary 与 terminal input/output 的大对象使用带 `tenant:<id>:<scope>` 的封闭
-envelope。可选的 tenant encryption 在写入文件系统前，以 Secret keyring 中的 active master key
-和不可逆 tenant-prefixed scope digest 通过 HKDF-SHA256 派生独立 AES-256-GCM subkey；数据库中的 content hash/size
-仍对应解密后的 canonical envelope。密文头只包含格式、key version、scope digest 和随机 nonce，
-不保存明文 tenant ID。AEAD 同时绑定 content hash、size 和 media type，头或密文被修改时读取
-fail-closed。
+Conversation、summary 与 terminal output 的大对象使用带 `tenant:<id>:<scope>` 的封闭 envelope，
+并写入 `conversation-content/{tenant_hash}/...` 或 `run-artifacts/{tenant_hash}/...`。tenant hash 不可逆，
+对象 key 不包含 filename、tenant 原文或用户输入。RustFS 的静态加密、KMS 与备份策略属于存储部署
+边界；平台不再维护 filesystem 专用 tenant keyring。
 
-配置文件只保存 Secret 环境变量名：
+S3 配置只保存 credential 环境变量名：
 
 ```yaml
-artifacts:
-  tenant_encryption:
-    active_key_version: "2026-07"
-    keyring_env: INSIGHT_ARTIFACT_TENANT_KEYRING
+object_storage:
+  # 默认 inline_data；只有模型 Provider 能访问 public_endpoint 时才改为 presigned_url。
+  llm_attachment_delivery: inline_data
+  s3:
+    endpoint: http://rustfs:9000
+    public_endpoint: https://files.example.com
+    bucket: insight-agent-platform
+    access_key_env: S3_ACCESS_KEY
+    secret_key_env: S3_SECRET_KEY
 ```
 
-环境变量是严格 JSON object；value 为 32-byte master key 的 64 位小写十六进制：
+应用只需要 bucket 范围内的闭合对象权限，不需要创建或删除 bucket。启动 readiness 会执行
+`HeadBucket`。File GC 先获取数据库 durable claim/fence，再按冻结 ETag/version 条件删除；S3 删除成功
+但 ack 丢失时，claim 到期后由新 fence 幂等重试。
 
-```text
-{"2026-06":"<64 lowercase hex>","2026-07":"<64 lowercase hex>"}
+`llm_attachment_delivery` 会进入不可变 Deployment Revision。`inline_data` 通过受限 S3 读取把图片编码为
+Provider input，不要求 Provider 访问 RustFS；`presigned_url` 仍会先校验媒体类型、大小、图片尺寸和冻结
+object identity，再生成一次短期 GET capability。预签名 URL 只存在于瞬时 Provider 请求，不能进入 durable
+payload、日志或错误；私网 `public_endpoint` 不得选择该模式。
+
+RustFS 镜像升级或 endpoint/proxy 变更前，使用独立测试 bucket 运行真实闭合 S3 合同。常规环境由
+运维预先创建 bucket；只有一次性的隔离测试实例可以设置 `RUSTFS_CONTRACT_CREATE_BUCKET=1`，让测试代码
+自行创建 bucket。该管理权限只属于 qualification fixture，应用进程仍然只执行 `HeadBucket`，不需要
+`CreateBucket` 权限。
+
+闭合操作集与短时效预签名 URL 的过期行为按以下命令验证：
+
+```bash
+RUSTFS_CONTRACT_ENDPOINT='http://127.0.0.1:9000' \
+RUSTFS_CONTRACT_PUBLIC_ENDPOINT='http://127.0.0.1:9000' \
+RUSTFS_CONTRACT_BUCKET='insight-contract' \
+RUSTFS_CONTRACT_ACCESS_KEY='...' \
+RUSTFS_CONTRACT_SECRET_KEY='...' \
+RUSTFS_CONTRACT_PRESIGN_TTL_SECONDS=1 \
+cargo test --locked --test rustfs_s3_contract \
+  rustfs_supports_the_closed_file_service_s3_contract -- --ignored --nocapture
 ```
 
-轮换时先把旧、新 key 同时部署到所有 runtime 并把 active version 切到新 key；旧密文按头中的
-version 继续读取，新写入及被再次写入的旧对象使用 active key。确认旧对象已迁移/到期删除后才能
-移除旧 key。已加密对象缺少对应历史 key 时拒绝读取，不能退回明文。启用前已存在的明文对象可读，
-在下一次幂等写入时原子迁移；要求立即全量加密的部署应在启用后执行离线迁移审计。privacy/retention
-删除的是同一受 repository fence 管理的密文对象。
+该测试实际执行 `HeadBucket`、带 content length/type/checksum 与不可覆盖条件的预签名 PUT、HEAD、GET、
+预签名 GET、错误 ETag 条件删除、正确 identity 删除，以及完整 File Service 生命周期。它是 release
+qualification，不由默认 hermetic 测试静默跳过后宣称兼容。TTL 不超过 5 秒时，测试还会等待 URL
+到期，并验证过期的预签名 PUT 被拒绝。2026-08-06 的正式结果见
+[RustFS/S3 资格验收](../archive/qualifications/2026-08-06-agent-invocation-rustfs-s3-qualification.md)。
+
+升级前后还必须用同一个数据目录和 bucket 执行重启持久性验证。先写入探针并保存冻结 identity：
+
+```bash
+RUSTFS_CONTRACT_ENDPOINT='http://127.0.0.1:9000' \
+RUSTFS_CONTRACT_BUCKET='insight-contract' \
+RUSTFS_CONTRACT_ACCESS_KEY='...' \
+RUSTFS_CONTRACT_SECRET_KEY='...' \
+RUSTFS_CONTRACT_RESTART_PHASE=seed \
+RUSTFS_CONTRACT_RESTART_STATE_FILE='/secure/tmp/rustfs-restart-state.json' \
+cargo test --locked --test rustfs_s3_contract \
+  rustfs_preserves_object_identity_across_restart -- --ignored --nocapture
+```
+
+停止 RustFS，使用待验证版本和原数据目录重新启动，再运行 verify 阶段：
+
+```bash
+RUSTFS_CONTRACT_ENDPOINT='http://127.0.0.1:9000' \
+RUSTFS_CONTRACT_BUCKET='insight-contract' \
+RUSTFS_CONTRACT_ACCESS_KEY='...' \
+RUSTFS_CONTRACT_SECRET_KEY='...' \
+RUSTFS_CONTRACT_RESTART_PHASE=verify \
+RUSTFS_CONTRACT_RESTART_STATE_FILE='/secure/tmp/rustfs-restart-state.json' \
+cargo test --locked --test rustfs_s3_contract \
+  rustfs_preserves_object_identity_across_restart -- --ignored --nocapture
+```
+
+verify 会比较 ETag、version、SHA-256、长度和完整内容，随后按冻结 identity 删除探针并移除状态文件。
+状态文件路径应位于受限的临时目录，禁止复用生产对象或生产 bucket。
 
 ## 认证
 

@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use insight_dsl::CompileError;
 use insight_engine::{
     execution::{stop_pair, ExecutionControl, RunError, RunErrorKind, StopReason},
+    file_store::FileAdmissionAuthority,
     plan::{DescriptorValue, VersionTag},
     retrieval::{deterministic_retrieval_id, FrozenRetrievalTarget, RetrievalCompletion},
     run_stream::LiveRunStreamBroker,
@@ -33,6 +34,7 @@ use insight_resources::{
 
 use crate::leaf_adapters::{
     production_worker_registry, production_worker_registry_with_live_run_stream,
+    production_worker_registry_with_live_run_stream_and_files,
 };
 
 const RETRIEVAL_DESCRIPTOR_VERSION: &str = "1";
@@ -200,6 +202,23 @@ pub fn production_worker_registry_with_live_run_stream_and_retrievals(
 ) -> Result<WorkerExecutorRegistry, CompileError> {
     let mut registry =
         production_worker_registry_with_live_run_stream(models, actions, live_run_stream_broker)?;
+    install_retrieval_workers(&mut registry, retrievals)?;
+    Ok(registry)
+}
+
+pub fn production_worker_registry_with_live_run_stream_retrievals_and_files(
+    models: &ModelRegistry,
+    actions: &ActionRegistry,
+    retrievals: &RetrievalRegistry,
+    live_run_stream_broker: Arc<dyn LiveRunStreamBroker>,
+    file_authority: Arc<dyn FileAdmissionAuthority>,
+) -> Result<WorkerExecutorRegistry, CompileError> {
+    let mut registry = production_worker_registry_with_live_run_stream_and_files(
+        models,
+        actions,
+        live_run_stream_broker,
+        file_authority,
+    )?;
     install_retrieval_workers(&mut registry, retrievals)?;
     Ok(registry)
 }

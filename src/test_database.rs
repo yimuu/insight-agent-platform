@@ -3,14 +3,122 @@
 //! The checked-in DDL is read only by test builds and is never embedded in the
 //! service or storage library.
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
+use async_trait::async_trait;
+use insight_engine::{
+    artifact_store::{adapter as artifact_store_adapter, WorkerArtifactStore},
+    repository::{RepositoryError, StorageLocator},
+    ArtifactRef, ContentHash,
+};
 use insight_storage::SqliteDurableRepository;
 use sqlx::{
     postgres::PgPoolOptions,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     AssertSqlSafe, PgPool,
 };
+
+pub(crate) struct TestS3ArtifactStore {
+    inner: Arc<dyn WorkerArtifactStore>,
+    store_id: String,
+    namespace: String,
+}
+
+#[async_trait]
+impl WorkerArtifactStore for TestS3ArtifactStore {
+    fn inline_threshold_bytes(&self) -> usize {
+        self.inner.inline_threshold_bytes()
+    }
+
+    fn deployment_contract(
+        &self,
+    ) -> insight_engine::artifact_store::ArtifactStoreDeploymentContract {
+        artifact_store_adapter::s3_deployment_contract(
+            self.store_id.clone(),
+            self.namespace.clone(),
+        )
+    }
+
+    fn artifact_for_bytes(
+        &self,
+        bytes: &[u8],
+        media_type: Option<String>,
+    ) -> Result<ArtifactRef, RepositoryError> {
+        self.inner.artifact_for_bytes(bytes, media_type)
+    }
+
+    fn storage_locator(&self, artifact: &ArtifactRef) -> Result<StorageLocator, RepositoryError> {
+        self.inner.storage_locator(artifact)
+    }
+
+    fn storage_locator_for_tenant(
+        &self,
+        namespace: &str,
+        tenant_id: &str,
+        artifact: &ArtifactRef,
+    ) -> Result<StorageLocator, RepositoryError> {
+        self.inner
+            .storage_locator_for_tenant(namespace, tenant_id, artifact)
+    }
+
+    async fn put_and_verify(
+        &self,
+        artifact: &ArtifactRef,
+        bytes: &[u8],
+    ) -> Result<(ContentHash, u64), RepositoryError> {
+        self.inner.put_and_verify(artifact, bytes).await
+    }
+
+    async fn put_and_verify_at(
+        &self,
+        artifact: &ArtifactRef,
+        locator: &StorageLocator,
+        bytes: &[u8],
+    ) -> Result<(ContentHash, u64), RepositoryError> {
+        self.inner.put_and_verify_at(artifact, locator, bytes).await
+    }
+
+    async fn read_and_verify(
+        &self,
+        artifact: &ArtifactRef,
+        locator: &StorageLocator,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        self.inner
+            .read_and_verify(artifact, locator, max_bytes)
+            .await
+    }
+
+    async fn delete(
+        &self,
+        artifact: &ArtifactRef,
+        locator: &StorageLocator,
+    ) -> Result<(), RepositoryError> {
+        self.inner.delete(artifact, locator).await
+    }
+}
+
+pub(crate) async fn test_s3_artifact_store(
+    root: impl AsRef<Path>,
+    inline_threshold_bytes: usize,
+    namespace: &str,
+) -> Arc<TestS3ArtifactStore> {
+    let inner = Arc::new(
+        insight_storage::artifact_store::LocalContentAddressedArtifactStore::open_shared(
+            root.as_ref().to_path_buf(),
+            inline_threshold_bytes,
+            namespace,
+        )
+        .await
+        .unwrap(),
+    );
+    let store_id = inner.deployment_contract().store_id().unwrap().to_owned();
+    Arc::new(TestS3ArtifactStore {
+        inner,
+        store_id,
+        namespace: namespace.to_owned(),
+    })
+}
 
 async fn schema_for(backend: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))

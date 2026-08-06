@@ -106,10 +106,18 @@ impl From<ServiceError> for ApiError {
                 "CONVERSATION_REQUEST_INVALID",
                 "conversation request is invalid",
             ),
-            "CONVERSATION_INPUT_INVALID" => Self::new(
+            "CONVERSATION_INPUT_INVALID"
+            | "AGENT_INPUT_INVALID"
+            | "AGENT_INPUT_CONTRACT_INVALID"
+            | "AGENT_INPUT_UNKNOWN_FIELD" => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "CONVERSATION_INPUT_INVALID",
-                "conversation message does not match the Agent input contract",
+                "AGENT_INPUT_INVALID",
+                "invocation does not match the Agent input contract",
+            ),
+            "AGENT_CONVERSATION_UNSUPPORTED" => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "AGENT_CONVERSATION_UNSUPPORTED",
+                "agent does not support conversations",
             ),
             "AGENT_NOT_FOUND" => {
                 Self::new(StatusCode::NOT_FOUND, "AGENT_NOT_FOUND", "agent not found")
@@ -137,6 +145,46 @@ impl From<ServiceError> for ApiError {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "ARTIFACT_TOO_LARGE",
                 "artifact exceeds the authorized read size",
+            ),
+            "FILE_NOT_FOUND" => {
+                Self::new(StatusCode::NOT_FOUND, "FILE_NOT_FOUND", "file not found")
+            }
+            "FILE_PRINCIPAL_REQUIRED" => Self::new(
+                StatusCode::BAD_REQUEST,
+                error.code(),
+                "file-bearing invocation is invalid",
+            ),
+            "INVOCATION_INVALID" => Self::new(
+                StatusCode::BAD_REQUEST,
+                "INVOCATION_INVALID",
+                "invocation envelope is invalid",
+            ),
+            "FILE_NOT_READY"
+            | "FILE_UPLOAD_EXPIRED"
+            | "FILE_UPLOAD_FAILED"
+            | "FILE_IDENTITY_CHANGED" => Self::new(
+                StatusCode::CONFLICT,
+                error.code(),
+                "file is not available for this invocation",
+            ),
+            "FILE_TOO_LARGE"
+            | "FILE_LIMIT_EXCEEDED"
+            | "CLIENT_HISTORY_UNSUPPORTED"
+            | "FILE_MEDIA_TYPE_UNSUPPORTED"
+            | "FILE_PROVIDER_UNSUPPORTED" => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                error.code(),
+                "invocation does not satisfy the Agent contract",
+            ),
+            "CONVERSATION_HISTORY_MANAGED" => Self::new(
+                StatusCode::BAD_REQUEST,
+                "CONVERSATION_HISTORY_MANAGED",
+                "conversation history is managed by the server",
+            ),
+            "FILE_CONTENT_MISMATCH" | "IDEMPOTENCY_KEY_REUSED" => Self::new(
+                StatusCode::CONFLICT,
+                error.code(),
+                "request conflicts with durable state",
             ),
             "RUN_CAPACITY_EXCEEDED" => Self::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -287,6 +335,16 @@ impl From<ServiceError> for ApiError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "CONVERSATION_UNAVAILABLE",
                 "conversation service is unavailable",
+            ),
+            "FILE_SERVICE_UNAVAILABLE" | "FILE_STORAGE_UNAVAILABLE" => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "FILE_SERVICE_UNAVAILABLE",
+                "file service is unavailable",
+            ),
+            "OBJECT_STORAGE_UNAVAILABLE" => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "OBJECT_STORAGE_UNAVAILABLE",
+                "object storage is unavailable",
             ),
             "GRAPH_PUBLICATION_UNAVAILABLE" | "GRAPH_SURFACE_UNAVAILABLE" => Self::new(
                 StatusCode::SERVICE_UNAVAILABLE,

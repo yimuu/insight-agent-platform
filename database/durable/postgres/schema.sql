@@ -946,7 +946,7 @@ CREATE TABLE artifact_store_authority (
     namespace text NOT NULL,
     store_id text NOT NULL,
     bound_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT artifact_store_authority_backend_check CHECK ((backend = 'shared_filesystem'::text)),
+    CONSTRAINT artifact_store_authority_backend_check CHECK ((backend = ANY (ARRAY['shared_filesystem'::text, 's3'::text]))),
     CONSTRAINT artifact_store_authority_namespace_check CHECK ((namespace ~ '^[A-Za-z0-9._-]{1,128}$'::text)),
     CONSTRAINT artifact_store_authority_singleton_check CHECK (singleton),
     CONSTRAINT artifact_store_authority_store_id_check CHECK ((store_id ~ '^artifact_store_[0-9a-f]{32}$'::text))
@@ -2234,6 +2234,7 @@ CREATE UNLOGGED TABLE terminal_runtime_instances (
 CREATE TABLE terminal_run_admissions (
     run_id text NOT NULL PRIMARY KEY,
     tenant_id text NOT NULL,
+    admission_id text NOT NULL,
     request_id text NOT NULL,
     agent_id text NOT NULL,
     definition_revision_id text NOT NULL,
@@ -2246,11 +2247,13 @@ CREATE TABLE terminal_run_admissions (
     owner_instance_id text NOT NULL,
     owner_epoch bigint NOT NULL,
     accepted_at timestamp with time zone NOT NULL,
-    CONSTRAINT terminal_run_admissions_tenant_request_key UNIQUE (tenant_id, request_id),
+    CONSTRAINT terminal_run_admissions_tenant_admission_key UNIQUE (tenant_id, admission_id),
     CONSTRAINT terminal_run_admissions_run_id_check
         CHECK ((run_id <> ''::text) AND (octet_length(run_id) <= 256)),
     CONSTRAINT terminal_run_admissions_tenant_id_check
         CHECK ((tenant_id <> ''::text) AND (octet_length(tenant_id) <= 256)),
+    CONSTRAINT terminal_run_admissions_admission_id_check
+        CHECK ((admission_id <> ''::text) AND (octet_length(admission_id) <= 256)),
     CONSTRAINT terminal_run_admissions_request_id_check
         CHECK ((request_id <> ''::text) AND (octet_length(request_id) <= 256)),
     CONSTRAINT terminal_run_admissions_agent_id_check
@@ -2646,9 +2649,20 @@ CREATE TABLE workflow_runs (
     CONSTRAINT workflow_runs_scheduler_lease_epoch_check CHECK ((scheduler_lease_epoch >= 0))
 );
 
+CREATE TABLE run_principals (
+    run_id text PRIMARY KEY,
+    tenant_id text NOT NULL,
+    user_id text,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT run_principals_identity_check CHECK (
+        tenant_id <> '' AND octet_length(tenant_id) <= 256 AND
+        (user_id IS NULL OR (user_id <> '' AND octet_length(user_id) <= 256))
+    )
+);
+
 CREATE TABLE full_conversation_turns (
     tenant_id text NOT NULL,
-    request_id text NOT NULL,
+    admission_id text NOT NULL,
     conversation_id text NOT NULL,
     user_id text NOT NULL,
     run_id text NOT NULL,
@@ -2657,13 +2671,13 @@ CREATE TABLE full_conversation_turns (
     user_content_hash text NOT NULL,
     selected_context_hash text NOT NULL,
     created_at timestamp with time zone NOT NULL,
-    PRIMARY KEY (tenant_id, request_id),
+    PRIMARY KEY (tenant_id, admission_id),
     UNIQUE (run_id),
     UNIQUE (user_message_id),
     UNIQUE (assistant_message_id),
     CONSTRAINT full_conversation_turns_identity_check CHECK (
         tenant_id <> '' AND octet_length(tenant_id) <= 256 AND
-        request_id <> '' AND octet_length(request_id) <= 256 AND
+        admission_id <> '' AND octet_length(admission_id) <= 256 AND
         user_id <> '' AND octet_length(user_id) <= 256 AND
         user_message_id <> '' AND octet_length(user_message_id) <= 256 AND
         assistant_message_id <> '' AND octet_length(assistant_message_id) <= 256
@@ -3031,11 +3045,17 @@ ALTER TABLE ONLY workflow_retrieval_publications
 ALTER TABLE ONLY workflow_runs
     ADD CONSTRAINT workflow_runs_pkey PRIMARY KEY (run_id);
 
+ALTER TABLE ONLY run_principals
+    ADD CONSTRAINT run_principals_run_id_fkey
+    FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id) ON DELETE CASCADE;
+
 ALTER TABLE ONLY full_conversation_turns
     ADD CONSTRAINT full_conversation_turns_run_id_fkey
     FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id) ON DELETE CASCADE;
 
 CREATE INDEX idx_activation_dispatch ON node_activations USING btree (run_id, lifecycle, scope_instance_id, activation_id) WHERE (lifecycle = ANY (ARRAY['ready'::text, 'retry_wait'::text, 'waiting'::text]));
+
+CREATE INDEX idx_run_principals_tenant_user ON run_principals USING btree (tenant_id, user_id, run_id);
 
 CREATE INDEX idx_activation_live_fence ON node_activations USING btree (run_id, activation_id, current_attempt_no, current_lease_epoch) WHERE (current_attempt_no IS NOT NULL);
 
@@ -4228,6 +4248,59 @@ BEFORE UPDATE ON agent_deployment_resolutions FOR EACH ROW EXECUTE FUNCTION reje
 CREATE TRIGGER agent_deployment_publication_rewrite_forbidden
 BEFORE DELETE OR UPDATE ON agent_deployment_publications FOR EACH ROW EXECUTE FUNCTION reject_transition_receipt_rewrite();
 
+CREATE TABLE files (
+    file_id text PRIMARY KEY,
+    tenant_id text NOT NULL CHECK(tenant_id<>'' AND octet_length(tenant_id)<=256),
+    user_id text NOT NULL CHECK(user_id<>'' AND octet_length(user_id)<=256),
+    filename text NOT NULL CHECK(filename<>'' AND octet_length(filename)<=1024),
+    media_type text NOT NULL CHECK(media_type<>'' AND octet_length(media_type)<=255),
+    expected_size_bytes bigint NOT NULL CHECK(expected_size_bytes>=0),
+    actual_size_bytes bigint CHECK(actual_size_bytes>=0),
+    checksum_sha256 text CHECK(checksum_sha256 IS NULL OR checksum_sha256 ~ '^[0-9a-f]{64}$'),
+    object_key text NOT NULL UNIQUE CHECK(object_key<>'' AND octet_length(object_key)<=1024),
+    object_etag text,
+    object_version_id text,
+    status text NOT NULL CHECK(status IN('pending_upload','ready','expired','failed','deleting','deleted')),
+    idempotency_key text,
+    request_hash text NOT NULL CHECK(request_hash ~ '^sha256:[0-9a-f]{64}$'),
+    created_at timestamptz NOT NULL,
+    upload_expires_at timestamptz NOT NULL,
+    ready_at timestamptz,
+    deleted_at timestamptz,
+    deletion_fence bigint NOT NULL DEFAULT 0 CHECK(deletion_fence>=0),
+    deletion_claim_token text,
+    deletion_claim_expires_at timestamptz,
+    CHECK((deletion_claim_token IS NULL)=(deletion_claim_expires_at IS NULL)),
+    CHECK(((status='ready')=(actual_size_bytes IS NOT NULL AND object_etag IS NOT NULL AND ready_at IS NOT NULL))
+          OR status IN('deleting','deleted'))
+);
+CREATE UNIQUE INDEX idx_files_idempotency
+ON files(tenant_id,user_id,idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX idx_files_owner
+ON files(tenant_id,user_id,created_at,file_id);
+CREATE INDEX idx_files_pending_expiry
+ON files(status,upload_expires_at,file_id);
+CREATE INDEX idx_files_deletion_claim
+ON files(status,deletion_claim_expires_at,file_id);
+CREATE TABLE file_bindings (
+    file_id text NOT NULL REFERENCES files(file_id) ON DELETE RESTRICT,
+    target_kind text NOT NULL CHECK(target_kind IN('run','conversation','artifact')),
+    target_id text NOT NULL CHECK(target_id<>'' AND octet_length(target_id)<=256),
+    tenant_id text NOT NULL CHECK(tenant_id<>'' AND octet_length(tenant_id)<=256),
+    user_id text NOT NULL CHECK(user_id<>'' AND octet_length(user_id)<=256),
+    filename text NOT NULL CHECK(filename<>'' AND octet_length(filename)<=1024),
+    media_type text NOT NULL CHECK(media_type<>'' AND octet_length(media_type)<=255),
+    size_bytes bigint NOT NULL CHECK(size_bytes>=0),
+    object_etag text NOT NULL CHECK(object_etag<>''),
+    object_version_id text,
+    created_at timestamptz NOT NULL,
+    retain_until timestamptz,
+    released_at timestamptz,
+    PRIMARY KEY(file_id,target_kind,target_id)
+);
+CREATE INDEX idx_file_bindings_target
+ON file_bindings(target_kind,target_id,file_id);
+
 CREATE TRIGGER mcp_signed_manifest_rewrite_forbidden
 BEFORE UPDATE ON mcp_signed_manifests FOR EACH ROW EXECUTE FUNCTION reject_transition_receipt_rewrite();
 CREATE TRIGGER mcp_discovery_snapshot_rewrite_forbidden
@@ -4259,7 +4332,7 @@ CREATE TABLE durable_schema_contract (
 INSERT INTO durable_schema_contract (singleton, contract_id, backend)
 VALUES (
     1,
-    'durable-schema-a7d26783-48d3-4bce-b337-8e634fda99a3',
+    'durable-schema-bc893e0d-33b5-4a90-9aa3-1db4f6d17c87',
     'postgres'
 );
 

@@ -581,6 +581,14 @@ pub mod adapter {
         command.full_conversation()
     }
 
+    pub fn create_run_file_bindings(command: &CreateRunCommand) -> &[crate::RunFileBinding] {
+        command.file_bindings()
+    }
+
+    pub fn create_run_principal(command: &CreateRunCommand) -> Option<&RunPrincipal> {
+        command.principal()
+    }
+
     pub fn public_event_intent(payload: PublicEventPayload) -> PublicEventIntent {
         PublicEventIntent::new(payload)
     }
@@ -1172,6 +1180,7 @@ pub struct FullConversationRunAdmission {
     conversation_id: String,
     tenant_id: String,
     user_id: String,
+    admission_id: String,
     agent_id: String,
     user_message_id: String,
     assistant_message_id: String,
@@ -1180,6 +1189,7 @@ pub struct FullConversationRunAdmission {
     user_content_hash: ContentHash,
     selected_context_hash: ContentHash,
     context_message_order: i64,
+    conversation_file_ids: Vec<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -1189,6 +1199,7 @@ impl FullConversationRunAdmission {
         conversation_id: impl Into<String>,
         tenant_id: impl Into<String>,
         user_id: impl Into<String>,
+        admission_id: impl Into<String>,
         agent_id: impl Into<String>,
         user_message_id: impl Into<String>,
         assistant_message_id: impl Into<String>,
@@ -1197,12 +1208,14 @@ impl FullConversationRunAdmission {
         user_content_hash: ContentHash,
         selected_context_hash: ContentHash,
         context_message_order: i64,
+        conversation_file_ids: Vec<String>,
         created_at: DateTime<Utc>,
     ) -> Result<Self, RepositoryError> {
         let admission = Self {
             conversation_id: conversation_id.into(),
             tenant_id: tenant_id.into(),
             user_id: user_id.into(),
+            admission_id: admission_id.into(),
             agent_id: agent_id.into(),
             user_message_id: user_message_id.into(),
             assistant_message_id: assistant_message_id.into(),
@@ -1211,12 +1224,14 @@ impl FullConversationRunAdmission {
             user_content_hash,
             selected_context_hash,
             context_message_order,
+            conversation_file_ids,
             created_at,
         };
         for value in [
             &admission.conversation_id,
             &admission.tenant_id,
             &admission.user_id,
+            &admission.admission_id,
             &admission.agent_id,
             &admission.user_message_id,
             &admission.assistant_message_id,
@@ -1224,6 +1239,15 @@ impl FullConversationRunAdmission {
             validate_body_free_label(value)?;
         }
         if admission.context_message_order < 0 {
+            return Err(RepositoryError::invalid_data());
+        }
+        let mut file_ids = std::collections::HashSet::new();
+        if admission.conversation_file_ids.iter().any(|file_id| {
+            file_id.is_empty()
+                || file_id.len() > 256
+                || file_id.chars().any(char::is_control)
+                || !file_ids.insert(file_id)
+        }) {
             return Err(RepositoryError::invalid_data());
         }
         if admission.user_content_inline.is_some() == admission.user_content_ref.is_some()
@@ -1251,6 +1275,10 @@ impl FullConversationRunAdmission {
 
     pub fn user_id(&self) -> &str {
         &self.user_id
+    }
+
+    pub fn admission_id(&self) -> &str {
+        &self.admission_id
     }
 
     pub fn agent_id(&self) -> &str {
@@ -1285,8 +1313,43 @@ impl FullConversationRunAdmission {
         self.context_message_order
     }
 
+    pub fn conversation_file_ids(&self) -> &[String] {
+        &self.conversation_file_ids
+    }
+
     pub fn created_at(&self) -> DateTime<Utc> {
         self.created_at
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunPrincipal {
+    tenant_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_id: Option<String>,
+}
+
+impl RunPrincipal {
+    pub fn new(
+        tenant_id: impl Into<String>,
+        user_id: Option<impl Into<String>>,
+    ) -> Result<Self, RepositoryError> {
+        let tenant_id = tenant_id.into();
+        validate_body_free_label(&tenant_id)?;
+        let user_id = user_id.map(Into::into);
+        if let Some(user_id) = &user_id {
+            validate_body_free_label(user_id)?;
+        }
+        Ok(Self { tenant_id, user_id })
+    }
+
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
+    pub fn user_id(&self) -> Option<&str> {
+        self.user_id.as_deref()
     }
 }
 
@@ -1298,6 +1361,10 @@ pub struct CreateRunCommand {
     deployment_revision_id: DeploymentRevisionId,
     plan_hash: ContentHash,
     binding_hash: ContentHash,
+    /// Trace correlation only. It is intentionally excluded from the durable
+    /// admission intent so a retry may carry a fresh `X-Request-ID` while the
+    /// idempotency identity remains stable.
+    #[serde(skip_serializing)]
     request_id: String,
     attachment: PublicRunAttachment,
     input: Value,
@@ -1320,6 +1387,13 @@ pub struct CreateRunCommand {
     expected_provider_fences: BTreeMap<String, u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     full_conversation: Option<FullConversationRunAdmission>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    file_bindings: Vec<crate::RunFileBinding>,
+    /// Principal authority for public standalone Runs. This is immutable
+    /// admission intent and is also the namespace source for private S3
+    /// artifacts. Internal legacy Runs may omit it but public APIs must not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    principal: Option<RunPrincipal>,
 }
 
 impl CreateRunCommand {
@@ -1348,6 +1422,8 @@ impl CreateRunCommand {
             expected_mcp_server_fences: BTreeMap::new(),
             expected_provider_fences: BTreeMap::new(),
             full_conversation: None,
+            file_bindings: Vec::new(),
+            principal: None,
         })
     }
 
@@ -1450,6 +1526,26 @@ impl CreateRunCommand {
         Ok(self)
     }
 
+    pub fn with_file_bindings(
+        mut self,
+        bindings: Vec<crate::RunFileBinding>,
+    ) -> Result<Self, RepositoryError> {
+        let mut file_ids = std::collections::HashSet::new();
+        for binding in &bindings {
+            binding.validate()?;
+            if !file_ids.insert(binding.file_id.as_str()) {
+                return Err(invalid_command());
+            }
+        }
+        self.file_bindings = bindings;
+        Ok(self)
+    }
+
+    pub fn with_principal(mut self, principal: RunPrincipal) -> Self {
+        self.principal = Some(principal);
+        self
+    }
+
     pub fn run_id(&self) -> &RunId {
         &self.run_id
     }
@@ -1508,6 +1604,14 @@ impl CreateRunCommand {
 
     pub(crate) fn full_conversation(&self) -> Option<&FullConversationRunAdmission> {
         self.full_conversation.as_ref()
+    }
+
+    pub(crate) fn file_bindings(&self) -> &[crate::RunFileBinding] {
+        &self.file_bindings
+    }
+
+    pub(crate) fn principal(&self) -> Option<&RunPrincipal> {
+        self.principal.as_ref()
     }
 }
 

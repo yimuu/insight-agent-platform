@@ -10,6 +10,7 @@ pub mod artifact;
 pub mod common;
 #[doc(hidden)]
 pub mod control_repository;
+pub mod file;
 #[doc(hidden)]
 pub mod human_task;
 #[doc(hidden)]
@@ -125,6 +126,11 @@ pub use control_repository::{
     ReuseCompatibility, RevokeControlTokenCommand, SchedulerLeaseRepository, SchedulerRunLease,
     SettleScopeCommand, TokenConsumerKind,
 };
+pub use file::{
+    AcknowledgeFileDeletionCommand, BoundConversationFilesQuery, BoundRunFilesQuery,
+    ClaimFileDeletionsCommand, CompleteFileCommand, CreateFileCommand, CreateFileOutcome,
+    FileDeletionClaim, FileDurableRepository, FileQuery, FileStatus, RunFileBinding, StoredFile,
+};
 pub use human_task::{
     ClaimHumanWorkItemCommand, CompleteHumanWorkItemCommand, HumanTaskDurableRepository,
     HumanTaskPrincipal, HumanWorkItem, HumanWorkItemClaim, HumanWorkItemCompletionAuthority,
@@ -182,7 +188,7 @@ pub use model::{
     ActivateAgentDeploymentCommand, AgentDeploymentActivationOutcome, AgentDeploymentTarget,
     CommitReceipt, CreateRunCommand, DurableRunStreamSnapshot, FullConversationRunAdmission,
     PlanInstallOutcome, PlanPublicationOutcome, PublicEventIntent, PublicRunAttachment,
-    PublicationHead, PublicationOrigin, PublishVersionedPlanCommand, RunProjection,
+    PublicationHead, PublicationOrigin, PublishVersionedPlanCommand, RunPrincipal, RunProjection,
     RunTerminalKind, RunTransitionCommand, RunUsageStatus, VersionedPlan, VersionedPlanCatalog,
 };
 pub use model_tool_parent_resume::ModelToolParentResume;
@@ -306,6 +312,16 @@ pub trait DurableRepository: Send + Sync {
         &self,
         run_id: &insight_engine::RunId,
     ) -> Result<Option<RunProjection>, RepositoryError>;
+
+    /// Returns the immutable public principal inherited from the nearest
+    /// externally admitted ancestor. The default preserves repository test
+    /// doubles and legacy internal Runs that predate principal binding.
+    async fn load_run_principal(
+        &self,
+        _run_id: &insight_engine::RunId,
+    ) -> Result<Option<RunPrincipal>, RepositoryError> {
+        Ok(None)
+    }
 
     async fn load_run_stream_snapshot(
         &self,

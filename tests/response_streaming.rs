@@ -584,7 +584,9 @@ impl Fixture {
             )
             .unwrap();
         let actions = ActionRegistry::default();
-        let publication_resolver = ProductionLeafDeploymentResolver::new(&models, &actions);
+        let publication_resolver = ProductionLeafDeploymentResolver::new(&models, &actions)
+            .with_inline_llm_attachments(1024 * 1024, 2 * 1024 * 1024, 10)
+            .unwrap();
         let mut deployed = Vec::new();
         for (stream_enabled, publish_enabled) in
             [(true, true), (true, false), (false, true), (false, false)]
@@ -1130,13 +1132,22 @@ async fn start_attached_response(
     request_id: &str,
     input: Value,
 ) -> axum::response::Response {
+    start_attached_invocation(app, agent_id, request_id, json!({"inputs": input})).await
+}
+
+async fn start_attached_invocation(
+    app: &Router,
+    agent_id: &str,
+    request_id: &str,
+    invocation: Value,
+) -> axum::response::Response {
     let response = app
         .clone()
         .oneshot(
             Request::post(format!("/v1/agents/{agent_id}/runs/stream"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("x-request-id", request_id)
-                .body(Body::from(serde_json::to_vec(&input).unwrap()))
+                .body(Body::from(serde_json::to_vec(&invocation).unwrap()))
                 .unwrap(),
         )
         .await
@@ -1616,7 +1627,8 @@ async fn a_real_tcp_client_that_stops_reading_hits_the_outbound_deadline_and_can
     let client_socket = tokio::net::TcpSocket::new_v4().unwrap();
     client_socket.set_recv_buffer_size(1_024).unwrap();
     let mut client = client_socket.connect(address).await.unwrap();
-    let body = serde_json::to_vec(&json!({"question": TCP_BACKPRESSURE_QUESTION})).unwrap();
+    let body =
+        serde_json::to_vec(&json!({"inputs":{"question": TCP_BACKPRESSURE_QUESTION}})).unwrap();
     let request_head = format!(
         "POST /v1/agents/response_stream_backpressure_wait/runs/stream HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -1846,14 +1858,16 @@ async fn terminal_lifecycle_matrix_is_closed_redacted_unique_and_immediately_eof
 #[tokio::test]
 async fn checked_in_medical_agent_preserves_three_initial_items_and_one_follow_up_item() {
     let fixture = Fixture::start_with_run_timeout(Duration::from_secs(30)).await;
-    let initial_response = start_attached_response(
+    let initial_response = start_attached_invocation(
         &fixture.app,
         "medical_report_interpreter",
         "request-medical-initial",
         json!({
-            "report_text": "白细胞 12×10^9/L，参考范围 4-10×10^9/L。",
+            "query": "请解读这份报告",
             "messages": [],
-            "question": "请解读这份报告"
+            "inputs": {
+                "report_text": "白细胞 12×10^9/L，参考范围 4-10×10^9/L。"
+            }
         }),
     )
     .await;
@@ -1872,17 +1886,19 @@ async fn checked_in_medical_agent_preserves_three_initial_items_and_one_follow_u
         initial.terminal()["run"]["result"]
     );
 
-    let follow_up_response = start_attached_response(
+    let follow_up_response = start_attached_invocation(
         &fixture.app,
         "medical_report_interpreter",
         "request-medical-follow-up",
         json!({
-            "report_text": "白细胞 12×10^9/L，参考范围 4-10×10^9/L。",
+            "query": "需要马上去急诊吗？",
             "messages": [{
                 "role": "user",
                 "content": [{"text": "刚才的白细胞结果偏高"}]
             }],
-            "question": "需要马上去急诊吗？"
+            "inputs": {
+                "report_text": "白细胞 12×10^9/L，参考范围 4-10×10^9/L。"
+            }
         }),
     )
     .await;
@@ -1923,7 +1939,7 @@ async fn first_public_delta_arrives_before_the_model_call_finishes() {
             Request::post("/v1/agents/response_stream_tt/runs/stream")
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("x-request-id", "request-live-before-finish")
-                .body(Body::from(r#"{"question":"show the response"}"#))
+                .body(Body::from(r#"{"inputs":{"question":"show the response"}}"#))
                 .unwrap(),
         )
         .await

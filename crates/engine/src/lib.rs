@@ -13,6 +13,7 @@ pub mod error;
 pub mod event;
 pub mod events;
 pub mod execution;
+pub mod file_store;
 pub mod history;
 pub mod human;
 pub mod identity;

@@ -10,11 +10,6 @@ execution:
   persistence_mode: terminal_only
 
 types:
-  FailureRequest:
-    fields:
-      text: string
-      effect_id: string
-      idempotency_key: string
   EffectReceipt:
     fields:
       effect_id: string
@@ -22,8 +17,12 @@ types:
       occurrence: integer
 
 inputs:
-  message: FailureRequest
-  conversation_context: any
+  query: string
+  messages:
+    type: Message[]
+    default: []
+  effect_id: string
+  idempotency_key: string
 
 output: any
 
@@ -33,13 +32,13 @@ workflow:
       id: record_effect
       call: qualification.effect_marker
       inputs:
-        effect_id: $message.effect_id
-        idempotency_key: $message.idempotency_key
+        effect_id: $effect_id
+        idempotency_key: $idempotency_key
       response: EffectReceipt
 
     - id: failure_window
       wait: {duration_ms: 15000}
 
     - return:
-        message: $message
+        query: $query
         effect: $record_effect

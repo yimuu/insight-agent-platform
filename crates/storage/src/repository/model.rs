@@ -6,8 +6,8 @@ use serde_json::Value;
 use insight_durable::model::adapter as durable_model_adapter;
 pub use insight_durable::{
     CommitReceipt, CreateRunCommand, FullConversationRunAdmission, PublicEventIntent,
-    PublicRunAttachment, PublicationHead, PublicationOrigin, RunProjection, RunTransitionCommand,
-    VersionedPlan, VersionedPlanCatalog,
+    PublicRunAttachment, PublicationHead, PublicationOrigin, RunPrincipal, RunProjection,
+    RunTransitionCommand, VersionedPlan, VersionedPlanCatalog,
 };
 
 use super::RepositoryError;
@@ -202,6 +202,8 @@ pub(crate) trait CreateRunCommandAdapter {
     fn expected_mcp_server_fences(&self) -> &BTreeMap<String, u64>;
     fn expected_provider_fences(&self) -> &BTreeMap<String, u64>;
     fn full_conversation(&self) -> Option<&FullConversationRunAdmission>;
+    fn file_bindings(&self) -> &[insight_durable::RunFileBinding];
+    fn principal(&self) -> Option<&RunPrincipal>;
 }
 
 impl CreateRunCommandAdapter for CreateRunCommand {
@@ -246,6 +248,12 @@ impl CreateRunCommandAdapter for CreateRunCommand {
     }
     fn full_conversation(&self) -> Option<&FullConversationRunAdmission> {
         durable_model_adapter::create_run_full_conversation(self)
+    }
+    fn file_bindings(&self) -> &[insight_durable::RunFileBinding] {
+        durable_model_adapter::create_run_file_bindings(self)
+    }
+    fn principal(&self) -> Option<&RunPrincipal> {
+        durable_model_adapter::create_run_principal(self)
     }
 }
 

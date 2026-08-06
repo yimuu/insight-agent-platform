@@ -36,6 +36,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "deployment_revisions",
     "durable_schema_contract",
     "execution_events",
+    "file_bindings",
+    "files",
     "fork_groups",
     "fork_legs",
     "full_conversation_turns",
@@ -100,6 +102,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "recovery_revision_roots",
     "recovery_transition_results",
     "response_public_items",
+    "run_principals",
     "run_stream_snapshots",
     "run_migration_intents",
     "run_recovery_lineage",
@@ -335,6 +338,25 @@ fn terminal_and_conversation_schema_layout_matches_the_lightweight_contract() {
     assert!(postgres.contains("create sequence conversation_message_order_seq cache 1000"));
 }
 
+#[test]
+fn file_schema_freezes_identity_bindings_and_fenced_gc_claims() {
+    let postgres = normalize(support::POSTGRES_SCHEMA);
+    let sqlite = normalize(support::SQLITE_SCHEMA);
+    for schema in [&postgres, &sqlite] {
+        assert!(schema.contains("create table files"));
+        assert!(schema.contains("create table file_bindings"));
+        assert!(schema.contains("deletion_claim_token"));
+        assert!(schema.contains("deletion_claim_expires_at"));
+        assert!(schema.contains("deletion_fence"));
+        assert!(schema.contains("idx_files_deletion_claim"));
+        assert!(schema.contains("object_version_id"));
+        assert!(schema.contains("object_etag"));
+        assert!(schema.contains("object_version_id"));
+        assert!(schema.contains("released_at"));
+        assert!(schema.contains("retain_until"));
+    }
+}
+
 #[tokio::test]
 async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
     let temporary = tempfile::tempdir().unwrap();
@@ -395,7 +417,7 @@ async fn sqlite_schema_installs_on_a_new_file_and_rejects_a_second_install() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(indexes.len(), 81, "all explicit indexes must be installed");
+    assert_eq!(indexes.len(), 87, "all explicit indexes must be installed");
     for (index, table) in [
         ("idx_runs_dispatch", "workflow_runs"),
         ("idx_runs_recovery", "workflow_runs"),

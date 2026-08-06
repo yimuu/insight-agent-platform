@@ -23,10 +23,10 @@ use insight_agent_platform::{
     engine::{
         plan::{LeafTaskDescriptor, SubflowContractRegistry},
         repository::{CreateRunCommand, DurableRepository, PostgresDurableRepository},
-        DefinitionRevisionId, EffectEvidence, LeafTaskExecutor, LeafTaskKind,
-        LocalContentAddressedArtifactStore, RunId, RuntimeValue, SchedulerTaskKind,
-        TaskExecutionRequest, TaskExecutionResult, TransitionKey, TransitionOutcome, VersionTag,
-        WorkerExecutionContext, WorkerExecutorRegistry, WorkerFailure,
+        DefinitionRevisionId, EffectEvidence, LeafTaskExecutor, LeafTaskKind, RunId, RuntimeValue,
+        SchedulerTaskKind, TaskExecutionRequest, TaskExecutionResult, TransitionKey,
+        TransitionOutcome, VersionTag, WorkerExecutionContext, WorkerExecutorRegistry,
+        WorkerFailure,
     },
     history::types::RunStatus,
     runtime::{
@@ -658,12 +658,8 @@ fn single_process_development_config() -> RunServiceConfig {
 async fn shared_artifact_store(
     root: PathBuf,
     namespace: &str,
-) -> Arc<LocalContentAddressedArtifactStore> {
-    Arc::new(
-        LocalContentAddressedArtifactStore::open_shared(root, 64 * 1024, namespace)
-            .await
-            .unwrap(),
-    )
+) -> Arc<database::TestS3ArtifactStore> {
+    database::test_s3_artifact_store(root, 64 * 1024, namespace).await
 }
 
 async fn response_json(response: axum::response::Response) -> Value {

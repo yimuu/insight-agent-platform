@@ -9,15 +9,12 @@ metadata:
 execution:
   persistence_mode: terminal_only
 
-types:
-  StreamRequest:
-    fields:
-      prompt: string
-      output_scale: string
-
 inputs:
-  message: StreamRequest
-  conversation_context: any
+  query: string
+  messages:
+    type: Message[]
+    default: []
+  output_scale: string
 
 output: string
 
@@ -33,7 +30,7 @@ workflow:
       messages:
         - role: user
           content:
-            - text: "{{ message.prompt }} output_scale={{ message.output_scale }}"
+            - text: "{{ query }} output_scale={{ output_scale }}"
       parameters: {temperature: 0}
       response: string
 

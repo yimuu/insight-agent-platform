@@ -1,7 +1,9 @@
 //! Conversation HTTP wire helpers.
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+use serde_json::{Map, Value};
+
+use insight_runtime::{AgentInvocation, FileRef};
 
 use super::RunDto;
 
@@ -28,7 +30,53 @@ pub struct CreateConversationRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppendConversationMessageRequest {
-    pub content: Value,
+    pub query: String,
+    /// Recognized only so the Conversation surface can return its dedicated
+    /// protocol error instead of collapsing managed history into a generic
+    /// JSON-shape rejection. Client history is never copied into the Run.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub messages: Option<Value>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub files: Option<Vec<FileRef>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inputs: Option<Map<String, Value>>,
+}
+
+fn deserialize_non_null_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)?
+        .ok_or_else(|| D::Error::custom("null is not allowed"))
+        .map(Some)
+}
+
+impl AppendConversationMessageRequest {
+    pub(crate) const fn has_client_history(&self) -> bool {
+        self.messages.is_some()
+    }
+
+    pub(crate) fn into_invocation(self) -> AgentInvocation {
+        AgentInvocation {
+            query: Some(self.query),
+            messages: None,
+            files: self.files,
+            inputs: self.inputs,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -259,13 +307,33 @@ mod tests {
         )
         .is_err());
         assert!(serde_json::from_value::<AppendConversationMessageRequest>(
-            json!({"content": {"text": "hello"}})
+            json!({"query": "hello", "files": [{"file_id":"file-a"}], "inputs": {"style":"short"}})
         )
         .is_ok());
-        assert!(serde_json::from_value::<AppendConversationMessageRequest>(
-            json!({"content": "hello", "provider_chunk": "must-not-persist"})
-        )
-        .is_err());
+        for alias in ["content", "message", "input", "payload"] {
+            assert!(
+                serde_json::from_value::<AppendConversationMessageRequest>(json!({
+                    "query":"hello",
+                    (alias):"must-not-be-accepted"
+                }))
+                .is_err()
+            );
+        }
+        let managed = serde_json::from_value::<AppendConversationMessageRequest>(json!({
+            "query":"hello",
+            "messages":[]
+        }))
+        .unwrap();
+        assert!(managed.has_client_history());
+        for field in ["messages", "files", "inputs"] {
+            assert!(
+                serde_json::from_value::<AppendConversationMessageRequest>(json!({
+                    "query":"hello",
+                    (field):null
+                }))
+                .is_err()
+            );
+        }
         assert!(serde_json::from_value::<ArchiveConversationRequest>(json!({})).is_ok());
         assert!(serde_json::from_value::<ArchiveConversationRequest>(
             json!({"delete_messages": true})

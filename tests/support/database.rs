@@ -6,9 +6,14 @@
 
 #![allow(dead_code)]
 
-use std::{fs::File, path::Path};
+use std::{fs::File, path::Path, sync::Arc};
 
-use insight_agent_platform::engine::repository::SqliteDurableRepository;
+use async_trait::async_trait;
+use insight_agent_platform::engine::{
+    repository::{RepositoryError, SqliteDurableRepository, StorageLocator},
+    ArtifactRef, ContentHash, WorkerArtifactStore,
+};
+use insight_engine::artifact_store::adapter as artifact_store_adapter;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     PgPool,
@@ -16,7 +21,7 @@ use sqlx::{
 use tempfile::TempDir;
 
 pub(crate) const DURABLE_SCHEMA_CONTRACT_ID: &str =
-    "durable-schema-a7d26783-48d3-4bce-b337-8e634fda99a3";
+    "durable-schema-bc893e0d-33b5-4a90-9aa3-1db4f6d17c87";
 pub(crate) const POSTGRES_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/database/durable/postgres/schema.sql"
@@ -25,6 +30,128 @@ pub(crate) const SQLITE_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/database/durable/sqlite/schema.sql"
 ));
+
+/// Hermetic test double for the production S3 deployment capability. The
+/// delegated store supplies local bytes only inside tests.
+pub(crate) struct TestS3ArtifactStore {
+    inner: Arc<dyn WorkerArtifactStore>,
+    store_id: String,
+    namespace: String,
+}
+
+impl TestS3ArtifactStore {
+    pub(crate) fn new(
+        inner: Arc<dyn WorkerArtifactStore>,
+        store_id: impl Into<String>,
+        namespace: impl Into<String>,
+    ) -> Self {
+        Self {
+            inner,
+            store_id: store_id.into(),
+            namespace: namespace.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl WorkerArtifactStore for TestS3ArtifactStore {
+    fn inline_threshold_bytes(&self) -> usize {
+        self.inner.inline_threshold_bytes()
+    }
+
+    fn deployment_contract(
+        &self,
+    ) -> insight_agent_platform::engine::ArtifactStoreDeploymentContract {
+        artifact_store_adapter::s3_deployment_contract(
+            self.store_id.clone(),
+            self.namespace.clone(),
+        )
+    }
+
+    fn artifact_for_bytes(
+        &self,
+        bytes: &[u8],
+        media_type: Option<String>,
+    ) -> Result<ArtifactRef, RepositoryError> {
+        self.inner.artifact_for_bytes(bytes, media_type)
+    }
+
+    fn storage_locator(&self, artifact: &ArtifactRef) -> Result<StorageLocator, RepositoryError> {
+        self.inner.storage_locator(artifact)
+    }
+
+    fn storage_locator_for_tenant(
+        &self,
+        namespace: &str,
+        tenant_id: &str,
+        artifact: &ArtifactRef,
+    ) -> Result<StorageLocator, RepositoryError> {
+        self.inner
+            .storage_locator_for_tenant(namespace, tenant_id, artifact)
+    }
+
+    async fn put_and_verify(
+        &self,
+        artifact: &ArtifactRef,
+        bytes: &[u8],
+    ) -> Result<(ContentHash, u64), RepositoryError> {
+        self.inner.put_and_verify(artifact, bytes).await
+    }
+
+    async fn put_and_verify_at(
+        &self,
+        artifact: &ArtifactRef,
+        locator: &StorageLocator,
+        bytes: &[u8],
+    ) -> Result<(ContentHash, u64), RepositoryError> {
+        self.inner.put_and_verify_at(artifact, locator, bytes).await
+    }
+
+    async fn read_and_verify(
+        &self,
+        artifact: &ArtifactRef,
+        locator: &StorageLocator,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        self.inner
+            .read_and_verify(artifact, locator, max_bytes)
+            .await
+    }
+
+    async fn delete(
+        &self,
+        artifact: &ArtifactRef,
+        locator: &StorageLocator,
+    ) -> Result<(), RepositoryError> {
+        self.inner.delete(artifact, locator).await
+    }
+}
+
+pub(crate) async fn test_s3_artifact_store(
+    root: impl AsRef<Path>,
+    inline_threshold_bytes: usize,
+    namespace: &str,
+) -> Arc<TestS3ArtifactStore> {
+    let inner = Arc::new(
+        insight_agent_platform::engine::LocalContentAddressedArtifactStore::open_shared(
+            root.as_ref().to_path_buf(),
+            inline_threshold_bytes,
+            namespace,
+        )
+        .await
+        .unwrap(),
+    );
+    let store_id = inner
+        .deployment_contract()
+        .store_id()
+        .expect("test shared store has a stable identity")
+        .to_owned();
+    Arc::new(TestS3ArtifactStore::new(
+        inner,
+        store_id,
+        namespace.to_owned(),
+    ))
+}
 
 pub(crate) async fn provision_sqlite_database(path: &Path) {
     assert!(

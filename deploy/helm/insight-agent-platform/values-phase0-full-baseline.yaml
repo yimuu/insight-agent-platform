@@ -13,11 +13,6 @@ runtime:
   terminalOnly:
     enabled: false
 
-artifacts:
-  persistence:
-    enabled: true
-    size: 2Gi
-
 postgresql:
   # The historical full-runtime result produced about 5.5GiB WAL per ten
   # minutes at 10 arrivals/s. Retain the whole exact-LSN inspection interval.

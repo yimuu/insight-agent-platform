@@ -10,8 +10,10 @@ execution:
   persistence_mode: terminal_only
 
 inputs:
-  message: any
-  conversation_context: any
+  query: string
+  messages:
+    type: Message[]
+    default: []
 
 output: string
 

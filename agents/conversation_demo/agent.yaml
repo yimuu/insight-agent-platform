@@ -7,11 +7,13 @@ metadata:
   description: Deterministic local passthrough fixture for terminal-only Conversation qualification.
 
 inputs:
-  message: any
-  conversation_context: any
+  query: string
+  messages:
+    type: Message[]
+    default: []
 
 output: any
 
 workflow:
   steps:
-    - return: $message
+    - return: $query

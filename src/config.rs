@@ -277,21 +277,12 @@ pub struct RunStreamConfig {
     pub outbound_write_timeout: Duration,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactStoreProvider {
-    LocalFilesystem,
-    SharedFilesystem,
-}
-
 /// External object-store policy for large durable worker values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactsConfig {
-    pub provider: ArtifactStoreProvider,
-    pub namespace: Option<String>,
-    pub directory: PathBuf,
+    /// Immutable authority namespace for S3-backed Worker Artifacts.
+    pub namespace: String,
     pub inline_threshold_bytes: usize,
-    pub tenant_encryption: Option<TenantArtifactEncryptionConfig>,
     /// Maximum bytes returned by one authorized Artifact read.
     pub max_read_bytes: usize,
     pub orphan_retention: Duration,
@@ -301,11 +292,50 @@ pub struct ArtifactsConfig {
     pub deletion_claim_seconds: u32,
 }
 
-/// Secret-backed, versioned tenant keyring for scoped Artifact envelopes.
+/// Concrete S3 protocol configuration. Credentials are referenced by
+/// environment-variable name and are resolved only during process composition.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TenantArtifactEncryptionConfig {
-    pub active_key_version: String,
-    pub keyring: SecretString,
+pub struct S3ObjectStorageConfig {
+    pub endpoint: String,
+    pub public_endpoint: String,
+    pub region: String,
+    pub bucket: String,
+    pub force_path_style: bool,
+    pub access_key_env: String,
+    pub secret_key_env: String,
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+    pub presign_upload_ttl: Duration,
+    pub presign_download_ttl: Duration,
+    pub allow_insecure_internal_endpoint: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectStorageLimitsConfig {
+    pub max_file_bytes: u64,
+    pub max_files_per_invocation: usize,
+    pub max_total_file_bytes_per_invocation: u64,
+    pub pending_upload_ttl: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectStorageGcConfig {
+    pub interval: Duration,
+    pub deletion_claim_seconds: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmAttachmentDeliveryConfig {
+    InlineData,
+    PresignedUrl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectStorageConfig {
+    pub s3: S3ObjectStorageConfig,
+    pub llm_attachment_delivery: LlmAttachmentDeliveryConfig,
+    pub limits: ObjectStorageLimitsConfig,
+    pub gc: ObjectStorageGcConfig,
 }
 
 impl HistoryConfig {
@@ -394,6 +424,7 @@ pub struct PlatformConfig {
     pub actions: ActionsConfig,
     pub history: HistoryConfig,
     pub artifacts: ArtifactsConfig,
+    pub object_storage: ObjectStorageConfig,
     pub runtime: RuntimeConfig,
     pub conversations: ConversationsConfig,
     pub mcp: McpConfig,
@@ -475,7 +506,8 @@ impl PlatformConfig {
                 "deployment_mode=production requires history.provider=postgres",
             ));
         }
-        let artifacts = resolve_artifacts(parent, raw.artifacts, raw.deployment_mode, &get_env)?;
+        let artifacts = resolve_artifacts(raw.artifacts, raw.deployment_mode)?;
+        let object_storage = resolve_object_storage(raw.object_storage, raw.deployment_mode)?;
         let runtime = resolve_runtime(parent, raw.runtime, raw.deployment_mode, &get_env)?;
         if matches!(history, HistoryConfig::Sqlite { .. })
             && runtime.run_stream.topology == RunStreamTopology::Distributed
@@ -505,6 +537,7 @@ impl PlatformConfig {
             actions,
             history,
             artifacts,
+            object_storage,
             runtime,
             conversations,
             mcp,
@@ -557,6 +590,8 @@ struct PlatformYaml {
     history: HistoryYaml,
     #[serde(default)]
     artifacts: Option<ArtifactsYaml>,
+    #[serde(default)]
+    object_storage: Option<ObjectStorageYaml>,
     runtime: RuntimeYaml,
     #[serde(default)]
     conversations: Option<ConversationsYaml>,
@@ -834,13 +869,8 @@ const fn default_postgres_pool_connections() -> u32 {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ArtifactsYaml {
-    provider: ArtifactStoreProvider,
-    #[serde(default)]
-    namespace: Option<String>,
-    directory: PathBuf,
+    namespace: String,
     inline_threshold_bytes: usize,
-    #[serde(default)]
-    tenant_encryption: Option<TenantArtifactEncryptionYaml>,
     #[serde(default)]
     max_read_bytes: Option<usize>,
     orphan_retention: String,
@@ -852,9 +882,98 @@ struct ArtifactsYaml {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TenantArtifactEncryptionYaml {
-    active_key_version: String,
-    keyring_env: String,
+struct ObjectStorageYaml {
+    s3: S3ObjectStorageYaml,
+    #[serde(default)]
+    llm_attachment_delivery: LlmAttachmentDeliveryYaml,
+    #[serde(default)]
+    limits: ObjectStorageLimitsYaml,
+    #[serde(default)]
+    gc: ObjectStorageGcYaml,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LlmAttachmentDeliveryYaml {
+    #[default]
+    InlineData,
+    PresignedUrl,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct S3ObjectStorageYaml {
+    endpoint: String,
+    #[serde(default)]
+    public_endpoint: Option<String>,
+    region: String,
+    bucket: String,
+    #[serde(default = "default_true")]
+    force_path_style: bool,
+    access_key_env: String,
+    secret_key_env: String,
+    #[serde(default = "default_s3_connect_timeout")]
+    connect_timeout: String,
+    #[serde(default = "default_s3_request_timeout")]
+    request_timeout: String,
+    #[serde(default = "default_presign_upload_ttl")]
+    presign_upload_ttl: String,
+    #[serde(default = "default_presign_download_ttl")]
+    presign_download_ttl: String,
+    #[serde(default)]
+    allow_insecure_internal_endpoint: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ObjectStorageLimitsYaml {
+    max_file_bytes: u64,
+    max_files_per_invocation: usize,
+    max_total_file_bytes_per_invocation: u64,
+    pending_upload_ttl: String,
+}
+
+impl Default for ObjectStorageLimitsYaml {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: 25 * 1_024 * 1_024,
+            max_files_per_invocation: 10,
+            max_total_file_bytes_per_invocation: 50 * 1_024 * 1_024,
+            pending_upload_ttl: "1h".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ObjectStorageGcYaml {
+    interval: String,
+    deletion_claim_seconds: u32,
+}
+
+impl Default for ObjectStorageGcYaml {
+    fn default() -> Self {
+        Self {
+            interval: "1m".to_owned(),
+            deletion_claim_seconds: 60,
+        }
+    }
+}
+
+fn default_s3_connect_timeout() -> String {
+    "5s".to_owned()
+}
+
+fn default_s3_request_timeout() -> String {
+    "30s".to_owned()
+}
+
+fn default_presign_upload_ttl() -> String {
+    "15m".to_owned()
+}
+
+fn default_presign_download_ttl() -> String {
+    "5m".to_owned()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1798,25 +1917,20 @@ fn resolve_history(
 }
 
 fn resolve_artifacts(
-    parent: &Path,
     artifacts: Option<ArtifactsYaml>,
     deployment_mode: DeploymentMode,
-    get_env: &impl Fn(&str) -> Option<String>,
 ) -> Result<ArtifactsConfig, PlatformConfigError> {
     let artifacts = match artifacts {
         Some(artifacts) => artifacts,
         None if deployment_mode == DeploymentMode::Production => {
             return Err(PlatformConfigError::new(
-                "PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE",
-                "deployment_mode=production requires artifacts.provider=shared_filesystem",
+                "PLATFORM_PRODUCTION_REQUIRES_ARTIFACT_POLICY",
+                "deployment_mode=production requires explicit S3 artifact policy",
             ));
         }
         None => ArtifactsYaml {
-            provider: ArtifactStoreProvider::LocalFilesystem,
-            namespace: None,
-            directory: PathBuf::from("../data/artifacts"),
+            namespace: "development".to_owned(),
             inline_threshold_bytes: 64 * 1024,
-            tenant_encryption: None,
             max_read_bytes: Some(64 * 1024 * 1024),
             orphan_retention: "24h".to_owned(),
             reference_retention: Some("30d".to_owned()),
@@ -1824,34 +1938,16 @@ fn resolve_artifacts(
             deletion_claim_seconds: 60,
         },
     };
-    let namespace_valid = artifacts.namespace.as_deref().is_some_and(|namespace| {
-        !namespace.is_empty()
-            && namespace.len() <= 128
-            && namespace
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    });
-    match artifacts.provider {
-        ArtifactStoreProvider::LocalFilesystem if artifacts.namespace.is_some() => {
-            return Err(PlatformConfigError::new(
-                "PLATFORM_ARTIFACTS_INVALID",
-                "artifacts.namespace is forbidden for local_filesystem",
-            ));
-        }
-        ArtifactStoreProvider::SharedFilesystem if !namespace_valid => {
-            return Err(PlatformConfigError::new(
-                "PLATFORM_ARTIFACTS_INVALID",
-                "shared_filesystem requires a valid artifacts.namespace",
-            ));
-        }
-        _ => {}
-    }
-    if deployment_mode == DeploymentMode::Production
-        && artifacts.provider != ArtifactStoreProvider::SharedFilesystem
-    {
+    let namespace_valid = !artifacts.namespace.is_empty()
+        && artifacts.namespace.len() <= 128
+        && artifacts
+            .namespace
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    if !namespace_valid {
         return Err(PlatformConfigError::new(
-            "PLATFORM_PRODUCTION_REQUIRES_SHARED_ARTIFACT_STORE",
-            "deployment_mode=production requires artifacts.provider=shared_filesystem",
+            "PLATFORM_ARTIFACTS_INVALID",
+            "artifacts.namespace must be a valid S3 authority namespace",
         ));
     }
     let max_read_bytes = artifacts.max_read_bytes.unwrap_or(64 * 1024 * 1024);
@@ -1879,44 +1975,9 @@ fn resolve_artifacts(
             "artifact reference retention must be between one second and ten years",
         ));
     }
-    let tenant_encryption = artifacts
-        .tenant_encryption
-        .map(|encryption| {
-            let active_key_version = encryption.active_key_version.trim().to_owned();
-            if active_key_version.is_empty()
-                || active_key_version.len() > 64
-                || !active_key_version
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-            {
-                return Err(PlatformConfigError::new(
-                    "PLATFORM_ARTIFACTS_INVALID",
-                    "artifacts.tenant_encryption.active_key_version is invalid",
-                ));
-            }
-            let keyring = required_secret(&encryption.keyring_env, get_env)?;
-            insight_storage::artifact_store::TenantArtifactEncryptionKeyring::from_secret_json(
-                active_key_version.clone(),
-                keyring.expose(),
-            )
-            .map_err(|_| {
-                PlatformConfigError::new(
-                    "PLATFORM_ARTIFACTS_INVALID",
-                    "artifacts tenant encryption keyring is invalid",
-                )
-            })?;
-            Ok(TenantArtifactEncryptionConfig {
-                active_key_version,
-                keyring,
-            })
-        })
-        .transpose()?;
     Ok(ArtifactsConfig {
-        provider: artifacts.provider,
         namespace: artifacts.namespace,
-        directory: resolve_path(parent, &artifacts.directory),
         inline_threshold_bytes: artifacts.inline_threshold_bytes,
-        tenant_encryption,
         max_read_bytes,
         orphan_retention: positive_artifact_duration(
             &artifacts.orphan_retention,
@@ -1926,6 +1987,183 @@ fn resolve_artifacts(
         gc_interval: positive_artifact_duration(&artifacts.gc_interval, "artifacts.gc_interval")?,
         deletion_claim_seconds: artifacts.deletion_claim_seconds,
     })
+}
+
+fn resolve_object_storage(
+    raw: Option<ObjectStorageYaml>,
+    deployment_mode: DeploymentMode,
+) -> Result<ObjectStorageConfig, PlatformConfigError> {
+    let raw = match raw {
+        Some(raw) => raw,
+        None if deployment_mode == DeploymentMode::Production => {
+            return Err(object_storage_error(
+                "deployment_mode=production requires explicit object_storage.s3 configuration",
+            ));
+        }
+        None => ObjectStorageYaml {
+            s3: S3ObjectStorageYaml {
+                endpoint: "http://127.0.0.1:9000".to_owned(),
+                public_endpoint: None,
+                region: "us-east-1".to_owned(),
+                bucket: "insight-agent-platform".to_owned(),
+                force_path_style: true,
+                access_key_env: "S3_ACCESS_KEY".to_owned(),
+                secret_key_env: "S3_SECRET_KEY".to_owned(),
+                connect_timeout: default_s3_connect_timeout(),
+                request_timeout: default_s3_request_timeout(),
+                presign_upload_ttl: default_presign_upload_ttl(),
+                presign_download_ttl: default_presign_download_ttl(),
+                allow_insecure_internal_endpoint: true,
+            },
+            llm_attachment_delivery: LlmAttachmentDeliveryYaml::InlineData,
+            limits: ObjectStorageLimitsYaml::default(),
+            gc: ObjectStorageGcYaml::default(),
+        },
+    };
+    validate_s3_endpoint(
+        &raw.s3.endpoint,
+        "object_storage.s3.endpoint",
+        deployment_mode != DeploymentMode::Production || raw.s3.allow_insecure_internal_endpoint,
+    )?;
+    let public_endpoint = raw
+        .s3
+        .public_endpoint
+        .unwrap_or_else(|| raw.s3.endpoint.clone());
+    validate_s3_endpoint(
+        &public_endpoint,
+        "object_storage.s3.public_endpoint",
+        deployment_mode != DeploymentMode::Production,
+    )?;
+    validate_environment_reference(&raw.s3.access_key_env, "object_storage.s3.access_key_env")?;
+    validate_environment_reference(&raw.s3.secret_key_env, "object_storage.s3.secret_key_env")?;
+    if raw.s3.access_key_env == raw.s3.secret_key_env
+        || raw.s3.region.is_empty()
+        || raw.s3.region.len() > 128
+        || raw.s3.region.chars().any(char::is_whitespace)
+        || !valid_s3_bucket(&raw.s3.bucket)
+        || raw.limits.max_file_bytes == 0
+        || raw.limits.max_file_bytes > 5 * 1_024 * 1_024 * 1_024
+        || !(1..=100).contains(&raw.limits.max_files_per_invocation)
+        || raw.limits.max_total_file_bytes_per_invocation < raw.limits.max_file_bytes
+        || raw.limits.max_total_file_bytes_per_invocation > 10 * 1_024 * 1_024 * 1_024
+        || raw.gc.deletion_claim_seconds == 0
+        || raw.gc.deletion_claim_seconds > 3_600
+    {
+        return Err(object_storage_error(
+            "S3 identity, File limits, or GC policy is invalid",
+        ));
+    }
+    let connect_timeout =
+        positive_duration(&raw.s3.connect_timeout, "object_storage.s3.connect_timeout")?;
+    let request_timeout =
+        positive_duration(&raw.s3.request_timeout, "object_storage.s3.request_timeout")?;
+    let presign_upload_ttl = positive_duration(
+        &raw.s3.presign_upload_ttl,
+        "object_storage.s3.presign_upload_ttl",
+    )?;
+    let presign_download_ttl = positive_duration(
+        &raw.s3.presign_download_ttl,
+        "object_storage.s3.presign_download_ttl",
+    )?;
+    let pending_upload_ttl = positive_duration(
+        &raw.limits.pending_upload_ttl,
+        "object_storage.limits.pending_upload_ttl",
+    )?;
+    let gc_interval = positive_duration(&raw.gc.interval, "object_storage.gc.interval")?;
+    if connect_timeout > Duration::from_secs(60)
+        || request_timeout < connect_timeout
+        || request_timeout > Duration::from_secs(10 * 60)
+        || presign_upload_ttl > pending_upload_ttl
+        || presign_upload_ttl > Duration::from_secs(60 * 60)
+        || presign_download_ttl > Duration::from_secs(60 * 60)
+        || pending_upload_ttl > Duration::from_secs(24 * 60 * 60)
+        || gc_interval > Duration::from_secs(60 * 60)
+    {
+        return Err(object_storage_error(
+            "S3 timeouts, capability TTLs, or GC interval are invalid",
+        ));
+    }
+    Ok(ObjectStorageConfig {
+        s3: S3ObjectStorageConfig {
+            endpoint: raw.s3.endpoint,
+            public_endpoint,
+            region: raw.s3.region,
+            bucket: raw.s3.bucket,
+            force_path_style: raw.s3.force_path_style,
+            access_key_env: raw.s3.access_key_env,
+            secret_key_env: raw.s3.secret_key_env,
+            connect_timeout,
+            request_timeout,
+            presign_upload_ttl,
+            presign_download_ttl,
+            allow_insecure_internal_endpoint: raw.s3.allow_insecure_internal_endpoint,
+        },
+        llm_attachment_delivery: match raw.llm_attachment_delivery {
+            LlmAttachmentDeliveryYaml::InlineData => LlmAttachmentDeliveryConfig::InlineData,
+            LlmAttachmentDeliveryYaml::PresignedUrl => LlmAttachmentDeliveryConfig::PresignedUrl,
+        },
+        limits: ObjectStorageLimitsConfig {
+            max_file_bytes: raw.limits.max_file_bytes,
+            max_files_per_invocation: raw.limits.max_files_per_invocation,
+            max_total_file_bytes_per_invocation: raw.limits.max_total_file_bytes_per_invocation,
+            pending_upload_ttl,
+        },
+        gc: ObjectStorageGcConfig {
+            interval: gc_interval,
+            deletion_claim_seconds: raw.gc.deletion_claim_seconds,
+        },
+    })
+}
+
+fn validate_s3_endpoint(
+    value: &str,
+    field: &str,
+    allow_http: bool,
+) -> Result<(), PlatformConfigError> {
+    let url = url::Url::parse(value)
+        .map_err(|_| object_storage_error(format!("{field} must be an absolute HTTP URL")))?;
+    let valid_scheme = url.scheme() == "https" || (allow_http && url.scheme() == "http");
+    if !valid_scheme
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return Err(object_storage_error(format!(
+            "{field} must be a credential-free origin with an allowed scheme"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_environment_reference(value: &str, field: &str) -> Result<(), PlatformConfigError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+        })
+    {
+        return Err(object_storage_error(format!(
+            "{field} must be a valid bounded environment reference"
+        )));
+    }
+    Ok(())
+}
+
+fn valid_s3_bucket(value: &str) -> bool {
+    (3..=63).contains(&value.len())
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
+        })
+        && !value.contains("..")
+}
+
+fn object_storage_error(message: impl Into<String>) -> PlatformConfigError {
+    PlatformConfigError::new("PLATFORM_OBJECT_STORAGE_INVALID", message)
 }
 
 fn validate_postgres_history_url(database_url: &str) -> Result<(), PlatformConfigError> {

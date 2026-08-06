@@ -10,9 +10,10 @@ pub mod run_stream;
 pub use control::{stop_pair, ExecutionControl, StopController, StopReason, StopSignal};
 pub use insight_engine::execution::{RunError, RunErrorKind};
 pub use insight_runtime::{
-    Conversation, ConversationAttachedTurn, ConversationContent, ConversationDetachedTurn,
-    ConversationMessage, ConversationMessagePage, ConversationMessagePageView,
-    ConversationMessageView, ConversationRole, MessageCursor, RecoveryCapability,
+    AgentInvocation, Conversation, ConversationAttachedTurn, ConversationContent,
+    ConversationDetachedTurn, ConversationMessage, ConversationMessagePage,
+    ConversationMessagePageView, ConversationMessageView, ConversationRole, FileRef,
+    InvocationFile, Message, MessageContentPart, MessageCursor, MessageRole, RecoveryCapability,
     RunPersistenceCapability, TerminalAttachedRun, TerminalOnlyRunConfig, TerminalOnlyRunEngine,
     TerminalOnlyStore, TerminalRunSubscription,
 };

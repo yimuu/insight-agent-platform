@@ -1,6 +1,7 @@
 mod agent_management_adapter;
 mod artifact_adapter;
 mod error;
+mod file_adapter;
 mod human_task_adapter;
 mod ingress_adapter;
 mod mcp_interaction_adapter;
