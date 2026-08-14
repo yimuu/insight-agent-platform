@@ -771,6 +771,12 @@ all-target/all-feature check、test、doc-test与strict Clippy及public API/cont
 结果以实施计划的最新记录为准。
 两个显式ignored RustFS qualification test仍不计为当前切片资格证据。
 
+Managed session的fenced lost authority现已交付：只有持有最新Job/version/lease/Worker/token fence且已经取得exact cleanup evidence的
+Executor才能在一个PostgreSQL事务中把旧物理Job推进为`Lost/ReconciliationRequired`、保守结算四条Sandbox quota、复验Artifact grant
+已释放、清除逻辑opaque session与物理link、设置`full_reconcile_required`并重排逻辑MCP Job，同时提交独立Receipt/Event/Outbox；重放返回
+同一终态。该路径继续复用23表与单一`0001`。Provider liveness/cleanup evidence尚未通过RPC交给长期Executor supervisor，expired lease的
+absence recovery也未交付，因此不能仅凭本切片创建replacement或关闭Phase 4。
+
 ## 28. 明确推迟的工作
 
 - deprecated HTTP+SSE compatibility；

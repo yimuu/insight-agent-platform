@@ -858,6 +858,45 @@ impl McpSubscriptionPayload {
         Ok((next, McpSubscriptionState::Pending))
     }
 
+    /// Clears the sole physical Managed stdio generation after that exact Sandbox Job has been
+    /// durably terminalized. The next admission must create a new physical identity and complete
+    /// a full reconcile before the subscription may return to its steady waiting state.
+    pub fn rebuild_managed_sandbox_session_after_loss(
+        &self,
+        expected_session_version: u64,
+        identity: &ManagedMcpSandboxSessionIdentity,
+        now: DateTime<Utc>,
+    ) -> Result<(Self, McpSubscriptionState), McpHostError> {
+        self.validate_canonical_at(now)?;
+        let link = self
+            .managed_sandbox_session
+            .as_ref()
+            .ok_or(McpHostError::InvalidSubscription)?;
+        if self.binding.transport_kind != McpTransportKind::ManagedStdio
+            || &link.identity != identity
+            || identity.session_generation != self.session.generation
+        {
+            return Err(McpHostError::InvalidSubscription);
+        }
+        let session = self
+            .session
+            .rebuild_after_loss(expected_session_version, now)?;
+        let mut next = Self {
+            schema_version: 1,
+            binding: self.binding.clone(),
+            session,
+            managed_sandbox_session: None,
+            last_notification_session_generation: 0,
+            last_notification_event_generation: 0,
+            pending_invalidation: None,
+            full_reconcile_required: true,
+            canonical_digest: placeholder_digest()?,
+        };
+        next.validate_at(now)?;
+        next.canonical_digest = digest_without_field(&next, "canonical_digest")?;
+        Ok((next, McpSubscriptionState::Pending))
+    }
+
     pub fn acknowledge_full_reconcile(
         &self,
         expected_session_generation: u64,
@@ -1842,6 +1881,15 @@ mod tests {
         assert!(ready
             .rebuild_after_session_loss(ready.session.version, now)
             .is_err());
+        let (rebuilding, state) = ready
+            .rebuild_managed_sandbox_session_after_loss(ready.session.version, &identity, now)
+            .unwrap();
+        assert_eq!(state, McpSubscriptionState::Pending);
+        assert_eq!(rebuilding.session.state, McpSessionState::Disconnected);
+        assert_eq!(rebuilding.session.generation, identity.session_generation);
+        assert!(rebuilding.session.encrypted_opaque_session.is_none());
+        assert!(rebuilding.managed_sandbox_session.is_none());
+        assert!(rebuilding.full_reconcile_required);
 
         let wrong_job = ManagedMcpSandboxSessionIdentity::build(
             &payload.binding,

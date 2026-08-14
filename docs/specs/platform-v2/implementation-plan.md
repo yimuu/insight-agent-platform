@@ -600,6 +600,13 @@ Provider调用收敛，再对任何已创建实例执行exact destroy，避免�
 `workload_kind=capability_execution`，不会因同表中的Managed session payload解码失败而阻断整个分片；Managed expired lease仍由待交付的
 专用terminal/absence recovery负责。
 
+Managed session fenced lost authority随后贯穿domain、PostgreSQL与internal gRPC：最新物理Job fence、exact cleanup、usage reservation与
+四个terminal quota ledger identity共同绑定请求；单事务把旧物理Job推进为`Lost/ReconciliationRequired`并清除lease，保守结算未知
+CPU/output、确认Artifact grant已释放，随后清除逻辑opaque session/物理link、设置full reconcile、重排逻辑MCP Job并提交独立
+Receipt/Event/Outbox。domain 37项、MCP Host 61项、authority RPC 10项测试及目标strict Clippy已通过；扩展PostgreSQL fixture已编译，
+但`PLATFORM_TEST_DATABASE_URL`未设置且Docker daemon仍无响应，故不声明本次真实数据库运行证据。Provider liveness/cleanup RPC、长期
+Executor supervisor与Managed expired-lease absence recovery仍Open。
+
 随后补齐了Firecracker生产拓扑前置项：新增独立`executor-microvm` DaemonSet与专用KVM node selector/taint toleration，非root Executor
 只经node-local mTLS Unix socket调用同Pod的最小Provider。只有Provider容器挂载KVM、host cgroup、持久化jail/state并持有closed Linux
 capability allowlist；Executor与Provider的TLS/queue/attestor volume互斥，均无Kubernetes API token。独立ConfigMap生成closed Executor/

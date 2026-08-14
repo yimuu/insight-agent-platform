@@ -5247,7 +5247,7 @@ pub(crate) async fn terminalize_sandbox_worker_receipt(
 }
 
 #[derive(Debug)]
-struct SandboxQuotaLine {
+pub(crate) struct SandboxQuotaLine {
     tenant_id: String,
     quota_account_id: String,
     metric: String,
@@ -5266,6 +5266,21 @@ async fn lock_sandbox_quota_bundle(
         .ok_or_else(|| {
             RepositoryError::CorruptRow("Sandbox Job has no quota reservation".to_owned())
         })?;
+    lock_sandbox_quota_bundle_for(
+        transaction,
+        &current.record.tenant_id,
+        reservation_id,
+        &current.payload.request.resources,
+    )
+    .await
+}
+
+pub(crate) async fn lock_sandbox_quota_bundle_for(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    reservation_id: &str,
+    resources: &SandboxResourceEnvelope,
+) -> Result<Vec<SandboxQuotaLine>, RepositoryError> {
     let rows = sqlx::query(
         r#"
         SELECT account.tenant_id, account.quota_account_id, account.scope_kind,
@@ -5282,7 +5297,7 @@ async fn lock_sandbox_quota_bundle(
         FOR UPDATE OF account
         "#,
     )
-    .bind(&current.record.tenant_id)
+    .bind(tenant_id)
     .bind(reservation_id)
     .fetch_all(&mut **transaction)
     .await?;
@@ -5299,7 +5314,7 @@ async fn lock_sandbox_quota_bundle(
         )
         "#,
     )
-    .bind(&current.record.tenant_id)
+    .bind(tenant_id)
     .bind(reservation_id)
     .fetch_one(&mut **transaction)
     .await?;
@@ -5311,18 +5326,17 @@ async fn lock_sandbox_quota_bundle(
     for row in rows {
         let metric: String = row.try_get("metric")?;
         let reserved_amount: i64 = row.try_get("reserved_amount")?;
-        let tenant_id: String = row.try_get("tenant_id")?;
+        let row_tenant_id: String = row.try_get("tenant_id")?;
         let scope_kind: String = row.try_get("scope_kind")?;
         let scope_id: String = row.try_get("scope_id")?;
         let work_class: String = row.try_get("work_class")?;
         let account_reserved: i64 = row.try_get("reserved_value")?;
-        if tenant_id != current.record.tenant_id
+        if row_tenant_id != tenant_id
             || scope_kind != "tenant"
-            || scope_id != current.record.tenant_id
+            || scope_id != tenant_id
             || work_class != "sandbox"
             || !metrics.insert(metric.clone())
-            || reserved_amount
-                != sandbox_reservation_amount(&metric, &current.payload.request.resources)?
+            || reserved_amount != sandbox_reservation_amount(&metric, resources)?
             || row.try_get::<i64, _>("reservation_used_amount")? != 0
             || account_reserved < reserved_amount
         {
@@ -5331,7 +5345,7 @@ async fn lock_sandbox_quota_bundle(
             ));
         }
         lines.push(SandboxQuotaLine {
-            tenant_id,
+            tenant_id: row_tenant_id,
             quota_account_id: row.try_get("quota_account_id")?,
             metric,
             reserved_amount,
@@ -5369,13 +5383,70 @@ async fn settle_sandbox_quota(
         .ok_or_else(|| {
             RepositoryError::CorruptRow("Sandbox Job has no quota reservation".to_owned())
         })?;
+    let usage = match outcome {
+        Some(SandboxExecutionOutcome::Completed(output)) => Some(&output.usage),
+        Some(SandboxExecutionOutcome::ManagedMcp(output)) => Some(&output.usage),
+        Some(
+            SandboxExecutionOutcome::Failed(_)
+            | SandboxExecutionOutcome::Cancelled(_)
+            | SandboxExecutionOutcome::TimedOut(_)
+            | SandboxExecutionOutcome::Uncertain(_),
+        )
+        | None => None,
+    };
+    settle_sandbox_quota_lines(
+        transaction,
+        reservation_id,
+        lines,
+        entry_ids,
+        usage,
+        outcome.is_some(),
+        request_digest,
+    )
+    .await
+}
+
+pub(crate) async fn settle_managed_mcp_session_quota(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    usage_reservation_id: &ResourceId,
+    resources: &SandboxResourceEnvelope,
+    entry_ids: &[ResourceId],
+    request_digest: &Sha256Digest,
+) -> Result<(), RepositoryError> {
+    let tenant = tenant_id.to_string();
+    let reservation = usage_reservation_id.to_string();
+    let lines =
+        lock_sandbox_quota_bundle_for(transaction, &tenant, &reservation, resources).await?;
+    settle_sandbox_quota_lines(
+        transaction,
+        &reservation,
+        &lines,
+        entry_ids,
+        None,
+        true,
+        request_digest,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_sandbox_quota_lines(
+    transaction: &mut Transaction<'_, Postgres>,
+    reservation_id: &str,
+    lines: &[SandboxQuotaLine],
+    entry_ids: &[ResourceId],
+    usage: Option<&SandboxResourceUsage>,
+    charge_unknown_usage: bool,
+    request_digest: &Sha256Digest,
+) -> Result<(), RepositoryError> {
     if lines.len() != SANDBOX_QUOTA_LINES || entry_ids.len() != SANDBOX_QUOTA_LINES {
         return Err(RepositoryError::InvalidInput(
             "Sandbox quota settlement line count is invalid".to_owned(),
         ));
     }
     for (line, entry_id) in lines.iter().zip(entry_ids) {
-        let used_amount = sandbox_used_amount(line, outcome)?;
+        let used_amount = sandbox_used_amount(line, usage, charge_unknown_usage)?;
         if used_amount < 0 || used_amount > line.reserved_amount {
             return Err(RepositoryError::QuotaExceeded);
         }
@@ -5439,7 +5510,7 @@ async fn release_sandbox_artifact_grants(
     .await
 }
 
-async fn release_and_confirm_sandbox_artifact_grants(
+pub(crate) async fn release_and_confirm_sandbox_artifact_grants(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
     sandbox_job_id: &str,
@@ -5516,33 +5587,34 @@ fn sandbox_reservation_amount(
 
 fn sandbox_used_amount(
     line: &SandboxQuotaLine,
-    outcome: Option<&SandboxExecutionOutcome>,
+    usage: Option<&SandboxResourceUsage>,
+    charge_unknown_usage: bool,
 ) -> Result<i64, RepositoryError> {
-    let usage = match outcome {
-        Some(SandboxExecutionOutcome::Completed(output)) => Some(&output.usage),
-        Some(SandboxExecutionOutcome::ManagedMcp(output)) => Some(&output.usage),
-        Some(
-            SandboxExecutionOutcome::Failed(_)
-            | SandboxExecutionOutcome::Cancelled(_)
-            | SandboxExecutionOutcome::TimedOut(_)
-            | SandboxExecutionOutcome::Uncertain(_),
-        )
-        | None => None,
-    };
-    let amount = if outcome.is_none()
-        || line.metric == QuotaDimension::SandboxConcurrentExecutions.as_str()
+    let amount = if line.metric == QuotaDimension::SandboxConcurrentExecutions.as_str()
         || line.metric == QuotaDimension::SandboxMemoryMebibytes.as_str()
     {
         0
     } else if line.metric == QuotaDimension::SandboxCpuSeconds.as_str() {
         usage
             .map(|usage| ceil_div(usage.cpu_milliseconds, 1_000))
-            .unwrap_or_else(|| u64::try_from(line.reserved_amount).unwrap_or(u64::MAX))
+            .unwrap_or_else(|| {
+                if charge_unknown_usage {
+                    u64::try_from(line.reserved_amount).unwrap_or(u64::MAX)
+                } else {
+                    0
+                }
+            })
     } else if line.metric == QuotaDimension::SandboxOutputBytes.as_str() {
         usage
             .map(sandbox_output_bytes)
             .transpose()?
-            .unwrap_or_else(|| u64::try_from(line.reserved_amount).unwrap_or(u64::MAX))
+            .unwrap_or_else(|| {
+                if charge_unknown_usage {
+                    u64::try_from(line.reserved_amount).unwrap_or(u64::MAX)
+                } else {
+                    0
+                }
+            })
     } else {
         return Err(RepositoryError::CorruptRow(
             "Sandbox quota metric is not registered".to_owned(),

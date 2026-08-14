@@ -815,6 +815,12 @@ daemon无响应未取得实际运行证据。Sandbox domain establishment Worker
 共享Sandbox Job表上的有限Capability expired-lease scan现强制按closed `workload_kind=capability_execution`过滤，不会把Managed session
 payload误送入有限执行解码器；Managed session仍须由其专用terminal/absence recovery扫描处理。
 
+Managed session新增独立fenced lost commit：exact Provider cleanup evidence、最新物理Job fence、usage reservation和四个terminal quota
+ledger identity共同进入请求摘要；PostgreSQL同一事务把物理Job写为`Lost/ReconciliationRequired`并清除lease，保守结算未知CPU/output、
+确认Artifact grant已释放，随后才清除逻辑session/link、设置full reconcile并重排逻辑MCP Job，Receipt/Event/Outbox与双状态变化原子提交。
+该authority已贯穿domain、PostgreSQL与internal gRPC且不增表/migration；Provider liveness/cleanup RPC、长期Executor supervisor和expired
+lease absence worker仍Open。
+
 Managed session的一次性Secret交付现已实现为两阶段、双平面协议。microVM Provider只以exact workload URI SAN调用Egress；Egress以自身
 workload identity调用Sandbox Controller执行reserve与commit，并在两者之间通过既有Security Authority、KMS和Secret Provider解析材料。
 Controller在reserve和commit均锁定并复验同一Managed Sandbox Job、request/attempt、当前lease、Executor、Provider process generation、

@@ -11,17 +11,17 @@ use insight_platform_contracts::{
     CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
     CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue, CodeTrustClass, CommandAudit,
     CommandOutcome, DataClassification, Effect, ExactDeploymentRef, ExactSecretBindingRef,
-    ExactVersionRef, McpAuthorizationPrincipalKind, McpClientCapabilities, McpDeploymentClosure,
-    McpMetadataPolicy, McpMethodLimits, McpNegotiatedCapabilities, McpProtocolPolicyDocument,
-    McpServerExecutionContract, McpServerLimits, McpToolCapabilityContract, McpTransportBinding,
-    McpTransportFeatures, McpTransportKind, PrincipalKind, PublishedMcpMethod, ResourceId,
-    ResourceKind, Retryability, SandboxAbiVersion, SandboxArtifactIoPolicyDocument,
-    SandboxCleanupPolicy, SandboxEntrypointKind, SandboxIsolationClass,
-    SandboxIsolationPolicyDocument, SandboxJobState, SandboxNetworkPolicyDocument,
-    SandboxPackageResourceSpec, SandboxProfileResourceSpec, SandboxResourcePolicyDocument,
-    SandboxRuntimeFamily, SandboxRuntimeResourceSpec, SandboxSecretDeliveryMode,
-    SandboxSecretResolutionPolicyDocument, SecretPurpose, SecretResolutionPolicy, ValueRef,
-    WorkClass, MCP_PROTOCOL_BASELINE,
+    ExactVersionRef, JobState, McpAuthorizationPrincipalKind, McpClientCapabilities,
+    McpDeploymentClosure, McpMetadataPolicy, McpMethodLimits, McpNegotiatedCapabilities,
+    McpProtocolPolicyDocument, McpServerExecutionContract, McpServerLimits,
+    McpToolCapabilityContract, McpTransportBinding, McpTransportFeatures, McpTransportKind,
+    PrincipalKind, PublishedMcpMethod, ResourceId, ResourceKind, Retryability, SandboxAbiVersion,
+    SandboxArtifactIoPolicyDocument, SandboxCleanupPolicy, SandboxEntrypointKind,
+    SandboxIsolationClass, SandboxIsolationPolicyDocument, SandboxJobState,
+    SandboxNetworkPolicyDocument, SandboxPackageResourceSpec, SandboxProfileResourceSpec,
+    SandboxResourcePolicyDocument, SandboxRuntimeFamily, SandboxRuntimeResourceSpec,
+    SandboxSecretDeliveryMode, SandboxSecretResolutionPolicyDocument, SecretPurpose,
+    SecretResolutionPolicy, ValueRef, WorkClass, MCP_PROTOCOL_BASELINE,
 };
 use insight_platform_invocations::{CapabilityOutputValue, DispatchOutcome};
 use insight_platform_jobs::{decide_claim, JobFence, LeasePolicy};
@@ -1206,6 +1206,30 @@ impl ManagedMcpSandboxSessionExecutionAuthority for RecordingManagedSessionAutho
         state.physical_job = decision.physical_job.clone();
         Ok(decision)
     }
+
+    async fn commit_managed_mcp_sandbox_session_lost(
+        &self,
+        command: CommitManagedMcpSandboxSessionLost,
+    ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
+        self.events.lock().unwrap().push("commit_lost");
+        let now = Utc::now();
+        let mut state = self.state.lock().unwrap();
+        let decision = decide_managed_mcp_sandbox_session_lost(
+            &state.logical,
+            &state.physical_job,
+            &state.physical_payload,
+            &command,
+            now,
+            limits(),
+        )
+        .map_err(|_| ManagedSessionFixtureError)?;
+        state.logical.version += 1;
+        state.logical.payload = decision.logical_payload.clone();
+        state.logical.state = decision.logical_state;
+        state.physical_job = decision.physical_job.clone();
+        state.physical_payload = decision.physical_payload.clone();
+        Ok(CommandOutcome::Applied(decision))
+    }
 }
 
 struct RecordingManagedSessionProvider {
@@ -1512,6 +1536,74 @@ async fn managed_session_worker_waits_for_prepare_then_destroys_on_heartbeat_fai
         .position(|event| *event == "provider_destroy")
         .unwrap();
     assert!(failed < destroyed);
+}
+
+#[tokio::test]
+async fn managed_session_loss_terminalizes_the_physical_job_before_rebuild() {
+    let now = Utc::now();
+    let (authority, provider, command) = managed_session_worker_fixture(now, false);
+    let worker = ManagedMcpSandboxSessionWorker::new(authority.clone(), provider, limits());
+    let established = worker.establish(command).await.unwrap();
+    let mut lost = CommitManagedMcpSandboxSessionLost {
+        audit: SandboxWorkerAudit {
+            tenant_id: established.request.identity.tenant_id.clone(),
+            worker_process_generation_id: established.fence.worker_process_generation_id.clone(),
+            receipt_id: id(ResourceKind::Receipt, 194),
+            event_id: id(ResourceKind::Event, 195),
+            outbox_id: id(ResourceKind::OutboxEvent, 196),
+            idempotency_key_digest: sha('f'),
+            request_digest: sha('0'),
+            receipt_expires_at: now + ChronoDuration::minutes(5),
+        },
+        identity: established.request.identity.clone(),
+        fence: established.fence.clone(),
+        cleanup: SandboxCleanupEvidence {
+            disposition: SandboxCleanupDisposition::Destroyed,
+            sandbox_identity_digest: established.prepared.sandbox_identity_digest.clone(),
+            grants_revoked: true,
+            ephemeral_storage_destroyed: true,
+            observed_at: Utc::now(),
+            evidence_digest: sha('1'),
+        },
+        session_loss_evidence_digest: sha('2'),
+        usage_reservation_id: established.usage_reservation_id,
+        quota_entry_ids: (197..201)
+            .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+            .collect(),
+    };
+    lost.audit.request_digest = lost.canonical_request_digest().unwrap();
+    let decision = match authority
+        .commit_managed_mcp_sandbox_session_lost(lost)
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(decision) => decision,
+        CommandOutcome::Replayed(_) => unreachable!(),
+    };
+    assert_eq!(decision.logical_state, McpSubscriptionState::Pending);
+    assert_eq!(
+        decision.logical_payload.session.state,
+        insight_platform_contracts::McpSessionState::Disconnected
+    );
+    assert!(decision.logical_payload.managed_sandbox_session.is_none());
+    assert!(decision.logical_payload.full_reconcile_required);
+    assert_eq!(
+        decision.physical_job.state,
+        JobState::ReconciliationRequired
+    );
+    assert!(decision.physical_job.lease.is_none());
+    assert_eq!(
+        decision.physical_payload.physical_state,
+        SandboxJobState::Lost
+    );
+    let cleanup = decision.physical_payload.cleanup.as_ref().unwrap();
+    assert_eq!(cleanup.disposition, SandboxCleanupDisposition::Destroyed);
+    assert_eq!(
+        cleanup.sandbox_identity_digest,
+        established.prepared.sandbox_identity_digest
+    );
+    assert!(cleanup.grants_revoked && cleanup.ephemeral_storage_destroyed);
+    assert_eq!(cleanup.evidence_digest, sha('1'));
 }
 
 #[test]

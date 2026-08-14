@@ -17,25 +17,26 @@ use insight_platform_jobs::JobFence;
 use insight_platform_sandbox::{
     AbortSandboxExecution, ActivatedManagedMcpSandboxSession,
     AuthorizedManagedMcpSandboxSecretDelivery, ClaimSandboxJobs, ClaimedManagedMcpSandboxSession,
-    ClaimedSandboxJob, CollectedSandbox, CommitManagedMcpSandboxSessionPhase,
-    CommitManagedMcpSandboxSessionReady, CommitSandboxOutcome, CommitSandboxPhase, DestroySandbox,
-    ExpiredSandboxLease, HeartbeatSandboxExecution, InstalledSandboxBackendDescriptor,
-    ManagedMcpSandboxSecretCommitOutcome, ManagedMcpSandboxSecretDeliveryAuthority,
-    ManagedMcpSandboxSecretDeliveryError, ManagedMcpSandboxSecretDeliveryRequest,
-    ManagedMcpSandboxSecretReservationOutcome, ManagedMcpSandboxSessionClaimAuthority,
-    ManagedMcpSandboxSessionExecutionAuthority, ManagedMcpSandboxSessionPhaseDecision,
-    ManagedMcpSandboxSessionProvider, ManagedMcpSandboxSessionRequest, MicroVmArtifactBroker,
-    MicroVmArtifactBrokerError, MicroVmArtifactReadRequest, MicroVmGrantRevocationError,
-    MicroVmGrantRevocationEvidence, MicroVmGrantRevoker, MicroVmIsolationProviderBackend,
-    MicroVmProviderExecutionFence, PreparedManagedMcpSandboxSession,
-    PreparedManagedMcpSandboxSessionActivation, PreparedSandbox, ProveWasiProcessGenerationAbsent,
-    RegisterWasiExecutorProcessGeneration, RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants,
-    RunningSandbox, SandboxBackendFailure, SandboxBackendFailureStage, SandboxClaimAuthority,
-    SandboxClaimFailure, SandboxCleanupEvidence, SandboxCommandLimits, SandboxExecutionAuthority,
-    SandboxExecutionRequest, SandboxExecutorBackend, SandboxIsolationBackendKind,
-    SandboxLeaseRecoveryEvidence, SandboxPhaseDecision, SandboxTerminationEvidence,
-    TerminateSandbox, VerifyWasiExecutorProcessGeneration, WasiArtifactBroker,
-    WasiArtifactBrokerError, WasiArtifactReadRequest, WasiExecutorProcessAttestationAuthority,
+    ClaimedSandboxJob, CollectedSandbox, CommitManagedMcpSandboxSessionLost,
+    CommitManagedMcpSandboxSessionPhase, CommitManagedMcpSandboxSessionReady, CommitSandboxOutcome,
+    CommitSandboxPhase, DestroySandbox, ExpiredSandboxLease, HeartbeatSandboxExecution,
+    InstalledSandboxBackendDescriptor, ManagedMcpSandboxSecretCommitOutcome,
+    ManagedMcpSandboxSecretDeliveryAuthority, ManagedMcpSandboxSecretDeliveryError,
+    ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSecretReservationOutcome,
+    ManagedMcpSandboxSessionClaimAuthority, ManagedMcpSandboxSessionExecutionAuthority,
+    ManagedMcpSandboxSessionPhaseDecision, ManagedMcpSandboxSessionProvider,
+    ManagedMcpSandboxSessionRequest, MicroVmArtifactBroker, MicroVmArtifactBrokerError,
+    MicroVmArtifactReadRequest, MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence,
+    MicroVmGrantRevoker, MicroVmIsolationProviderBackend, MicroVmProviderExecutionFence,
+    PreparedManagedMcpSandboxSession, PreparedManagedMcpSandboxSessionActivation, PreparedSandbox,
+    ProveWasiProcessGenerationAbsent, RegisterWasiExecutorProcessGeneration,
+    RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants, RunningSandbox, SandboxBackendFailure,
+    SandboxBackendFailureStage, SandboxClaimAuthority, SandboxClaimFailure, SandboxCleanupEvidence,
+    SandboxCommandLimits, SandboxExecutionAuthority, SandboxExecutionRequest,
+    SandboxExecutorBackend, SandboxIsolationBackendKind, SandboxLeaseRecoveryEvidence,
+    SandboxPhaseDecision, SandboxTerminationEvidence, TerminateSandbox,
+    VerifyWasiExecutorProcessGeneration, WasiArtifactBroker, WasiArtifactBrokerError,
+    WasiArtifactReadRequest, WasiExecutorProcessAttestationAuthority,
     WasiExecutorProcessIdentityEvidence, WasiExecutorProcessRegistrar,
     WasiExecutorProcessRegistrationError, WasiExecutorProcessRegistrationVerifier,
     WasiExecutorRegistrationPeer, WasiGrantRevocationError, WasiGrantRevocationEvidence,
@@ -1239,6 +1240,16 @@ impl ManagedMcpSandboxSessionExecutionAuthority for SandboxManagedMcpSessionAuth
             .map_err(|_| SandboxRpcError::InvalidEnvelope)?;
         self.unary(&command, |client, request| {
             Box::pin(client.heartbeat_managed_mcp_sandbox_session(request))
+        })
+        .await
+    }
+
+    async fn commit_managed_mcp_sandbox_session_lost(
+        &self,
+        command: CommitManagedMcpSandboxSessionLost,
+    ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
+        self.unary(&command, |client, request| {
+            Box::pin(client.commit_managed_mcp_sandbox_session_lost(request))
         })
         .await
     }
@@ -2491,6 +2502,20 @@ where
             .map_err(authority_status)?;
         Ok(Response::new(encode(&result, self.limits)?))
     }
+
+    async fn commit_managed_mcp_sandbox_session_lost(
+        &self,
+        request: Request<ClosedSandboxEnvelope>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let command: CommitManagedMcpSandboxSessionLost =
+            decode(request.into_inner(), self.limits)?;
+        let result = self
+            .authority
+            .commit_managed_mcp_sandbox_session_lost(command)
+            .await
+            .map_err(authority_status)?;
+        Ok(Response::new(encode(&result, self.limits)?))
+    }
 }
 
 #[tonic::async_trait]
@@ -3033,6 +3058,13 @@ mod tests {
             _command: HeartbeatSandboxExecution,
         ) -> Result<ManagedMcpSandboxSessionPhaseDecision, Self::Error> {
             self.managed_heartbeats.fetch_add(1, Ordering::AcqRel);
+            Err(SandboxRpcError::Rejected)
+        }
+
+        async fn commit_managed_mcp_sandbox_session_lost(
+            &self,
+            _command: CommitManagedMcpSandboxSessionLost,
+        ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
             Err(SandboxRpcError::Rejected)
         }
     }

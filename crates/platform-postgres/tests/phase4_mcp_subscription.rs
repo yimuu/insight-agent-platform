@@ -48,16 +48,17 @@ use insight_platform_postgres::{
     verify_schema,
 };
 use insight_platform_sandbox::{
-    AcceptManagedMcpSandboxSession, ClaimSandboxJobs, CommitManagedMcpSandboxSessionPhase,
-    CommitManagedMcpSandboxSessionReady, HeartbeatSandboxExecution,
-    ManagedMcpSandboxSecretCommitOutcome, ManagedMcpSandboxSecretDeliveryAuthority,
-    ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSecretReservationOutcome,
-    ManagedMcpSandboxSessionCallback, ManagedMcpSandboxSessionReadyEvidence,
-    ManagedMcpSandboxSessionRequest, MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest,
-    MicroVmGrantRevoker, MicroVmSandboxWorkloadKind, NodeAttestorRoute,
-    PreparedManagedMcpSandboxSession, RevokeMicroVmSandboxGrants, SandboxExecutionPolicyClosure,
-    SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit, ScopedArtifactGrant,
-    ScopedSecretGrant, SANDBOX_PROTOCOL_VERSION,
+    AcceptManagedMcpSandboxSession, ClaimSandboxJobs, CommitManagedMcpSandboxSessionLost,
+    CommitManagedMcpSandboxSessionPhase, CommitManagedMcpSandboxSessionReady,
+    HeartbeatSandboxExecution, ManagedMcpSandboxSecretCommitOutcome,
+    ManagedMcpSandboxSecretDeliveryAuthority, ManagedMcpSandboxSecretDeliveryRequest,
+    ManagedMcpSandboxSecretReservationOutcome, ManagedMcpSandboxSessionCallback,
+    ManagedMcpSandboxSessionReadyEvidence, ManagedMcpSandboxSessionRequest,
+    MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest, MicroVmGrantRevoker,
+    MicroVmSandboxWorkloadKind, NodeAttestorRoute, PreparedManagedMcpSandboxSession,
+    RevokeMicroVmSandboxGrants, SandboxCleanupDisposition, SandboxCleanupEvidence,
+    SandboxExecutionPolicyClosure, SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit,
+    ScopedArtifactGrant, ScopedSecretGrant, SANDBOX_PROTOCOL_VERSION,
 };
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use std::collections::BTreeMap;
@@ -3190,7 +3191,7 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         request_digest: winner.request.request_digest.clone(),
         executor_worker_process_generation_id: sandbox_worker.clone(),
         provider_process_generation_id,
-        sandbox_identity_digest,
+        sandbox_identity_digest: sandbox_identity_digest.clone(),
         attempt_no: renewed.physical_job.attempt_count,
         lease_generation: renewed.physical_job.lease_generation,
     };
@@ -3220,7 +3221,93 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         CommandOutcome::Replayed(_)
     ));
 
-    let final_states: (String, String, String, String, String, String, bool) = sqlx::query_as(
+    let mut lost = CommitManagedMcpSandboxSessionLost {
+        audit: phase_audit(0x6e0, "managed-session-lost-key"),
+        identity: winner.request.identity.clone(),
+        fence: DomainJobFence {
+            expected_version: renewed.physical_job.version,
+            worker_process_generation_id: sandbox_worker,
+            lease_generation: renewed.physical_job.lease_generation,
+            token_digest: renewed
+                .physical_job
+                .lease
+                .as_ref()
+                .unwrap()
+                .token_digest
+                .clone(),
+        },
+        cleanup: SandboxCleanupEvidence {
+            disposition: SandboxCleanupDisposition::Destroyed,
+            sandbox_identity_digest,
+            grants_revoked: true,
+            ephemeral_storage_destroyed: true,
+            observed_at: Utc::now(),
+            evidence_digest: revoked.evidence_digest,
+        },
+        session_loss_evidence_digest: named_digest("managed-session-loss-evidence"),
+        usage_reservation_id: winner.usage_reservation_id.clone(),
+        quota_entry_ids: (0x6d0..0x6d4)
+            .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+            .collect(),
+    };
+    lost.audit.request_digest = lost.canonical_request_digest().unwrap();
+    let lost_decision = match repository
+        .commit_managed_mcp_sandbox_session_lost(lost.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(decision) => decision,
+        CommandOutcome::Replayed(_) => panic!("Managed MCP lost must apply"),
+    };
+    assert!(matches!(
+        repository
+            .commit_managed_mcp_sandbox_session_lost(lost)
+            .await
+            .unwrap(),
+        CommandOutcome::Replayed(_)
+    ));
+    assert_eq!(lost_decision.logical_state.to_string(), "pending");
+    assert_eq!(
+        lost_decision.logical_payload.session.state,
+        McpSessionState::Disconnected
+    );
+    assert!(lost_decision
+        .logical_payload
+        .managed_sandbox_session
+        .is_none());
+    assert!(lost_decision.logical_payload.full_reconcile_required);
+    assert_eq!(
+        lost_decision.physical_job.state.to_string(),
+        "reconciliation_required"
+    );
+    assert_eq!(
+        lost_decision.physical_payload.physical_state,
+        SandboxJobState::Lost
+    );
+    let settled_quota_lines: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM insight_platform.quota_ledger
+        WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'
+        "#,
+    )
+    .bind(winner.request.identity.tenant_id.to_string())
+    .bind(winner.usage_reservation_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(settled_quota_lines, 4);
+
+    let final_states: (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+        bool,
+        String,
+    ) = sqlx::query_as(
         r#"
         SELECT subscription.state,
                subscription.payload #>> '{session,state}',
@@ -3228,43 +3315,50 @@ async fn managed_mcp_sandbox_session_admission_fixture(
                physical.payload #>> '{workload,physical_state}',
                subscription.payload #>> '{session,encrypted_opaque_session,key_id}',
                physical.payload #>> '{workload,ready_binding,ready_evidence_digest}',
-               physical.payload #> '{workload,ready_binding,encrypted_opaque_session}' IS NULL
+               physical.payload #> '{workload,ready_binding,encrypted_opaque_session}' IS NULL,
+               logical.state
         FROM insight_platform.invocations AS subscription
         JOIN insight_platform.jobs AS physical
           ON physical.tenant_id = subscription.tenant_id
          AND physical.job_id = $3
+        JOIN insight_platform.jobs AS logical
+          ON logical.tenant_id = subscription.tenant_id
+         AND logical.job_id = $4
         WHERE subscription.tenant_id = $1 AND subscription.invocation_id = $2
         "#,
     )
     .bind(fixture.subscription.tenant_id.to_string())
     .bind(fixture.subscription.subscription_id.to_string())
     .bind(winner.request.identity.physical_job_id.to_string())
+    .bind(winner.request.identity.logical_job_id.to_string())
     .fetch_one(pool)
     .await
     .unwrap();
     assert_eq!(
         final_states,
         (
-            "active".to_owned(),
-            "ready".to_owned(),
-            "running".to_owned(),
-            "running".to_owned(),
-            "managed-session-runtime-key".to_owned(),
+            "pending".to_owned(),
+            "disconnected".to_owned(),
+            "reconciliation_required".to_owned(),
+            "lost".to_owned(),
+            None,
             ready_evidence_digest.to_string(),
             true,
+            "ready".to_owned(),
         )
     );
     let lifecycle_durability: (i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT
             (SELECT count(*) FROM insight_platform.receipts
-             WHERE tenant_id = $1 AND receipt_id IN ($2, $3, $4) AND state = 'succeeded'),
+             WHERE tenant_id = $1 AND receipt_id IN ($2, $3, $4, $11) AND state = 'succeeded'),
             (SELECT count(*) FROM insight_platform.events
-             WHERE tenant_id = $1 AND event_id IN ($5, $6, $7)
+             WHERE tenant_id = $1 AND event_id IN ($5, $6, $7, $12)
                AND event_type IN ('mcp.managed_sandbox_session_phase_changed',
-                                  'mcp.managed_sandbox_session_ready')),
+                                  'mcp.managed_sandbox_session_ready',
+                                  'mcp.managed_sandbox_session_lost')),
             (SELECT count(*) FROM insight_platform.outbox_events
-             WHERE tenant_id = $1 AND outbox_id IN ($8, $9, $10))
+             WHERE tenant_id = $1 AND outbox_id IN ($8, $9, $10, $13))
         "#,
     )
     .bind(fixture.subscription.tenant_id.to_string())
@@ -3277,8 +3371,11 @@ async fn managed_mcp_sandbox_session_admission_fixture(
     .bind(id(ResourceKind::OutboxEvent, 0x692).to_string())
     .bind(id(ResourceKind::OutboxEvent, 0x6b2).to_string())
     .bind(id(ResourceKind::OutboxEvent, 0x6c2).to_string())
+    .bind(id(ResourceKind::Receipt, 0x6e0).to_string())
+    .bind(id(ResourceKind::Event, 0x6e1).to_string())
+    .bind(id(ResourceKind::OutboxEvent, 0x6e2).to_string())
     .fetch_one(pool)
     .await
     .unwrap();
-    assert_eq!(lifecycle_durability, (3, 3, 3));
+    assert_eq!(lifecycle_durability, (4, 4, 4));
 }
