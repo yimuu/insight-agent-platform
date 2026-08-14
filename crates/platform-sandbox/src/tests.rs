@@ -924,6 +924,7 @@ fn managed_subscription_commits_physical_phases_and_both_jobs_before_ready() {
         executor_identity_digest: sha('e'),
         attestor_route: attestor_route(),
         phase_evidence_digest: sha('f'),
+        prepared_binding: None,
     };
     preparing.audit.request_digest = preparing.canonical_request_digest().unwrap();
     let preparing = decide_managed_mcp_sandbox_session_phase(
@@ -944,6 +945,20 @@ fn managed_subscription_commits_physical_phases_and_both_jobs_before_ready() {
         insight_platform_contracts::McpSessionState::Connecting
     );
 
+    let prepared_binding = PreparedManagedMcpSandboxSession {
+        schema_version: 1,
+        identity: admission.request.identity.clone(),
+        request_digest: admission.request.request_digest.clone(),
+        worker_process_generation_id: worker.clone(),
+        provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 88),
+        lease_generation: preparing.physical_job.lease_generation,
+        executor_identity_digest: sha('e'),
+        sandbox_identity_digest: sha('2'),
+        prepare_evidence_digest: sha('1'),
+        canonical_digest: sha('0'),
+    }
+    .seal()
+    .unwrap();
     let mut starting = CommitManagedMcpSandboxSessionPhase {
         audit: audit(87),
         identity: admission.request.identity.clone(),
@@ -956,7 +971,8 @@ fn managed_subscription_commits_physical_phases_and_both_jobs_before_ready() {
         target: SandboxJobState::Starting,
         executor_identity_digest: sha('e'),
         attestor_route: attestor_route(),
-        phase_evidence_digest: sha('1'),
+        phase_evidence_digest: prepared_binding.canonical_digest.clone(),
+        prepared_binding: Some(prepared_binding.clone()),
     };
     starting.audit.request_digest = starting.canonical_request_digest().unwrap();
     let starting = decide_managed_mcp_sandbox_session_phase(
@@ -974,6 +990,10 @@ fn managed_subscription_commits_physical_phases_and_both_jobs_before_ready() {
     assert_eq!(
         logical.payload.session.state,
         insight_platform_contracts::McpSessionState::Initializing
+    );
+    assert_eq!(
+        starting.physical_payload.prepared_binding.as_ref(),
+        Some(&prepared_binding)
     );
 
     let ready_at = now + ChronoDuration::seconds(1);

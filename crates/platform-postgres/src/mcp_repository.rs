@@ -6905,8 +6905,9 @@ fn require_managed_mcp_sandbox_session_phase_replay(
     };
     let current_target_has_exact_evidence = decision.physical_payload.physical_state
         != command.target
-        || decision.physical_payload.phase_evidence_digest.as_ref()
-            == Some(&command.phase_evidence_digest);
+        || (decision.physical_payload.phase_evidence_digest.as_ref()
+            == Some(&command.phase_evidence_digest)
+            && decision.physical_payload.prepared_binding == command.prepared_binding);
     if !same_binding || !reached_target || !current_target_has_exact_evidence {
         return Err(RepositoryError::Conflict(
             "Managed MCP Sandbox session phase replay",

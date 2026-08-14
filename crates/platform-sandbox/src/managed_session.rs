@@ -304,6 +304,10 @@ pub struct ManagedMcpSandboxSessionJobPayload {
     pub executor_identity_digest: Option<Sha256Digest>,
     pub attestor_route: Option<NodeAttestorRoute>,
     pub phase_evidence_digest: Option<Sha256Digest>,
+    /// Credential-free exact Provider allocation retained from `Starting` onward. Recovery must
+    /// be able to address and validate the old instance without reconstructing evidence from an
+    /// opaque digest after the lease token has expired.
+    pub prepared_binding: Option<PreparedManagedMcpSandboxSession>,
     pub ready_binding: Option<ManagedMcpSandboxSessionReadyBinding>,
     pub cleanup: Option<SandboxCleanupEvidence>,
     pub payload_digest: Sha256Digest,
@@ -323,6 +327,7 @@ impl ManagedMcpSandboxSessionJobPayload {
             executor_identity_digest: None,
             attestor_route: None,
             phase_evidence_digest: None,
+            prepared_binding: None,
             ready_binding: None,
             cleanup: None,
             payload_digest: submission_digest.clone(),
@@ -368,6 +373,7 @@ impl ManagedMcpSandboxSessionJobPayload {
                     || self.executor_identity_digest.is_some()
                     || self.attestor_route.is_some()
                     || self.phase_evidence_digest.is_some()
+                    || self.prepared_binding.is_some()
                     || self.ready_binding.is_some()
                     || self.cleanup.is_some()))
             || (matches!(
@@ -384,6 +390,12 @@ impl ManagedMcpSandboxSessionJobPayload {
                     || self.attestor_route.is_none()
                     || self.phase_evidence_digest.is_none()
                     || self.cleanup.is_none()))
+            || (self.physical_state == SandboxJobState::Preparing
+                && self.prepared_binding.is_some())
+            || (matches!(
+                self.physical_state,
+                SandboxJobState::Starting | SandboxJobState::Running
+            ) && self.prepared_binding.is_none())
             || matches!(
                 self.physical_state,
                 SandboxJobState::Accepted | SandboxJobState::Preparing | SandboxJobState::Starting
@@ -397,6 +409,25 @@ impl ManagedMcpSandboxSessionJobPayload {
         {
             return Err(SandboxContractError::InvalidJob);
         }
+        if let Some(prepared) = &self.prepared_binding {
+            prepared.validate_durable_for(
+                &self.request,
+                self.executor_identity_digest
+                    .as_ref()
+                    .ok_or(SandboxContractError::InvalidOutcome)?,
+            )?;
+            if matches!(
+                self.physical_state,
+                SandboxJobState::Starting | SandboxJobState::Running
+            ) {
+                let lease = job.lease.as_ref().ok_or(SandboxContractError::InvalidJob)?;
+                if prepared.worker_process_generation_id != lease.worker_process_generation_id
+                    || prepared.lease_generation != lease.lease_generation
+                {
+                    return Err(SandboxContractError::InvalidJob);
+                }
+            }
+        }
         if let Some(cleanup) = &self.cleanup {
             cleanup.validate_recovery()?;
             if self.ready_binding.as_ref().is_some_and(|ready| {
@@ -404,6 +435,17 @@ impl ManagedMcpSandboxSessionJobPayload {
             }) {
                 return Err(SandboxContractError::InvalidOutcome);
             }
+        }
+        if self
+            .prepared_binding
+            .as_ref()
+            .zip(self.ready_binding.as_ref())
+            .is_some_and(|(prepared, ready)| {
+                prepared.sandbox_identity_digest != ready.sandbox_identity_digest
+                    || prepared.identity.canonical_digest != ready.session_identity_digest
+            })
+        {
+            return Err(SandboxContractError::InvalidOutcome);
         }
         Ok(())
     }
@@ -559,6 +601,7 @@ pub struct CommitManagedMcpSandboxSessionPhase {
     pub executor_identity_digest: Sha256Digest,
     pub attestor_route: NodeAttestorRoute,
     pub phase_evidence_digest: Sha256Digest,
+    pub prepared_binding: Option<PreparedManagedMcpSandboxSession>,
 }
 
 impl CommitManagedMcpSandboxSessionPhase {
@@ -569,6 +612,7 @@ impl CommitManagedMcpSandboxSessionPhase {
             "fence": self.fence,
             "identity": self.identity,
             "phase_evidence_digest": self.phase_evidence_digest,
+            "prepared_binding": self.prepared_binding,
             "schema_version": 1,
             "target": self.target,
             "tenant_id": self.audit.tenant_id,
@@ -591,6 +635,17 @@ impl CommitManagedMcpSandboxSessionPhase {
                 self.target,
                 SandboxJobState::Preparing | SandboxJobState::Starting
             )
+            || (self.target == SandboxJobState::Preparing && self.prepared_binding.is_some())
+            || (self.target == SandboxJobState::Starting
+                && self.prepared_binding.as_ref().is_none_or(|prepared| {
+                    prepared
+                        .validate_shape_for(
+                            &self.identity,
+                            &self.fence,
+                            &self.executor_identity_digest,
+                        )
+                        .is_err()
+                }))
             || self.audit.request_digest != self.canonical_request_digest()?
         {
             return Err(SandboxContractError::InvalidWorkerCommand);
@@ -946,6 +1001,44 @@ impl PreparedManagedMcpSandboxSession {
             || self.worker_process_generation_id != fence.worker_process_generation_id
             || self.provider_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
             || self.lease_generation != fence.lease_generation
+            || &self.executor_identity_digest != executor_identity_digest
+            || digest_without_field(self, "canonical_digest")? != self.canonical_digest
+        {
+            return Err(SandboxContractError::InvalidOutcome);
+        }
+        Ok(())
+    }
+
+    fn validate_shape_for(
+        &self,
+        identity: &ManagedMcpSandboxSessionIdentity,
+        fence: &JobFence,
+        executor_identity_digest: &Sha256Digest,
+    ) -> Result<(), SandboxContractError> {
+        if self.schema_version != 1
+            || &self.identity != identity
+            || self.worker_process_generation_id != fence.worker_process_generation_id
+            || self.provider_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.lease_generation != fence.lease_generation
+            || &self.executor_identity_digest != executor_identity_digest
+            || digest_without_field(self, "canonical_digest")? != self.canonical_digest
+        {
+            return Err(SandboxContractError::InvalidOutcome);
+        }
+        Ok(())
+    }
+
+    fn validate_durable_for(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        executor_identity_digest: &Sha256Digest,
+    ) -> Result<(), SandboxContractError> {
+        if self.schema_version != 1
+            || self.identity != request.identity
+            || self.request_digest != request.request_digest
+            || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.provider_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.lease_generation == 0
             || &self.executor_identity_digest != executor_identity_digest
             || digest_without_field(self, "canonical_digest")? != self.canonical_digest
         {
@@ -1711,10 +1804,13 @@ where
             &command.audits.preparing,
             request,
             &fence,
-            SandboxJobState::Preparing,
             &command.executor_identity_digest,
             &command.attestor_route,
-            preparing_evidence,
+            ManagedMcpPhaseCommit {
+                target: SandboxJobState::Preparing,
+                evidence_digest: preparing_evidence,
+                prepared_binding: None,
+            },
         )
         .map_err(ManagedMcpSandboxSessionWorkerError::Contract)?;
         let preparing = self
@@ -1784,10 +1880,13 @@ where
             &command.audits.starting,
             request,
             &fence,
-            SandboxJobState::Starting,
             &command.executor_identity_digest,
             &command.attestor_route,
-            prepared.canonical_digest.clone(),
+            ManagedMcpPhaseCommit {
+                target: SandboxJobState::Starting,
+                evidence_digest: prepared.canonical_digest.clone(),
+                prepared_binding: Some(prepared.clone()),
+            },
         ) {
             Ok(command) => command,
             Err(contract) => {
@@ -2230,23 +2329,29 @@ fn managed_mcp_prepare_intent_digest(
     .map_err(|_| SandboxContractError::Canonicalization)
 }
 
+struct ManagedMcpPhaseCommit {
+    target: SandboxJobState,
+    evidence_digest: Sha256Digest,
+    prepared_binding: Option<PreparedManagedMcpSandboxSession>,
+}
+
 fn managed_mcp_phase_command(
     audit: &SandboxWorkerCommitIdentity,
     request: &ManagedMcpSandboxSessionRequest,
     fence: &JobFence,
-    target: SandboxJobState,
     executor_identity_digest: &Sha256Digest,
     attestor_route: &NodeAttestorRoute,
-    phase_evidence_digest: Sha256Digest,
+    phase: ManagedMcpPhaseCommit,
 ) -> Result<CommitManagedMcpSandboxSessionPhase, SandboxContractError> {
     let mut command = CommitManagedMcpSandboxSessionPhase {
         audit: audit.materialize(audit.idempotency_key_digest.clone()),
         identity: request.identity.clone(),
         fence: fence.clone(),
-        target,
+        target: phase.target,
         executor_identity_digest: executor_identity_digest.clone(),
         attestor_route: attestor_route.clone(),
-        phase_evidence_digest,
+        phase_evidence_digest: phase.evidence_digest,
+        prepared_binding: phase.prepared_binding,
     };
     command.audit.request_digest = command.canonical_request_digest()?;
     command.validate_at(Utc::now())?;
@@ -2385,6 +2490,16 @@ pub fn decide_managed_mcp_sandbox_session_phase(
             || current_payload.executor_identity_digest.as_ref()
                 != Some(&command.executor_identity_digest)
             || current_payload.attestor_route.as_ref() != Some(&command.attestor_route)
+            || command.prepared_binding.as_ref().is_none_or(|prepared| {
+                prepared
+                    .validate_for(
+                        &current_payload.request,
+                        &command.fence,
+                        &command.executor_identity_digest,
+                    )
+                    .is_err()
+                    || prepared.canonical_digest != command.phase_evidence_digest
+            })
         {
             return Err(SandboxContractError::InvalidTransition);
         }
@@ -2420,6 +2535,7 @@ pub fn decide_managed_mcp_sandbox_session_phase(
     physical_payload.executor_identity_digest = Some(command.executor_identity_digest.clone());
     physical_payload.attestor_route = Some(command.attestor_route.clone());
     physical_payload.phase_evidence_digest = Some(command.phase_evidence_digest.clone());
+    physical_payload.prepared_binding = command.prepared_binding.clone();
     physical_payload = physical_payload.seal()?;
     physical_payload.validate_for(&physical_job, limits)?;
     Ok(ManagedMcpSandboxSessionPhaseDecision {

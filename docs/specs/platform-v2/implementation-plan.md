@@ -567,7 +567,7 @@ Artifact/Secret grant、四维quota reservation及Receipt/Event/Outbox。全新P
 同idempotency key请求漂移冲突、双向身份、grant/quota和Secret canary，且仍为23表/单一baseline migration。后续domain/repository切片
 已经交付专用Managed claim和`Preparing -> Starting -> Running` fenced phase authority：普通Sandbox claim不可见该workload，并发Managed
 claim只有一个winner；`Starting`与逻辑`Initializing`、Ready与逻辑`Active/Ready`分别在同一事务提交Receipt/Event/Outbox。加密opaque
-session只由逻辑Invocation保存，物理Job只保存credential-free ready binding。新的全新PostgreSQL 16 fixture实际覆盖队列隔离、并发claim、
+session只由逻辑Invocation保存；物理Job从`Starting`保存credential-free exact prepared binding并在`Running`追加ready binding。新的全新PostgreSQL 16 fixture实际覆盖队列隔离、并发claim、
 phase replay、stale fence、后续阶段的admission replay及双状态Ready原子性。该开发期证据仍不包含Managed session provider的实际prepare、
 durable Ready返回后的同实例activation、terminal/session-loss recovery、真实Linux KVM/jailer/guest-agent互操作、
 process-kill或escape/saturation资格，因此CR-131/CR-158和Phase 4继续保持Open。Sandbox domain随后新增closed establishment
@@ -612,6 +612,10 @@ Executor supervisor随后也已组合：microVM进程同时运行有限和Manage
 future在整个session期间持有permit，按profile执行exact observation/heartbeat，并在guest退出、deadline、process drain或观察/续租失败时
 先取得`Destroyed(evidence)`，再生成fresh terminal audit/quota identity并以最新fence提交lost。Executor 5项、Sandbox 38项定向测试与strict
 Clippy通过；Managed expired-lease absence recovery仍Open。
+
+absence recovery前置的durable prepared binding也已补齐：`Starting` command、Job payload与replay现在保存并逐字段验证Provider generation、
+sandbox identity、旧Executor generation、lease及完整prepared canonical digest；opaque session仍只存在逻辑Invocation。Sandbox 38项测试及
+相关crate编译通过，不增加表或migration；专用scan/proof/recovery driver仍Open。
 
 随后补齐了Firecracker生产拓扑前置项：新增独立`executor-microvm` DaemonSet与专用KVM node selector/taint toleration，非root Executor
 只经node-local mTLS Unix socket调用同Pod的最小Provider。只有Provider容器挂载KVM、host cgroup、持久化jail/state并持有closed Linux

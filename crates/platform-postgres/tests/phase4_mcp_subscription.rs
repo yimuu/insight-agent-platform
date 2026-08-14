@@ -2861,6 +2861,7 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         executor_identity_digest: executor_identity_digest.clone(),
         attestor_route: attestor_route.clone(),
         phase_evidence_digest: named_digest("managed-session-preparing-evidence"),
+        prepared_binding: None,
     };
     preparing.audit.request_digest = preparing.canonical_request_digest().unwrap();
     let prepared = match repository
@@ -2884,6 +2885,20 @@ async fn managed_mcp_sandbox_session_admission_fixture(
     );
     assert_eq!(prepared.logical_state.to_string(), "pending");
 
+    let stale_prepared_binding = PreparedManagedMcpSandboxSession {
+        schema_version: 1,
+        identity: winner.request.identity.clone(),
+        request_digest: winner.request.request_digest.clone(),
+        worker_process_generation_id: sandbox_worker.clone(),
+        provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x6b7),
+        lease_generation: prepared.physical_job.lease_generation,
+        executor_identity_digest: executor_identity_digest.clone(),
+        sandbox_identity_digest: named_digest("managed-session-stale-sandbox"),
+        prepare_evidence_digest: named_digest("managed-session-stale-prepare"),
+        canonical_digest: named_digest("placeholder"),
+    }
+    .seal()
+    .unwrap();
     let mut stale_starting = CommitManagedMcpSandboxSessionPhase {
         audit: phase_audit(0x6a0, "managed-session-stale-starting-key"),
         identity: winner.request.identity.clone(),
@@ -2896,7 +2911,8 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         target: SandboxJobState::Starting,
         executor_identity_digest: executor_identity_digest.clone(),
         attestor_route: attestor_route.clone(),
-        phase_evidence_digest: named_digest("managed-session-stale-starting-evidence"),
+        phase_evidence_digest: stale_prepared_binding.canonical_digest.clone(),
+        prepared_binding: Some(stale_prepared_binding),
     };
     stale_starting.audit.request_digest = stale_starting.canonical_request_digest().unwrap();
     assert!(matches!(
@@ -2935,6 +2951,7 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         executor_identity_digest: executor_identity_digest.clone(),
         attestor_route: attestor_route.clone(),
         phase_evidence_digest: prepared_session.canonical_digest.clone(),
+        prepared_binding: Some(prepared_session.clone()),
     };
     starting.audit.request_digest = starting.canonical_request_digest().unwrap();
     let started = match repository

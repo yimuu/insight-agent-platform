@@ -790,8 +790,9 @@ generation、MCP/Discovery/Auth closure、Runtime/Package/Profile/Policy、Artif
 PostgreSQL在一个事务内验证并锁定全部exact authority，双向写入逻辑session link与唯一Sandbox Job，将逻辑MCP Job停回Waiting，并提交
 Receipt/Event/Outbox。专用claim按closed workload discriminator领取，普通Sandbox claim对其不可见；并发claim只有一个lease winner。
 fenced `Preparing`提交Executor/Attestor evidence，`Starting`原子推进逻辑session为`Initializing`，Ready事务同时推进逻辑
-`Active/Ready`与物理`Running`。加密opaque session只存逻辑Invocation，物理Job只保留credential-free ready binding，避免复制current
-session状态。全新PostgreSQL 16 fixture覆盖admission唯一winner/replay/idempotency drift、双向identity、grant/quota/canary、队列隔离、
+`Active/Ready`与物理`Running`。加密opaque session只存逻辑Invocation；物理Job从`Starting`起保留credential-free exact prepared
+binding，并在`Running`追加credential-free ready binding，使恢复者能够回绑Provider generation与sandbox identity而不复制current session状态。
+全新PostgreSQL 16 fixture覆盖admission唯一winner/replay/idempotency drift、双向identity、grant/quota/canary、队列隔离、
 claim first-winner、phase replay/stale fence与双状态Ready的Receipt/Event/Outbox原子性。普通MCP subscription Worker同时已fail closed为
 Streamable HTTP only。新增的Sandbox establishment Worker以closed Provider port强制`Preparing提交 -> prepare -> Starting提交 ->
 initialize但不放行通知 -> Ready提交 -> 同一prepared instance activation`；所有provider evidence绑定request、lease、Worker、Executor及
@@ -824,6 +825,10 @@ transport failure绝不等于`Exited`。cleanup closed outcome区分`Absent`与�
 同一证据。microVM Executor现把Managed专用driver与有限执行driver、NATS control listener置于同一supervisor；两条lane共享
 `LocalWorkerPools`，Managed permit保留到cleanup与terminal commit得到durable disposition。长期循环按profile续租，guest退出、deadline、
 process drain或观察/heartbeat失败均先exact destroy，只有`Destroyed(evidence)`才可构造并提交lost。expired lease absence worker仍Open。
+
+作为absence worker的前置合同，`Starting`提交现把完整credential-free prepared binding与其canonical digest一并持久化；Job校验逐字段回绑
+request、旧Executor/Provider generation、lease和sandbox identity，replay也必须返回同一binding。此前仅保存不可展开摘要的状态不足以让
+过期租约恢复验证Provider cleanup，现已消除该歧义；不增加表或migration。
 
 Managed session的一次性Secret交付现已实现为两阶段、双平面协议。microVM Provider只以exact workload URI SAN调用Egress；Egress以自身
 workload identity调用Sandbox Controller执行reserve与commit，并在两者之间通过既有Security Authority、KMS和Secret Provider解析材料。

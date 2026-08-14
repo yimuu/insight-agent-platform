@@ -757,8 +757,8 @@ request、attempt、lease、Executor、Provider process generation、sandbox ide
 Security Authority、KMS和Secret Provider解析明文；解析后Controller再次锁定并复验全部authority，再原子提交Receipt/Event/Outbox。
 只有fresh reserve与fresh commit同时成功的一次调用可以向Provider返回bytes；reserve/commit重放、响应丢失或任一fence漂移均fail closed，
 已经提交的重放不得再次返回明文。Controller永不接触明文，Egress没有数据库credential，Provider没有数据库、KMS或Secret Manager权限。
-`maximum_reads`由现有Receipt计数执行，不增加表或migration，也不修改Job version；`Starting` phase evidence改为提交包含Provider generation
-和sandbox identity的完整prepared canonical digest，防止交付时用较弱prepare evidence替换实际运行实例。
+`maximum_reads`由现有Receipt计数执行，不增加表或migration，也不修改Job version；`Starting` phase evidence改为提交并持久化包含Provider
+generation和sandbox identity的完整credential-free prepared binding及canonical digest，防止交付或恢复时用较弱prepare evidence替换实际运行实例。
 真实microVM Managed session Provider、guest Artifact/一次性Secret注入和同实例activation现已进入独立Provider进程；Managed authority又新增
 非事件化、exact Job/version/lease/Worker/token fenced heartbeat，PostgreSQL只推进物理Job version与lease，不能延长request deadline或
 session expiry，也不创建Receipt/Event/Outbox。domain与gRPC测试已执行，fresh PostgreSQL fixture已编译；本机Docker daemon无响应，故本次不把
