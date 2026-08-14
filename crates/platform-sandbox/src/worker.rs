@@ -65,7 +65,7 @@ pub struct SandboxWorkerCommitIdentity {
 }
 
 impl SandboxWorkerCommitIdentity {
-    fn materialize(&self, request_digest: Sha256Digest) -> SandboxWorkerAudit {
+    pub(crate) fn materialize(&self, request_digest: Sha256Digest) -> SandboxWorkerAudit {
         SandboxWorkerAudit {
             tenant_id: self.tenant_id.clone(),
             worker_process_generation_id: self.worker_process_generation_id.clone(),
@@ -78,7 +78,7 @@ impl SandboxWorkerCommitIdentity {
         }
     }
 
-    fn validate_at(&self, now: DateTime<Utc>) -> Result<(), SandboxWorkerContractError> {
+    pub(crate) fn validate_at(&self, now: DateTime<Utc>) -> Result<(), SandboxWorkerContractError> {
         self.materialize(self.idempotency_key_digest.clone())
             .validate_at(now)
     }

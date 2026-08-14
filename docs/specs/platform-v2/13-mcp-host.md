@@ -740,9 +740,12 @@ materialize后才执行；Provider不再拒绝已安装的Managed MCP runtime。
 `Active/Ready`与物理`Running`。加密opaque session只保存在逻辑Invocation这一处current-state authority；物理Job只保存无Secret的
 sandbox/protocol/ready-evidence digest binding。每一步均使用fenced Receipt、Event和Outbox，admission replay在后续阶段仍稳定。
 全新PostgreSQL 16 fixture实际覆盖普通/专用队列隔离、并发claim first-winner、phase replay、stale fence和双状态Ready原子性。
-这仍只是domain/repository authority；Managed session Provider的实际prepare、durable commit后的同实例activation、terminal/session-loss
-recovery以及真实Linux KVM/jailer/guest-agent、process-kill/recovery与escape/saturation资格仍未交付，因此该证据不关闭MCP或Phase 4，
-也不把本规范标记为Implemented/Verified。此前workspace
+Sandbox domain现又增加closed establishment Worker/Provider port，唯一允许顺序为`commit Preparing -> provider prepare -> commit Starting ->
+provider initialize（通知仍关闭）-> commit Ready -> provider activate`；provider evidence逐字段回绑同一request、lease、Worker、Executor与
+sandbox identity。两个故障注入unit fixture证明activation严格晚于durable Ready，并证明Ready提交失败会destroy prepared instance且不
+activate。该切片仍未把Worker接入Executor claim/RPC或真实microVM Managed session Provider；terminal/session-loss recovery以及真实Linux
+KVM/jailer/guest-agent、process-kill/recovery与escape/saturation资格也未交付，因此该证据不关闭MCP或Phase 4，也不把本规范标记为
+Implemented/Verified。此前workspace
 all-target/all-feature check、test、doc-test与strict Clippy及public API/contract/schema/cutover门禁证据不自动覆盖本次变更；本次完整门禁
 结果以实施计划的最新记录为准。
 两个显式ignored RustFS qualification test仍不计为当前切片资格证据。

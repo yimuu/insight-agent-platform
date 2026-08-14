@@ -1,16 +1,16 @@
 use crate::{
     digest_without_field, required_isolation, ClaimSandboxJobs, NodeAttestorRoute,
     SandboxClaimFailure, SandboxCommandLimits, SandboxContractError, SandboxExecutionPolicyClosure,
-    SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit, ScopedArtifactGrant,
-    ScopedSecretGrant, MAX_SANDBOX_ARTIFACT_GRANTS, MAX_SANDBOX_SECRET_GRANTS,
+    SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit, SandboxWorkerCommitIdentity,
+    ScopedArtifactGrant, ScopedSecretGrant, MAX_SANDBOX_ARTIFACT_GRANTS, MAX_SANDBOX_SECRET_GRANTS,
     SANDBOX_PROTOCOL_VERSION, SANDBOX_QUOTA_LINES,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    ArtifactGrantOperation, CommandOutcome, DataClassification, Effect, JobState, ResourceDocument,
-    ResourceId, ResourceKind, SandboxIsolationClass, SandboxJobState, SandboxRuntimeFamily,
-    Sha256Digest, WorkClass,
+    ArtifactGrantOperation, CommandOutcome, DataClassification, Effect, JobState, McpSessionState,
+    ResourceDocument, ResourceId, ResourceKind, SandboxIsolationClass, SandboxJobState,
+    SandboxRuntimeFamily, Sha256Digest, WorkClass,
 };
 use insight_platform_jobs::{
     decide_observation_update, decide_start, JobFence, JobOwnerRef, JobProjection,
@@ -21,7 +21,7 @@ use insight_platform_mcp_host::{
     McpSubscriptionWorkerAudit,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
 
 /// Exact callback audience used when the Sandbox session reaches prepared or terminal state.
 /// It contains no endpoint, credential, plaintext session handle or caller-selected URL.
@@ -732,6 +732,711 @@ pub trait ManagedMcpSandboxSessionExecutionAuthority: Send + Sync {
         &self,
         command: CommitManagedMcpSandboxSessionReady,
     ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error>;
+}
+
+/// Exact mutation identities consumed while establishing one Managed MCP session. Long-lived
+/// terminal/recovery commits use their own identities and are intentionally not preallocated here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedMcpSandboxSessionWorkerAudits {
+    pub preparing: SandboxWorkerCommitIdentity,
+    pub starting: SandboxWorkerCommitIdentity,
+    pub ready: SandboxWorkerCommitIdentity,
+}
+
+impl ManagedMcpSandboxSessionWorkerAudits {
+    fn validate_at(
+        &self,
+        tenant_id: &ResourceId,
+        worker_process_generation_id: &ResourceId,
+        now: DateTime<Utc>,
+    ) -> Result<(), SandboxContractError> {
+        let audits = [&self.preparing, &self.starting, &self.ready];
+        for audit in audits {
+            audit
+                .validate_at(now)
+                .map_err(|_| SandboxContractError::InvalidWorkerCommand)?;
+            if &audit.tenant_id != tenant_id
+                || &audit.worker_process_generation_id != worker_process_generation_id
+            {
+                return Err(SandboxContractError::InvalidWorkerCommand);
+            }
+        }
+        if audits
+            .iter()
+            .map(|audit| &audit.receipt_id)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != audits.len()
+            || audits
+                .iter()
+                .map(|audit| &audit.event_id)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != audits.len()
+            || audits
+                .iter()
+                .map(|audit| &audit.outbox_id)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != audits.len()
+            || audits
+                .iter()
+                .map(|audit| &audit.idempotency_key_digest)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != audits.len()
+        {
+            return Err(SandboxContractError::InvalidWorkerCommand);
+        }
+        Ok(())
+    }
+}
+
+/// Executor-local command built only after the dedicated Managed-session claim wins.
+#[derive(Debug, Clone)]
+pub struct ExecuteManagedMcpSandboxSession {
+    pub claimed: ClaimedManagedMcpSandboxSession,
+    pub executor_identity_digest: Sha256Digest,
+    pub attestor_route: NodeAttestorRoute,
+    pub audits: ManagedMcpSandboxSessionWorkerAudits,
+}
+
+impl ExecuteManagedMcpSandboxSession {
+    pub fn validate_at(
+        &self,
+        now: DateTime<Utc>,
+        limits: SandboxCommandLimits,
+    ) -> Result<(), SandboxContractError> {
+        self.claimed.validate_at(now, limits)?;
+        self.audits.validate_at(
+            &self.claimed.request.identity.tenant_id,
+            &self.claimed.fence.worker_process_generation_id,
+            now,
+        )
+    }
+}
+
+/// Credential-free proof that the provider allocated the exact physical instance. An error from
+/// `prepare` means the provider proved that no instance survived; once this value exists, every
+/// later failure must call `destroy_prepared` before the worker returns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedManagedMcpSandboxSession {
+    pub schema_version: u32,
+    pub identity: ManagedMcpSandboxSessionIdentity,
+    pub request_digest: Sha256Digest,
+    pub worker_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub executor_identity_digest: Sha256Digest,
+    pub sandbox_identity_digest: Sha256Digest,
+    pub prepare_evidence_digest: Sha256Digest,
+    pub canonical_digest: Sha256Digest,
+}
+
+impl PreparedManagedMcpSandboxSession {
+    pub fn seal(mut self) -> Result<Self, SandboxContractError> {
+        self.canonical_digest = digest_without_field(&self, "canonical_digest")?;
+        Ok(self)
+    }
+
+    pub fn validate_for(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        executor_identity_digest: &Sha256Digest,
+    ) -> Result<(), SandboxContractError> {
+        if self.schema_version != 1
+            || self.identity != request.identity
+            || self.request_digest != request.request_digest
+            || self.worker_process_generation_id != fence.worker_process_generation_id
+            || self.lease_generation != fence.lease_generation
+            || &self.executor_identity_digest != executor_identity_digest
+            || digest_without_field(self, "canonical_digest")? != self.canonical_digest
+        {
+            return Err(SandboxContractError::InvalidOutcome);
+        }
+        Ok(())
+    }
+}
+
+/// Provider-side prepared activation. The provider retains the live byte stream behind this
+/// credential-free binding; the worker may only release it after durable Ready commits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedManagedMcpSandboxSessionActivation {
+    pub schema_version: u32,
+    pub prepared: PreparedManagedMcpSandboxSession,
+    pub ready: ManagedMcpSandboxSessionReadyEvidence,
+    pub activation_binding_digest: Sha256Digest,
+    pub canonical_digest: Sha256Digest,
+}
+
+impl PreparedManagedMcpSandboxSessionActivation {
+    pub fn seal(mut self) -> Result<Self, SandboxContractError> {
+        self.canonical_digest = digest_without_field(&self, "canonical_digest")?;
+        Ok(self)
+    }
+
+    pub fn validate_for(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        executor_identity_digest: &Sha256Digest,
+        now: DateTime<Utc>,
+    ) -> Result<(), SandboxContractError> {
+        self.prepared
+            .validate_for(request, fence, executor_identity_digest)?;
+        self.ready.validate_for(request, now)?;
+        if self.schema_version != 1
+            || self.ready.sandbox_identity_digest != self.prepared.sandbox_identity_digest
+            || digest_without_field(self, "canonical_digest")? != self.canonical_digest
+        {
+            return Err(SandboxContractError::InvalidOutcome);
+        }
+        Ok(())
+    }
+}
+
+/// Evidence produced only after the provider released notification delivery on the same prepared
+/// instance. Durable Ready remains the authority; this value is execution-plane observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivatedManagedMcpSandboxSession {
+    pub schema_version: u32,
+    pub identity: ManagedMcpSandboxSessionIdentity,
+    pub request_digest: Sha256Digest,
+    pub worker_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub sandbox_identity_digest: Sha256Digest,
+    pub ready_evidence_digest: Sha256Digest,
+    pub activated_at: DateTime<Utc>,
+    pub activation_evidence_digest: Sha256Digest,
+    pub canonical_digest: Sha256Digest,
+}
+
+impl ActivatedManagedMcpSandboxSession {
+    pub fn seal(mut self) -> Result<Self, SandboxContractError> {
+        self.canonical_digest = digest_without_field(&self, "canonical_digest")?;
+        Ok(self)
+    }
+
+    pub fn validate_for(
+        &self,
+        activation: &PreparedManagedMcpSandboxSessionActivation,
+        now: DateTime<Utc>,
+    ) -> Result<(), SandboxContractError> {
+        if self.schema_version != 1
+            || self.identity != activation.prepared.identity
+            || self.request_digest != activation.prepared.request_digest
+            || self.worker_process_generation_id != activation.prepared.worker_process_generation_id
+            || self.lease_generation != activation.prepared.lease_generation
+            || self.sandbox_identity_digest != activation.prepared.sandbox_identity_digest
+            || self.ready_evidence_digest != activation.ready.canonical_digest
+            || self.activated_at < activation.ready.established_at
+            || self.activated_at > now
+            || self.activated_at >= activation.ready.expires_at
+            || digest_without_field(self, "canonical_digest")? != self.canonical_digest
+        {
+            return Err(SandboxContractError::InvalidOutcome);
+        }
+        Ok(())
+    }
+}
+
+/// Physical Managed-session provider boundary. Implementations run only in the Sandbox execution
+/// plane. `initialize` must keep notification delivery disabled, and `activate` must address the
+/// exact same instance represented by `PreparedManagedMcpSandboxSessionActivation`.
+#[async_trait]
+pub trait ManagedMcpSandboxSessionProvider: Send + Sync {
+    type Error: Send;
+
+    async fn prepare(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        executor_identity_digest: &Sha256Digest,
+    ) -> Result<PreparedManagedMcpSandboxSession, Self::Error>;
+
+    async fn initialize(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+    ) -> Result<PreparedManagedMcpSandboxSessionActivation, Self::Error>;
+
+    async fn activate(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        activation: &PreparedManagedMcpSandboxSessionActivation,
+    ) -> Result<ActivatedManagedMcpSandboxSession, Self::Error>;
+
+    async fn destroy_prepared(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+    ) -> Result<(), Self::Error>;
+}
+
+/// Establishment worker that enforces the only valid activation order:
+///
+/// `commit Preparing -> provider prepare -> commit Starting -> provider initialize ->`
+/// `commit Ready -> provider activate`.
+pub struct ManagedMcpSandboxSessionWorker<A, P> {
+    authority: Arc<A>,
+    provider: Arc<P>,
+    limits: SandboxCommandLimits,
+}
+
+impl<A, P> ManagedMcpSandboxSessionWorker<A, P> {
+    pub fn new(authority: Arc<A>, provider: Arc<P>, limits: SandboxCommandLimits) -> Self {
+        Self {
+            authority,
+            provider,
+            limits,
+        }
+    }
+}
+
+impl<A, P> ManagedMcpSandboxSessionWorker<A, P>
+where
+    A: ManagedMcpSandboxSessionExecutionAuthority,
+    P: ManagedMcpSandboxSessionProvider,
+{
+    pub async fn establish(
+        &self,
+        command: ExecuteManagedMcpSandboxSession,
+    ) -> Result<
+        ActivatedManagedMcpSandboxSession,
+        ManagedMcpSandboxSessionWorkerError<A::Error, P::Error>,
+    > {
+        command
+            .validate_at(Utc::now(), self.limits)
+            .map_err(ManagedMcpSandboxSessionWorkerError::Contract)?;
+        let request = &command.claimed.request;
+        let mut fence = command.claimed.fence.clone();
+
+        let preparing_evidence = managed_mcp_prepare_intent_digest(&command)
+            .map_err(ManagedMcpSandboxSessionWorkerError::Contract)?;
+        let preparing = managed_mcp_phase_command(
+            &command.audits.preparing,
+            request,
+            &fence,
+            SandboxJobState::Preparing,
+            &command.executor_identity_digest,
+            &command.attestor_route,
+            preparing_evidence,
+        )
+        .map_err(ManagedMcpSandboxSessionWorkerError::Contract)?;
+        let preparing = self
+            .authority
+            .commit_managed_mcp_sandbox_session_phase(preparing)
+            .await
+            .map_err(ManagedMcpSandboxSessionWorkerError::Authority)?;
+        let preparing = managed_mcp_outcome_ref(&preparing);
+        validate_managed_mcp_authority_decision(
+            preparing,
+            request,
+            SandboxJobState::Preparing,
+            McpSessionState::Connecting,
+            self.limits,
+        )
+        .map_err(ManagedMcpSandboxSessionWorkerError::Contract)?;
+        fence = next_managed_mcp_fence(preparing, &fence);
+
+        let prepared = self
+            .provider
+            .prepare(request, &fence, &command.executor_identity_digest)
+            .await
+            .map_err(ManagedMcpSandboxSessionWorkerError::Provider)?;
+        if let Err(contract) =
+            prepared.validate_for(request, &fence, &command.executor_identity_digest)
+        {
+            return Err(
+                match self
+                    .provider
+                    .destroy_prepared(request, &fence, &prepared)
+                    .await
+                {
+                    Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                    Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
+                        contract,
+                        cleanup,
+                    },
+                },
+            );
+        }
+
+        let starting = match managed_mcp_phase_command(
+            &command.audits.starting,
+            request,
+            &fence,
+            SandboxJobState::Starting,
+            &command.executor_identity_digest,
+            &command.attestor_route,
+            prepared.prepare_evidence_digest.clone(),
+        ) {
+            Ok(command) => command,
+            Err(contract) => {
+                return Err(
+                    match self
+                        .provider
+                        .destroy_prepared(request, &fence, &prepared)
+                        .await
+                    {
+                        Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                        Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
+                            contract,
+                            cleanup,
+                        },
+                    },
+                );
+            }
+        };
+        let starting = match self
+            .authority
+            .commit_managed_mcp_sandbox_session_phase(starting)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(authority) => {
+                return Err(
+                    match self
+                        .provider
+                        .destroy_prepared(request, &fence, &prepared)
+                        .await
+                    {
+                        Ok(()) => ManagedMcpSandboxSessionWorkerError::Authority(authority),
+                        Err(cleanup) => {
+                            ManagedMcpSandboxSessionWorkerError::CleanupAfterAuthority {
+                                authority,
+                                cleanup,
+                            }
+                        }
+                    },
+                );
+            }
+        };
+        let starting = managed_mcp_outcome_ref(&starting);
+        if let Err(contract) = validate_managed_mcp_authority_decision(
+            starting,
+            request,
+            SandboxJobState::Starting,
+            McpSessionState::Initializing,
+            self.limits,
+        ) {
+            return Err(
+                match self
+                    .provider
+                    .destroy_prepared(request, &fence, &prepared)
+                    .await
+                {
+                    Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                    Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
+                        contract,
+                        cleanup,
+                    },
+                },
+            );
+        }
+        fence = next_managed_mcp_fence(starting, &fence);
+
+        let activation = match self.provider.initialize(request, &fence, &prepared).await {
+            Ok(activation) => activation,
+            Err(provider) => {
+                return Err(
+                    match self
+                        .provider
+                        .destroy_prepared(request, &fence, &prepared)
+                        .await
+                    {
+                        Ok(()) => ManagedMcpSandboxSessionWorkerError::Provider(provider),
+                        Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterProvider {
+                            provider,
+                            cleanup,
+                        },
+                    },
+                );
+            }
+        };
+        if let Err(contract) = activation.validate_for(
+            request,
+            &fence,
+            &command.executor_identity_digest,
+            Utc::now(),
+        ) {
+            return Err(
+                match self
+                    .provider
+                    .destroy_prepared(request, &fence, &prepared)
+                    .await
+                {
+                    Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                    Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
+                        contract,
+                        cleanup,
+                    },
+                },
+            );
+        }
+
+        let ready = match managed_mcp_ready_command(
+            &command.audits.ready,
+            request,
+            &fence,
+            activation.ready.clone(),
+            activation.canonical_digest.clone(),
+        ) {
+            Ok(command) => command,
+            Err(contract) => {
+                return Err(
+                    match self
+                        .provider
+                        .destroy_prepared(request, &fence, &prepared)
+                        .await
+                    {
+                        Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                        Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
+                            contract,
+                            cleanup,
+                        },
+                    },
+                );
+            }
+        };
+        let ready = match self
+            .authority
+            .commit_managed_mcp_sandbox_session_ready(ready)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(authority) => {
+                return Err(
+                    match self
+                        .provider
+                        .destroy_prepared(request, &fence, &prepared)
+                        .await
+                    {
+                        Ok(()) => ManagedMcpSandboxSessionWorkerError::Authority(authority),
+                        Err(cleanup) => {
+                            ManagedMcpSandboxSessionWorkerError::CleanupAfterAuthority {
+                                authority,
+                                cleanup,
+                            }
+                        }
+                    },
+                );
+            }
+        };
+        let ready = managed_mcp_outcome_ref(&ready);
+        if let Err(contract) = validate_managed_mcp_authority_decision(
+            ready,
+            request,
+            SandboxJobState::Running,
+            McpSessionState::Ready,
+            self.limits,
+        ) {
+            return Err(
+                match self
+                    .provider
+                    .destroy_prepared(request, &fence, &prepared)
+                    .await
+                {
+                    Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                    Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
+                        contract,
+                        cleanup,
+                    },
+                },
+            );
+        }
+        fence = next_managed_mcp_fence(ready, &fence);
+
+        let activated = match self.provider.activate(request, &fence, &activation).await {
+            Ok(activated) => activated,
+            Err(provider) => {
+                return Err(
+                    match self
+                        .provider
+                        .destroy_prepared(request, &fence, &prepared)
+                        .await
+                    {
+                        Ok(()) => ManagedMcpSandboxSessionWorkerError::Provider(provider),
+                        Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterProvider {
+                            provider,
+                            cleanup,
+                        },
+                    },
+                );
+            }
+        };
+        if let Err(contract) = activated.validate_for(&activation, Utc::now()) {
+            return Err(
+                match self
+                    .provider
+                    .destroy_prepared(request, &fence, &prepared)
+                    .await
+                {
+                    Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                    Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
+                        contract,
+                        cleanup,
+                    },
+                },
+            );
+        }
+        Ok(activated)
+    }
+}
+
+#[derive(Debug)]
+pub enum ManagedMcpSandboxSessionWorkerError<AuthorityError, ProviderError> {
+    Contract(SandboxContractError),
+    Authority(AuthorityError),
+    Provider(ProviderError),
+    CleanupAfterContract {
+        contract: SandboxContractError,
+        cleanup: ProviderError,
+    },
+    CleanupAfterAuthority {
+        authority: AuthorityError,
+        cleanup: ProviderError,
+    },
+    CleanupAfterProvider {
+        provider: ProviderError,
+        cleanup: ProviderError,
+    },
+}
+
+impl<AuthorityError, ProviderError> fmt::Display
+    for ManagedMcpSandboxSessionWorkerError<AuthorityError, ProviderError>
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Contract(_) => "Managed MCP session worker rejected its contract",
+            Self::Authority(_) => "Managed MCP session durable authority failed",
+            Self::Provider(_) => "Managed MCP session provider failed",
+            Self::CleanupAfterContract { .. }
+            | Self::CleanupAfterAuthority { .. }
+            | Self::CleanupAfterProvider { .. } => {
+                "Managed MCP session provider cleanup failed after establishment failure"
+            }
+        })
+    }
+}
+
+impl<AuthorityError, ProviderError> Error
+    for ManagedMcpSandboxSessionWorkerError<AuthorityError, ProviderError>
+where
+    AuthorityError: Error + 'static,
+    ProviderError: Error + 'static,
+{
+}
+
+fn managed_mcp_outcome_ref<T>(outcome: &CommandOutcome<T>) -> &T {
+    match outcome {
+        CommandOutcome::Applied(value) | CommandOutcome::Replayed(value) => value,
+    }
+}
+
+fn next_managed_mcp_fence(
+    decision: &ManagedMcpSandboxSessionPhaseDecision,
+    prior: &JobFence,
+) -> JobFence {
+    JobFence {
+        expected_version: decision.physical_job.version,
+        worker_process_generation_id: prior.worker_process_generation_id.clone(),
+        lease_generation: prior.lease_generation,
+        token_digest: prior.token_digest.clone(),
+    }
+}
+
+fn managed_mcp_prepare_intent_digest(
+    command: &ExecuteManagedMcpSandboxSession,
+) -> Result<Sha256Digest, SandboxContractError> {
+    insight_platform_contracts::canonical_digest(&serde_json::json!({
+        "attestor_route": command.attestor_route,
+        "domain": "managed_mcp_sandbox_session_prepare_intent",
+        "executor_identity_digest": command.executor_identity_digest,
+        "fence": command.claimed.fence,
+        "identity": command.claimed.request.identity,
+        "request_digest": command.claimed.request.request_digest,
+        "schema_version": 1,
+    }))
+    .map_err(|_| SandboxContractError::Canonicalization)?
+    .parse()
+    .map_err(|_| SandboxContractError::Canonicalization)
+}
+
+fn managed_mcp_phase_command(
+    audit: &SandboxWorkerCommitIdentity,
+    request: &ManagedMcpSandboxSessionRequest,
+    fence: &JobFence,
+    target: SandboxJobState,
+    executor_identity_digest: &Sha256Digest,
+    attestor_route: &NodeAttestorRoute,
+    phase_evidence_digest: Sha256Digest,
+) -> Result<CommitManagedMcpSandboxSessionPhase, SandboxContractError> {
+    let mut command = CommitManagedMcpSandboxSessionPhase {
+        audit: audit.materialize(audit.idempotency_key_digest.clone()),
+        identity: request.identity.clone(),
+        fence: fence.clone(),
+        target,
+        executor_identity_digest: executor_identity_digest.clone(),
+        attestor_route: attestor_route.clone(),
+        phase_evidence_digest,
+    };
+    command.audit.request_digest = command.canonical_request_digest()?;
+    command.validate_at(Utc::now())?;
+    Ok(command)
+}
+
+fn managed_mcp_ready_command(
+    audit: &SandboxWorkerCommitIdentity,
+    request: &ManagedMcpSandboxSessionRequest,
+    fence: &JobFence,
+    ready: ManagedMcpSandboxSessionReadyEvidence,
+    phase_evidence_digest: Sha256Digest,
+) -> Result<CommitManagedMcpSandboxSessionReady, SandboxContractError> {
+    let mut command = CommitManagedMcpSandboxSessionReady {
+        audit: audit.materialize(audit.idempotency_key_digest.clone()),
+        identity: request.identity.clone(),
+        fence: fence.clone(),
+        ready,
+        phase_evidence_digest,
+    };
+    command.audit.request_digest = command.canonical_request_digest()?;
+    command.validate_at(request, Utc::now())?;
+    Ok(command)
+}
+
+fn validate_managed_mcp_authority_decision(
+    decision: &ManagedMcpSandboxSessionPhaseDecision,
+    request: &ManagedMcpSandboxSessionRequest,
+    physical_state: SandboxJobState,
+    logical_state: insight_platform_contracts::McpSessionState,
+    limits: SandboxCommandLimits,
+) -> Result<(), SandboxContractError> {
+    decision
+        .physical_payload
+        .validate_for(&decision.physical_job, limits)?;
+    let link = decision
+        .logical_payload
+        .managed_sandbox_session
+        .as_ref()
+        .ok_or(SandboxContractError::InvalidExactBinding)?;
+    if decision.physical_job.job_id != request.identity.physical_job_id
+        || decision.physical_payload.request.as_ref() != request
+        || decision.physical_payload.physical_state != physical_state
+        || decision.logical_payload.session.state != logical_state
+        || link.identity != request.identity
+        || link.sandbox_request_digest != request.request_digest
+    {
+        return Err(SandboxContractError::InvalidExactBinding);
+    }
+    Ok(())
 }
 
 pub fn decide_accept_managed_mcp_sandbox_session(

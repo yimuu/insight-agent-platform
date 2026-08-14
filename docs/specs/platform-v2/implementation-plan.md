@@ -570,7 +570,11 @@ claim只有一个winner；`Starting`与逻辑`Initializing`、Ready与逻辑`Act
 session只由逻辑Invocation保存，物理Job只保存credential-free ready binding。新的全新PostgreSQL 16 fixture实际覆盖队列隔离、并发claim、
 phase replay、stale fence、后续阶段的admission replay及双状态Ready原子性。该开发期证据仍不包含Managed session provider的实际prepare、
 durable Ready返回后的同实例activation、terminal/session-loss recovery、真实Linux KVM/jailer/guest-agent互操作、
-process-kill或escape/saturation资格，因此CR-131/CR-158和Phase 4继续保持Open。
+process-kill或escape/saturation资格，因此CR-131/CR-158和Phase 4继续保持Open。Sandbox domain随后新增closed establishment
+Worker/Provider port，将顺序收紧为`Preparing commit -> prepare -> Starting commit -> initialize但保持通知关闭 -> Ready commit ->
+same-instance activate`，并在任一post-prepare合同、authority或provider失败时要求exact destroy。两个unit fixture已证明Ready提交先于
+activation及Ready提交失败时destroy且不activation；Executor claim/internal RPC与实际Managed microVM session Provider尚未接入，故上述
+开放项和Phase状态不变。
 
 CR-159关闭Phase 6入口的CandidateManifest machine-contract空洞：closed Rust type与checked-in JSON Schema冻结full tagged Git object ID、
 `cand`/`qpr` nominal identity、schema contract version、bounded component image map、canonical WorkerManifest digest set、deployment/limit/

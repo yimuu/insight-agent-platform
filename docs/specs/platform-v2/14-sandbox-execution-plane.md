@@ -785,7 +785,10 @@ fenced `Preparing`提交Executor/Attestor evidence，`Starting`原子推进逻�
 `Active/Ready`与物理`Running`。加密opaque session只存逻辑Invocation，物理Job只保留credential-free ready binding，避免复制current
 session状态。全新PostgreSQL 16 fixture覆盖admission唯一winner/replay/idempotency drift、双向identity、grant/quota/canary、队列隔离、
 claim first-winner、phase replay/stale fence与双状态Ready的Receipt/Event/Outbox原子性。普通MCP subscription Worker同时已fail closed为
-Streamable HTTP only。该切片尚未组合实际Managed session Provider prepare、durable commit后的同实例activation、terminal/session-loss
+Streamable HTTP only。新增的Sandbox establishment Worker以closed Provider port强制`Preparing提交 -> prepare -> Starting提交 ->
+initialize但不放行通知 -> Ready提交 -> 同一prepared instance activation`；所有provider evidence绑定request、lease、Worker、Executor及
+sandbox identity，任一post-prepare合同、authority或provider失败都必须先调用exact destroy。两个unit fixture覆盖成功顺序和Ready提交失败
+销毁且不activation。该切片尚未把Worker接入Executor claim/internal RPC，也没有实际Managed microVM session Provider、terminal/session-loss
 recovery或真实进程资格，因此不关闭Phase 4。
 
 process-generation isolation authority是独立于PostgreSQL lease、NATS和Controller进程的node/runtime attestor；数据库lease过期、NATS

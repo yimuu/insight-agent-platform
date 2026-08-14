@@ -10,9 +10,9 @@ use insight_platform_contracts::{
     CapabilityImplementationResourceSpec, CapabilityInterfaceLimits,
     CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
     CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue, CodeTrustClass, CommandAudit,
-    DataClassification, Effect, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef,
-    McpAuthorizationPrincipalKind, McpClientCapabilities, McpDeploymentClosure, McpMetadataPolicy,
-    McpMethodLimits, McpNegotiatedCapabilities, McpProtocolPolicyDocument,
+    CommandOutcome, DataClassification, Effect, ExactDeploymentRef, ExactSecretBindingRef,
+    ExactVersionRef, McpAuthorizationPrincipalKind, McpClientCapabilities, McpDeploymentClosure,
+    McpMetadataPolicy, McpMethodLimits, McpNegotiatedCapabilities, McpProtocolPolicyDocument,
     McpServerExecutionContract, McpServerLimits, McpToolCapabilityContract, McpTransportBinding,
     McpTransportFeatures, McpTransportKind, PrincipalKind, PublishedMcpMethod, ResourceId,
     ResourceKind, Retryability, SandboxAbiVersion, SandboxArtifactIoPolicyDocument,
@@ -1034,6 +1034,330 @@ fn managed_subscription_commits_physical_phases_and_both_jobs_before_ready() {
         .physical_payload
         .validate_for(&ready.physical_job, limits())
         .unwrap();
+}
+
+#[derive(Debug)]
+struct ManagedSessionFixtureError;
+
+impl std::fmt::Display for ManagedSessionFixtureError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("managed session fixture failure")
+    }
+}
+
+impl std::error::Error for ManagedSessionFixtureError {}
+
+struct ManagedSessionAuthorityState {
+    logical: McpSubscriptionRecord,
+    physical_job: insight_platform_jobs::JobProjection,
+    physical_payload: ManagedMcpSandboxSessionJobPayload,
+}
+
+struct RecordingManagedSessionAuthority {
+    state: Mutex<ManagedSessionAuthorityState>,
+    events: Arc<Mutex<Vec<&'static str>>>,
+    fail_ready: bool,
+}
+
+#[async_trait]
+impl ManagedMcpSandboxSessionExecutionAuthority for RecordingManagedSessionAuthority {
+    type Error = ManagedSessionFixtureError;
+
+    async fn commit_managed_mcp_sandbox_session_phase(
+        &self,
+        command: CommitManagedMcpSandboxSessionPhase,
+    ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
+        self.events.lock().unwrap().push(match command.target {
+            SandboxJobState::Preparing => "commit_preparing",
+            SandboxJobState::Starting => "commit_starting",
+            _ => return Err(ManagedSessionFixtureError),
+        });
+        let now = Utc::now();
+        let mut state = self.state.lock().unwrap();
+        let decision = decide_managed_mcp_sandbox_session_phase(
+            &state.logical,
+            &state.physical_job,
+            &state.physical_payload,
+            &command,
+            now,
+            limits(),
+        )
+        .map_err(|_| ManagedSessionFixtureError)?;
+        if decision.logical_payload != state.logical.payload
+            || decision.logical_state != state.logical.state
+        {
+            state.logical.version += 1;
+            state.logical.payload = decision.logical_payload.clone();
+            state.logical.state = decision.logical_state;
+        }
+        state.physical_job = decision.physical_job.clone();
+        state.physical_payload = decision.physical_payload.clone();
+        Ok(CommandOutcome::Applied(decision))
+    }
+
+    async fn commit_managed_mcp_sandbox_session_ready(
+        &self,
+        command: CommitManagedMcpSandboxSessionReady,
+    ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
+        self.events.lock().unwrap().push(if self.fail_ready {
+            "commit_ready_failed"
+        } else {
+            "commit_ready"
+        });
+        if self.fail_ready {
+            return Err(ManagedSessionFixtureError);
+        }
+        let now = Utc::now();
+        let mut state = self.state.lock().unwrap();
+        let decision = decide_managed_mcp_sandbox_session_ready(
+            &state.logical,
+            &state.physical_job,
+            &state.physical_payload,
+            &command,
+            now,
+            limits(),
+        )
+        .map_err(|_| ManagedSessionFixtureError)?;
+        state.logical.version += 1;
+        state.logical.payload = decision.logical_payload.clone();
+        state.logical.state = decision.logical_state;
+        state.physical_job = decision.physical_job.clone();
+        state.physical_payload = decision.physical_payload.clone();
+        Ok(CommandOutcome::Applied(decision))
+    }
+}
+
+struct RecordingManagedSessionProvider {
+    events: Arc<Mutex<Vec<&'static str>>>,
+}
+
+#[async_trait]
+impl ManagedMcpSandboxSessionProvider for RecordingManagedSessionProvider {
+    type Error = ManagedSessionFixtureError;
+
+    async fn prepare(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        executor_identity_digest: &insight_platform_contracts::Sha256Digest,
+    ) -> Result<PreparedManagedMcpSandboxSession, Self::Error> {
+        self.events.lock().unwrap().push("provider_prepare");
+        PreparedManagedMcpSandboxSession {
+            schema_version: 1,
+            identity: request.identity.clone(),
+            request_digest: request.request_digest.clone(),
+            worker_process_generation_id: fence.worker_process_generation_id.clone(),
+            lease_generation: fence.lease_generation,
+            executor_identity_digest: executor_identity_digest.clone(),
+            sandbox_identity_digest: sha('2'),
+            prepare_evidence_digest: sha('3'),
+            canonical_digest: sha('0'),
+        }
+        .seal()
+        .map_err(|_| ManagedSessionFixtureError)
+    }
+
+    async fn initialize(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        _fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+    ) -> Result<PreparedManagedMcpSandboxSessionActivation, Self::Error> {
+        self.events.lock().unwrap().push("provider_initialize");
+        let established_at = Utc::now();
+        let ready = ManagedMcpSandboxSessionReadyEvidence {
+            schema_version: 1,
+            session_identity_digest: request.identity.canonical_digest.clone(),
+            sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
+            encrypted_opaque_session: insight_platform_mcp_host::EncryptedMcpState {
+                scheme: "aes256_gcm_v1".to_owned(),
+                ciphertext: vec![7, 8, 9],
+                key_id: "fixture-session-key".to_owned(),
+                key_reference_digest: sha('4'),
+                plaintext_digest: sha('5'),
+            },
+            established_at,
+            expires_at: established_at + ChronoDuration::seconds(30),
+            protocol_evidence_digest: sha('6'),
+            canonical_digest: sha('0'),
+        }
+        .seal()
+        .map_err(|_| ManagedSessionFixtureError)?;
+        PreparedManagedMcpSandboxSessionActivation {
+            schema_version: 1,
+            prepared: prepared.clone(),
+            ready,
+            activation_binding_digest: sha('7'),
+            canonical_digest: sha('0'),
+        }
+        .seal()
+        .map_err(|_| ManagedSessionFixtureError)
+    }
+
+    async fn activate(
+        &self,
+        _request: &ManagedMcpSandboxSessionRequest,
+        _fence: &JobFence,
+        activation: &PreparedManagedMcpSandboxSessionActivation,
+    ) -> Result<ActivatedManagedMcpSandboxSession, Self::Error> {
+        self.events.lock().unwrap().push("provider_activate");
+        ActivatedManagedMcpSandboxSession {
+            schema_version: 1,
+            identity: activation.prepared.identity.clone(),
+            request_digest: activation.prepared.request_digest.clone(),
+            worker_process_generation_id: activation.prepared.worker_process_generation_id.clone(),
+            lease_generation: activation.prepared.lease_generation,
+            sandbox_identity_digest: activation.prepared.sandbox_identity_digest.clone(),
+            ready_evidence_digest: activation.ready.canonical_digest.clone(),
+            activated_at: Utc::now(),
+            activation_evidence_digest: sha('8'),
+            canonical_digest: sha('0'),
+        }
+        .seal()
+        .map_err(|_| ManagedSessionFixtureError)
+    }
+
+    async fn destroy_prepared(
+        &self,
+        _request: &ManagedMcpSandboxSessionRequest,
+        _fence: &JobFence,
+        _prepared: &PreparedManagedMcpSandboxSession,
+    ) -> Result<(), Self::Error> {
+        self.events.lock().unwrap().push("provider_destroy");
+        Ok(())
+    }
+}
+
+fn managed_session_worker_fixture(
+    now: DateTime<Utc>,
+    fail_ready: bool,
+) -> (
+    Arc<RecordingManagedSessionAuthority>,
+    Arc<RecordingManagedSessionProvider>,
+    ExecuteManagedMcpSandboxSession,
+) {
+    let (mut logical, admission) = managed_mcp_session_fixture(now);
+    let accepted =
+        decide_accept_managed_mcp_sandbox_session(&logical, &admission, now, limits()).unwrap();
+    logical.version += 1;
+    logical.payload = accepted.logical_payload;
+    logical.state = accepted.logical_state;
+    let worker = id(ResourceKind::WorkerProcessGeneration, 180);
+    let leased = decide_claim(
+        &accepted.physical_job,
+        now,
+        worker.clone(),
+        sha('a'),
+        LeasePolicy {
+            requested_milliseconds: 60_000,
+            hard_maximum_milliseconds: 60_000,
+        },
+    )
+    .unwrap();
+    let identity = |suffix: u16, digest: char| SandboxWorkerCommitIdentity {
+        tenant_id: logical.tenant_id.clone(),
+        worker_process_generation_id: worker.clone(),
+        receipt_id: id(ResourceKind::Receipt, suffix),
+        event_id: id(ResourceKind::Event, suffix + 10),
+        outbox_id: id(ResourceKind::OutboxEvent, suffix + 20),
+        idempotency_key_digest: sha(digest),
+        receipt_expires_at: now + ChronoDuration::minutes(5),
+    };
+    let audits = ManagedMcpSandboxSessionWorkerAudits {
+        preparing: identity(181, 'c'),
+        starting: identity(182, 'd'),
+        ready: identity(183, 'e'),
+    };
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let authority = Arc::new(RecordingManagedSessionAuthority {
+        state: Mutex::new(ManagedSessionAuthorityState {
+            logical,
+            physical_job: leased.clone(),
+            physical_payload: accepted.physical_payload,
+        }),
+        events: Arc::clone(&events),
+        fail_ready,
+    });
+    let provider = Arc::new(RecordingManagedSessionProvider { events });
+    let command = ExecuteManagedMcpSandboxSession {
+        claimed: ClaimedManagedMcpSandboxSession {
+            request: admission.request,
+            fence: JobFence {
+                expected_version: leased.version,
+                worker_process_generation_id: worker,
+                lease_generation: leased.lease_generation,
+                token_digest: sha('a'),
+            },
+            usage_reservation_id: admission.usage_reservation_id,
+        },
+        executor_identity_digest: sha('b'),
+        attestor_route: attestor_route(),
+        audits,
+    };
+    (authority, provider, command)
+}
+
+#[tokio::test]
+async fn managed_session_worker_activates_only_after_durable_ready_on_the_same_instance() {
+    let now = Utc::now();
+    let (authority, provider, command) = managed_session_worker_fixture(now, false);
+    let events = Arc::clone(&provider.events);
+    let worker = ManagedMcpSandboxSessionWorker::new(authority.clone(), provider, limits());
+    let activated = worker.establish(command).await.unwrap();
+    assert_eq!(activated.sandbox_identity_digest, sha('2'));
+    assert_eq!(
+        events.lock().unwrap().as_slice(),
+        [
+            "commit_preparing",
+            "provider_prepare",
+            "commit_starting",
+            "provider_initialize",
+            "commit_ready",
+            "provider_activate",
+        ]
+    );
+    let state = authority.state.lock().unwrap();
+    assert_eq!(state.logical.state, McpSubscriptionState::Active);
+    assert_eq!(
+        state.logical.payload.session.state,
+        insight_platform_contracts::McpSessionState::Ready
+    );
+    assert_eq!(
+        state.physical_payload.physical_state,
+        SandboxJobState::Running
+    );
+    assert_eq!(
+        state
+            .physical_payload
+            .ready_binding
+            .as_ref()
+            .unwrap()
+            .sandbox_identity_digest,
+        activated.sandbox_identity_digest
+    );
+}
+
+#[tokio::test]
+async fn managed_session_worker_destroys_prepared_instance_when_ready_commit_fails() {
+    let now = Utc::now();
+    let (authority, provider, command) = managed_session_worker_fixture(now, true);
+    let events = Arc::clone(&provider.events);
+    let worker = ManagedMcpSandboxSessionWorker::new(authority, provider, limits());
+    assert!(matches!(
+        worker.establish(command).await,
+        Err(ManagedMcpSandboxSessionWorkerError::Authority(_))
+    ));
+    assert_eq!(
+        events.lock().unwrap().as_slice(),
+        [
+            "commit_preparing",
+            "provider_prepare",
+            "commit_starting",
+            "provider_initialize",
+            "commit_ready_failed",
+            "provider_destroy",
+        ]
+    );
 }
 
 fn managed_mcp_session_fixture(
