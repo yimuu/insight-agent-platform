@@ -848,6 +848,53 @@ pub struct ModelRequestValue {
     pub request: CanonicalModelRequest,
 }
 
+/// Exact logical Model request material handed to a Model Worker after a durable claim.
+///
+/// PostgreSQL may return bounded inline JSON directly. Artifact-backed request bytes remain
+/// behind the Artifact broker; the claim carries only the already-frozen link identity so the
+/// worker cannot substitute an arbitrary object reference.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelExecutionInputMaterial {
+    Inline { value: serde_json::Value },
+    LinkedArtifact { artifact_link_id: ResourceId },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelExecutionInput {
+    pub exact: ExactInvocationValueRef,
+    pub material: ModelExecutionInputMaterial,
+}
+
+impl ModelExecutionInput {
+    pub fn validate(&self) -> Result<(), ModelTurnError> {
+        self.exact
+            .validate()
+            .map_err(|_| ModelTurnError::InvalidRequestValue)?;
+        if self.exact.value_kind != "model_request" {
+            return Err(ModelTurnError::InvalidRequestValue);
+        }
+        match (&self.exact.storage, &self.material) {
+            (InvocationValueStorage::Inline, ModelExecutionInputMaterial::Inline { value }) => {
+                let actual: Sha256Digest = canonical_digest(value)
+                    .map_err(|_| ModelTurnError::Canonicalization)?
+                    .parse()
+                    .map_err(|_| ModelTurnError::Canonicalization)?;
+                if actual != self.exact.content_digest {
+                    return Err(ModelTurnError::InvalidRequestValue);
+                }
+            }
+            (
+                InvocationValueStorage::Artifact { .. },
+                ModelExecutionInputMaterial::LinkedArtifact { artifact_link_id },
+            ) if artifact_link_id.kind() == ResourceKind::ArtifactLink => {}
+            _ => return Err(ModelTurnError::InvalidRequestValue),
+        }
+        Ok(())
+    }
+}
+
 impl ModelRequestValue {
     pub fn exact_for(
         &self,

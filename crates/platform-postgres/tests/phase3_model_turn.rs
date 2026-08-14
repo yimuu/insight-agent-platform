@@ -27,9 +27,10 @@ use insight_platform_models::{
     CanonicalMessagePart, CanonicalMessageRole, CanonicalModelRequest, CanonicalModelResponse,
     ClaimModelJobs, CommitModelCancellationOutcome, CommitModelOutcome, ControlModelTurn,
     CreateModelTurn, ModelAttemptMeasurement, ModelClaimSlot, ModelContentSource, ModelControlKind,
-    ModelDispatchOutcome, ModelObservation, ModelOutputValue, ModelRequestValue,
-    ModelResponseContract, ModelToolIntent, ModelToolProjection, ModelTurnTransaction, ModelUsage,
-    ModelWorkerAudit, PrepareModelDispatch, SafeTraceContext,
+    ModelDispatchOutcome, ModelExecutionInputMaterial, ModelObservation, ModelOutputValue,
+    ModelRequestValue, ModelResponseContract, ModelToolIntent, ModelToolProjection,
+    ModelTurnLimits, ModelTurnTransaction, ModelUsage, ModelWorkerAudit, PrepareModelDispatch,
+    SafeTraceContext,
 };
 use insight_platform_orchestrator::RunCurrentSnapshot;
 use insight_platform_postgres::{
@@ -1591,6 +1592,38 @@ async fn model_turn_fixture() {
     assert_eq!(first_claim.claimed.turn.state, ModelTurnState::InFlight);
     assert_eq!(first_claim.claimed.job.attempt_no, 1);
     assert_eq!(first_claim.claimed.quota_account_ids.len(), 4);
+    assert!(matches!(
+        &first_claim.claimed.request_input.material,
+        ModelExecutionInputMaterial::Inline { value }
+            if value == &serde_json::to_value(&primary.request.request).unwrap()
+    ));
+    let adapter_job = first_claim
+        .claimed
+        .adapter_job(
+            primary.request.request.clone(),
+            first_claim
+                .claimed
+                .turn
+                .payload
+                .admission
+                .provider
+                .installed_adapter
+                .worker_manifest_digest
+                .clone(),
+            worker_audit(&fixture.tenant_id, &first_claim.worker_id, 0x140, '9', '8'),
+            (0..4)
+                .map(|offset| id(ResourceKind::QuotaLedgerEntry, 0x143 + offset))
+                .collect(),
+            ModelTurnLimits::from_profile(
+                &insight_platform_contracts::checked_in_hard_limit_profile(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        adapter_job.execution.request_digest,
+        first_claim.claimed.turn.payload.admission.request_digest
+    );
     assert!(matches!(
         execute_create(&repository, primary.clone()).await.unwrap(),
         CommandOutcome::Replayed(record) if record == first_claim.claimed.turn

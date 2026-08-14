@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-07 |
+| 日期 | 2026-08-15 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`06-durable-run-state-machine.md`](06-durable-run-state-machine.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`10-capability-invocation.md`](10-capability-invocation.md)、[`15-artifacts-and-files.md`](15-artifacts-and-files.md) |
 | 直接下游 | 13、17、18 |
 
@@ -631,7 +631,9 @@ Phase 5 public API或Phase 6 qualification，因此不能把文档16整体标记
 CR-132进一步交付Phase 4的首个adapter-host slice：独立`insight-platform-model-adapters`按完整signed adapter descriptor做
 exact process-local resolution，消费closed normalized stream并强制Provider级delta/first-byte/idle/total timeout、sequence、terminal、
 response local validation、cancel与panic containment。worker materializer和PostgreSQL authority之间只有fenced
-`CommitModelOutcome`；claim显式返回fence、usage reservation与quota ledger identity，未知dispatch按冻结token/cost ceiling保守结算。
+`CommitModelOutcome`；claim显式返回fence、usage reservation、quota ledger identity与exact request input，后者逐字段回绑冻结
+RunValue；Inline正文复核canonical digest，Artifact-backed只暴露已验证的ArtifactLink identity。terminal command还在Provider I/O前
+拒绝复用reservation ledger identity。未知dispatch按冻结token/cost ceiling保守结算。
 OpenAI Responses与Anthropic Messages现各有独立production wire adapter：它们从同一canonical request映射固定endpoint/protocol body，
 通过credential-free `ModelProviderWireConnector`消费bounded SSE event，隐藏reasoning，且把text、tool arguments、structured output、usage与
 terminal归一为同一closed stream。共同fixture覆盖message/stream/tool/schema/usage、请求digest与未知Provider field fail-closed；原有host/

@@ -16,6 +16,7 @@ use insight_platform_contracts::{
     NodeExecutionState, Permission, PlanNodeKind, QuotaDimension, RegistryResourceKind,
     ResourceDocument, ResourceId, ResourceKind, RunState, Sha256Digest, ValueRef, WorkClass,
 };
+use insight_platform_invocations::InvocationValueStorage;
 use insight_platform_jobs::{JobFence, JobProjection, LeasePolicy};
 use insight_platform_model_adapters::{ModelAdapterExecutionRequest, ModelExecutionAuthority};
 use insight_platform_models::{
@@ -23,9 +24,10 @@ use insight_platform_models::{
     decide_model_turn_admission, decide_prepare_model_dispatch, decide_start_model_dispatch,
     CanonicalMessagePart, ClaimModelJobs, CommitModelCancellationOutcome, CommitModelOutcome,
     ControlModelTurn, CreateModelTurn, ModelAdmissionFacts, ModelControlKind, ModelDispatchOutcome,
-    ModelJobPayload, ModelOutputValue, ModelQuotaCeiling, ModelQuotaSettlement, ModelRequestValue,
-    ModelTurnLimits, ModelTurnPayload, ModelTurnRecord, ModelTurnStore, ModelTurnTransaction,
-    ModelWorkerAudit, PrepareModelDispatch, PreparedModelDispatch, MODEL_QUOTA_LINES,
+    ModelExecutionInput, ModelExecutionInputMaterial, ModelJobPayload, ModelOutputValue,
+    ModelQuotaCeiling, ModelQuotaSettlement, ModelRequestValue, ModelTurnLimits, ModelTurnPayload,
+    ModelTurnRecord, ModelTurnStore, ModelTurnTransaction, ModelWorkerAudit, PrepareModelDispatch,
+    PreparedModelDispatch, MODEL_QUOTA_LINES,
 };
 use sqlx::{postgres::PgRow, Acquire, Postgres, Row, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,6 +58,7 @@ impl ModelExecutionAuthority for PgRepository {
 pub struct ClaimedModelExecution {
     pub turn: ModelTurnRecord,
     pub job: JobRecord,
+    pub request_input: ModelExecutionInput,
     pub quota_account_ids: Vec<String>,
     pub fence: JobFence,
     pub usage_reservation_id: ResourceId,
@@ -116,6 +119,38 @@ impl ClaimedModelExecution {
             .validate_at(Utc::now(), limits)
             .map_err(|_| RepositoryError::Conflict("Model adapter execution contract"))?;
         Ok(execution)
+    }
+
+    pub fn adapter_job(
+        &self,
+        request: insight_platform_models::CanonicalModelRequest,
+        worker_manifest_digest: Sha256Digest,
+        audit: ModelWorkerAudit,
+        quota_settlement_entry_ids: Vec<ResourceId>,
+        limits: ModelTurnLimits,
+    ) -> Result<insight_platform_model_adapters::ExecuteModelAdapterJob, RepositoryError> {
+        let reservation_ids = self.quota_entry_ids.iter().collect::<BTreeSet<_>>();
+        if quota_settlement_entry_ids
+            .iter()
+            .any(|identity| reservation_ids.contains(identity))
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Model quota settlement identities reuse reservation identities".to_owned(),
+            ));
+        }
+        let execution = self.adapter_execution(request, worker_manifest_digest, limits)?;
+        let command = insight_platform_model_adapters::ExecuteModelAdapterJob {
+            audit,
+            expected_turn_version: self.turn.version,
+            fence: self.fence.clone(),
+            usage_reservation_id: self.usage_reservation_id.clone(),
+            quota_entry_ids: quota_settlement_entry_ids,
+            execution,
+        };
+        command
+            .validate_at(Utc::now())
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        Ok(command)
     }
 }
 
@@ -1391,6 +1426,7 @@ impl PgRepository {
             .await?;
             require_model_claim_parents(&mut transaction, &current_turn, &run, &node, database_now)
                 .await?;
+            let request_input = load_model_execution_input(&mut transaction, &current_turn).await?;
             let current_job = load_model_job(&mut transaction, &tenant_id, &job_id, true).await?;
             if current_job.version != observed_job.version
                 || current_job.state != observed_job.state
@@ -1486,6 +1522,7 @@ impl PgRepository {
             claimed.push(ClaimedModelExecution {
                 turn,
                 job,
+                request_input,
                 quota_account_ids,
                 fence: JobFence {
                     expected_version: decision.job.version,
@@ -1500,6 +1537,109 @@ impl PgRepository {
         transaction.commit().await?;
         Ok(claimed)
     }
+}
+
+async fn load_model_execution_input(
+    transaction: &mut Transaction<'_, Postgres>,
+    turn: &ModelTurnRecord,
+) -> Result<ModelExecutionInput, RepositoryError> {
+    let exact = &turn.payload.admission.request;
+    exact
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if exact.value_kind != "model_request"
+        || exact.run_id != turn.run_id
+        || exact.producing_node_id.as_ref() != Some(&turn.node_execution_id)
+        || exact.value_id != turn.request_value_id
+    {
+        return Err(RepositoryError::CorruptRow(
+            "Model request binding differs from its turn".to_owned(),
+        ));
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT inline_value, artifact_id
+        FROM insight_platform.run_values
+        WHERE tenant_id = $1 AND value_id = $2 AND run_id = $3
+          AND node_id = $4 AND value_kind = 'model_request' AND classification = $5
+          AND schema_digest = $6 AND content_digest = $7
+        "#,
+    )
+    .bind(turn.tenant_id.to_string())
+    .bind(exact.value_id.to_string())
+    .bind(exact.run_id.to_string())
+    .bind(turn.node_execution_id.to_string())
+    .bind(exact.classification.as_str())
+    .bind(exact.schema_digest.to_string())
+    .bind(exact.content_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("Model request RunValue"))?;
+    let inline_value: Option<serde_json::Value> = row.try_get("inline_value")?;
+    let artifact_id: Option<String> = row.try_get("artifact_id")?;
+    let material = match (&exact.storage, inline_value, artifact_id) {
+        (InvocationValueStorage::Inline, Some(value), None)
+            if turn.payload.admission.request_artifact_link_id.is_none() =>
+        {
+            ModelExecutionInputMaterial::Inline { value }
+        }
+        (InvocationValueStorage::Artifact { artifact }, None, Some(stored_artifact_id))
+            if stored_artifact_id == artifact.artifact_id().to_string() =>
+        {
+            let link_id = turn
+                .payload
+                .admission
+                .request_artifact_link_id
+                .as_ref()
+                .ok_or_else(|| {
+                    RepositoryError::CorruptRow(
+                        "Artifact-backed Model request has no frozen ArtifactLink".to_owned(),
+                    )
+                })?;
+            lock_ready_model_artifact(transaction, &turn.tenant_id, artifact).await?;
+            let linked: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM insight_platform.artifact_links
+                    WHERE tenant_id = $1 AND artifact_link_id = $2
+                      AND link_kind = 'reference'
+                      AND owner_kind = 'model_turn' AND owner_id = $3
+                      AND target_artifact_id = $4 AND state = 'active'
+                      AND released_at IS NULL
+                      AND (expires_at IS NULL OR expires_at > clock_timestamp())
+                )
+                "#,
+            )
+            .bind(turn.tenant_id.to_string())
+            .bind(link_id.to_string())
+            .bind(turn.model_turn_id.to_string())
+            .bind(artifact.artifact_id().to_string())
+            .fetch_one(&mut **transaction)
+            .await?;
+            if !linked {
+                return Err(RepositoryError::NotFound(
+                    "active Model request ArtifactLink",
+                ));
+            }
+            ModelExecutionInputMaterial::LinkedArtifact {
+                artifact_link_id: link_id.clone(),
+            }
+        }
+        _ => {
+            return Err(RepositoryError::CorruptRow(
+                "Model request storage differs from frozen admission".to_owned(),
+            ));
+        }
+    };
+    let input = ModelExecutionInput {
+        exact: exact.clone(),
+        material,
+    };
+    input
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    Ok(input)
 }
 
 fn model_claim_candidate<'a>(

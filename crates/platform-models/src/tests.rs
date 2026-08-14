@@ -511,6 +511,32 @@ fn output(fixture: &Fixture, response: CanonicalModelResponse) -> ModelOutputVal
 }
 
 #[test]
+fn claimed_model_input_binds_exact_inline_bytes() {
+    let fixture = fixture();
+    let exact = fixture
+        .command
+        .request
+        .exact_for(
+            &fixture.command.run_id,
+            &fixture.command.node_execution_id,
+            fixture.limits,
+        )
+        .unwrap();
+    let mut input = ModelExecutionInput {
+        exact,
+        material: ModelExecutionInputMaterial::Inline {
+            value: serde_json::to_value(&fixture.request).unwrap(),
+        },
+    };
+    input.validate().unwrap();
+
+    input.material = ModelExecutionInputMaterial::Inline {
+        value: json!({"messages": []}),
+    };
+    assert_eq!(input.validate(), Err(ModelTurnError::InvalidRequestValue));
+}
+
+#[test]
 fn admission_dispatch_tool_intent_and_usage_are_closed() {
     let (fixture, started, reservation, fence) = started(fixture());
     let response = tool_response(&fixture);

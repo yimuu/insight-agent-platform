@@ -348,7 +348,9 @@ CR-132（进行中）建立独立`insight-platform-model-adapters`：按qualifie
 digest精确选择进程内adapter，Provider SDK/wire类型保持在port之后；canonical request、exact Provider/Profile/Deployment、
 deployment级delta/timeout、stream sequence/terminal、本地response validation、cancel和panic containment均fail closed。Model worker把
 规范化结果经materializer转换为RunValue/Artifact形状，并只通过fenced PostgreSQL authority提交；claim现在返回精确fence、usage
-reservation和quota ledger IDs，dispatch后未知结果按冻结上限保守结算且attempt耗尽不重放。OpenAI Responses与Anthropic Messages
+reservation、quota ledger IDs以及与冻结RunValue和ArtifactLink逐字段复核的exact request input。Inline正文按canonical digest复核后交付，
+Artifact-backed正文仍只交付link identity并留在Artifact Broker边界；terminal command在Provider I/O前拒绝复用reservation ledger ID。
+dispatch后未知结果按冻结上限保守结算且attempt耗尽不重放。OpenAI Responses与Anthropic Messages
 production wire adapter现通过credential-free Connector边界实现固定endpoint/protocol request与bounded SSE normalization；共同fixture覆盖
 text stream、usage、tool intent、本地structured/tool schema、请求digest及未知字段fail-closed。brokered connector现在还把credential-free
 request交给独立Egress broker port，并对raw SSE执行incremental总量/line/event限制、strict JSON重复key拒绝、closed content-type/status/
