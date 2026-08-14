@@ -1,0 +1,57 @@
+{{- if eq .Values.namespaces.egress .Values.namespaces.securityAuthority }}
+{{- fail "Egress Broker and Security Authority namespaces must be different" }}
+{{- end }}
+{{- if lt (int .Values.egress.replicas) 2 }}
+{{- fail "egress.replicas must be at least 2" }}
+{{- end }}
+{{- if lt (int .Values.securityAuthority.replicas) 2 }}
+{{- fail "securityAuthority.replicas must be at least 2" }}
+{{- end }}
+{{- if not .Values.networkPolicy.enabled }}
+{{- fail "networkPolicy.enabled must remain true" }}
+{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}
+{{- fail "image.digest must be an immutable lowercase sha256 digest" }}
+{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.egress.config.digest) }}
+{{- fail "egress.config.digest must be a lowercase sha256 digest" }}
+{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.securityAuthority.config.digest) }}
+{{- fail "securityAuthority.config.digest must be a lowercase sha256 digest" }}
+{{- end }}
+{{- if or (lt (int .Values.egress.port) 1) (gt (int .Values.egress.port) 65535) }}
+{{- fail "egress.port must be valid" }}
+{{- end }}
+{{- if or (lt (int .Values.securityAuthority.port) 1) (gt (int .Values.securityAuthority.port) 65535) }}
+{{- fail "securityAuthority.port must be valid" }}
+{{- end }}
+{{- if empty .Values.networkPolicy.workerCallers }}
+{{- fail "networkPolicy.workerCallers is required" }}
+{{- end }}
+{{- if empty .Values.networkPolicy.postgresCidrs }}
+{{- fail "networkPolicy.postgresCidrs is required" }}
+{{- end }}
+{{- if empty .Values.networkPolicy.secretProviderCidrs }}
+{{- fail "networkPolicy.secretProviderCidrs is required" }}
+{{- end }}
+{{- if empty .Values.networkPolicy.externalDestinationCidrs }}
+{{- fail "networkPolicy.externalDestinationCidrs is required" }}
+{{- end }}
+{{- if empty .Values.networkPolicy.workloadIdentityCidrs }}
+{{- fail "networkPolicy.workloadIdentityCidrs is required" }}
+{{- end }}
+{{- if empty .Values.egress.serviceAccount.annotations }}
+{{- fail "egress workload-identity annotation is required" }}
+{{- end }}
+{{- if or (empty .Values.egress.config.existingConfigMap) (empty .Values.egress.config.fileKey) }}
+{{- fail "egress immutable Candidate config reference is required" }}
+{{- end }}
+{{- if empty .Values.egress.mcpStateKeys.existingSecret }}
+{{- fail "Egress MCP remote-task state key Secret is required" }}
+{{- end }}
+{{- if or (empty .Values.securityAuthority.config.existingConfigMap) (empty .Values.securityAuthority.config.fileKey) }}
+{{- fail "Security Authority immutable Candidate config reference is required" }}
+{{- end }}
+{{- if empty .Values.securityAuthority.database.existingSecret }}
+{{- fail "Security Authority restricted database Secret is required" }}
+{{- end }}

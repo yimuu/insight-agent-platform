@@ -1,0 +1,183 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "insight-platform-security-egress.egressName" . }}
+  namespace: {{ .Values.namespaces.egress }}
+  labels:
+    {{- include "insight-platform-security-egress.labels" . | nindent 4 }}
+    app.kubernetes.io/component: egress-broker
+spec:
+  replicas: {{ int .Values.egress.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: egress-broker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: egress-broker
+        insight.platform/workload-role: egress-broker
+    spec:
+      serviceAccountName: {{ include "insight-platform-security-egress.egressName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 8 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: egress-broker
+      containers:
+        - name: egress-broker
+          image: {{ include "insight-platform-security-egress.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/platform-egress-broker"]
+          ports: [{name: grpc-mtls, containerPort: {{ int .Values.egress.port }}, protocol: TCP}]
+          env:
+            - {name: PLATFORM_EGRESS_BROKER_CONFIG, value: /etc/insight/config/egress.json}
+            - {name: PLATFORM_EGRESS_BROKER_CONFIG_DIGEST, value: {{ .Values.egress.config.digest | quote }}}
+            - {name: PLATFORM_EGRESS_BROKER_CLIENT_CA_PATH, value: /etc/insight/server-tls/client-ca.pem}
+            - {name: PLATFORM_EGRESS_BROKER_CERT_PATH, value: /etc/insight/server-tls/server.pem}
+            - {name: PLATFORM_EGRESS_BROKER_KEY_PATH, value: /etc/insight/server-tls/server-key.pem}
+            - {name: PLATFORM_EGRESS_BROKER_AUTHORITY_CA_PATH, value: /etc/insight/authority-tls/authority-ca.pem}
+            - {name: PLATFORM_EGRESS_BROKER_AUTHORITY_CERT_PATH, value: /etc/insight/authority-tls/authority-client.pem}
+            - {name: PLATFORM_EGRESS_BROKER_AUTHORITY_KEY_PATH, value: /etc/insight/authority-tls/authority-client-key.pem}
+          readinessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          startupProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          resources: {{ toYaml .Values.egress.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            - {name: mcp-state-keys, mountPath: /etc/insight/mcp-state-keys, readOnly: true}
+            - {name: server-tls, mountPath: /etc/insight/server-tls, readOnly: true}
+            - {name: authority-tls, mountPath: /etc/insight/authority-tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Values.egress.config.existingConfigMap }}
+            items: [{key: {{ .Values.egress.config.fileKey }}, path: egress.json}]
+        - name: mcp-state-keys
+          secret:
+            secretName: {{ .Values.egress.mcpStateKeys.existingSecret }}
+            defaultMode: 0440
+        - name: server-tls
+          secret:
+            secretName: {{ .Values.egress.tls.serverSecret }}
+            items:
+              - {key: {{ .Values.egress.tls.keys.clientCa }}, path: client-ca.pem}
+              - {key: {{ .Values.egress.tls.keys.serverCertificate }}, path: server.pem}
+              - {key: {{ .Values.egress.tls.keys.serverPrivateKey }}, path: server-key.pem}
+        - name: authority-tls
+          secret:
+            secretName: {{ .Values.egress.tls.authorityClientSecret }}
+            items:
+              - {key: {{ .Values.egress.tls.keys.authorityCa }}, path: authority-ca.pem}
+              - {key: {{ .Values.egress.tls.keys.authorityClientCertificate }}, path: authority-client.pem}
+              - {key: {{ .Values.egress.tls.keys.authorityClientPrivateKey }}, path: authority-client-key.pem}
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "insight-platform-security-egress.authorityName" . }}
+  namespace: {{ .Values.namespaces.securityAuthority }}
+  labels:
+    {{- include "insight-platform-security-egress.labels" . | nindent 4 }}
+    app.kubernetes.io/component: security-authority
+spec:
+  replicas: {{ int .Values.securityAuthority.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: security-authority
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: security-authority
+        insight.platform/workload-role: security-authority
+    spec:
+      serviceAccountName: {{ include "insight-platform-security-egress.authorityName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 8 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: security-authority
+      containers:
+        - name: security-authority
+          image: {{ include "insight-platform-security-egress.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/platform-security-authority"]
+          ports: [{name: grpc-mtls, containerPort: {{ int .Values.securityAuthority.port }}, protocol: TCP}]
+          env:
+            - {name: PLATFORM_SECURITY_AUTHORITY_CONFIG, value: /etc/insight/config/authority.json}
+            - {name: PLATFORM_SECURITY_AUTHORITY_CONFIG_DIGEST, value: {{ .Values.securityAuthority.config.digest | quote }}}
+            - name: PLATFORM_SECURITY_AUTHORITY_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ .Values.securityAuthority.database.existingSecret }}, key: {{ .Values.securityAuthority.database.urlKey }}}}
+            - {name: PLATFORM_SECURITY_AUTHORITY_CLIENT_CA_PATH, value: /etc/insight/tls/client-ca.pem}
+            - {name: PLATFORM_SECURITY_AUTHORITY_CERT_PATH, value: /etc/insight/tls/server.pem}
+            - {name: PLATFORM_SECURITY_AUTHORITY_KEY_PATH, value: /etc/insight/tls/server-key.pem}
+          readinessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          startupProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          resources: {{ toYaml .Values.securityAuthority.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            - {name: tls, mountPath: /etc/insight/tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Values.securityAuthority.config.existingConfigMap }}
+            items: [{key: {{ .Values.securityAuthority.config.fileKey }}, path: authority.json}]
+        - name: tls
+          secret:
+            secretName: {{ .Values.securityAuthority.tls.serverSecret }}
+            items:
+              - {key: {{ .Values.securityAuthority.tls.keys.clientCa }}, path: client-ca.pem}
+              - {key: {{ .Values.securityAuthority.tls.keys.serverCertificate }}, path: server.pem}
+              - {key: {{ .Values.securityAuthority.tls.keys.serverPrivateKey }}, path: server-key.pem}
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}

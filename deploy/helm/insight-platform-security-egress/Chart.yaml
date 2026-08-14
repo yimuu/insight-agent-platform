@@ -1,0 +1,6 @@
+apiVersion: v2
+name: insight-platform-security-egress
+description: Independent Egress Broker and restricted Security Authority for Insight Platform v1
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

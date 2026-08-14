@@ -1,0 +1,50 @@
+image:
+  repository: insight-agent-platform
+  digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+namespace: platform-control
+replicas: 2
+port: 8080
+
+config:
+  existingConfigMap: insight-platform-callback-api-candidate
+  fileKey: callback-api.json
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+database:
+  existingSecret: insight-platform-callback-api-database
+  urlKey: database-url
+oauthStateKeys:
+  existingSecret: insight-platform-callback-api-oauth-state-keys
+egressTls:
+  existingSecret: insight-platform-callback-api-egress-client-tls
+  keys:
+    ca: ca.pem
+    certificate: client.pem
+    privateKey: client-key.pem
+
+ingress:
+  enabled: true
+  className: nginx
+  host: callback.example.invalid
+  tlsSecret: insight-platform-callback-api-public-tls
+  namespaceSelector: {insight.platform/ingress-namespace: "true"}
+  podSelector: {app.kubernetes.io/component: ingress-controller}
+
+networkPolicy:
+  enabled: true
+  egressNamespace: platform-egress
+  egressPodSelector: {app.kubernetes.io/component: egress-broker}
+  egressPort: 8443
+  dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
+  dnsPodSelector: {k8s-app: kube-dns}
+  postgresCidrs: [10.10.0.0/24]
+
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {cpu: "1", memory: 512Mi}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

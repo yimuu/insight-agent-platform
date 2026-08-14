@@ -1,0 +1,93 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: {{ .Values.namespaces.egress }}}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: {{ .Values.namespaces.securityAuthority }}}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-broker
+  namespace: {{ .Values.namespaces.egress }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: egress-broker
+  policyTypes: [Ingress, Egress]
+  ingress:
+    {{- range .Values.networkPolicy.workerCallers }}
+    - from:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .namespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml .podSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int $.Values.egress.port }}}]
+    {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ .Values.namespaces.securityAuthority }}}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: security-authority
+      ports: [{protocol: TCP, port: {{ int .Values.securityAuthority.port }}}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.dnsPodSelector | nindent 16 }}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        {{- range .Values.networkPolicy.secretProviderCidrs }}
+        - ipBlock: {cidr: {{ . }}}
+        {{- end }}
+      ports: [{protocol: TCP, port: 443}]
+    - to:
+        {{- range .Values.networkPolicy.externalDestinationCidrs }}
+        - ipBlock: {cidr: {{ . }}}
+        {{- end }}
+      ports: [{protocol: TCP, port: 443}]
+    - to:
+        {{- range .Values.networkPolicy.workloadIdentityCidrs }}
+        - ipBlock: {cidr: {{ . }}}
+        {{- end }}
+      ports: [{protocol: TCP, port: 443}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: security-authority
+  namespace: {{ .Values.namespaces.securityAuthority }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: security-authority
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ .Values.namespaces.egress }}}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: egress-broker
+      ports: [{protocol: TCP, port: {{ int .Values.securityAuthority.port }}}]
+  egress:
+    - to:
+        {{- range .Values.networkPolicy.postgresCidrs }}
+        - ipBlock: {cidr: {{ . }}}
+        {{- end }}
+      ports: [{protocol: TCP, port: 5432}]
+{{- end }}

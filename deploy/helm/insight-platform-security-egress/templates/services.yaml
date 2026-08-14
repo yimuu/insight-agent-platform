@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "insight-platform-security-egress.egressName" . }}
+  namespace: {{ .Values.namespaces.egress }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: egress-broker
+  ports:
+    - name: grpc-mtls
+      protocol: TCP
+      port: {{ int .Values.egress.port }}
+      targetPort: grpc-mtls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "insight-platform-security-egress.authorityName" . }}
+  namespace: {{ .Values.namespaces.securityAuthority }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: security-authority
+  ports:
+    - name: grpc-mtls
+      protocol: TCP
+      port: {{ int .Values.securityAuthority.port }}
+      targetPort: grpc-mtls

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: insight-platform-mcp-cleanup-worker
+description: Durable MCP OAuth PKCE cleanup delivery worker for the clean-cut Platform v1 candidate
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

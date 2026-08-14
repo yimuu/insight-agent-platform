@@ -1,0 +1,33 @@
+{{- if lt (int .Values.replicas) 2 }}
+{{- fail "replicas must be at least 2" }}
+{{- end }}
+{{- if not .Values.networkPolicy.enabled }}
+{{- fail "networkPolicy.enabled must remain true" }}
+{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}
+{{- fail "image.digest must be an immutable lowercase sha256 digest" }}
+{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) }}
+{{- fail "config.digest must be a lowercase sha256 digest" }}
+{{- end }}
+{{- if or (lt (int .Values.port) 1) (gt (int .Values.port) 65535) }}
+{{- fail "port must be valid" }}
+{{- end }}
+{{- if or (empty .Values.config.existingConfigMap) (empty .Values.config.fileKey) }}
+{{- fail "immutable Candidate config reference is required" }}
+{{- end }}
+{{- if empty .Values.database.existingSecret }}
+{{- fail "callback database Secret is required" }}
+{{- end }}
+{{- if empty .Values.oauthStateKeys.existingSecret }}
+{{- fail "OAuth state-key Secret is required" }}
+{{- end }}
+{{- if empty .Values.egressTls.existingSecret }}
+{{- fail "Egress mTLS client Secret is required" }}
+{{- end }}
+{{- if and .Values.ingress.enabled (or (empty .Values.ingress.host) (empty .Values.ingress.tlsSecret)) }}
+{{- fail "enabled callback Ingress requires exact host and TLS Secret" }}
+{{- end }}
+{{- if empty .Values.networkPolicy.postgresCidrs }}
+{{- fail "networkPolicy.postgresCidrs is required" }}
+{{- end }}

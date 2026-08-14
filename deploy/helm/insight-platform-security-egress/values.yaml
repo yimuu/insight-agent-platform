@@ -1,0 +1,80 @@
+image:
+  repository: insight-agent-platform
+  digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+namespaces:
+  egress: platform-egress
+  securityAuthority: platform-security-authority
+
+egress:
+  replicas: 2
+  port: 8443
+  config:
+    existingConfigMap: insight-platform-egress-candidate
+    fileKey: egress.json
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  mcpStateKeys:
+    existingSecret: insight-platform-egress-mcp-state-keys
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/insight-platform-egress
+  tls:
+    serverSecret: insight-platform-egress-server-tls
+    authorityClientSecret: insight-platform-egress-authority-client-tls
+    keys:
+      clientCa: client-ca.pem
+      serverCertificate: server.pem
+      serverPrivateKey: server-key.pem
+      authorityCa: authority-ca.pem
+      authorityClientCertificate: authority-client.pem
+      authorityClientPrivateKey: authority-client-key.pem
+  resources:
+    requests: {cpu: 200m, memory: 256Mi}
+    limits: {cpu: "2", memory: 1Gi}
+
+securityAuthority:
+  replicas: 2
+  port: 9443
+  config:
+    existingConfigMap: insight-platform-security-authority-candidate
+    fileKey: authority.json
+    digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  database:
+    existingSecret: insight-platform-security-authority-database
+    urlKey: database-url
+  tls:
+    serverSecret: insight-platform-security-authority-server-tls
+    keys:
+      clientCa: client-ca.pem
+      serverCertificate: server.pem
+      serverPrivateKey: server-key.pem
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+
+networkPolicy:
+  enabled: true
+  dnsNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system
+  dnsPodSelector:
+    k8s-app: kube-dns
+  workerCallers:
+    - namespaceSelector: {insight.platform/workload-namespace: model-worker}
+      podSelector: {insight.platform/workload-role: model-worker}
+    - namespaceSelector: {insight.platform/workload-namespace: capability-worker}
+      podSelector: {insight.platform/workload-role: capability-worker}
+    - namespaceSelector: {insight.platform/workload-namespace: mcp-host}
+      podSelector: {insight.platform/workload-role: mcp-host}
+    - namespaceSelector: {insight.platform/workload-namespace: callback-api}
+      podSelector: {insight.platform/workload-role: mcp-callback-api}
+  # CandidateManifest replaces these examples with the exact routed endpoint ranges.
+  postgresCidrs: [10.10.0.0/24]
+  secretProviderCidrs: [10.30.0.0/24]
+  externalDestinationCidrs: [198.51.100.0/24]
+  workloadIdentityCidrs: [10.40.0.0/24]
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
