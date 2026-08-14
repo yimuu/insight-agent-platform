@@ -776,7 +776,9 @@ Executor才能在一个PostgreSQL事务中把旧物理Job推进为`Lost/Reconcil
 已释放、清除逻辑opaque session与物理link、设置`full_reconcile_required`并重排逻辑MCP Job，同时提交独立Receipt/Event/Outbox；重放返回
 同一终态。该路径继续复用23表与单一`0001`。Provider现通过closed node-local RPC返回exact liveness observation，以及区分“从未创建”与
 “已销毁”的typed cleanup outcome；Linux实现同时校验PID/start identity，RPC不可达不能伪装成`Exited`，已销毁tombstone可重放同一cleanup
-evidence。长期Executor supervisor和expired lease的absence recovery仍未交付，因此不能仅凭本切片创建replacement或关闭Phase 4。
+evidence。microVM Executor现同时运行有限任务与Managed session两条closed claim loop并共享同一个本地Sandbox容量池；长期session future持有
+permit，按profile持续observe/heartbeat，在guest退出、deadline、进程drain或观察/续租失败时先exact destroy，再用最新fence提交lost authority。
+expired lease的absence recovery仍未交付，因此不能仅凭本切片创建replacement或关闭Phase 4。
 
 ## 28. 明确推迟的工作
 

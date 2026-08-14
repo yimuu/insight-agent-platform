@@ -11,6 +11,7 @@ use insight_platform_sandbox::{
     WasiGrantRevoker, WasiProcessGenerationIsolation, WasiValueValidator,
 };
 use insight_platform_sandbox_executor::{
+    ManagedMcpSandboxSessionExecutorDriver, RegisteredManagedMcpSandboxSessionExecutor,
     RegisteredSandboxJobExecutor, SandboxExecutorBinding, SandboxExecutorDriver,
     SandboxExecutorDriverConfig, SandboxExecutorDriverTiming, UuidExecutorIdentityFactory,
 };
@@ -18,6 +19,7 @@ use insight_platform_sandbox_rpc::{
     NatsSandboxControlListener, NatsSandboxControlTransportConfig, SandboxAuthorityGrpcClient,
     SandboxBrokerGrpcClient, SandboxExecutorProcessRegistrationGrpcClient,
     SandboxInternalRpcLimits, SandboxIsolationProviderGrpcClient,
+    SandboxManagedMcpSessionAuthorityGrpcClient, SandboxManagedMcpSessionProviderGrpcClient,
     SandboxMicroVmExecutorProcessRegistrationGrpcClient,
 };
 use insight_platform_sandbox_wasi::{
@@ -239,11 +241,24 @@ async fn run() -> Result<(), ProcessError> {
 
     let channel = connect_authority(&config).await?;
     let authority = Arc::new(SandboxAuthorityGrpcClient::new(channel.clone(), rpc_limits));
+    let managed_authority = matches!(
+        &config.backend,
+        ExecutorBackendProcessConfig::MicroVm { .. }
+    )
+    .then(|| {
+        Arc::new(SandboxManagedMcpSessionAuthorityGrpcClient::new(
+            channel.clone(),
+            rpc_limits,
+        ))
+    });
     let descriptor = config.backend.descriptor(
         worker_manifest_digest,
         config.backend_contract_digest.clone(),
     );
-    let backend: Arc<dyn SandboxExecutorBackend> = match &config.backend {
+    let (backend, managed_provider): (
+        Arc<dyn SandboxExecutorBackend>,
+        Option<Arc<SandboxManagedMcpSessionProviderGrpcClient>>,
+    ) = match &config.backend {
         ExecutorBackendProcessConfig::Wasi { .. } => {
             let broker = Arc::new(SandboxBrokerGrpcClient::new(channel, rpc_limits));
             let artifacts: Arc<dyn WasiArtifactBroker> = broker.clone();
@@ -256,7 +271,7 @@ async fn run() -> Result<(), ProcessError> {
             );
             backend_config.maximum_concurrent_executions =
                 usize::from(config.worker_manifest.max_concurrency);
-            Arc::new(
+            let backend: Arc<dyn SandboxExecutorBackend> = Arc::new(
                 WasmtimeSandboxExecutorBackend::new(
                     backend_config,
                     artifacts,
@@ -266,32 +281,37 @@ async fn run() -> Result<(), ProcessError> {
                     Arc::new(SystemWasiExecutorClock),
                 )
                 .map_err(|_| ProcessError::InvalidConfiguration)?,
-            )
+            );
+            (backend, None)
         }
-        ExecutorBackendProcessConfig::MicroVm { .. } => Arc::new(
-            SandboxIsolationProviderGrpcClient::new(
-                connect_isolation_provider(&config).await?,
+        ExecutorBackendProcessConfig::MicroVm { .. } => {
+            let provider_channel = connect_isolation_provider(&config).await?;
+            let managed_provider = Arc::new(SandboxManagedMcpSessionProviderGrpcClient::new(
+                provider_channel.clone(),
                 rpc_limits,
-                descriptor,
-                process_generation_id.clone(),
-            )
-            .map_err(|_| ProcessError::InvalidConfiguration)?,
-        ),
+            ));
+            let backend: Arc<dyn SandboxExecutorBackend> = Arc::new(
+                SandboxIsolationProviderGrpcClient::new(
+                    provider_channel,
+                    rpc_limits,
+                    descriptor,
+                    process_generation_id.clone(),
+                )
+                .map_err(|_| ProcessError::InvalidConfiguration)?,
+            );
+            (backend, Some(managed_provider))
+        }
     };
     let mut registry = InstalledSandboxBackendRegistry::default();
     registry
         .install(backend)
         .map_err(|_| ProcessError::InvalidConfiguration)?;
     let host = Arc::new(SandboxExecutorHost::new(registry, limits));
+    let heartbeat = SandboxHeartbeatConfig::from_profile(&profile)
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
     let worker = Arc::new(
-        SandboxExecutorWorker::with_heartbeat(
-            host,
-            Arc::clone(&authority),
-            limits,
-            SandboxHeartbeatConfig::from_profile(&profile)
-                .map_err(|_| ProcessError::InvalidConfiguration)?,
-        )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        SandboxExecutorWorker::with_heartbeat(host, Arc::clone(&authority), limits, heartbeat)
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
     let control_router = Arc::new(
         SandboxExecutionControlRouter::new(usize::from(config.worker_manifest.max_concurrency))
@@ -301,30 +321,59 @@ async fn run() -> Result<(), ProcessError> {
         worker,
         Arc::clone(&control_router),
     ));
+    let identities = Arc::new(UuidExecutorIdentityFactory);
+    let binding = SandboxExecutorBinding {
+        isolation_backend_contract_digest: config.backend_contract_digest.clone(),
+        executor_identity_digest: process_identity.executor_identity_digest,
+        attestor_route: process_identity.attestor_route,
+    };
+    let driver_config = SandboxExecutorDriverConfig::from_profile(
+        &profile,
+        Duration::from_secs(config.receipt_ttl_seconds),
+        SandboxExecutorDriverTiming {
+            safety_scan_interval: Duration::from_millis(config.claim_scan_milliseconds),
+            claim_failure_backoff: Duration::from_millis(config.claim_failure_backoff_milliseconds),
+            drain_grace: Duration::from_millis(config.drain_grace_milliseconds),
+        },
+    )
+    .map_err(|_| ProcessError::InvalidConfiguration)?;
     let driver = SandboxExecutorDriver::new(
         Arc::clone(&authority),
         executor,
-        Arc::new(UuidExecutorIdentityFactory),
-        pools,
-        SandboxExecutorBinding {
-            isolation_backend_contract_digest: config.backend_contract_digest.clone(),
-            executor_identity_digest: process_identity.executor_identity_digest,
-            attestor_route: process_identity.attestor_route,
-        },
-        SandboxExecutorDriverConfig::from_profile(
-            &profile,
-            Duration::from_secs(config.receipt_ttl_seconds),
-            SandboxExecutorDriverTiming {
-                safety_scan_interval: Duration::from_millis(config.claim_scan_milliseconds),
-                claim_failure_backoff: Duration::from_millis(
-                    config.claim_failure_backoff_milliseconds,
-                ),
-                drain_grace: Duration::from_millis(config.drain_grace_milliseconds),
-            },
-        )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        Arc::clone(&identities),
+        pools.clone(),
+        binding.clone(),
+        driver_config,
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let managed_driver = match (managed_authority, managed_provider) {
+        (Some(authority), Some(provider)) => {
+            let executor = Arc::new(
+                RegisteredManagedMcpSandboxSessionExecutor::new(
+                    Arc::clone(&authority),
+                    provider,
+                    Arc::clone(&identities),
+                    limits,
+                    heartbeat,
+                    Duration::from_secs(config.receipt_ttl_seconds),
+                )
+                .map_err(|_| ProcessError::InvalidConfiguration)?,
+            );
+            Some(
+                ManagedMcpSandboxSessionExecutorDriver::new(
+                    authority,
+                    executor,
+                    identities,
+                    pools,
+                    binding,
+                    driver_config,
+                )
+                .map_err(|_| ProcessError::InvalidConfiguration)?,
+            )
+        }
+        (None, None) => None,
+        _ => return Err(ProcessError::InvalidConfiguration),
+    };
 
     let nats = connect_nats(&config).await?;
     let local_sink: Arc<dyn insight_platform_sandbox::SandboxControlSignalSink> = control_router;
@@ -343,10 +392,21 @@ async fn run() -> Result<(), ProcessError> {
 
     let shutdown = CancellationToken::new();
     let mut driver_task = tokio::spawn(driver.run(shutdown.child_token()));
+    let managed_shutdown = shutdown.child_token();
+    let mut managed_driver_task = tokio::spawn(async move {
+        match managed_driver {
+            Some(driver) => driver.run(managed_shutdown).await,
+            None => {
+                managed_shutdown.cancelled().await;
+                Ok(Default::default())
+            }
+        }
+    });
     let mut control_task = tokio::spawn(listener.run(shutdown.child_token()));
     let trigger = tokio::select! {
         signal = tokio::signal::ctrl_c() => SupervisorTrigger::Signal(signal.is_ok()),
         joined = &mut driver_task => SupervisorTrigger::Driver(joined),
+        joined = &mut managed_driver_task => SupervisorTrigger::ManagedDriver(joined),
         joined = &mut control_task => SupervisorTrigger::Control(joined),
     };
     shutdown.cancel();
@@ -355,6 +415,7 @@ async fn run() -> Result<(), ProcessError> {
         SupervisorTrigger::Signal(signal_received) => {
             let drained = tokio::time::timeout(grace, async {
                 map_driver_join((&mut driver_task).await)?;
+                map_driver_join((&mut managed_driver_task).await)?;
                 map_control_join((&mut control_task).await)
             })
             .await
@@ -369,6 +430,14 @@ async fn run() -> Result<(), ProcessError> {
         SupervisorTrigger::Driver(joined) => {
             let primary =
                 map_driver_join(joined).and(Err(ProcessError::ExecutorExitedUnexpectedly));
+            await_driver_shutdown(&mut managed_driver_task, grace).await?;
+            await_control_shutdown(&mut control_task, grace).await?;
+            primary
+        }
+        SupervisorTrigger::ManagedDriver(joined) => {
+            let primary =
+                map_driver_join(joined).and(Err(ProcessError::ExecutorExitedUnexpectedly));
+            await_driver_shutdown(&mut driver_task, grace).await?;
             await_control_shutdown(&mut control_task, grace).await?;
             primary
         }
@@ -376,6 +445,7 @@ async fn run() -> Result<(), ProcessError> {
             let primary =
                 map_control_join(joined).and(Err(ProcessError::ControlExitedUnexpectedly));
             await_driver_shutdown(&mut driver_task, grace).await?;
+            await_driver_shutdown(&mut managed_driver_task, grace).await?;
             primary
         }
     }
@@ -384,6 +454,15 @@ async fn run() -> Result<(), ProcessError> {
 enum SupervisorTrigger {
     Signal(bool),
     Driver(
+        Result<
+            Result<
+                insight_platform_sandbox_executor::SandboxExecutorCycleReport,
+                insight_platform_sandbox_executor::SandboxExecutorDriverError,
+            >,
+            tokio::task::JoinError,
+        >,
+    ),
+    ManagedDriver(
         Result<
             Result<
                 insight_platform_sandbox_executor::SandboxExecutorCycleReport,

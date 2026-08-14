@@ -608,7 +608,10 @@ Receipt/Event/Outbox。domain 37项、MCP Host 61项、authority RPC 10项测试
 liveness与cleanup RPC：observation exact绑定session/request、Executor/Provider generation、lease和sandbox identity；Linux实现同时观察
 child exit和PID/start identity，RPC失败不能被解释为`Exited`。cleanup outcome显式区分未创建实例的`Absent`和可供terminal authority使用的
 `Destroyed(evidence)`，持久tombstone支持byte-stable evidence重放。Sandbox domain 38项、microVM 5项和RPC 10项定向测试通过。长期
-Executor supervisor与Managed expired-lease absence recovery仍Open。
+Executor supervisor随后也已组合：microVM进程同时运行有限和Managed两条closed claim driver，共享同一`LocalWorkerPools`；Managed
+future在整个session期间持有permit，按profile执行exact observation/heartbeat，并在guest退出、deadline、process drain或观察/续租失败时
+先取得`Destroyed(evidence)`，再生成fresh terminal audit/quota identity并以最新fence提交lost。Executor 5项、Sandbox 38项定向测试与strict
+Clippy通过；Managed expired-lease absence recovery仍Open。
 
 随后补齐了Firecracker生产拓扑前置项：新增独立`executor-microvm` DaemonSet与专用KVM node selector/taint toleration，非root Executor
 只经node-local mTLS Unix socket调用同Pod的最小Provider。只有Provider容器挂载KVM、host cgroup、持久化jail/state并持有closed Linux

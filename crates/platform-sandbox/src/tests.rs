@@ -1597,14 +1597,29 @@ async fn managed_session_worker_renews_the_latest_fence_while_provider_prepare_i
     let heartbeat =
         SandboxHeartbeatConfig::bounded(std::time::Duration::from_millis(5), 100, 1_000).unwrap();
     let worker = ManagedMcpSandboxSessionWorker::with_heartbeat(
-        authority,
+        authority.clone(),
         provider.clone(),
         limits(),
         heartbeat,
     );
-    let established = worker.establish(command).await.unwrap();
+    let mut established = worker.establish(command).await.unwrap();
     assert!(established.fence.expected_version > 5);
     assert!(provider.events.lock().unwrap().contains(&"heartbeat"));
+    let prior_version = established.fence.expected_version;
+    let decision = authority
+        .heartbeat_managed_mcp_sandbox_session(HeartbeatSandboxExecution {
+            tenant_id: established.request.identity.tenant_id.clone(),
+            sandbox_job_id: established.request.identity.sandbox_job_id.clone(),
+            job_id: established.request.identity.physical_job_id.clone(),
+            fence: established.fence.clone(),
+            lease_milliseconds: 100,
+        })
+        .await
+        .unwrap();
+    established
+        .apply_running_heartbeat(&decision, limits())
+        .unwrap();
+    assert_eq!(established.fence.expected_version, prior_version + 1);
 }
 
 #[tokio::test]
@@ -1680,7 +1695,7 @@ async fn managed_session_loss_terminalizes_the_physical_job_before_rebuild() {
             evidence_digest: sha('1'),
         },
         session_loss_evidence_digest: sha('2'),
-        usage_reservation_id: established.usage_reservation_id,
+        usage_reservation_id: established.usage_reservation_id.clone(),
         quota_entry_ids: (197..201)
             .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
             .collect(),
@@ -1711,6 +1726,9 @@ async fn managed_session_loss_terminalizes_the_physical_job_before_rebuild() {
         SandboxJobState::Lost
     );
     let cleanup = decision.physical_payload.cleanup.as_ref().unwrap();
+    established
+        .validate_lost_decision(&decision, cleanup, limits())
+        .unwrap();
     assert_eq!(cleanup.disposition, SandboxCleanupDisposition::Destroyed);
     assert_eq!(
         cleanup.sandbox_identity_digest,

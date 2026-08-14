@@ -7,14 +7,20 @@
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
-    HardLimitProfile, ResourceId, ResourceIdError, ResourceKind, Sha256Digest, WorkClass,
+    canonical_digest, CommandOutcome, HardLimitProfile, ResourceId, ResourceIdError, ResourceKind,
+    Sha256Digest, WorkClass,
 };
 use insight_platform_sandbox::{
     ClaimSandboxJobs, ClaimedManagedMcpSandboxSession, ClaimedSandboxJob,
-    ExecuteManagedMcpSandboxSession, ExecuteSandboxJob, ManagedMcpSandboxSessionClaimAuthority,
+    CommitManagedMcpSandboxSessionLost, ExecuteManagedMcpSandboxSession, ExecuteSandboxJob,
+    HeartbeatSandboxExecution, ManagedMcpSandboxSessionClaimAuthority,
+    ManagedMcpSandboxSessionCleanupOutcome, ManagedMcpSandboxSessionExecutionAuthority,
+    ManagedMcpSandboxSessionLiveness, ManagedMcpSandboxSessionLivenessEvidence,
+    ManagedMcpSandboxSessionProvider, ManagedMcpSandboxSessionWorker,
     ManagedMcpSandboxSessionWorkerAudits, SandboxClaimAuthority, SandboxClaimFailure,
-    SandboxExecutionAuthority, SandboxExecutionControlRouter, SandboxExecutorWorker,
-    SandboxWorkerAuditBundle, SandboxWorkerCommitIdentity, SANDBOX_QUOTA_LINES,
+    SandboxCommandLimits, SandboxExecutionAuthority, SandboxExecutionControlRouter,
+    SandboxExecutorWorker, SandboxHeartbeatConfig, SandboxWorkerAudit, SandboxWorkerAuditBundle,
+    SandboxWorkerCommitIdentity, SANDBOX_QUOTA_LINES,
 };
 use insight_platform_worker::{
     ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPoolError, LocalWorkerPools,
@@ -451,6 +457,312 @@ pub trait ManagedMcpSandboxSessionCommandExecutor: Send + Sync + 'static {
         command: ExecuteManagedMcpSandboxSession,
         cancellation: CancellationToken,
     ) -> SandboxExecutionDisposition;
+}
+
+/// Production long-lived session supervisor. A transient Provider observation error never becomes
+/// an `Exited` fact: the supervisor first destroys the exact prepared instance and only then asks
+/// the durable authority to rebuild the logical generation.
+pub struct RegisteredManagedMcpSandboxSessionExecutor<A, P, I> {
+    worker: ManagedMcpSandboxSessionWorker<A, P>,
+    authority: Arc<A>,
+    provider: Arc<P>,
+    identities: Arc<I>,
+    limits: SandboxCommandLimits,
+    heartbeat: SandboxHeartbeatConfig,
+    receipt_ttl: Duration,
+}
+
+impl<A, P, I> RegisteredManagedMcpSandboxSessionExecutor<A, P, I>
+where
+    A: ManagedMcpSandboxSessionExecutionAuthority,
+    P: ManagedMcpSandboxSessionProvider,
+    I: ExecutorIdentityFactory,
+{
+    pub fn new(
+        authority: Arc<A>,
+        provider: Arc<P>,
+        identities: Arc<I>,
+        limits: SandboxCommandLimits,
+        heartbeat: SandboxHeartbeatConfig,
+        receipt_ttl: Duration,
+    ) -> Result<Self, SandboxExecutorDriverError> {
+        if receipt_ttl.is_zero() || ChronoDuration::from_std(receipt_ttl).is_err() {
+            return Err(SandboxExecutorDriverError::InvalidConfig(
+                "Managed MCP terminal receipt TTL is invalid".to_owned(),
+            ));
+        }
+        Ok(Self {
+            worker: ManagedMcpSandboxSessionWorker::with_heartbeat(
+                Arc::clone(&authority),
+                Arc::clone(&provider),
+                limits,
+                heartbeat,
+            ),
+            authority,
+            provider,
+            identities,
+            limits,
+            heartbeat,
+            receipt_ttl,
+        })
+    }
+
+    async fn supervise(
+        &self,
+        mut session: insight_platform_sandbox::EstablishedManagedMcpSandboxSession,
+        cancellation: CancellationToken,
+    ) -> SandboxExecutionDisposition {
+        let mut heartbeat = tokio::time::interval_at(
+            Instant::now() + self.heartbeat.interval(),
+            self.heartbeat.interval(),
+        );
+        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let until_deadline = (session.request.deadline - Utc::now())
+            .to_std()
+            .unwrap_or(Duration::ZERO);
+        let deadline = tokio::time::sleep(until_deadline);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    return self.terminalize(session, "executor_shutdown", None).await;
+                }
+                _ = &mut deadline => {
+                    return self.terminalize(session, "session_deadline", None).await;
+                }
+                _ = heartbeat.tick() => {
+                    let observation = self.provider.observe_exact(
+                        &session.request,
+                        &session.fence,
+                        &session.prepared,
+                        &session.activated,
+                    ).await;
+                    match observation {
+                        Ok(evidence) => {
+                            if evidence.validate_for(
+                                &session.request,
+                                &session.fence,
+                                &session.prepared,
+                                &session.activated,
+                                Utc::now(),
+                            ).is_err() {
+                                return self.terminalize(
+                                    session,
+                                    "provider_observation_invalid",
+                                    None,
+                                ).await;
+                            }
+                            if evidence.liveness == ManagedMcpSandboxSessionLiveness::Exited {
+                                return self.terminalize(
+                                    session,
+                                    "provider_observed_exit",
+                                    Some(&evidence),
+                                ).await;
+                            }
+                        }
+                        Err(_) => {
+                            return self.terminalize(
+                                session,
+                                "provider_observation_unavailable",
+                                None,
+                            ).await;
+                        }
+                    }
+                    let heartbeat = HeartbeatSandboxExecution {
+                        tenant_id: session.request.identity.tenant_id.clone(),
+                        sandbox_job_id: session.request.identity.sandbox_job_id.clone(),
+                        job_id: session.request.identity.physical_job_id.clone(),
+                        fence: session.fence.clone(),
+                        lease_milliseconds: self.heartbeat.lease_milliseconds(),
+                    };
+                    let decision = match self
+                        .authority
+                        .heartbeat_managed_mcp_sandbox_session(heartbeat)
+                        .await
+                    {
+                        Ok(decision) => decision,
+                        Err(_) => {
+                            return self.terminalize(
+                                session,
+                                "durable_heartbeat_unavailable",
+                                None,
+                            ).await;
+                        }
+                    };
+                    if session.apply_running_heartbeat(&decision, self.limits).is_err() {
+                        return self.terminalize(
+                            session,
+                            "durable_heartbeat_invalid",
+                            None,
+                        ).await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn terminalize(
+        &self,
+        mut session: insight_platform_sandbox::EstablishedManagedMcpSandboxSession,
+        reason: &'static str,
+        observation: Option<&ManagedMcpSandboxSessionLivenessEvidence>,
+    ) -> SandboxExecutionDisposition {
+        let cleanup = loop {
+            match self
+                .provider
+                .destroy_exact(&session.request, &session.fence, Some(&session.prepared))
+                .await
+            {
+                Ok(ManagedMcpSandboxSessionCleanupOutcome::Destroyed(evidence))
+                    if evidence
+                        .validate_for(
+                            &session.request,
+                            &session.fence,
+                            Some(&session.prepared),
+                            Utc::now(),
+                        )
+                        .is_ok() =>
+                {
+                    break evidence.cleanup;
+                }
+                Ok(_) | Err(_) => {
+                    let heartbeat = HeartbeatSandboxExecution {
+                        tenant_id: session.request.identity.tenant_id.clone(),
+                        sandbox_job_id: session.request.identity.sandbox_job_id.clone(),
+                        job_id: session.request.identity.physical_job_id.clone(),
+                        fence: session.fence.clone(),
+                        lease_milliseconds: self.heartbeat.lease_milliseconds(),
+                    };
+                    if let Ok(decision) = self
+                        .authority
+                        .heartbeat_managed_mcp_sandbox_session(heartbeat)
+                        .await
+                    {
+                        let _ = session.apply_running_heartbeat(&decision, self.limits);
+                    }
+                    tokio::time::sleep(self.heartbeat.interval()).await;
+                }
+            }
+        };
+        let loss_evidence_digest = match canonical_digest(&serde_json::json!({
+            "cleanup_evidence_digest": cleanup.evidence_digest,
+            "domain": "managed_mcp_sandbox_session_supervisor_loss",
+            "identity": session.request.identity,
+            "observation_evidence_digest": observation.map(|value| &value.evidence_digest),
+            "reason": reason,
+            "request_digest": session.request.request_digest,
+            "schema_version": 1,
+        }))
+        .ok()
+        .and_then(|value| value.parse().ok())
+        {
+            Some(digest) => digest,
+            None => return SandboxExecutionDisposition::Abandoned,
+        };
+        let now = Utc::now();
+        let receipt_expires_at = match ChronoDuration::from_std(self.receipt_ttl)
+            .ok()
+            .and_then(|ttl| now.checked_add_signed(ttl))
+        {
+            Some(expires_at) => expires_at,
+            None => return SandboxExecutionDisposition::Abandoned,
+        };
+        let mut quota_entry_ids = match (0..SANDBOX_QUOTA_LINES)
+            .map(|_| {
+                self.identities
+                    .new_resource_id(ResourceKind::QuotaLedgerEntry)
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(ids) => ids,
+            Err(_) => return SandboxExecutionDisposition::Abandoned,
+        };
+        quota_entry_ids.sort();
+        let mut command = match self.terminal_command(
+            &session,
+            cleanup.clone(),
+            loss_evidence_digest,
+            quota_entry_ids,
+            receipt_expires_at,
+        ) {
+            Ok(command) => command,
+            Err(_) => return SandboxExecutionDisposition::Abandoned,
+        };
+        command.audit.request_digest = match command.canonical_request_digest() {
+            Ok(digest) => digest,
+            Err(_) => return SandboxExecutionDisposition::Abandoned,
+        };
+        if command.validate_at(Utc::now()).is_err() {
+            return SandboxExecutionDisposition::Abandoned;
+        }
+        let outcome = match self
+            .authority
+            .commit_managed_mcp_sandbox_session_lost(command)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => return SandboxExecutionDisposition::Abandoned,
+        };
+        let decision = match &outcome {
+            CommandOutcome::Applied(decision) | CommandOutcome::Replayed(decision) => decision,
+        };
+        if session
+            .validate_lost_decision(decision, &cleanup, self.limits)
+            .is_err()
+        {
+            return SandboxExecutionDisposition::Abandoned;
+        }
+        SandboxExecutionDisposition::Settled
+    }
+
+    fn terminal_command(
+        &self,
+        session: &insight_platform_sandbox::EstablishedManagedMcpSandboxSession,
+        cleanup: insight_platform_sandbox::SandboxCleanupEvidence,
+        session_loss_evidence_digest: Sha256Digest,
+        quota_entry_ids: Vec<ResourceId>,
+        receipt_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<CommitManagedMcpSandboxSessionLost, ExecutorIdentityError> {
+        Ok(CommitManagedMcpSandboxSessionLost {
+            audit: SandboxWorkerAudit {
+                tenant_id: session.request.identity.tenant_id.clone(),
+                worker_process_generation_id: session.fence.worker_process_generation_id.clone(),
+                receipt_id: self.identities.new_resource_id(ResourceKind::Receipt)?,
+                event_id: self.identities.new_resource_id(ResourceKind::Event)?,
+                outbox_id: self.identities.new_resource_id(ResourceKind::OutboxEvent)?,
+                idempotency_key_digest: self.identities.new_lease_token_digest()?,
+                request_digest: session_loss_evidence_digest.clone(),
+                receipt_expires_at,
+            },
+            identity: session.request.identity.clone(),
+            fence: session.fence.clone(),
+            cleanup,
+            session_loss_evidence_digest,
+            usage_reservation_id: session.usage_reservation_id.clone(),
+            quota_entry_ids,
+        })
+    }
+}
+
+#[async_trait]
+impl<A, P, I> ManagedMcpSandboxSessionCommandExecutor
+    for RegisteredManagedMcpSandboxSessionExecutor<A, P, I>
+where
+    A: ManagedMcpSandboxSessionExecutionAuthority + 'static,
+    P: ManagedMcpSandboxSessionProvider + 'static,
+    I: ExecutorIdentityFactory + 'static,
+{
+    async fn execute(
+        &self,
+        command: ExecuteManagedMcpSandboxSession,
+        cancellation: CancellationToken,
+    ) -> SandboxExecutionDisposition {
+        match self.worker.establish(command).await {
+            Ok(session) => self.supervise(session, cancellation).await,
+            Err(_) => SandboxExecutionDisposition::Abandoned,
+        }
+    }
 }
 
 /// Dedicated claim loop for Managed MCP subscription sessions. It shares `LocalWorkerPools` with

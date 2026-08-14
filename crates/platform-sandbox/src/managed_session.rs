@@ -1627,6 +1627,53 @@ pub struct EstablishedManagedMcpSandboxSession {
     pub activated: ActivatedManagedMcpSandboxSession,
 }
 
+impl EstablishedManagedMcpSandboxSession {
+    pub fn apply_running_heartbeat(
+        &mut self,
+        decision: &ManagedMcpSandboxSessionPhaseDecision,
+        limits: SandboxCommandLimits,
+    ) -> Result<(), SandboxContractError> {
+        validate_managed_mcp_authority_decision(
+            decision,
+            &self.request,
+            SandboxJobState::Running,
+            McpSessionState::Ready,
+            limits,
+        )?;
+        self.fence = next_managed_mcp_fence(decision, &self.fence);
+        Ok(())
+    }
+
+    pub fn validate_lost_decision(
+        &self,
+        decision: &ManagedMcpSandboxSessionPhaseDecision,
+        cleanup: &SandboxCleanupEvidence,
+        limits: SandboxCommandLimits,
+    ) -> Result<(), SandboxContractError> {
+        decision
+            .physical_payload
+            .validate_for(&decision.physical_job, limits)?;
+        if decision.physical_job.job_id != self.request.identity.physical_job_id
+            || decision.physical_job.state != JobState::ReconciliationRequired
+            || decision.physical_payload.request.as_ref() != &self.request
+            || decision.physical_payload.physical_state != SandboxJobState::Lost
+            || decision.physical_payload.cleanup.as_ref() != Some(cleanup)
+            || decision.logical_state != McpSubscriptionState::Pending
+            || decision.logical_payload.managed_sandbox_session.is_some()
+            || !decision.logical_payload.full_reconcile_required
+            || decision.logical_payload.session.state != McpSessionState::Disconnected
+            || decision
+                .logical_payload
+                .session
+                .encrypted_opaque_session
+                .is_some()
+        {
+            return Err(SandboxContractError::InvalidExactBinding);
+        }
+        Ok(())
+    }
+}
+
 enum ManagedMcpProviderStep<T, AuthorityError, ProviderError> {
     Completed(Result<T, ProviderError>),
     HeartbeatFailed {

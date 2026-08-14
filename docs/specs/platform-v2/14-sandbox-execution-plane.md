@@ -821,7 +821,9 @@ ledger identity共同进入请求摘要；PostgreSQL同一事务把物理Job写�
 该authority已贯穿domain、PostgreSQL与internal gRPC且不增表/migration。Provider lifecycle现增加exact observation和typed cleanup RPC：
 observation绑定逻辑/物理identity、两端process generation、lease与sandbox identity，Linux Provider用child wait加PID/start identity判活；
 transport failure绝不等于`Exited`。cleanup closed outcome区分`Absent`与含完整`SandboxCleanupEvidence`的`Destroyed`，tombstone replay返回
-同一证据。长期Executor supervisor和expired lease absence worker仍Open。
+同一证据。microVM Executor现把Managed专用driver与有限执行driver、NATS control listener置于同一supervisor；两条lane共享
+`LocalWorkerPools`，Managed permit保留到cleanup与terminal commit得到durable disposition。长期循环按profile续租，guest退出、deadline、
+process drain或观察/heartbeat失败均先exact destroy，只有`Destroyed(evidence)`才可构造并提交lost。expired lease absence worker仍Open。
 
 Managed session的一次性Secret交付现已实现为两阶段、双平面协议。microVM Provider只以exact workload URI SAN调用Egress；Egress以自身
 workload identity调用Sandbox Controller执行reserve与commit，并在两者之间通过既有Security Authority、KMS和Secret Provider解析材料。
