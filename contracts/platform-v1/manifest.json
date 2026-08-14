@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:46c72b158f9edbf4e4a631bca386fb1072c05dae263ffcdce590261603ad566a",
+  "contract_digest": "sha256:17e53e8b10bcd8cfa908feaf7870baa19c07849c24a29b9b00d9f092552c8b64",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -67,6 +67,12 @@
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/worker-manifest.schema.json",
       "sha256": "07851119c32bc17ffcce1f2c28d0e833e2689697992623fff03ac2fc36f5ca7d"
+    },
+    {
+      "bytes": 2497,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/candidate-manifest.schema.json",
+      "sha256": "a3ee754ce9324dbebc40cb22cd70f029a47042e4c8ff846b4c991e737af1b00e"
     },
     {
       "bytes": 1117,

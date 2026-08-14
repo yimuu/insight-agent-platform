@@ -16,6 +16,7 @@ pub mod machine;
 pub mod mcp;
 pub mod model;
 pub mod nominal;
+pub mod qualification;
 pub mod registry;
 pub mod resource;
 pub mod sandbox_policy;
@@ -43,6 +44,10 @@ pub use model::*;
 pub use nominal::{
     canonical_schema_digest, is_known_pinned_nominal_reference, nominal_schemas,
     pinned_nominal_reference,
+};
+pub use qualification::{
+    CandidateManifest, CandidateManifestError, ComponentRole, GitCommit, NewCandidateManifest,
+    MAX_CANDIDATE_COMPONENT_IMAGES, MAX_CANDIDATE_WORKER_MANIFESTS,
 };
 pub use registry::{
     require_cursor_purpose, validate_public_event_envelope, AgentAuthoringMode, ApiProblemCode,

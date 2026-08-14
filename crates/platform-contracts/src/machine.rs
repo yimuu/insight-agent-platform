@@ -22,6 +22,7 @@ use crate::{
     schema::{ALLOWED_SCHEMA_KEYWORDS, CLOSED_SCHEMA_PROFILE_ID},
     state::{all_state_machines, AttemptCommitDisposition},
     types::MAX_PUBLIC_EVENT_SAFE_SUMMARY_BYTES,
+    MAX_CANDIDATE_COMPONENT_IMAGES, MAX_CANDIDATE_WORKER_MANIFESTS,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -263,6 +264,7 @@ pub const CONTRACT_MANIFEST_INPUTS: &[&str] = &[
     "contracts/platform-v1/schemas/nominal-types.json",
     "contracts/platform-v1/schemas/frozen-slot-binding.schema.json",
     "contracts/platform-v1/schemas/worker-manifest.schema.json",
+    "contracts/platform-v1/schemas/candidate-manifest.schema.json",
     "contracts/platform-v1/schemas/policies/artifact-retention-policy.schema.json",
     "contracts/platform-v1/schemas/policies/scheduling-policy.schema.json",
     "contracts/platform-v1/schemas/nominal/api-problem.schema.json",
@@ -454,6 +456,7 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
     });
     let frozen_slot_binding_schema = frozen_slot_binding_schema();
     let worker_manifest_schema = worker_manifest_schema();
+    let candidate_manifest_schema = candidate_manifest_schema();
     let artifact_retention_policy_schema = artifact_retention_policy_schema();
     let scheduling_policy_schema = scheduling_policy_schema();
     let public_run_payload_schema = durable_public_run_payload_schema();
@@ -508,6 +511,10 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
         (
             "schemas/worker-manifest.schema.json",
             pretty(&worker_manifest_schema),
+        ),
+        (
+            "schemas/candidate-manifest.schema.json",
+            pretty(&candidate_manifest_schema),
         ),
         (
             "schemas/policies/artifact-retention-policy.schema.json",
@@ -598,6 +605,79 @@ fn worker_manifest_schema() -> Value {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 65535
+            }
+        }
+    })
+}
+
+fn candidate_manifest_schema() -> Value {
+    let digest = json!({
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+    });
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:insight:platform:v1:candidate-manifest",
+        "title": "CandidateManifest",
+        "description": "Immutable digest closure that binds every Gate A-G result to one exact source, contract, schema, image, worker, configuration, limit, policy and qualification profile set.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "candidate_id",
+            "git_commit",
+            "contract_digest",
+            "database_schema_version",
+            "component_images",
+            "worker_manifests",
+            "deployment_config_digest",
+            "hard_limit_profile_digest",
+            "policy_baseline_digest",
+            "qualification_profile",
+            "created_at"
+        ],
+        "properties": {
+            "candidate_id": {
+                "type": "string",
+                "pattern": "^cand_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "git_commit": {
+                "type": "string",
+                "pattern": "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$"
+            },
+            "contract_digest": digest.clone(),
+            "database_schema_version": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": u32::MAX
+            },
+            "component_images": {
+                "type": "object",
+                "minProperties": 1,
+                "maxProperties": MAX_CANDIDATE_COMPONENT_IMAGES,
+                "propertyNames": {
+                    "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+                },
+                "additionalProperties": digest.clone()
+            },
+            "worker_manifests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_CANDIDATE_WORKER_MANIFESTS,
+                "uniqueItems": true,
+                "description": "Canonical ascending digest set; Rust validation additionally enforces ordering and exact installed WorkerManifest closure.",
+                "items": digest.clone()
+            },
+            "deployment_config_digest": digest.clone(),
+            "hard_limit_profile_digest": digest.clone(),
+            "policy_baseline_digest": digest,
+            "qualification_profile": {
+                "type": "string",
+                "pattern": "^qpr_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "created_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"
             }
         }
     })

@@ -35,6 +35,7 @@ CONTRACT_FILES = [
     "contracts/platform-v1/schemas/nominal-types.json",
     "contracts/platform-v1/schemas/frozen-slot-binding.schema.json",
     "contracts/platform-v1/schemas/worker-manifest.schema.json",
+    "contracts/platform-v1/schemas/candidate-manifest.schema.json",
     "contracts/platform-v1/schemas/policies/artifact-retention-policy.schema.json",
     "contracts/platform-v1/schemas/policies/scheduling-policy.schema.json",
     "contracts/platform-v1/schemas/nominal/api-problem.schema.json",
@@ -274,6 +275,62 @@ def check_worker_manifest(errors):
         errors.append("Q1 WorkerManifest max_concurrency is invalid")
     if not isinstance(example.get("critical_control_reserved_slots"), int) or not 1 <= example.get("critical_control_reserved_slots", 0) <= 65535:
         errors.append("Q1 WorkerManifest critical-control reserve is invalid")
+
+
+def check_candidate_manifest(errors):
+    schema = load(CONTRACT_ROOT / "schemas" / "candidate-manifest.schema.json")
+    properties = schema.get("properties", {})
+    expected_fields = {
+        "candidate_id",
+        "git_commit",
+        "contract_digest",
+        "database_schema_version",
+        "component_images",
+        "worker_manifests",
+        "deployment_config_digest",
+        "hard_limit_profile_digest",
+        "policy_baseline_digest",
+        "qualification_profile",
+        "created_at",
+    }
+    if schema.get("additionalProperties") is not False:
+        errors.append("CandidateManifest schema must reject unknown fields")
+    if set(schema.get("required", [])) != expected_fields or set(properties) != expected_fields:
+        errors.append("CandidateManifest schema differs from its closed qualification shape")
+    if properties.get("candidate_id", {}).get("pattern", "").startswith("^cand_") is False:
+        errors.append("CandidateManifest candidate_id is not nominally bound")
+    if properties.get("qualification_profile", {}).get("pattern", "").startswith("^qpr_") is False:
+        errors.append("CandidateManifest qualification_profile is not nominally bound")
+    if properties.get("git_commit", {}).get("pattern") != (
+        "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$"
+    ):
+        errors.append("CandidateManifest git_commit must be an exact tagged object ID")
+    schema_version = properties.get("database_schema_version", {})
+    if (
+        schema_version.get("type") != "integer"
+        or schema_version.get("minimum") != 1
+        or schema_version.get("maximum") != 4_294_967_295
+    ):
+        errors.append("CandidateManifest database schema contract version is invalid")
+    images = properties.get("component_images", {})
+    if (
+        images.get("type") != "object"
+        or images.get("minProperties") != 1
+        or images.get("maxProperties") != 256
+        or images.get("propertyNames", {}).get("pattern")
+        != "^[a-z][a-z0-9_.-]{0,127}$"
+        or images.get("additionalProperties", {}).get("pattern") != DIGEST.pattern
+    ):
+        errors.append("CandidateManifest component image closure is invalid")
+    workers = properties.get("worker_manifests", {})
+    if (
+        workers.get("type") != "array"
+        or workers.get("minItems") != 1
+        or workers.get("maxItems") != 512
+        or workers.get("uniqueItems") is not True
+        or workers.get("items", {}).get("pattern") != DIGEST.pattern
+    ):
+        errors.append("CandidateManifest worker manifest closure is invalid")
 
 
 def check_nominal_schemas(errors):
@@ -900,6 +957,7 @@ def main():
     check_limits(errors)
     check_foundation_surfaces(errors)
     check_worker_manifest(errors)
+    check_candidate_manifest(errors)
     check_nominal_schemas(errors)
     check_contract_manifest(errors)
     check_spec_registry_alignment(errors)

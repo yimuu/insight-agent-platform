@@ -107,6 +107,12 @@ struct ReleaseManifest {
 }
 ```
 
+`GitCommit` wire值必须是带算法标签的完整小写object ID：`sha1:<40-hex>`或`sha256:<64-hex>`；分支、tag、缩写SHA和
+`latest`均非法。`ComponentRole`是稳定的小写部署角色键，必须匹配`[a-z][a-z0-9_.-]{0,127}`，不得用临时Pod名或副本名。
+`database_schema_version`精确表示`insight-platform-postgres`导出的schema contract version（当前候选基线为`6`），不是
+migration文件数量、数据库产品版本或payload schema version。Candidate创建器必须从实际安装的closed `WorkerManifest`集合和
+`HardLimitProfile`计算canonical digest closure；worker digest按字节升序且唯一，重复role、缺失或额外manifest、limit digest漂移均拒绝。
+
 只要Candidate包含MCP OAuth绑定，`deployment_config_digest`覆盖的closed Egress配置还必须包含exact Auth Policy revision、完整
 Auth Profile、允许的非对称JWT算法、public JWKS及其canonical digest，以及OAuth写入所用ServiceIdentity Principal。运行时不得从
 issuer动态补齐、刷新或替换该信任根；key rotation通过新Candidate发布并重新资格，而不是在旧Candidate内静默漂移。
@@ -127,6 +133,10 @@ bounded safety scan、独立business/critical-control pool以及lease-fenced exe
 Contract/Functional子证据：尚未绑定immutable CandidateManifest、production-equivalent images/config/topology和完整Q1 dataset，
 因此不能声明Gate D/E、Q1或Release资格。Artifact/Invocation、外部backend、50 active Runs、跨WorkClass饱和、24小时soak与DR
 证据必须在对应实现阶段重新产生，不能沿用已撤销设计的数字或报告。
+
+CandidateManifest的closed Rust type、checked-in JSON Schema、canonical digest与实际Worker/HardLimit exact-closure validator已经交付，
+并进入`insight.platform/v1`根合同digest。当前尚未生成绑定production-equivalent images/config/topology的Candidate实例，也没有任何
+Gate A～G结果或ReleaseManifest；因此这项machine-contract foundation本身不构成资格证据。
 
 Sandbox expired-lease runtime现也有独立`WorkClass::Sandbox` business/critical-control permit、分片scan、backend evidence与fenced
 commit driver；unit fixture证明Sandbox业务permit耗尽时critical-control scan仍运行。Core NATS control adapter也已实现exact

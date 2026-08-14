@@ -1,0 +1,84 @@
+{
+  "$id": "urn:insight:platform:v1:candidate-manifest",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable digest closure that binds every Gate A-G result to one exact source, contract, schema, image, worker, configuration, limit, policy and qualification profile set.",
+  "properties": {
+    "candidate_id": {
+      "pattern": "^cand_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "component_images": {
+      "additionalProperties": {
+        "pattern": "^sha256:[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "maxProperties": 256,
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+      },
+      "type": "object"
+    },
+    "contract_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$",
+      "type": "string"
+    },
+    "database_schema_version": {
+      "maximum": 4294967295,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "deployment_config_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "git_commit": {
+      "pattern": "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "hard_limit_profile_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "policy_baseline_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "qualification_profile": {
+      "pattern": "^qpr_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "worker_manifests": {
+      "description": "Canonical ascending digest set; Rust validation additionally enforces ordering and exact installed WorkerManifest closure.",
+      "items": {
+        "pattern": "^sha256:[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "maxItems": 512,
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "candidate_id",
+    "git_commit",
+    "contract_digest",
+    "database_schema_version",
+    "component_images",
+    "worker_manifests",
+    "deployment_config_digest",
+    "hard_limit_profile_digest",
+    "policy_baseline_digest",
+    "qualification_profile",
+    "created_at"
+  ],
+  "title": "CandidateManifest",
+  "type": "object"
+}

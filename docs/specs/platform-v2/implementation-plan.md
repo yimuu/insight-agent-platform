@@ -563,6 +563,13 @@ materialization、后发送同一fence的execute command；主逻辑输入只接
 该开发期证据仍不包含真实Linux KVM/jailer/guest-agent互操作、Managed subscription的MCP Job→Sandbox session Job组合、process-kill/
 recovery或escape/saturation资格，因此CR-131/CR-158和Phase 4继续保持Open。
 
+CR-159关闭Phase 6入口的CandidateManifest machine-contract空洞：closed Rust type与checked-in JSON Schema冻结full tagged Git object ID、
+`cand`/`qpr` nominal identity、schema contract version、bounded component image map、canonical WorkerManifest digest set、deployment/limit/
+policy/contract digest和UTC创建时间。builder从实际WorkerManifest与HardLimitProfile计算closure，复验拒绝重复role、缺失或额外worker、
+limit drift及非canonical顺序；schema已进入`insight.platform/v1`根合同digest，并由Rust和独立Python checker共同验证。这里的
+`database_schema_version`是当前值为6的PostgreSQL schema contract version，不是migration数量。该开发期合同不等于实际Candidate，
+尚未绑定production-equivalent images/config/topology，也没有Gate A～G或ReleaseManifest，因此Phase 6保持Pending。
+
 clean-cut baseline现由部署期独立provisioning流程对fresh PostgreSQL target一次性安装；Platform运行时crate已删除DDL apply入口，
 API/Scheduler/Worker只做read-only schema verification。旧`coordinator.rs`实现路径改为role-neutral orchestration模块，cutover gate
 不再把Accepted ADR中的外部migration ledger表名误判为运行时migration authority，但会继续拒绝任何Rust `apply_migrations`或旧
