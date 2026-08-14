@@ -1773,6 +1773,7 @@ impl PgRepository {
               AND job.state IN ('leased', 'running', 'cancelling')
               AND job.lease_expires_at <= $1 AND job.terminal_at IS NULL
               AND job.worker_id IS NOT NULL AND job.lease_epoch > 0
+              AND job.payload ->> 'workload_kind' = 'capability_execution'
               AND mod(('x' || right(job.job_id, 8))::bit(32)::bigint, $4) = $3
               AND (
                   $5::timestamptz IS NULL OR

@@ -596,6 +596,9 @@ fixture已编译；本机Docker daemon无响应，故尚无本次路径的真实
 Provider prepare/initialize/activate等待期间按profile heartbeat，将每次返回的新version串行带入下一phase；heartbeat失败时先等待
 Provider调用收敛，再对任何已创建实例执行exact destroy，避免取消中的RPC留下孤儿VM。长期liveness heartbeat与terminal supervisor仍未
 组合进Executor进程，terminal/session-loss recovery和真实资格也未交付，故上述开放项和Phase状态不变。
+同时修正共享Sandbox Job恢复扫描的队列隔离：有限Capability expired-lease scan现在在SQL候选阶段要求closed
+`workload_kind=capability_execution`，不会因同表中的Managed session payload解码失败而阻断整个分片；Managed expired lease仍由待交付的
+专用terminal/absence recovery负责。
 
 随后补齐了Firecracker生产拓扑前置项：新增独立`executor-microvm` DaemonSet与专用KVM node selector/taint toleration，非root Executor
 只经node-local mTLS Unix socket调用同Pod的最小Provider。只有Provider容器挂载KVM、host cgroup、持久化jail/state并持有closed Linux

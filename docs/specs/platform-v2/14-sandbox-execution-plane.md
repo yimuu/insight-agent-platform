@@ -812,6 +812,9 @@ daemon无响应未取得实际运行证据。Sandbox domain establishment Worker
 或真实进程资格，
 因此不关闭Phase 4。
 
+共享Sandbox Job表上的有限Capability expired-lease scan现强制按closed `workload_kind=capability_execution`过滤，不会把Managed session
+payload误送入有限执行解码器；Managed session仍须由其专用terminal/absence recovery扫描处理。
+
 Managed session的一次性Secret交付现已实现为两阶段、双平面协议。microVM Provider只以exact workload URI SAN调用Egress；Egress以自身
 workload identity调用Sandbox Controller执行reserve与commit，并在两者之间通过既有Security Authority、KMS和Secret Provider解析材料。
 Controller在reserve和commit均锁定并复验同一Managed Sandbox Job、request/attempt、当前lease、Executor、Provider process generation、
