@@ -665,7 +665,9 @@ durable Resource subscription现已复用shared Invocation/Job/Receipt/Event/Out
 Deployment/Discovery/Profile、transport closure、published Context Deployment与canonical credential-free URI；session opaque state只允许加密保存。
 严格notification ingress拒绝duplicate/unknown字段、错误method/session/generation和越界正文，并使用独立permit与keyed rate authority；同一pending
 窗口只产生一次durable wake，后续更新合并为最高generation。fenced subscription worker按`Connecting -> Initializing -> Ready`提交session；
-成功或终止phase的evidence digest同时进入请求摘要、Receipt和Event。它只通过Streamable HTTP/Managed stdio credential-free connector或runner port建立订阅；notification/周期reconcile必须先取得下游Context/Discovery
+成功或终止phase的evidence digest同时进入请求摘要、Receipt和Event。该Worker只允许Streamable HTTP connector建立订阅；Managed stdio
+在到达该transport port前必须转交Sandbox admission，Host-local Worker即使收到声称为Managed stdio的transport也会在dispatch前拒绝。
+notification/周期reconcile必须先取得下游Context/Discovery
 durable acceptance，随后才清除pending并把Job停回Waiting。按tenant和数据库时间的bounded safety scan使用独立critical-control permit唤醒
 长期未更新的Waiting Job。显式session-loss报告与expired lease/session safety scan会以version/generation/CAS first-winner清除旧加密opaque state、
 把同一Job重排到Ready并设置`full_reconcile_required`；重建的新generation在下游完整reconcile取得durable acceptance前不得回到Waiting。
@@ -733,7 +735,12 @@ committed Event投影，临时/不确定失败退避重试，永久合同错误d
 first-winner完成，双副本/PDB/default-deny NetworkPolicy部署合同也已通过，不增加表或migration。Managed stdio operation现已直接进入
 唯一Sandbox Job，并由production Firecracker Provider经Controller Artifact Broker取得exact Package/input、在private vsock中bounded
 materialize后才执行；Provider不再拒绝已安装的Managed MCP runtime。Managed subscription尚未建立MCP Job→Sandbox session Job的
-production组合，真实Linux KVM/jailer/guest-agent、process-kill/recovery与escape/saturation资格也未取得，因此该证据不关闭MCP或Phase 4，
+provider组合，但其durable admission authority已经交付：同一PostgreSQL事务锁定逻辑Invocation/MCP Job及exact contract closure，创建
+双向generation link和唯一`work_class=sandbox`物理Job，将逻辑Job停回Waiting，锁定Artifact/Secret grant，写入四维quota reservation及
+Receipt/Event/Outbox。共享Sandbox payload使用closed workload discriminator区分Capability execution与Managed MCP subscription session；
+MCP Host已删除Managed subscription直接broker入口。真实PostgreSQL 16并发fixture覆盖first-winner、exact replay、同key漂移冲突、双向Job
+绑定、grant/quota及Secret canary。prepared→durable Ready→activation、terminal/session-loss recovery以及真实Linux KVM/jailer/guest-agent、
+process-kill/recovery与escape/saturation资格仍未交付，因此该证据不关闭MCP或Phase 4，
 也不把本规范标记为Implemented/Verified。此前workspace
 all-target/all-feature check、test、doc-test与strict Clippy及public API/contract/schema/cutover门禁证据不自动覆盖本次变更；本次完整门禁
 结果以实施计划的最新记录为准。

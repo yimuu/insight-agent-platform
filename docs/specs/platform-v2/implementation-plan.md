@@ -560,8 +560,13 @@ Artifact Broker按exact tenant/Job/request/Executor generation/Provider generati
 Artifact-backed逻辑输入，二次复核完整`ArtifactRef`长度与SHA-256，再以bounded canonical chunk在private vsock上先完成一次性guest
 materialization、后发送同一fence的execute command；主逻辑输入只接受exact `read_whole` grant。进程配置不再拒绝已安装且digest闭合的
 `managed_mcp_server` runtime。定向29项Sandbox、1项Provider config和10项microVM protocol/Firecracker socket fixture实际通过。
-该开发期证据仍不包含真实Linux KVM/jailer/guest-agent互操作、Managed subscription的MCP Job→Sandbox session Job组合、process-kill/
-recovery或escape/saturation资格，因此CR-131/CR-158和Phase 4继续保持Open。
+Managed subscription的durable admission首片也已交付：Host删除直接Managed subscription broker且普通subscription Worker只接受
+Streamable HTTP；closed Sandbox payload新增Managed session workload，完整冻结双向Job/generation与MCP、Sandbox、grant、resource、callback
+closure。PostgreSQL以单事务锁定逻辑Invocation/MCP Job和全部exact authority，创建唯一Ready Sandbox Job，将逻辑Job停回Waiting，提交
+Artifact/Secret grant、四维quota reservation及Receipt/Event/Outbox。全新PostgreSQL 16并发fixture已实际通过唯一winner、exact replay、
+同idempotency key请求漂移冲突、双向身份、grant/quota和Secret canary，且仍为23表/单一baseline migration。该开发期证据仍不包含
+Managed session provider的Preparing→durable Ready→activation、terminal/session-loss recovery、真实Linux KVM/jailer/guest-agent互操作、
+process-kill或escape/saturation资格，因此CR-131/CR-158和Phase 4继续保持Open。
 
 CR-159关闭Phase 6入口的CandidateManifest machine-contract空洞：closed Rust type与checked-in JSON Schema冻结full tagged Git object ID、
 `cand`/`qpr` nominal identity、schema contract version、bounded component image map、canonical WorkerManifest digest set、deployment/limit/
