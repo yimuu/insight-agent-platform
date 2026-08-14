@@ -883,12 +883,15 @@ pub trait ManagedMcpSandboxSessionClaimAuthority: Send + Sync + 'static {
 #[serde(deny_unknown_fields)]
 pub struct ManagedMcpSandboxSessionRecoveryCursor {
     pub lease_expires_at: DateTime<Utc>,
+    pub tenant_id: ResourceId,
     pub physical_job_id: ResourceId,
 }
 
 impl ManagedMcpSandboxSessionRecoveryCursor {
     pub fn validate(&self) -> Result<(), SandboxContractError> {
-        if self.physical_job_id.kind() != ResourceKind::Job {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.physical_job_id.kind() != ResourceKind::Job
+        {
             return Err(SandboxContractError::InvalidWorkerCommand);
         }
         Ok(())
@@ -912,17 +915,35 @@ impl ManagedMcpSandboxSessionRecoveryShard {
     }
 }
 
+/// Exact registered recovery Executor used for both candidate routing and transport-side
+/// re-authorization. This is caller identity, not part of the stable recovery business request:
+/// a replacement process may replay the same old-lease recovery after an uncertain response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedMcpSandboxSessionRecoveryExecutor {
+    pub worker_process_generation_id: ResourceId,
+    pub worker_manifest_digest: Sha256Digest,
+    pub isolation_backend_contract_digest: Sha256Digest,
+    pub executor_identity_digest: Sha256Digest,
+    pub attestor_route: NodeAttestorRoute,
+}
+
+impl ManagedMcpSandboxSessionRecoveryExecutor {
+    pub fn validate(&self) -> Result<(), SandboxContractError> {
+        if self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration {
+            return Err(SandboxContractError::InvalidWorkerCommand);
+        }
+        Ok(())
+    }
+}
+
 /// Exact current recovery-Executor identity. The Controller re-verifies this registration before
 /// returning any candidate; started candidates are additionally pinned to the same node route so
 /// the caller can address the authoritative node-local Provider state directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScanExpiredManagedMcpSandboxSessionLeases {
-    pub recovery_worker_process_generation_id: ResourceId,
-    pub worker_manifest_digest: Sha256Digest,
-    pub isolation_backend_contract_digest: Sha256Digest,
-    pub recovery_executor_identity_digest: Sha256Digest,
-    pub recovery_attestor_route: NodeAttestorRoute,
+    pub executor: ManagedMcpSandboxSessionRecoveryExecutor,
     pub shard: ManagedMcpSandboxSessionRecoveryShard,
     pub after: Option<ManagedMcpSandboxSessionRecoveryCursor>,
     pub limit: u16,
@@ -935,11 +956,8 @@ impl ScanExpiredManagedMcpSandboxSessionLeases {
         maximum_shards: u16,
     ) -> Result<(), SandboxContractError> {
         self.shard.validate(maximum_shards)?;
-        if self.recovery_worker_process_generation_id.kind()
-            != ResourceKind::WorkerProcessGeneration
-            || self.limit == 0
-            || self.limit > maximum_batch
-        {
+        self.executor.validate()?;
+        if self.limit == 0 || self.limit > maximum_batch {
             return Err(SandboxContractError::InvalidWorkerCommand);
         }
         if let Some(after) = &self.after {
@@ -1264,6 +1282,7 @@ impl ManagedMcpSandboxSessionRecoveryAudit {
 #[serde(deny_unknown_fields)]
 pub struct RecoverExpiredManagedMcpSandboxSessionLease {
     pub audit: ManagedMcpSandboxSessionRecoveryAudit,
+    pub executor: ManagedMcpSandboxSessionRecoveryExecutor,
     pub expired: ExpiredManagedMcpSandboxSessionLease,
     pub action: ManagedMcpSandboxSessionLeaseRecoveryAction,
     pub quota_entry_ids: Vec<ResourceId>,
@@ -1286,7 +1305,6 @@ impl RecoverExpiredManagedMcpSandboxSessionLease {
             "action": self.action,
             "expired": self.expired,
             "quota_entry_ids": self.quota_entry_ids,
-            "recovery_process_generation_id": self.audit.recovery_process_generation_id,
             "schema_version": 1,
             "tenant_id": self.audit.tenant_id,
         }))
@@ -1301,12 +1319,21 @@ impl RecoverExpiredManagedMcpSandboxSessionLease {
         limits: SandboxCommandLimits,
     ) -> Result<(), SandboxContractError> {
         self.audit.validate_at(now)?;
+        self.executor.validate()?;
         self.expired.validate(limits)?;
         let terminal = !matches!(
             self.action,
             ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted { .. }
         );
         if self.audit.tenant_id != self.expired.request.identity.tenant_id
+            || self.audit.recovery_process_generation_id
+                != self.executor.worker_process_generation_id
+            || self.executor.worker_manifest_digest
+                != self.expired.request.executor_worker_manifest_digest
+            || self.executor.isolation_backend_contract_digest
+                != self.expired.request.isolation_backend_contract_digest
+            || (self.expired.physical_state != SandboxJobState::Accepted
+                && self.expired.attestor_route.as_ref() != Some(&self.executor.attestor_route))
             || (terminal && self.quota_entry_ids.len() != SANDBOX_QUOTA_LINES)
             || (!terminal && !self.quota_entry_ids.is_empty())
             || self
@@ -3466,16 +3493,7 @@ pub fn decide_expired_managed_mcp_sandbox_session_lease(
                 .checked_add(1)
                 .ok_or(SandboxContractError::InvalidTransition)?;
             physical_payload.phase_evidence_digest = Some(evidence.canonical_digest.clone());
-            physical_payload.cleanup =
-                evidence
-                    .provider_cleanup
-                    .as_ref()
-                    .and_then(|outcome| match outcome {
-                        ManagedMcpSandboxSessionCleanupOutcome::Destroyed(evidence) => {
-                            Some(evidence.cleanup.clone())
-                        }
-                        ManagedMcpSandboxSessionCleanupOutcome::Absent(_) => None,
-                    });
+            physical_payload.cleanup = None;
             physical_payload.expired_lease_recovery = Some(evidence.as_ref().clone());
             (physical_job, logical_payload, logical_state)
         }

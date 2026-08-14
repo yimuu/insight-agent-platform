@@ -778,7 +778,12 @@ Executor才能在一个PostgreSQL事务中把旧物理Job推进为`Lost/Reconcil
 “已销毁”的typed cleanup outcome；Linux实现同时校验PID/start identity，RPC不可达不能伪装成`Exited`，已销毁tombstone可重放同一cleanup
 evidence。microVM Executor现同时运行有限任务与Managed session两条closed claim loop并共享同一个本地Sandbox容量池；长期session future持有
 permit，按profile持续observe/heartbeat，在guest退出、deadline、进程drain或观察/续租失败时先exact destroy，再用最新fence提交lost authority。
-expired lease的absence recovery仍未交付，因此不能仅凭本切片创建replacement或关闭Phase 4。
+expired lease的PostgreSQL authority现已交付专用bounded/sharded/keyset scan和token-free CAS commit：`Accepted`在deadline前只清除旧lease并
+回到Ready，deadline后以零实际使用量结算并同时终结逻辑/物理Job；`Preparing`及以后只有旧process-generation absence与同节点Provider
+observation组成的closed evidence才能写`Lost`、保守结算并重排逻辑MCP Job。Receipt的semantic key绑定旧lease generation而不绑定恢复
+Worker，使新generation可以对不确定响应进行exact replay；当前恢复Executor registration仍作为每次transport调用的独立授权输入。domain
+40项测试通过，PostgreSQL fixture已扩展Accepted scan/requeue/replay但本机没有可用数据库执行证据。authority internal RPC与Executor recovery
+driver仍未交付，因此不能仅凭本切片创建replacement或关闭Phase 4。
 
 ## 28. 明确推迟的工作
 

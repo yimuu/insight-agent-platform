@@ -830,6 +830,14 @@ process drain或观察/heartbeat失败均先exact destroy，只有`Destroyed(evi
 request、旧Executor/Provider generation、lease和sandbox identity，replay也必须返回同一binding。此前仅保存不可展开摘要的状态不足以让
 过期租约恢复验证Provider cleanup，现已消除该歧义；不增加表或migration。
 
+Managed expired-lease的domain与PostgreSQL authority现已进一步交付。专用scan只读取closed Managed workload，按manifest/backend过滤，并只把
+started候选返回给持有相同node-local attestor route的新Executor；cursor包含lease expiry、tenant与physical Job，避免跨tenant同ID边界漏项。
+commit以旧lease generation的stable key创建共享`JobCommit` Receipt并执行exact version/generation CAS：未启动Job可requeue或在deadline后
+TimedOut，started Job必须同时验证旧Executor process absence与随后发生的Provider `Absent | Destroyed`，一旦已有durable prepared binding则
+只接受逐字段相等的`Destroyed`。terminal事务与logical subscription/Job、quota、Artifact grant、Event及Outbox原子提交，不增表或migration。
+当前domain 40项测试通过，真实PostgreSQL fixture已编译但本机Docker daemon无响应；internal authority RPC和critical-control recovery driver
+仍Open。
+
 Managed session的一次性Secret交付现已实现为两阶段、双平面协议。microVM Provider只以exact workload URI SAN调用Egress；Egress以自身
 workload identity调用Sandbox Controller执行reserve与commit，并在两者之间通过既有Security Authority、KMS和Secret Provider解析材料。
 Controller在reserve和commit均锁定并复验同一Managed Sandbox Job、request/attempt、当前lease、Executor、Provider process generation、

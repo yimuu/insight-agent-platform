@@ -5430,6 +5430,30 @@ pub(crate) async fn settle_managed_mcp_session_quota(
     .await
 }
 
+pub(crate) async fn settle_unstarted_managed_mcp_session_quota(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    usage_reservation_id: &ResourceId,
+    resources: &SandboxResourceEnvelope,
+    entry_ids: &[ResourceId],
+    request_digest: &Sha256Digest,
+) -> Result<(), RepositoryError> {
+    let tenant = tenant_id.to_string();
+    let reservation = usage_reservation_id.to_string();
+    let lines =
+        lock_sandbox_quota_bundle_for(transaction, &tenant, &reservation, resources).await?;
+    settle_sandbox_quota_lines(
+        transaction,
+        &reservation,
+        &lines,
+        entry_ids,
+        None,
+        false,
+        request_digest,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn settle_sandbox_quota_lines(
     transaction: &mut Transaction<'_, Postgres>,

@@ -617,6 +617,13 @@ absence recovery前置的durable prepared binding也已补齐：`Starting` comma
 sandbox identity、旧Executor generation、lease及完整prepared canonical digest；opaque session仍只存在逻辑Invocation。Sandbox 38项测试及
 相关crate编译通过，不增加表或migration；专用scan/proof/recovery driver仍Open。
 
+Managed expired-lease的专用domain/PostgreSQL authority现已交付：scan按closed workload、manifest/backend、node-local route、bounded shard和
+包含tenant的keyset cursor返回token-free exact observation；commit使用旧lease generation的stable Receipt做CAS，支持Accepted requeue、
+deadline timeout零使用量结算，以及旧process absence后Provider exact observation的started Lost。业务request digest不绑定恢复Worker，但每次
+调用仍携带完整当前Executor registration供Controller重新鉴权；逻辑/物理Job、quota、grant、Receipt/Event/Outbox同事务提交，保持23表与单一
+`0001`。Sandbox domain增至40项并通过；PostgreSQL fixture已扩展scan/requeue/replay且可编译，但本机`PLATFORM_TEST_DATABASE_URL`未配置、
+Docker daemon无响应，故不登记fresh PG执行证据。Managed authority RPC与Executor recovery driver仍Open。
+
 随后补齐了Firecracker生产拓扑前置项：新增独立`executor-microvm` DaemonSet与专用KVM node selector/taint toleration，非root Executor
 只经node-local mTLS Unix socket调用同Pod的最小Provider。只有Provider容器挂载KVM、host cgroup、持久化jail/state并持有closed Linux
 capability allowlist；Executor与Provider的TLS/queue/attestor volume互斥，均无Kubernetes API token。独立ConfigMap生成closed Executor/

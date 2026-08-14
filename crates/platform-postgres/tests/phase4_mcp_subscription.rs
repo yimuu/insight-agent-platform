@@ -53,12 +53,16 @@ use insight_platform_sandbox::{
     HeartbeatSandboxExecution, ManagedMcpSandboxSecretCommitOutcome,
     ManagedMcpSandboxSecretDeliveryAuthority, ManagedMcpSandboxSecretDeliveryRequest,
     ManagedMcpSandboxSecretReservationOutcome, ManagedMcpSandboxSessionCallback,
-    ManagedMcpSandboxSessionReadyEvidence, ManagedMcpSandboxSessionRequest,
+    ManagedMcpSandboxSessionLeaseRecoveryAction, ManagedMcpSandboxSessionReadyEvidence,
+    ManagedMcpSandboxSessionRecoveryAudit, ManagedMcpSandboxSessionRecoveryExecutor,
+    ManagedMcpSandboxSessionRecoveryShard, ManagedMcpSandboxSessionRequest,
     MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest, MicroVmGrantRevoker,
     MicroVmSandboxWorkloadKind, NodeAttestorRoute, PreparedManagedMcpSandboxSession,
-    RevokeMicroVmSandboxGrants, SandboxCleanupDisposition, SandboxCleanupEvidence,
-    SandboxExecutionPolicyClosure, SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit,
-    ScopedArtifactGrant, ScopedSecretGrant, SANDBOX_PROTOCOL_VERSION,
+    RecoverExpiredManagedMcpSandboxSessionLease, RevokeMicroVmSandboxGrants,
+    SandboxCleanupDisposition, SandboxCleanupEvidence, SandboxExecutionPolicyClosure,
+    SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit,
+    ScanExpiredManagedMcpSandboxSessionLeases, ScopedArtifactGrant, ScopedSecretGrant,
+    SANDBOX_PROTOCOL_VERSION,
 };
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use std::collections::BTreeMap;
@@ -2800,6 +2804,105 @@ async fn managed_mcp_sandbox_session_admission_fixture(
 
     let executor_identity_digest = named_digest("managed-session-executor-identity");
     let attestor_route: NodeAttestorRoute = "https://10.0.0.7:9443".parse().unwrap();
+    let expired_claim = repository
+        .claim_managed_mcp_sandbox_sessions(ClaimSandboxJobs {
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x670),
+            worker_manifest_digest: winner.request.executor_worker_manifest_digest.clone(),
+            isolation_backend_contract_digest: winner
+                .request
+                .isolation_backend_contract_digest
+                .clone(),
+            executor_identity_digest: named_digest("expired-managed-session-old-executor"),
+            attestor_route: attestor_route.clone(),
+            limit: 1,
+            lease_milliseconds: 1_000,
+            lease_token_digests: vec![named_digest("expired-managed-session-lease")],
+        })
+        .await
+        .unwrap();
+    assert_eq!(expired_claim.len(), 1);
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET heartbeat_at = clock_timestamp() - interval '2 seconds',
+            lease_expires_at = clock_timestamp() - interval '1 second'
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+        "#,
+    )
+    .bind(winner.request.identity.tenant_id.to_string())
+    .bind(winner.request.identity.physical_job_id.to_string())
+    .bind(i64::try_from(expired_claim[0].fence.expected_version).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+    let recovery_executor = ManagedMcpSandboxSessionRecoveryExecutor {
+        worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x671),
+        worker_manifest_digest: winner.request.executor_worker_manifest_digest.clone(),
+        isolation_backend_contract_digest: winner.request.isolation_backend_contract_digest.clone(),
+        executor_identity_digest: named_digest("managed-session-recovery-executor"),
+        attestor_route: attestor_route.clone(),
+    };
+    let page = repository
+        .scan_expired_managed_mcp_sandbox_session_leases(
+            ScanExpiredManagedMcpSandboxSessionLeases {
+                executor: recovery_executor.clone(),
+                shard: ManagedMcpSandboxSessionRecoveryShard { index: 0, count: 1 },
+                after: None,
+                limit: 1,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.records.len(), 1);
+    assert_eq!(page.records[0].request, winner.request);
+    assert_eq!(
+        page.records[0].previous_worker_process_generation_id,
+        expired_claim[0].fence.worker_process_generation_id
+    );
+    let mut recovery = RecoverExpiredManagedMcpSandboxSessionLease {
+        audit: ManagedMcpSandboxSessionRecoveryAudit {
+            tenant_id: winner.request.identity.tenant_id.clone(),
+            recovery_process_generation_id: recovery_executor.worker_process_generation_id.clone(),
+            receipt_id: id(ResourceKind::Receipt, 0x672),
+            event_id: id(ResourceKind::Event, 0x673),
+            outbox_id: id(ResourceKind::OutboxEvent, 0x674),
+            idempotency_key_digest: named_digest("placeholder"),
+            request_digest: named_digest("placeholder"),
+            receipt_expires_at: now + Duration::hours(2),
+        },
+        executor: recovery_executor,
+        expired: page.records[0].clone(),
+        action: ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted {
+            recovery_evidence_digest: named_digest("managed-session-lease-expired"),
+        },
+        quota_entry_ids: vec![],
+    };
+    recovery.audit.idempotency_key_digest = recovery.canonical_idempotency_key_digest().unwrap();
+    recovery.audit.request_digest = recovery.canonical_request_digest().unwrap();
+    assert!(matches!(
+        repository
+            .recover_expired_managed_mcp_sandbox_session_lease(recovery.clone())
+            .await
+            .unwrap(),
+        CommandOutcome::Applied(_)
+    ));
+    assert!(matches!(
+        repository
+            .recover_expired_managed_mcp_sandbox_session_lease(recovery)
+            .await
+            .unwrap(),
+        CommandOutcome::Replayed(_)
+    ));
+    let requeued: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+        "SELECT state, worker_id, lease_expires_at FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(winner.request.identity.tenant_id.to_string())
+    .bind(winner.request.identity.physical_job_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(requeued, ("ready".to_owned(), None, None));
+
     let generic_claim = repository
         .claim_sandbox_jobs(ClaimSandboxJobs {
             worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x67f),

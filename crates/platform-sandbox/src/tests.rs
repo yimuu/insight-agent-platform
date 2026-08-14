@@ -1766,6 +1766,273 @@ async fn managed_session_loss_terminalizes_the_physical_job_before_rebuild() {
     assert_eq!(cleanup.evidence_digest, sha('1'));
 }
 
+fn managed_recovery_executor(
+    request: &ManagedMcpSandboxSessionRequest,
+    worker_suffix: u16,
+    executor_identity_digest: insight_platform_contracts::Sha256Digest,
+) -> ManagedMcpSandboxSessionRecoveryExecutor {
+    ManagedMcpSandboxSessionRecoveryExecutor {
+        worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, worker_suffix),
+        worker_manifest_digest: request.executor_worker_manifest_digest.clone(),
+        isolation_backend_contract_digest: request.isolation_backend_contract_digest.clone(),
+        executor_identity_digest,
+        attestor_route: attestor_route(),
+    }
+}
+
+fn managed_recovery_command(
+    expired: ExpiredManagedMcpSandboxSessionLease,
+    executor: ManagedMcpSandboxSessionRecoveryExecutor,
+    action: ManagedMcpSandboxSessionLeaseRecoveryAction,
+    base: u16,
+    now: DateTime<Utc>,
+) -> RecoverExpiredManagedMcpSandboxSessionLease {
+    let terminal = !matches!(
+        &action,
+        ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted { .. }
+    );
+    let mut command = RecoverExpiredManagedMcpSandboxSessionLease {
+        audit: ManagedMcpSandboxSessionRecoveryAudit {
+            tenant_id: expired.request.identity.tenant_id.clone(),
+            recovery_process_generation_id: executor.worker_process_generation_id.clone(),
+            receipt_id: id(ResourceKind::Receipt, base),
+            event_id: id(ResourceKind::Event, base + 1),
+            outbox_id: id(ResourceKind::OutboxEvent, base + 2),
+            idempotency_key_digest: sha('0'),
+            request_digest: sha('0'),
+            receipt_expires_at: now + ChronoDuration::minutes(5),
+        },
+        executor,
+        expired,
+        action,
+        quota_entry_ids: if terminal {
+            (base + 3..base + 7)
+                .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                .collect()
+        } else {
+            vec![]
+        },
+    };
+    command.audit.idempotency_key_digest = command.canonical_idempotency_key_digest().unwrap();
+    command.audit.request_digest = command.canonical_request_digest().unwrap();
+    command
+}
+
+#[test]
+fn managed_expired_accepted_lease_requeues_before_deadline_and_times_out_after_it() {
+    let now = Utc::now();
+    let (mut logical, admission) = managed_mcp_session_fixture(now);
+    let accepted =
+        decide_accept_managed_mcp_sandbox_session(&logical, &admission, now, limits()).unwrap();
+    logical.version += 1;
+    logical.payload = accepted.logical_payload.clone();
+    logical.state = accepted.logical_state;
+    let old_worker = id(ResourceKind::WorkerProcessGeneration, 330);
+    let leased = decide_claim(
+        &accepted.physical_job,
+        now,
+        old_worker.clone(),
+        sha('a'),
+        LeasePolicy {
+            requested_milliseconds: 10,
+            hard_maximum_milliseconds: 100,
+        },
+    )
+    .unwrap();
+    let lease = leased.lease.as_ref().unwrap();
+    let observed_at = lease.expires_at + ChronoDuration::milliseconds(1);
+    let expired = ExpiredManagedMcpSandboxSessionLease {
+        request: admission.request.clone(),
+        usage_reservation_id: admission.usage_reservation_id.clone(),
+        observed_job_version: leased.version,
+        observed_lease_generation: leased.lease_generation,
+        previous_worker_process_generation_id: old_worker,
+        lease_expires_at: lease.expires_at,
+        database_observed_at: observed_at,
+        physical_state: SandboxJobState::Accepted,
+        executor_identity_digest: None,
+        attestor_route: None,
+        phase_evidence_digest: None,
+        prepared_binding: None,
+        ready_binding: None,
+    };
+    let recovery_executor = managed_recovery_executor(&admission.request, 331, sha('b'));
+    let requeue = managed_recovery_command(
+        expired.clone(),
+        recovery_executor.clone(),
+        ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted {
+            recovery_evidence_digest: sha('c'),
+        },
+        332,
+        observed_at,
+    );
+    let requeued = decide_expired_managed_mcp_sandbox_session_lease(
+        &logical,
+        &leased,
+        &accepted.physical_payload,
+        &requeue,
+        observed_at,
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(requeued.physical_job.state, JobState::Ready);
+    assert!(requeued.physical_job.lease.is_none());
+    assert_eq!(requeued.logical_payload, logical.payload);
+    assert_eq!(requeued.logical_state, logical.state);
+
+    let timed_out_at = leased.deadline + ChronoDuration::milliseconds(1);
+    let mut timeout_expired = expired;
+    timeout_expired.database_observed_at = timed_out_at;
+    let timeout = managed_recovery_command(
+        timeout_expired,
+        recovery_executor,
+        ManagedMcpSandboxSessionLeaseRecoveryAction::TimeoutUnstarted {
+            recovery_evidence_digest: sha('d'),
+        },
+        340,
+        timed_out_at,
+    );
+    let timed_out = decide_expired_managed_mcp_sandbox_session_lease(
+        &logical,
+        &leased,
+        &accepted.physical_payload,
+        &timeout,
+        timed_out_at,
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(timed_out.physical_job.state, JobState::TimedOut);
+    assert_eq!(
+        timed_out.physical_payload.physical_state,
+        SandboxJobState::TimedOut
+    );
+    assert_eq!(timed_out.logical_state, McpSubscriptionState::Failed);
+    assert_eq!(
+        timed_out.logical_payload.session.state,
+        insight_platform_contracts::McpSessionState::Failed
+    );
+}
+
+#[tokio::test]
+async fn managed_expired_running_lease_requires_old_process_and_exact_provider_destruction() {
+    let now = Utc::now();
+    let (authority, provider, establish) = managed_session_worker_fixture(now, false);
+    let worker = ManagedMcpSandboxSessionWorker::new(authority.clone(), provider, limits());
+    worker.establish(establish).await.unwrap();
+    let state = authority.state.lock().unwrap();
+    let logical = state.logical.clone();
+    let physical_job = state.physical_job.clone();
+    let physical_payload = state.physical_payload.clone();
+    drop(state);
+    let lease = physical_job.lease.as_ref().unwrap();
+    let observed_at = lease.expires_at + ChronoDuration::milliseconds(1);
+    let expired = ExpiredManagedMcpSandboxSessionLease {
+        request: physical_payload.request.as_ref().clone(),
+        usage_reservation_id: id(ResourceKind::UsageReservation, 79),
+        observed_job_version: physical_job.version,
+        observed_lease_generation: physical_job.lease_generation,
+        previous_worker_process_generation_id: lease.worker_process_generation_id.clone(),
+        lease_expires_at: lease.expires_at,
+        database_observed_at: observed_at,
+        physical_state: physical_payload.physical_state,
+        executor_identity_digest: physical_payload.executor_identity_digest.clone(),
+        attestor_route: physical_payload.attestor_route.clone(),
+        phase_evidence_digest: physical_payload.phase_evidence_digest.clone(),
+        prepared_binding: physical_payload.prepared_binding.clone(),
+        ready_binding: physical_payload.ready_binding.clone(),
+    };
+    let process_absence = SandboxProcessGenerationAbsenceEvidence {
+        schema_version: 1,
+        tenant_id: expired.request.identity.tenant_id.clone(),
+        sandbox_job_id: expired.request.identity.sandbox_job_id.clone(),
+        request_digest: expired.request.request_digest.clone(),
+        previous_worker_process_generation_id: expired
+            .previous_worker_process_generation_id
+            .clone(),
+        executor_identity_digest: expired.executor_identity_digest.clone().unwrap(),
+        attestor_identity_digest: sha('4'),
+        attestor_route: expired.attestor_route.clone().unwrap(),
+        disposition: SandboxProcessGenerationIsolationDisposition::ProcessAbsent,
+        observed_at,
+        evidence_digest: sha('0'),
+    }
+    .seal()
+    .unwrap();
+    let prepared = expired.prepared_binding.as_ref().unwrap();
+    let cleanup_observed_at = observed_at + ChronoDuration::milliseconds(1);
+    let destroyed = ManagedMcpSandboxSessionDestroyedEvidence {
+        schema_version: 1,
+        identity: expired.request.identity.clone(),
+        request_digest: expired.request.request_digest.clone(),
+        worker_process_generation_id: expired.previous_worker_process_generation_id.clone(),
+        provider_process_generation_id: prepared.provider_process_generation_id.clone(),
+        lease_generation: expired.observed_lease_generation,
+        executor_identity_digest: prepared.executor_identity_digest.clone(),
+        sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
+        cleanup: SandboxCleanupEvidence {
+            disposition: SandboxCleanupDisposition::Destroyed,
+            sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
+            grants_revoked: true,
+            ephemeral_storage_destroyed: true,
+            observed_at: cleanup_observed_at,
+            evidence_digest: sha('5'),
+        },
+        evidence_digest: sha('0'),
+    }
+    .seal()
+    .unwrap();
+    let evidence = ManagedMcpSandboxSessionExpiredLeaseEvidence {
+        schema_version: 1,
+        process_absence,
+        provider_cleanup: Some(ManagedMcpSandboxSessionCleanupOutcome::Destroyed(destroyed)),
+        canonical_digest: sha('0'),
+    }
+    .seal()
+    .unwrap();
+    let recovery_executor = managed_recovery_executor(&expired.request, 350, sha('6'));
+    let command = managed_recovery_command(
+        expired.clone(),
+        recovery_executor,
+        ManagedMcpSandboxSessionLeaseRecoveryAction::MarkLost {
+            evidence: Box::new(evidence.clone()),
+        },
+        351,
+        cleanup_observed_at,
+    );
+    let lost = decide_expired_managed_mcp_sandbox_session_lease(
+        &logical,
+        &physical_job,
+        &physical_payload,
+        &command,
+        cleanup_observed_at,
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(lost.physical_job.state, JobState::ReconciliationRequired);
+    assert_eq!(lost.physical_payload.physical_state, SandboxJobState::Lost);
+    assert_eq!(lost.logical_state, McpSubscriptionState::Pending);
+    assert!(lost.logical_payload.managed_sandbox_session.is_none());
+    assert!(lost.logical_payload.full_reconcile_required);
+
+    let absent = ManagedMcpSandboxSessionAbsenceEvidence {
+        schema_version: 1,
+        identity: expired.request.identity.clone(),
+        request_digest: expired.request.request_digest.clone(),
+        worker_process_generation_id: expired.previous_worker_process_generation_id.clone(),
+        lease_generation: expired.observed_lease_generation,
+        observed_at: cleanup_observed_at,
+        evidence_digest: sha('0'),
+    }
+    .seal()
+    .unwrap();
+    let mut invalid = evidence;
+    invalid.provider_cleanup = Some(ManagedMcpSandboxSessionCleanupOutcome::Absent(absent));
+    invalid = invalid.seal().unwrap();
+    assert!(invalid
+        .validate_for(&expired, cleanup_observed_at, limits())
+        .is_err());
+}
+
 #[test]
 fn managed_session_opaque_claims_bind_both_process_generations_and_the_exact_vm() {
     let now = Utc::now();
