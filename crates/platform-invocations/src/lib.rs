@@ -876,15 +876,25 @@ impl CapabilityInvocationPayload {
             InvocationState::AwaitingInput => {
                 self.current_job_id.is_some()
                     && self.input_task_id.is_some()
-                    && matches!(
-                        &self.detached_pending,
+                    && match &self.detached_pending {
+                        // Ordinary remote Capability execution keeps the exact input request in
+                        // its fenced Job payload. The Invocation owns only the interaction ID.
+                        None => true,
+                        // A detached Managed MCP Sandbox Job is already terminal, so its logical
+                        // continuation must remain on the Invocation until the next Job exists.
                         Some(CapabilityDetachedPending::InputRequired {
                             request,
                             resolution: None,
                             ..
-                        })
-                            if self.input_task_id.as_ref() == Some(&request.input_task_id)
-                    )
+                        }) => self.input_task_id.as_ref() == Some(&request.input_task_id),
+                        Some(
+                            CapabilityDetachedPending::InputRequired {
+                                resolution: Some(_),
+                                ..
+                            }
+                            | CapabilityDetachedPending::RemoteTask { .. },
+                        ) => false,
+                    }
                     && self.result.is_none()
                     && self.failure.is_none()
             }
