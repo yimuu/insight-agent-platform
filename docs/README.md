@@ -32,7 +32,11 @@
 [`specs/`](specs/README.md) 描述已经形成实施和验收边界、但尚未完全成为当前可执行合同的目标设计。
 规范中的新 API、配置、schema 和容量数字在实现及 conformance evidence 完成前均不是当前行为。
 
-当前没有活动设计规范。最近完成的
+当前活动设计为 [Platform v2 clean-cut 规范集合](specs/platform-v2/00-overview.md)。00～18 已完成
+[全量 cross-review](specs/platform-v2/cross-review.md)，Accepted 基线已冻结；当前正按
+[依赖驱动的分阶段实现计划](specs/platform-v2/implementation-plan.md)执行 Phase 1 PostgreSQL Authority。Phase 0
+Contract Foundation 已通过退出门禁；当前 Phase 1 仍只在隔离 candidate schema 中实现，不改变 `insight.agent/v1`
+当前合同；“v2”是架构代号，目标公共合同仍使用 `/v1`，并在交付时 clean replacement 旧实现。最近完成的
 [MCP 完整支持规范](archive/specs/2026-07-30-complete-mcp-support.md)及其
 [资格验收](archive/qualifications/2026-07-30-complete-mcp-qualification.md)已归档；当前合同见
 [MCP 使用、运行与安全合同](current/mcp.md)。Provider Catalog 优化见

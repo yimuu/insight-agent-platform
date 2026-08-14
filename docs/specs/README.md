@@ -11,7 +11,14 @@
 
 ## 当前规范
 
-当前没有尚未完成的活动设计规范。
+- [Platform v2 clean-cut 规范集合](platform-v2/00-overview.md)：重新定义 Agent、Skill、Capability、
+  Context、MCP、Subagent、Model、Sandbox 与 Artifact 的最优边界。00～18 已完成
+  [全量 cross-review](platform-v2/cross-review.md)，Accepted 基线已冻结；当前正遵循
+  [依赖驱动的分阶段实现计划](platform-v2/implementation-plan.md)执行 Phase 1 PostgreSQL Authority。Phase 0
+  Contract Foundation 已通过退出门禁；这些目标合同尚未改变 v1 当前行为；
+  其中“v2”是架构代号，交付时会由新的 `insight.platform/v1` 原位替换旧合同，不提供兼容或双栈；
+
+除上述规范外，当前没有其他尚未完成的活动设计规范。
 
 最近完成的规范：
 
