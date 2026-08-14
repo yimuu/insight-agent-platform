@@ -19,35 +19,40 @@ use insight_platform_sandbox::{
     AuthorizedManagedMcpSandboxSecretDelivery, ClaimSandboxJobs, ClaimedManagedMcpSandboxSession,
     ClaimedSandboxJob, CollectedSandbox, CommitManagedMcpSandboxSessionLost,
     CommitManagedMcpSandboxSessionPhase, CommitManagedMcpSandboxSessionReady, CommitSandboxOutcome,
-    CommitSandboxPhase, DestroySandbox, ExpiredManagedMcpSandboxSessionLease, ExpiredSandboxLease,
-    HeartbeatSandboxExecution, InstalledSandboxBackendDescriptor,
-    ManagedMcpSandboxSecretCommitOutcome, ManagedMcpSandboxSecretDeliveryAuthority,
-    ManagedMcpSandboxSecretDeliveryError, ManagedMcpSandboxSecretDeliveryRequest,
-    ManagedMcpSandboxSecretReservationOutcome, ManagedMcpSandboxSessionClaimAuthority,
-    ManagedMcpSandboxSessionCleanupOutcome, ManagedMcpSandboxSessionExecutionAuthority,
+    CommitSandboxPhase, DestroySandbox, ExpiredManagedMcpSandboxSessionLease,
+    ExpiredManagedMcpSandboxSessionLeasePage, ExpiredSandboxLease, HeartbeatSandboxExecution,
+    InstalledSandboxBackendDescriptor, ManagedMcpSandboxSecretCommitOutcome,
+    ManagedMcpSandboxSecretDeliveryAuthority, ManagedMcpSandboxSecretDeliveryError,
+    ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSecretReservationOutcome,
+    ManagedMcpSandboxSessionClaimAuthority, ManagedMcpSandboxSessionCleanupOutcome,
+    ManagedMcpSandboxSessionExecutionAuthority, ManagedMcpSandboxSessionLeaseRecoveryResult,
     ManagedMcpSandboxSessionLivenessEvidence, ManagedMcpSandboxSessionPhaseDecision,
-    ManagedMcpSandboxSessionProvider, ManagedMcpSandboxSessionRequest, MicroVmArtifactBroker,
-    MicroVmArtifactBrokerError, MicroVmArtifactReadRequest, MicroVmGrantRevocationError,
-    MicroVmGrantRevocationEvidence, MicroVmGrantRevoker, MicroVmIsolationProviderBackend,
-    MicroVmProviderExecutionFence, PreparedManagedMcpSandboxSession,
-    PreparedManagedMcpSandboxSessionActivation, PreparedSandbox,
-    ProveSandboxProcessGenerationAbsent, RegisterWasiExecutorProcessGeneration,
-    RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants, RunningSandbox, SandboxBackendFailure,
-    SandboxBackendFailureStage, SandboxClaimAuthority, SandboxClaimFailure, SandboxCleanupEvidence,
-    SandboxCommandLimits, SandboxExecutionAuthority, SandboxExecutionRequest,
-    SandboxExecutorBackend, SandboxIsolationBackendKind, SandboxLeaseRecoveryEvidence,
-    SandboxPhaseDecision, SandboxProcessGenerationAbsenceEvidence,
+    ManagedMcpSandboxSessionProvider, ManagedMcpSandboxSessionRecoveryAuthority,
+    ManagedMcpSandboxSessionRecoveryFailure, ManagedMcpSandboxSessionRequest,
+    MicroVmArtifactBroker, MicroVmArtifactBrokerError, MicroVmArtifactReadRequest,
+    MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence, MicroVmGrantRevoker,
+    MicroVmIsolationProviderBackend, MicroVmProviderExecutionFence,
+    PreparedManagedMcpSandboxSession, PreparedManagedMcpSandboxSessionActivation, PreparedSandbox,
+    ProveSandboxProcessGenerationAbsent, RecoverExpiredManagedMcpSandboxSessionLease,
+    RegisterWasiExecutorProcessGeneration, RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants,
+    RunningSandbox, SandboxBackendFailure, SandboxBackendFailureStage, SandboxClaimAuthority,
+    SandboxClaimFailure, SandboxCleanupEvidence, SandboxCommandLimits, SandboxExecutionAuthority,
+    SandboxExecutionRequest, SandboxExecutorBackend, SandboxIsolationBackendKind,
+    SandboxLeaseRecoveryEvidence, SandboxPhaseDecision, SandboxProcessGenerationAbsenceEvidence,
     SandboxProcessGenerationIsolation, SandboxProcessGenerationIsolationError,
-    SandboxTerminationEvidence, TerminateSandbox, VerifyWasiExecutorProcessGeneration,
-    WasiArtifactBroker, WasiArtifactBrokerError, WasiArtifactReadRequest,
-    WasiExecutorProcessAttestationAuthority, WasiExecutorProcessIdentityEvidence,
-    WasiExecutorProcessRegistrar, WasiExecutorProcessRegistrationError,
-    WasiExecutorProcessRegistrationVerifier, WasiExecutorRegistrationPeer,
-    WasiGrantRevocationError, WasiGrantRevocationEvidence, WasiGrantRevoker,
-    WasiValueValidationError, WasiValueValidationRequest, WasiValueValidator,
+    SandboxTerminationEvidence, ScanExpiredManagedMcpSandboxSessionLeases, TerminateSandbox,
+    VerifyWasiExecutorProcessGeneration, WasiArtifactBroker, WasiArtifactBrokerError,
+    WasiArtifactReadRequest, WasiExecutorProcessAttestationAuthority,
+    WasiExecutorProcessIdentityEvidence, WasiExecutorProcessRegistrar,
+    WasiExecutorProcessRegistrationError, WasiExecutorProcessRegistrationVerifier,
+    WasiExecutorRegistrationPeer, WasiGrantRevocationError, WasiGrantRevocationEvidence,
+    WasiGrantRevoker, WasiValueValidationError, WasiValueValidationRequest, WasiValueValidator,
 };
 #[cfg(test)]
-use insight_platform_sandbox::{MicroVmArtifactReadPurpose, MicroVmSandboxWorkloadKind};
+use insight_platform_sandbox::{
+    ManagedMcpSandboxSessionRecoveryExecutor, ManagedMcpSandboxSessionRecoveryShard,
+    MicroVmArtifactReadPurpose, MicroVmSandboxWorkloadKind,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{error::Error, fmt, sync::Arc};
@@ -304,6 +309,8 @@ pub struct SandboxInternalRpcLimits {
     maximum_message_bytes: usize,
     maximum_claim_batch: u16,
     maximum_lease_milliseconds: u64,
+    maximum_recovery_batch: u16,
+    maximum_recovery_shards: u16,
 }
 
 impl SandboxInternalRpcLimits {
@@ -315,14 +322,22 @@ impl SandboxInternalRpcLimits {
             .map_err(|_| SandboxRpcError::InvalidConfiguration)?;
         let maximum_claim_batch = u16::try_from(profile.run_scheduler.claim_batch.hard_max)
             .map_err(|_| SandboxRpcError::InvalidConfiguration)?;
+        let maximum_recovery_batch = u16::try_from(profile.control_data.recovery_batch.q1_default)
+            .map_err(|_| SandboxRpcError::InvalidConfiguration)?;
+        let maximum_recovery_shards = u16::try_from(profile.control_data.recovery_shards.hard_max)
+            .map_err(|_| SandboxRpcError::InvalidConfiguration)?;
         let limits = Self {
             maximum_message_bytes,
             maximum_claim_batch,
             maximum_lease_milliseconds: profile.run_scheduler.lease_milliseconds.hard_max,
+            maximum_recovery_batch,
+            maximum_recovery_shards,
         };
         if maximum_message_bytes == 0
             || maximum_claim_batch == 0
             || limits.maximum_lease_milliseconds == 0
+            || maximum_recovery_batch == 0
+            || maximum_recovery_shards == 0
         {
             return Err(SandboxRpcError::InvalidConfiguration);
         }
@@ -1265,6 +1280,67 @@ impl ManagedMcpSandboxSessionExecutionAuthority for SandboxManagedMcpSessionAuth
             Box::pin(client.commit_managed_mcp_sandbox_session_lost(request))
         })
         .await
+    }
+}
+
+#[async_trait]
+impl ManagedMcpSandboxSessionRecoveryAuthority for SandboxManagedMcpSessionAuthorityGrpcClient {
+    async fn scan_expired_managed_mcp_sandbox_session_leases(
+        &self,
+        command: ScanExpiredManagedMcpSandboxSessionLeases,
+    ) -> Result<ExpiredManagedMcpSandboxSessionLeasePage, ManagedMcpSandboxSessionRecoveryFailure>
+    {
+        command
+            .validate(
+                self.limits.maximum_recovery_batch,
+                self.limits.maximum_recovery_shards,
+            )
+            .map_err(|_| ManagedMcpSandboxSessionRecoveryFailure::InvariantViolation)?;
+        self.unary(&command, |client, request| {
+            Box::pin(client.scan_expired_managed_mcp_sandbox_session_leases(request))
+        })
+        .await
+        .map_err(map_managed_recovery_client_error)
+    }
+
+    async fn recover_expired_managed_mcp_sandbox_session_lease(
+        &self,
+        command: RecoverExpiredManagedMcpSandboxSessionLease,
+    ) -> Result<
+        CommandOutcome<ManagedMcpSandboxSessionLeaseRecoveryResult>,
+        ManagedMcpSandboxSessionRecoveryFailure,
+    > {
+        command
+            .executor
+            .validate()
+            .map_err(|_| ManagedMcpSandboxSessionRecoveryFailure::InvariantViolation)?;
+        self.unary(&command, |client, request| {
+            Box::pin(client.recover_expired_managed_mcp_sandbox_session_lease(request))
+        })
+        .await
+        .map_err(map_managed_recovery_client_error)
+    }
+}
+
+#[async_trait]
+impl SandboxProcessGenerationIsolation for SandboxManagedMcpSessionAuthorityGrpcClient {
+    async fn prove_absent(
+        &self,
+        request: ProveSandboxProcessGenerationAbsent,
+    ) -> Result<SandboxProcessGenerationAbsenceEvidence, SandboxProcessGenerationIsolationError>
+    {
+        request
+            .validate()
+            .map_err(|_| SandboxProcessGenerationIsolationError::Rejected)?;
+        self.unary(&request, |client, request| {
+            Box::pin(client.prove_managed_mcp_sandbox_session_process_absent(request))
+        })
+        .await
+        .map_err(|error| match error {
+            SandboxRpcError::Unavailable => SandboxProcessGenerationIsolationError::Unavailable,
+            SandboxRpcError::FirstWinnerLost => SandboxProcessGenerationIsolationError::StillLive,
+            _ => SandboxProcessGenerationIsolationError::Rejected,
+        })
     }
 }
 
@@ -2336,6 +2412,20 @@ fn registration_status(error: WasiExecutorProcessRegistrationError) -> Status {
     }
 }
 
+fn process_isolation_status(error: SandboxProcessGenerationIsolationError) -> Status {
+    match error {
+        SandboxProcessGenerationIsolationError::StillLive => {
+            Status::aborted("process generation is still live")
+        }
+        SandboxProcessGenerationIsolationError::Unavailable => {
+            Status::unavailable("process isolation attestor unavailable")
+        }
+        SandboxProcessGenerationIsolationError::Rejected => {
+            Status::failed_precondition("process absence proof rejected")
+        }
+    }
+}
+
 impl<B, V, G, P> SandboxBrokerGrpcService<B, V, G, P> {
     pub fn new(
         artifacts: Arc<B>,
@@ -2548,9 +2638,10 @@ impl<A, V> SandboxManagedMcpSessionAuthorityService
 where
     A: ManagedMcpSandboxSessionClaimAuthority
         + ManagedMcpSandboxSessionExecutionAuthority
+        + ManagedMcpSandboxSessionRecoveryAuthority
         + 'static,
     A::Error: fmt::Display + Send + Sync,
-    V: WasiExecutorProcessRegistrationVerifier + 'static,
+    V: WasiExecutorProcessRegistrationVerifier + SandboxProcessGenerationIsolation + 'static,
 {
     async fn claim_managed_mcp_sandbox_sessions(
         &self,
@@ -2638,6 +2729,90 @@ where
             .commit_managed_mcp_sandbox_session_lost(command)
             .await
             .map_err(authority_status)?;
+        Ok(Response::new(encode(&result, self.limits)?))
+    }
+
+    async fn scan_expired_managed_mcp_sandbox_session_leases(
+        &self,
+        request: Request<ClosedSandboxEnvelope>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let command: ScanExpiredManagedMcpSandboxSessionLeases =
+            decode(request.into_inner(), self.limits)?;
+        command
+            .validate(
+                self.limits.maximum_recovery_batch,
+                self.limits.maximum_recovery_shards,
+            )
+            .map_err(|_| Status::invalid_argument("invalid Managed MCP recovery scan"))?;
+        self.process_registration
+            .verify_registered(VerifyWasiExecutorProcessGeneration {
+                worker_process_generation_id: command.executor.worker_process_generation_id.clone(),
+                worker_manifest_digest: command.executor.worker_manifest_digest.clone(),
+                isolation_backend_contract_digest: command
+                    .executor
+                    .isolation_backend_contract_digest
+                    .clone(),
+                executor_identity_digest: command.executor.executor_identity_digest.clone(),
+                attestor_route: command.executor.attestor_route.clone(),
+            })
+            .await
+            .map_err(registration_status)?;
+        let result = self
+            .authority
+            .scan_expired_managed_mcp_sandbox_session_leases(command)
+            .await
+            .map_err(managed_recovery_status)?;
+        Ok(Response::new(encode(&result, self.limits)?))
+    }
+
+    async fn prove_managed_mcp_sandbox_session_process_absent(
+        &self,
+        request: Request<ClosedSandboxEnvelope>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let request: ProveSandboxProcessGenerationAbsent =
+            decode(request.into_inner(), self.limits)?;
+        request
+            .validate()
+            .map_err(|_| Status::invalid_argument("invalid process absence request"))?;
+        let evidence = self
+            .process_registration
+            .prove_absent(request.clone())
+            .await
+            .map_err(process_isolation_status)?;
+        evidence
+            .validate_for(&request, chrono::Utc::now())
+            .map_err(|_| Status::failed_precondition("process absence evidence is invalid"))?;
+        Ok(Response::new(encode(&evidence, self.limits)?))
+    }
+
+    async fn recover_expired_managed_mcp_sandbox_session_lease(
+        &self,
+        request: Request<ClosedSandboxEnvelope>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let command: RecoverExpiredManagedMcpSandboxSessionLease =
+            decode(request.into_inner(), self.limits)?;
+        command
+            .executor
+            .validate()
+            .map_err(|_| Status::invalid_argument("invalid Managed MCP recovery Executor"))?;
+        self.process_registration
+            .verify_registered(VerifyWasiExecutorProcessGeneration {
+                worker_process_generation_id: command.executor.worker_process_generation_id.clone(),
+                worker_manifest_digest: command.executor.worker_manifest_digest.clone(),
+                isolation_backend_contract_digest: command
+                    .executor
+                    .isolation_backend_contract_digest
+                    .clone(),
+                executor_identity_digest: command.executor.executor_identity_digest.clone(),
+                attestor_route: command.executor.attestor_route.clone(),
+            })
+            .await
+            .map_err(registration_status)?;
+        let result = self
+            .authority
+            .recover_expired_managed_mcp_sandbox_session_lease(command)
+            .await
+            .map_err(managed_recovery_status)?;
         Ok(Response::new(encode(&result, self.limits)?))
     }
 }
@@ -2881,6 +3056,34 @@ fn claim_status(error: SandboxClaimFailure) -> Status {
     }
 }
 
+fn managed_recovery_status(error: ManagedMcpSandboxSessionRecoveryFailure) -> Status {
+    match error {
+        ManagedMcpSandboxSessionRecoveryFailure::Unavailable => {
+            Status::unavailable("Managed MCP recovery authority unavailable")
+        }
+        ManagedMcpSandboxSessionRecoveryFailure::FirstWinnerLost => {
+            Status::aborted("Managed MCP recovery lost the first-winner race")
+        }
+        ManagedMcpSandboxSessionRecoveryFailure::InvariantViolation => {
+            Status::failed_precondition("Managed MCP recovery invariant failed")
+        }
+    }
+}
+
+fn map_managed_recovery_client_error(
+    error: SandboxRpcError,
+) -> ManagedMcpSandboxSessionRecoveryFailure {
+    match error {
+        SandboxRpcError::Unavailable => ManagedMcpSandboxSessionRecoveryFailure::Unavailable,
+        SandboxRpcError::FirstWinnerLost => {
+            ManagedMcpSandboxSessionRecoveryFailure::FirstWinnerLost
+        }
+        SandboxRpcError::InvalidConfiguration
+        | SandboxRpcError::InvalidEnvelope
+        | SandboxRpcError::Rejected => ManagedMcpSandboxSessionRecoveryFailure::InvariantViolation,
+    }
+}
+
 fn authority_status(error: impl fmt::Display) -> Status {
     let _ = error;
     Status::failed_precondition("Sandbox authority rejected command")
@@ -3109,6 +3312,7 @@ mod tests {
     struct RecordingAuthority {
         claims: AtomicUsize,
         managed_heartbeats: AtomicUsize,
+        managed_recovery_scans: AtomicUsize,
     }
 
     #[async_trait]
@@ -3190,6 +3394,32 @@ mod tests {
             _command: CommitManagedMcpSandboxSessionLost,
         ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
             Err(SandboxRpcError::Rejected)
+        }
+    }
+
+    #[async_trait]
+    impl ManagedMcpSandboxSessionRecoveryAuthority for RecordingAuthority {
+        async fn scan_expired_managed_mcp_sandbox_session_leases(
+            &self,
+            _command: ScanExpiredManagedMcpSandboxSessionLeases,
+        ) -> Result<ExpiredManagedMcpSandboxSessionLeasePage, ManagedMcpSandboxSessionRecoveryFailure>
+        {
+            self.managed_recovery_scans.fetch_add(1, Ordering::AcqRel);
+            Ok(ExpiredManagedMcpSandboxSessionLeasePage {
+                records: Vec::new(),
+                next_cursor: None,
+                exhausted: true,
+            })
+        }
+
+        async fn recover_expired_managed_mcp_sandbox_session_lease(
+            &self,
+            _command: RecoverExpiredManagedMcpSandboxSessionLease,
+        ) -> Result<
+            CommandOutcome<ManagedMcpSandboxSessionLeaseRecoveryResult>,
+            ManagedMcpSandboxSessionRecoveryFailure,
+        > {
+            Err(ManagedMcpSandboxSessionRecoveryFailure::FirstWinnerLost)
         }
     }
 
@@ -3783,7 +4013,7 @@ mod tests {
         let service = proto::sandbox_managed_mcp_session_authority_service_server::SandboxManagedMcpSessionAuthorityServiceServer::new(
             SandboxManagedMcpSessionAuthorityGrpcService::new(
                 Arc::clone(&authority),
-                process_registration,
+                Arc::clone(&process_registration),
                 limits,
             ),
         )
@@ -3843,6 +4073,51 @@ mod tests {
             .is_empty());
         assert_eq!(authority.claims.load(Ordering::Acquire), 1);
 
+        let recovery_scan = ScanExpiredManagedMcpSandboxSessionLeases {
+            executor: ManagedMcpSandboxSessionRecoveryExecutor {
+                worker_process_generation_id: command.worker_process_generation_id.clone(),
+                worker_manifest_digest: command.worker_manifest_digest.clone(),
+                isolation_backend_contract_digest: command
+                    .isolation_backend_contract_digest
+                    .clone(),
+                executor_identity_digest: command.executor_identity_digest.clone(),
+                attestor_route: command.attestor_route.clone(),
+            },
+            shard: ManagedMcpSandboxSessionRecoveryShard { index: 0, count: 1 },
+            after: None,
+            limit: 1,
+        };
+        let page = client
+            .scan_expired_managed_mcp_sandbox_session_leases(recovery_scan.clone())
+            .await
+            .unwrap();
+        assert!(page.exhausted);
+        assert!(page.records.is_empty());
+        assert_eq!(authority.managed_recovery_scans.load(Ordering::Acquire), 1);
+
+        let absence_request = ProveSandboxProcessGenerationAbsent {
+            tenant_id: ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7())
+                .unwrap(),
+            sandbox_job_id: ResourceId::from_uuid_v7(
+                ResourceKind::SandboxJob,
+                uuid::Uuid::now_v7(),
+            )
+            .unwrap(),
+            request_digest: format!("sha256:{}", "f".repeat(64)).parse().unwrap(),
+            previous_worker_process_generation_id: ResourceId::from_uuid_v7(
+                ResourceKind::WorkerProcessGeneration,
+                uuid::Uuid::now_v7(),
+            )
+            .unwrap(),
+            executor_identity_digest: format!("sha256:{}", "1".repeat(64)).parse().unwrap(),
+            attestor_route: attestor_route(),
+        };
+        let absence = client.prove_absent(absence_request.clone()).await.unwrap();
+        absence
+            .validate_for(&absence_request, chrono::Utc::now())
+            .unwrap();
+        assert_eq!(process_registration.calls.load(Ordering::Acquire), 1);
+
         let heartbeat = HeartbeatSandboxExecution {
             tenant_id: ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7())
                 .unwrap(),
@@ -3891,6 +4166,14 @@ mod tests {
             .unwrap_err();
         assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
         assert_eq!(authority.managed_heartbeats.load(Ordering::Acquire), 1);
+        let rejected = unauthorized
+            .scan_expired_managed_mcp_sandbox_session_leases(Request::new(
+                encode(&recovery_scan, limits).unwrap(),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
+        assert_eq!(authority.managed_recovery_scans.load(Ordering::Acquire), 1);
 
         shutdown_sender.send(()).unwrap();
         server.await.unwrap();

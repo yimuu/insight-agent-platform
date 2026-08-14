@@ -20,6 +20,9 @@ service SandboxManagedMcpSessionAuthorityService {
   rpc CommitManagedMcpSandboxSessionReady(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
   rpc HeartbeatManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
   rpc CommitManagedMcpSandboxSessionLost(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc ScanExpiredManagedMcpSandboxSessionLeases(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc ProveManagedMcpSandboxSessionProcessAbsent(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc RecoverExpiredManagedMcpSandboxSessionLease(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
 }
 
 service SandboxExecutorBrokerService {
