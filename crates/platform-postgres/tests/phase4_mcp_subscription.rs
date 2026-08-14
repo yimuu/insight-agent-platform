@@ -49,12 +49,15 @@ use insight_platform_postgres::{
 };
 use insight_platform_sandbox::{
     AcceptManagedMcpSandboxSession, ClaimSandboxJobs, CommitManagedMcpSandboxSessionPhase,
-    CommitManagedMcpSandboxSessionReady, ManagedMcpSandboxSessionCallback,
+    CommitManagedMcpSandboxSessionReady, ManagedMcpSandboxSecretCommitOutcome,
+    ManagedMcpSandboxSecretDeliveryAuthority, ManagedMcpSandboxSecretDeliveryRequest,
+    ManagedMcpSandboxSecretReservationOutcome, ManagedMcpSandboxSessionCallback,
     ManagedMcpSandboxSessionReadyEvidence, ManagedMcpSandboxSessionRequest,
     MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest, MicroVmGrantRevoker,
-    MicroVmSandboxWorkloadKind, NodeAttestorRoute, RevokeMicroVmSandboxGrants,
-    SandboxExecutionPolicyClosure, SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit,
-    ScopedArtifactGrant, ScopedSecretGrant, SANDBOX_PROTOCOL_VERSION,
+    MicroVmSandboxWorkloadKind, NodeAttestorRoute, PreparedManagedMcpSandboxSession,
+    RevokeMicroVmSandboxGrants, SandboxExecutionPolicyClosure, SandboxNetworkMode,
+    SandboxResourceEnvelope, SandboxWorkerAudit, ScopedArtifactGrant, ScopedSecretGrant,
+    SANDBOX_PROTOCOL_VERSION,
 };
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use std::collections::BTreeMap;
@@ -2902,6 +2905,22 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         Err(RepositoryError::StaleFence)
     ));
 
+    let provider_process_generation_id = id(ResourceKind::WorkerProcessGeneration, 0x6b8);
+    let sandbox_identity_digest = named_digest("managed-session-sandbox-identity");
+    let prepared_session = PreparedManagedMcpSandboxSession {
+        schema_version: 1,
+        identity: winner.request.identity.clone(),
+        request_digest: winner.request.request_digest.clone(),
+        worker_process_generation_id: sandbox_worker.clone(),
+        provider_process_generation_id: provider_process_generation_id.clone(),
+        lease_generation: prepared.physical_job.lease_generation,
+        executor_identity_digest: executor_identity_digest.clone(),
+        sandbox_identity_digest: sandbox_identity_digest.clone(),
+        prepare_evidence_digest: named_digest("managed-session-provider-prepare-evidence"),
+        canonical_digest: named_digest("placeholder"),
+    }
+    .seal()
+    .unwrap();
     let mut starting = CommitManagedMcpSandboxSessionPhase {
         audit: phase_audit(0x6b0, "managed-session-starting-key"),
         identity: winner.request.identity.clone(),
@@ -2914,7 +2933,7 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         target: SandboxJobState::Starting,
         executor_identity_digest: executor_identity_digest.clone(),
         attestor_route: attestor_route.clone(),
-        phase_evidence_digest: named_digest("managed-session-starting-evidence"),
+        phase_evidence_digest: prepared_session.canonical_digest.clone(),
     };
     starting.audit.request_digest = starting.canonical_request_digest().unwrap();
     let started = match repository
@@ -2937,8 +2956,6 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         McpSessionState::Initializing
     );
 
-    let provider_process_generation_id = id(ResourceKind::WorkerProcessGeneration, 0x6b8);
-    let sandbox_identity_digest = named_digest("managed-session-sandbox-identity");
     let artifact_read = MicroVmArtifactReadRequest {
         workload_kind: MicroVmSandboxWorkloadKind::ManagedMcpSubscriptionSession,
         tenant_id: winner.request.identity.tenant_id.clone(),
@@ -2978,6 +2995,102 @@ async fn managed_mcp_sandbox_session_admission_fixture(
             .await,
         Err(ArtifactObjectReadAuthorityError::Denied)
     ));
+
+    let secret_delivery_fence = DomainJobFence {
+        expected_version: started.physical_job.version,
+        worker_process_generation_id: sandbox_worker.clone(),
+        lease_generation: started.physical_job.lease_generation,
+        token_digest: claim.fence.token_digest.clone(),
+    };
+    let secret_delivery = ManagedMcpSandboxSecretDeliveryRequest {
+        schema_version: 1,
+        receipt_id: id(ResourceKind::Receipt, 0x6bb),
+        event_id: id(ResourceKind::Event, 0x6bc),
+        outbox_id: id(ResourceKind::OutboxEvent, 0x6bd),
+        idempotency_key_digest: named_digest("managed-session-secret-delivery-key"),
+        identity: winner.request.identity.clone(),
+        request_digest: winner.request.request_digest.clone(),
+        fence: secret_delivery_fence,
+        prepared: prepared_session.clone(),
+        secret_grant: winner.request.secret_grants[0].clone(),
+        canonical_digest: named_digest("placeholder"),
+    }
+    .seal()
+    .unwrap();
+    let authorization = match repository
+        .reserve_managed_mcp_sandbox_secret_delivery(&secret_delivery)
+        .await
+        .unwrap()
+    {
+        ManagedMcpSandboxSecretReservationOutcome::Authorized(authorization) => *authorization,
+        other => panic!("fresh Secret delivery must reserve: {other:?}"),
+    };
+    assert_eq!(
+        repository
+            .reserve_managed_mcp_sandbox_secret_delivery(&secret_delivery)
+            .await
+            .unwrap(),
+        ManagedMcpSandboxSecretReservationOutcome::AlreadyReserved
+    );
+    let delivered = match repository
+        .commit_managed_mcp_sandbox_secret_delivery(
+            &secret_delivery,
+            &authorization,
+            &named_digest("managed-session-secret-resolution-evidence"),
+        )
+        .await
+        .unwrap()
+    {
+        ManagedMcpSandboxSecretCommitOutcome::Delivered(evidence) => evidence,
+        ManagedMcpSandboxSecretCommitOutcome::Replayed(_) => {
+            panic!("fresh Secret delivery commit must apply")
+        }
+    };
+    assert!(matches!(
+        repository
+            .commit_managed_mcp_sandbox_secret_delivery(
+                &secret_delivery,
+                &authorization,
+                &named_digest("managed-session-secret-resolution-evidence"),
+            )
+            .await
+            .unwrap(),
+        ManagedMcpSandboxSecretCommitOutcome::Replayed(ref replayed) if replayed == &delivered
+    ));
+    assert_eq!(
+        repository
+            .reserve_managed_mcp_sandbox_secret_delivery(&secret_delivery)
+            .await
+            .unwrap(),
+        ManagedMcpSandboxSecretReservationOutcome::AlreadyDelivered
+    );
+    let mut excess_delivery = secret_delivery.clone();
+    excess_delivery.receipt_id = id(ResourceKind::Receipt, 0x6be);
+    excess_delivery.event_id = id(ResourceKind::Event, 0x6bf);
+    excess_delivery.outbox_id = id(ResourceKind::OutboxEvent, 0x6c8);
+    excess_delivery.idempotency_key_digest = named_digest("managed-session-secret-excess-key");
+    excess_delivery.canonical_digest = named_digest("placeholder");
+    excess_delivery = excess_delivery.seal().unwrap();
+    assert!(repository
+        .reserve_managed_mcp_sandbox_secret_delivery(&excess_delivery)
+        .await
+        .is_err());
+    let durable_secret_delivery: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND receipt_id = $2 AND state = 'succeeded' AND disposition = 'delivered'),
+            (SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND event_id = $3 AND event_type = 'sandbox.secret_delivered'),
+            (SELECT count(*) FROM insight_platform.outbox_events WHERE tenant_id = $1 AND outbox_id = $4)
+        "#,
+    )
+    .bind(fixture.subscription.tenant_id.to_string())
+    .bind(secret_delivery.receipt_id.to_string())
+    .bind(secret_delivery.event_id.to_string())
+    .bind(secret_delivery.outbox_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(durable_secret_delivery, (1, 1, 1));
 
     let ready_evidence = ManagedMcpSandboxSessionReadyEvidence {
         schema_version: 1,

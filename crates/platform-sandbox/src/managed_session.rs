@@ -828,6 +828,7 @@ pub struct PreparedManagedMcpSandboxSession {
     pub identity: ManagedMcpSandboxSessionIdentity,
     pub request_digest: Sha256Digest,
     pub worker_process_generation_id: ResourceId,
+    pub provider_process_generation_id: ResourceId,
     pub lease_generation: u64,
     pub executor_identity_digest: Sha256Digest,
     pub sandbox_identity_digest: Sha256Digest,
@@ -851,6 +852,7 @@ impl PreparedManagedMcpSandboxSession {
             || self.identity != request.identity
             || self.request_digest != request.request_digest
             || self.worker_process_generation_id != fence.worker_process_generation_id
+            || self.provider_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
             || self.lease_generation != fence.lease_generation
             || &self.executor_identity_digest != executor_identity_digest
             || digest_without_field(self, "canonical_digest")? != self.canonical_digest
@@ -859,6 +861,188 @@ impl PreparedManagedMcpSandboxSession {
         }
         Ok(())
     }
+}
+
+/// One fail-closed Secret delivery attempt for a prepared Managed MCP microVM.
+///
+/// The request is credential-free. The Egress Broker first reserves the exact read with the
+/// Controller, resolves the Secret through its existing KMS/Provider composition, then commits
+/// delivery before releasing bytes to the Provider. A replay never receives a second
+/// authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedMcpSandboxSecretDeliveryRequest {
+    pub schema_version: u32,
+    pub receipt_id: ResourceId,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+    pub idempotency_key_digest: Sha256Digest,
+    pub identity: ManagedMcpSandboxSessionIdentity,
+    pub request_digest: Sha256Digest,
+    pub fence: JobFence,
+    pub prepared: PreparedManagedMcpSandboxSession,
+    pub secret_grant: ScopedSecretGrant,
+    pub canonical_digest: Sha256Digest,
+}
+
+impl ManagedMcpSandboxSecretDeliveryRequest {
+    pub fn seal(mut self) -> Result<Self, SandboxContractError> {
+        self.canonical_digest = digest_without_field(&self, "canonical_digest")?;
+        Ok(self)
+    }
+
+    pub fn validate_shape(&self) -> Result<(), SandboxContractError> {
+        self.secret_grant.validate_for(
+            &self.identity.tenant_id,
+            &self.identity.sandbox_job_id,
+            &self.secret_grant.runtime_digest,
+            self.secret_grant.expires_at,
+        )?;
+        if self.schema_version != 1
+            || self.receipt_id.kind() != ResourceKind::Receipt
+            || self.event_id.kind() != ResourceKind::Event
+            || self.outbox_id.kind() != ResourceKind::OutboxEvent
+            || self.identity != self.prepared.identity
+            || self.request_digest != self.prepared.request_digest
+            || self.fence.worker_process_generation_id != self.prepared.worker_process_generation_id
+            || self.fence.lease_generation != self.prepared.lease_generation
+            || self.fence.expected_version == 0
+            || self.secret_grant.tenant_id != self.identity.tenant_id
+            || self.secret_grant.sandbox_job_id != self.identity.sandbox_job_id
+            || digest_without_field(self, "canonical_digest")? != self.canonical_digest
+        {
+            return Err(SandboxContractError::InvalidSecretGrant);
+        }
+        Ok(())
+    }
+}
+
+/// Controller-issued authorization for exactly one fresh receipt reservation. It contains no
+/// provider reference or Secret bytes and is never returned for a replayed reservation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizedManagedMcpSandboxSecretDelivery {
+    pub schema_version: u32,
+    pub receipt_id: ResourceId,
+    pub tenant_id: ResourceId,
+    pub sandbox_job_id: ResourceId,
+    pub secret_binding: insight_platform_contracts::ExactSecretBindingRef,
+    pub resolved_binding_generation: u64,
+    pub delivery_request_digest: Sha256Digest,
+    pub expires_at: DateTime<Utc>,
+    pub authorization_digest: Sha256Digest,
+}
+
+impl AuthorizedManagedMcpSandboxSecretDelivery {
+    pub fn seal(mut self) -> Result<Self, SandboxContractError> {
+        self.authorization_digest = digest_without_field(&self, "authorization_digest")?;
+        Ok(self)
+    }
+
+    pub fn validate_for(
+        &self,
+        request: &ManagedMcpSandboxSecretDeliveryRequest,
+    ) -> Result<(), SandboxContractError> {
+        request.validate_shape()?;
+        if self.schema_version != 1
+            || self.receipt_id != request.receipt_id
+            || self.tenant_id != request.identity.tenant_id
+            || self.sandbox_job_id != request.identity.sandbox_job_id
+            || self.secret_binding != request.secret_grant.secret_binding
+            || self.resolved_binding_generation != request.secret_grant.resolved_binding_generation
+            || self.delivery_request_digest != request.canonical_digest
+            || self.expires_at != request.secret_grant.expires_at
+            || digest_without_field(self, "authorization_digest")? != self.authorization_digest
+        {
+            return Err(SandboxContractError::InvalidSecretGrant);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedMcpSandboxSecretReservationOutcome {
+    Authorized(Box<AuthorizedManagedMcpSandboxSecretDelivery>),
+    AlreadyReserved,
+    AlreadyDelivered,
+}
+
+/// Credential-free durable proof that the Egress Broker completed resolution and the Controller
+/// revalidated the current Job/lease/grant immediately before material release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedMcpSandboxSecretDeliveryEvidence {
+    pub schema_version: u32,
+    pub receipt_id: ResourceId,
+    pub tenant_id: ResourceId,
+    pub sandbox_job_id: ResourceId,
+    pub secret_binding_id: ResourceId,
+    pub resolved_binding_generation: u64,
+    pub authorization_digest: Sha256Digest,
+    pub resolution_evidence_digest: Sha256Digest,
+    pub delivered_at: DateTime<Utc>,
+    pub evidence_digest: Sha256Digest,
+}
+
+impl ManagedMcpSandboxSecretDeliveryEvidence {
+    pub fn seal(mut self) -> Result<Self, SandboxContractError> {
+        self.evidence_digest = digest_without_field(&self, "evidence_digest")?;
+        Ok(self)
+    }
+
+    pub fn validate_for(
+        &self,
+        request: &ManagedMcpSandboxSecretDeliveryRequest,
+        authorization: &AuthorizedManagedMcpSandboxSecretDelivery,
+    ) -> Result<(), SandboxContractError> {
+        authorization.validate_for(request)?;
+        if self.schema_version != 1
+            || self.receipt_id != request.receipt_id
+            || self.tenant_id != request.identity.tenant_id
+            || self.sandbox_job_id != request.identity.sandbox_job_id
+            || self.secret_binding_id != request.secret_grant.secret_binding.secret_binding_id
+            || self.resolved_binding_generation != request.secret_grant.resolved_binding_generation
+            || self.authorization_digest != authorization.authorization_digest
+            || self.delivered_at >= authorization.expires_at
+            || digest_without_field(self, "evidence_digest")? != self.evidence_digest
+        {
+            return Err(SandboxContractError::InvalidSecretGrant);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedMcpSandboxSecretCommitOutcome {
+    Delivered(ManagedMcpSandboxSecretDeliveryEvidence),
+    Replayed(ManagedMcpSandboxSecretDeliveryEvidence),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedMcpSandboxSecretDeliveryError {
+    Unavailable,
+    Denied,
+    OutcomeUncertain,
+}
+
+/// Durable Controller authority used only by the Egress Broker. PostgreSQL stores one bounded
+/// receipt per read, so `maximum_reads` is enforced without a Secret-specific table or mutation
+/// of the Job version fence.
+#[async_trait]
+pub trait ManagedMcpSandboxSecretDeliveryAuthority: Send + Sync {
+    async fn reserve_managed_mcp_sandbox_secret_delivery(
+        &self,
+        request: &ManagedMcpSandboxSecretDeliveryRequest,
+    ) -> Result<ManagedMcpSandboxSecretReservationOutcome, ManagedMcpSandboxSecretDeliveryError>;
+
+    async fn commit_managed_mcp_sandbox_secret_delivery(
+        &self,
+        request: &ManagedMcpSandboxSecretDeliveryRequest,
+        authorization: &AuthorizedManagedMcpSandboxSecretDelivery,
+        resolution_evidence_digest: &Sha256Digest,
+    ) -> Result<ManagedMcpSandboxSecretCommitOutcome, ManagedMcpSandboxSecretDeliveryError>;
 }
 
 /// Provider-side prepared activation. The provider retains the live byte stream behind this
@@ -1081,7 +1265,7 @@ where
             SandboxJobState::Starting,
             &command.executor_identity_digest,
             &command.attestor_route,
-            prepared.prepare_evidence_digest.clone(),
+            prepared.canonical_digest.clone(),
         ) {
             Ok(command) => command,
             Err(contract) => {

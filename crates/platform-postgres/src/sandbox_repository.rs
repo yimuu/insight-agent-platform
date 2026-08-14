@@ -48,24 +48,27 @@ use insight_platform_mcp_host::{
 use insight_platform_sandbox::{
     decide_accept, decide_advance_phase, decide_begin_execution, decide_execution_outcome,
     decide_expired_lease_recovery, decide_prestart_control, AcceptSandboxExecution,
-    ClaimSandboxJobs, ClaimedSandboxJob, CommitSandboxOutcome, CommitSandboxPhase,
-    ExpiredSandboxLease, HeartbeatSandboxExecution, ManagedMcpSandboxSessionRequest,
-    MergeSandboxCapabilityOutcome, MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest,
-    MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence, MicroVmGrantRevoker,
-    MicroVmSandboxWorkloadKind, PendingSandboxCapabilityOutcome, RecoverExpiredSandboxLease,
-    RecoverSandboxControlSignals, ResolveSandboxControlEvent, RevokeMicroVmSandboxGrants,
-    RevokeWasiSandboxGrants, SandboxClaimAuthority, SandboxClaimFailure, SandboxCommandLimits,
-    SandboxControlAuthority, SandboxControlScanCursor, SandboxControlSignalPage,
-    SandboxControlSignalSource, SandboxExecutionAuthority, SandboxExecutionJobPayload,
-    SandboxExecutionOutcome, SandboxExecutionPolicyClosure, SandboxExecutionRequest,
-    SandboxExecutionSource, SandboxGatewayAuthority, SandboxJobPayload, SandboxLeaseRecoveryAction,
-    SandboxLeaseRecoveryAuthority, SandboxLeaseRecoveryDisposition, SandboxLeaseRecoveryResult,
-    SandboxPhaseDecision, SandboxPrestartControlOutcome, SandboxRecoveryAudit,
-    SandboxResourceEnvelope, SandboxResourceUsage, SandboxStopReason, SandboxStopSignal,
-    SandboxWorkerAudit, ScopedArtifactGrant, ScopedSecretGrant, StopUnclaimedSandboxJob,
-    WasiArtifactReadPurpose, WasiArtifactReadRequest, WasiGrantRevocationError,
-    WasiGrantRevocationEvidence, WasiGrantRevoker, WasiValueDirection, WasiValueValidationError,
-    WasiValueValidationRequest, WasiValueValidator, SANDBOX_QUOTA_LINES,
+    AuthorizedManagedMcpSandboxSecretDelivery, ClaimSandboxJobs, ClaimedSandboxJob,
+    CommitSandboxOutcome, CommitSandboxPhase, ExpiredSandboxLease, HeartbeatSandboxExecution,
+    ManagedMcpSandboxSecretCommitOutcome, ManagedMcpSandboxSecretDeliveryAuthority,
+    ManagedMcpSandboxSecretDeliveryError, ManagedMcpSandboxSecretDeliveryEvidence,
+    ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSecretReservationOutcome,
+    ManagedMcpSandboxSessionRequest, MergeSandboxCapabilityOutcome, MicroVmArtifactReadPurpose,
+    MicroVmArtifactReadRequest, MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence,
+    MicroVmGrantRevoker, MicroVmSandboxWorkloadKind, PendingSandboxCapabilityOutcome,
+    RecoverExpiredSandboxLease, RecoverSandboxControlSignals, ResolveSandboxControlEvent,
+    RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants, SandboxClaimAuthority,
+    SandboxClaimFailure, SandboxCommandLimits, SandboxControlAuthority, SandboxControlScanCursor,
+    SandboxControlSignalPage, SandboxControlSignalSource, SandboxExecutionAuthority,
+    SandboxExecutionJobPayload, SandboxExecutionOutcome, SandboxExecutionPolicyClosure,
+    SandboxExecutionRequest, SandboxExecutionSource, SandboxGatewayAuthority, SandboxJobPayload,
+    SandboxLeaseRecoveryAction, SandboxLeaseRecoveryAuthority, SandboxLeaseRecoveryDisposition,
+    SandboxLeaseRecoveryResult, SandboxPhaseDecision, SandboxPrestartControlOutcome,
+    SandboxRecoveryAudit, SandboxResourceEnvelope, SandboxResourceUsage, SandboxStopReason,
+    SandboxStopSignal, SandboxWorkerAudit, ScopedArtifactGrant, ScopedSecretGrant,
+    StopUnclaimedSandboxJob, WasiArtifactReadPurpose, WasiArtifactReadRequest,
+    WasiGrantRevocationError, WasiGrantRevocationEvidence, WasiGrantRevoker, WasiValueDirection,
+    WasiValueValidationError, WasiValueValidationRequest, WasiValueValidator, SANDBOX_QUOTA_LINES,
 };
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -506,6 +509,422 @@ impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for PgRepository {
             .await
             .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
         Ok(authorized)
+    }
+}
+
+#[async_trait::async_trait]
+impl ManagedMcpSandboxSecretDeliveryAuthority for PgRepository {
+    async fn reserve_managed_mcp_sandbox_secret_delivery(
+        &self,
+        request: &ManagedMcpSandboxSecretDeliveryRequest,
+    ) -> Result<ManagedMcpSandboxSecretReservationOutcome, ManagedMcpSandboxSecretDeliveryError>
+    {
+        request
+            .validate_shape()
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Denied)?;
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Unavailable)?;
+        let database_now = database_now(&mut transaction)
+            .await
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Unavailable)?;
+        authorize_managed_mcp_secret_delivery(
+            &mut transaction,
+            request,
+            database_now,
+            self.sandbox_limits(),
+        )
+        .await
+        .map_err(classify_managed_mcp_secret_delivery_repository_error)?;
+
+        if let Some((receipt_id, request_digest, state, payload)) =
+            load_managed_mcp_secret_delivery_receipt(&mut transaction, request)
+                .await
+                .map_err(classify_managed_mcp_secret_delivery_repository_error)?
+        {
+            if receipt_id != request.receipt_id.to_string()
+                || request_digest != request.canonical_digest.to_string()
+            {
+                return Err(ManagedMcpSandboxSecretDeliveryError::Denied);
+            }
+            if state == "processing" {
+                let authorization: AuthorizedManagedMcpSandboxSecretDelivery =
+                    decode_versioned_payload(&payload, "Managed MCP Secret delivery authorization")
+                        .map_err(classify_managed_mcp_secret_delivery_repository_error)?;
+                authorization
+                    .validate_for(request)
+                    .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Denied)?;
+            } else if state != "succeeded" {
+                return Err(ManagedMcpSandboxSecretDeliveryError::OutcomeUncertain);
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Unavailable)?;
+            return match state.as_str() {
+                "processing" => Ok(ManagedMcpSandboxSecretReservationOutcome::AlreadyReserved),
+                "succeeded" => Ok(ManagedMcpSandboxSecretReservationOutcome::AlreadyDelivered),
+                _ => unreachable!("closed receipt state was checked before commit"),
+            };
+        }
+
+        let consumed: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM insight_platform.receipts
+            WHERE tenant_id = $1
+              AND receipt_kind = 'sandbox_secret_delivery'
+              AND scope_kind = 'sandbox_job' AND scope_id = $2
+              AND dedupe_owner_id = $3 AND operation = 'sandbox.secret.deliver'
+              AND state IN ('processing', 'succeeded')
+            "#,
+        )
+        .bind(request.identity.tenant_id.to_string())
+        .bind(request.identity.sandbox_job_id.to_string())
+        .bind(
+            request
+                .secret_grant
+                .secret_binding
+                .secret_binding_id
+                .to_string(),
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Unavailable)?;
+        if consumed < 0
+            || u64::try_from(consumed).ok() >= Some(u64::from(request.secret_grant.maximum_reads))
+        {
+            return Err(ManagedMcpSandboxSecretDeliveryError::Denied);
+        }
+
+        let authorization = AuthorizedManagedMcpSandboxSecretDelivery {
+            schema_version: 1,
+            receipt_id: request.receipt_id.clone(),
+            tenant_id: request.identity.tenant_id.clone(),
+            sandbox_job_id: request.identity.sandbox_job_id.clone(),
+            secret_binding: request.secret_grant.secret_binding.clone(),
+            resolved_binding_generation: request.secret_grant.resolved_binding_generation,
+            delivery_request_digest: request.canonical_digest.clone(),
+            expires_at: request.secret_grant.expires_at,
+            authorization_digest: request.canonical_digest.clone(),
+        }
+        .seal()
+        .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Denied)?;
+        let payload = TypedPayload::from_versioned(1, &authorization, 262_144)
+            .map_err(classify_managed_mcp_secret_delivery_repository_error)?;
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.receipts (
+                tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+                dedupe_owner_id, operation, idempotency_key_digest, request_digest, state,
+                payload_schema_version, payload, payload_digest, expires_at
+            ) VALUES ($1, $2, 'sandbox_secret_delivery', 'sandbox_job', $3,
+                      $4, 'sandbox.secret.deliver', $5, $6, 'processing', $7, $8, $9, $10)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(request.identity.tenant_id.to_string())
+        .bind(request.receipt_id.to_string())
+        .bind(request.identity.sandbox_job_id.to_string())
+        .bind(
+            request
+                .secret_grant
+                .secret_binding
+                .secret_binding_id
+                .to_string(),
+        )
+        .bind(request.idempotency_key_digest.to_string())
+        .bind(request.canonical_digest.to_string())
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .bind(request.secret_grant.expires_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Unavailable)?
+        .rows_affected();
+        if inserted != 1 {
+            return Err(ManagedMcpSandboxSecretDeliveryError::OutcomeUncertain);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Unavailable)?;
+        Ok(ManagedMcpSandboxSecretReservationOutcome::Authorized(
+            Box::new(authorization),
+        ))
+    }
+
+    async fn commit_managed_mcp_sandbox_secret_delivery(
+        &self,
+        request: &ManagedMcpSandboxSecretDeliveryRequest,
+        authorization: &AuthorizedManagedMcpSandboxSecretDelivery,
+        resolution_evidence_digest: &Sha256Digest,
+    ) -> Result<ManagedMcpSandboxSecretCommitOutcome, ManagedMcpSandboxSecretDeliveryError> {
+        request
+            .validate_shape()
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Denied)?;
+        authorization
+            .validate_for(request)
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Denied)?;
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Unavailable)?;
+        let database_now = database_now(&mut transaction)
+            .await
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Unavailable)?;
+        authorize_managed_mcp_secret_delivery(
+            &mut transaction,
+            request,
+            database_now,
+            self.sandbox_limits(),
+        )
+        .await
+        .map_err(classify_managed_mcp_secret_delivery_repository_error)?;
+        let row = sqlx::query(
+            r#"
+            SELECT request_digest, state, payload_schema_version, payload, payload_digest
+            FROM insight_platform.receipts
+            WHERE tenant_id = $1 AND receipt_id = $2
+              AND receipt_kind = 'sandbox_secret_delivery'
+              AND scope_kind = 'sandbox_job' AND scope_id = $3
+              AND dedupe_owner_id = $4 AND operation = 'sandbox.secret.deliver'
+              AND idempotency_key_digest = $5
+            FOR UPDATE
+            "#,
+        )
+        .bind(request.identity.tenant_id.to_string())
+        .bind(request.receipt_id.to_string())
+        .bind(request.identity.sandbox_job_id.to_string())
+        .bind(
+            request
+                .secret_grant
+                .secret_binding
+                .secret_binding_id
+                .to_string(),
+        )
+        .bind(request.idempotency_key_digest.to_string())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Unavailable)?
+        .ok_or(ManagedMcpSandboxSecretDeliveryError::Denied)?;
+        if row
+            .try_get::<String, _>("request_digest")
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::OutcomeUncertain)?
+            != request.canonical_digest.to_string()
+        {
+            return Err(ManagedMcpSandboxSecretDeliveryError::Denied);
+        }
+        let state: String = row
+            .try_get("state")
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::OutcomeUncertain)?;
+        let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")
+            .map_err(classify_managed_mcp_secret_delivery_repository_error)?;
+        if state == "succeeded" {
+            let evidence: ManagedMcpSandboxSecretDeliveryEvidence =
+                decode_versioned_payload(&payload, "Managed MCP Secret delivery evidence")
+                    .map_err(classify_managed_mcp_secret_delivery_repository_error)?;
+            evidence
+                .validate_for(request, authorization)
+                .map_err(|_| ManagedMcpSandboxSecretDeliveryError::OutcomeUncertain)?;
+            if evidence.resolution_evidence_digest != *resolution_evidence_digest {
+                return Err(ManagedMcpSandboxSecretDeliveryError::Denied);
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Unavailable)?;
+            return Ok(ManagedMcpSandboxSecretCommitOutcome::Replayed(evidence));
+        }
+        if state != "processing" {
+            return Err(ManagedMcpSandboxSecretDeliveryError::OutcomeUncertain);
+        }
+        let stored: AuthorizedManagedMcpSandboxSecretDelivery =
+            decode_versioned_payload(&payload, "Managed MCP Secret delivery authorization")
+                .map_err(classify_managed_mcp_secret_delivery_repository_error)?;
+        if stored != *authorization {
+            return Err(ManagedMcpSandboxSecretDeliveryError::Denied);
+        }
+        let evidence = ManagedMcpSandboxSecretDeliveryEvidence {
+            schema_version: 1,
+            receipt_id: request.receipt_id.clone(),
+            tenant_id: request.identity.tenant_id.clone(),
+            sandbox_job_id: request.identity.sandbox_job_id.clone(),
+            secret_binding_id: request
+                .secret_grant
+                .secret_binding
+                .secret_binding_id
+                .clone(),
+            resolved_binding_generation: request.secret_grant.resolved_binding_generation,
+            authorization_digest: authorization.authorization_digest.clone(),
+            resolution_evidence_digest: resolution_evidence_digest.clone(),
+            delivered_at: database_now,
+            evidence_digest: request.canonical_digest.clone(),
+        }
+        .seal()
+        .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Denied)?;
+        evidence
+            .validate_for(request, authorization)
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Denied)?;
+        let receipt_payload = TypedPayload::from_versioned(1, &evidence, 262_144)
+            .map_err(classify_managed_mcp_secret_delivery_repository_error)?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE insight_platform.receipts
+            SET state = 'succeeded', disposition = 'delivered',
+                payload_schema_version = $3, payload = $4, payload_digest = $5,
+                completed_at = $6
+            WHERE tenant_id = $1 AND receipt_id = $2 AND state = 'processing'
+            "#,
+        )
+        .bind(request.identity.tenant_id.to_string())
+        .bind(request.receipt_id.to_string())
+        .bind(receipt_payload.schema_version)
+        .bind(&receipt_payload.value)
+        .bind(&receipt_payload.digest)
+        .bind(database_now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Unavailable)?
+        .rows_affected();
+        if updated != 1 {
+            return Err(ManagedMcpSandboxSecretDeliveryError::OutcomeUncertain);
+        }
+        append_scheduler_event(
+            &mut transaction,
+            &request.identity.tenant_id.to_string(),
+            &request.event_id,
+            &request.outbox_id,
+            "sandbox_secret_delivery",
+            &request.receipt_id.to_string(),
+            1,
+            None,
+            "sandbox.secret_delivered",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "authorization_digest": authorization.authorization_digest,
+                    "provider_process_generation_id": request.prepared.provider_process_generation_id,
+                    "resolved_binding_generation": request.secret_grant.resolved_binding_generation,
+                    "sandbox_identity_digest": request.prepared.sandbox_identity_digest,
+                    "sandbox_job_id": request.identity.sandbox_job_id,
+                    "secret_binding_id": request.secret_grant.secret_binding.secret_binding_id,
+                }),
+            )
+            .map_err(classify_managed_mcp_secret_delivery_repository_error)?,
+        )
+        .await
+        .map_err(classify_managed_mcp_secret_delivery_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Unavailable)?;
+        Ok(ManagedMcpSandboxSecretCommitOutcome::Delivered(evidence))
+    }
+}
+
+async fn authorize_managed_mcp_secret_delivery(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &ManagedMcpSandboxSecretDeliveryRequest,
+    database_now: DateTime<Utc>,
+    limits: SandboxCommandLimits,
+) -> Result<(), RepositoryError> {
+    request.validate_shape()?;
+    let (job, payload, _) = load_managed_mcp_sandbox_session_job(
+        transaction,
+        &request.identity.tenant_id,
+        &request.identity.physical_job_id,
+        limits,
+        true,
+    )
+    .await?;
+    let lease = job.lease.as_ref().ok_or(RepositoryError::StaleFence)?;
+    let executor_identity_digest = payload
+        .executor_identity_digest
+        .as_ref()
+        .ok_or(RepositoryError::StaleFence)?;
+    request
+        .prepared
+        .validate_for(&payload.request, &request.fence, executor_identity_digest)?;
+    if payload.physical_state != SandboxJobState::Starting
+        || payload.request.identity != request.identity
+        || payload.request.request_digest != request.request_digest
+        || payload.phase_evidence_digest.as_ref() != Some(&request.prepared.canonical_digest)
+        || job.version != request.fence.expected_version
+        || lease.worker_process_generation_id != request.fence.worker_process_generation_id
+        || lease.lease_generation != request.fence.lease_generation
+        || lease.token_digest != request.fence.token_digest
+        || lease.expires_at <= database_now
+        || request.secret_grant.expires_at <= database_now
+        || !payload
+            .request
+            .secret_grants
+            .iter()
+            .any(|grant| grant == &request.secret_grant)
+    {
+        return Err(RepositoryError::StaleFence);
+    }
+    lock_sandbox_secret_grants(
+        transaction,
+        &request.identity.tenant_id,
+        std::slice::from_ref(&request.secret_grant),
+    )
+    .await
+}
+
+async fn load_managed_mcp_secret_delivery_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &ManagedMcpSandboxSecretDeliveryRequest,
+) -> Result<Option<(String, String, String, TypedPayload)>, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT receipt_id, request_digest, state,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1
+          AND receipt_kind = 'sandbox_secret_delivery'
+          AND scope_kind = 'sandbox_job' AND scope_id = $2
+          AND dedupe_owner_id = $3 AND operation = 'sandbox.secret.deliver'
+          AND idempotency_key_digest = $4
+        FOR UPDATE
+        "#,
+    )
+    .bind(request.identity.tenant_id.to_string())
+    .bind(request.identity.sandbox_job_id.to_string())
+    .bind(
+        request
+            .secret_grant
+            .secret_binding
+            .secret_binding_id
+            .to_string(),
+    )
+    .bind(request.idempotency_key_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    row.map(|row| {
+        Ok((
+            row.try_get("receipt_id")?,
+            row.try_get("request_digest")?,
+            row.try_get("state")?,
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?,
+        ))
+    })
+    .transpose()
+}
+
+fn classify_managed_mcp_secret_delivery_repository_error(
+    error: RepositoryError,
+) -> ManagedMcpSandboxSecretDeliveryError {
+    match error {
+        RepositoryError::Database(_) => ManagedMcpSandboxSecretDeliveryError::Unavailable,
+        RepositoryError::Conflict(_) | RepositoryError::IdempotencyConflict => {
+            ManagedMcpSandboxSecretDeliveryError::OutcomeUncertain
+        }
+        _ => ManagedMcpSandboxSecretDeliveryError::Denied,
     }
 }
 

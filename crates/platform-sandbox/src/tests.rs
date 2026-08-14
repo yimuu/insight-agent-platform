@@ -1147,6 +1147,7 @@ impl ManagedMcpSandboxSessionProvider for RecordingManagedSessionProvider {
             identity: request.identity.clone(),
             request_digest: request.request_digest.clone(),
             worker_process_generation_id: fence.worker_process_generation_id.clone(),
+            provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 36),
             lease_generation: fence.lease_generation,
             executor_identity_digest: executor_identity_digest.clone(),
             sandbox_identity_digest: sha('2'),
