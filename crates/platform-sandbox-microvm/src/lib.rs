@@ -28,12 +28,14 @@ use sha2::{Digest as _, Sha256};
 mod firecracker;
 mod guest_protocol;
 mod lifecycle;
+mod managed_guest_protocol;
 mod provider;
 mod system_host;
 
 pub use firecracker::*;
 pub use guest_protocol::*;
 pub use lifecycle::*;
+pub use managed_guest_protocol::*;
 pub use provider::*;
 pub use system_host::*;
 
