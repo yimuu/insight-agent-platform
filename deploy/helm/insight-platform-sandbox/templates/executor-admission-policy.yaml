@@ -16,13 +16,16 @@ spec:
         has(object.metadata.labels) &&
         object.metadata.labels['app.kubernetes.io/name'] == {{ .Chart.Name | quote }} &&
         object.metadata.labels['app.kubernetes.io/instance'] == {{ .Release.Name | quote }} &&
-        object.metadata.labels['app.kubernetes.io/component'] in ['attestor', 'executor-wasi']
-      message: only the installed attestor and WASI Executor pod roles are allowed
+        object.metadata.labels['app.kubernetes.io/component'] in ['attestor', 'executor-wasi', 'executor-microvm']
+      message: only the installed attestor, WASI Executor, and microVM Executor pod roles are allowed
     - expression: >-
         object.spec.automountServiceAccountToken == false &&
         !object.spec.hostNetwork && !object.spec.hostIPC &&
-        object.spec.nodeSelector['insight.platform/sandbox-node'] == 'true'
-      message: Sandbox execution pods require the exact node and API-token isolation contract
+        ((object.metadata.labels['app.kubernetes.io/component'] in ['attestor', 'executor-wasi'] &&
+          object.spec.nodeSelector['insight.platform/sandbox-node'] == 'true') ||
+         (object.metadata.labels['app.kubernetes.io/component'] == 'executor-microvm' &&
+          object.spec.nodeSelector['insight.platform/sandbox-microvm-node'] == 'true'))
+      message: Sandbox execution pods require their exact dedicated node and API-token isolation contract
     - expression: >-
         object.metadata.labels['app.kubernetes.io/component'] != 'executor-wasi' ||
         ((!has(object.spec.hostPID) || !object.spec.hostPID) &&
@@ -36,6 +39,27 @@ spec:
          object.spec.containers.all(c, !has(c.securityContext.privileged) || !c.securityContext.privileged) &&
          object.spec.containers.all(c, !has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.size() == 0))
       message: WASI Executor cannot receive host PID, extra host paths, privilege, or capabilities
+    - expression: >-
+        object.metadata.labels['app.kubernetes.io/component'] != 'executor-microvm' ||
+        ((!has(object.spec.hostPID) || !object.spec.hostPID) &&
+         object.spec.serviceAccountName == {{ include "insight-platform-sandbox.microVmExecutorName" . | quote }} &&
+         object.spec.containers.size() == 2 &&
+         object.spec.containers.exists_one(c, c.name == 'executor' && c.securityContext.runAsNonRoot &&
+           c.securityContext.runAsUser == 10001 &&
+           (!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+           (!has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.size() == 0) &&
+           !c.volumeMounts.exists(v, v.name in ['kvm', 'firecracker-jails', 'provider-state', 'host-cgroup', 'provider-tls'])) &&
+         object.spec.containers.exists_one(c, c.name == 'provider' && c.securityContext.runAsUser == 0 &&
+           c.securityContext.runAsGroup == 10001 && !c.securityContext.privileged &&
+           c.securityContext.capabilities.add == ['CHOWN', 'DAC_OVERRIDE', 'KILL', 'SETGID', 'SETUID', 'SYS_ADMIN', 'SYS_RESOURCE'] &&
+           !c.volumeMounts.exists(v, v.name in ['executor-tls', 'nats-tls', 'attestor-socket'])) &&
+         object.spec.volumes.filter(v, has(v.hostPath)).size() == 5 &&
+         object.spec.volumes.exists_one(v, v.name == 'attestor-socket' && has(v.hostPath) && v.hostPath.path == {{ .Values.attestor.hostPaths.socketDirectory | quote }} && v.hostPath.type == 'Directory') &&
+         object.spec.volumes.exists_one(v, v.name == 'kvm' && has(v.hostPath) && v.hostPath.path == {{ .Values.microVmExecutor.provider.hostPaths.kvm | quote }} && v.hostPath.type == 'CharDevice') &&
+         object.spec.volumes.exists_one(v, v.name == 'firecracker-jails' && has(v.hostPath) && v.hostPath.path == {{ .Values.microVmExecutor.provider.hostPaths.chrootBaseDirectory | quote }} && v.hostPath.type == 'DirectoryOrCreate') &&
+         object.spec.volumes.exists_one(v, v.name == 'provider-state' && has(v.hostPath) && v.hostPath.path == {{ .Values.microVmExecutor.provider.hostPaths.stateDirectory | quote }} && v.hostPath.type == 'DirectoryOrCreate') &&
+         object.spec.volumes.exists_one(v, v.name == 'host-cgroup' && has(v.hostPath) && v.hostPath.path == {{ .Values.microVmExecutor.provider.hostPaths.cgroup | quote }} && v.hostPath.type == 'Directory'))
+      message: microVM Executor and Provider must retain the exact split KVM, state, cgroup, credential, and capability profile
     - expression: >-
         object.metadata.labels['app.kubernetes.io/component'] != 'attestor' ||
         (object.spec.hostPID &&

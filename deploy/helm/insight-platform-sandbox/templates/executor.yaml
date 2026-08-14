@@ -67,7 +67,7 @@ spec:
             - {name: tmp, mountPath: /tmp}
       volumes:
         - {name: config, configMap: {name: {{ include "insight-platform-sandbox.executorName" . }}}}
-        - {name: tls, secret: {secretName: {{ .Values.tls.executorSecret }}, defaultMode: 0440}}
+        - {name: tls, secret: {secretName: {{ .Values.tls.wasiExecutorSecret }}, defaultMode: 0440}}
         - {name: nats-tls, secret: {secretName: {{ .Values.natsTls.existingSecret }}, defaultMode: 0440}}
         - {name: socket, hostPath: {path: {{ .Values.attestor.hostPaths.socketDirectory }}, type: Directory}}
         - {name: tmp, emptyDir: {sizeLimit: 64Mi}}

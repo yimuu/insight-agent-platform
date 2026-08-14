@@ -13,6 +13,24 @@
 {{- if empty .Values.executor.nodeSelector }}
 {{- fail "executor.nodeSelector is required" }}
 {{- end }}
+{{- if or (empty .Values.microVmExecutor.nodeSelector) (empty .Values.microVmExecutor.tolerations) }}
+{{- fail "microVmExecutor requires an exact nodeSelector and taint toleration" }}
+{{- end }}
+{{- if hasKey .Values.microVmExecutor.nodeSelector "insight.platform/sandbox-node" }}
+{{- fail "microVmExecutor must use a distinct microVM-only node selector" }}
+{{- end }}
+{{- if ne .Values.microVmExecutor.provider.installation.chroot_base_directory "/srv/insight-firecracker-jails" }}
+{{- fail "microVM provider chroot_base_directory must match its exact container mount" }}
+{{- end }}
+{{- if ne .Values.microVmExecutor.provider.stateDirectory "/var/lib/insight-sandbox-provider" }}
+{{- fail "microVM provider stateDirectory must match its exact container mount" }}
+{{- end }}
+{{- if or (empty .Values.microVmExecutor.provider.runtimes) (lt (int .Values.microVmExecutor.provider.maximumInstances) 1) }}
+{{- fail "microVM provider requires an installed runtime and bounded nonzero capacity" }}
+{{- end }}
+{{- if gt (int .Values.microVmExecutor.workerManifest.max_concurrency) (int .Values.microVmExecutor.provider.maximumInstances) }}
+{{- fail "microVM worker concurrency cannot exceed provider instance capacity" }}
+{{- end }}
 {{- if empty .Values.controller.attestor.allowedNodeCidrs }}
 {{- fail "controller.attestor.allowedNodeCidrs is required" }}
 {{- end }}
@@ -30,6 +48,9 @@
 {{- end }}
 {{- if or (empty .Values.networkPolicy.egressBrokerNamespaceSelector) (empty .Values.networkPolicy.egressBrokerPodSelector) }}
 {{- fail "Egress Broker NetworkPolicy selectors are required" }}
+{{- end }}
+{{- if or (lt (int .Values.networkPolicy.egressBrokerPort) 1) (gt (int .Values.networkPolicy.egressBrokerPort) 65535) }}
+{{- fail "networkPolicy.egressBrokerPort must be a valid fixed port" }}
 {{- end }}
 {{- if or (empty .Values.controller.workloadIdentity.roleArn) (empty .Values.controller.workloadIdentity.audience) }}
 {{- fail "controller.workloadIdentity roleArn and audience are required" }}

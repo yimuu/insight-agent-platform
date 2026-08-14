@@ -86,6 +86,77 @@ executor:
     requests: {cpu: "1", memory: 512Mi}
     limits: {cpu: "4", memory: 2Gi}
 
+microVmExecutor:
+  serviceAccount:
+    annotations: {}
+  nodeSelector:
+    insight.platform/sandbox-microvm-node: "true"
+  tolerations:
+    - {key: insight.platform/sandbox-microvm, operator: Equal, value: "true", effect: NoSchedule}
+  workerManifest:
+    manifest_version: 1
+    worker_role: sandbox-executor.microvm
+    work_class: sandbox
+    adapter_runtime_digest: sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+    protocol_version: 1
+    max_concurrency: 2
+    critical_control_reserved_slots: 1
+  backendContractDigest: sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  natsEndpoint: tls://nats.platform-runtime.svc:4222
+  receiptTtlSeconds: 7200
+  claimScanMilliseconds: 100
+  claimFailureBackoffMilliseconds: 25
+  drainGraceMilliseconds: 30000
+  controlRequestTimeoutMilliseconds: 5000
+  connectTimeoutMilliseconds: 5000
+  requestTimeoutMilliseconds: 30000
+  provider:
+    socketPath: /run/insight-sandbox-provider/provider.sock
+    tlsServerName: sandbox-provider.insight.internal
+    installation:
+      version: 1.12.1
+      firecracker_path: /opt/insight/firecracker/firecracker
+      firecracker_digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+      jailer_path: /opt/insight/firecracker/jailer
+      jailer_digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+      chroot_base_directory: /srv/insight-firecracker-jails
+      parent_cgroup: insight-sandbox
+    runtimes:
+      - runtime_family: managed_mcp_server
+        runtime_digest: sha256:3333333333333333333333333333333333333333333333333333333333333333
+        guest_kernel_digest: sha256:4444444444444444444444444444444444444444444444444444444444444444
+        guest_agent_digest: sha256:5555555555555555555555555555555555555555555555555555555555555555
+        guest_kernel_path: /opt/insight/runtimes/managed-mcp/vmlinux
+        rootfs_path: /opt/insight/runtimes/managed-mcp/rootfs.ext4
+        rootfs_bytes: 536870912
+    stateDirectory: /var/lib/insight-sandbox-provider
+    ephemeralUidBase: 100000
+    ephemeralGidBase: 100000
+    ephemeralIdentityCount: 1024
+    maximumInstances: 64
+    maximumTombstones: 256
+    tombstoneRetentionSeconds: 86400
+    maximumLifecycleEntries: 128
+    apiTimeoutMilliseconds: 3000
+    guestChannelTimeoutMilliseconds: 10000
+    socketPollMilliseconds: 25
+    processTerminationTimeoutMilliseconds: 5000
+    connectTimeoutMilliseconds: 3000
+    requestTimeoutMilliseconds: 10000
+    tlsHandshakeTimeoutMilliseconds: 3000
+    shutdownGraceMilliseconds: 30000
+    hostPaths:
+      kvm: /dev/kvm
+      chrootBaseDirectory: /var/lib/insight-firecracker-jails
+      stateDirectory: /var/lib/insight-sandbox-provider
+      cgroup: /sys/fs/cgroup
+    resources:
+      requests: {cpu: 500m, memory: 256Mi}
+      limits: {cpu: "2", memory: 1Gi}
+  resources:
+    requests: {cpu: "1", memory: 512Mi}
+    limits: {cpu: "4", memory: 2Gi}
+
 attestor:
   controllerPort: 7444
   maximumRegistrations: 10000
@@ -103,7 +174,9 @@ attestor:
 
 tls:
   controllerSecret: insight-platform-sandbox-controller-tls
-  executorSecret: insight-platform-sandbox-executor-tls
+  wasiExecutorSecret: insight-platform-sandbox-executor-wasi-tls
+  microVmExecutorSecret: insight-platform-sandbox-executor-microvm-tls
+  microVmProviderSecret: insight-platform-sandbox-provider-microvm-tls
   attestorSecret: insight-platform-sandbox-attestor-tls
   keys:
     controllerServerCa: controller-server-ca.pem
@@ -119,6 +192,12 @@ tls:
     executorClientPrivateKey: executor-client-key.pem
     attestorServerCertificate: attestor-server.pem
     attestorServerPrivateKey: attestor-server-key.pem
+    providerClientCa: provider-client-ca.pem
+    providerServerCertificate: provider-server.pem
+    providerServerPrivateKey: provider-server-key.pem
+    providerControllerCa: controller-server-ca.pem
+    providerClientCertificate: provider-client.pem
+    providerClientPrivateKey: provider-client-key.pem
 
 natsTls:
   existingSecret: insight-platform-sandbox-nats-tls
@@ -140,4 +219,5 @@ networkPolicy:
   workloadIdentityCidrs: [10.40.0.0/24]
   egressBrokerNamespaceSelector: {insight.platform/egress-namespace: "true"}
   egressBrokerPodSelector: {insight.platform/workload-role: egress-broker}
+  egressBrokerPort: 8443
   natsPort: 4222

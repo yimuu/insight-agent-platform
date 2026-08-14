@@ -4,5 +4,8 @@ Before install, replace every example CIDR/digest/endpoint and provide all refer
 database, NATS, and workload-identity authorities. The chart intentionally creates no
 credentials, no RBAC Role/RoleBinding, and no attestor Service.
 
-The attestor is the only workload with hostPID and hostPath access. The WASI Executor remains
-non-root, has no Kubernetes API token, and can reach only Controller, DNS, and NATS.
+The attestor is the only workload with hostPID. The WASI Executor remains non-root and mounts only
+the attestor socket. The microVM Executor is also non-root; only its node-local Provider container
+receives the exact KVM, cgroup, jail/state host paths and bounded Linux capabilities. Neither role
+receives a Kubernetes API token. Install the microVM DaemonSet only on the tainted KVM node pool
+after replacing every runtime asset digest and path with CandidateManifest-qualified values.

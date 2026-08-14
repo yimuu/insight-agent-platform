@@ -24,3 +24,21 @@ metadata:
   namespace: {{ .Values.namespaces.executor }}
 data:
   executor.json: {{ $executorConfig | quote }}
+---
+{{- $microVmExecutorConfig := include "insight-platform-sandbox.microVmExecutorConfig" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "insight-platform-sandbox.microVmExecutorName" . }}
+  namespace: {{ .Values.namespaces.executor }}
+data:
+  executor.json: {{ $microVmExecutorConfig | quote }}
+---
+{{- $microVmProviderConfig := include "insight-platform-sandbox.microVmProviderConfig" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "insight-platform-sandbox.microVmExecutorName" . }}-provider
+  namespace: {{ .Values.namespaces.executor }}
+data:
+  provider.json: {{ $microVmProviderConfig | quote }}

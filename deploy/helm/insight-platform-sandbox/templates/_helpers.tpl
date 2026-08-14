@@ -21,6 +21,10 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- printf "%s-executor-wasi" (include "insight-platform-sandbox.name" .) | trunc 63 | trimSuffix "-" -}}
 {{- end }}
 
+{{- define "insight-platform-sandbox.microVmExecutorName" -}}
+{{- printf "%s-executor-microvm" (include "insight-platform-sandbox.name" .) | trunc 63 | trimSuffix "-" -}}
+{{- end }}
+
 {{- define "insight-platform-sandbox.image" -}}
 {{- printf "%s@%s" .Values.image.repository .Values.image.digest -}}
 {{- end }}
@@ -88,5 +92,60 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   "control_request_timeout_milliseconds" (int .Values.executor.controlRequestTimeoutMilliseconds)
   "connect_timeout_milliseconds" (int .Values.executor.connectTimeoutMilliseconds)
   "request_timeout_milliseconds" (int .Values.executor.requestTimeoutMilliseconds)
+  | toJson -}}
+{{- end }}
+
+{{- define "insight-platform-sandbox.microVmExecutorConfig" -}}
+{{- dict
+  "schema_version" 1
+  "worker_manifest" .Values.microVmExecutor.workerManifest
+  "backend" (dict
+    "kind" "micro_vm"
+    "provider_socket_path" .Values.microVmExecutor.provider.socketPath
+    "provider_tls_server_name" .Values.microVmExecutor.provider.tlsServerName)
+  "backend_contract_digest" .Values.microVmExecutor.backendContractDigest
+  "authority_endpoint" (include "insight-platform-sandbox.controllerEndpoint" .)
+  "authority_tls_server_name" (printf "%s.%s.svc" (include "insight-platform-sandbox.controllerName" .) .Values.namespaces.controller)
+  "process_registration_attestor_socket_path" "/run/insight-sandbox-attestor/registration.sock"
+  "process_registration_attestor_tls_server_name" .Values.controller.attestor.tlsServerName
+  "process_registration_attestor_identity_digest" .Values.controller.attestor.identityDigest
+  "nats_endpoint" .Values.microVmExecutor.natsEndpoint
+  "receipt_ttl_seconds" (int .Values.microVmExecutor.receiptTtlSeconds)
+  "claim_scan_milliseconds" (int .Values.microVmExecutor.claimScanMilliseconds)
+  "claim_failure_backoff_milliseconds" (int .Values.microVmExecutor.claimFailureBackoffMilliseconds)
+  "drain_grace_milliseconds" (int .Values.microVmExecutor.drainGraceMilliseconds)
+  "control_request_timeout_milliseconds" (int .Values.microVmExecutor.controlRequestTimeoutMilliseconds)
+  "connect_timeout_milliseconds" (int .Values.microVmExecutor.connectTimeoutMilliseconds)
+  "request_timeout_milliseconds" (int .Values.microVmExecutor.requestTimeoutMilliseconds)
+  | toJson -}}
+{{- end }}
+
+{{- define "insight-platform-sandbox.microVmProviderConfig" -}}
+{{- dict
+  "schema_version" 1
+  "provider_socket_path" .Values.microVmExecutor.provider.socketPath
+  "provider_tls_server_name" .Values.microVmExecutor.provider.tlsServerName
+  "controller_broker_endpoint" (include "insight-platform-sandbox.controllerEndpoint" .)
+  "controller_broker_tls_server_name" (printf "%s.%s.svc" (include "insight-platform-sandbox.controllerName" .) .Values.namespaces.controller)
+  "worker_manifest_digest" (printf "sha256:%s" (toJson .Values.microVmExecutor.workerManifest | sha256sum))
+  "backend_contract_digest" .Values.microVmExecutor.backendContractDigest
+  "installation" .Values.microVmExecutor.provider.installation
+  "runtimes" .Values.microVmExecutor.provider.runtimes
+  "state_directory" .Values.microVmExecutor.provider.stateDirectory
+  "ephemeral_uid_base" (int .Values.microVmExecutor.provider.ephemeralUidBase)
+  "ephemeral_gid_base" (int .Values.microVmExecutor.provider.ephemeralGidBase)
+  "ephemeral_identity_count" (int .Values.microVmExecutor.provider.ephemeralIdentityCount)
+  "maximum_instances" (int .Values.microVmExecutor.provider.maximumInstances)
+  "maximum_tombstones" (int .Values.microVmExecutor.provider.maximumTombstones)
+  "tombstone_retention_seconds" (int .Values.microVmExecutor.provider.tombstoneRetentionSeconds)
+  "maximum_lifecycle_entries" (int .Values.microVmExecutor.provider.maximumLifecycleEntries)
+  "api_timeout_milliseconds" (int .Values.microVmExecutor.provider.apiTimeoutMilliseconds)
+  "guest_channel_timeout_milliseconds" (int .Values.microVmExecutor.provider.guestChannelTimeoutMilliseconds)
+  "socket_poll_milliseconds" (int .Values.microVmExecutor.provider.socketPollMilliseconds)
+  "process_termination_timeout_milliseconds" (int .Values.microVmExecutor.provider.processTerminationTimeoutMilliseconds)
+  "connect_timeout_milliseconds" (int .Values.microVmExecutor.provider.connectTimeoutMilliseconds)
+  "request_timeout_milliseconds" (int .Values.microVmExecutor.provider.requestTimeoutMilliseconds)
+  "tls_handshake_timeout_milliseconds" (int .Values.microVmExecutor.provider.tlsHandshakeTimeoutMilliseconds)
+  "shutdown_grace_milliseconds" (int .Values.microVmExecutor.provider.shutdownGraceMilliseconds)
   | toJson -}}
 {{- end }}

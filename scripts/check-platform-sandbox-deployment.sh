@@ -8,6 +8,12 @@ trap 'rm -f "$rendered"' EXIT
 
 helm lint "$chart"
 helm template sandbox "$chart" --include-crds >"$rendered"
+if helm template sandbox "$chart" \
+  --set microVmExecutor.workerManifest.max_concurrency=65 \
+  --set microVmExecutor.provider.maximumInstances=64 >/dev/null 2>&1; then
+  echo "sandbox deployment: microVM worker capacity drift was accepted" >&2
+  exit 1
+fi
 
 ruby -rjson -ryaml -e '
 docs = YAML.load_stream(File.read(ARGV.fetch(0))).compact
@@ -23,20 +29,44 @@ by_component = workloads.to_h do |doc|
 end
 controller = by_component["controller"]
 executor = by_component["executor-wasi"]
+microvm = by_component["executor-microvm"]
 attestor = by_component["attestor"]
-failures << "missing Controller/Executor/attestor workload" unless controller && executor && attestor
+failures << "missing Controller/WASI Executor/microVM Executor/attestor workload" unless controller && executor && microvm && attestor
 
-if controller && executor && attestor
+if controller && executor && microvm && attestor
   failures << "Controller and Executor must use different namespaces" if controller.dig("metadata", "namespace") == executor.dig("metadata", "namespace")
   failures << "Executor must not use hostPID" if executor.dig("spec", "template", "spec", "hostPID")
+  failures << "microVM Executor must not use hostPID" if microvm.dig("spec", "template", "spec", "hostPID")
   failures << "attestor must use hostPID" unless attestor.dig("spec", "template", "spec", "hostPID") == true
-  failures << "all workloads must disable automatic API tokens" unless [controller, executor, attestor].all? { |doc| doc.dig("spec", "template", "spec", "automountServiceAccountToken") == false }
+  failures << "all workloads must disable automatic API tokens" unless [controller, executor, microvm, attestor].all? { |doc| doc.dig("spec", "template", "spec", "automountServiceAccountToken") == false }
 
   host_paths = ->(doc) { doc.dig("spec", "template", "spec", "volumes").to_a.select { |volume| volume.key?("hostPath") } }
   failures << "Controller must have no hostPath" unless host_paths.call(controller).empty?
   executor_paths = host_paths.call(executor)
   failures << "Executor may mount only the node-local attestor socket" unless executor_paths.length == 1 && executor_paths.first["name"] == "socket"
+  microvm_paths = host_paths.call(microvm)
+  failures << "microVM pod must expose only the exact attestor/KVM/jail/state/cgroup host paths" unless microvm_paths.map { |volume| volume["name"] }.sort == %w[attestor-socket firecracker-jails host-cgroup kvm provider-state]
   failures << "attestor must own exact proc/node/registry/socket host paths" unless host_paths.call(attestor).map { |volume| volume["name"] }.sort == %w[host-proc node-uid registry socket]
+
+  microvm_spec = microvm.dig("spec", "template", "spec")
+  failures << "microVM Executor must use its dedicated node pool" unless microvm_spec.dig("nodeSelector", "insight.platform/sandbox-microvm-node") == "true" && !microvm_spec.fetch("nodeSelector", {}).key?("insight.platform/sandbox-node")
+  failures << "microVM Executor must tolerate only an explicitly configured KVM pool" unless microvm_spec.fetch("tolerations", []).any? { |entry| entry["key"] == "insight.platform/sandbox-microvm" && entry["effect"] == "NoSchedule" }
+  microvm_containers = microvm_spec.fetch("containers")
+  microvm_executor = microvm_containers.find { |container| container["name"] == "executor" }
+  provider = microvm_containers.find { |container| container["name"] == "provider" }
+  failures << "microVM pod must contain exactly the unprivileged Executor and Provider" unless microvm_containers.length == 2 && microvm_executor && provider
+  if microvm_executor && provider
+    executor_mounts = microvm_executor.fetch("volumeMounts", []).map { |mount| mount["name"] }
+    provider_mounts = provider.fetch("volumeMounts", []).map { |mount| mount["name"] }
+    failures << "microVM Executor received Provider host authority or credentials" unless (executor_mounts & %w[kvm firecracker-jails provider-state host-cgroup provider-tls]).empty?
+    failures << "microVM Provider received Executor queue/authority credentials" unless (provider_mounts & %w[executor-tls nats-tls attestor-socket]).empty?
+    failures << "only Provider may own KVM and lifecycle mounts" unless %w[kvm firecracker-jails provider-state host-cgroup].all? { |name| provider_mounts.include?(name) }
+    executor_security = microvm_executor.fetch("securityContext")
+    provider_security = provider.fetch("securityContext")
+    failures << "microVM Executor must remain unprivileged and capability-free" unless executor_security["runAsNonRoot"] == true && executor_security.dig("capabilities", "add").to_a.empty?
+    expected_capabilities = %w[CHOWN DAC_OVERRIDE KILL SETGID SETUID SYS_ADMIN SYS_RESOURCE]
+    failures << "microVM Provider capability set drifted" unless provider_security["privileged"] == false && provider_security.dig("capabilities", "add") == expected_capabilities
+  end
 
   images = workloads.flat_map { |doc| doc.dig("spec", "template", "spec", "containers").to_a + doc.dig("spec", "template", "spec", "initContainers").to_a }.map { |container| container["image"] }
   failures << "all Sandbox workload images must use immutable sha256 digests" unless images.all? { |image| image&.match?(/@sha256:[0-9a-f]{64}\z/) }
@@ -46,7 +76,7 @@ if controller && executor && attestor
 end
 
 network_policies = docs.select { |doc| doc["kind"] == "NetworkPolicy" }
-failures << "expected five default-deny/role NetworkPolicies" unless network_policies.length == 5
+failures << "expected six default-deny/role NetworkPolicies" unless network_policies.length == 6
 failures << "missing fail-closed Executor ValidatingAdmissionPolicy" unless docs.count { |doc| doc["kind"] == "ValidatingAdmissionPolicy" } == 1
 failures << "missing Executor ValidatingAdmissionPolicyBinding" unless docs.count { |doc| doc["kind"] == "ValidatingAdmissionPolicyBinding" } == 1
 
