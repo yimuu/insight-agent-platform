@@ -517,7 +517,8 @@ impl ManagedMcpSandboxSessionReadyBinding {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManagedMcpSandboxSessionPhaseDecision {
     pub logical_payload: insight_platform_mcp_host::McpSubscriptionPayload,
     pub logical_state: McpSubscriptionState,
@@ -819,7 +820,7 @@ impl ExecuteManagedMcpSandboxSession {
 
 /// Credential-free proof that the provider allocated the exact physical instance. An error from
 /// `prepare` means the provider proved that no instance survived; once this value exists, every
-/// later failure must call `destroy_prepared` before the worker returns.
+/// later failure must call `destroy_exact` before the worker returns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedManagedMcpSandboxSession {
@@ -972,11 +973,15 @@ pub trait ManagedMcpSandboxSessionProvider: Send + Sync {
         activation: &PreparedManagedMcpSandboxSessionActivation,
     ) -> Result<ActivatedManagedMcpSandboxSession, Self::Error>;
 
-    async fn destroy_prepared(
+    /// Destroys the exact deterministic request/fence instance. `prepared` is absent only when a
+    /// remote prepare response was lost; implementations must still prove the keyed instance is
+    /// absent before returning success. This makes a transport timeout fail closed instead of
+    /// leaking an untracked microVM.
+    async fn destroy_exact(
         &self,
         request: &ManagedMcpSandboxSessionRequest,
         fence: &JobFence,
-        prepared: &PreparedManagedMcpSandboxSession,
+        prepared: Option<&PreparedManagedMcpSandboxSession>,
     ) -> Result<(), Self::Error>;
 }
 
@@ -1057,7 +1062,7 @@ where
             return Err(
                 match self
                     .provider
-                    .destroy_prepared(request, &fence, &prepared)
+                    .destroy_exact(request, &fence, Some(&prepared))
                     .await
                 {
                     Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
@@ -1083,7 +1088,7 @@ where
                 return Err(
                     match self
                         .provider
-                        .destroy_prepared(request, &fence, &prepared)
+                        .destroy_exact(request, &fence, Some(&prepared))
                         .await
                     {
                         Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
@@ -1105,7 +1110,7 @@ where
                 return Err(
                     match self
                         .provider
-                        .destroy_prepared(request, &fence, &prepared)
+                        .destroy_exact(request, &fence, Some(&prepared))
                         .await
                     {
                         Ok(()) => ManagedMcpSandboxSessionWorkerError::Authority(authority),
@@ -1130,7 +1135,7 @@ where
             return Err(
                 match self
                     .provider
-                    .destroy_prepared(request, &fence, &prepared)
+                    .destroy_exact(request, &fence, Some(&prepared))
                     .await
                 {
                     Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
@@ -1149,7 +1154,7 @@ where
                 return Err(
                     match self
                         .provider
-                        .destroy_prepared(request, &fence, &prepared)
+                        .destroy_exact(request, &fence, Some(&prepared))
                         .await
                     {
                         Ok(()) => ManagedMcpSandboxSessionWorkerError::Provider(provider),
@@ -1170,7 +1175,7 @@ where
             return Err(
                 match self
                     .provider
-                    .destroy_prepared(request, &fence, &prepared)
+                    .destroy_exact(request, &fence, Some(&prepared))
                     .await
                 {
                     Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
@@ -1194,7 +1199,7 @@ where
                 return Err(
                     match self
                         .provider
-                        .destroy_prepared(request, &fence, &prepared)
+                        .destroy_exact(request, &fence, Some(&prepared))
                         .await
                     {
                         Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
@@ -1216,7 +1221,7 @@ where
                 return Err(
                     match self
                         .provider
-                        .destroy_prepared(request, &fence, &prepared)
+                        .destroy_exact(request, &fence, Some(&prepared))
                         .await
                     {
                         Ok(()) => ManagedMcpSandboxSessionWorkerError::Authority(authority),
@@ -1241,7 +1246,7 @@ where
             return Err(
                 match self
                     .provider
-                    .destroy_prepared(request, &fence, &prepared)
+                    .destroy_exact(request, &fence, Some(&prepared))
                     .await
                 {
                     Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
@@ -1260,7 +1265,7 @@ where
                 return Err(
                     match self
                         .provider
-                        .destroy_prepared(request, &fence, &prepared)
+                        .destroy_exact(request, &fence, Some(&prepared))
                         .await
                     {
                         Ok(()) => ManagedMcpSandboxSessionWorkerError::Provider(provider),
@@ -1276,7 +1281,7 @@ where
             return Err(
                 match self
                     .provider
-                    .destroy_prepared(request, &fence, &prepared)
+                    .destroy_exact(request, &fence, Some(&prepared))
                     .await
                 {
                     Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),

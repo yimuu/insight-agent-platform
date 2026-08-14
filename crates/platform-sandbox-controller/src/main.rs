@@ -22,12 +22,13 @@ use insight_platform_sandbox_rpc::{
     proto::{
         sandbox_executor_authority_service_server::SandboxExecutorAuthorityServiceServer,
         sandbox_executor_broker_service_server::SandboxExecutorBrokerServiceServer,
+        sandbox_managed_mcp_session_authority_service_server::SandboxManagedMcpSessionAuthorityServiceServer,
         sandbox_micro_vm_broker_service_server::SandboxMicroVmBrokerServiceServer,
     },
-    MicroVmProviderWorkloadIdentity, SandboxAuthorityGrpcService, SandboxBrokerGrpcService,
-    SandboxExecutorAuthorityWorkloadIdentity, SandboxInternalRpcLimits,
-    SandboxMicroVmBrokerGrpcService, SandboxProcessIsolationAttestorGrpcClient,
-    WasiExecutorWorkloadIdentity,
+    MicroVmExecutorWorkloadIdentity, MicroVmProviderWorkloadIdentity, SandboxAuthorityGrpcService,
+    SandboxBrokerGrpcService, SandboxExecutorAuthorityWorkloadIdentity, SandboxInternalRpcLimits,
+    SandboxManagedMcpSessionAuthorityGrpcService, SandboxMicroVmBrokerGrpcService,
+    SandboxProcessIsolationAttestorGrpcClient, WasiExecutorWorkloadIdentity,
 };
 use ipnet::IpNet;
 use serde::Deserialize;
@@ -228,9 +229,18 @@ async fn run() -> Result<(), ProcessError> {
         artifacts.clone(),
         repository.clone(),
         repository.clone(),
-        process_isolation,
+        process_isolation.clone(),
         limits,
     ))
+    .max_encoding_message_size(maximum)
+    .max_decoding_message_size(maximum);
+    let managed_session_authority_service = SandboxManagedMcpSessionAuthorityServiceServer::new(
+        SandboxManagedMcpSessionAuthorityGrpcService::new(
+            repository.clone(),
+            process_isolation.clone(),
+            limits,
+        ),
+    )
     .max_encoding_message_size(maximum)
     .max_decoding_message_size(maximum);
     let micro_vm_broker_service = SandboxMicroVmBrokerServiceServer::new(
@@ -245,6 +255,10 @@ async fn run() -> Result<(), ProcessError> {
     let broker_service = tonic::service::interceptor::InterceptedService::new(
         broker_service,
         WasiExecutorWorkloadIdentity,
+    );
+    let managed_session_authority_service = tonic::service::interceptor::InterceptedService::new(
+        managed_session_authority_service,
+        MicroVmExecutorWorkloadIdentity,
     );
     let micro_vm_broker_service = tonic::service::interceptor::InterceptedService::new(
         micro_vm_broker_service,
@@ -277,6 +291,7 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::InvalidTls)?
         .add_service(authority_service)
         .add_service(broker_service)
+        .add_service(managed_session_authority_service)
         .add_service(micro_vm_broker_service)
         .serve_with_shutdown(address, async {
             let _ = shutdown_receiver.await;

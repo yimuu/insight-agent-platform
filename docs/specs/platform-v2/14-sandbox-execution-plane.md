@@ -788,8 +788,12 @@ claim first-winner、phase replay/stale fence与双状态Ready的Receipt/Event/O
 Streamable HTTP only。新增的Sandbox establishment Worker以closed Provider port强制`Preparing提交 -> prepare -> Starting提交 ->
 initialize但不放行通知 -> Ready提交 -> 同一prepared instance activation`；所有provider evidence绑定request、lease、Worker、Executor及
 sandbox identity，任一post-prepare合同、authority或provider失败都必须先调用exact destroy。两个unit fixture覆盖成功顺序和Ready提交失败
-销毁且不activation。该切片尚未把Worker接入Executor claim/internal RPC，也没有实际Managed microVM session Provider、terminal/session-loss
-recovery或真实进程资格，因此不关闭Phase 4。
+销毁且不activation。cleanup port现可在prepare响应丢失时按exact request/fence、无prepared evidence执行销毁。独立Managed session
+authority internal gRPC已在Controller组合，先由node attestor校验登记，再只允许exact microVM Executor URI SAN执行claim/phase/Ready；
+Executor library的专用claim driver与普通Sandbox共享同一`LocalWorkerPools`，先保留本地容量再claim，并在长生命周期command future结束前
+保持permit。mTLS authority、Executor pool和Sandbox domain定向测试分别9、3、33项通过。该切片尚未把establishment Worker、真实Managed
+microVM session Provider和terminal supervisor组合进Executor进程，也没有heartbeat、terminal/session-loss recovery或真实进程资格，
+因此不关闭Phase 4。
 
 process-generation isolation authority是独立于PostgreSQL lease、NATS和Controller进程的node/runtime attestor；数据库lease过期、NATS
 断连、Pod deletion request、Controller本地cache miss或对旧generation RPC超时都不是absence proof。其closed请求必须精确绑定

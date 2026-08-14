@@ -743,8 +743,12 @@ sandbox/protocol/ready-evidence digest binding。每一步均使用fenced Receip
 Sandbox domain现又增加closed establishment Worker/Provider port，唯一允许顺序为`commit Preparing -> provider prepare -> commit Starting ->
 provider initialize（通知仍关闭）-> commit Ready -> provider activate`；provider evidence逐字段回绑同一request、lease、Worker、Executor与
 sandbox identity。两个故障注入unit fixture证明activation严格晚于durable Ready，并证明Ready提交失败会destroy prepared instance且不
-activate。该切片仍未把Worker接入Executor claim/RPC或真实microVM Managed session Provider；terminal/session-loss recovery以及真实Linux
-KVM/jailer/guest-agent、process-kill/recovery与escape/saturation资格也未交付，因此该证据不关闭MCP或Phase 4，也不把本规范标记为
+activate。cleanup port进一步改为按exact request/fence销毁，允许后续Provider RPC在prepare响应丢失时以缺失prepared evidence收敛，而不把
+未登记的VM留在运行面。独立Managed session authority internal gRPC已接入Controller，并以node attestor登记和exact microVM Executor URI
+SAN限制claim/phase/Ready方法；Executor library也新增专用claim driver，与普通Sandbox共享同一`LocalWorkerPools`，先保留本地容量再claim，
+并在长生命周期command future结束前持续持有permit。mTLS authority、Executor pool及Sandbox domain定向测试分别9、3、33项通过。
+该切片仍未把establishment Worker、真实microVM Managed session Provider和terminal supervisor组合进Executor进程；heartbeat、
+terminal/session-loss recovery以及真实Linux KVM/jailer/guest-agent、process-kill/recovery与escape/saturation资格也未交付，因此该证据不关闭MCP或Phase 4，也不把本规范标记为
 Implemented/Verified。此前workspace
 all-target/all-feature check、test、doc-test与strict Clippy及public API/contract/schema/cutover门禁证据不自动覆盖本次变更；本次完整门禁
 结果以实施计划的最新记录为准。

@@ -11,6 +11,15 @@ service SandboxExecutorAuthorityService {
   rpc HeartbeatSandboxExecution(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
 }
 
+// Managed MCP subscription sessions have a distinct logical lifecycle and claim discriminator.
+// Keeping their authority on a separate service prevents an ordinary Sandbox Executor from
+// decoding or committing long-lived session payloads while both roles still share work_class.
+service SandboxManagedMcpSessionAuthorityService {
+  rpc ClaimManagedMcpSandboxSessions(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc CommitManagedMcpSandboxSessionPhase(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc CommitManagedMcpSandboxSessionReady(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+}
+
 service SandboxExecutorBrokerService {
   rpc ReadExactArtifact(ClosedSandboxEnvelope) returns (SandboxBytesEnvelope);
   rpc ValidateWasiValue(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);

@@ -1217,11 +1217,11 @@ impl ManagedMcpSandboxSessionProvider for RecordingManagedSessionProvider {
         .map_err(|_| ManagedSessionFixtureError)
     }
 
-    async fn destroy_prepared(
+    async fn destroy_exact(
         &self,
         _request: &ManagedMcpSandboxSessionRequest,
         _fence: &JobFence,
-        _prepared: &PreparedManagedMcpSandboxSession,
+        _prepared: Option<&PreparedManagedMcpSandboxSession>,
     ) -> Result<(), Self::Error> {
         self.events.lock().unwrap().push("provider_destroy");
         Ok(())

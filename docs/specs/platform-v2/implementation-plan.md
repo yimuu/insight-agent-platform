@@ -573,8 +573,12 @@ durable Ready返回后的同实例activation、terminal/session-loss recovery、
 process-kill或escape/saturation资格，因此CR-131/CR-158和Phase 4继续保持Open。Sandbox domain随后新增closed establishment
 Worker/Provider port，将顺序收紧为`Preparing commit -> prepare -> Starting commit -> initialize但保持通知关闭 -> Ready commit ->
 same-instance activate`，并在任一post-prepare合同、authority或provider失败时要求exact destroy。两个unit fixture已证明Ready提交先于
-activation及Ready提交失败时destroy且不activation；Executor claim/internal RPC与实际Managed microVM session Provider尚未接入，故上述
-开放项和Phase状态不变。
+activation及Ready提交失败时destroy且不activation。cleanup port现支持按exact request/fence、无prepared evidence销毁，为后续Provider RPC
+prepare响应丢失收敛保留closed路径。独立Managed session authority internal gRPC已由Controller以`PgRepository`和node attestor组合，只有
+exact microVM Executor URI SAN可调用claim/phase/Ready；Executor library专用claim driver与普通Sandbox共享`LocalWorkerPools`，执行
+reserve-before-claim并在长生命周期command future结束前持有permit。定向authority RPC、Executor和Sandbox domain测试分别9、3、33项通过。
+establishment Worker、实际Managed microVM session Provider与terminal supervisor仍未组合进Executor进程，heartbeat、terminal/session-loss
+recovery和真实资格也未交付，故上述开放项和Phase状态不变。
 
 CR-159关闭Phase 6入口的CandidateManifest machine-contract空洞：closed Rust type与checked-in JSON Schema冻结full tagged Git object ID、
 `cand`/`qpr` nominal identity、schema contract version、bounded component image map、canonical WorkerManifest digest set、deployment/limit/

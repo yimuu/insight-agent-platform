@@ -10,10 +10,11 @@ use insight_platform_contracts::{
     HardLimitProfile, ResourceId, ResourceIdError, ResourceKind, Sha256Digest, WorkClass,
 };
 use insight_platform_sandbox::{
-    ClaimSandboxJobs, ClaimedSandboxJob, ExecuteSandboxJob, SandboxClaimAuthority,
-    SandboxClaimFailure, SandboxExecutionAuthority, SandboxExecutionControlRouter,
-    SandboxExecutorWorker, SandboxWorkerAuditBundle, SandboxWorkerCommitIdentity,
-    SANDBOX_QUOTA_LINES,
+    ClaimSandboxJobs, ClaimedManagedMcpSandboxSession, ClaimedSandboxJob,
+    ExecuteManagedMcpSandboxSession, ExecuteSandboxJob, ManagedMcpSandboxSessionClaimAuthority,
+    ManagedMcpSandboxSessionWorkerAudits, SandboxClaimAuthority, SandboxClaimFailure,
+    SandboxExecutionAuthority, SandboxExecutionControlRouter, SandboxExecutorWorker,
+    SandboxWorkerAuditBundle, SandboxWorkerCommitIdentity, SANDBOX_QUOTA_LINES,
 };
 use insight_platform_worker::{
     ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPoolError, LocalWorkerPools,
@@ -440,6 +441,270 @@ where
     }
 }
 
+/// Long-lived Managed MCP session executor. The future MUST remain pending while the exact
+/// activated session owns physical resources; the driver retains the shared Sandbox permit until
+/// this future reports a durable terminal/recovery disposition.
+#[async_trait]
+pub trait ManagedMcpSandboxSessionCommandExecutor: Send + Sync + 'static {
+    async fn execute(
+        &self,
+        command: ExecuteManagedMcpSandboxSession,
+        cancellation: CancellationToken,
+    ) -> SandboxExecutionDisposition;
+}
+
+/// Dedicated claim loop for Managed MCP subscription sessions. It shares `LocalWorkerPools` with
+/// finite Sandbox execution, but uses the closed Managed-session claim authority so neither lane
+/// can decode the other's payload shape.
+pub struct ManagedMcpSandboxSessionExecutorDriver<S, E, I> {
+    claim_authority: Arc<S>,
+    executor: Arc<E>,
+    identities: Arc<I>,
+    pools: LocalWorkerPools,
+    binding: SandboxExecutorBinding,
+    config: SandboxExecutorDriverConfig,
+}
+
+impl<S, E, I> ManagedMcpSandboxSessionExecutorDriver<S, E, I>
+where
+    S: ManagedMcpSandboxSessionClaimAuthority,
+    E: ManagedMcpSandboxSessionCommandExecutor,
+    I: ExecutorIdentityFactory + 'static,
+{
+    pub fn new(
+        claim_authority: Arc<S>,
+        executor: Arc<E>,
+        identities: Arc<I>,
+        pools: LocalWorkerPools,
+        binding: SandboxExecutorBinding,
+        config: SandboxExecutorDriverConfig,
+    ) -> Result<Self, SandboxExecutorDriverError> {
+        config.validate()?;
+        let pool = pools.snapshot();
+        if pool.work_class != WorkClass::Sandbox || pool.critical_control_capacity == 0 {
+            return Err(SandboxExecutorDriverError::WrongWorkerManifest);
+        }
+        Ok(Self {
+            claim_authority,
+            executor,
+            identities,
+            pools,
+            binding,
+            config,
+        })
+    }
+
+    pub async fn drive_once(
+        &self,
+        active: &mut JoinSet<SandboxExecutionDisposition>,
+        cancellation: &CancellationToken,
+    ) -> Result<usize, SandboxExecutorDriverError> {
+        let Some(reservation) = self
+            .pools
+            .reserve_claim_capacity(
+                WorkClass::Sandbox,
+                self.config.requested_claim_size,
+                self.config.claim_batch_hard_limit,
+            )
+            .map_err(SandboxExecutorDriverError::LocalPool)?
+        else {
+            return Ok(0);
+        };
+        let claim_limit = reservation.claim_limit();
+        let lease_token_digests = (0..claim_limit)
+            .map(|_| self.identities.new_lease_token_digest())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SandboxExecutorDriverError::Identity)?;
+        let expected_tokens = lease_token_digests.iter().cloned().collect::<BTreeSet<_>>();
+        let claimed = self
+            .claim_authority
+            .claim_managed_mcp_sandbox_sessions(ClaimSandboxJobs {
+                worker_process_generation_id: self.pools.snapshot().worker_process_generation_id,
+                worker_manifest_digest: self.pools.snapshot().worker_manifest_digest,
+                isolation_backend_contract_digest: self
+                    .binding
+                    .isolation_backend_contract_digest
+                    .clone(),
+                executor_identity_digest: self.binding.executor_identity_digest.clone(),
+                attestor_route: self.binding.attestor_route.clone(),
+                limit: u16::try_from(claim_limit)
+                    .map_err(|_| SandboxExecutorDriverError::InvalidGeneratedCommand)?,
+                lease_milliseconds: self.config.lease_milliseconds,
+                lease_token_digests,
+            })
+            .await
+            .map_err(SandboxExecutorDriverError::Claim)?;
+        if claimed.is_empty() {
+            return Ok(0);
+        }
+        let pool = self.pools.snapshot();
+        let identities =
+            validate_managed_mcp_session_claims(&claimed, &pool, &expected_tokens, &self.binding)?;
+        let permits = reservation
+            .bind_claimed_jobs(identities)
+            .map_err(SandboxExecutorDriverError::LocalPool)?;
+        if permits.len() != claimed.len() {
+            return Err(SandboxExecutorDriverError::CorruptClaim);
+        }
+        let count = claimed.len();
+        for (claimed, permit) in claimed.into_iter().zip(permits) {
+            let command = self.execution_command(claimed)?;
+            let executor = Arc::clone(&self.executor);
+            let cancellation = cancellation.child_token();
+            active.spawn(async move {
+                let _permit = permit;
+                executor.execute(command, cancellation).await
+            });
+        }
+        Ok(count)
+    }
+
+    fn execution_command(
+        &self,
+        claimed: ClaimedManagedMcpSandboxSession,
+    ) -> Result<ExecuteManagedMcpSandboxSession, SandboxExecutorDriverError> {
+        let expires_at = Utc::now()
+            .checked_add_signed(
+                ChronoDuration::from_std(self.config.receipt_ttl)
+                    .map_err(|_| SandboxExecutorDriverError::InvalidGeneratedCommand)?,
+            )
+            .ok_or(SandboxExecutorDriverError::InvalidGeneratedCommand)?;
+        let tenant_id = claimed.request.identity.tenant_id.clone();
+        let worker_process_generation_id = self.pools.snapshot().worker_process_generation_id;
+        Ok(ExecuteManagedMcpSandboxSession {
+            claimed,
+            executor_identity_digest: self.binding.executor_identity_digest.clone(),
+            attestor_route: self.binding.attestor_route.clone(),
+            audits: ManagedMcpSandboxSessionWorkerAudits {
+                preparing: self.commit_identity(
+                    &tenant_id,
+                    &worker_process_generation_id,
+                    expires_at,
+                )?,
+                starting: self.commit_identity(
+                    &tenant_id,
+                    &worker_process_generation_id,
+                    expires_at,
+                )?,
+                ready: self.commit_identity(
+                    &tenant_id,
+                    &worker_process_generation_id,
+                    expires_at,
+                )?,
+            },
+        })
+    }
+
+    fn commit_identity(
+        &self,
+        tenant_id: &ResourceId,
+        worker_process_generation_id: &ResourceId,
+        receipt_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<SandboxWorkerCommitIdentity, SandboxExecutorDriverError> {
+        Ok(SandboxWorkerCommitIdentity {
+            tenant_id: tenant_id.clone(),
+            worker_process_generation_id: worker_process_generation_id.clone(),
+            receipt_id: self.new_id(ResourceKind::Receipt)?,
+            event_id: self.new_id(ResourceKind::Event)?,
+            outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+            idempotency_key_digest: self
+                .identities
+                .new_lease_token_digest()
+                .map_err(SandboxExecutorDriverError::Identity)?,
+            receipt_expires_at,
+        })
+    }
+
+    fn new_id(&self, kind: ResourceKind) -> Result<ResourceId, SandboxExecutorDriverError> {
+        self.identities
+            .new_resource_id(kind)
+            .map_err(SandboxExecutorDriverError::Identity)
+    }
+
+    pub async fn run(
+        self,
+        cancellation: CancellationToken,
+    ) -> Result<SandboxExecutorCycleReport, SandboxExecutorDriverError> {
+        let mut active = JoinSet::new();
+        let mut report = SandboxExecutorCycleReport::default();
+        let mut scan =
+            tokio::time::interval_at(Instant::now(), self.config.timing.safety_scan_interval);
+        scan.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => break,
+                joined = active.join_next(), if !active.is_empty() => {
+                    observe_join(joined, &mut report);
+                }
+                _ = self.pools.wait_for_business_capacity(), if self.pools.snapshot().business_available == 0 => {}
+                _ = scan.tick() => {
+                    match self.drive_once(&mut active, &cancellation).await {
+                        Ok(claimed) => report.claimed = report.claimed.saturating_add(claimed as u64),
+                        Err(SandboxExecutorDriverError::Claim(SandboxClaimFailure::Unavailable | SandboxClaimFailure::FirstWinnerLost)) => {
+                            tokio::select! {
+                                _ = cancellation.cancelled() => break,
+                                _ = tokio::time::sleep(self.config.timing.claim_failure_backoff) => {}
+                            }
+                        }
+                        Err(failure) => return Err(failure),
+                    }
+                }
+            }
+        }
+        let drain = async {
+            while let Some(joined) = active.join_next().await {
+                observe_join(Some(joined), &mut report);
+            }
+        };
+        if tokio::time::timeout(self.config.timing.drain_grace, drain)
+            .await
+            .is_err()
+        {
+            return Err(SandboxExecutorDriverError::DrainRequiresProcessTermination);
+        }
+        Ok(report)
+    }
+}
+
+fn validate_managed_mcp_session_claims(
+    claimed: &[ClaimedManagedMcpSandboxSession],
+    pool: &insight_platform_worker::LocalWorkerPoolSnapshot,
+    expected_tokens: &BTreeSet<Sha256Digest>,
+    binding: &SandboxExecutorBinding,
+) -> Result<Vec<ClaimedJobIdentity>, SandboxExecutorDriverError> {
+    if claimed.len() > expected_tokens.len() {
+        return Err(SandboxExecutorDriverError::CorruptClaim);
+    }
+    let limits = insight_platform_sandbox::SandboxCommandLimits::from_profile(
+        &insight_platform_contracts::checked_in_hard_limit_profile(),
+    )
+    .map_err(|_| SandboxExecutorDriverError::CorruptClaim)?;
+    let mut jobs = BTreeSet::new();
+    let mut tokens = BTreeSet::new();
+    let mut identities = Vec::with_capacity(claimed.len());
+    for claim in claimed {
+        claim
+            .validate_at(Utc::now(), limits)
+            .map_err(|_| SandboxExecutorDriverError::CorruptClaim)?;
+        if claim.fence.worker_process_generation_id != pool.worker_process_generation_id
+            || claim.request.executor_worker_manifest_digest != pool.worker_manifest_digest
+            || claim.request.isolation_backend_contract_digest
+                != binding.isolation_backend_contract_digest
+            || !expected_tokens.contains(&claim.fence.token_digest)
+            || !jobs.insert(claim.request.identity.physical_job_id.clone())
+            || !tokens.insert(claim.fence.token_digest.clone())
+        {
+            return Err(SandboxExecutorDriverError::CorruptClaim);
+        }
+        identities.push(ClaimedJobIdentity {
+            job_id: claim.request.identity.physical_job_id.clone(),
+            lease_generation: claim.fence.lease_generation,
+        });
+    }
+    Ok(identities)
+}
+
 fn validate_claims(
     claimed: &[ClaimedSandboxJob],
     pool: &insight_platform_worker::LocalWorkerPoolSnapshot,
@@ -554,6 +819,35 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct EmptyManagedSessionAuthority {
+        claim: Mutex<Option<ClaimSandboxJobs>>,
+    }
+
+    #[async_trait]
+    impl ManagedMcpSandboxSessionClaimAuthority for EmptyManagedSessionAuthority {
+        async fn claim_managed_mcp_sandbox_sessions(
+            &self,
+            command: ClaimSandboxJobs,
+        ) -> Result<Vec<ClaimedManagedMcpSandboxSession>, SandboxClaimFailure> {
+            *self.claim.lock().unwrap() = Some(command);
+            Ok(Vec::new())
+        }
+    }
+
+    struct UnusedManagedSessionExecutor;
+
+    #[async_trait]
+    impl ManagedMcpSandboxSessionCommandExecutor for UnusedManagedSessionExecutor {
+        async fn execute(
+            &self,
+            _command: ExecuteManagedMcpSandboxSession,
+            _cancellation: CancellationToken,
+        ) -> SandboxExecutionDisposition {
+            panic!("empty authority must not dispatch")
+        }
+    }
+
     fn digest(character: char) -> Sha256Digest {
         format!("sha256:{}", character.to_string().repeat(64))
             .parse()
@@ -565,6 +859,23 @@ mod tests {
             WorkerManifest {
                 manifest_version: WORKER_MANIFEST_VERSION,
                 worker_role: "sandbox-executor.wasi".to_owned(),
+                work_class: WorkClass::Sandbox,
+                adapter_runtime_digest: digest('a'),
+                protocol_version: WORKER_PROTOCOL_VERSION,
+                max_concurrency: 2,
+                critical_control_reserved_slots: 1,
+            },
+            ResourceId::from_uuid_v7(ResourceKind::WorkerProcessGeneration, Uuid::now_v7())
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn micro_vm_pools() -> LocalWorkerPools {
+        LocalWorkerPools::new(
+            WorkerManifest {
+                manifest_version: WORKER_MANIFEST_VERSION,
+                worker_role: "sandbox-executor.microvm".to_owned(),
                 work_class: WorkClass::Sandbox,
                 adapter_runtime_digest: digest('a'),
                 protocol_version: WORKER_PROTOCOL_VERSION,
@@ -616,6 +927,52 @@ mod tests {
         assert_eq!(claim.limit, 2);
         assert_eq!(claim.lease_token_digests.len(), 2);
         assert_ne!(claim.lease_token_digests[0], claim.lease_token_digests[1]);
+        assert_eq!(local_pools.snapshot().business_available, 2);
+    }
+
+    #[tokio::test]
+    async fn managed_session_claim_uses_the_same_bounded_sandbox_pool_and_closed_lane() {
+        let authority = Arc::new(EmptyManagedSessionAuthority::default());
+        let local_pools = micro_vm_pools();
+        let generation = local_pools.snapshot().worker_process_generation_id;
+        let worker_manifest_digest = local_pools.snapshot().worker_manifest_digest;
+        let driver = ManagedMcpSandboxSessionExecutorDriver::new(
+            Arc::clone(&authority),
+            Arc::new(UnusedManagedSessionExecutor),
+            Arc::new(UuidExecutorIdentityFactory),
+            local_pools.clone(),
+            SandboxExecutorBinding {
+                isolation_backend_contract_digest: digest('c'),
+                executor_identity_digest: digest('d'),
+                attestor_route: "https://10.0.0.7:9443".parse().unwrap(),
+            },
+            SandboxExecutorDriverConfig::from_profile(
+                &checked_in_hard_limit_profile(),
+                Duration::from_secs(7_200),
+                SandboxExecutorDriverTiming {
+                    safety_scan_interval: Duration::from_millis(100),
+                    claim_failure_backoff: Duration::from_millis(10),
+                    drain_grace: Duration::from_secs(1),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut active = JoinSet::new();
+        assert_eq!(
+            driver
+                .drive_once(&mut active, &CancellationToken::new())
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(active.is_empty());
+        let claim = authority.claim.lock().unwrap().clone().unwrap();
+        assert_eq!(claim.worker_process_generation_id, generation);
+        assert_eq!(claim.worker_manifest_digest, worker_manifest_digest);
+        assert_eq!(claim.isolation_backend_contract_digest, digest('c'));
+        assert_eq!(claim.limit, 2);
+        assert_eq!(claim.lease_token_digests.len(), 2);
         assert_eq!(local_pools.snapshot().business_available, 2);
     }
 
