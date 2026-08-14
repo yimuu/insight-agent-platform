@@ -35,6 +35,14 @@ service SandboxMicroVmBrokerService {
   rpc RevokeMicroVmGrants(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
 }
 
+// Egress-only durable authorization for one-time Managed MCP Secret delivery. Secret material
+// never crosses this service: reserve and commit carry only exact Job/grant fences and
+// credential-free evidence.
+service SandboxSecretDeliveryAuthorityService {
+  rpc ReserveManagedMcpSandboxSecretDelivery(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc CommitManagedMcpSandboxSecretDelivery(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+}
+
 // Node-local/sidecar isolation-provider boundary. The Executor owns the durable Job lease and
 // phase commits; this service owns only the concrete microVM lifecycle. All calls for one sandbox
 // identity must be routed to the same provider instance rather than a load-balanced ClusterIP.

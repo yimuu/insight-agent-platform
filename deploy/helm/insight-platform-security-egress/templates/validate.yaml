@@ -28,6 +28,12 @@
 {{- if empty .Values.networkPolicy.workerCallers }}
 {{- fail "networkPolicy.workerCallers is required" }}
 {{- end }}
+{{- if or (empty .Values.networkPolicy.sandboxControllerNamespaceSelector) (empty .Values.networkPolicy.sandboxControllerPodSelector) }}
+{{- fail "Sandbox Controller NetworkPolicy selectors are required" }}
+{{- end }}
+{{- if or (lt (int .Values.networkPolicy.sandboxControllerPort) 1) (gt (int .Values.networkPolicy.sandboxControllerPort) 65535) }}
+{{- fail "networkPolicy.sandboxControllerPort must be valid" }}
+{{- end }}
 {{- if empty .Values.networkPolicy.postgresCidrs }}
 {{- fail "networkPolicy.postgresCidrs is required" }}
 {{- end }}

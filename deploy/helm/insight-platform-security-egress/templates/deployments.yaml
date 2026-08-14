@@ -58,6 +58,7 @@ spec:
             - {name: PLATFORM_EGRESS_BROKER_AUTHORITY_CA_PATH, value: /etc/insight/authority-tls/authority-ca.pem}
             - {name: PLATFORM_EGRESS_BROKER_AUTHORITY_CERT_PATH, value: /etc/insight/authority-tls/authority-client.pem}
             - {name: PLATFORM_EGRESS_BROKER_AUTHORITY_KEY_PATH, value: /etc/insight/authority-tls/authority-client-key.pem}
+            - {name: PLATFORM_EGRESS_BROKER_SANDBOX_CONTROLLER_CA_PATH, value: /etc/insight/authority-tls/sandbox-controller-ca.pem}
           readinessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
           livenessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
           startupProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
@@ -95,6 +96,7 @@ spec:
               - {key: {{ .Values.egress.tls.keys.authorityCa }}, path: authority-ca.pem}
               - {key: {{ .Values.egress.tls.keys.authorityClientCertificate }}, path: authority-client.pem}
               - {key: {{ .Values.egress.tls.keys.authorityClientPrivateKey }}, path: authority-client-key.pem}
+              - {key: {{ .Values.egress.tls.keys.sandboxControllerCa }}, path: sandbox-controller-ca.pem}
         - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
 ---
 apiVersion: apps/v1

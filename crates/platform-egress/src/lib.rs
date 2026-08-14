@@ -17,6 +17,11 @@ use insight_platform_model_adapters::{
     ModelProviderEgressResponse, ModelProviderRequestIdentity, ModelProviderWireProtocol,
     ModelProviderWireRequest,
 };
+use insight_platform_sandbox::{
+    ManagedMcpSandboxSecretCommitOutcome, ManagedMcpSandboxSecretDeliveryAuthority,
+    ManagedMcpSandboxSecretDeliveryError, ManagedMcpSandboxSecretDeliveryEvidence,
+    ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSecretReservationOutcome,
+};
 use reqwest::header::{
     HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
 };
@@ -336,6 +341,208 @@ pub trait SecretMaterialResolver: Send + Sync {
         tenant_id: &ResourceId,
         binding: &ExactSecretBindingRef,
     ) -> Result<ResolvedSecretMaterial, SecretMaterialResolutionError>;
+}
+
+/// Plaintext returned only across the Egress-to-Provider mTLS boundary. It cannot be cloned or
+/// formatted and is zeroed if the RPC adapter drops it before transfer.
+pub struct DeliveredManagedMcpSandboxSecret {
+    pub authorization: insight_platform_sandbox::AuthorizedManagedMcpSandboxSecretDelivery,
+    pub evidence: ManagedMcpSandboxSecretDeliveryEvidence,
+    material: Vec<u8>,
+}
+
+impl DeliveredManagedMcpSandboxSecret {
+    pub fn from_committed(
+        request: &ManagedMcpSandboxSecretDeliveryRequest,
+        authorization: insight_platform_sandbox::AuthorizedManagedMcpSandboxSecretDelivery,
+        evidence: ManagedMcpSandboxSecretDeliveryEvidence,
+        mut material: Vec<u8>,
+    ) -> Result<Self, ManagedMcpSandboxSecretBrokerError> {
+        if material.is_empty()
+            || material.len() > MAX_SECRET_MATERIAL_BYTES_HARD
+            || authorization.validate_for(request).is_err()
+            || evidence.validate_for(request, &authorization).is_err()
+        {
+            material.fill(0);
+            return Err(ManagedMcpSandboxSecretBrokerError::Denied);
+        }
+        Ok(Self {
+            authorization,
+            evidence,
+            material,
+        })
+    }
+
+    pub fn into_material(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.material)
+    }
+}
+
+impl fmt::Debug for DeliveredManagedMcpSandboxSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeliveredManagedMcpSandboxSecret")
+            .field("authorization", &self.authorization)
+            .field("evidence", &self.evidence)
+            .field("byte_length", &self.material.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for DeliveredManagedMcpSandboxSecret {
+    fn drop(&mut self) {
+        self.material.fill(0);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedMcpSandboxSecretBrokerError {
+    Unavailable,
+    Denied,
+    OutcomeUncertain,
+}
+
+#[async_trait]
+pub trait ManagedMcpSandboxSecretBroker: Send + Sync {
+    async fn deliver(
+        &self,
+        request: ManagedMcpSandboxSecretDeliveryRequest,
+    ) -> Result<DeliveredManagedMcpSandboxSecret, ManagedMcpSandboxSecretBrokerError>;
+}
+
+/// Two-plane Secret delivery composition. The Controller reserves and revalidates an exact read;
+/// the existing Egress resolver alone sees KMS/Provider material. Only a fresh reserve followed by
+/// a fresh durable commit can release bytes to the microVM Provider.
+pub struct BrokeredManagedMcpSandboxSecretDelivery<A> {
+    authority: Arc<A>,
+    resolver: Arc<dyn SecretMaterialResolver>,
+    maximum_material_bytes: usize,
+}
+
+impl<A> BrokeredManagedMcpSandboxSecretDelivery<A> {
+    pub fn new(
+        authority: Arc<A>,
+        resolver: Arc<dyn SecretMaterialResolver>,
+        maximum_material_bytes: usize,
+    ) -> Result<Self, EgressConfigurationError> {
+        if maximum_material_bytes == 0 || maximum_material_bytes > MAX_SECRET_MATERIAL_BYTES_HARD {
+            return Err(EgressConfigurationError::InvalidLimits);
+        }
+        Ok(Self {
+            authority,
+            resolver,
+            maximum_material_bytes,
+        })
+    }
+}
+
+#[async_trait]
+impl<A> ManagedMcpSandboxSecretBroker for BrokeredManagedMcpSandboxSecretDelivery<A>
+where
+    A: ManagedMcpSandboxSecretDeliveryAuthority,
+{
+    async fn deliver(
+        &self,
+        request: ManagedMcpSandboxSecretDeliveryRequest,
+    ) -> Result<DeliveredManagedMcpSandboxSecret, ManagedMcpSandboxSecretBrokerError> {
+        request
+            .validate_shape()
+            .map_err(|_| ManagedMcpSandboxSecretBrokerError::Denied)?;
+        if request.secret_grant.expires_at <= Utc::now() {
+            return Err(ManagedMcpSandboxSecretBrokerError::Denied);
+        }
+        let authorization = match self
+            .authority
+            .reserve_managed_mcp_sandbox_secret_delivery(&request)
+            .await
+            .map_err(map_sandbox_secret_authority_error)?
+        {
+            ManagedMcpSandboxSecretReservationOutcome::Authorized(authorization) => *authorization,
+            ManagedMcpSandboxSecretReservationOutcome::AlreadyReserved
+            | ManagedMcpSandboxSecretReservationOutcome::AlreadyDelivered => {
+                return Err(ManagedMcpSandboxSecretBrokerError::OutcomeUncertain);
+            }
+        };
+        authorization
+            .validate_for(&request)
+            .map_err(|_| ManagedMcpSandboxSecretBrokerError::Denied)?;
+        let mut resolved = self
+            .resolver
+            .resolve(&authorization.tenant_id, &authorization.secret_binding)
+            .await
+            .map_err(map_sandbox_secret_resolution_error)?;
+        if !resolved.validate_for(&authorization.secret_binding, self.maximum_material_bytes)
+            || resolved.binding_generation != authorization.resolved_binding_generation
+        {
+            return Err(ManagedMcpSandboxSecretBrokerError::Denied);
+        }
+        let resolution_evidence_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "authorization_digest": authorization.authorization_digest,
+            "binding_generation": resolved.binding_generation,
+            "domain": "managed_mcp_sandbox_secret_resolution",
+            "opaque_version_identity_digest": resolved.opaque_version_identity_digest,
+            "provider_id": resolved.provider_id,
+            "purpose": resolved.purpose,
+            "schema_version": 1,
+            "secret_binding_id": resolved.secret_binding_id,
+        }))
+        .map_err(|_| ManagedMcpSandboxSecretBrokerError::Denied)?
+        .parse()
+        .map_err(|_| ManagedMcpSandboxSecretBrokerError::Denied)?;
+        let evidence = match self
+            .authority
+            .commit_managed_mcp_sandbox_secret_delivery(
+                &request,
+                &authorization,
+                &resolution_evidence_digest,
+            )
+            .await
+            .map_err(map_sandbox_secret_authority_error)?
+        {
+            ManagedMcpSandboxSecretCommitOutcome::Delivered(evidence) => evidence,
+            ManagedMcpSandboxSecretCommitOutcome::Replayed(_) => {
+                return Err(ManagedMcpSandboxSecretBrokerError::OutcomeUncertain);
+            }
+        };
+        evidence
+            .validate_for(&request, &authorization)
+            .map_err(|_| ManagedMcpSandboxSecretBrokerError::Denied)?;
+        DeliveredManagedMcpSandboxSecret::from_committed(
+            &request,
+            authorization,
+            evidence,
+            std::mem::take(&mut resolved.material.0),
+        )
+    }
+}
+
+fn map_sandbox_secret_authority_error(
+    error: ManagedMcpSandboxSecretDeliveryError,
+) -> ManagedMcpSandboxSecretBrokerError {
+    match error {
+        ManagedMcpSandboxSecretDeliveryError::Unavailable => {
+            ManagedMcpSandboxSecretBrokerError::Unavailable
+        }
+        ManagedMcpSandboxSecretDeliveryError::Denied => ManagedMcpSandboxSecretBrokerError::Denied,
+        ManagedMcpSandboxSecretDeliveryError::OutcomeUncertain => {
+            ManagedMcpSandboxSecretBrokerError::OutcomeUncertain
+        }
+    }
+}
+
+fn map_sandbox_secret_resolution_error(
+    error: SecretMaterialResolutionError,
+) -> ManagedMcpSandboxSecretBrokerError {
+    match error {
+        SecretMaterialResolutionError::Unavailable => {
+            ManagedMcpSandboxSecretBrokerError::Unavailable
+        }
+        SecretMaterialResolutionError::NotFound
+        | SecretMaterialResolutionError::Revoked
+        | SecretMaterialResolutionError::InvalidEvidence => {
+            ManagedMcpSandboxSecretBrokerError::Denied
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -138,4 +138,6 @@ networkPolicy:
   natsCidrs: [10.20.0.0/24]
   artifactProviderCidrs: [10.30.0.0/24]
   workloadIdentityCidrs: [10.40.0.0/24]
+  egressBrokerNamespaceSelector: {insight.platform/egress-namespace: "true"}
+  egressBrokerPodSelector: {insight.platform/workload-role: egress-broker}
   natsPort: 4222

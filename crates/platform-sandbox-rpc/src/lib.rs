@@ -14,10 +14,13 @@ use insight_platform_contracts::{
     Retryability, Sha256Digest,
 };
 use insight_platform_sandbox::{
-    AbortSandboxExecution, ClaimSandboxJobs, ClaimedManagedMcpSandboxSession, ClaimedSandboxJob,
-    CollectedSandbox, CommitManagedMcpSandboxSessionPhase, CommitManagedMcpSandboxSessionReady,
-    CommitSandboxOutcome, CommitSandboxPhase, DestroySandbox, ExpiredSandboxLease,
-    HeartbeatSandboxExecution, InstalledSandboxBackendDescriptor,
+    AbortSandboxExecution, AuthorizedManagedMcpSandboxSecretDelivery, ClaimSandboxJobs,
+    ClaimedManagedMcpSandboxSession, ClaimedSandboxJob, CollectedSandbox,
+    CommitManagedMcpSandboxSessionPhase, CommitManagedMcpSandboxSessionReady, CommitSandboxOutcome,
+    CommitSandboxPhase, DestroySandbox, ExpiredSandboxLease, HeartbeatSandboxExecution,
+    InstalledSandboxBackendDescriptor, ManagedMcpSandboxSecretCommitOutcome,
+    ManagedMcpSandboxSecretDeliveryAuthority, ManagedMcpSandboxSecretDeliveryError,
+    ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSecretReservationOutcome,
     ManagedMcpSandboxSessionClaimAuthority, ManagedMcpSandboxSessionExecutionAuthority,
     ManagedMcpSandboxSessionPhaseDecision, MicroVmArtifactBroker, MicroVmArtifactBrokerError,
     MicroVmArtifactReadRequest, MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence,
@@ -39,7 +42,7 @@ use insight_platform_sandbox::{
 };
 #[cfg(test)]
 use insight_platform_sandbox::{MicroVmArtifactReadPurpose, MicroVmSandboxWorkloadKind};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{error::Error, fmt, sync::Arc};
 use tonic::transport::server::{TlsConnectInfo, UdsConnectInfo};
@@ -67,6 +70,8 @@ use proto::{
     sandbox_micro_vm_executor_process_registration_service_server::SandboxMicroVmExecutorProcessRegistrationService,
     sandbox_process_isolation_attestor_service_client::SandboxProcessIsolationAttestorServiceClient,
     sandbox_process_isolation_attestor_service_server::SandboxProcessIsolationAttestorService,
+    sandbox_secret_delivery_authority_service_client::SandboxSecretDeliveryAuthorityServiceClient,
+    sandbox_secret_delivery_authority_service_server::SandboxSecretDeliveryAuthorityService,
     ClosedSandboxEnvelope, SandboxArtifactChunkEnvelope, SandboxBytesEnvelope,
 };
 
@@ -79,6 +84,8 @@ pub const MICROVM_EXECUTOR_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-executor.microvm";
 pub const MICROVM_PROVIDER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-provider.microvm";
+pub const EGRESS_BROKER_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/egress-broker";
 const MICROVM_ARTIFACT_CHUNK_BYTES: usize = 1024 * 1024;
 
 /// Authorizes the mTLS-authenticated peer before any Sandbox request body is decoded.
@@ -148,6 +155,24 @@ impl tonic::service::Interceptor for MicroVmProviderWorkloadIdentity {
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), MICROVM_PROVIDER_WORKLOAD_IDENTITY)?;
+        Ok(request)
+    }
+}
+
+/// Authorizes only the independently deployed Egress Broker at the credential-free Secret
+/// delivery authority boundary.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EgressBrokerWorkloadIdentity;
+
+impl tonic::service::Interceptor for EgressBrokerWorkloadIdentity {
+    fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
+        let certificates = request
+            .peer_certs()
+            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
+        let leaf = certificates
+            .first()
+            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
+        require_exact_workload_uri(leaf.as_ref(), EGRESS_BROKER_WORKLOAD_IDENTITY)?;
         Ok(request)
     }
 }
@@ -349,6 +374,32 @@ impl SandboxAuthorityGrpcClient {
 pub struct SandboxManagedMcpSessionAuthorityGrpcClient {
     client: SandboxManagedMcpSessionAuthorityServiceClient<tonic::transport::Channel>,
     limits: SandboxInternalRpcLimits,
+}
+
+#[derive(Clone)]
+pub struct SandboxSecretDeliveryAuthorityGrpcClient {
+    client: SandboxSecretDeliveryAuthorityServiceClient<tonic::transport::Channel>,
+    limits: SandboxInternalRpcLimits,
+}
+
+impl SandboxSecretDeliveryAuthorityGrpcClient {
+    pub fn new(channel: tonic::transport::Channel, limits: SandboxInternalRpcLimits) -> Self {
+        let maximum = limits.maximum_message_bytes();
+        Self {
+            client: SandboxSecretDeliveryAuthorityServiceClient::new(channel)
+                .max_encoding_message_size(maximum)
+                .max_decoding_message_size(maximum),
+            limits,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommitManagedMcpSandboxSecretDeliveryWire {
+    request: ManagedMcpSandboxSecretDeliveryRequest,
+    authorization: AuthorizedManagedMcpSandboxSecretDelivery,
+    resolution_evidence_digest: Sha256Digest,
 }
 
 impl SandboxManagedMcpSessionAuthorityGrpcClient {
@@ -1061,6 +1112,56 @@ impl ManagedMcpSandboxSessionExecutionAuthority for SandboxManagedMcpSessionAuth
     }
 }
 
+#[async_trait]
+impl ManagedMcpSandboxSecretDeliveryAuthority for SandboxSecretDeliveryAuthorityGrpcClient {
+    async fn reserve_managed_mcp_sandbox_secret_delivery(
+        &self,
+        request: &ManagedMcpSandboxSecretDeliveryRequest,
+    ) -> Result<ManagedMcpSandboxSecretReservationOutcome, ManagedMcpSandboxSecretDeliveryError>
+    {
+        request
+            .validate_shape()
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Denied)?;
+        let envelope = encode(request, self.limits)
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Denied)?;
+        let mut client = self.client.clone();
+        let response = client
+            .reserve_managed_mcp_sandbox_secret_delivery(Request::new(envelope))
+            .await
+            .map_err(secret_delivery_client_error)?;
+        decode(response.into_inner(), self.limits)
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::OutcomeUncertain)
+    }
+
+    async fn commit_managed_mcp_sandbox_secret_delivery(
+        &self,
+        request: &ManagedMcpSandboxSecretDeliveryRequest,
+        authorization: &AuthorizedManagedMcpSandboxSecretDelivery,
+        resolution_evidence_digest: &Sha256Digest,
+    ) -> Result<ManagedMcpSandboxSecretCommitOutcome, ManagedMcpSandboxSecretDeliveryError> {
+        request
+            .validate_shape()
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Denied)?;
+        authorization
+            .validate_for(request)
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::Denied)?;
+        let wire = CommitManagedMcpSandboxSecretDeliveryWire {
+            request: request.clone(),
+            authorization: authorization.clone(),
+            resolution_evidence_digest: resolution_evidence_digest.clone(),
+        };
+        let envelope =
+            encode(&wire, self.limits).map_err(|_| ManagedMcpSandboxSecretDeliveryError::Denied)?;
+        let mut client = self.client.clone();
+        let response = client
+            .commit_managed_mcp_sandbox_secret_delivery(Request::new(envelope))
+            .await
+            .map_err(secret_delivery_client_error)?;
+        decode(response.into_inner(), self.limits)
+            .map_err(|_| ManagedMcpSandboxSecretDeliveryError::OutcomeUncertain)
+    }
+}
+
 fn request_external_effect_possible(request: &SandboxExecutionRequest) -> bool {
     request.effect.risk_rank() >= insight_platform_contracts::Effect::IdempotentWrite.risk_rank()
         || request.network_mode != insight_platform_sandbox::SandboxNetworkMode::None
@@ -1214,6 +1315,17 @@ pub struct SandboxManagedMcpSessionAuthorityGrpcService<A, V> {
     authority: Arc<A>,
     process_registration: Arc<V>,
     limits: SandboxInternalRpcLimits,
+}
+
+pub struct SandboxSecretDeliveryAuthorityGrpcService<A> {
+    authority: Arc<A>,
+    limits: SandboxInternalRpcLimits,
+}
+
+impl<A> SandboxSecretDeliveryAuthorityGrpcService<A> {
+    pub fn new(authority: Arc<A>, limits: SandboxInternalRpcLimits) -> Self {
+        Self { authority, limits }
+    }
 }
 
 impl<A, V> SandboxManagedMcpSessionAuthorityGrpcService<A, V> {
@@ -1971,6 +2083,53 @@ where
     }
 }
 
+#[tonic::async_trait]
+impl<A> SandboxSecretDeliveryAuthorityService for SandboxSecretDeliveryAuthorityGrpcService<A>
+where
+    A: ManagedMcpSandboxSecretDeliveryAuthority + 'static,
+{
+    async fn reserve_managed_mcp_sandbox_secret_delivery(
+        &self,
+        request: Request<ClosedSandboxEnvelope>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let request: ManagedMcpSandboxSecretDeliveryRequest =
+            decode(request.into_inner(), self.limits)?;
+        request
+            .validate_shape()
+            .map_err(|_| Status::invalid_argument("invalid Managed MCP Secret delivery"))?;
+        let result = self
+            .authority
+            .reserve_managed_mcp_sandbox_secret_delivery(&request)
+            .await
+            .map_err(secret_delivery_status)?;
+        Ok(Response::new(encode(&result, self.limits)?))
+    }
+
+    async fn commit_managed_mcp_sandbox_secret_delivery(
+        &self,
+        request: Request<ClosedSandboxEnvelope>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let wire: CommitManagedMcpSandboxSecretDeliveryWire =
+            decode(request.into_inner(), self.limits)?;
+        wire.request
+            .validate_shape()
+            .map_err(|_| Status::invalid_argument("invalid Managed MCP Secret delivery"))?;
+        wire.authorization
+            .validate_for(&wire.request)
+            .map_err(|_| Status::invalid_argument("invalid Managed MCP Secret authorization"))?;
+        let result = self
+            .authority
+            .commit_managed_mcp_sandbox_secret_delivery(
+                &wire.request,
+                &wire.authorization,
+                &wire.resolution_evidence_digest,
+            )
+            .await
+            .map_err(secret_delivery_status)?;
+        Ok(Response::new(encode(&result, self.limits)?))
+    }
+}
+
 fn encode<T: Serialize>(
     value: &T,
     limits: SandboxInternalRpcLimits,
@@ -2124,6 +2283,32 @@ fn micro_vm_artifact_client_error(status: Status) -> MicroVmArtifactBrokerError 
         tonic::Code::NotFound => MicroVmArtifactBrokerError::NotFound,
         tonic::Code::ResourceExhausted => MicroVmArtifactBrokerError::TooLarge,
         _ => MicroVmArtifactBrokerError::Integrity,
+    }
+}
+
+fn secret_delivery_status(error: ManagedMcpSandboxSecretDeliveryError) -> Status {
+    match error {
+        ManagedMcpSandboxSecretDeliveryError::Unavailable => {
+            Status::unavailable("Sandbox Secret delivery authority unavailable")
+        }
+        ManagedMcpSandboxSecretDeliveryError::Denied => {
+            Status::permission_denied("Sandbox Secret delivery denied")
+        }
+        ManagedMcpSandboxSecretDeliveryError::OutcomeUncertain => {
+            Status::aborted("Sandbox Secret delivery outcome is uncertain")
+        }
+    }
+}
+
+fn secret_delivery_client_error(status: Status) -> ManagedMcpSandboxSecretDeliveryError {
+    match status.code() {
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
+            ManagedMcpSandboxSecretDeliveryError::Unavailable
+        }
+        tonic::Code::Aborted | tonic::Code::AlreadyExists => {
+            ManagedMcpSandboxSecretDeliveryError::OutcomeUncertain
+        }
+        _ => ManagedMcpSandboxSecretDeliveryError::Denied,
     }
 }
 
@@ -2818,6 +3003,17 @@ mod tests {
         require_exact_workload_uri(&microvm, MICROVM_EXECUTOR_WORKLOAD_IDENTITY).unwrap();
         assert_eq!(
             require_exact_workload_uri(&microvm, WASI_EXECUTOR_WORKLOAD_IDENTITY)
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+
+        let egress = certificate_with_sans(vec![SanType::URI(
+            EGRESS_BROKER_WORKLOAD_IDENTITY.try_into().unwrap(),
+        )]);
+        require_exact_workload_uri(&egress, EGRESS_BROKER_WORKLOAD_IDENTITY).unwrap();
+        assert_eq!(
+            require_exact_workload_uri(&egress, MICROVM_PROVIDER_WORKLOAD_IDENTITY)
                 .unwrap_err()
                 .code(),
             tonic::Code::PermissionDenied

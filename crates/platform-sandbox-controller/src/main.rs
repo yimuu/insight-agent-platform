@@ -24,11 +24,14 @@ use insight_platform_sandbox_rpc::{
         sandbox_executor_broker_service_server::SandboxExecutorBrokerServiceServer,
         sandbox_managed_mcp_session_authority_service_server::SandboxManagedMcpSessionAuthorityServiceServer,
         sandbox_micro_vm_broker_service_server::SandboxMicroVmBrokerServiceServer,
+        sandbox_secret_delivery_authority_service_server::SandboxSecretDeliveryAuthorityServiceServer,
     },
-    MicroVmExecutorWorkloadIdentity, MicroVmProviderWorkloadIdentity, SandboxAuthorityGrpcService,
-    SandboxBrokerGrpcService, SandboxExecutorAuthorityWorkloadIdentity, SandboxInternalRpcLimits,
+    EgressBrokerWorkloadIdentity, MicroVmExecutorWorkloadIdentity, MicroVmProviderWorkloadIdentity,
+    SandboxAuthorityGrpcService, SandboxBrokerGrpcService,
+    SandboxExecutorAuthorityWorkloadIdentity, SandboxInternalRpcLimits,
     SandboxManagedMcpSessionAuthorityGrpcService, SandboxMicroVmBrokerGrpcService,
-    SandboxProcessIsolationAttestorGrpcClient, WasiExecutorWorkloadIdentity,
+    SandboxProcessIsolationAttestorGrpcClient, SandboxSecretDeliveryAuthorityGrpcService,
+    WasiExecutorWorkloadIdentity,
 };
 use ipnet::IpNet;
 use serde::Deserialize;
@@ -249,6 +252,11 @@ async fn run() -> Result<(), ProcessError> {
     )
     .max_encoding_message_size(maximum)
     .max_decoding_message_size(maximum);
+    let secret_delivery_authority_service = SandboxSecretDeliveryAuthorityServiceServer::new(
+        SandboxSecretDeliveryAuthorityGrpcService::new(repository.clone(), limits),
+    )
+    .max_encoding_message_size(maximum)
+    .max_decoding_message_size(maximum);
     let authority_service = tonic::service::interceptor::InterceptedService::new(
         authority_service,
         SandboxExecutorAuthorityWorkloadIdentity,
@@ -264,6 +272,10 @@ async fn run() -> Result<(), ProcessError> {
     let micro_vm_broker_service = tonic::service::interceptor::InterceptedService::new(
         micro_vm_broker_service,
         MicroVmProviderWorkloadIdentity,
+    );
+    let secret_delivery_authority_service = tonic::service::interceptor::InterceptedService::new(
+        secret_delivery_authority_service,
+        EgressBrokerWorkloadIdentity,
     );
 
     let ca = read_bounded(
@@ -294,6 +306,7 @@ async fn run() -> Result<(), ProcessError> {
         .add_service(broker_service)
         .add_service(managed_session_authority_service)
         .add_service(micro_vm_broker_service)
+        .add_service(secret_delivery_authority_service)
         .serve_with_shutdown(address, async {
             let _ = shutdown_receiver.await;
         });

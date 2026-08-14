@@ -30,6 +30,7 @@ egress:
       authorityCa: authority-ca.pem
       authorityClientCertificate: authority-client.pem
       authorityClientPrivateKey: authority-client-key.pem
+      sandboxControllerCa: sandbox-controller-ca.pem
   resources:
     requests: {cpu: 200m, memory: 256Mi}
     limits: {cpu: "2", memory: 1Gi}
@@ -69,6 +70,11 @@ networkPolicy:
       podSelector: {insight.platform/workload-role: mcp-host}
     - namespaceSelector: {insight.platform/workload-namespace: callback-api}
       podSelector: {insight.platform/workload-role: mcp-callback-api}
+    - namespaceSelector: {insight.platform/sandbox-executor-namespace: "true"}
+      podSelector: {insight.platform/workload-role: sandbox-provider.microvm}
+  sandboxControllerNamespaceSelector: {kubernetes.io/metadata.name: platform-sandbox}
+  sandboxControllerPodSelector: {insight.platform/workload-role: sandbox-controller}
+  sandboxControllerPort: 7443
   # CandidateManifest replaces these examples with the exact routed endpoint ranges.
   postgresCidrs: [10.10.0.0/24]
   secretProviderCidrs: [10.30.0.0/24]

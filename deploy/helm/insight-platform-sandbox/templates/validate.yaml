@@ -28,6 +28,9 @@
 {{- if empty .Values.networkPolicy.workloadIdentityCidrs }}
 {{- fail "networkPolicy.workloadIdentityCidrs is required" }}
 {{- end }}
+{{- if or (empty .Values.networkPolicy.egressBrokerNamespaceSelector) (empty .Values.networkPolicy.egressBrokerPodSelector) }}
+{{- fail "Egress Broker NetworkPolicy selectors are required" }}
+{{- end }}
 {{- if or (empty .Values.controller.workloadIdentity.roleArn) (empty .Values.controller.workloadIdentity.audience) }}
 {{- fail "controller.workloadIdentity roleArn and audience are required" }}
 {{- end }}

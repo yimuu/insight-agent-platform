@@ -31,6 +31,12 @@ spec:
               app.kubernetes.io/instance: {{ .Release.Name }}
               app.kubernetes.io/component: executor-wasi
       ports: [{protocol: TCP, port: {{ int .Values.controller.port }}}]
+    - from:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.egressBrokerNamespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.egressBrokerPodSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int .Values.controller.port }}}]
   egress:
     - to:
         - namespaceSelector:

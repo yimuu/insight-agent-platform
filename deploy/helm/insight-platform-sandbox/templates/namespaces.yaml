@@ -3,6 +3,7 @@ kind: Namespace
 metadata:
   name: {{ .Values.namespaces.controller }}
   labels:
+    insight.platform/sandbox-controller-namespace: "true"
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
 ---

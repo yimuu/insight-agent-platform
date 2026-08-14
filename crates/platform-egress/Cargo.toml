@@ -24,6 +24,7 @@ insight-platform-contracts.workspace = true
 insight-platform-capability-adapters.workspace = true
 insight-platform-mcp-host.workspace = true
 insight-platform-model-adapters.workspace = true
+insight-platform-sandbox.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
 ring.workspace = true
@@ -33,3 +34,6 @@ tokio.workspace = true
 tokio-util.workspace = true
 tower.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+insight-platform-jobs.workspace = true
