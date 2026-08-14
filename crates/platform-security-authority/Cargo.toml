@@ -1,0 +1,23 @@
+[package]
+name = "insight-platform-security-authority"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "platform-security-authority"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+insight-platform-contracts.workspace = true
+insight-platform-postgres.workspace = true
+insight-platform-security.workspace = true
+insight-platform-security-rpc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tonic.workspace = true
