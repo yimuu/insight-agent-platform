@@ -1225,8 +1225,9 @@ impl PgRepository {
               AND job.state = 'ready' AND job.terminal_at IS NULL
               AND job.worker_id IS NULL AND job.scheduled_at <= $1
               AND job.deadline > $1
-              AND job.payload #>> '{request,executor_worker_manifest_digest}' = $3
-              AND job.payload #>> '{request,isolation_backend_contract_digest}' = $4
+              AND job.payload ->> 'workload_kind' = 'capability_execution'
+              AND job.payload #>> '{workload,request,executor_worker_manifest_digest}' = $3
+              AND job.payload #>> '{workload,request,isolation_backend_contract_digest}' = $4
             ORDER BY job.priority DESC, job.scheduled_at, job.job_id
             LIMIT $2
             "#,
@@ -4040,7 +4041,8 @@ async fn update_sandbox_job(
     database_now: DateTime<Utc>,
     release_quota: bool,
 ) -> Result<JobRecord, RepositoryError> {
-    let payload = TypedPayload::from_versioned(1, &decision.payload, 1_048_576)?;
+    let stored_payload = SandboxJobPayload::capability_execution(decision.payload.clone());
+    let payload = TypedPayload::from_versioned(1, &stored_payload, 1_048_576)?;
     let (worker_id, lease_token_digest, lease_expires_at, heartbeat_at) = decision
         .job
         .lease
