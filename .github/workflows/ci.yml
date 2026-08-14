@@ -34,8 +34,22 @@ jobs:
           cache-on-failure: "false"
       - name: Check DSL cutover residuals
         run: bash scripts/check-cutover-residuals.sh
+      - name: Check Platform v1 machine contracts and fixtures
+        run: python3 scripts/check-platform-v1-contracts.py && cargo run --locked -p insight-platform-contracts --bin check-platform-contracts
+      - name: Check Platform v1 PostgreSQL schema contract
+        run: python3 scripts/check-platform-postgres-schema.py && cargo run --locked -p insight-platform-postgres --bin check-platform-schema-contract
       - name: Check crate boundaries and dependency feature baseline
         run: bash scripts/check-crate-boundaries.sh
+      - name: Install Helm for Sandbox deployment contract
+        uses: azure/setup-helm@v4
+      - name: Check Sandbox deployment contract
+        run: bash scripts/check-platform-sandbox-deployment.sh
+      - name: Check Security Authority and Egress deployment boundary
+        run: bash scripts/check-platform-security-deployment.sh
+      - name: Check MCP OAuth cleanup deployment boundary
+        run: bash scripts/check-platform-mcp-cleanup-deployment.sh
+      - name: Check callback API deployment boundary
+        run: bash scripts/check-platform-callback-deployment.sh
       - name: Check root public API baseline
         run: CARGO_TARGET_DIR=target bash scripts/check-public-api-baseline.sh
       - name: Format
@@ -52,6 +66,9 @@ jobs:
       RUN_HISTORY_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
       # All durable PostgreSQL gates exercise the same real PG16 service in CI.
       TEST_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
+      PLATFORM_TEST_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
+      TEST_NATS_URL: nats://localhost:4222
+      PLATFORM_TEST_NATS_URL: nats://localhost:4222
     services:
       postgres:
         image: postgres:16-alpine
@@ -66,6 +83,10 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      nats:
+        image: nats:2.10-alpine
+        ports:
+          - 4222:4222
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -77,7 +98,20 @@ jobs:
           shared-key: "registry-only"
           cache-targets: "false"
           cache-on-failure: "false"
+      - name: Provision clean-cut Platform PostgreSQL baseline
+        env:
+          PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
+        run: bash scripts/provision-platform-postgres.sh
+      - name: Provision Security Authority least-privilege role
+        env:
+          PLATFORM_DATABASE_ADMIN_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
+          PLATFORM_SECURITY_AUTHORITY_ROLE: platform_security_authority_qualification
+        run: |
+          psql "$PLATFORM_DATABASE_ADMIN_URL" --no-psqlrc --set ON_ERROR_STOP=1 --command 'CREATE ROLE platform_security_authority_qualification NOLOGIN'
+          bash scripts/provision-platform-security-authority-role.sh
       - name: Test
+        env:
+          PLATFORM_SECURITY_AUTHORITY_TEST_ROLE: platform_security_authority_qualification
         run: cargo test --locked --workspace --all-targets --all-features
       - name: Documentation tests
         run: cargo test --locked --workspace --doc --all-features
