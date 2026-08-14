@@ -127,6 +127,8 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   "provider_tls_server_name" .Values.microVmExecutor.provider.tlsServerName
   "controller_broker_endpoint" (include "insight-platform-sandbox.controllerEndpoint" .)
   "controller_broker_tls_server_name" (printf "%s.%s.svc" (include "insight-platform-sandbox.controllerName" .) .Values.namespaces.controller)
+  "egress_broker_endpoint" .Values.microVmExecutor.provider.egressBrokerEndpoint
+  "egress_broker_tls_server_name" .Values.microVmExecutor.provider.egressBrokerTlsServerName
   "worker_manifest_digest" (printf "sha256:%s" (toJson .Values.microVmExecutor.workerManifest | sha256sum))
   "backend_contract_digest" .Values.microVmExecutor.backendContractDigest
   "installation" .Values.microVmExecutor.provider.installation

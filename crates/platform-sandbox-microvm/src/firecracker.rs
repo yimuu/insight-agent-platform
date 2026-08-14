@@ -530,9 +530,13 @@ impl FirecrackerGuestChannel {
         expected_sequence: u64,
         material: &mut [u8],
     ) -> Result<(), FirecrackerGuestChannelError> {
-        command
+        if command
             .validate_for(request, fence, prepared, expected_sequence)
-            .map_err(|_| FirecrackerGuestChannelError::InvalidFrame)?;
+            .is_err()
+        {
+            material.fill(0);
+            return Err(FirecrackerGuestChannelError::InvalidFrame);
+        }
         match timeout(
             self.timeout,
             write_managed_mcp_guest_secret(&mut self.stream, command, material),

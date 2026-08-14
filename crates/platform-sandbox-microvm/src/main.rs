@@ -10,19 +10,23 @@ use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, ResourceId,
     ResourceKind, Sha256Digest,
 };
+use insight_platform_egress::ManagedMcpSandboxSecretBroker;
+use insight_platform_egress_rpc::{EgressBrokerGrpcClient, EgressInternalRpcLimits};
 use insight_platform_sandbox::{
-    InstalledSandboxBackendDescriptor, MicroVmArtifactBroker, MicroVmGrantRevoker,
-    SandboxCommandLimits, SandboxIsolationBackendKind,
+    InstalledSandboxBackendDescriptor, ManagedMcpSandboxSessionStateSealer, MicroVmArtifactBroker,
+    MicroVmGrantRevoker, SandboxCommandLimits, SandboxIsolationBackendKind,
 };
 use insight_platform_sandbox_microvm::{
     DurableMicroVmLifecycle, FirecrackerInstallation, InstalledMicroVmRuntime,
-    LinuxFirecrackerHostConfig, LinuxFirecrackerHostFactory, ManagedMcpSandboxProtocolAdapter,
-    MicroVmSandboxExecutorBackend, SystemMicroVmProviderClock,
+    LinuxFirecrackerHostConfig, LinuxFirecrackerHostFactory, LinuxManagedMcpSessionFactory,
+    ManagedMcpMicroVmSessionProvider, ManagedMcpSandboxProtocolAdapter, MicroVmProviderCapacity,
+    MicroVmSandboxExecutorBackend, SystemManagedMcpProviderClock, SystemMicroVmProviderClock,
 };
 use insight_platform_sandbox_rpc::{
     proto::sandbox_isolation_provider_service_server::SandboxIsolationProviderServiceServer,
+    proto::sandbox_managed_mcp_session_provider_service_server::SandboxManagedMcpSessionProviderServiceServer,
     MicroVmExecutorWorkloadIdentity, SandboxInternalRpcLimits, SandboxIsolationProviderGrpcService,
-    SandboxMicroVmBrokerGrpcClient,
+    SandboxManagedMcpSessionProviderGrpcService, SandboxMicroVmBrokerGrpcClient,
 };
 use serde::Deserialize;
 use std::{
@@ -45,6 +49,9 @@ const SERVER_KEY_PATH_ENV: &str = "PLATFORM_SANDBOX_PROVIDER_KEY_PATH";
 const BROKER_CA_PATH_ENV: &str = "PLATFORM_SANDBOX_PROVIDER_BROKER_CA_PATH";
 const BROKER_CERT_PATH_ENV: &str = "PLATFORM_SANDBOX_PROVIDER_BROKER_CERT_PATH";
 const BROKER_KEY_PATH_ENV: &str = "PLATFORM_SANDBOX_PROVIDER_BROKER_KEY_PATH";
+const EGRESS_CA_PATH_ENV: &str = "PLATFORM_SANDBOX_PROVIDER_EGRESS_CA_PATH";
+const EGRESS_CERT_PATH_ENV: &str = "PLATFORM_SANDBOX_PROVIDER_EGRESS_CERT_PATH";
+const EGRESS_KEY_PATH_ENV: &str = "PLATFORM_SANDBOX_PROVIDER_EGRESS_KEY_PATH";
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const MAX_TLS_FILE_BYTES: usize = 1024 * 1024;
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 100;
@@ -57,6 +64,8 @@ struct ProviderProcessConfig {
     provider_tls_server_name: String,
     controller_broker_endpoint: String,
     controller_broker_tls_server_name: String,
+    egress_broker_endpoint: String,
+    egress_broker_tls_server_name: String,
     worker_manifest_digest: Sha256Digest,
     backend_contract_digest: Sha256Digest,
     installation: FirecrackerInstallation,
@@ -122,6 +131,8 @@ impl ProviderProcessConfig {
             || !stable_dns_name(&self.provider_tls_server_name)
             || !closed_service_endpoint(&self.controller_broker_endpoint, "https")
             || !stable_dns_name(&self.controller_broker_tls_server_name)
+            || !closed_service_endpoint(&self.egress_broker_endpoint, "https")
+            || !stable_dns_name(&self.egress_broker_tls_server_name)
             || !closed_absolute_path(state, 4_096)
             || is_broad_directory(state)
             || state == self.installation.chroot_base_directory
@@ -193,36 +204,44 @@ async fn run() -> Result<(), ProcessError> {
     let provider_process_generation_id =
         ResourceId::from_uuid_v7(ResourceKind::WorkerProcessGeneration, uuid::Uuid::now_v7())
             .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let broker = Arc::new(SandboxMicroVmBrokerGrpcClient::new(
+    let controller_broker = Arc::new(SandboxMicroVmBrokerGrpcClient::new(
         connect_broker(&config).await?,
         rpc_limits,
     ));
-    let grant_revoker: Arc<dyn MicroVmGrantRevoker> = broker.clone();
-    let artifact_broker: Arc<dyn MicroVmArtifactBroker> = broker;
+    let egress_broker = Arc::new(EgressBrokerGrpcClient::new(
+        connect_egress(&config).await?,
+        EgressInternalRpcLimits::default(),
+    ));
+    let host_config = LinuxFirecrackerHostConfig {
+        installation: config.installation.clone(),
+        runtimes: config.runtimes.clone(),
+        provider_process_generation_id,
+        state_directory: PathBuf::from(&config.state_directory),
+        ephemeral_uid_base: config.ephemeral_uid_base,
+        ephemeral_gid_base: config.ephemeral_gid_base,
+        ephemeral_identity_count: config.ephemeral_identity_count,
+        maximum_instances: config.maximum_instances,
+        maximum_tombstones: config.maximum_tombstones,
+        tombstone_retention: Duration::from_secs(config.tombstone_retention_seconds),
+        api_timeout: Duration::from_millis(config.api_timeout_milliseconds),
+        guest_channel_timeout: Duration::from_millis(config.guest_channel_timeout_milliseconds),
+        socket_poll_interval: Duration::from_millis(config.socket_poll_milliseconds),
+        process_termination_timeout: Duration::from_millis(
+            config.process_termination_timeout_milliseconds,
+        ),
+    };
+    let grant_revoker: Arc<dyn MicroVmGrantRevoker> = controller_broker.clone();
+    let artifact_broker: Arc<dyn MicroVmArtifactBroker> = controller_broker.clone();
+    let provider_capacity = Arc::new(
+        MicroVmProviderCapacity::new(config.maximum_instances)
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
     let host = Arc::new(
         LinuxFirecrackerHostFactory::install(
-            LinuxFirecrackerHostConfig {
-                installation: config.installation.clone(),
-                runtimes: config.runtimes.clone(),
-                provider_process_generation_id,
-                state_directory: PathBuf::from(&config.state_directory),
-                ephemeral_uid_base: config.ephemeral_uid_base,
-                ephemeral_gid_base: config.ephemeral_gid_base,
-                ephemeral_identity_count: config.ephemeral_identity_count,
-                maximum_instances: config.maximum_instances,
-                maximum_tombstones: config.maximum_tombstones,
-                tombstone_retention: Duration::from_secs(config.tombstone_retention_seconds),
-                api_timeout: Duration::from_millis(config.api_timeout_milliseconds),
-                guest_channel_timeout: Duration::from_millis(
-                    config.guest_channel_timeout_milliseconds,
-                ),
-                socket_poll_interval: Duration::from_millis(config.socket_poll_milliseconds),
-                process_termination_timeout: Duration::from_millis(
-                    config.process_termination_timeout_milliseconds,
-                ),
-            },
+            host_config.clone(),
             grant_revoker,
             artifact_broker,
+            Arc::clone(&provider_capacity),
         )
         .await
         .map_err(|_| ProcessError::HostUnavailable)?,
@@ -245,6 +264,31 @@ async fn run() -> Result<(), ProcessError> {
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
+    let managed_grant_revoker: Arc<dyn MicroVmGrantRevoker> = controller_broker.clone();
+    let managed_artifact_broker: Arc<dyn MicroVmArtifactBroker> = controller_broker;
+    let secret_broker: Arc<dyn ManagedMcpSandboxSecretBroker> = egress_broker.clone();
+    let state_sealer: Arc<dyn ManagedMcpSandboxSessionStateSealer> = egress_broker;
+    let managed_lifecycle = Arc::new(
+        LinuxManagedMcpSessionFactory::install(
+            host_config,
+            managed_grant_revoker,
+            managed_artifact_broker,
+            secret_broker,
+            state_sealer,
+            provider_capacity,
+        )
+        .await
+        .map_err(|_| ProcessError::HostUnavailable)?,
+    );
+    let managed_backend = Arc::new(
+        ManagedMcpMicroVmSessionProvider::new(
+            config.descriptor(),
+            sandbox_limits,
+            managed_lifecycle,
+            Arc::new(SystemManagedMcpProviderClock),
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
     let maximum = rpc_limits.maximum_message_bytes();
     let service = SandboxIsolationProviderServiceServer::new(
         SandboxIsolationProviderGrpcService::new(backend, rpc_limits, sandbox_limits)
@@ -256,6 +300,21 @@ async fn run() -> Result<(), ProcessError> {
         service,
         MicroVmExecutorWorkloadIdentity,
     );
+    let managed_service = SandboxManagedMcpSessionProviderServiceServer::new(
+        SandboxManagedMcpSessionProviderGrpcService::new(
+            managed_backend,
+            config.descriptor(),
+            rpc_limits,
+            sandbox_limits,
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
+    )
+    .max_encoding_message_size(maximum)
+    .max_decoding_message_size(maximum);
+    let managed_service = tonic::service::interceptor::InterceptedService::new(
+        managed_service,
+        MicroVmExecutorWorkloadIdentity,
+    );
     let tls = server_tls(&config)?;
     let socket_path = PathBuf::from(&config.provider_socket_path);
     let listener = bind_provider_socket(&socket_path)?;
@@ -265,6 +324,7 @@ async fn run() -> Result<(), ProcessError> {
         .tls_config(tls)
         .map_err(|_| ProcessError::InvalidTls)?
         .add_service(service)
+        .add_service(managed_service)
         .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async {
             let _ = shutdown_receiver.await;
         });
@@ -305,6 +365,36 @@ async fn connect_broker(
         .ca_certificate(Certificate::from_pem(ca))
         .identity(Identity::from_pem(certificate, key));
     Endpoint::from_shared(config.controller_broker_endpoint.clone())
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .connect_timeout(Duration::from_millis(config.connect_timeout_milliseconds))
+        .timeout(Duration::from_millis(config.request_timeout_milliseconds))
+        .tls_config(tls)
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .connect()
+        .await
+        .map_err(|_| ProcessError::BrokerUnavailable)
+}
+
+async fn connect_egress(
+    config: &ProviderProcessConfig,
+) -> Result<tonic::transport::Channel, ProcessError> {
+    let ca = read_bounded(
+        &required_absolute_path(EGRESS_CA_PATH_ENV, 4_096)?,
+        MAX_TLS_FILE_BYTES,
+    )?;
+    let certificate = read_bounded(
+        &required_absolute_path(EGRESS_CERT_PATH_ENV, 4_096)?,
+        MAX_TLS_FILE_BYTES,
+    )?;
+    let key = read_bounded(
+        &required_absolute_path(EGRESS_KEY_PATH_ENV, 4_096)?,
+        MAX_TLS_FILE_BYTES,
+    )?;
+    let tls = ClientTlsConfig::new()
+        .domain_name(config.egress_broker_tls_server_name.clone())
+        .ca_certificate(Certificate::from_pem(ca))
+        .identity(Identity::from_pem(certificate, key));
+    Endpoint::from_shared(config.egress_broker_endpoint.clone())
         .map_err(|_| ProcessError::InvalidConfiguration)?
         .connect_timeout(Duration::from_millis(config.connect_timeout_milliseconds))
         .timeout(Duration::from_millis(config.request_timeout_milliseconds))
@@ -512,6 +602,8 @@ mod tests {
             provider_tls_server_name: "sandbox-provider.platform.svc".to_owned(),
             controller_broker_endpoint: "https://sandbox-controller.platform.svc:7443".to_owned(),
             controller_broker_tls_server_name: "sandbox-controller.platform.svc".to_owned(),
+            egress_broker_endpoint: "https://egress-broker.platform.svc:7444".to_owned(),
+            egress_broker_tls_server_name: "egress-broker.platform.svc".to_owned(),
             worker_manifest_digest: digest('a'),
             backend_contract_digest: digest('b'),
             installation: FirecrackerInstallation {

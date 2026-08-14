@@ -113,6 +113,8 @@ microVmExecutor:
   provider:
     socketPath: /run/insight-sandbox-provider/provider.sock
     tlsServerName: sandbox-provider.insight.internal
+    egressBrokerEndpoint: https://insight-platform-security-egress-egress.platform-egress.svc:8443
+    egressBrokerTlsServerName: insight-platform-security-egress-egress.platform-egress.svc
     installation:
       version: 1.12.1
       firecracker_path: /opt/insight/firecracker/firecracker
@@ -196,6 +198,7 @@ tls:
     providerServerCertificate: provider-server.pem
     providerServerPrivateKey: provider-server-key.pem
     providerControllerCa: controller-server-ca.pem
+    providerEgressCa: egress-server-ca.pem
     providerClientCertificate: provider-client.pem
     providerClientPrivateKey: provider-client-key.pem
 

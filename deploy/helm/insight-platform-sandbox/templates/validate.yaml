@@ -28,6 +28,9 @@
 {{- if or (empty .Values.microVmExecutor.provider.runtimes) (lt (int .Values.microVmExecutor.provider.maximumInstances) 1) }}
 {{- fail "microVM provider requires an installed runtime and bounded nonzero capacity" }}
 {{- end }}
+{{- if or (empty .Values.microVmExecutor.provider.egressBrokerEndpoint) (empty .Values.microVmExecutor.provider.egressBrokerTlsServerName) }}
+{{- fail "microVM provider requires an exact Egress Broker mTLS endpoint" }}
+{{- end }}
 {{- if gt (int .Values.microVmExecutor.workerManifest.max_concurrency) (int .Values.microVmExecutor.provider.maximumInstances) }}
 {{- fail "microVM worker concurrency cannot exceed provider instance capacity" }}
 {{- end }}

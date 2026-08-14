@@ -31,7 +31,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -53,6 +53,75 @@ const MAX_EPHEMERAL_IDENTITIES: u32 = 1_000_000;
 const MIN_TOMBSTONE_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_TOMBSTONE_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// One process-wide capacity authority shared by finite and long-lived microVM workloads.
+/// Per-registry limits remain corruption guards; this counter prevents the two closed lifecycle
+/// implementations from each consuming the full Provider capacity independently.
+pub struct MicroVmProviderCapacity {
+    maximum: usize,
+    active: AtomicUsize,
+}
+
+impl MicroVmProviderCapacity {
+    pub fn new(maximum: usize) -> Result<Self, LinuxFirecrackerHostError> {
+        if maximum == 0 || maximum > 65_536 {
+            return Err(LinuxFirecrackerHostError::InvalidConfiguration);
+        }
+        Ok(Self {
+            maximum,
+            active: AtomicUsize::new(0),
+        })
+    }
+
+    pub(crate) fn register_existing(&self, count: usize) -> Result<(), LinuxFirecrackerHostError> {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(count)
+                    .filter(|next| *next <= self.maximum)
+            })
+            .map(|_| ())
+            .map_err(|_| LinuxFirecrackerHostError::RegistryCorrupt)
+    }
+
+    pub(crate) fn reserve(
+        self: &Arc<Self>,
+    ) -> Result<MicroVmCapacityReservation, MicroVmProviderFailure> {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1).filter(|next| *next <= self.maximum)
+            })
+            .map_err(|_| contract_failure("microvm_provider_capacity_exhausted"))?;
+        Ok(MicroVmCapacityReservation {
+            capacity: Arc::clone(self),
+            committed: false,
+        })
+    }
+
+    pub(crate) fn release(&self) {
+        let previous = self.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "microVM capacity release must be paired");
+    }
+}
+
+pub(crate) struct MicroVmCapacityReservation {
+    capacity: Arc<MicroVmProviderCapacity>,
+    committed: bool,
+}
+
+impl MicroVmCapacityReservation {
+    pub(crate) fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for MicroVmCapacityReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.capacity.release();
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LinuxFirecrackerHostConfig {
     pub installation: FirecrackerInstallation,
@@ -72,7 +141,7 @@ pub struct LinuxFirecrackerHostConfig {
 }
 
 impl LinuxFirecrackerHostConfig {
-    fn validate(&self) -> Result<(), LinuxFirecrackerHostError> {
+    pub(crate) fn validate(&self) -> Result<(), LinuxFirecrackerHostError> {
         self.installation
             .validate()
             .map_err(|_| LinuxFirecrackerHostError::InvalidConfiguration)?;
@@ -129,6 +198,7 @@ struct LinuxFirecrackerShared {
     runtimes: BTreeMap<Sha256Digest, InstalledMicroVmRuntime>,
     grant_authority: Arc<dyn MicroVmGrantRevoker>,
     artifact_broker: Arc<dyn MicroVmArtifactBroker>,
+    capacity: Arc<MicroVmProviderCapacity>,
 }
 
 pub struct LinuxFirecrackerHostFactory {
@@ -138,9 +208,10 @@ pub struct LinuxFirecrackerHostFactory {
 
 impl LinuxFirecrackerHostFactory {
     pub async fn install(
-        config: LinuxFirecrackerHostConfig,
+        mut config: LinuxFirecrackerHostConfig,
         grant_authority: Arc<dyn MicroVmGrantRevoker>,
         artifact_broker: Arc<dyn MicroVmArtifactBroker>,
+        capacity: Arc<MicroVmProviderCapacity>,
     ) -> Result<Self, LinuxFirecrackerHostError> {
         if !cfg!(target_os = "linux") {
             return Err(LinuxFirecrackerHostError::LinuxRequired);
@@ -160,8 +231,10 @@ impl LinuxFirecrackerHostFactory {
             true,
         )
         .await?;
-        verify_root_directory(&config.installation.chroot_base_directory).await?;
-        verify_root_directory(&config.state_directory).await?;
+        prepare_root_directory(&config.installation.chroot_base_directory).await?;
+        prepare_root_directory(&config.state_directory).await?;
+        config.state_directory =
+            prepare_state_subdirectory(&config.state_directory, "capability").await?;
         let mut runtimes = BTreeMap::new();
         for runtime in &config.runtimes {
             verify_root_protected_file(
@@ -194,6 +267,7 @@ impl LinuxFirecrackerHostFactory {
                 runtimes,
                 grant_authority,
                 artifact_broker,
+                capacity,
             }),
             instances: Mutex::new(BTreeMap::new()),
         };
@@ -261,6 +335,7 @@ impl LinuxFirecrackerHostFactory {
         {
             return Err(LinuxFirecrackerHostError::RegistryCorrupt);
         }
+        self.shared.capacity.register_existing(active)?;
         *self.instances.lock().await = loaded;
         Ok(())
     }
@@ -363,6 +438,7 @@ impl LinuxFirecrackerHostFactory {
         }
         let (uid, gid, identity_offset) =
             selected.ok_or_else(|| contract_failure("microvm_identity_pool_exhausted"))?;
+        let mut capacity_reservation = self.shared.capacity.reserve()?;
         let instance_id = instance_id(&key)?;
         let plan = JailerLaunchPlan::build(
             &self.shared.config.installation,
@@ -430,6 +506,7 @@ impl LinuxFirecrackerHostFactory {
             request.clone(),
         ));
         instances.insert(key, Arc::clone(&instance));
+        capacity_reservation.commit();
         Ok(instance)
     }
 }
@@ -478,6 +555,7 @@ struct LinuxFirecrackerInstance {
     uid: u32,
     destroyed: AtomicBool,
     destroyed_at_millis: AtomicI64,
+    capacity_released: AtomicBool,
     record: Mutex<FirecrackerHostRecord>,
     plan: JailerLaunchPlan,
     request: Mutex<Option<SandboxExecutionRequest>>,
@@ -515,6 +593,7 @@ impl LinuxFirecrackerInstance {
             uid,
             destroyed: AtomicBool::new(destroyed),
             destroyed_at_millis: AtomicI64::new(destroyed_at_millis),
+            capacity_released: AtomicBool::new(destroyed),
             record: Mutex::new(record),
             plan,
             request: Mutex::new(Some(request)),
@@ -552,6 +631,7 @@ impl LinuxFirecrackerInstance {
             uid,
             destroyed: AtomicBool::new(destroyed),
             destroyed_at_millis: AtomicI64::new(destroyed_at_millis),
+            capacity_released: AtomicBool::new(destroyed),
             record: Mutex::new(record),
             plan,
             request: Mutex::new(None),
@@ -920,6 +1000,9 @@ impl LinuxFirecrackerInstance {
         self.destroyed_at_millis
             .store(observed_at.timestamp_millis(), Ordering::Release);
         self.destroyed.store(true, Ordering::Release);
+        if !self.capacity_released.swap(true, Ordering::AcqRel) {
+            self.shared.capacity.release();
+        }
         Ok(proof)
     }
 }
@@ -1440,7 +1523,7 @@ impl FirecrackerHostRecord {
     }
 }
 
-async fn materialize_jail(
+pub(crate) async fn materialize_jail(
     installation: &FirecrackerInstallation,
     plan: &JailerLaunchPlan,
     runtime: &InstalledMicroVmRuntime,
@@ -1557,7 +1640,7 @@ async fn persist_record(
     .map_err(|_| contract_failure("microvm_host_registry_sync_failed"))
 }
 
-async fn wait_for_socket(
+pub(crate) async fn wait_for_socket(
     path: &Path,
     maximum: Duration,
     interval: Duration,
@@ -1577,7 +1660,7 @@ async fn wait_for_socket(
     .map_err(|_| uncertain_failure("microvm_socket_startup_timeout", None, false))
 }
 
-async fn verify_root_protected_file(
+pub(crate) async fn verify_root_protected_file(
     path: &Path,
     expected_digest: &Sha256Digest,
     maximum_bytes: u64,
@@ -1604,7 +1687,7 @@ async fn verify_root_protected_file(
     Ok(())
 }
 
-async fn verify_root_directory(path: &Path) -> Result<(), LinuxFirecrackerHostError> {
+pub(crate) async fn verify_root_directory(path: &Path) -> Result<(), LinuxFirecrackerHostError> {
     let metadata = fs::symlink_metadata(path)
         .await
         .map_err(|_| LinuxFirecrackerHostError::RegistryUnavailable)?;
@@ -1616,6 +1699,47 @@ async fn verify_root_directory(path: &Path) -> Result<(), LinuxFirecrackerHostEr
         return Err(LinuxFirecrackerHostError::AssetUntrusted);
     }
     Ok(())
+}
+
+/// Closes permissions on a root-owned hostPath before it is used as a trust boundary. Kubernetes
+/// `DirectoryOrCreate` may initially create the directory as 0755, so requiring 0700 without this
+/// transition would make a freshly scheduled Provider fail closed on every new node.
+pub(crate) async fn prepare_root_directory(path: &Path) -> Result<(), LinuxFirecrackerHostError> {
+    let metadata = fs::symlink_metadata(path)
+        .await
+        .map_err(|_| LinuxFirecrackerHostError::RegistryUnavailable)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || metadata.uid() != 0 {
+        return Err(LinuxFirecrackerHostError::AssetUntrusted);
+    }
+    fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .await
+        .map_err(|_| LinuxFirecrackerHostError::RegistryUnavailable)?;
+    verify_root_directory(path).await
+}
+
+pub(crate) async fn prepare_state_subdirectory(
+    base: &Path,
+    name: &str,
+) -> Result<PathBuf, LinuxFirecrackerHostError> {
+    if !matches!(name, "capability" | "managed-mcp") {
+        return Err(LinuxFirecrackerHostError::InvalidConfiguration);
+    }
+    let path = base.join(name);
+    match fs::symlink_metadata(&path).await {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(LinuxFirecrackerHostError::RegistryUnavailable),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&path)
+                .await
+                .map_err(|_| LinuxFirecrackerHostError::RegistryUnavailable)?;
+            fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .await
+                .map_err(|_| LinuxFirecrackerHostError::RegistryUnavailable)?;
+        }
+        Err(_) => return Err(LinuxFirecrackerHostError::RegistryUnavailable),
+    }
+    verify_root_directory(&path).await?;
+    Ok(path)
 }
 
 async fn digest_file(
@@ -1657,7 +1781,7 @@ async fn digest_file(
         .map_err(|_| LinuxFirecrackerHostError::AssetUntrusted)
 }
 
-async fn read_bounded(
+pub(crate) async fn read_bounded(
     path: &Path,
     maximum_bytes: usize,
 ) -> Result<Vec<u8>, LinuxFirecrackerHostError> {
@@ -1676,7 +1800,9 @@ async fn read_bounded(
     Ok(bytes)
 }
 
-fn configure_child_isolation(command: &mut Command) -> Result<(), MicroVmProviderFailure> {
+pub(crate) fn configure_child_isolation(
+    command: &mut Command,
+) -> Result<(), MicroVmProviderFailure> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt as _;
@@ -1700,7 +1826,7 @@ fn configure_child_isolation(command: &mut Command) -> Result<(), MicroVmProvide
     }
 }
 
-fn terminate_process_group(process_id: u32) -> Result<(), MicroVmProviderFailure> {
+pub(crate) fn terminate_process_group(process_id: u32) -> Result<(), MicroVmProviderFailure> {
     #[cfg(target_os = "linux")]
     {
         let pid = i32::try_from(process_id)
@@ -1725,7 +1851,7 @@ fn terminate_process_group(process_id: u32) -> Result<(), MicroVmProviderFailure
     }
 }
 
-async fn process_start_identity(process_id: u32) -> Result<u64, MicroVmProviderFailure> {
+pub(crate) async fn process_start_identity(process_id: u32) -> Result<u64, MicroVmProviderFailure> {
     #[cfg(target_os = "linux")]
     {
         let stat = fs::read_to_string(format!("/proc/{process_id}/stat"))
@@ -1748,7 +1874,7 @@ async fn process_start_identity(process_id: u32) -> Result<u64, MicroVmProviderF
     }
 }
 
-async fn process_absent(process_id: u32) -> Result<bool, MicroVmProviderFailure> {
+pub(crate) async fn process_absent(process_id: u32) -> Result<bool, MicroVmProviderFailure> {
     #[cfg(target_os = "linux")]
     {
         match fs::metadata(format!("/proc/{process_id}")).await {
@@ -1778,7 +1904,7 @@ fn change_owner(path: &Path, uid: u32, gid: u32) -> Result<(), MicroVmProviderFa
     Ok(())
 }
 
-fn validate_destroy_path(
+pub(crate) fn validate_destroy_path(
     installation: &FirecrackerInstallation,
     plan: &JailerLaunchPlan,
     path: &Path,
@@ -1837,14 +1963,14 @@ fn record_path(
     Ok(state_directory.join(format!("{instance_id}.json")))
 }
 
-fn path_string(path: &Path) -> Result<String, MicroVmProviderFailure> {
+pub(crate) fn path_string(path: &Path) -> Result<String, MicroVmProviderFailure> {
     path.to_str()
         .filter(|value| !value.is_empty() && value.len() <= 4_096)
         .map(ToOwned::to_owned)
         .ok_or_else(|| contract_failure("microvm_path_invalid"))
 }
 
-fn closed_absolute_path(path: &Path) -> bool {
+pub(crate) fn closed_absolute_path(path: &Path) -> bool {
     path.is_absolute()
         && path.as_os_str().as_bytes().len() <= 4_096
         && path.components().all(|component| {
@@ -1855,7 +1981,7 @@ fn closed_absolute_path(path: &Path) -> bool {
         })
 }
 
-fn bounded_timeout(value: Duration, maximum_seconds: u64) -> bool {
+pub(crate) fn bounded_timeout(value: Duration, maximum_seconds: u64) -> bool {
     !value.is_zero() && value <= Duration::from_secs(maximum_seconds)
 }
 
@@ -1890,7 +2016,7 @@ fn digest_without_field<T: Serialize>(
     digest(&value)
 }
 
-fn contract_failure(code: &str) -> MicroVmProviderFailure {
+pub(crate) fn contract_failure(code: &str) -> MicroVmProviderFailure {
     MicroVmProviderFailure {
         safe_code: code.to_owned(),
         safe_message: "microVM host rejected an invalid or unavailable physical contract"
@@ -1902,7 +2028,7 @@ fn contract_failure(code: &str) -> MicroVmProviderFailure {
     }
 }
 
-fn uncertain_failure(
+pub(crate) fn uncertain_failure(
     code: &str,
     sandbox_identity_digest: Option<Sha256Digest>,
     external_effect_possible: bool,

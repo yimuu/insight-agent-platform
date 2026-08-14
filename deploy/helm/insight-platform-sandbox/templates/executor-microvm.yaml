@@ -92,6 +92,9 @@ spec:
             - {name: PLATFORM_SANDBOX_PROVIDER_BROKER_CA_PATH, value: /etc/insight/provider-tls/{{ .Values.tls.keys.providerControllerCa }}}
             - {name: PLATFORM_SANDBOX_PROVIDER_BROKER_CERT_PATH, value: /etc/insight/provider-tls/{{ .Values.tls.keys.providerClientCertificate }}}
             - {name: PLATFORM_SANDBOX_PROVIDER_BROKER_KEY_PATH, value: /etc/insight/provider-tls/{{ .Values.tls.keys.providerClientPrivateKey }}}
+            - {name: PLATFORM_SANDBOX_PROVIDER_EGRESS_CA_PATH, value: /etc/insight/provider-tls/{{ .Values.tls.keys.providerEgressCa }}}
+            - {name: PLATFORM_SANDBOX_PROVIDER_EGRESS_CERT_PATH, value: /etc/insight/provider-tls/{{ .Values.tls.keys.providerClientCertificate }}}
+            - {name: PLATFORM_SANDBOX_PROVIDER_EGRESS_KEY_PATH, value: /etc/insight/provider-tls/{{ .Values.tls.keys.providerClientPrivateKey }}}
           startupProbe: {exec: {command: ["sh", "-ec", "kill -0 1 && test -S /run/insight-sandbox-provider/provider.sock"]}, failureThreshold: 90, periodSeconds: 2}
           readinessProbe: {exec: {command: ["sh", "-ec", "kill -0 1 && test -S /run/insight-sandbox-provider/provider.sock"]}, periodSeconds: 5, timeoutSeconds: 2}
           livenessProbe: {exec: {command: ["sh", "-ec", "kill -0 1"]}, periodSeconds: 10, timeoutSeconds: 2}

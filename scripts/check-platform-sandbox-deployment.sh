@@ -66,7 +66,14 @@ if controller && executor && microvm && attestor
     failures << "microVM Executor must remain unprivileged and capability-free" unless executor_security["runAsNonRoot"] == true && executor_security.dig("capabilities", "add").to_a.empty?
     expected_capabilities = %w[CHOWN DAC_OVERRIDE KILL SETGID SETUID SYS_ADMIN SYS_RESOURCE]
     failures << "microVM Provider capability set drifted" unless provider_security["privileged"] == false && provider_security.dig("capabilities", "add") == expected_capabilities
+    provider_env = provider.fetch("env", []).to_h { |entry| [entry["name"], entry["value"]] }
+    required_egress_env = %w[PLATFORM_SANDBOX_PROVIDER_EGRESS_CA_PATH PLATFORM_SANDBOX_PROVIDER_EGRESS_CERT_PATH PLATFORM_SANDBOX_PROVIDER_EGRESS_KEY_PATH]
+    failures << "microVM Provider is missing its dedicated Egress mTLS client configuration" unless required_egress_env.all? { |name| provider_env[name]&.start_with?("/etc/insight/provider-tls/") }
   end
+
+  provider_config_map = docs.find { |doc| doc["kind"] == "ConfigMap" && doc.dig("metadata", "name")&.end_with?("-executor-microvm-provider") }
+  provider_config = provider_config_map && JSON.parse(provider_config_map.fetch("data").fetch("provider.json"))
+  failures << "microVM Provider config is missing exact Egress Broker routing" unless provider_config && provider_config["egress_broker_endpoint"]&.start_with?("https://") && !provider_config["egress_broker_tls_server_name"].to_s.empty?
 
   images = workloads.flat_map { |doc| doc.dig("spec", "template", "spec", "containers").to_a + doc.dig("spec", "template", "spec", "initContainers").to_a }.map { |container| container["image"] }
   failures << "all Sandbox workload images must use immutable sha256 digests" unless images.all? { |image| image&.match?(/@sha256:[0-9a-f]{64}\z/) }

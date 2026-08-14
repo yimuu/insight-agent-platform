@@ -30,6 +30,7 @@ mod guest_protocol;
 mod lifecycle;
 mod managed_guest_protocol;
 mod managed_provider;
+mod managed_system_host;
 mod provider;
 mod system_host;
 
@@ -38,6 +39,7 @@ pub use guest_protocol::*;
 pub use lifecycle::*;
 pub use managed_guest_protocol::*;
 pub use managed_provider::*;
+pub use managed_system_host::*;
 pub use provider::*;
 pub use system_host::*;
 
