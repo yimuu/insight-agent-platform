@@ -592,8 +592,10 @@ Sandbox deployment合同门禁；两个显式ignored RustFS资格测试仍不计
 实际Managed microVM session Provider已进入独立Provider进程并完成guest Artifact/一次性Secret注入与同实例activation。Managed authority的
 非事件化heartbeat也已贯穿closed domain、PostgreSQL和独立gRPC：每次只用exact Job/version/lease/Worker/token续租，返回的新version成为
 下一次mutation fence，不延长request deadline/session expiry，也不创建Receipt/Event/Outbox。domain和RPC测试已执行，fresh PostgreSQL
-fixture已编译；本机Docker daemon无响应，故尚无本次路径的真实数据库运行证据。establishment/heartbeat loop与terminal supervisor仍未组合
-进Executor进程，terminal/session-loss recovery和真实资格也未交付，故上述开放项和Phase状态不变。
+fixture已编译；本机Docker daemon无响应，故尚无本次路径的真实数据库运行证据。Sandbox domain establishment Worker现在会在
+Provider prepare/initialize/activate等待期间按profile heartbeat，将每次返回的新version串行带入下一phase；heartbeat失败时先等待
+Provider调用收敛，再对任何已创建实例执行exact destroy，避免取消中的RPC留下孤儿VM。长期liveness heartbeat与terminal supervisor仍未
+组合进Executor进程，terminal/session-loss recovery和真实资格也未交付，故上述开放项和Phase状态不变。
 
 随后补齐了Firecracker生产拓扑前置项：新增独立`executor-microvm` DaemonSet与专用KVM node selector/taint toleration，非root Executor
 只经node-local mTLS Unix socket调用同Pod的最小Provider。只有Provider容器挂载KVM、host cgroup、持久化jail/state并持有closed Linux

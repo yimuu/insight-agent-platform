@@ -1,10 +1,10 @@
 use crate::{
     digest_without_field, required_isolation, ClaimSandboxJobs, HeartbeatSandboxExecution,
     NodeAttestorRoute, SandboxClaimFailure, SandboxCommandLimits, SandboxContractError,
-    SandboxExecutionPolicyClosure, SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit,
-    SandboxWorkerCommitIdentity, ScopedArtifactGrant, ScopedSecretGrant,
-    MAX_SANDBOX_ARTIFACT_GRANTS, MAX_SANDBOX_SECRET_GRANTS, SANDBOX_PROTOCOL_VERSION,
-    SANDBOX_QUOTA_LINES,
+    SandboxExecutionPolicyClosure, SandboxHeartbeatConfig, SandboxNetworkMode,
+    SandboxResourceEnvelope, SandboxWorkerAudit, SandboxWorkerCommitIdentity, ScopedArtifactGrant,
+    ScopedSecretGrant, MAX_SANDBOX_ARTIFACT_GRANTS, MAX_SANDBOX_SECRET_GRANTS,
+    SANDBOX_PROTOCOL_VERSION, SANDBOX_QUOTA_LINES,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -23,7 +23,7 @@ use insight_platform_mcp_host::{
     McpSubscriptionWorkerAudit,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
+use std::{collections::BTreeSet, error::Error, fmt, future::Future, sync::Arc};
 
 /// Exact callback audience used when the Sandbox session reaches prepared or terminal state.
 /// It contains no endpoint, credential, plaintext session handle or caller-selected URL.
@@ -1303,6 +1303,7 @@ pub struct ManagedMcpSandboxSessionWorker<A, P> {
     authority: Arc<A>,
     provider: Arc<P>,
     limits: SandboxCommandLimits,
+    heartbeat: SandboxHeartbeatConfig,
 }
 
 impl<A, P> ManagedMcpSandboxSessionWorker<A, P> {
@@ -1311,8 +1312,50 @@ impl<A, P> ManagedMcpSandboxSessionWorker<A, P> {
             authority,
             provider,
             limits,
+            heartbeat: SandboxHeartbeatConfig::from_profile(
+                &insight_platform_contracts::checked_in_hard_limit_profile(),
+            )
+            .expect("checked-in HardLimitProfile has valid Sandbox heartbeat timing"),
         }
     }
+
+    pub fn with_heartbeat(
+        authority: Arc<A>,
+        provider: Arc<P>,
+        limits: SandboxCommandLimits,
+        heartbeat: SandboxHeartbeatConfig,
+    ) -> Self {
+        Self {
+            authority,
+            provider,
+            limits,
+            heartbeat,
+        }
+    }
+}
+
+/// Exact established generation retained by the long-lived Executor supervisor. In particular,
+/// the latest Job fence includes every heartbeat that won while Provider I/O was in flight; using
+/// the original claim fence for a later heartbeat, terminal commit or cleanup is always stale.
+#[derive(Debug, Clone)]
+pub struct EstablishedManagedMcpSandboxSession {
+    pub request: ManagedMcpSandboxSessionRequest,
+    pub fence: JobFence,
+    pub prepared: PreparedManagedMcpSandboxSession,
+    pub activated: ActivatedManagedMcpSandboxSession,
+}
+
+enum ManagedMcpProviderStep<T, AuthorityError, ProviderError> {
+    Completed(Result<T, ProviderError>),
+    HeartbeatFailed {
+        failure: ManagedMcpHeartbeatFailure<AuthorityError>,
+        completion: Result<T, ProviderError>,
+    },
+}
+
+enum ManagedMcpHeartbeatFailure<AuthorityError> {
+    Contract(SandboxContractError),
+    Authority(AuthorityError),
 }
 
 impl<A, P> ManagedMcpSandboxSessionWorker<A, P>
@@ -1324,7 +1367,7 @@ where
         &self,
         command: ExecuteManagedMcpSandboxSession,
     ) -> Result<
-        ActivatedManagedMcpSandboxSession,
+        EstablishedManagedMcpSandboxSession,
         ManagedMcpSandboxSessionWorkerError<A::Error, P::Error>,
     > {
         command
@@ -1361,11 +1404,35 @@ where
         .map_err(ManagedMcpSandboxSessionWorkerError::Contract)?;
         fence = next_managed_mcp_fence(preparing, &fence);
 
-        let prepared = self
-            .provider
-            .prepare(request, &fence, &command.executor_identity_digest)
+        let prepare_fence = fence.clone();
+        let prepared = match self
+            .await_provider_with_heartbeats(
+                request,
+                &mut fence,
+                SandboxJobState::Preparing,
+                McpSessionState::Connecting,
+                self.provider
+                    .prepare(request, &prepare_fence, &command.executor_identity_digest),
+            )
             .await
-            .map_err(ManagedMcpSandboxSessionWorkerError::Provider)?;
+        {
+            ManagedMcpProviderStep::Completed(Ok(prepared)) => prepared,
+            ManagedMcpProviderStep::Completed(Err(provider)) => {
+                return Err(ManagedMcpSandboxSessionWorkerError::Provider(provider));
+            }
+            ManagedMcpProviderStep::HeartbeatFailed {
+                failure,
+                completion,
+            } => {
+                return Err(match completion {
+                    Ok(prepared) => {
+                        self.cleanup_after_heartbeat_failure(request, &fence, &prepared, failure)
+                            .await
+                    }
+                    Err(_) => managed_mcp_heartbeat_failure(failure),
+                });
+            }
+        };
         if let Err(contract) =
             prepared.validate_for(request, &fence, &command.executor_identity_digest)
         {
@@ -1458,9 +1525,20 @@ where
         }
         fence = next_managed_mcp_fence(starting, &fence);
 
-        let activation = match self.provider.initialize(request, &fence, &prepared).await {
-            Ok(activation) => activation,
-            Err(provider) => {
+        let initialize_fence = fence.clone();
+        let activation = match self
+            .await_provider_with_heartbeats(
+                request,
+                &mut fence,
+                SandboxJobState::Starting,
+                McpSessionState::Initializing,
+                self.provider
+                    .initialize(request, &initialize_fence, &prepared),
+            )
+            .await
+        {
+            ManagedMcpProviderStep::Completed(Ok(activation)) => activation,
+            ManagedMcpProviderStep::Completed(Err(provider)) => {
                 return Err(
                     match self
                         .provider
@@ -1474,6 +1552,14 @@ where
                         },
                     },
                 );
+            }
+            ManagedMcpProviderStep::HeartbeatFailed {
+                failure,
+                completion: _,
+            } => {
+                return Err(self
+                    .cleanup_after_heartbeat_failure(request, &fence, &prepared, failure)
+                    .await);
             }
         };
         if let Err(contract) = activation.validate_for(
@@ -1569,9 +1655,20 @@ where
         }
         fence = next_managed_mcp_fence(ready, &fence);
 
-        let activated = match self.provider.activate(request, &fence, &activation).await {
-            Ok(activated) => activated,
-            Err(provider) => {
+        let activate_fence = fence.clone();
+        let activated = match self
+            .await_provider_with_heartbeats(
+                request,
+                &mut fence,
+                SandboxJobState::Running,
+                McpSessionState::Ready,
+                self.provider
+                    .activate(request, &activate_fence, &activation),
+            )
+            .await
+        {
+            ManagedMcpProviderStep::Completed(Ok(activated)) => activated,
+            ManagedMcpProviderStep::Completed(Err(provider)) => {
                 return Err(
                     match self
                         .provider
@@ -1585,6 +1682,14 @@ where
                         },
                     },
                 );
+            }
+            ManagedMcpProviderStep::HeartbeatFailed {
+                failure,
+                completion: _,
+            } => {
+                return Err(self
+                    .cleanup_after_heartbeat_failure(request, &fence, &prepared, failure)
+                    .await);
             }
         };
         if let Err(contract) = activated.validate_for(&activation, Utc::now()) {
@@ -1602,7 +1707,117 @@ where
                 },
             );
         }
-        Ok(activated)
+        Ok(EstablishedManagedMcpSandboxSession {
+            request: command.claimed.request,
+            fence,
+            prepared,
+            activated,
+        })
+    }
+
+    async fn await_provider_with_heartbeats<T, F>(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &mut JobFence,
+        physical_state: SandboxJobState,
+        logical_state: McpSessionState,
+        provider: F,
+    ) -> ManagedMcpProviderStep<T, A::Error, P::Error>
+    where
+        F: Future<Output = Result<T, P::Error>>,
+    {
+        tokio::pin!(provider);
+        let mut heartbeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + self.heartbeat.interval(),
+            self.heartbeat.interval(),
+        );
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                completion = &mut provider => {
+                    return ManagedMcpProviderStep::Completed(completion);
+                }
+                _ = heartbeat.tick() => {
+                    let heartbeat = HeartbeatSandboxExecution {
+                        tenant_id: request.identity.tenant_id.clone(),
+                        sandbox_job_id: request.identity.sandbox_job_id.clone(),
+                        job_id: request.identity.physical_job_id.clone(),
+                        fence: fence.clone(),
+                        lease_milliseconds: self.heartbeat.lease_milliseconds(),
+                    };
+                    let decision = match self
+                        .authority
+                        .heartbeat_managed_mcp_sandbox_session(heartbeat)
+                        .await
+                    {
+                        Ok(decision) => decision,
+                        Err(authority) => {
+                            let completion = provider.await;
+                            return ManagedMcpProviderStep::HeartbeatFailed {
+                                failure: ManagedMcpHeartbeatFailure::Authority(authority),
+                                completion,
+                            };
+                        }
+                    };
+                    if let Err(contract) = validate_managed_mcp_authority_decision(
+                        &decision,
+                        request,
+                        physical_state,
+                        logical_state,
+                        self.limits,
+                    ) {
+                        let completion = provider.await;
+                        return ManagedMcpProviderStep::HeartbeatFailed {
+                            failure: ManagedMcpHeartbeatFailure::Contract(contract),
+                            completion,
+                        };
+                    }
+                    *fence = next_managed_mcp_fence(&decision, fence);
+                }
+            }
+        }
+    }
+
+    async fn cleanup_after_heartbeat_failure(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+        failure: ManagedMcpHeartbeatFailure<A::Error>,
+    ) -> ManagedMcpSandboxSessionWorkerError<A::Error, P::Error> {
+        match (
+            failure,
+            self.provider
+                .destroy_exact(request, fence, Some(prepared))
+                .await,
+        ) {
+            (ManagedMcpHeartbeatFailure::Contract(contract), Ok(())) => {
+                ManagedMcpSandboxSessionWorkerError::Contract(contract)
+            }
+            (ManagedMcpHeartbeatFailure::Authority(authority), Ok(())) => {
+                ManagedMcpSandboxSessionWorkerError::Authority(authority)
+            }
+            (ManagedMcpHeartbeatFailure::Contract(contract), Err(cleanup)) => {
+                ManagedMcpSandboxSessionWorkerError::CleanupAfterContract { contract, cleanup }
+            }
+            (ManagedMcpHeartbeatFailure::Authority(authority), Err(cleanup)) => {
+                ManagedMcpSandboxSessionWorkerError::CleanupAfterAuthority { authority, cleanup }
+            }
+        }
+    }
+}
+
+fn managed_mcp_heartbeat_failure<AuthorityError, ProviderError>(
+    failure: ManagedMcpHeartbeatFailure<AuthorityError>,
+) -> ManagedMcpSandboxSessionWorkerError<AuthorityError, ProviderError> {
+    match failure {
+        ManagedMcpHeartbeatFailure::Contract(contract) => {
+            ManagedMcpSandboxSessionWorkerError::Contract(contract)
+        }
+        ManagedMcpHeartbeatFailure::Authority(authority) => {
+            ManagedMcpSandboxSessionWorkerError::Authority(authority)
+        }
     }
 }
 

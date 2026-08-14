@@ -806,8 +806,10 @@ workload区分有限Capability与长生命周期session，并对Managed Job/requ
 全新PostgreSQL 16 Managed fixture及既有Sandbox回归fixture均实际通过，不增加表或migration。mTLS authority、Executor pool和Sandbox
 domain定向测试分别9、3、33项通过。真实Managed microVM session Provider、guest Artifact/Secret注入和同实例activation现已进入独立
 Provider进程；Managed authority新增非事件化exact-fence heartbeat，domain/RPC测试通过，fresh PostgreSQL fixture已编译但因本机Docker
-daemon无响应未取得实际运行证据。该切片尚未把establishment/heartbeat loop和terminal supervisor组合进Executor进程，也没有
-terminal/session-loss recovery或真实进程资格，
+daemon无响应未取得实际运行证据。Sandbox domain establishment Worker现会在Provider prepare/initialize/activate等待期间按profile
+续租，并把最新version fence串行传给下一phase；heartbeat失败后先等待Provider调用收敛，再对任何已创建实例执行exact destroy，避免
+取消中的RPC留下孤儿microVM。长期liveness heartbeat、terminal supervisor仍未组合进Executor进程，也没有terminal/session-loss recovery
+或真实进程资格，
 因此不关闭Phase 4。
 
 Managed session的一次性Secret交付现已实现为两阶段、双平面协议。microVM Provider只以exact workload URI SAN调用Egress；Egress以自身

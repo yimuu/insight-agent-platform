@@ -1109,6 +1109,7 @@ struct RecordingManagedSessionAuthority {
     state: Mutex<ManagedSessionAuthorityState>,
     events: Arc<Mutex<Vec<&'static str>>>,
     fail_ready: bool,
+    fail_heartbeat: bool,
 }
 
 #[async_trait]
@@ -1182,6 +1183,14 @@ impl ManagedMcpSandboxSessionExecutionAuthority for RecordingManagedSessionAutho
         &self,
         command: HeartbeatSandboxExecution,
     ) -> Result<ManagedMcpSandboxSessionPhaseDecision, Self::Error> {
+        self.events.lock().unwrap().push(if self.fail_heartbeat {
+            "heartbeat_failed"
+        } else {
+            "heartbeat"
+        });
+        if self.fail_heartbeat {
+            return Err(ManagedSessionFixtureError);
+        }
         let now = Utc::now();
         let mut state = self.state.lock().unwrap();
         let decision = decide_managed_mcp_sandbox_session_heartbeat(
@@ -1201,6 +1210,7 @@ impl ManagedMcpSandboxSessionExecutionAuthority for RecordingManagedSessionAutho
 
 struct RecordingManagedSessionProvider {
     events: Arc<Mutex<Vec<&'static str>>>,
+    prepare_delay: std::time::Duration,
 }
 
 #[async_trait]
@@ -1214,6 +1224,7 @@ impl ManagedMcpSandboxSessionProvider for RecordingManagedSessionProvider {
         executor_identity_digest: &insight_platform_contracts::Sha256Digest,
     ) -> Result<PreparedManagedMcpSandboxSession, Self::Error> {
         self.events.lock().unwrap().push("provider_prepare");
+        tokio::time::sleep(self.prepare_delay).await;
         PreparedManagedMcpSandboxSession {
             schema_version: 1,
             identity: request.identity.clone(),
@@ -1350,8 +1361,12 @@ fn managed_session_worker_fixture(
         }),
         events: Arc::clone(&events),
         fail_ready,
+        fail_heartbeat: false,
     });
-    let provider = Arc::new(RecordingManagedSessionProvider { events });
+    let provider = Arc::new(RecordingManagedSessionProvider {
+        events,
+        prepare_delay: std::time::Duration::ZERO,
+    });
     let command = ExecuteManagedMcpSandboxSession {
         claimed: ClaimedManagedMcpSandboxSession {
             request: admission.request,
@@ -1376,8 +1391,8 @@ async fn managed_session_worker_activates_only_after_durable_ready_on_the_same_i
     let (authority, provider, command) = managed_session_worker_fixture(now, false);
     let events = Arc::clone(&provider.events);
     let worker = ManagedMcpSandboxSessionWorker::new(authority.clone(), provider, limits());
-    let activated = worker.establish(command).await.unwrap();
-    assert_eq!(activated.sandbox_identity_digest, sha('2'));
+    let established = worker.establish(command).await.unwrap();
+    assert_eq!(established.activated.sandbox_identity_digest, sha('2'));
     assert_eq!(
         events.lock().unwrap().as_slice(),
         [
@@ -1406,7 +1421,7 @@ async fn managed_session_worker_activates_only_after_durable_ready_on_the_same_i
             .as_ref()
             .unwrap()
             .sandbox_identity_digest,
-        activated.sandbox_identity_digest
+        established.activated.sandbox_identity_digest
     );
 }
 
@@ -1431,6 +1446,72 @@ async fn managed_session_worker_destroys_prepared_instance_when_ready_commit_fai
             "provider_destroy",
         ]
     );
+}
+
+#[tokio::test]
+async fn managed_session_worker_renews_the_latest_fence_while_provider_prepare_is_pending() {
+    let now = Utc::now();
+    let (authority, provider, command) = managed_session_worker_fixture(now, false);
+    let provider = Arc::new(RecordingManagedSessionProvider {
+        events: Arc::clone(&provider.events),
+        prepare_delay: std::time::Duration::from_millis(35),
+    });
+    let heartbeat =
+        SandboxHeartbeatConfig::bounded(std::time::Duration::from_millis(5), 100, 1_000).unwrap();
+    let worker = ManagedMcpSandboxSessionWorker::with_heartbeat(
+        authority,
+        provider.clone(),
+        limits(),
+        heartbeat,
+    );
+    let established = worker.establish(command).await.unwrap();
+    assert!(established.fence.expected_version > 5);
+    assert!(provider.events.lock().unwrap().contains(&"heartbeat"));
+}
+
+#[tokio::test]
+async fn managed_session_worker_waits_for_prepare_then_destroys_on_heartbeat_failure() {
+    let now = Utc::now();
+    let (authority, provider, command) = managed_session_worker_fixture(now, false);
+    let authority = Arc::new(RecordingManagedSessionAuthority {
+        state: Mutex::new({
+            let state = authority.state.lock().unwrap();
+            ManagedSessionAuthorityState {
+                logical: state.logical.clone(),
+                physical_job: state.physical_job.clone(),
+                physical_payload: state.physical_payload.clone(),
+            }
+        }),
+        events: Arc::clone(&provider.events),
+        fail_ready: false,
+        fail_heartbeat: true,
+    });
+    let provider = Arc::new(RecordingManagedSessionProvider {
+        events: Arc::clone(&provider.events),
+        prepare_delay: std::time::Duration::from_millis(25),
+    });
+    let heartbeat =
+        SandboxHeartbeatConfig::bounded(std::time::Duration::from_millis(5), 100, 1_000).unwrap();
+    let worker = ManagedMcpSandboxSessionWorker::with_heartbeat(
+        authority,
+        provider.clone(),
+        limits(),
+        heartbeat,
+    );
+    assert!(matches!(
+        worker.establish(command).await,
+        Err(ManagedMcpSandboxSessionWorkerError::Authority(_))
+    ));
+    let events = provider.events.lock().unwrap();
+    let failed = events
+        .iter()
+        .position(|event| *event == "heartbeat_failed")
+        .unwrap();
+    let destroyed = events
+        .iter()
+        .position(|event| *event == "provider_destroy")
+        .unwrap();
+    assert!(failed < destroyed);
 }
 
 #[test]
