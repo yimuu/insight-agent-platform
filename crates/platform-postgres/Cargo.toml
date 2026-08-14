@@ -1,0 +1,52 @@
+[package]
+name = "insight-platform-postgres"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "platform-schema"
+path = "src/bin/platform_schema.rs"
+
+[[bin]]
+name = "check-platform-schema-contract"
+path = "src/bin/check_platform_schema_contract.rs"
+
+[[bin]]
+name = "platform-bootstrap-operator"
+path = "src/bin/platform_bootstrap_operator.rs"
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+insight-platform-artifacts.workspace = true
+insight-platform-capability-adapters.workspace = true
+insight-platform-contracts.workspace = true
+insight-platform-context.workspace = true
+insight-platform-invocations.workspace = true
+insight-platform-jobs.workspace = true
+insight-platform-model-adapters.workspace = true
+insight-platform-models.workspace = true
+insight-platform-mcp-host.workspace = true
+insight-platform-orchestrator.workspace = true
+insight-platform-registry.workspace = true
+insight-platform-sandbox.workspace = true
+insight-platform-scheduler.workspace = true
+insight-platform-security.workspace = true
+insight-platform-tasks.workspace = true
+serde.workspace = true
+serde_jcs.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+insight-platform-artifact-broker.workspace = true

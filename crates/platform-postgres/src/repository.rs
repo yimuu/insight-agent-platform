@@ -1,0 +1,22042 @@
+use chrono::{DateTime, Duration, Utc};
+use insight_platform_artifacts::{ArtifactCommandLimits, ArtifactJobPayload};
+use insight_platform_context::{
+    ContextJobPayload, ContextQueryError as DomainContextQueryError, ContextQueryLimits,
+};
+use insight_platform_contracts::{
+    checked_in_hard_limit_profile, is_execution_work_owner_pair, ActiveTarget, AdministrativeGate,
+    ArtifactRef, AuthoringPackage, CommandAudit, CommandOutcome, DataClassification,
+    DeploymentClosure, EntityLifecycle, ExactDatasetGenerationRef, ExactDeploymentRef,
+    ExactSecretBindingRef, ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource,
+    FrozenSlotTarget, HardLimitProfile, InstallationPrincipalBinding, JobState, JsonLimits,
+    NodeExecutionState, Permission, PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind,
+    PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceDraftPayload,
+    ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState, SchedulerPriority,
+    ScopeState, SecretBindingPayload, SecretPurpose, Sha256Digest, TenantConfig,
+    TenantPrincipalPayload, ValueRef, WorkClass, MAX_RESOURCE_DEPENDENCIES,
+};
+use insight_platform_invocations::{
+    CapabilityJobPayload, InvocationCommandLimits, InvocationError as DomainInvocationError,
+};
+use insight_platform_jobs::{
+    decide_claim as decide_job_claim, decide_expired_lease as decide_expired_job_lease,
+    decide_heartbeat as decide_job_heartbeat, decide_owner_terminal as decide_job_owner_terminal,
+    decide_retry as decide_job_retry, decide_retry_due as decide_job_retry_due,
+    decide_start as decide_job_start, decide_terminal as decide_job_terminal,
+    decide_wait as decide_job_wait, decide_wake as decide_job_wake, JobError as DomainJobError,
+    JobFence as DomainJobFence, JobLease, JobOwnerRef, JobProjection, LeasePolicy, WakeContract,
+    WakeSource,
+};
+use insight_platform_mcp_host::McpJobPayload;
+use insight_platform_models::{ModelTurnError as DomainModelTurnError, ModelTurnLimits};
+use insight_platform_orchestrator::{
+    decide_cancel, decide_child_link_cancel, decide_child_link_terminal, decide_controller,
+    decide_orchestration_convergence, decide_pause, decide_timeout, prepare_child_run, AdmitRun,
+    ChildBudget, ChildCancellationPolicy, ChildLinkState, ChildOutcome, ChildRunLinkPayload,
+    ChildRunLinkProjection, ControlDecision, ControllerDecision, ControllerObservation, JoinPolicy,
+    JoinRemainderPolicy, MapFailurePolicy, ObserveRunTimeout, OrchestrationConvergenceDecision,
+    OrchestrationConvergenceFacts, OrchestrationConvergenceReason, OrchestrationJobPayload,
+    OrchestratorError, PlanLimits, PlanNodeKey, PrepareChildRun, RequestRunCancel,
+    RunCurrentSnapshot, RunInputValue, RunStore, RunTransaction, RuntimePlan, SetRunPause,
+};
+use insight_platform_registry::{
+    ActivateResource, CreateDeployment, CreateResourceDraft, NewPublishedVersion,
+    PublishResourceVersions, RecordResourceValidation, RegistryCommandError, RegistryStore,
+    RegistryTransaction, RegistryValidationJobPayload, RequestResourceValidation, SetResourceGate,
+    TransitionResourceLifecycle, UpdateResourceDraft,
+};
+use insight_platform_sandbox::{
+    SandboxCommandLimits, SandboxContractError as DomainSandboxContractError,
+    SandboxControlError as DomainSandboxControlError, SandboxJobPayload,
+    SandboxWorkerContractError as DomainSandboxWorkerContractError,
+};
+use insight_platform_scheduler::{
+    select_weighted_deficit_round_robin, ReadyWork, SchedulerHardLimits, SchedulerLane,
+    SchedulerStateSnapshot, TenantSchedulingPolicyBinding, TenantWindow,
+};
+use insight_platform_security::{
+    BindTenantPrincipal, BindTenantSchedulingPolicy,
+    CreateSecretBinding as CreateSecretBindingCommand, EncryptedOpaqueReference,
+    PreparedSecretBindingAuthority, PreparedSecretBindingRegistrationDisposition,
+    PreparedSecretBindingRegistrationError, PreparedSecretBindingRegistrationOutcome,
+    RegisterPreparedSecretBinding, RevokeSecretBinding, RevokeTenantPrincipal, RotateSecretBinding,
+    SecretBindingResolutionAuthority, SecretBindingResolutionError, SecretBindingResolutionRecord,
+    SecurityCommandError, SecurityStore, SecurityTransaction, UpdateTenantPrincipalPermissions,
+};
+use insight_platform_tasks::{
+    decide_resolution as decide_task_resolution, ResolveTask as DomainResolveTask, TaskDefinition,
+    TaskError as DomainTaskError, TaskKind, TaskPayload, TaskProjection, TaskState,
+};
+use serde::{de::DeserializeOwned, Serialize};
+use serde_json::{Map, Number, Value};
+use sha2::{Digest as _, Sha256};
+use sqlx::{postgres::PgRow, Acquire, PgPool, Postgres, Row, Transaction};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    ops::Deref,
+};
+use uuid::{Uuid, Variant, Version};
+
+pub const DEFAULT_PAYLOAD_LIMIT: usize = 1_048_576;
+pub const MAX_JOB_LEASE_MILLISECONDS: i64 = 120_000;
+
+pub const DEFAULT_SCHEDULER_LIMITS: SchedulerHardLimits = SchedulerHardLimits {
+    maximum_deficit: 1_000_000,
+    maximum_tenants: 64,
+    maximum_state_tenants: 1_024,
+    maximum_window_per_tenant: 16,
+    maximum_batch: 64,
+};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedPayload {
+    pub schema_version: i32,
+    pub value: Value,
+    pub digest: String,
+}
+
+impl TypedPayload {
+    pub fn new<T: Serialize>(schema_version: i32, source: &T) -> Result<Self, RepositoryError> {
+        Self::with_limit(schema_version, source, DEFAULT_PAYLOAD_LIMIT)
+    }
+
+    pub fn with_limit<T: Serialize>(
+        schema_version: i32,
+        source: &T,
+        maximum_bytes: usize,
+    ) -> Result<Self, RepositoryError> {
+        if schema_version <= 0 {
+            return Err(RepositoryError::InvalidInput(
+                "payload schema version must be positive".to_owned(),
+            ));
+        }
+        let value = serde_json::to_value(source)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let Value::Object(mut object) = value else {
+            return Err(RepositoryError::InvalidInput(
+                "typed payload must serialize to a JSON object".to_owned(),
+            ));
+        };
+        if object.contains_key("schema_version") {
+            return Err(RepositoryError::InvalidInput(
+                "typed payload source must not define schema_version".to_owned(),
+            ));
+        }
+        object.insert(
+            "schema_version".to_owned(),
+            Value::Number(Number::from(schema_version)),
+        );
+        let value = Value::Object(object);
+        let canonical = serde_jcs::to_vec(&value)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if canonical.len() > maximum_bytes {
+            return Err(RepositoryError::InvalidInput(format!(
+                "typed payload is {} bytes; maximum is {maximum_bytes}",
+                canonical.len()
+            )));
+        }
+        Ok(Self {
+            schema_version,
+            value,
+            digest: sha256(&canonical),
+        })
+    }
+
+    pub fn empty(schema_version: i32) -> Result<Self, RepositoryError> {
+        Self::new(schema_version, &Map::<String, Value>::new())
+    }
+
+    pub fn from_versioned<T: Serialize>(
+        schema_version: i32,
+        source: &T,
+        maximum_bytes: usize,
+    ) -> Result<Self, RepositoryError> {
+        if schema_version <= 0 {
+            return Err(RepositoryError::InvalidInput(
+                "payload schema version must be positive".to_owned(),
+            ));
+        }
+        let value = serde_json::to_value(source)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let Value::Object(object) = &value else {
+            return Err(RepositoryError::InvalidInput(
+                "versioned payload must serialize to a JSON object".to_owned(),
+            ));
+        };
+        if object.get("schema_version").and_then(Value::as_i64) != Some(i64::from(schema_version)) {
+            return Err(RepositoryError::InvalidInput(
+                "embedded and relational schema versions disagree".to_owned(),
+            ));
+        }
+        let canonical = serde_jcs::to_vec(&value)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if canonical.len() > maximum_bytes {
+            return Err(RepositoryError::InvalidInput(format!(
+                "typed payload is {} bytes; maximum is {maximum_bytes}",
+                canonical.len()
+            )));
+        }
+        Ok(Self {
+            schema_version,
+            value,
+            digest: sha256(&canonical),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum RepositoryError {
+    Database(sqlx::Error),
+    InvalidInput(String),
+    NotFound(&'static str),
+    Conflict(&'static str),
+    StaleFence,
+    LeaseExpired,
+    QuotaExceeded,
+    PermissionDenied,
+    IdempotencyConflict,
+    CorruptRow(String),
+}
+
+impl fmt::Display for RepositoryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Database(failure) => write!(formatter, "PostgreSQL repository failed: {failure}"),
+            Self::InvalidInput(message) => write!(formatter, "invalid repository input: {message}"),
+            Self::NotFound(kind) => write!(formatter, "{kind} was not found"),
+            Self::Conflict(kind) => write!(formatter, "{kind} changed concurrently"),
+            Self::StaleFence => formatter.write_str("job lease fence is stale"),
+            Self::LeaseExpired => formatter.write_str("job lease has expired"),
+            Self::QuotaExceeded => formatter.write_str("quota would be exceeded"),
+            Self::PermissionDenied => formatter.write_str("permission denied"),
+            Self::IdempotencyConflict => {
+                formatter.write_str("idempotency key was used with a different request")
+            }
+            Self::CorruptRow(message) => write!(formatter, "repository row is invalid: {message}"),
+        }
+    }
+}
+
+impl Error for RepositoryError {}
+
+impl From<sqlx::Error> for RepositoryError {
+    fn from(failure: sqlx::Error) -> Self {
+        Self::Database(failure)
+    }
+}
+
+impl From<RegistryCommandError> for RepositoryError {
+    fn from(failure: RegistryCommandError) -> Self {
+        Self::InvalidInput(failure.to_string())
+    }
+}
+
+impl From<SecurityCommandError> for RepositoryError {
+    fn from(failure: SecurityCommandError) -> Self {
+        Self::InvalidInput(failure.to_string())
+    }
+}
+
+impl From<OrchestratorError> for RepositoryError {
+    fn from(failure: OrchestratorError) -> Self {
+        match failure {
+            OrchestratorError::StaleGeneration => Self::Conflict("run control generation"),
+            OrchestratorError::ControlConflict => Self::Conflict("run control"),
+            _ => Self::InvalidInput(failure.to_string()),
+        }
+    }
+}
+
+impl From<DomainJobError> for RepositoryError {
+    fn from(failure: DomainJobError) -> Self {
+        match failure {
+            DomainJobError::StaleFence => Self::StaleFence,
+            DomainJobError::LeaseExpired => Self::LeaseExpired,
+            DomainJobError::NotClaimable => Self::Conflict("job claim"),
+            _ => Self::InvalidInput(failure.to_string()),
+        }
+    }
+}
+
+impl From<DomainTaskError> for RepositoryError {
+    fn from(failure: DomainTaskError) -> Self {
+        match failure {
+            DomainTaskError::FirstWinnerLost => Self::Conflict("Task first-winner"),
+            DomainTaskError::DeadlineExceeded | DomainTaskError::DeadlineNotReached => {
+                Self::Conflict("Task deadline")
+            }
+            _ => Self::InvalidInput(failure.to_string()),
+        }
+    }
+}
+
+impl From<DomainInvocationError> for RepositoryError {
+    fn from(failure: DomainInvocationError) -> Self {
+        match failure {
+            DomainInvocationError::FirstWinnerLost => {
+                Self::Conflict("CapabilityInvocation first-winner")
+            }
+            DomainInvocationError::AdmissionRejected => {
+                Self::Conflict("CapabilityInvocation admission")
+            }
+            _ => Self::InvalidInput(failure.to_string()),
+        }
+    }
+}
+
+impl From<DomainModelTurnError> for RepositoryError {
+    fn from(failure: DomainModelTurnError) -> Self {
+        match failure {
+            DomainModelTurnError::FirstWinnerLost => Self::Conflict("ModelTurn first-winner"),
+            DomainModelTurnError::AdmissionRejected => Self::Conflict("ModelTurn admission"),
+            DomainModelTurnError::UsageCeilingExceeded => Self::QuotaExceeded,
+            _ => Self::InvalidInput(failure.to_string()),
+        }
+    }
+}
+
+impl From<DomainContextQueryError> for RepositoryError {
+    fn from(failure: DomainContextQueryError) -> Self {
+        match failure {
+            DomainContextQueryError::FirstWinnerLost => Self::Conflict("ContextQuery first-winner"),
+            DomainContextQueryError::AdmissionRejected => Self::Conflict("ContextQuery admission"),
+            DomainContextQueryError::StaleFence => Self::StaleFence,
+            _ => Self::InvalidInput(failure.to_string()),
+        }
+    }
+}
+
+impl From<DomainSandboxContractError> for RepositoryError {
+    fn from(failure: DomainSandboxContractError) -> Self {
+        match failure {
+            DomainSandboxContractError::StaleFence => Self::StaleFence,
+            _ => Self::InvalidInput(failure.to_string()),
+        }
+    }
+}
+
+impl From<DomainSandboxWorkerContractError> for RepositoryError {
+    fn from(failure: DomainSandboxWorkerContractError) -> Self {
+        match failure {
+            DomainSandboxWorkerContractError::Contract(DomainSandboxContractError::StaleFence) => {
+                Self::StaleFence
+            }
+            _ => Self::InvalidInput(failure.to_string()),
+        }
+    }
+}
+
+impl From<DomainSandboxControlError> for RepositoryError {
+    fn from(failure: DomainSandboxControlError) -> Self {
+        Self::InvalidInput(failure.to_string())
+    }
+}
+
+#[derive(Clone)]
+pub struct PgRepository {
+    pool: PgPool,
+    artifact_limits: ArtifactCommandLimits,
+    invocation_limits: InvocationCommandLimits,
+    context_query_limits: ContextQueryLimits,
+    model_turn_limits: ModelTurnLimits,
+    sandbox_limits: SandboxCommandLimits,
+    scheduler_limits: SchedulerHardLimits,
+    plan_limits: PlanLimits,
+    recovery_batch_limit: u16,
+    recovery_shard_limit: u16,
+}
+
+impl PgRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self::with_hard_limit_profile(pool, &checked_in_hard_limit_profile())
+            .expect("checked-in HardLimitProfile must construct repository limits")
+    }
+
+    pub fn with_hard_limit_profile(
+        pool: PgPool,
+        profile: &HardLimitProfile,
+    ) -> Result<Self, RepositoryError> {
+        profile
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let maximum_batch =
+            u16::try_from(profile.run_scheduler.claim_batch.q1_default).map_err(|_| {
+                RepositoryError::InvalidInput(
+                    "run_scheduler.claim_batch exceeds scheduler representation".to_owned(),
+                )
+            })?;
+        let scheduler_limits = SchedulerHardLimits {
+            maximum_batch,
+            ..DEFAULT_SCHEDULER_LIMITS
+        };
+        scheduler_limits
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let recovery_batch_limit = u16::try_from(profile.control_data.recovery_batch.q1_default)
+            .map_err(|_| {
+                RepositoryError::InvalidInput(
+                    "control_data.recovery_batch exceeds repository representation".to_owned(),
+                )
+            })?;
+        let recovery_shard_limit = u16::try_from(profile.control_data.recovery_shards.hard_max)
+            .map_err(|_| {
+                RepositoryError::InvalidInput(
+                    "control_data.recovery_shards exceeds repository representation".to_owned(),
+                )
+            })?;
+        Ok(Self {
+            pool,
+            artifact_limits: ArtifactCommandLimits::from_profile(profile)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            invocation_limits: InvocationCommandLimits::from_profile(profile)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            context_query_limits: ContextQueryLimits::from_profile(profile)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            model_turn_limits: ModelTurnLimits::from_profile(profile)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            sandbox_limits: SandboxCommandLimits::from_profile(profile)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            scheduler_limits,
+            plan_limits: PlanLimits::from_profile(profile)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            recovery_batch_limit,
+            recovery_shard_limit,
+        })
+    }
+
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    pub(crate) const fn artifact_limits(&self) -> ArtifactCommandLimits {
+        self.artifact_limits
+    }
+
+    pub(crate) const fn recovery_batch_limit(&self) -> u16 {
+        self.recovery_batch_limit
+    }
+
+    pub(crate) const fn recovery_shard_limit(&self) -> u16 {
+        self.recovery_shard_limit
+    }
+
+    pub(crate) const fn invocation_limits(&self) -> InvocationCommandLimits {
+        self.invocation_limits
+    }
+
+    pub(crate) const fn model_turn_limits(&self) -> ModelTurnLimits {
+        self.model_turn_limits
+    }
+
+    pub(crate) const fn context_query_limits(&self) -> ContextQueryLimits {
+        self.context_query_limits
+    }
+
+    pub(crate) const fn sandbox_limits(&self) -> SandboxCommandLimits {
+        self.sandbox_limits
+    }
+
+    pub async fn bootstrap_installation_operator(
+        &self,
+        command: BootstrapInstallationOperator,
+    ) -> Result<BootstrapOutcome, RepositoryError> {
+        if command.principal_id.kind() != ResourceKind::Principal
+            || command.request_id.kind() != ResourceKind::ServerRequest
+        {
+            return Err(RepositoryError::InvalidInput(
+                "bootstrap principal or request ID has the wrong kind".to_owned(),
+            ));
+        }
+        let bindings = PrincipalBindingsPayload {
+            installation_bindings: vec![InstallationPrincipalBinding {
+                principal_kind: PrincipalKind::InstallationOperator,
+                permissions: PermissionSet::new(vec![
+                    Permission::InstallationManage,
+                    Permission::InstallationSupport,
+                ])
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+                state: PrincipalBindingState::Active,
+                generation: 1,
+            }],
+        };
+        bindings
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let principal_payload = TypedPayload::with_limit(1, &bindings, 65_536)?;
+        let event_payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "authentication_authority_digest": command.authentication_authority_digest.as_str(),
+                "evidence_digest": command.evidence_digest.as_str(),
+                "principal_id": command.principal_id.to_string(),
+                "request_id": command.request_id.to_string(),
+                "subject_digest": command.subject_digest.as_str(),
+            }),
+            65_536,
+        )?;
+        let event_id = format!("evt_{}", command.request_id.uuid().hyphenated());
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(0x4950_424f_4f54_5354_i64)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "LOCK TABLE insight_platform.principals, insight_platform.tenant_principals IN SHARE ROW EXCLUSIVE MODE",
+        )
+        .execute(&mut *transaction)
+        .await?;
+
+        let principal_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM insight_platform.principals")
+                .fetch_one(&mut *transaction)
+                .await?;
+        let tenant_binding_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM insight_platform.tenant_principals")
+                .fetch_one(&mut *transaction)
+                .await?;
+        if principal_count == 0 && tenant_binding_count == 0 {
+            sqlx::query(
+                r#"
+                INSERT INTO insight_platform.principals (
+                    principal_id, state, authentication_authority_digest, subject_digest,
+                    payload_schema_version, payload, payload_digest
+                ) VALUES ($1, 'active', $2, $3, $4, $5, $6)
+                "#,
+            )
+            .bind(command.principal_id.to_string())
+            .bind(command.authentication_authority_digest.to_string())
+            .bind(command.subject_digest.to_string())
+            .bind(principal_payload.schema_version)
+            .bind(&principal_payload.value)
+            .bind(&principal_payload.digest)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO insight_platform.events (
+                    tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
+                    event_type, visibility, payload_schema_version, payload, payload_digest
+                ) VALUES (NULL, $1, 'principal', $2, 1, 'installation.bootstrap',
+                          'internal', $3, $4, $5)
+                "#,
+            )
+            .bind(&event_id)
+            .bind(command.principal_id.to_string())
+            .bind(event_payload.schema_version)
+            .bind(&event_payload.value)
+            .bind(&event_payload.digest)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            return Ok(BootstrapOutcome::Created);
+        }
+
+        if principal_count != 1 || tenant_binding_count != 0 {
+            return Err(RepositoryError::Conflict("installation bootstrap"));
+        }
+        let row = sqlx::query(
+            r#"
+            SELECT principal_id, state, authentication_authority_digest, subject_digest,
+                   version, payload_schema_version, payload, payload_digest,
+                   created_at, updated_at
+            FROM insight_platform.principals
+            FOR UPDATE
+            "#,
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+        let stored = principal_from_row(row)?;
+        let stored_event_digest: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT payload_digest FROM insight_platform.events
+            WHERE tenant_id IS NULL AND event_id = $1 AND aggregate_kind = 'principal'
+              AND aggregate_id = $2 AND aggregate_version = 1
+              AND event_type = 'installation.bootstrap'
+            "#,
+        )
+        .bind(&event_id)
+        .bind(command.principal_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if stored.principal_id != command.principal_id.to_string()
+            || stored.state != "active"
+            || stored.version != 1
+            || stored.authentication_authority_digest
+                != command.authentication_authority_digest.to_string()
+            || stored.subject_digest != command.subject_digest.to_string()
+            || stored.payload.digest != principal_payload.digest
+            || stored_event_digest.as_deref() != Some(event_payload.digest.as_str())
+        {
+            return Err(RepositoryError::Conflict("installation bootstrap"));
+        }
+        transaction.commit().await?;
+        Ok(BootstrapOutcome::Replayed)
+    }
+
+    pub async fn create_tenant(&self, command: NewTenant) -> Result<TenantRecord, RepositoryError> {
+        validate_id(&command.tenant_id)?;
+        validate_code("tenant state", &command.state)?;
+        command
+            .config
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if command.config.scheduling_policy.is_some() {
+            return Err(RepositoryError::InvalidInput(
+                "tenant scheduling policy must be bound after its ResourceVersion is published"
+                    .to_owned(),
+            ));
+        }
+        let config = TypedPayload::with_limit(1, &command.config, 65_536)?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.tenants (
+                tenant_id, state, config_schema_version, config, config_digest
+            ) VALUES ($1, $2, $3, $4, $5)
+            RETURNING tenant_id, state, version, config_schema_version, config,
+                      config_digest, created_at, updated_at
+            "#,
+        )
+        .bind(command.tenant_id)
+        .bind(command.state)
+        .bind(config.schema_version)
+        .bind(config.value)
+        .bind(config.digest)
+        .fetch_one(&self.pool)
+        .await?;
+        tenant_from_row(row)
+    }
+
+    pub async fn create_principal(
+        &self,
+        command: NewPrincipal,
+    ) -> Result<PrincipalRecord, RepositoryError> {
+        if command.principal_id.kind() != ResourceKind::Principal {
+            return Err(RepositoryError::InvalidInput(
+                "principal ID has the wrong kind".to_owned(),
+            ));
+        }
+        command
+            .installation_bindings
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let payload = TypedPayload::with_limit(1, &command.installation_bindings, 65_536)?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.principals (
+                principal_id, state, authentication_authority_digest, subject_digest,
+                payload_schema_version, payload, payload_digest
+            ) VALUES ($1, 'active', $2, $3, $4, $5, $6)
+            RETURNING principal_id, state, authentication_authority_digest, subject_digest,
+                      version, payload_schema_version, payload, payload_digest,
+                      created_at, updated_at
+            "#,
+        )
+        .bind(command.principal_id.to_string())
+        .bind(command.authentication_authority_digest.to_string())
+        .bind(command.subject_digest.to_string())
+        .bind(payload.schema_version)
+        .bind(payload.value)
+        .bind(payload.digest)
+        .fetch_one(&self.pool)
+        .await?;
+        principal_from_row(row)
+    }
+
+    pub async fn bind_tenant_principal(
+        &self,
+        command: NewTenantPrincipal,
+    ) -> Result<TenantPrincipalRecord, RepositoryError> {
+        if command.tenant_id.kind() != ResourceKind::Tenant
+            || command.principal_id.kind() != ResourceKind::Principal
+            || command.principal_kind == PrincipalKind::InstallationOperator
+        {
+            return Err(RepositoryError::InvalidInput(
+                "tenant principal identity or kind is invalid".to_owned(),
+            ));
+        }
+        let payload = TypedPayload::with_limit(1, &command.payload, 65_536)?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.tenant_principals (
+                tenant_id, principal_id, principal_kind, state, permissions_schema_version,
+                permissions, permissions_digest
+            )
+            SELECT $1, $2, $3, 'active', $4, $5, $6
+            FROM insight_platform.principals
+            WHERE principal_id = $2 AND state = 'active'
+            RETURNING tenant_id, principal_id, principal_kind, state, generation, version,
+                      permissions_schema_version, permissions, permissions_digest,
+                      created_at, updated_at
+            "#,
+        )
+        .bind(command.tenant_id.to_string())
+        .bind(command.principal_id.to_string())
+        .bind(command.principal_kind.as_str())
+        .bind(payload.schema_version)
+        .bind(payload.value)
+        .bind(payload.digest)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(tenant_principal_from_row)
+            .transpose()?
+            .ok_or(RepositoryError::NotFound("active principal"))
+    }
+
+    pub async fn create_secret_binding(
+        &self,
+        command: NewSecretBinding,
+    ) -> Result<SecretBindingRecord, RepositoryError> {
+        if command.tenant_id.kind() != ResourceKind::Tenant
+            || command.secret_binding_id.kind() != ResourceKind::SecretBinding
+        {
+            return Err(RepositoryError::InvalidInput(
+                "secret binding identity is invalid".to_owned(),
+            ));
+        }
+        command
+            .payload
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if command.payload.provider_id != command.provider_id
+            || command.opaque_reference_ciphertext.is_empty()
+            || command.opaque_reference_ciphertext.len() > 16_384
+            || command.key_id.is_empty()
+            || command.key_id.len() > 255
+        {
+            return Err(RepositoryError::InvalidInput(
+                "secret binding metadata is inconsistent or unbounded".to_owned(),
+            ));
+        }
+        let payload = TypedPayload::with_limit(1, &command.payload, 65_536)?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.secret_bindings (
+                tenant_id, secret_binding_id, purpose, provider, state,
+                opaque_reference_ciphertext, key_id, reference_digest,
+                payload_schema_version, payload, payload_digest
+            ) VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10)
+            RETURNING tenant_id, secret_binding_id, purpose, provider, state, generation,
+                      version, opaque_reference_ciphertext, key_id, reference_digest,
+                      payload_schema_version, payload, payload_digest,
+                      created_at, updated_at, revoked_at
+            "#,
+        )
+        .bind(command.tenant_id.to_string())
+        .bind(command.secret_binding_id.to_string())
+        .bind(command.purpose.as_str())
+        .bind(command.provider_id.to_string())
+        .bind(command.opaque_reference_ciphertext)
+        .bind(command.key_id)
+        .bind(command.reference_digest.to_string())
+        .bind(payload.schema_version)
+        .bind(payload.value)
+        .bind(payload.digest)
+        .fetch_one(&self.pool)
+        .await?;
+        secret_binding_from_row(row)
+    }
+
+    pub async fn begin_registry_transaction(
+        &self,
+    ) -> Result<PgRegistryTransaction, RepositoryError> {
+        Ok(PgRegistryTransaction {
+            transaction: self.pool.begin().await?,
+        })
+    }
+
+    pub async fn begin_security_transaction(
+        &self,
+    ) -> Result<PgSecurityTransaction, RepositoryError> {
+        Ok(PgSecurityTransaction {
+            transaction: self.pool.begin().await?,
+        })
+    }
+
+    pub async fn begin_run_transaction(&self) -> Result<PgRunTransaction, RepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *transaction)
+            .await?;
+        Ok(PgRunTransaction { transaction })
+    }
+
+    pub async fn begin_scheduler_transaction(
+        &self,
+    ) -> Result<PgSchedulerTransaction, RepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *transaction)
+            .await?;
+        Ok(PgSchedulerTransaction {
+            transaction,
+            limits: self.scheduler_limits,
+            plan_limits: self.plan_limits,
+            recovery_batch_limit: self.recovery_batch_limit,
+            recovery_shard_limit: self.recovery_shard_limit,
+        })
+    }
+}
+
+pub struct PgRegistryTransaction {
+    pub(crate) transaction: Transaction<'static, Postgres>,
+}
+
+impl PgRegistryTransaction {
+    pub async fn create_resource_draft(
+        &mut self,
+        command: CreateResourceDraft,
+    ) -> Result<CommandOutcome<ResourceRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &command.resource_id.to_string(),
+            "resource.create_draft",
+        )
+        .await?
+        {
+            let record = load_resource(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.resource_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        require_tenant_permission(
+            &mut transaction,
+            &command.audit,
+            write_permission(command.draft.document.kind()),
+        )
+        .await?;
+        require_ready_authoring_artifact(
+            &mut transaction,
+            &command.audit.tenant_id,
+            command.draft.document.authoring_package(),
+        )
+        .await?;
+        let payload = TypedPayload::new(1, &command.draft)?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.resources (
+                tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+                payload_schema_version, payload, payload_digest
+            ) VALUES ($1, $2, $3, 'active', 'enabled', $4, $5, $6)
+            RETURNING tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+                      draft_generation, active_version_id, active_deployment_id, version,
+                      payload_schema_version, payload, payload_digest, created_at, updated_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.resource_id.to_string())
+        .bind(command.draft.document.kind().as_str())
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let record = resource_from_row(row)?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &record.resource_id,
+            record.version,
+            "resource.draft_created",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "draft_digest": record.payload.digest,
+                    "resource_kind": record.resource_kind,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &record.resource_id,
+            "created",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn update_resource_draft(
+        &mut self,
+        command: UpdateResourceDraft,
+    ) -> Result<CommandOutcome<ResourceRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &command.resource_id.to_string(),
+            "resource.update_draft",
+        )
+        .await?
+        {
+            let record = load_resource(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.resource_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        require_tenant_permission(
+            &mut transaction,
+            &command.audit,
+            write_permission(command.draft.document.kind()),
+        )
+        .await?;
+        require_ready_authoring_artifact(
+            &mut transaction,
+            &command.audit.tenant_id,
+            command.draft.document.authoring_package(),
+        )
+        .await?;
+        let payload = TypedPayload::new(1, &command.draft)?;
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.resources
+            SET payload_schema_version = $4, payload = $5, payload_digest = $6,
+                draft_generation = draft_generation + 1, version = version + 1,
+                updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND resource_id = $2 AND version = $3
+              AND lifecycle_state <> 'retired' AND resource_kind = $7
+            RETURNING tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+                      draft_generation, active_version_id, active_deployment_id, version,
+                      payload_schema_version, payload, payload_digest, created_at, updated_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.resource_id.to_string())
+        .bind(command.expected_resource_version)
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .bind(command.draft.document.kind().as_str())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("resource"))?;
+        let record = resource_from_row(row)?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &record.resource_id,
+            record.version,
+            "resource.draft_updated",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({"draft_digest": record.payload.digest}),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &record.resource_id,
+            "updated",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn record_resource_validation(
+        &mut self,
+        command: RecordResourceValidation,
+    ) -> Result<CommandOutcome<ResourceRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &command.resource_id.to_string(),
+            "resource.record_validation",
+        )
+        .await?
+        {
+            let record = load_resource(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.resource_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        let locked = load_resource_for_update(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.resource_id,
+        )
+        .await?;
+        let kind = locked
+            .resource_kind
+            .parse::<RegistryResourceKind>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        require_tenant_permission(&mut transaction, &command.audit, write_permission(kind)).await?;
+        let mut draft = decode_resource_draft(&locked.payload)?;
+        let document_digest = draft
+            .document_digest()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        if locked.version != command.expected_resource_version
+            || document_digest != command.expected_draft_digest
+            || locked.lifecycle_state == "retired"
+        {
+            return Err(RepositoryError::Conflict("resource"));
+        }
+        draft.validation = Some(command.validation.clone());
+        let payload = TypedPayload::new(1, &draft)?;
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.resources
+            SET payload_schema_version = $4, payload = $5, payload_digest = $6,
+                version = version + 1, updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND resource_id = $2 AND version = $3
+            RETURNING tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+                      draft_generation, active_version_id, active_deployment_id, version,
+                      payload_schema_version, payload, payload_digest, created_at, updated_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.resource_id.to_string())
+        .bind(command.expected_resource_version)
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let record = resource_from_row(row)?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &record.resource_id,
+            record.version,
+            "resource.validation_recorded",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "validated_draft_digest": command.validation.validated_draft_digest,
+                    "validator_digest": command.validation.validator_digest,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &record.resource_id,
+            "validated",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn request_resource_validation(
+        &mut self,
+        command: RequestResourceValidation,
+    ) -> Result<CommandOutcome<JobRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &command.resource_id.to_string(),
+            "resource.validate",
+        )
+        .await?
+        {
+            let job = load_job(&mut transaction, &command.audit.tenant_id, &command.job_id).await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(job));
+        }
+        let locked = load_resource_for_update(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.resource_id,
+        )
+        .await?;
+        let kind = locked
+            .resource_kind
+            .parse::<RegistryResourceKind>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        require_tenant_permission(&mut transaction, &command.audit, write_permission(kind)).await?;
+        let draft = decode_resource_draft(&locked.payload)?;
+        let document_digest = draft
+            .document_digest()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        if locked.version != command.expected_resource_version
+            || document_digest != command.expected_draft_digest
+            || locked.lifecycle_state == "retired"
+        {
+            return Err(RepositoryError::Conflict("resource"));
+        }
+        let validation_job = RegistryValidationJobPayload::from_request(&command, kind)?;
+        let payload = TypedPayload::from_versioned(1, &validation_job, 262_144)?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.jobs (
+                tenant_id, job_id, work_class, owner_kind, owner_id, state,
+                attempt_limit, scheduled_at, deadline, priority, request_digest,
+                payload_schema_version, payload, payload_digest
+            ) VALUES (
+                $1, $2, 'registry_validation', 'management_operation', $3, 'ready',
+                $4, GREATEST($5, clock_timestamp()), $6, 0, $7, $8, $9, $10
+            )
+            RETURNING *
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.job_id.to_string())
+        .bind(command.operation_id.to_string())
+        .bind(command.attempt_limit)
+        .bind(command.scheduled_at)
+        .bind(command.deadline)
+        .bind(command.audit.request_digest.to_string())
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let job = job_from_row(row)?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "management_operation",
+            &command.operation_id.to_string(),
+            1,
+            "resource.validation_requested",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "draft_digest": command.expected_draft_digest,
+                    "job_id": command.job_id,
+                    "resource_id": command.resource_id,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &command.operation_id.to_string(),
+            "accepted",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(job))
+    }
+
+    pub async fn publish_resource_versions(
+        &mut self,
+        command: PublishResourceVersions,
+    ) -> Result<CommandOutcome<PublishedResource>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &command.resource_id.to_string(),
+            "resource.publish",
+        )
+        .await?
+        {
+            let published = load_published_resource(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.resource_id,
+                &command.versions,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(published));
+        }
+        let locked = load_resource_for_update(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.resource_id,
+        )
+        .await?;
+        let kind = locked
+            .resource_kind
+            .parse::<RegistryResourceKind>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        require_tenant_permission(&mut transaction, &command.audit, publish_permission(kind))
+            .await?;
+        let draft = decode_resource_draft(&locked.payload)?;
+        let document_digest = draft
+            .document_digest()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        if locked.version != command.expected_resource_version
+            || document_digest != command.expected_draft_digest
+            || locked.lifecycle_state != "active"
+        {
+            return Err(RepositoryError::Conflict("resource"));
+        }
+        let Some(validation) = draft.validation.as_ref() else {
+            return Err(RepositoryError::InvalidInput(
+                "resource draft has no validation summary".to_owned(),
+            ));
+        };
+        if validation.validated_draft_digest != command.expected_draft_digest {
+            return Err(RepositoryError::Conflict("resource validation"));
+        }
+        require_ready_authoring_artifact(
+            &mut transaction,
+            &command.audit.tenant_id,
+            draft.document.authoring_package(),
+        )
+        .await?;
+        let document_refs = draft.document.exact_version_refs();
+        validate_exact_version_refs_exist(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &document_refs,
+        )
+        .await?;
+        validate_publish_batch(kind, &command.versions)?;
+        let mut records = Vec::with_capacity(command.versions.len());
+        for version in &command.versions {
+            version
+                .payload
+                .validate_for(kind, &version.resource_version_id)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+            if version.payload.validation != *validation {
+                return Err(RepositoryError::InvalidInput(
+                    "published validation does not match the validated draft".to_owned(),
+                ));
+            }
+            let payload = TypedPayload::new(1, &version.payload)?;
+            let artifact_id = version.artifact_id.as_ref().map(ToString::to_string);
+            let row = sqlx::query(
+                r#"
+                INSERT INTO insight_platform.resource_versions (
+                    tenant_id, resource_version_id, resource_id, resource_version_kind,
+                    revision_no, content_digest, artifact_id, payload_schema_version,
+                    payload, payload_digest, created_by
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                RETURNING tenant_id, resource_version_id, resource_id, resource_version_kind,
+                          revision_no, content_digest, artifact_id, payload_schema_version,
+                          payload, payload_digest, created_by, created_at
+                "#,
+            )
+            .bind(command.audit.tenant_id.to_string())
+            .bind(version.resource_version_id.to_string())
+            .bind(command.resource_id.to_string())
+            .bind(version.resource_version_id.kind().descriptor().name)
+            .bind(version.revision_no)
+            .bind(version.content_digest.to_string())
+            .bind(artifact_id)
+            .bind(payload.schema_version)
+            .bind(&payload.value)
+            .bind(&payload.digest)
+            .bind(command.audit.principal_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            records.push(resource_version_from_row(row)?);
+        }
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.resources
+            SET version = version + 1, updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND resource_id = $2 AND version = $3
+              AND lifecycle_state = 'active'
+            RETURNING tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+                      draft_generation, active_version_id, active_deployment_id, version,
+                      payload_schema_version, payload, payload_digest, created_at, updated_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.resource_id.to_string())
+        .bind(command.expected_resource_version)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let resource = resource_from_row(row)?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &resource.resource_id,
+            resource.version,
+            "resource.published",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "draft_digest": command.expected_draft_digest,
+                    "resource_version_ids": records.iter().map(|record| &record.resource_version_id).collect::<Vec<_>>(),
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &resource.resource_id,
+            "published",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(PublishedResource {
+            resource,
+            versions: records,
+        }))
+    }
+
+    pub async fn create_deployment(
+        &mut self,
+        command: CreateDeployment,
+    ) -> Result<CommandOutcome<DeploymentRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &command.resource_id.to_string(),
+            "resource.deploy",
+        )
+        .await?
+        {
+            let record = load_deployment(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.deployment_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        let locked = load_resource_for_update(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.resource_id,
+        )
+        .await?;
+        let kind = locked
+            .resource_kind
+            .parse::<RegistryResourceKind>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        require_tenant_permission(&mut transaction, &command.audit, deploy_permission(kind))
+            .await?;
+        if locked.version != command.expected_resource_version || locked.lifecycle_state != "active"
+        {
+            return Err(RepositoryError::Conflict("resource"));
+        }
+        if command.closure.resource_kind() != kind
+            || kind.deployment_kind() != Some(command.deployment_id.kind())
+            || !kind.allows_version_kind(command.resource_version_id.kind())
+        {
+            return Err(RepositoryError::InvalidInput(
+                "deployment kind does not match its resource".to_owned(),
+            ));
+        }
+        if let DeploymentClosure::Agent(closure) = &command.closure {
+            for slot in &closure.slots {
+                if let FrozenSlotTarget::Context { binding } = &slot.target {
+                    if binding.owner_agent_deployment_id != command.deployment_id {
+                        return Err(RepositoryError::InvalidInput(
+                            "Context binding owner differs from Agent Deployment".to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+        validate_deployment_closure_exists(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.closure,
+        )
+        .await?;
+        validate_exact_secret_bindings_at_creation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            command.closure.secret_bindings(),
+        )
+        .await?;
+        let bindings = TypedPayload::new(1, &command.closure)?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.deployments (
+                tenant_id, deployment_id, resource_id, resource_version_id, environment,
+                bindings_digest, payload_schema_version, bindings, created_by
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING tenant_id, deployment_id, resource_id, resource_version_id, environment,
+                      bindings_digest, payload_schema_version, bindings, created_by, created_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.deployment_id.to_string())
+        .bind(command.resource_id.to_string())
+        .bind(command.resource_version_id.to_string())
+        .bind(&command.environment)
+        .bind(&bindings.digest)
+        .bind(bindings.schema_version)
+        .bind(&bindings.value)
+        .bind(command.audit.principal_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let record = deployment_from_row(row)?;
+        let new_version: i64 = sqlx::query_scalar(
+            r#"
+            UPDATE insight_platform.resources
+            SET version = version + 1, updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND resource_id = $2 AND version = $3
+            RETURNING version
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.resource_id.to_string())
+        .bind(command.expected_resource_version)
+        .fetch_one(&mut *transaction)
+        .await?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &command.resource_id.to_string(),
+            new_version,
+            "resource.deployed",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "deployment_digest": record.bindings.digest,
+                    "deployment_id": record.deployment_id,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &record.deployment_id,
+            "deployed",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn activate_resource(
+        &mut self,
+        command: ActivateResource,
+    ) -> Result<CommandOutcome<ResourceRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &command.resource_id.to_string(),
+            "resource.activate",
+        )
+        .await?
+        {
+            let record = load_resource(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.resource_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        let locked = load_resource_for_update(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.resource_id,
+        )
+        .await?;
+        let kind = locked
+            .resource_kind
+            .parse::<RegistryResourceKind>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        require_tenant_permission(&mut transaction, &command.audit, activate_permission(kind))
+            .await?;
+        if locked.version != command.expected_resource_version
+            || locked.lifecycle_state != "active"
+            || locked.gate_state != "enabled"
+        {
+            return Err(RepositoryError::Conflict("resource"));
+        }
+        let (version_id, deployment_id) = resolve_activation_target(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.resource_id,
+            kind,
+            &command.target,
+        )
+        .await?;
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.resources
+            SET active_version_id = $4, active_deployment_id = $5,
+                version = version + 1, updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND resource_id = $2 AND version = $3
+            RETURNING tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+                      draft_generation, active_version_id, active_deployment_id, version,
+                      payload_schema_version, payload, payload_digest, created_at, updated_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.resource_id.to_string())
+        .bind(command.expected_resource_version)
+        .bind(version_id)
+        .bind(deployment_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let record = resource_from_row(row)?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &record.resource_id,
+            record.version,
+            "resource.activated",
+            &TypedPayload::new(1, &command.target)?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &record.resource_id,
+            "activated",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn transition_resource_lifecycle(
+        &mut self,
+        command: TransitionResourceLifecycle,
+    ) -> Result<CommandOutcome<ResourceRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        self.transition_resource_control(
+            command.audit,
+            command.resource_id,
+            command.expected_resource_version,
+            Some(command.target),
+            None,
+            "resource.lifecycle_transitioned",
+        )
+        .await
+    }
+
+    pub async fn set_resource_gate(
+        &mut self,
+        command: SetResourceGate,
+    ) -> Result<CommandOutcome<ResourceRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        self.transition_resource_control(
+            command.audit,
+            command.resource_id,
+            command.expected_resource_version,
+            None,
+            Some(command.target),
+            "resource.gate_changed",
+        )
+        .await
+    }
+
+    async fn transition_resource_control(
+        &mut self,
+        audit: CommandAudit,
+        resource_id: ResourceId,
+        expected_resource_version: i64,
+        lifecycle: Option<EntityLifecycle>,
+        gate: Option<AdministrativeGate>,
+        event_type: &'static str,
+    ) -> Result<CommandOutcome<ResourceRecord>, RepositoryError> {
+        let operation = if lifecycle.is_some() {
+            "resource.transition_lifecycle"
+        } else {
+            "resource.set_gate"
+        };
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &audit,
+            "resource",
+            &resource_id.to_string(),
+            operation,
+        )
+        .await?
+        {
+            let record = load_resource(&mut transaction, &audit.tenant_id, &resource_id).await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        let locked =
+            load_resource_for_update(&mut transaction, &audit.tenant_id, &resource_id).await?;
+        let kind = locked
+            .resource_kind
+            .parse::<RegistryResourceKind>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        require_tenant_permission(&mut transaction, &audit, activate_permission(kind)).await?;
+        if locked.version != expected_resource_version {
+            return Err(RepositoryError::Conflict("resource"));
+        }
+        let current_lifecycle = locked
+            .lifecycle_state
+            .parse::<EntityLifecycle>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let current_gate = locked
+            .gate_state
+            .parse::<AdministrativeGate>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let next_lifecycle = lifecycle.unwrap_or(current_lifecycle);
+        let next_gate = gate.unwrap_or(current_gate);
+        if lifecycle.is_some() && !current_lifecycle.can_transition_to(next_lifecycle) {
+            return Err(RepositoryError::InvalidInput(
+                "resource lifecycle transition is not allowed".to_owned(),
+            ));
+        }
+        if gate.is_some() && !current_gate.can_transition_to(next_gate) {
+            return Err(RepositoryError::InvalidInput(
+                "resource gate transition is not allowed".to_owned(),
+            ));
+        }
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.resources
+            SET lifecycle_state = $4, gate_state = $5,
+                version = version + 1, updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND resource_id = $2 AND version = $3
+            RETURNING tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+                      draft_generation, active_version_id, active_deployment_id, version,
+                      payload_schema_version, payload, payload_digest, created_at, updated_at
+            "#,
+        )
+        .bind(audit.tenant_id.to_string())
+        .bind(resource_id.to_string())
+        .bind(expected_resource_version)
+        .bind(next_lifecycle.as_str())
+        .bind(next_gate.as_str())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let record = resource_from_row(row)?;
+        append_command_event(
+            &mut transaction,
+            &audit,
+            "resource",
+            &record.resource_id,
+            record.version,
+            event_type,
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "gate": next_gate,
+                    "lifecycle": next_lifecycle,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(&mut transaction, &audit, &record.resource_id, "updated")
+            .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn commit(self) -> Result<(), RepositoryError> {
+        self.transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn rollback(self) -> Result<(), RepositoryError> {
+        self.transaction.rollback().await?;
+        Ok(())
+    }
+}
+
+impl PgRepository {
+    pub async fn create_job(&self, command: NewJob) -> Result<JobRecord, RepositoryError> {
+        command.validate()?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.jobs (
+                tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
+                run_id, node_id, state, attempt_limit, scheduled_at, deadline, priority,
+                request_digest, effect_key_digest, payload_schema_version, payload, payload_digest
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, 'ready', $9,
+                GREATEST($10, clock_timestamp()), $11, $12, $13, $14, $15, $16, $17
+            )
+            RETURNING *
+            "#,
+        )
+        .bind(command.tenant_id)
+        .bind(command.job_id)
+        .bind(command.work_class)
+        .bind(command.owner_kind)
+        .bind(command.owner_id)
+        .bind(command.invocation_id)
+        .bind(command.run_id)
+        .bind(command.node_id)
+        .bind(command.attempt_limit)
+        .bind(command.scheduled_at)
+        .bind(command.deadline)
+        .bind(scheduler_priority_to_database(command.priority))
+        .bind(command.request_digest)
+        .bind(command.effect_key_digest)
+        .bind(command.payload.schema_version)
+        .bind(command.payload.value)
+        .bind(command.payload.digest)
+        .fetch_one(&self.pool)
+        .await?;
+        job_from_row(row)
+    }
+
+    pub async fn claim_jobs(&self, command: ClaimJobs) -> Result<Vec<JobRecord>, RepositoryError> {
+        command.validate()?;
+        let mut transaction = self.pool.begin().await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let candidates = sqlx::query(
+            r#"
+            SELECT *
+            FROM insight_platform.jobs
+            WHERE work_class = $1
+              AND state IN ('ready', 'retry_scheduled')
+              AND terminal_at IS NULL
+              AND worker_id IS NULL
+              AND scheduled_at <= $3
+              AND (retry_at IS NULL OR retry_at <= $3)
+              AND deadline > $3
+            ORDER BY priority DESC, COALESCE(retry_at, scheduled_at), job_id
+            FOR UPDATE SKIP LOCKED
+            LIMIT $2
+            "#,
+        )
+        .bind(&command.work_class)
+        .bind(i64::from(command.limit))
+        .bind(database_now)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut claimed = Vec::with_capacity(candidates.len());
+        for (candidate, lease_token_digest) in
+            candidates.into_iter().zip(&command.lease_token_digests)
+        {
+            let current = job_from_row(candidate)?;
+            validate_claimed_job_payload(&current)?;
+            let current_projection = job_projection(&current)?;
+            let next = decide_job_claim(
+                &current_projection,
+                database_now,
+                command.worker_id.clone(),
+                lease_token_digest.clone(),
+                LeasePolicy {
+                    requested_milliseconds: u64::try_from(command.lease_milliseconds).map_err(
+                        |_| RepositoryError::InvalidInput("negative Job lease".to_owned()),
+                    )?,
+                    hard_maximum_milliseconds: u64::try_from(MAX_JOB_LEASE_MILLISECONDS)
+                        .expect("positive Job lease hard maximum"),
+                },
+            )?;
+            let lease = next.lease.as_ref().ok_or_else(|| {
+                RepositoryError::InvalidInput("claim decision did not create a lease".to_owned())
+            })?;
+            let row = sqlx::query(
+                r#"
+                UPDATE insight_platform.jobs
+                SET state = $4, version = $5, attempt_no = $6, lease_epoch = $7,
+                    worker_id = $8, lease_token_digest = $9,
+                    lease_expires_at = $10, heartbeat_at = $11, retry_at = NULL,
+                    updated_at = $11
+                WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+                  AND state IN ('ready', 'retry_scheduled') AND worker_id IS NULL
+                RETURNING *
+                "#,
+            )
+            .bind(&current.tenant_id)
+            .bind(&current.job_id)
+            .bind(current.version)
+            .bind(next.state.as_str())
+            .bind(i64::try_from(next.version).map_err(|_| {
+                RepositoryError::InvalidInput("Job version exceeds bigint".to_owned())
+            })?)
+            .bind(i32::try_from(next.attempt_count).map_err(|_| {
+                RepositoryError::InvalidInput("Job attempt count exceeds integer".to_owned())
+            })?)
+            .bind(i64::try_from(next.lease_generation).map_err(|_| {
+                RepositoryError::InvalidInput("Job lease generation exceeds bigint".to_owned())
+            })?)
+            .bind(lease.worker_process_generation_id.to_string())
+            .bind(lease.token_digest.to_string())
+            .bind(lease.expires_at)
+            .bind(lease.heartbeat_at)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(row) = row {
+                claimed.push(job_from_row(row)?);
+            }
+        }
+        transaction.commit().await?;
+        Ok(claimed)
+    }
+
+    pub async fn start_job(&self, command: JobFence) -> Result<JobRecord, RepositoryError> {
+        command.validate()?;
+        let mut transaction = self.pool.begin().await?;
+        let current =
+            load_job_for_update_by_text(&mut transaction, &command.tenant_id, &command.job_id)
+                .await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let next = decide_job_start(
+            &job_projection(&current)?,
+            &domain_job_fence(&command)?,
+            database_now,
+        )?;
+        let row =
+            sqlx::query(
+                r#"
+            UPDATE insight_platform.jobs
+            SET state = $4, version = $5, attempt_no = $6, started_at = $7,
+                updated_at = $7
+            WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+            RETURNING *
+            "#,
+            )
+            .bind(&command.tenant_id)
+            .bind(&command.job_id)
+            .bind(current.version)
+            .bind(next.state.as_str())
+            .bind(i64::try_from(next.version).map_err(|_| {
+                RepositoryError::InvalidInput("Job version exceeds bigint".to_owned())
+            })?)
+            .bind(i32::try_from(next.attempt_count).map_err(|_| {
+                RepositoryError::InvalidInput("Job attempt count exceeds integer".to_owned())
+            })?)
+            .bind(database_now)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let record = job_from_row(row)?;
+        transaction.commit().await?;
+        Ok(record)
+    }
+
+    pub async fn heartbeat_job(&self, command: HeartbeatJob) -> Result<JobRecord, RepositoryError> {
+        command.fence.validate()?;
+        if command.lease_milliseconds <= 0
+            || command.lease_milliseconds > MAX_JOB_LEASE_MILLISECONDS
+        {
+            return Err(RepositoryError::InvalidInput(
+                "lease duration is outside the platform bound".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let next = decide_job_heartbeat(
+            &job_projection(&current)?,
+            &domain_job_fence(&command.fence)?,
+            database_now,
+            LeasePolicy {
+                requested_milliseconds: u64::try_from(command.lease_milliseconds)
+                    .map_err(|_| RepositoryError::InvalidInput("negative Job lease".to_owned()))?,
+                hard_maximum_milliseconds: u64::try_from(MAX_JOB_LEASE_MILLISECONDS)
+                    .expect("positive Job lease hard maximum"),
+            },
+        )?;
+        let lease = next.lease.as_ref().ok_or_else(|| {
+            RepositoryError::InvalidInput("heartbeat decision removed the Job lease".to_owned())
+        })?;
+        let row =
+            sqlx::query(
+                r#"
+            UPDATE insight_platform.jobs
+            SET version = $4, heartbeat_at = $5, lease_expires_at = $6, updated_at = $5
+            WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+            RETURNING *
+            "#,
+            )
+            .bind(&command.fence.tenant_id)
+            .bind(&command.fence.job_id)
+            .bind(current.version)
+            .bind(i64::try_from(next.version).map_err(|_| {
+                RepositoryError::InvalidInput("Job version exceeds bigint".to_owned())
+            })?)
+            .bind(lease.heartbeat_at)
+            .bind(lease.expires_at)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let record = job_from_row(row)?;
+        transaction.commit().await?;
+        Ok(record)
+    }
+
+    pub async fn commit_job(
+        &self,
+        command: CommitJob,
+    ) -> Result<JobCommitOutcome, RepositoryError> {
+        command.validate()?;
+        let mut transaction = self.pool.begin().await?;
+        let inserted_receipt = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.receipts (
+                tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+                dedupe_owner_id, operation, idempotency_key_digest, request_digest, state,
+                payload_schema_version, payload, payload_digest, expires_at
+            ) VALUES ($1, $2, 'job_commit', 'job', $3, $4, 'job.commit', $5, $6,
+                      'processing', $7, $8, $9, $10)
+            ON CONFLICT (
+                tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+                operation, idempotency_key_digest
+            )
+            DO NOTHING
+            RETURNING receipt_id
+            "#,
+        )
+        .bind(&command.fence.tenant_id)
+        .bind(&command.receipt_id)
+        .bind(&command.fence.job_id)
+        .bind(command.fence.worker_id.to_string())
+        .bind(&command.idempotency_key_digest)
+        .bind(&command.request_digest)
+        .bind(command.receipt_payload.schema_version)
+        .bind(&command.receipt_payload.value)
+        .bind(&command.receipt_payload.digest)
+        .bind(command.receipt_expires_at)
+        .fetch_optional(&mut *transaction)
+        .await?;
+
+        if inserted_receipt.is_none() {
+            let existing = sqlx::query(
+                r#"
+                SELECT request_digest, state, disposition
+                FROM insight_platform.receipts
+                WHERE tenant_id = $1 AND receipt_kind = 'job_commit'
+                  AND scope_kind = 'job' AND scope_id = $2
+                  AND dedupe_owner_id = $3 AND operation = 'job.commit'
+                  AND idempotency_key_digest = $4
+                FOR UPDATE
+                "#,
+            )
+            .bind(&command.fence.tenant_id)
+            .bind(&command.fence.job_id)
+            .bind(command.fence.worker_id.to_string())
+            .bind(&command.idempotency_key_digest)
+            .fetch_one(&mut *transaction)
+            .await?;
+            let request_digest: String = existing.try_get("request_digest")?;
+            if request_digest != command.request_digest {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+            let state: String = existing.try_get("state")?;
+            if state == "succeeded" {
+                let disposition: Option<String> = existing.try_get("disposition")?;
+                transaction.commit().await?;
+                return Ok(JobCommitOutcome::Replayed { disposition });
+            }
+            return Err(RepositoryError::Conflict("job commit receipt"));
+        }
+
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let next = decide_job_terminal(
+            &job_projection(&current)?,
+            &domain_job_fence(&command.fence)?,
+            database_now,
+            command.terminal_state.job_state(),
+        )?;
+        let row =
+            sqlx::query(
+                r#"
+            UPDATE insight_platform.jobs
+            SET state = $4, version = $5, result_digest = $6,
+                payload_schema_version = $7, payload = $8, payload_digest = $9,
+                worker_id = NULL, lease_token_digest = NULL,
+                lease_expires_at = NULL, heartbeat_at = NULL,
+                terminal_at = $10, updated_at = $10
+            WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+            RETURNING *
+            "#,
+            )
+            .bind(&command.fence.tenant_id)
+            .bind(&command.fence.job_id)
+            .bind(current.version)
+            .bind(next.state.as_str())
+            .bind(i64::try_from(next.version).map_err(|_| {
+                RepositoryError::InvalidInput("Job version exceeds bigint".to_owned())
+            })?)
+            .bind(&command.result_digest)
+            .bind(command.result_payload.schema_version)
+            .bind(&command.result_payload.value)
+            .bind(&command.result_payload.digest)
+            .bind(database_now)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let job = job_from_row(row)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.events (
+                tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
+                run_id, event_type, visibility, payload_schema_version, payload, payload_digest
+            ) VALUES ($1, $2, 'job', $3, $4, $5, $6, 'internal', $7, $8, $9)
+            "#,
+        )
+        .bind(&command.fence.tenant_id)
+        .bind(&command.event_id)
+        .bind(&command.fence.job_id)
+        .bind(job.version)
+        .bind(&job.run_id)
+        .bind(&command.event_type)
+        .bind(command.event_payload.schema_version)
+        .bind(&command.event_payload.value)
+        .bind(&command.event_payload.digest)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.outbox_events (
+                tenant_id, outbox_id, event_id
+            ) VALUES ($1, $2, $3)
+            "#,
+        )
+        .bind(&command.fence.tenant_id)
+        .bind(&command.outbox_id)
+        .bind(&command.event_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE insight_platform.receipts
+            SET state = 'succeeded', disposition = 'committed', response_reference_id = $4,
+                completed_at = clock_timestamp()
+            WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
+            "#,
+        )
+        .bind(&command.fence.tenant_id)
+        .bind(&command.receipt_id)
+        .bind(&command.request_digest)
+        .bind(&command.fence.job_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(JobCommitOutcome::Committed(Box::new(job)))
+    }
+
+    pub async fn create_quota_account(
+        &self,
+        command: NewQuotaAccount,
+    ) -> Result<QuotaAccountRecord, RepositoryError> {
+        command.validate()?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.quota_accounts (
+                tenant_id, quota_account_id, scope_kind, scope_id, work_class, metric,
+                limit_value, payload_schema_version, payload, payload_digest
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING *
+            "#,
+        )
+        .bind(command.tenant_id)
+        .bind(command.quota_account_id)
+        .bind(command.scope_kind)
+        .bind(command.scope_id)
+        .bind(command.work_class)
+        .bind(command.metric)
+        .bind(command.limit_value)
+        .bind(command.payload.schema_version)
+        .bind(command.payload.value)
+        .bind(command.payload.digest)
+        .fetch_one(&self.pool)
+        .await?;
+        quota_account_from_row(row)
+    }
+
+    pub async fn reserve_quota(
+        &self,
+        command: ReserveQuota,
+    ) -> Result<QuotaMutationOutcome, RepositoryError> {
+        command.validate()?;
+        let mut transaction = self.pool.begin().await?;
+        if let Some(replay) = existing_quota_entry(
+            &mut transaction,
+            &command.tenant_id,
+            &command.quota_account_id,
+            &command.correlation_id,
+            "reserve",
+            &command.request_digest,
+        )
+        .await?
+        {
+            transaction.commit().await?;
+            return Ok(QuotaMutationOutcome::Replayed(replay));
+        }
+        let account = sqlx::query(
+            r#"
+            UPDATE insight_platform.quota_accounts
+            SET reserved_value = reserved_value + $3, version = version + 1,
+                updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND quota_account_id = $2
+              AND reserved_value + used_value + $3 <= limit_value
+            RETURNING *
+            "#,
+        )
+        .bind(&command.tenant_id)
+        .bind(&command.quota_account_id)
+        .bind(command.amount)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(account) = account else {
+            return Err(RepositoryError::QuotaExceeded);
+        };
+        let account = quota_account_from_row(account)?;
+        insert_quota_entry(
+            &mut transaction,
+            QuotaEntryInsert {
+                tenant_id: &command.tenant_id,
+                quota_entry_id: &command.quota_entry_id,
+                quota_account_id: &command.quota_account_id,
+                correlation_id: &command.correlation_id,
+                entry_kind: "reserve",
+                reserved_amount: command.amount,
+                used_amount: 0,
+                account_version: account.version,
+                request_digest: &command.request_digest,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(QuotaMutationOutcome::Applied(account))
+    }
+
+    pub async fn settle_quota(
+        &self,
+        command: SettleQuota,
+    ) -> Result<QuotaMutationOutcome, RepositoryError> {
+        command.validate()?;
+        let mut transaction = self.pool.begin().await?;
+        if let Some(replay) = existing_quota_entry(
+            &mut transaction,
+            &command.tenant_id,
+            &command.quota_account_id,
+            &command.correlation_id,
+            "settle",
+            &command.request_digest,
+        )
+        .await?
+        {
+            transaction.commit().await?;
+            return Ok(QuotaMutationOutcome::Replayed(replay));
+        }
+        let reserve = sqlx::query(
+            r#"
+            SELECT reserved_amount FROM insight_platform.quota_ledger
+            WHERE tenant_id = $1 AND quota_account_id = $2
+              AND correlation_id = $3 AND entry_kind = 'reserve'
+            FOR SHARE
+            "#,
+        )
+        .bind(&command.tenant_id)
+        .bind(&command.quota_account_id)
+        .bind(&command.correlation_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(reserve) = reserve else {
+            return Err(RepositoryError::NotFound("quota reservation"));
+        };
+        let reserved_amount: i64 = reserve.try_get("reserved_amount")?;
+        if command.used_amount > reserved_amount {
+            return Err(RepositoryError::QuotaExceeded);
+        }
+        let account = sqlx::query(
+            r#"
+            UPDATE insight_platform.quota_accounts
+            SET reserved_value = reserved_value - $3,
+                used_value = used_value + $4,
+                version = version + 1, updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND quota_account_id = $2
+              AND reserved_value >= $3 AND used_value + $4 <= limit_value
+            RETURNING *
+            "#,
+        )
+        .bind(&command.tenant_id)
+        .bind(&command.quota_account_id)
+        .bind(reserved_amount)
+        .bind(command.used_amount)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(account) = account else {
+            return Err(RepositoryError::Conflict("quota account"));
+        };
+        let account = quota_account_from_row(account)?;
+        insert_quota_entry(
+            &mut transaction,
+            QuotaEntryInsert {
+                tenant_id: &command.tenant_id,
+                quota_entry_id: &command.quota_entry_id,
+                quota_account_id: &command.quota_account_id,
+                correlation_id: &command.correlation_id,
+                entry_kind: "settle",
+                reserved_amount,
+                used_amount: command.used_amount,
+                account_version: account.version,
+                request_digest: &command.request_digest,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(QuotaMutationOutcome::Applied(account))
+    }
+}
+
+impl RegistryTransaction for PgRegistryTransaction {
+    type Error = RepositoryError;
+    type ResourceRecord = ResourceRecord;
+    type PublishedResource = PublishedResource;
+    type DeploymentRecord = DeploymentRecord;
+    type ValidationJob = JobRecord;
+
+    async fn create_resource_draft(
+        &mut self,
+        command: CreateResourceDraft,
+    ) -> Result<CommandOutcome<Self::ResourceRecord>, Self::Error> {
+        PgRegistryTransaction::create_resource_draft(self, command).await
+    }
+
+    async fn update_resource_draft(
+        &mut self,
+        command: UpdateResourceDraft,
+    ) -> Result<CommandOutcome<Self::ResourceRecord>, Self::Error> {
+        PgRegistryTransaction::update_resource_draft(self, command).await
+    }
+
+    async fn request_resource_validation(
+        &mut self,
+        command: RequestResourceValidation,
+    ) -> Result<CommandOutcome<Self::ValidationJob>, Self::Error> {
+        PgRegistryTransaction::request_resource_validation(self, command).await
+    }
+
+    async fn record_resource_validation(
+        &mut self,
+        command: RecordResourceValidation,
+    ) -> Result<CommandOutcome<Self::ResourceRecord>, Self::Error> {
+        PgRegistryTransaction::record_resource_validation(self, command).await
+    }
+
+    async fn publish_resource_versions(
+        &mut self,
+        command: PublishResourceVersions,
+    ) -> Result<CommandOutcome<Self::PublishedResource>, Self::Error> {
+        PgRegistryTransaction::publish_resource_versions(self, command).await
+    }
+
+    async fn create_deployment(
+        &mut self,
+        command: CreateDeployment,
+    ) -> Result<CommandOutcome<Self::DeploymentRecord>, Self::Error> {
+        PgRegistryTransaction::create_deployment(self, command).await
+    }
+
+    async fn activate_resource(
+        &mut self,
+        command: ActivateResource,
+    ) -> Result<CommandOutcome<Self::ResourceRecord>, Self::Error> {
+        PgRegistryTransaction::activate_resource(self, command).await
+    }
+
+    async fn transition_resource_lifecycle(
+        &mut self,
+        command: TransitionResourceLifecycle,
+    ) -> Result<CommandOutcome<Self::ResourceRecord>, Self::Error> {
+        PgRegistryTransaction::transition_resource_lifecycle(self, command).await
+    }
+
+    async fn set_resource_gate(
+        &mut self,
+        command: SetResourceGate,
+    ) -> Result<CommandOutcome<Self::ResourceRecord>, Self::Error> {
+        PgRegistryTransaction::set_resource_gate(self, command).await
+    }
+
+    async fn commit(self) -> Result<(), Self::Error> {
+        PgRegistryTransaction::commit(self).await
+    }
+
+    async fn rollback(self) -> Result<(), Self::Error> {
+        PgRegistryTransaction::rollback(self).await
+    }
+}
+
+impl RegistryStore for PgRepository {
+    type Error = RepositoryError;
+    type Transaction<'a> = PgRegistryTransaction;
+
+    async fn begin(&self) -> Result<Self::Transaction<'_>, Self::Error> {
+        self.begin_registry_transaction().await
+    }
+}
+
+pub struct PgSecurityTransaction {
+    transaction: Transaction<'static, Postgres>,
+}
+
+impl PgSecurityTransaction {
+    pub async fn bind_tenant_principal(
+        &mut self,
+        command: BindTenantPrincipal,
+    ) -> Result<CommandOutcome<TenantPrincipalRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        let scope_kind = tenant_principal_scope_kind(command.principal_kind);
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &scope_kind,
+            &command.principal_id.to_string(),
+            "security.tenant_principal.bind",
+        )
+        .await?
+        {
+            let record = load_tenant_principal(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.principal_id,
+                command.principal_kind,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        require_tenant_permission(&mut transaction, &command.audit, Permission::TenantManage)
+            .await?;
+        let payload = TypedPayload::with_limit(
+            1,
+            &TenantPrincipalPayload {
+                permissions: command.permissions,
+            },
+            65_536,
+        )?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.tenant_principals (
+                tenant_id, principal_id, principal_kind, state, permissions_schema_version,
+                permissions, permissions_digest
+            )
+            SELECT $1, $2, $3, 'active', $4, $5, $6
+            FROM insight_platform.principals AS principal
+            JOIN insight_platform.tenants AS tenant
+              ON tenant.tenant_id = $1 AND tenant.state = 'active'
+            WHERE principal.principal_id = $2 AND principal.state = 'active'
+            ON CONFLICT (tenant_id, principal_id, principal_kind) DO NOTHING
+            RETURNING tenant_id, principal_id, principal_kind, state, generation, version,
+                      permissions_schema_version, permissions, permissions_digest,
+                      created_at, updated_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.principal_id.to_string())
+        .bind(command.principal_kind.as_str())
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("tenant principal"))?;
+        let record = tenant_principal_from_row(row)?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            &scope_kind,
+            &record.principal_id,
+            record.version,
+            "security.tenant_principal_bound",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "generation": record.generation,
+                    "principal_kind": record.principal_kind,
+                    "permissions_digest": record.permissions.digest,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &record.principal_id,
+            "bound",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn update_tenant_principal_permissions(
+        &mut self,
+        command: UpdateTenantPrincipalPermissions,
+    ) -> Result<CommandOutcome<TenantPrincipalRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        let scope_kind = tenant_principal_scope_kind(command.principal_kind);
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &scope_kind,
+            &command.principal_id.to_string(),
+            "security.tenant_principal.update_permissions",
+        )
+        .await?
+        {
+            let record = load_tenant_principal(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.principal_id,
+                command.principal_kind,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        require_tenant_permission(&mut transaction, &command.audit, Permission::TenantManage)
+            .await?;
+        let payload = TypedPayload::with_limit(
+            1,
+            &TenantPrincipalPayload {
+                permissions: command.permissions,
+            },
+            65_536,
+        )?;
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.tenant_principals
+            SET permissions_schema_version = $6, permissions = $7, permissions_digest = $8,
+                generation = generation + 1, version = version + 1,
+                updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND principal_id = $2 AND principal_kind = $3
+              AND generation = $4 AND version = $5 AND state = 'active'
+            RETURNING tenant_id, principal_id, principal_kind, state, generation, version,
+                      permissions_schema_version, permissions, permissions_digest,
+                      created_at, updated_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.principal_id.to_string())
+        .bind(command.principal_kind.as_str())
+        .bind(command.expected_generation)
+        .bind(command.expected_version)
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            return Err(classify_tenant_principal_cas(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.principal_id,
+                command.principal_kind,
+            )
+            .await?);
+        };
+        let record = tenant_principal_from_row(row)?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            &scope_kind,
+            &record.principal_id,
+            record.version,
+            "security.tenant_principal_permissions_updated",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "generation": record.generation,
+                    "principal_kind": record.principal_kind,
+                    "permissions_digest": record.permissions.digest,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &record.principal_id,
+            "updated",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn revoke_tenant_principal(
+        &mut self,
+        command: RevokeTenantPrincipal,
+    ) -> Result<CommandOutcome<TenantPrincipalRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        let scope_kind = tenant_principal_scope_kind(command.principal_kind);
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &scope_kind,
+            &command.principal_id.to_string(),
+            "security.tenant_principal.revoke",
+        )
+        .await?
+        {
+            let record = load_tenant_principal(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.principal_id,
+                command.principal_kind,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        require_tenant_permission(&mut transaction, &command.audit, Permission::TenantManage)
+            .await?;
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.tenant_principals
+            SET state = 'revoked', generation = generation + 1, version = version + 1,
+                updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND principal_id = $2 AND principal_kind = $3
+              AND generation = $4 AND version = $5 AND state = 'active'
+            RETURNING tenant_id, principal_id, principal_kind, state, generation, version,
+                      permissions_schema_version, permissions, permissions_digest,
+                      created_at, updated_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.principal_id.to_string())
+        .bind(command.principal_kind.as_str())
+        .bind(command.expected_generation)
+        .bind(command.expected_version)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            return Err(classify_tenant_principal_cas(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.principal_id,
+                command.principal_kind,
+            )
+            .await?);
+        };
+        let record = tenant_principal_from_row(row)?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            &scope_kind,
+            &record.principal_id,
+            record.version,
+            "security.tenant_principal_revoked",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "generation": record.generation,
+                    "principal_kind": record.principal_kind,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &record.principal_id,
+            "revoked",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn bind_tenant_scheduling_policy(
+        &mut self,
+        command: BindTenantSchedulingPolicy,
+    ) -> Result<CommandOutcome<TenantRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "tenant",
+            &command.audit.tenant_id.to_string(),
+            "security.tenant.bind_scheduling_policy",
+        )
+        .await?
+        {
+            let record = load_tenant(&mut transaction, &command.audit.tenant_id).await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        require_tenant_permission(&mut transaction, &command.audit, Permission::TenantManage)
+            .await?;
+        let current = load_tenant_for_update(&mut transaction, &command.audit.tenant_id).await?;
+        if current.state != "active" || current.version != command.expected_tenant_version {
+            return Err(RepositoryError::Conflict("tenant"));
+        }
+
+        let row = sqlx::query(
+            r#"
+            SELECT version.payload_schema_version, version.payload, version.payload_digest
+            FROM insight_platform.resource_versions AS version
+            JOIN insight_platform.resources AS resource
+              ON resource.tenant_id = version.tenant_id
+             AND resource.resource_id = version.resource_id
+            WHERE version.tenant_id = $1 AND version.resource_version_id = $2
+              AND version.resource_version_kind = 'policy_revision'
+              AND version.content_digest = $3
+              AND resource.resource_kind = 'policy'
+              AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
+            FOR SHARE OF version, resource
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.policy.revision_id.to_string())
+        .bind(command.policy.semantic_digest.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("scheduling policy version"))?;
+        let payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let published = decode_published_version_payload(&payload)?;
+        published
+            .validate_for(RegistryResourceKind::Policy, &command.policy.revision_id)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let ResourceDocument::Policy(policy) = published.document else {
+            return Err(RepositoryError::CorruptRow(
+                "policy ResourceVersion contains the wrong document".to_owned(),
+            ));
+        };
+        if policy.policy_kind != PolicyKind::Scheduling || policy.scheduling.is_none() {
+            return Err(RepositoryError::InvalidInput(
+                "tenant scheduling binding requires a Scheduling policy document".to_owned(),
+            ));
+        }
+
+        let config = TenantConfig {
+            scheduling_policy: Some(command.policy.clone()),
+        };
+        config
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let config = TypedPayload::with_limit(1, &config, 65_536)?;
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.tenants
+            SET config_schema_version = $3, config = $4, config_digest = $5,
+                version = version + 1, updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND version = $2 AND state = 'active'
+            RETURNING tenant_id, state, version, config_schema_version, config,
+                      config_digest, created_at, updated_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.expected_tenant_version)
+        .bind(config.schema_version)
+        .bind(&config.value)
+        .bind(&config.digest)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("tenant"))?;
+        let record = tenant_from_row(row)?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "tenant",
+            &record.tenant_id,
+            record.version,
+            "security.tenant_scheduling_policy_bound",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "policy_version_id": command.policy.revision_id,
+                    "policy_version_digest": command.policy.semantic_digest,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(&mut transaction, &command.audit, &record.tenant_id, "bound")
+            .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn create_secret_binding(
+        &mut self,
+        command: CreateSecretBindingCommand,
+    ) -> Result<CommandOutcome<SecretBindingMetadataRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "secret_binding",
+            &command.secret_binding_id.to_string(),
+            "security.secret_binding.create",
+        )
+        .await?
+        {
+            let record = load_secret_binding_metadata(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.secret_binding_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        require_tenant_permission(&mut transaction, &command.audit, Permission::SecretBind).await?;
+        let payload = TypedPayload::with_limit(1, &command.payload, 65_536)?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.secret_bindings (
+                tenant_id, secret_binding_id, purpose, provider, state,
+                opaque_reference_ciphertext, key_id, reference_digest,
+                payload_schema_version, payload, payload_digest
+            ) VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (tenant_id, secret_binding_id) DO NOTHING
+            RETURNING tenant_id, secret_binding_id, purpose, provider, state, generation,
+                      version, payload_schema_version, payload, payload_digest,
+                      created_at, updated_at, revoked_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.secret_binding_id.to_string())
+        .bind(command.purpose.as_str())
+        .bind(command.payload.provider_id.to_string())
+        .bind(command.encrypted_reference.as_bytes())
+        .bind(&command.key_id)
+        .bind(command.reference_digest.to_string())
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("secret binding"))?;
+        let record = secret_binding_metadata_from_row(row)?;
+        append_secret_binding_event(
+            &mut transaction,
+            &command.audit,
+            &record,
+            "security.secret_binding_created",
+            None,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &record.secret_binding_id,
+            "created",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn rotate_secret_binding(
+        &mut self,
+        command: RotateSecretBinding,
+    ) -> Result<CommandOutcome<SecretBindingMetadataRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "secret_binding",
+            &command.secret_binding_id.to_string(),
+            "security.secret_binding.rotate",
+        )
+        .await?
+        {
+            let record = load_secret_binding_metadata(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.secret_binding_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        require_tenant_permission(&mut transaction, &command.audit, Permission::SecretRotate)
+            .await?;
+        let current = load_secret_binding_metadata_for_update(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.secret_binding_id,
+        )
+        .await?;
+        if current.state != "active"
+            || current.generation != command.expected_generation
+            || current.version != command.expected_version
+            || current.provider_id != command.payload.provider_id.to_string()
+        {
+            return Err(RepositoryError::Conflict("secret binding"));
+        }
+        let payload = TypedPayload::with_limit(1, &command.payload, 65_536)?;
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.secret_bindings
+            SET opaque_reference_ciphertext = $5, key_id = $6, reference_digest = $7,
+                payload_schema_version = $8, payload = $9, payload_digest = $10,
+                generation = generation + 1, version = version + 1,
+                updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND secret_binding_id = $2
+              AND generation = $3 AND version = $4 AND state = 'active'
+            RETURNING tenant_id, secret_binding_id, purpose, provider, state, generation,
+                      version, payload_schema_version, payload, payload_digest,
+                      created_at, updated_at, revoked_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.secret_binding_id.to_string())
+        .bind(command.expected_generation)
+        .bind(command.expected_version)
+        .bind(command.encrypted_reference.as_bytes())
+        .bind(&command.key_id)
+        .bind(command.reference_digest.to_string())
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("secret binding"))?;
+        let record = secret_binding_metadata_from_row(row)?;
+        append_secret_binding_event(
+            &mut transaction,
+            &command.audit,
+            &record,
+            "security.secret_binding_rotated",
+            Some(&command.provider_evidence_digest),
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &record.secret_binding_id,
+            "rotated",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn revoke_secret_binding(
+        &mut self,
+        command: RevokeSecretBinding,
+    ) -> Result<CommandOutcome<SecretBindingMetadataRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "secret_binding",
+            &command.secret_binding_id.to_string(),
+            "security.secret_binding.revoke",
+        )
+        .await?
+        {
+            let record = load_secret_binding_metadata(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.secret_binding_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        require_tenant_permission(&mut transaction, &command.audit, Permission::SecretRevoke)
+            .await?;
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.secret_bindings
+            SET state = 'revoked', generation = generation + 1, version = version + 1,
+                updated_at = clock_timestamp(), revoked_at = clock_timestamp()
+            WHERE tenant_id = $1 AND secret_binding_id = $2
+              AND generation = $3 AND version = $4 AND state = 'active'
+            RETURNING tenant_id, secret_binding_id, purpose, provider, state, generation,
+                      version, payload_schema_version, payload, payload_digest,
+                      created_at, updated_at, revoked_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.secret_binding_id.to_string())
+        .bind(command.expected_generation)
+        .bind(command.expected_version)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            return Err(classify_secret_binding_cas(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.secret_binding_id,
+            )
+            .await?);
+        };
+        let record = secret_binding_metadata_from_row(row)?;
+        append_secret_binding_event(
+            &mut transaction,
+            &command.audit,
+            &record,
+            "security.secret_binding_revoked",
+            None,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &record.secret_binding_id,
+            "revoked",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn commit(self) -> Result<(), RepositoryError> {
+        self.transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn rollback(self) -> Result<(), RepositoryError> {
+        self.transaction.rollback().await?;
+        Ok(())
+    }
+}
+
+impl SecurityTransaction for PgSecurityTransaction {
+    type Error = RepositoryError;
+    type TenantRecord = TenantRecord;
+    type TenantPrincipalRecord = TenantPrincipalRecord;
+    type SecretBindingRecord = SecretBindingMetadataRecord;
+
+    async fn bind_tenant_principal(
+        &mut self,
+        command: BindTenantPrincipal,
+    ) -> Result<CommandOutcome<Self::TenantPrincipalRecord>, Self::Error> {
+        PgSecurityTransaction::bind_tenant_principal(self, command).await
+    }
+
+    async fn update_tenant_principal_permissions(
+        &mut self,
+        command: UpdateTenantPrincipalPermissions,
+    ) -> Result<CommandOutcome<Self::TenantPrincipalRecord>, Self::Error> {
+        PgSecurityTransaction::update_tenant_principal_permissions(self, command).await
+    }
+
+    async fn revoke_tenant_principal(
+        &mut self,
+        command: RevokeTenantPrincipal,
+    ) -> Result<CommandOutcome<Self::TenantPrincipalRecord>, Self::Error> {
+        PgSecurityTransaction::revoke_tenant_principal(self, command).await
+    }
+
+    async fn bind_tenant_scheduling_policy(
+        &mut self,
+        command: BindTenantSchedulingPolicy,
+    ) -> Result<CommandOutcome<Self::TenantRecord>, Self::Error> {
+        PgSecurityTransaction::bind_tenant_scheduling_policy(self, command).await
+    }
+
+    async fn create_secret_binding(
+        &mut self,
+        command: CreateSecretBindingCommand,
+    ) -> Result<CommandOutcome<Self::SecretBindingRecord>, Self::Error> {
+        PgSecurityTransaction::create_secret_binding(self, command).await
+    }
+
+    async fn rotate_secret_binding(
+        &mut self,
+        command: RotateSecretBinding,
+    ) -> Result<CommandOutcome<Self::SecretBindingRecord>, Self::Error> {
+        PgSecurityTransaction::rotate_secret_binding(self, command).await
+    }
+
+    async fn revoke_secret_binding(
+        &mut self,
+        command: RevokeSecretBinding,
+    ) -> Result<CommandOutcome<Self::SecretBindingRecord>, Self::Error> {
+        PgSecurityTransaction::revoke_secret_binding(self, command).await
+    }
+
+    async fn commit(self) -> Result<(), Self::Error> {
+        PgSecurityTransaction::commit(self).await
+    }
+
+    async fn rollback(self) -> Result<(), Self::Error> {
+        PgSecurityTransaction::rollback(self).await
+    }
+}
+
+impl SecurityStore for PgRepository {
+    type Error = RepositoryError;
+    type Transaction<'a> = PgSecurityTransaction;
+
+    async fn begin(&self) -> Result<Self::Transaction<'_>, Self::Error> {
+        self.begin_security_transaction().await
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretBindingResolutionAuthority for PgRepository {
+    async fn load_for_resolution(
+        &self,
+        tenant_id: &ResourceId,
+        secret_binding_id: &ResourceId,
+    ) -> Result<SecretBindingResolutionRecord, SecretBindingResolutionError> {
+        if tenant_id.kind() != ResourceKind::Tenant
+            || secret_binding_id.kind() != ResourceKind::SecretBinding
+        {
+            return Err(SecretBindingResolutionError::NotFound);
+        }
+        let row = sqlx::query(
+            r#"
+            SELECT tenant_id, secret_binding_id, purpose, provider, state, generation,
+                   opaque_reference_ciphertext, key_id, reference_digest,
+                   payload_schema_version, payload, payload_digest
+            FROM insight_platform.secret_bindings
+            WHERE tenant_id = $1 AND secret_binding_id = $2
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(secret_binding_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| SecretBindingResolutionError::Unavailable)?
+        .ok_or(SecretBindingResolutionError::NotFound)?;
+        secret_binding_resolution_from_row(row)
+            .map_err(|_| SecretBindingResolutionError::InvalidEvidence)
+    }
+}
+
+impl PgRepository {
+    async fn register_prepared_secret_binding(
+        &self,
+        command: RegisterPreparedSecretBinding,
+    ) -> Result<PreparedSecretBindingRegistrationOutcome, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let exact_binding = command.exact_binding()?;
+        let mut transaction = self.pool.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "secret_binding",
+            &command.secret_binding_id.to_string(),
+            "security.prepared_secret_binding.register",
+        )
+        .await?
+        {
+            // The Receipt row above serializes an exact preparation replay. A different
+            // preparation cannot pass the SecretBinding primary key insert below. Avoiding a
+            // redundant row lock lets the dedicated Security Authority retain SELECT+INSERT-only
+            // privilege on SecretBinding current state.
+            let current = load_secret_binding_resolution_in_transaction(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.secret_binding_id,
+            )
+            .await?;
+            validate_registered_prepared_binding(&current, &command)?;
+            transaction.commit().await?;
+            return Ok(PreparedSecretBindingRegistrationOutcome {
+                disposition: PreparedSecretBindingRegistrationDisposition::Replayed,
+                exact_binding,
+            });
+        }
+        require_tenant_permission(&mut transaction, &command.audit, Permission::SecretBind).await?;
+        let payload = SecretBindingPayload {
+            provider_id: command.provider_id.clone(),
+            resolution_policy: insight_platform_contracts::SecretResolutionPolicy::Pinned {
+                opaque_version_identity_digest: command.opaque_version_identity_digest.clone(),
+            },
+        };
+        let payload = TypedPayload::with_limit(1, &payload, 65_536)?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.secret_bindings (
+                tenant_id, secret_binding_id, purpose, provider, state,
+                opaque_reference_ciphertext, key_id, reference_digest,
+                payload_schema_version, payload, payload_digest
+            ) VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (tenant_id, secret_binding_id) DO NOTHING
+            RETURNING tenant_id, secret_binding_id, purpose, provider, state, generation, version,
+                      opaque_reference_ciphertext, key_id, reference_digest,
+                      payload_schema_version, payload, payload_digest
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.secret_binding_id.to_string())
+        .bind(command.purpose.as_str())
+        .bind(command.provider_id.to_string())
+        .bind(command.encrypted_reference.as_bytes())
+        .bind(&command.key_id)
+        .bind(command.reference_digest.to_string())
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("secret binding"))?;
+        let aggregate_version: i64 = row.try_get("version")?;
+        let current = secret_binding_resolution_from_row(row)?;
+        validate_registered_prepared_binding(&current, &command)?;
+        let secret_binding_id = command.secret_binding_id.to_string();
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "secret_binding",
+            &secret_binding_id,
+            aggregate_version,
+            "security.prepared_secret_binding_registered",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "generation": current.generation,
+                    "preparation_digest": command.preparation_digest,
+                    "provider_id": command.provider_id,
+                    "provider_storage_evidence_digest": command.provider_storage_evidence_digest,
+                    "purpose": command.purpose,
+                    "state": current.state,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &secret_binding_id,
+            "registered",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(PreparedSecretBindingRegistrationOutcome {
+            disposition: PreparedSecretBindingRegistrationDisposition::Applied,
+            exact_binding,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl PreparedSecretBindingAuthority for PgRepository {
+    async fn register_prepared(
+        &self,
+        command: RegisterPreparedSecretBinding,
+    ) -> Result<PreparedSecretBindingRegistrationOutcome, PreparedSecretBindingRegistrationError>
+    {
+        self.register_prepared_secret_binding(command)
+            .await
+            .map_err(map_prepared_secret_binding_registration_error)
+    }
+}
+
+fn map_prepared_secret_binding_registration_error(
+    failure: RepositoryError,
+) -> PreparedSecretBindingRegistrationError {
+    match failure {
+        RepositoryError::Database(_) => {
+            PreparedSecretBindingRegistrationError::TemporarilyUnavailable
+        }
+        _ => PreparedSecretBindingRegistrationError::Rejected,
+    }
+}
+
+pub struct PgSchedulerTransaction {
+    transaction: Transaction<'static, Postgres>,
+    limits: SchedulerHardLimits,
+    plan_limits: PlanLimits,
+    recovery_batch_limit: u16,
+    recovery_shard_limit: u16,
+}
+
+impl PgSchedulerTransaction {
+    pub async fn claim_orchestration_jobs(
+        &mut self,
+        command: ClaimOrchestrationJobs,
+    ) -> Result<Vec<ClaimedOrchestrationJob>, RepositoryError> {
+        command.validate(self.limits)?;
+        let mut transaction = self.transaction.begin().await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let scheduler = load_scheduler_state_for_update(
+            &mut transaction,
+            WorkClass::Orchestration,
+            self.limits,
+        )
+        .await?;
+        let candidates = enumerate_orchestration_candidates(
+            &mut transaction,
+            database_now,
+            scheduler.snapshot.cursor_tenant_id.as_ref(),
+            self.limits,
+        )
+        .await?;
+        if candidates.is_empty() {
+            transaction.commit().await?;
+            return Ok(Vec::new());
+        }
+
+        let mut candidate_by_job = BTreeMap::new();
+        let mut windows = BTreeMap::<ResourceId, Vec<ReadyWork>>::new();
+        for candidate in candidates {
+            let tenant_id: ResourceId = candidate.job.tenant_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let job_id: ResourceId = candidate.job.job_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            windows.entry(tenant_id).or_default().push(ReadyWork {
+                job_id: job_id.clone(),
+                priority: candidate.job.priority,
+                lane: SchedulerLane::Business,
+                enqueue_round: candidate.enqueue_round,
+                cost: 1,
+            });
+            if candidate_by_job.insert(job_id, candidate).is_some() {
+                return Err(RepositoryError::CorruptRow(
+                    "scheduler candidate query returned a duplicate Job".to_owned(),
+                ));
+            }
+        }
+        let windows = windows
+            .into_iter()
+            .map(|(tenant_id, work)| TenantWindow { tenant_id, work })
+            .collect::<Vec<_>>();
+        let mut policies = Vec::with_capacity(windows.len());
+        for window in &windows {
+            policies
+                .push(load_tenant_scheduling_policy(&mut transaction, &window.tenant_id).await?);
+        }
+        let decision = select_weighted_deficit_round_robin(
+            &scheduler.snapshot,
+            &self.limits,
+            &policies,
+            &windows,
+            command.limit,
+        )
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if decision.selected_job_ids.is_empty() {
+            persist_scheduler_state(&mut transaction, &scheduler, &decision.next_state).await?;
+            transaction.commit().await?;
+            return Ok(Vec::new());
+        }
+
+        let mut selected = Vec::with_capacity(decision.selected_job_ids.len());
+        for (job_id, slot) in decision.selected_job_ids.iter().zip(command.slots.iter()) {
+            let candidate = candidate_by_job.remove(job_id).ok_or_else(|| {
+                RepositoryError::CorruptRow(
+                    "WDRR selected a Job outside its candidate window".to_owned(),
+                )
+            })?;
+            selected.push((candidate, slot));
+        }
+        selected.sort_by(|(left, _), (right, _)| left.lock_key().cmp(&right.lock_key()));
+
+        let quota_accounts = lock_orchestration_quota_accounts(&mut transaction, &selected).await?;
+        let locked_parents =
+            lock_orchestration_parents(&mut transaction, &selected, database_now).await?;
+        let locked_jobs = lock_selected_jobs(&mut transaction, &selected).await?;
+
+        let mut decisions = BTreeMap::new();
+        for (candidate, slot) in &selected {
+            let locked = locked_jobs
+                .get(&candidate.job.job_id)
+                .ok_or_else(|| RepositoryError::Conflict("selected orchestration Job"))?;
+            if locked.version != candidate.job.version
+                || locked.state != candidate.job.state
+                || locked.payload.digest != candidate.job.payload.digest
+            {
+                return Err(RepositoryError::Conflict("selected orchestration Job"));
+            }
+            let next = decide_job_claim(
+                &job_projection(locked)?,
+                database_now,
+                command.worker_id.clone(),
+                slot.lease_token_digest.clone(),
+                LeasePolicy {
+                    requested_milliseconds: u64::try_from(command.lease_milliseconds).map_err(
+                        |_| RepositoryError::InvalidInput("negative Job lease".to_owned()),
+                    )?,
+                    hard_maximum_milliseconds: u64::try_from(MAX_JOB_LEASE_MILLISECONDS)
+                        .expect("positive Job lease hard maximum"),
+                },
+            )?;
+            decisions.insert(candidate.job.job_id.clone(), next);
+        }
+
+        let quota_lines = reserve_orchestration_quota_bundles(
+            &mut transaction,
+            &selected,
+            &quota_accounts,
+            &decisions,
+        )
+        .await?;
+        let parent_versions = mutate_orchestration_parents(
+            &mut transaction,
+            &selected,
+            &locked_parents,
+            database_now,
+        )
+        .await?;
+        let mut claimed =
+            mutate_claimed_jobs(&mut transaction, &selected, &decisions, &quota_lines).await?;
+        append_orchestration_claim_events(
+            &mut transaction,
+            &selected,
+            &claimed,
+            &parent_versions,
+            &quota_lines,
+        )
+        .await?;
+        persist_scheduler_state(&mut transaction, &scheduler, &decision.next_state).await?;
+
+        for record in &mut claimed {
+            let (run_version, node_version) = parent_versions
+                .get(&record.job.job_id)
+                .copied()
+                .ok_or_else(|| RepositoryError::CorruptRow("missing parent version".to_owned()))?;
+            record.run_version = run_version;
+            record.node_version = node_version;
+        }
+        transaction.commit().await?;
+        Ok(claimed)
+    }
+
+    pub async fn start_orchestration_job(
+        &mut self,
+        command: StartOrchestrationJob,
+    ) -> Result<CommandOutcome<JobRecord>, RepositoryError> {
+        command.validate()?;
+        let mut transaction = self.transaction.begin().await?;
+        let receipt_payload = TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "job_id": command.fence.job_id,
+                "lease_generation": command.fence.lease_epoch,
+                "worker_process_generation_id": command.fence.worker_id,
+            }),
+        )?;
+        if claim_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.receipt_id,
+            "orchestration.job.start",
+            &command.idempotency_key_digest,
+            &command.request_digest,
+            &receipt_payload,
+            command.receipt_expires_at,
+        )
+        .await?
+        {
+            let record = load_job_for_update_by_text(
+                &mut transaction,
+                &command.fence.tenant_id,
+                &command.fence.job_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+
+        let observed = load_job_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        require_orchestration_job(&observed)?;
+        let parents = lock_orchestration_job_parents(&mut transaction, &observed, "ready").await?;
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        if current.version != observed.version || current.payload.digest != observed.payload.digest
+        {
+            return Err(RepositoryError::Conflict("orchestration Job"));
+        }
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let next = decide_job_start(
+            &job_projection(&current)?,
+            &domain_job_fence(&command.fence)?,
+            database_now,
+        )?;
+        let row =
+            sqlx::query(
+                r#"
+            UPDATE insight_platform.jobs
+            SET state = 'running', version = $4, attempt_no = $5,
+                started_at = $6, updated_at = $6
+            WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+              AND state = 'leased'
+            RETURNING *
+            "#,
+            )
+            .bind(&current.tenant_id)
+            .bind(&current.job_id)
+            .bind(current.version)
+            .bind(i64::try_from(next.version).map_err(|_| {
+                RepositoryError::InvalidInput("Job version exceeds bigint".to_owned())
+            })?)
+            .bind(i32::try_from(next.attempt_count).map_err(|_| {
+                RepositoryError::InvalidInput("Job attempt count exceeds integer".to_owned())
+            })?)
+            .bind(database_now)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict("orchestration Job"))?;
+        let record = job_from_row(row)?;
+        let node_version: i64 = sqlx::query_scalar(
+            r#"
+            UPDATE insight_platform.run_nodes
+            SET state = 'running', version = version + 1,
+                started_at = COALESCE(started_at, $4), updated_at = $4
+            WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+              AND record_kind = 'node_execution' AND state = 'ready'
+              AND terminal_at IS NULL
+            RETURNING version
+            "#,
+        )
+        .bind(&record.tenant_id)
+        .bind(&parents.node_id)
+        .bind(parents.node_version)
+        .bind(database_now)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("orchestration Node start"))?;
+        let event_payload = TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "attempt_count": record.attempt_no,
+                "lease_generation": record.lease_epoch,
+                "worker_process_generation_id": record.worker_id,
+            }),
+        )?;
+        append_scheduler_event(
+            &mut transaction,
+            &record.tenant_id,
+            &command.node_event_id,
+            &command.node_outbox_id,
+            "node_execution",
+            &parents.node_id,
+            node_version,
+            record.run_id.as_deref(),
+            "node.started",
+            &event_payload,
+        )
+        .await?;
+        append_scheduler_event(
+            &mut transaction,
+            &record.tenant_id,
+            &command.job_event_id,
+            &command.job_outbox_id,
+            "job",
+            &record.job_id,
+            record.version,
+            record.run_id.as_deref(),
+            "job.started",
+            &event_payload,
+        )
+        .await?;
+        terminalize_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.receipt_id,
+            &command.request_digest,
+            "started",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn heartbeat_orchestration_job(
+        &mut self,
+        command: HeartbeatJob,
+    ) -> Result<JobRecord, RepositoryError> {
+        command.fence.validate()?;
+        if command.lease_milliseconds <= 0
+            || command.lease_milliseconds > MAX_JOB_LEASE_MILLISECONDS
+        {
+            return Err(RepositoryError::InvalidInput(
+                "lease duration is outside the platform bound".to_owned(),
+            ));
+        }
+        let mut transaction = self.transaction.begin().await?;
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        require_orchestration_job(&current)?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let next = decide_job_heartbeat(
+            &job_projection(&current)?,
+            &domain_job_fence(&command.fence)?,
+            database_now,
+            LeasePolicy {
+                requested_milliseconds: u64::try_from(command.lease_milliseconds)
+                    .map_err(|_| RepositoryError::InvalidInput("negative Job lease".to_owned()))?,
+                hard_maximum_milliseconds: u64::try_from(MAX_JOB_LEASE_MILLISECONDS)
+                    .expect("positive Job lease hard maximum"),
+            },
+        )?;
+        let lease = next.lease.as_ref().ok_or_else(|| {
+            RepositoryError::CorruptRow("heartbeat decision removed Job lease".to_owned())
+        })?;
+        let row =
+            sqlx::query(
+                r#"
+            UPDATE insight_platform.jobs
+            SET version = $4, heartbeat_at = $5, lease_expires_at = $6, updated_at = $5
+            WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+            RETURNING *
+            "#,
+            )
+            .bind(&current.tenant_id)
+            .bind(&current.job_id)
+            .bind(current.version)
+            .bind(i64::try_from(next.version).map_err(|_| {
+                RepositoryError::InvalidInput("Job version exceeds bigint".to_owned())
+            })?)
+            .bind(lease.heartbeat_at)
+            .bind(lease.expires_at)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict("orchestration Job"))?;
+        let record = job_from_row(row)?;
+        transaction.commit().await?;
+        Ok(record)
+    }
+
+    pub async fn yield_orchestration_job(
+        &mut self,
+        command: YieldOrchestrationJob,
+    ) -> Result<CommandOutcome<YieldedOrchestrationJob>, RepositoryError> {
+        command.validate()?;
+        let mut transaction = self.transaction.begin().await?;
+        let receipt_payload = TypedPayload::with_limit(1, &command.outcome, 65_536)?;
+        if claim_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            "orchestration.job.yield",
+            &command.idempotency_key_digest,
+            &command.request_digest,
+            &receipt_payload,
+            command.receipt_expires_at,
+        )
+        .await?
+        {
+            let yielded = load_yielded_orchestration_job(
+                &mut transaction,
+                &command.fence.tenant_id,
+                &command.fence.job_id,
+                command.outcome.state(),
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(yielded));
+        }
+
+        let observed = load_job_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        require_orchestration_job(&observed)?;
+        let quota_accounts = lock_job_quota_bundle(
+            &mut transaction,
+            &observed,
+            &command.mutations.quota_entry_ids,
+        )
+        .await?;
+        let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        if current.version != observed.version
+            || current.payload.digest != observed.payload.digest
+            || current.quota_reservation_id != observed.quota_reservation_id
+        {
+            return Err(RepositoryError::Conflict("orchestration Job"));
+        }
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let (next, wake_contract) = match &command.outcome {
+            OrchestrationYield::Wait { wake_contract } => (
+                decide_job_wait(
+                    &job_projection(&current)?,
+                    &domain_job_fence(&command.fence)?,
+                    database_now,
+                    wake_contract.clone(),
+                )?,
+                Some(wake_contract.clone()),
+            ),
+            OrchestrationYield::Retry { retry_at } => (
+                decide_job_retry(
+                    &job_projection(&current)?,
+                    &domain_job_fence(&command.fence)?,
+                    database_now,
+                    *retry_at,
+                )?,
+                None,
+            ),
+        };
+        settle_locked_job_quota_bundle(
+            &mut transaction,
+            &current,
+            &quota_accounts,
+            &command.mutations.quota_entry_ids,
+            &command.request_digest,
+        )
+        .await?;
+        let mut yielded = mutate_yielded_orchestration_job(
+            &mut transaction,
+            &current,
+            &next,
+            &parents,
+            wake_contract,
+            database_now,
+        )
+        .await?;
+        yielded.settled_quota_account_ids = quota_accounts
+            .iter()
+            .map(|account| account.quota_account_id.clone())
+            .collect();
+        append_orchestration_yield_events(
+            &mut transaction,
+            &yielded,
+            &command.mutations,
+            &receipt_payload,
+        )
+        .await?;
+        terminalize_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            &command.request_digest,
+            command.outcome.state().as_str(),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(yielded))
+    }
+
+    pub async fn apply_orchestration_controller_step(
+        &mut self,
+        command: ApplyOrchestrationControllerStep,
+    ) -> Result<CommandOutcome<AppliedOrchestrationControllerStep>, RepositoryError> {
+        command.validate(self.plan_limits)?;
+        let plan_digest = command
+            .plan
+            .canonical_digest(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let receipt_payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "activations": command
+                    .mutations
+                    .activations
+                    .iter()
+                    .map(|slot| serde_json::json!({
+                        "job_event_id": slot.job_event_id,
+                        "job_outbox_id": slot.job_outbox_id,
+                        "node_event_id": slot.node_event_id,
+                        "node_execution_id": slot.node_execution_id,
+                        "node_outbox_id": slot.node_outbox_id,
+                        "orchestration_job_id": slot.orchestration_job_id,
+                        "scope": slot.scope.as_ref().map(|scope| serde_json::json!({
+                            "scope_event_id": scope.scope_event_id,
+                            "scope_instance_id": scope.scope_instance_id,
+                            "scope_outbox_id": scope.scope_outbox_id,
+                        })),
+                    }))
+                    .collect::<Vec<_>>(),
+                "controller_event_ids": {
+                    "job_event_id": command.mutations.job_event_id,
+                    "job_outbox_id": command.mutations.job_outbox_id,
+                    "node_event_id": command.mutations.node_event_id,
+                    "node_outbox_id": command.mutations.node_outbox_id,
+                    "run_event_id": command.mutations.run_event_id,
+                    "run_outbox_id": command.mutations.run_outbox_id,
+                },
+                "observation": command.observation,
+                "pending_nodes": command
+                    .mutations
+                    .pending_nodes
+                    .iter()
+                    .map(|slot| serde_json::json!({
+                        "node_event_id": slot.node_event_id,
+                        "node_execution_id": slot.node_execution_id,
+                        "node_outbox_id": slot.node_outbox_id,
+                    }))
+                    .collect::<Vec<_>>(),
+                "pending_wake": command
+                    .mutations
+                    .pending_wake
+                    .as_ref()
+                    .map(|slot| serde_json::json!({
+                        "job_event_id": slot.job_event_id,
+                        "job_outbox_id": slot.job_outbox_id,
+                        "node_event_id": slot.node_event_id,
+                        "node_outbox_id": slot.node_outbox_id,
+                        "orchestration_job_id": slot.orchestration_job_id,
+                        "request_digest": slot.request_digest,
+                    })),
+                "plan_digest": plan_digest,
+                "quota_entry_ids": command.mutations.quota_entry_ids,
+                "receipt_id": command.mutations.receipt_id,
+                "remainder_cancellations": command
+                    .mutations
+                    .remainder_cancellations
+                    .iter()
+                    .map(|slot| serde_json::json!({
+                        "expected_scope_id": slot.expected_scope_id,
+                        "job_terminal_event_id": slot.job_terminal_event_id,
+                        "job_terminal_outbox_id": slot.job_terminal_outbox_id,
+                        "node_cancelling_event_id": slot.node_cancelling_event_id,
+                        "node_cancelling_outbox_id": slot.node_cancelling_outbox_id,
+                        "node_terminal_event_id": slot.node_terminal_event_id,
+                        "node_terminal_outbox_id": slot.node_terminal_outbox_id,
+                        "quota_entry_ids": slot.quota_entry_ids,
+                        "scope_closing_event_id": slot.scope_closing_event_id,
+                        "scope_closing_outbox_id": slot.scope_closing_outbox_id,
+                        "scope_terminal_event_id": slot.scope_terminal_event_id,
+                        "scope_terminal_outbox_id": slot.scope_terminal_outbox_id,
+                    }))
+                    .collect::<Vec<_>>(),
+                "structural_exit": command
+                    .mutations
+                    .structural_exit
+                    .as_ref()
+                    .map(|slot| serde_json::json!({
+                        "scope_closing_event_id": slot.scope_closing_event_id,
+                        "scope_closing_outbox_id": slot.scope_closing_outbox_id,
+                        "scope_terminal_event_id": slot.scope_terminal_event_id,
+                        "scope_terminal_outbox_id": slot.scope_terminal_outbox_id,
+                    })),
+            }),
+            262_144,
+        )?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            "orchestration.controller.step",
+            &command.idempotency_key_digest,
+            &command.request_digest,
+            &receipt_payload,
+            command.receipt_expires_at,
+        )
+        .await?
+        {
+            let applied = load_applied_orchestration_controller_step(
+                &mut transaction,
+                &command.fence,
+                &command.mutations,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(applied));
+        }
+
+        let observed = load_job_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        require_orchestration_job(&observed)?;
+        let quota_accounts = lock_job_quota_bundle(
+            &mut transaction,
+            &observed,
+            &command.mutations.quota_entry_ids,
+        )
+        .await?;
+        let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
+        require_exact_runtime_plan(&mut transaction, &parents.run, &command.plan, &plan_digest)
+            .await?;
+        let source_node =
+            load_controller_source_node(&mut transaction, &observed, &parents, &command.plan)
+                .await?;
+        let runtime_node = command.plan.node(&source_node.plan_node_key)?;
+        require_exact_controller_observation(
+            &mut transaction,
+            &observed,
+            &parents,
+            &source_node,
+            runtime_node,
+            &command.observation,
+        )
+        .await?;
+        let decision = decide_controller(runtime_node, &command.observation)?;
+        let shape = match (&decision, runtime_node) {
+            (
+                ControllerDecision::CompleteNode { activate },
+                insight_platform_orchestrator::RuntimeNode::Start { .. }
+                | insight_platform_orchestrator::RuntimeNode::Compute { .. }
+                | insight_platform_orchestrator::RuntimeNode::Branch { .. }
+                | insight_platform_orchestrator::RuntimeNode::Join { .. }
+                | insight_platform_orchestrator::RuntimeNode::Map { .. }
+                | insight_platform_orchestrator::RuntimeNode::Loop { .. }
+                | insight_platform_orchestrator::RuntimeNode::ErrorBoundary { .. },
+            ) => {
+                if let [target] = activate.as_slice() {
+                    if let Some(exit) = load_parallel_leg_exit(
+                        &mut transaction,
+                        &observed,
+                        &parents,
+                        &source_node,
+                        Some(target),
+                    )
+                    .await?
+                    {
+                        exit
+                    } else if let Some(exit) = load_loop_iteration_exit(
+                        &mut transaction,
+                        &observed,
+                        &parents,
+                        &source_node,
+                        target,
+                    )
+                    .await?
+                    {
+                        exit
+                    } else if let Some(exit) = load_map_item_exit(
+                        &mut transaction,
+                        &observed,
+                        &parents,
+                        &source_node,
+                        Some(target),
+                    )
+                    .await?
+                    {
+                        exit
+                    } else {
+                        ControllerStepShape::Sequential {
+                            targets: activate.clone(),
+                        }
+                    }
+                } else {
+                    ControllerStepShape::Sequential {
+                        targets: activate.clone(),
+                    }
+                }
+            }
+            (
+                ControllerDecision::OpenMapItems {
+                    body: _,
+                    next,
+                    item_count,
+                    failure_policy: _,
+                },
+                insight_platform_orchestrator::RuntimeNode::Map { .. },
+            ) if *item_count == 0 => ControllerStepShape::Sequential {
+                targets: vec![next.clone()],
+            },
+            (
+                ControllerDecision::OpenMapItems {
+                    body,
+                    next,
+                    item_count,
+                    failure_policy,
+                },
+                insight_platform_orchestrator::RuntimeNode::Map { .. },
+            ) => {
+                load_map_batch_shape(
+                    &mut transaction,
+                    &observed,
+                    &parents,
+                    &source_node,
+                    body,
+                    next,
+                    *failure_policy,
+                    *item_count,
+                    self.plan_limits.maximum_fan_out,
+                )
+                .await?
+            }
+            (
+                ControllerDecision::OpenLoopIteration { body, iteration },
+                insight_platform_orchestrator::RuntimeNode::Loop {
+                    body: plan_body, ..
+                },
+            ) if body == plan_body => ControllerStepShape::LoopIteration {
+                body: body.clone(),
+                loop_plan_node_key: source_node.plan_node_key.clone(),
+                iteration: *iteration,
+            },
+            (
+                ControllerDecision::FanOut {
+                    activate,
+                    create_pending,
+                },
+                insight_platform_orchestrator::RuntimeNode::Fork { join, .. },
+            ) if create_pending == std::slice::from_ref(join) => {
+                let insight_platform_orchestrator::RuntimeNode::Join {
+                    policy,
+                    quorum,
+                    remainder,
+                    ..
+                } = command.plan.node(join)?
+                else {
+                    return Err(RepositoryError::InvalidInput(
+                        "Fork pending target is not a Join node".to_owned(),
+                    ));
+                };
+                if quorum.is_some_and(|required| usize::from(required) > activate.len()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "Join quorum exceeds Fork leg count".to_owned(),
+                    ));
+                }
+                ControllerStepShape::Fork {
+                    legs: activate.clone(),
+                    join: join.clone(),
+                    policy: *policy,
+                    quorum: *quorum,
+                    remainder: *remainder,
+                }
+            }
+            _ => return Err(RepositoryError::InvalidInput(
+                "controller decision requires its typed fan-out, wait, leaf, or terminal adapter"
+                    .to_owned(),
+            )),
+        };
+        shape.validate_slots(&command.mutations)?;
+
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        if current.version != observed.version
+            || current.payload.digest != observed.payload.digest
+            || current.quota_reservation_id != observed.quota_reservation_id
+        {
+            return Err(RepositoryError::Conflict("orchestration controller Job"));
+        }
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let next_job = decide_job_terminal(
+            &job_projection(&current)?,
+            &domain_job_fence(&command.fence)?,
+            database_now,
+            JobState::Succeeded,
+        )?;
+        settle_locked_job_quota_bundle(
+            &mut transaction,
+            &current,
+            &quota_accounts,
+            &command.mutations.quota_entry_ids,
+            &command.request_digest,
+        )
+        .await?;
+        let mut applied = mutate_orchestration_controller_step(
+            &mut transaction,
+            &current,
+            &next_job,
+            &parents,
+            &source_node,
+            &shape,
+            &command.mutations,
+            &command.plan,
+            &command.request_digest,
+            database_now,
+        )
+        .await?;
+        applied.settled_quota_account_ids = quota_accounts
+            .iter()
+            .map(|account| account.quota_account_id.clone())
+            .collect();
+        append_orchestration_controller_events(
+            &mut transaction,
+            &applied,
+            &command.mutations,
+            &plan_digest,
+            &receipt_payload,
+        )
+        .await?;
+        terminalize_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            &command.request_digest,
+            "controller_step_applied",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(applied))
+    }
+
+    pub async fn fail_orchestration_job(
+        &mut self,
+        command: FailOrchestrationJob,
+    ) -> Result<CommandOutcome<FailedOrchestrationJob>, RepositoryError> {
+        command.validate(self.plan_limits)?;
+        let plan_digest = command
+            .plan
+            .canonical_digest(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let receipt_payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "cause": command.cause,
+                "mutations": command.mutations,
+                "plan_digest": plan_digest,
+            }),
+            262_144,
+        )?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            "orchestration.job.fail",
+            &command.idempotency_key_digest,
+            &command.request_digest,
+            &receipt_payload,
+            command.receipt_expires_at,
+        )
+        .await?
+        {
+            let failed = load_failed_orchestration_job(
+                &mut transaction,
+                &command.fence,
+                &command.plan,
+                &plan_digest,
+                &command.cause,
+                &command.mutations,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(failed));
+        }
+
+        let observed = load_job_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        require_orchestration_job(&observed)?;
+        let quota_accounts = lock_job_quota_bundle(
+            &mut transaction,
+            &observed,
+            &command.mutations.quota_entry_ids,
+        )
+        .await?;
+        let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
+        require_exact_runtime_plan(&mut transaction, &parents.run, &command.plan, &plan_digest)
+            .await?;
+        let source_node =
+            load_controller_source_node(&mut transaction, &observed, &parents, &command.plan)
+                .await?;
+        let runtime_node = command.plan.node(&source_node.plan_node_key)?;
+        if let OrchestrationFailureCause::Controller { observation } = &command.cause {
+            require_exact_controller_observation(
+                &mut transaction,
+                &observed,
+                &parents,
+                &source_node,
+                runtime_node,
+                observation,
+            )
+            .await?;
+        }
+        let (failure, controller_code) =
+            derive_orchestration_failure(&command.cause, runtime_node)?;
+        require_failure_references(&mut transaction, &parents.run, &failure).await?;
+        let error_route = find_matching_error_boundary(
+            &mut transaction,
+            &parents.run,
+            &parents.node_id,
+            &command.plan,
+            &failure,
+            self.plan_limits.maximum_nodes,
+        )
+        .await?;
+        let shape = if error_route.is_none() {
+            if let Some(exit) =
+                load_parallel_leg_exit(&mut transaction, &observed, &parents, &source_node, None)
+                    .await?
+            {
+                Some(exit)
+            } else {
+                load_map_item_exit(&mut transaction, &observed, &parents, &source_node, None)
+                    .await?
+            }
+        } else {
+            None
+        };
+        validate_failure_mutation_shape(&command.mutations, shape.is_some(), error_route.as_ref())?;
+
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        if current.version != observed.version
+            || current.payload.digest != observed.payload.digest
+            || current.quota_reservation_id != observed.quota_reservation_id
+        {
+            return Err(RepositoryError::Conflict("orchestration failed Job"));
+        }
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let next_job = decide_job_terminal(
+            &job_projection(&current)?,
+            &domain_job_fence(&command.fence)?,
+            database_now,
+            JobState::Failed,
+        )?;
+        settle_locked_job_quota_bundle(
+            &mut transaction,
+            &current,
+            &quota_accounts,
+            &command.mutations.quota_entry_ids,
+            &command.request_digest,
+        )
+        .await?;
+        let failure_payload = TypedPayload::with_limit(1, &failure, 65_536)?;
+        let mut failed = mutate_failed_orchestration_job(
+            &mut transaction,
+            &current,
+            &next_job,
+            &parents,
+            &source_node,
+            shape.as_ref(),
+            error_route.as_ref(),
+            &command.mutations,
+            &command.plan,
+            failure,
+            controller_code,
+            &failure_payload,
+            &command.request_digest,
+            database_now,
+        )
+        .await?;
+        failed.settled_quota_account_ids = quota_accounts
+            .iter()
+            .map(|account| account.quota_account_id.clone())
+            .collect();
+        append_failed_orchestration_events(
+            &mut transaction,
+            &failed,
+            &command.mutations,
+            &plan_digest,
+            &failure_payload,
+        )
+        .await?;
+        terminalize_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            &command.request_digest,
+            "orchestration_job_failed",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(failed))
+    }
+
+    pub async fn defer_orchestration_to_task(
+        &mut self,
+        command: DeferOrchestrationToTask,
+    ) -> Result<CommandOutcome<DeferredOrchestrationTask>, RepositoryError> {
+        command.validate()?;
+        let mut transaction = self.transaction.begin().await?;
+        let receipt_payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "task_id": command.task_id,
+                "task_kind": command.definition.task_kind().as_str(),
+                "task_deadline": command.task_deadline,
+            }),
+            65_536,
+        )?;
+        if claim_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            "orchestration.task.defer",
+            &command.idempotency_key_digest,
+            &command.request_digest,
+            &receipt_payload,
+            command.receipt_expires_at,
+        )
+        .await?
+        {
+            let deferred = load_deferred_orchestration_task(
+                &mut transaction,
+                &command.fence.tenant_id,
+                &command.fence.job_id,
+                &command.task_id.to_string(),
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(deferred));
+        }
+        let observed = load_job_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        require_orchestration_job(&observed)?;
+        let quota_accounts = lock_job_quota_bundle(
+            &mut transaction,
+            &observed,
+            &command.mutations.quota_entry_ids,
+        )
+        .await?;
+        let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        if current.version != observed.version
+            || current.payload.digest != observed.payload.digest
+            || current.quota_reservation_id != observed.quota_reservation_id
+            || command.task_deadline > current.deadline
+            || command.task_deadline > parents.run.deadline
+        {
+            return Err(RepositoryError::Conflict("orchestration Task deferral"));
+        }
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        if command.task_deadline <= database_now {
+            return Err(RepositoryError::Conflict("Task deadline"));
+        }
+        let next_job = decide_job_terminal(
+            &job_projection(&current)?,
+            &domain_job_fence(&command.fence)?,
+            database_now,
+            JobState::Succeeded,
+        )?;
+        let task_payload = TaskPayload {
+            definition: command.definition.clone(),
+            created_by: parents.run.bindings.principal.clone(),
+            resolution: None,
+        };
+        task_payload
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let task_payload = TypedPayload::with_limit(1, &task_payload, 262_144)?;
+        settle_locked_job_quota_bundle(
+            &mut transaction,
+            &current,
+            &quota_accounts,
+            &command.mutations.quota_entry_ids,
+            &command.request_digest,
+        )
+        .await?;
+        let mut deferred = mutate_deferred_orchestration_task(
+            &mut transaction,
+            &current,
+            &next_job,
+            &parents,
+            &command,
+            &task_payload,
+            database_now,
+        )
+        .await?;
+        deferred.settled_quota_account_ids = quota_accounts
+            .iter()
+            .map(|account| account.quota_account_id.clone())
+            .collect();
+        append_deferred_orchestration_task_events(
+            &mut transaction,
+            &deferred,
+            &command.mutations,
+            &receipt_payload,
+        )
+        .await?;
+        terminalize_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            &command.request_digest,
+            "task_pending",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(deferred))
+    }
+
+    pub async fn defer_orchestration_to_child_run(
+        &mut self,
+        command: DeferOrchestrationToChildRun,
+    ) -> Result<CommandOutcome<DeferredOrchestrationChildRun>, RepositoryError> {
+        command.validate()?;
+        let mut transaction = self.transaction.begin().await?;
+        let receipt_payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "child_link_id": command.child_link_id,
+                "child_run_id": command.child_run_id,
+                "input_digest": command.input.content_digest,
+                "selected_child_deployment": command.selected_child_deployment,
+                "slot_id": command.slot_id,
+            }),
+            65_536,
+        )?;
+        if claim_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            "orchestration.child.defer",
+            &command.idempotency_key_digest,
+            &command.request_digest,
+            &receipt_payload,
+            command.receipt_expires_at,
+        )
+        .await?
+        {
+            let deferred = load_deferred_orchestration_child_run(
+                &mut transaction,
+                &command.fence.tenant_id,
+                &command.fence.job_id,
+                &command.child_link_id.to_string(),
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(deferred));
+        }
+
+        let observed = load_job_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        require_orchestration_job(&observed)?;
+        let parent_run_id: ResourceId = observed
+            .run_id
+            .as_deref()
+            .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Run".to_owned()))?
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+        let tenant_id: ResourceId = command.fence.tenant_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        let observed_parent = load_run(&mut transaction, &tenant_id, &parent_run_id).await?;
+        let root_run_id: ResourceId = observed_parent.root_run_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        let (quota_accounts, quota_already_settled) =
+            lock_job_quota_bundle_state(&mut transaction, &observed).await?;
+
+        let locked_root = if root_run_id == parent_run_id {
+            None
+        } else {
+            Some(load_run_for_update(&mut transaction, &tenant_id, &root_run_id).await?)
+        };
+        let locked_parent =
+            load_run_for_update(&mut transaction, &tenant_id, &parent_run_id).await?;
+        if locked_parent.root_run_id != root_run_id.to_string() {
+            return Err(RepositoryError::Conflict("orchestration child parent Run"));
+        }
+
+        if let Some(existing) = load_child_run_link_by_logical_key(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &locked_parent.run_id,
+            &command.logical_key,
+        )
+        .await?
+        {
+            require_same_child_run_request(&existing, &observed, &command)?;
+            if !quota_already_settled {
+                return Err(RepositoryError::Conflict(
+                    "orchestration child logical replay quota",
+                ));
+            }
+            let deferred = load_deferred_orchestration_child_run(
+                &mut transaction,
+                &command.fence.tenant_id,
+                &command.fence.job_id,
+                &existing.child_link_id,
+            )
+            .await?;
+            terminalize_job_mutation_receipt_with_reference(
+                &mut transaction,
+                &command.fence,
+                &command.mutations.receipt_id,
+                &command.request_digest,
+                "child_run_existing",
+                &existing.child_link_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(deferred));
+        }
+        if quota_already_settled {
+            return Err(RepositoryError::Conflict(
+                "orchestration child quota settlement",
+            ));
+        }
+        if locked_parent.version != observed_parent.version {
+            return Err(RepositoryError::Conflict("orchestration child parent Run"));
+        }
+
+        let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        if current.version != observed.version
+            || current.payload.digest != observed.payload.digest
+            || current.quota_reservation_id != observed.quota_reservation_id
+            || parents.run.version != locked_parent.version
+        {
+            return Err(RepositoryError::Conflict("orchestration child deferral"));
+        }
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let root_snapshot = locked_root.as_ref().unwrap_or(&parents.run);
+        let root_state = root_snapshot
+            .state
+            .parse::<RunState>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        if root_snapshot.terminal_at.is_some()
+            || !matches!(root_state, RunState::Running | RunState::Waiting)
+            || root_snapshot.deadline <= database_now
+            || root_snapshot.current.control.pause_requested
+            || root_snapshot.current.control.cancel_requested_at.is_some()
+            || root_snapshot.current.control.timeout_requested_at.is_some()
+        {
+            return Err(RepositoryError::Conflict("orchestration child root Run"));
+        }
+        if command.budget.deadline <= database_now
+            || command.budget.deadline > current.deadline
+            || command.budget.deadline > parents.run.deadline
+        {
+            return Err(RepositoryError::Conflict("orchestration child deadline"));
+        }
+
+        require_frozen_child_candidate(&parents.run.bindings, &command)?;
+        let child_deployment = require_enabled_exact_agent_deployment(
+            &mut transaction,
+            &tenant_id,
+            &command.selected_child_deployment,
+        )
+        .await?;
+        let child_closure = match decode_deployment_closure(&child_deployment.bindings)? {
+            DeploymentClosure::Agent(closure) => closure,
+            _ => {
+                return Err(RepositoryError::CorruptRow(
+                    "child Agent Deployment has a non-Agent closure".to_owned(),
+                ))
+            }
+        };
+        validate_deployment_closure_exists(
+            &mut transaction,
+            &tenant_id,
+            &DeploymentClosure::Agent(child_closure.clone()),
+        )
+        .await?;
+        let child_bindings = RunBindingsSnapshot::build(
+            command.selected_child_deployment.clone(),
+            parents.run.bindings.principal.clone(),
+            &child_closure,
+        )
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        require_child_input_schema(
+            &mut transaction,
+            &tenant_id,
+            &child_closure.interface,
+            &command.input.schema_digest,
+        )
+        .await?;
+        require_child_input_sources(
+            &mut transaction,
+            &tenant_id,
+            &parent_run_id,
+            &command.source_value_ids,
+            command.input.classification,
+        )
+        .await?;
+        if let ValueRef::Artifact { artifact } = &command.input.value {
+            require_ready_run_artifact(&mut transaction, &tenant_id, artifact).await?;
+        }
+
+        let parent_descendant_count = u32::try_from(
+            locked_root
+                .as_ref()
+                .unwrap_or(&parents.run)
+                .descendant_count,
+        )
+        .map_err(|_| RepositoryError::CorruptRow("negative root descendant count".to_owned()))?;
+        let (parent_delegated_budget, parent_delegated_descendant_count) = if let Some(
+            parent_link_id,
+        ) =
+            parents.run.current.ancestry.parent_child_link_id.as_ref()
+        {
+            let parent_link = load_child_run_link_by_id(
+                &mut transaction,
+                &command.fence.tenant_id,
+                &parent_link_id.to_string(),
+            )
+            .await?;
+            if parent_link.child_run_id != parents.run.run_id || parent_link.state.is_terminal() {
+                return Err(RepositoryError::Conflict(
+                    "orchestration parent ChildRunLink budget",
+                ));
+            }
+            (
+                Some(parent_link.payload.budget),
+                count_run_descendants(&mut transaction, &tenant_id, &parent_run_id).await?,
+            )
+        } else {
+            (None, 0)
+        };
+        let child_ancestry = prepare_child_run(PrepareChildRun {
+            parent_run_id: parent_run_id.clone(),
+            parent_node_execution_id: observed
+                .node_id
+                .as_deref()
+                .ok_or_else(|| {
+                    RepositoryError::CorruptRow("orchestration Job has no Node".to_owned())
+                })?
+                .parse()
+                .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                })?,
+            child_link_id: command.child_link_id.clone(),
+            child_run_id: command.child_run_id.clone(),
+            child_agent_deployment: command.selected_child_deployment.clone(),
+            parent_ancestry: parents.run.current.ancestry.clone(),
+            parent_deadline: parents.run.deadline,
+            parent_delegated_budget,
+            parent_delegated_descendant_count,
+            parent_descendant_count,
+            maximum_depth: MAX_CHILD_RUN_DEPTH,
+            maximum_descendants: MAX_DESCENDANT_RUNS,
+            budget: command.budget.clone(),
+        })
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let next_parent_job = decide_job_terminal(
+            &job_projection(&current)?,
+            &domain_job_fence(&command.fence)?,
+            database_now,
+            JobState::Succeeded,
+        )?;
+        let parent_attempt_ordinal = u16::try_from(current.attempt_no).map_err(|_| {
+            RepositoryError::CorruptRow("orchestration attempt exceeds u16".to_owned())
+        })?;
+        let child_link_payload = ChildRunLinkPayload {
+            parent_attempt_ordinal,
+            child_agent_deployment: command.selected_child_deployment.clone(),
+            input_digest: command.input.content_digest.clone(),
+            cancellation_policy: command.cancellation_policy,
+            budget: command.budget.clone(),
+        };
+        child_link_payload
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+
+        settle_locked_job_quota_bundle(
+            &mut transaction,
+            &current,
+            &quota_accounts,
+            &command.mutations.quota_entry_ids,
+            &command.request_digest,
+        )
+        .await?;
+        let mut deferred = mutate_deferred_orchestration_child_run(
+            &mut transaction,
+            &current,
+            &next_parent_job,
+            &parents,
+            locked_root.as_ref(),
+            &command,
+            &child_bindings,
+            &child_ancestry,
+            &child_link_payload,
+            database_now,
+        )
+        .await?;
+        deferred.settled_quota_account_ids = quota_accounts
+            .iter()
+            .map(|account| account.quota_account_id.clone())
+            .collect();
+        append_deferred_orchestration_child_events(
+            &mut transaction,
+            &deferred,
+            &command.mutations,
+            &receipt_payload,
+        )
+        .await?;
+        terminalize_job_mutation_receipt_with_reference(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            &command.request_digest,
+            "child_run_created",
+            &deferred.child_link.child_link_id,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(deferred))
+    }
+
+    pub async fn drive_terminal_child_runs(
+        &mut self,
+        command: DriveTerminalChildRuns,
+    ) -> Result<Vec<ResolvedOrchestrationChildRun>, RepositoryError> {
+        command.validate(self.limits)?;
+        let mut transaction = self.transaction.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT link.tenant_id, link.node_id AS child_link_id,
+                   link.run_id AS parent_run_id, link.related_run_id AS child_run_id,
+                   parent.root_run_id, child.terminal_at AS child_terminal_at
+            FROM insight_platform.run_nodes AS link
+            JOIN insight_platform.runs AS parent
+              ON parent.tenant_id = link.tenant_id AND parent.run_id = link.run_id
+            JOIN insight_platform.runs AS child
+              ON child.tenant_id = link.tenant_id AND child.run_id = link.related_run_id
+            JOIN insight_platform.run_nodes AS node
+              ON node.tenant_id = link.tenant_id AND node.node_id = link.parent_node_id
+            WHERE link.record_kind = 'child_run_link'
+              AND link.state IN ('running', 'waiting', 'cancelling')
+              AND link.terminal_at IS NULL
+              AND child.state IN ('succeeded', 'failed', 'cancelled', 'timed_out')
+              AND child.terminal_at IS NOT NULL
+              AND parent.state IN ('running', 'waiting', 'cancelling')
+              AND parent.terminal_at IS NULL
+              AND node.record_kind = 'node_execution' AND node.state = 'waiting'
+              AND node.terminal_at IS NULL
+            ORDER BY child.terminal_at, link.tenant_id, link.node_id
+            LIMIT $1
+            "#,
+        )
+        .bind(i64::from(command.limit))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let candidates = rows
+            .into_iter()
+            .map(|row| {
+                Ok(TerminalChildRunCandidate {
+                    tenant_id: row.try_get("tenant_id")?,
+                    child_link_id: row.try_get("child_link_id")?,
+                    parent_run_id: row.try_get("parent_run_id")?,
+                    child_run_id: row.try_get("child_run_id")?,
+                    root_run_id: row.try_get("root_run_id")?,
+                })
+            })
+            .collect::<Result<Vec<_>, RepositoryError>>()?;
+        let mut resolved = Vec::with_capacity(candidates.len());
+        for (candidate, slot) in candidates.into_iter().zip(command.slots.iter()) {
+            let tenant_id: ResourceId = candidate.tenant_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let root_run_id: ResourceId = candidate.root_run_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let parent_run_id: ResourceId = candidate.parent_run_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let child_run_id: ResourceId = candidate.child_run_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            if root_run_id != parent_run_id {
+                load_run_for_update(&mut transaction, &tenant_id, &root_run_id).await?;
+            }
+            let parent_run =
+                load_run_for_update(&mut transaction, &tenant_id, &parent_run_id).await?;
+            let child_run =
+                load_run_for_update(&mut transaction, &tenant_id, &child_run_id).await?;
+            let child_link = load_child_run_link_for_update(
+                &mut transaction,
+                &candidate.tenant_id,
+                &candidate.child_link_id,
+            )
+            .await?;
+            if child_link.parent_run_id != parent_run.run_id
+                || child_link.child_run_id != child_run.run_id
+                || child_run.root_run_id != root_run_id.to_string()
+                || child_run.parent_run_id.as_deref() != Some(parent_run.run_id.as_str())
+                || child_run.parent_node_id.as_deref()
+                    != Some(child_link.parent_node_execution_id.as_str())
+            {
+                return Err(RepositoryError::Conflict("terminal child Run relation"));
+            }
+            let (parent_node_version, parent_scope_id) = lock_waiting_child_parent_node(
+                &mut transaction,
+                &candidate.tenant_id,
+                &parent_run.run_id,
+                &child_link.parent_node_execution_id,
+            )
+            .await?;
+            let source_job = load_task_source_orchestration_job(
+                &mut transaction,
+                &candidate.tenant_id,
+                &child_link.parent_node_execution_id,
+            )
+            .await?;
+            let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&mut *transaction)
+                .await?;
+            let child_state = child_run
+                .state
+                .parse::<RunState>()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            let next_link = decide_child_link_terminal(
+                &child_link_projection(&child_link)?,
+                u64::try_from(child_link.generation).map_err(|_| {
+                    RepositoryError::CorruptRow("negative ChildRunLink generation".to_owned())
+                })?,
+                u64::try_from(child_link.version).map_err(|_| {
+                    RepositoryError::CorruptRow("negative ChildRunLink version".to_owned())
+                })?,
+                child_state,
+                database_now,
+            )?;
+            let converging = parent_run.state == RunState::Cancelling.as_str()
+                || parent_run.current.control.cancel_requested_at.is_some()
+                || parent_run.current.control.timeout_requested_at.is_some()
+                || parent_run.deadline <= database_now;
+            let result = mutate_terminal_child_run(
+                &mut transaction,
+                &parent_run,
+                parent_node_version,
+                &parent_scope_id,
+                &source_job,
+                &child_run,
+                &child_link,
+                &next_link,
+                slot,
+                converging,
+                database_now,
+            )
+            .await?;
+            append_terminal_child_run_events(&mut transaction, &result, slot, converging).await?;
+            resolved.push(result);
+        }
+        transaction.commit().await?;
+        Ok(resolved)
+    }
+
+    pub async fn drive_child_run_cancellations(
+        &mut self,
+        command: DriveChildRunCancellations,
+    ) -> Result<Vec<CancellingOrchestrationChildRun>, RepositoryError> {
+        command.validate(self.limits)?;
+        let mut transaction = self.transaction.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT link.tenant_id, link.node_id AS child_link_id,
+                   link.run_id AS parent_run_id, link.related_run_id AS child_run_id,
+                   parent.root_run_id
+            FROM insight_platform.run_nodes AS link
+            JOIN insight_platform.runs AS parent
+              ON parent.tenant_id = link.tenant_id AND parent.run_id = link.run_id
+            JOIN insight_platform.runs AS child
+              ON child.tenant_id = link.tenant_id AND child.run_id = link.related_run_id
+            JOIN insight_platform.run_nodes AS node
+              ON node.tenant_id = link.tenant_id AND node.node_id = link.parent_node_id
+            WHERE link.record_kind = 'child_run_link'
+              AND link.state IN ('running', 'waiting') AND link.terminal_at IS NULL
+              AND parent.state = 'cancelling' AND parent.terminal_at IS NULL
+              AND parent.current_payload #> '{control,cancel_requested_at}' <> 'null'::jsonb
+              AND child.state IN ('queued', 'running', 'waiting', 'cancelling')
+              AND child.terminal_at IS NULL
+              AND node.record_kind = 'node_execution' AND node.state = 'waiting'
+              AND node.terminal_at IS NULL
+            ORDER BY parent.updated_at, link.tenant_id, link.node_id
+            LIMIT $1
+            "#,
+        )
+        .bind(i64::from(command.limit))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let candidates = rows
+            .into_iter()
+            .map(|row| {
+                Ok(TerminalChildRunCandidate {
+                    tenant_id: row.try_get("tenant_id")?,
+                    child_link_id: row.try_get("child_link_id")?,
+                    parent_run_id: row.try_get("parent_run_id")?,
+                    child_run_id: row.try_get("child_run_id")?,
+                    root_run_id: row.try_get("root_run_id")?,
+                })
+            })
+            .collect::<Result<Vec<_>, RepositoryError>>()?;
+        let mut cancelling = Vec::with_capacity(candidates.len());
+        for (candidate, slot) in candidates.into_iter().zip(command.slots.iter()) {
+            let tenant_id: ResourceId = candidate.tenant_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let root_run_id: ResourceId = candidate.root_run_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let parent_run_id: ResourceId = candidate.parent_run_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let child_run_id: ResourceId = candidate.child_run_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            if root_run_id != parent_run_id {
+                load_run_for_update(&mut transaction, &tenant_id, &root_run_id).await?;
+            }
+            let parent_run =
+                load_run_for_update(&mut transaction, &tenant_id, &parent_run_id).await?;
+            let child_run =
+                load_run_for_update(&mut transaction, &tenant_id, &child_run_id).await?;
+            let child_link = load_child_run_link_for_update(
+                &mut transaction,
+                &candidate.tenant_id,
+                &candidate.child_link_id,
+            )
+            .await?;
+            if parent_run.state != RunState::Cancelling.as_str()
+                || parent_run.current.control.cancel_requested_at.is_none()
+                || child_link.parent_run_id != parent_run.run_id
+                || child_link.child_run_id != child_run.run_id
+                || child_run.root_run_id != root_run_id.to_string()
+                || child_run.parent_run_id.as_deref() != Some(parent_run.run_id.as_str())
+            {
+                return Err(RepositoryError::Conflict("child Run cancellation relation"));
+            }
+            let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&mut *transaction)
+                .await?;
+            let next_link = decide_child_link_cancel(
+                &child_link_projection(&child_link)?,
+                u64::try_from(child_link.generation).map_err(|_| {
+                    RepositoryError::CorruptRow("negative ChildRunLink generation".to_owned())
+                })?,
+                u64::try_from(child_link.version).map_err(|_| {
+                    RepositoryError::CorruptRow("negative ChildRunLink version".to_owned())
+                })?,
+            )?;
+            let reason_code = parent_run
+                .current
+                .control
+                .cancel_reason_code
+                .clone()
+                .ok_or_else(|| {
+                    RepositoryError::CorruptRow("parent cancel has no reason".to_owned())
+                })?;
+            let principal = parent_run
+                .current
+                .control
+                .cancel_principal
+                .clone()
+                .ok_or_else(|| {
+                    RepositoryError::CorruptRow("parent cancel has no principal".to_owned())
+                })?;
+            let next_child_control = match decide_cancel(
+                &child_run.current.control,
+                child_run.current.control.cancel_generation,
+                database_now,
+                reason_code,
+                principal,
+            )? {
+                ControlDecision::Updated(control) | ControlDecision::Unchanged(control) => control,
+            };
+            let result = mutate_cancelling_child_run(
+                &mut transaction,
+                &parent_run,
+                &child_run,
+                &child_link,
+                &next_link,
+                next_child_control,
+                database_now,
+            )
+            .await?;
+            append_cancelling_child_run_events(&mut transaction, &result, slot).await?;
+            cancelling.push(result);
+        }
+        transaction.commit().await?;
+        Ok(cancelling)
+    }
+
+    pub async fn resolve_orchestration_task(
+        &mut self,
+        command: ResolveOrchestrationTask,
+    ) -> Result<CommandOutcome<ResolvedOrchestrationTask>, RepositoryError> {
+        command.validate()?;
+        let mut transaction = self.transaction.begin().await?;
+        let task_id = command.task_id.to_string();
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "interaction",
+            &task_id,
+            "interaction.respond",
+        )
+        .await?
+        {
+            let resolved = load_resolved_orchestration_task(
+                &mut transaction,
+                &command.audit.tenant_id.to_string(),
+                &task_id,
+                &command.resume_job_id.to_string(),
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(resolved));
+        }
+        let observed = load_task_by_text(
+            &mut transaction,
+            &command.audit.tenant_id.to_string(),
+            &task_id,
+        )
+        .await?;
+        if observed.task_kind == TaskKind::Approval {
+            return Err(RepositoryError::Conflict(
+                "approval Task requires its Invocation owner adapter",
+            ));
+        }
+        if observed.state != TaskState::Pending || observed.responded_at.is_some() {
+            return Err(RepositoryError::Conflict("Task first-winner"));
+        }
+        let principal = require_tenant_permission(
+            &mut transaction,
+            &command.audit,
+            observed.task_kind.responder_permission(),
+        )
+        .await?;
+        let run_id: ResourceId = observed
+            .run_id
+            .as_deref()
+            .ok_or_else(|| RepositoryError::CorruptRow("Task has no Run owner".to_owned()))?
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+        let node_id = observed
+            .node_id
+            .as_deref()
+            .ok_or_else(|| RepositoryError::CorruptRow("Task has no Node owner".to_owned()))?;
+        if observed.owner_kind != "node_execution" || observed.owner_id != node_id {
+            return Err(RepositoryError::CorruptRow(
+                "Task owner does not match its Node".to_owned(),
+            ));
+        }
+        let run = load_run_for_update(&mut transaction, &command.audit.tenant_id, &run_id).await?;
+        let node = sqlx::query(
+            r#"
+            SELECT version, state FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+              AND record_kind = 'node_execution'
+            FOR UPDATE
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(node_id)
+        .bind(run_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("Task owner Node"))?;
+        let current =
+            load_task_for_update(&mut transaction, &command.audit.tenant_id, &command.task_id)
+                .await?;
+        if current.state != TaskState::Pending || current.responded_at.is_some() {
+            return Err(RepositoryError::Conflict("Task first-winner"));
+        }
+        if run.terminal_at.is_some()
+            || !matches!(run.state.as_str(), "waiting" | "running")
+            || run.current.control.cancel_requested_at.is_some()
+            || run.current.control.timeout_requested_at.is_some()
+            || node.try_get::<String, _>("state")? != "waiting"
+        {
+            return Err(RepositoryError::Conflict("Task owner wake"));
+        }
+        if current.version
+            != i64::try_from(command.expected_task_version).map_err(|_| {
+                RepositoryError::InvalidInput("Task version exceeds bigint".to_owned())
+            })?
+            || current.generation
+                != i64::try_from(command.expected_generation).map_err(|_| {
+                    RepositoryError::InvalidInput("Task generation exceeds bigint".to_owned())
+                })?
+            || current.payload.digest != observed.payload.digest
+        {
+            return Err(RepositoryError::Conflict("Task first-winner"));
+        }
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let next = decide_task_resolution(
+            &task_projection(&current)?,
+            DomainResolveTask {
+                expected_generation: command.expected_generation,
+                expected_version: command.expected_task_version,
+                target: command.target,
+                principal: Some(principal),
+                response_value_id: command
+                    .response
+                    .as_ref()
+                    .map(|response| response.value_id.clone()),
+                response_schema_digest: command
+                    .response
+                    .as_ref()
+                    .map(|response| response.schema_digest.clone()),
+            },
+            database_now,
+        )?;
+        if let Some(response) = &command.response {
+            insert_task_response_value(&mut transaction, &current, &run, node_id, response).await?;
+        }
+        let source_job =
+            load_task_source_orchestration_job(&mut transaction, &current.tenant_id, node_id)
+                .await?;
+        if source_job.deadline <= database_now || source_job.deadline != run.deadline {
+            return Err(RepositoryError::Conflict("Task resume deadline"));
+        }
+        let resolved = mutate_resolved_orchestration_task(
+            &mut transaction,
+            &current,
+            &next,
+            &run,
+            node.try_get("version")?,
+            &source_job,
+            &command.resume_job_id,
+            &command.resume_request_digest,
+            database_now,
+        )
+        .await?;
+        append_resolved_orchestration_task_events(&mut transaction, &resolved, &command).await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &resolved.task.task_id,
+            resolved.task.state.as_str(),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(resolved))
+    }
+
+    pub async fn drive_expired_orchestration_tasks(
+        &mut self,
+        command: DriveExpiredOrchestrationTasks,
+    ) -> Result<SafetyScanPage<ResolvedOrchestrationTask>, RepositoryError> {
+        command.validate(self.recovery_batch_limit, self.recovery_shard_limit)?;
+        let mut transaction = self.transaction.begin().await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let candidates = sqlx::query(
+            r#"
+            SELECT task.tenant_id, task.task_id, task.run_id, task.node_id,
+                   task.deadline AS scan_sort_at
+            FROM insight_platform.tasks AS task
+            JOIN insight_platform.runs AS run
+              ON run.tenant_id = task.tenant_id AND run.run_id = task.run_id
+            JOIN insight_platform.run_nodes AS node
+              ON node.tenant_id = task.tenant_id AND node.node_id = task.node_id
+            WHERE task.owner_kind = 'node_execution'
+              AND task.task_kind <> 'approval'
+              AND task.state = 'pending' AND task.responded_at IS NULL
+              AND task.deadline <= $1
+              AND run.state IN ('waiting', 'running') AND run.terminal_at IS NULL
+              AND run.deadline > $1
+              AND run.current_payload #> '{control,cancel_requested_at}' = 'null'::jsonb
+              AND run.current_payload #> '{control,timeout_requested_at}' = 'null'::jsonb
+              AND node.record_kind = 'node_execution' AND node.state = 'waiting'
+              AND node.terminal_at IS NULL
+              AND mod(('x' || right(task.task_id, 8))::bit(32)::bigint, $4) = $3
+              AND (
+                  $5::timestamptz IS NULL OR
+                  (task.deadline, task.tenant_id, task.task_id) >
+                      ($5::timestamptz, $6::text, $7::text)
+              )
+            ORDER BY task.deadline, task.tenant_id, task.task_id
+            LIMIT $2
+            "#,
+        )
+        .bind(database_now)
+        .bind(i64::from(command.limit))
+        .bind(i64::from(command.shard.index))
+        .bind(i64::from(command.shard.count))
+        .bind(command.after.as_ref().map(|cursor| cursor.sort_at))
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.tenant_id.to_string()),
+        )
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.item_id.to_string()),
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        let scanned_count = candidates.len();
+        let last_cursor = candidates
+            .last()
+            .map(|row| safety_scan_cursor_from_row(row, "task_id", ResourceKind::Interaction))
+            .transpose()?;
+        let mut expired = Vec::with_capacity(candidates.len());
+        for (candidate, slot) in candidates.into_iter().zip(command.slots.iter()) {
+            let tenant_id: ResourceId = candidate
+                .try_get::<String, _>("tenant_id")?
+                .parse()
+                .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                })?;
+            let run_id: ResourceId = candidate
+                .try_get::<Option<String>, _>("run_id")?
+                .ok_or_else(|| RepositoryError::CorruptRow("Task has no Run".to_owned()))?
+                .parse()
+                .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                })?;
+            let task_id: ResourceId = candidate.try_get::<String, _>("task_id")?.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let node_id = candidate
+                .try_get::<Option<String>, _>("node_id")?
+                .ok_or_else(|| RepositoryError::CorruptRow("Task has no Node".to_owned()))?;
+            let run = load_run_for_update(&mut transaction, &tenant_id, &run_id).await?;
+            let node = sqlx::query(
+                r#"
+                SELECT version, state FROM insight_platform.run_nodes
+                WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+                  AND record_kind = 'node_execution'
+                FOR UPDATE
+                "#,
+            )
+            .bind(tenant_id.to_string())
+            .bind(&node_id)
+            .bind(run_id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RepositoryError::NotFound("Task owner Node"))?;
+            let task = load_task_for_update(&mut transaction, &tenant_id, &task_id).await?;
+            if task.task_kind == TaskKind::Approval
+                || task.owner_kind != "node_execution"
+                || task.owner_id != node_id
+                || task.run_id.as_deref() != Some(run.run_id.as_str())
+                || task.node_id.as_deref() != Some(node_id.as_str())
+                || task.state != TaskState::Pending
+                || task.responded_at.is_some()
+                || task.deadline > database_now
+                || run.terminal_at.is_some()
+                || !matches!(run.state.as_str(), "waiting" | "running")
+                || run.deadline <= database_now
+                || run.current.control.cancel_requested_at.is_some()
+                || run.current.control.timeout_requested_at.is_some()
+                || node.try_get::<String, _>("state")? != "waiting"
+            {
+                continue;
+            }
+            let next = decide_task_resolution(
+                &task_projection(&task)?,
+                DomainResolveTask {
+                    expected_generation: u64::try_from(task.generation).map_err(|_| {
+                        RepositoryError::CorruptRow(
+                            "Task generation is outside the domain bound".to_owned(),
+                        )
+                    })?,
+                    expected_version: u64::try_from(task.version).map_err(|_| {
+                        RepositoryError::CorruptRow(
+                            "Task version is outside the domain bound".to_owned(),
+                        )
+                    })?,
+                    target: TaskState::Expired,
+                    principal: None,
+                    response_value_id: None,
+                    response_schema_digest: None,
+                },
+                database_now,
+            )?;
+            let source_job =
+                load_task_source_orchestration_job(&mut transaction, &task.tenant_id, &node_id)
+                    .await?;
+            if source_job.deadline <= database_now || source_job.deadline != run.deadline {
+                continue;
+            }
+            let resolved = mutate_resolved_orchestration_task(
+                &mut transaction,
+                &task,
+                &next,
+                &run,
+                node.try_get("version")?,
+                &source_job,
+                &slot.resume_job_id,
+                &slot.resume_request_digest,
+                database_now,
+            )
+            .await?;
+            append_expired_orchestration_task_events(&mut transaction, &resolved, slot).await?;
+            expired.push(resolved);
+        }
+        transaction.commit().await?;
+        Ok(safety_scan_page(
+            expired,
+            scanned_count,
+            command.limit,
+            last_cursor,
+        ))
+    }
+
+    pub async fn wake_orchestration_job(
+        &mut self,
+        command: WakeOrchestrationJob,
+    ) -> Result<CommandOutcome<WokenOrchestrationJob>, RepositoryError> {
+        command.validate()?;
+        let tenant_id = command.tenant_id.to_string();
+        let job_id = command.job_id.to_string();
+        let mut transaction = self.transaction.begin().await?;
+        let receipt_payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "expected_job_version": command.expected_job_version,
+                "expected_wake_generation": command.expected_wake_generation,
+                "job_id": command.job_id,
+                "source": command.source.as_str(),
+            }),
+            65_536,
+        )?;
+        if claim_job_wake_receipt(&mut transaction, &command, &receipt_payload).await? {
+            let woken = load_woken_orchestration_job(&mut transaction, &tenant_id, &job_id).await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(woken));
+        }
+        let observed = load_job_by_text(&mut transaction, &tenant_id, &job_id).await?;
+        require_orchestration_job(&observed)?;
+        if observed.state != JobState::Waiting.as_str()
+            || observed.version != command.expected_job_version
+            || observed.wake_generation
+                != i64::try_from(command.expected_wake_generation).unwrap_or_default()
+        {
+            return Err(RepositoryError::Conflict("orchestration wake first-winner"));
+        }
+        let parents = lock_waiting_orchestration_job_parents(&mut transaction, &observed).await?;
+        let current = load_job_for_update_by_text(&mut transaction, &tenant_id, &job_id).await?;
+        if current.version != command.expected_job_version
+            || current.version != observed.version
+            || current.payload.digest != observed.payload.digest
+        {
+            return Err(RepositoryError::Conflict("waiting orchestration Job"));
+        }
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let next = decide_job_wake(
+            &job_projection(&current)?,
+            command.expected_wake_generation,
+            command.source,
+            database_now,
+        )?;
+        let woken = mutate_woken_orchestration_job(
+            &mut transaction,
+            &current,
+            &next,
+            &parents,
+            database_now,
+        )
+        .await?;
+        append_orchestration_wake_events(
+            &mut transaction,
+            &woken,
+            &command.mutations,
+            &receipt_payload,
+        )
+        .await?;
+        terminalize_job_wake_receipt(&mut transaction, &command, "consumed").await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(woken))
+    }
+
+    pub async fn drive_due_orchestration_retries(
+        &mut self,
+        command: DriveDueOrchestrationRetries,
+    ) -> Result<SafetyScanPage<PromotedOrchestrationRetry>, RepositoryError> {
+        command.validate(self.recovery_batch_limit, self.recovery_shard_limit)?;
+        let mut transaction = self.transaction.begin().await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT job.*, node.version AS retry_node_version, job.retry_at AS scan_sort_at
+            FROM insight_platform.jobs AS job
+            JOIN insight_platform.runs AS run
+              ON run.tenant_id = job.tenant_id AND run.run_id = job.run_id
+            JOIN insight_platform.run_nodes AS node
+              ON node.tenant_id = job.tenant_id AND node.node_id = job.node_id
+            JOIN insight_platform.run_nodes AS scope
+              ON scope.tenant_id = node.tenant_id AND scope.node_id = node.scope_id
+            WHERE job.work_class = 'orchestration'
+              AND job.owner_kind = 'node_execution' AND job.owner_id = node.node_id
+              AND job.state = 'retry_scheduled' AND job.retry_at <= $1
+              AND job.terminal_at IS NULL AND job.worker_id IS NULL
+              AND job.attempt_no < job.attempt_limit AND job.deadline > $1
+              AND run.state = 'running' AND run.terminal_at IS NULL AND run.deadline > $1
+              AND run.current_payload #>> '{control,pause_requested}' = 'false'
+              AND run.current_payload #> '{control,cancel_requested_at}' = 'null'::jsonb
+              AND run.current_payload #> '{control,timeout_requested_at}' = 'null'::jsonb
+              AND node.record_kind = 'node_execution' AND node.state = 'retry_scheduled'
+              AND node.retry_at = job.retry_at AND node.terminal_at IS NULL
+              AND scope.record_kind = 'scope_instance' AND scope.state = 'open'
+              AND scope.terminal_at IS NULL
+              AND mod(('x' || right(job.job_id, 8))::bit(32)::bigint, $4) = $3
+              AND (
+                  $5::timestamptz IS NULL OR
+                  (job.retry_at, job.tenant_id, job.job_id) >
+                      ($5::timestamptz, $6::text, $7::text)
+              )
+            ORDER BY job.retry_at, job.tenant_id, job.job_id
+            LIMIT $2
+            FOR UPDATE OF run, node, scope, job SKIP LOCKED
+            "#,
+        )
+        .bind(database_now)
+        .bind(i64::from(command.limit))
+        .bind(i64::from(command.shard.index))
+        .bind(i64::from(command.shard.count))
+        .bind(command.after.as_ref().map(|cursor| cursor.sort_at))
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.tenant_id.to_string()),
+        )
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.item_id.to_string()),
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        let scanned_count = rows.len();
+        let last_cursor = rows
+            .last()
+            .map(|row| safety_scan_cursor_from_row(row, "job_id", ResourceKind::Job))
+            .transpose()?;
+        let mut promoted = Vec::with_capacity(rows.len());
+        for (row, slot) in rows.into_iter().zip(command.slots.iter()) {
+            let node_version: i64 = row.try_get("retry_node_version")?;
+            let current = job_from_row(row)?;
+            require_orchestration_job(&current)?;
+            let next = decide_job_retry_due(&job_projection(&current)?, database_now)?;
+            let job = sqlx::query(
+                r#"
+                UPDATE insight_platform.jobs
+                SET state = 'ready', version = $4, scheduled_at = $5, retry_at = NULL,
+                    updated_at = $5
+                WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+                  AND state = 'retry_scheduled' AND worker_id IS NULL
+                RETURNING *
+                "#,
+            )
+            .bind(&current.tenant_id)
+            .bind(&current.job_id)
+            .bind(current.version)
+            .bind(i64::try_from(next.version).map_err(|_| {
+                RepositoryError::InvalidInput("Job version exceeds bigint".to_owned())
+            })?)
+            .bind(database_now)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict("due orchestration Job retry"))?;
+            let job = job_from_row(job)?;
+            let node_id = current.node_id.as_deref().ok_or_else(|| {
+                RepositoryError::CorruptRow("orchestration Job has no Node".to_owned())
+            })?;
+            let next_node_version: i64 = sqlx::query_scalar(
+                r#"
+                UPDATE insight_platform.run_nodes
+                SET state = 'ready', version = version + 1, retry_at = NULL,
+                    updated_at = $4
+                WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+                  AND record_kind = 'node_execution' AND state = 'retry_scheduled'
+                  AND terminal_at IS NULL
+                RETURNING version
+                "#,
+            )
+            .bind(&current.tenant_id)
+            .bind(node_id)
+            .bind(node_version)
+            .bind(database_now)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict("due orchestration Node retry"))?;
+            let payload = TypedPayload::with_limit(
+                1,
+                &serde_json::json!({
+                    "job_id": job.job_id,
+                    "lease_generation": job.lease_epoch,
+                    "retry_observed_at": database_now,
+                }),
+                65_536,
+            )?;
+            let run_id = job.run_id.as_deref().ok_or_else(|| {
+                RepositoryError::CorruptRow("orchestration Job has no Run".to_owned())
+            })?;
+            append_scheduler_event(
+                &mut transaction,
+                &job.tenant_id,
+                &slot.node_event_id,
+                &slot.node_outbox_id,
+                "node_execution",
+                node_id,
+                next_node_version,
+                Some(run_id),
+                "node.retry_ready",
+                &payload,
+            )
+            .await?;
+            append_scheduler_event(
+                &mut transaction,
+                &job.tenant_id,
+                &slot.job_event_id,
+                &slot.job_outbox_id,
+                "job",
+                &job.job_id,
+                job.version,
+                Some(run_id),
+                "job.retry_ready",
+                &payload,
+            )
+            .await?;
+            promoted.push(PromotedOrchestrationRetry {
+                job,
+                node_id: node_id.to_owned(),
+                node_version: next_node_version,
+            });
+        }
+        transaction.commit().await?;
+        Ok(safety_scan_page(
+            promoted,
+            scanned_count,
+            command.limit,
+            last_cursor,
+        ))
+    }
+
+    pub async fn drive_expired_orchestration_jobs(
+        &mut self,
+        command: DriveExpiredOrchestrationJobs,
+    ) -> Result<SafetyScanPage<RecoveredOrchestrationJob>, RepositoryError> {
+        command.validate(self.recovery_batch_limit, self.recovery_shard_limit)?;
+        let mut transaction = self.transaction.begin().await?;
+        let scan_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT job.*, job.lease_expires_at AS scan_sort_at
+            FROM insight_platform.jobs AS job
+            JOIN insight_platform.runs AS run
+              ON run.tenant_id = job.tenant_id AND run.run_id = job.run_id
+            JOIN insight_platform.run_nodes AS node
+              ON node.tenant_id = job.tenant_id AND node.node_id = job.node_id
+            JOIN insight_platform.run_nodes AS scope
+              ON scope.tenant_id = node.tenant_id AND scope.node_id = node.scope_id
+            WHERE job.work_class = 'orchestration'
+              AND job.owner_kind = 'node_execution' AND job.owner_id = node.node_id
+              AND job.state IN ('leased', 'running')
+              AND job.lease_expires_at <= $1 AND job.terminal_at IS NULL
+              AND job.attempt_no < job.attempt_limit AND job.deadline > $1 + interval '60 seconds'
+              AND run.state = 'running' AND run.terminal_at IS NULL
+              AND run.deadline > $1 + interval '60 seconds'
+              AND run.current_payload #> '{control,cancel_requested_at}' = 'null'::jsonb
+              AND run.current_payload #> '{control,timeout_requested_at}' = 'null'::jsonb
+              AND node.record_kind = 'node_execution'
+              AND (
+                  (job.state = 'leased' AND node.state = 'ready') OR
+                  (job.state = 'running' AND node.state = 'running')
+              )
+              AND node.terminal_at IS NULL
+              AND scope.record_kind = 'scope_instance' AND scope.state = 'open'
+              AND scope.terminal_at IS NULL
+              AND mod(('x' || right(job.job_id, 8))::bit(32)::bigint, $4) = $3
+              AND (
+                  $5::timestamptz IS NULL OR
+                  (job.lease_expires_at, job.tenant_id, job.job_id) >
+                      ($5::timestamptz, $6::text, $7::text)
+              )
+            ORDER BY job.lease_expires_at, job.tenant_id, job.job_id
+            LIMIT $2
+            "#,
+        )
+        .bind(scan_now)
+        .bind(i64::from(command.limit))
+        .bind(i64::from(command.shard.index))
+        .bind(i64::from(command.shard.count))
+        .bind(command.after.as_ref().map(|cursor| cursor.sort_at))
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.tenant_id.to_string()),
+        )
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.item_id.to_string()),
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        let scanned_count = rows.len();
+        let last_cursor = rows
+            .last()
+            .map(|row| safety_scan_cursor_from_row(row, "job_id", ResourceKind::Job))
+            .transpose()?;
+        let candidates = rows
+            .into_iter()
+            .map(job_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut recovered = Vec::with_capacity(candidates.len());
+        for (observed, slot) in candidates.into_iter().zip(command.slots.iter()) {
+            let quota_accounts =
+                lock_job_quota_bundle(&mut transaction, &observed, &slot.quota_entry_ids).await?;
+            let expected_node_state = if observed.state == JobState::Leased.as_str() {
+                "ready"
+            } else {
+                "running"
+            };
+            let parents =
+                lock_orchestration_job_parents(&mut transaction, &observed, expected_node_state)
+                    .await?;
+            let current = load_job_for_update_by_text(
+                &mut transaction,
+                &observed.tenant_id,
+                &observed.job_id,
+            )
+            .await?;
+            if current.version != observed.version
+                || current.lease_epoch != observed.lease_epoch
+                || current.lease_expires_at != observed.lease_expires_at
+                || current.payload.digest != observed.payload.digest
+                || current.quota_reservation_id != observed.quota_reservation_id
+            {
+                return Err(RepositoryError::Conflict("expired orchestration Job"));
+            }
+            let recovery_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&mut *transaction)
+                .await?;
+            let payload: OrchestrationJobPayload =
+                decode_typed_payload(&current.payload, "orchestration Job")?;
+            payload
+                .validate()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            let (target, retry_at) = if current.state == JobState::Leased.as_str() {
+                (JobState::Ready, None)
+            } else {
+                let retry_at = recovery_now
+                    .checked_add_signed(Duration::milliseconds(
+                        i64::try_from(payload.retry_backoff_milliseconds).map_err(|_| {
+                            RepositoryError::CorruptRow(
+                                "retry backoff exceeds signed milliseconds".to_owned(),
+                            )
+                        })?,
+                    ))
+                    .ok_or_else(|| {
+                        RepositoryError::InvalidInput("retry deadline overflowed".to_owned())
+                    })?;
+                (JobState::RetryScheduled, Some(retry_at))
+            };
+            let next = decide_expired_job_lease(
+                &job_projection(&current)?,
+                u64::try_from(current.version)
+                    .map_err(|_| RepositoryError::CorruptRow("negative Job version".to_owned()))?,
+                u64::try_from(current.lease_epoch).map_err(|_| {
+                    RepositoryError::CorruptRow("negative Job lease generation".to_owned())
+                })?,
+                recovery_now,
+                target,
+                retry_at,
+            )?;
+            settle_locked_job_quota_bundle(
+                &mut transaction,
+                &current,
+                &quota_accounts,
+                &slot.quota_entry_ids,
+                &current
+                    .request_digest
+                    .parse::<Sha256Digest>()
+                    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+            )
+            .await?;
+            let mut record = mutate_recovered_orchestration_job(
+                &mut transaction,
+                &current,
+                &next,
+                &parents,
+                recovery_now,
+            )
+            .await?;
+            record.settled_quota_account_ids = quota_accounts
+                .iter()
+                .map(|account| account.quota_account_id.clone())
+                .collect();
+            append_orchestration_recovery_events(&mut transaction, &record, slot).await?;
+            recovered.push(record);
+        }
+        transaction.commit().await?;
+        Ok(safety_scan_page(
+            recovered,
+            scanned_count,
+            command.limit,
+            last_cursor,
+        ))
+    }
+
+    pub async fn drive_orchestration_convergence(
+        &mut self,
+        command: DriveOrchestrationConvergence,
+    ) -> Result<SafetyScanPage<ConvergedOrchestrationRun>, RepositoryError> {
+        command.validate(self.recovery_batch_limit, self.recovery_shard_limit)?;
+        let mut transaction = self.transaction.begin().await?;
+        let scan_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT job.*, LEAST(run.deadline, job.deadline) AS scan_sort_at
+            FROM insight_platform.jobs AS job
+            JOIN insight_platform.runs AS run
+              ON run.tenant_id = job.tenant_id AND run.run_id = job.run_id
+            JOIN insight_platform.run_nodes AS node
+              ON node.tenant_id = job.tenant_id AND node.node_id = job.node_id
+            JOIN insight_platform.run_nodes AS scope
+              ON scope.tenant_id = node.tenant_id AND scope.node_id = node.scope_id
+            WHERE job.work_class = 'orchestration'
+              AND job.owner_kind = 'node_execution' AND job.owner_id = node.node_id
+              AND job.state IN ('ready', 'leased', 'running', 'waiting', 'retry_scheduled', 'cancelling')
+              AND job.terminal_at IS NULL
+              AND run.state IN ('queued', 'running', 'waiting', 'cancelling')
+              AND run.terminal_at IS NULL
+              AND node.record_kind = 'node_execution' AND node.terminal_at IS NULL
+              AND (
+                  (job.state = 'ready' AND node.state = 'ready') OR
+                  (job.state = 'leased' AND node.state = 'ready') OR
+                  (job.state = 'running' AND node.state = 'running') OR
+                  (job.state = 'waiting' AND node.state = 'waiting') OR
+                  (job.state = 'retry_scheduled' AND node.state = 'retry_scheduled') OR
+                  (job.state = 'cancelling' AND node.state = 'cancelling')
+              )
+              AND scope.record_kind = 'scope_instance' AND scope.state = 'open'
+              AND scope.terminal_at IS NULL
+              AND (
+                  run.current_payload #> '{control,cancel_requested_at}' <> 'null'::jsonb OR
+                  run.current_payload #> '{control,timeout_requested_at}' <> 'null'::jsonb OR
+                  run.deadline <= $1 OR job.deadline <= $1 OR
+                  (
+                      job.attempt_no >= job.attempt_limit AND
+                      (
+                          job.state IN ('waiting', 'cancelling') OR
+                          (job.state = 'running' AND job.lease_expires_at <= $1)
+                      )
+                  )
+              )
+              AND mod(('x' || right(job.job_id, 8))::bit(32)::bigint, $4) = $3
+              AND (
+                  $5::timestamptz IS NULL OR
+                  (LEAST(run.deadline, job.deadline), job.tenant_id, job.job_id) >
+                      ($5::timestamptz, $6::text, $7::text)
+              )
+            ORDER BY LEAST(run.deadline, job.deadline), job.tenant_id, job.job_id
+            LIMIT $2
+            "#,
+        )
+        .bind(scan_now)
+        .bind(i64::from(command.limit))
+        .bind(i64::from(command.shard.index))
+        .bind(i64::from(command.shard.count))
+        .bind(command.after.as_ref().map(|cursor| cursor.sort_at))
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.tenant_id.to_string()),
+        )
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.item_id.to_string()),
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        let scanned_count = rows.len();
+        let last_cursor = rows
+            .last()
+            .map(|row| safety_scan_cursor_from_row(row, "job_id", ResourceKind::Job))
+            .transpose()?;
+        let candidates = rows
+            .into_iter()
+            .map(job_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut converged = Vec::with_capacity(candidates.len());
+        for (observed, slot) in candidates.into_iter().zip(command.slots.iter()) {
+            require_orchestration_job(&observed)?;
+            let has_active_permit = matches!(observed.state.as_str(), "leased" | "running");
+            let quota_accounts = if has_active_permit {
+                lock_job_quota_bundle(&mut transaction, &observed, &slot.quota_entry_ids).await?
+            } else {
+                Vec::new()
+            };
+            let expected_node_state = orchestration_node_state_for_job_state(&observed.state)?;
+            let parents = lock_orchestration_job_parents_matching(
+                &mut transaction,
+                &observed,
+                expected_node_state,
+                &[
+                    RunState::Queued,
+                    RunState::Running,
+                    RunState::Waiting,
+                    RunState::Cancelling,
+                ],
+            )
+            .await?;
+            let other_live_nodes: i64 = sqlx::query_scalar(
+                r#"
+                SELECT count(*) FROM insight_platform.run_nodes
+                WHERE tenant_id = $1 AND run_id = $2 AND record_kind = 'node_execution'
+                  AND node_id <> $3 AND terminal_at IS NULL
+                "#,
+            )
+            .bind(&observed.tenant_id)
+            .bind(&parents.run.run_id)
+            .bind(&parents.node_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            let expected_active_work = i32::from(has_active_permit);
+            if other_live_nodes != 0 || parents.run.active_work_count != expected_active_work {
+                return Err(RepositoryError::Conflict(
+                    "orchestration convergence parent closure",
+                ));
+            }
+            let current = load_job_for_update_by_text(
+                &mut transaction,
+                &observed.tenant_id,
+                &observed.job_id,
+            )
+            .await?;
+            if current.version != observed.version
+                || current.state != observed.state
+                || current.lease_epoch != observed.lease_epoch
+                || current.lease_expires_at != observed.lease_expires_at
+                || current.payload.digest != observed.payload.digest
+                || current.quota_reservation_id != observed.quota_reservation_id
+            {
+                return Err(RepositoryError::Conflict("orchestration convergence Job"));
+            }
+            let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&mut *transaction)
+                .await?;
+            let decision = decide_orchestration_convergence(
+                OrchestrationConvergenceFacts {
+                    run_state: parents.run.state.parse().map_err(
+                        |failure: insight_platform_contracts::state::StateParseError| {
+                            RepositoryError::CorruptRow(failure.to_string())
+                        },
+                    )?,
+                    run_version: u64::try_from(parents.run.version).map_err(|_| {
+                        RepositoryError::CorruptRow("negative Run version".to_owned())
+                    })?,
+                    run_deadline: parents.run.deadline,
+                    control: parents.run.current.control.clone(),
+                    node_state: expected_node_state.parse().map_err(
+                        |failure: insight_platform_contracts::state::StateParseError| {
+                            RepositoryError::CorruptRow(failure.to_string())
+                        },
+                    )?,
+                    job_state: current.state.parse().map_err(
+                        |failure: insight_platform_contracts::state::StateParseError| {
+                            RepositoryError::CorruptRow(failure.to_string())
+                        },
+                    )?,
+                    job_attempt_count: u32::try_from(current.attempt_no).map_err(|_| {
+                        RepositoryError::CorruptRow("negative Job attempt count".to_owned())
+                    })?,
+                    job_attempt_limit: u32::try_from(current.attempt_limit).map_err(|_| {
+                        RepositoryError::CorruptRow("invalid Job attempt limit".to_owned())
+                    })?,
+                    job_deadline: current.deadline,
+                    lease_expires_at: current.lease_expires_at,
+                },
+                database_now,
+            )?
+            .ok_or(RepositoryError::Conflict(
+                "orchestration convergence candidate",
+            ))?;
+            let next_job =
+                decide_job_owner_terminal(&job_projection(&current)?, decision.job_state)?;
+            let result_payload = TypedPayload::with_limit(
+                1,
+                &serde_json::json!({
+                    "attempt_count": current.attempt_no,
+                    "job_id": current.job_id,
+                    "lease_generation": current.lease_epoch,
+                    "reason": decision.reason.as_str(),
+                    "terminal_state": decision.run_state.as_str(),
+                }),
+                65_536,
+            )?;
+            if has_active_permit {
+                let request_digest = result_payload
+                    .digest
+                    .parse::<Sha256Digest>()
+                    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+                settle_locked_job_quota_bundle(
+                    &mut transaction,
+                    &current,
+                    &quota_accounts,
+                    &slot.quota_entry_ids,
+                    &request_digest,
+                )
+                .await?;
+            }
+            let (mut completed, node_cancelling_version) = mutate_converged_orchestration_run(
+                &mut transaction,
+                &current,
+                &next_job,
+                &parents,
+                &decision,
+                &result_payload,
+                database_now,
+                has_active_permit,
+            )
+            .await?;
+            completed.settled_quota_account_ids = quota_accounts
+                .iter()
+                .map(|account| account.quota_account_id.clone())
+                .collect();
+            append_orchestration_convergence_events(
+                &mut transaction,
+                &completed,
+                decision.reason,
+                slot,
+                &result_payload,
+                node_cancelling_version,
+            )
+            .await?;
+            converged.push(ConvergedOrchestrationRun {
+                reason: decision.reason,
+                completed,
+            });
+        }
+        transaction.commit().await?;
+        Ok(safety_scan_page(
+            converged,
+            scanned_count,
+            command.limit,
+            last_cursor,
+        ))
+    }
+
+    pub async fn complete_orchestration_run(
+        &mut self,
+        command: CompleteOrchestrationRun,
+    ) -> Result<CommandOutcome<CompletedOrchestrationRun>, RepositoryError> {
+        command.validate()?;
+        let terminal_failure = command.terminal_failure()?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            "orchestration.run.complete",
+            &command.idempotency_key_digest,
+            &command.request_digest,
+            &command.result_payload,
+            command.receipt_expires_at,
+        )
+        .await?
+        {
+            let completed = load_completed_orchestration_run(
+                &mut transaction,
+                &command.fence.tenant_id,
+                &command.fence.job_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(completed));
+        }
+
+        let observed = load_job_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        require_orchestration_job(&observed)?;
+        let quota_accounts = lock_job_quota_bundle(
+            &mut transaction,
+            &observed,
+            &command.mutations.quota_entry_ids,
+        )
+        .await?;
+        let parents = lock_terminal_orchestration_parents(&mut transaction, &observed).await?;
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        if current.version != observed.version
+            || current.payload.digest != observed.payload.digest
+            || current.quota_reservation_id != observed.quota_reservation_id
+        {
+            return Err(RepositoryError::Conflict("orchestration Job"));
+        }
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let next = decide_job_terminal(
+            &job_projection(&current)?,
+            &domain_job_fence(&command.fence)?,
+            database_now,
+            command.terminal_state.job_state(),
+        )?;
+        let output_value_id = if let Some(output) = &command.output {
+            Some(
+                insert_run_output_value(&mut transaction, &current, &parents.node_id, output)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        settle_locked_job_quota_bundle(
+            &mut transaction,
+            &current,
+            &quota_accounts,
+            &command.mutations.quota_entry_ids,
+            &command.request_digest,
+        )
+        .await?;
+        let mut completed = mutate_terminal_orchestration_run(
+            &mut transaction,
+            &current,
+            &next,
+            &parents,
+            command.terminal_state,
+            &command.result_digest,
+            output_value_id.as_deref(),
+            terminal_failure.as_ref(),
+            database_now,
+        )
+        .await?;
+        completed.settled_quota_account_ids = quota_accounts
+            .iter()
+            .map(|account| account.quota_account_id.clone())
+            .collect();
+        append_orchestration_terminal_events(
+            &mut transaction,
+            &completed,
+            command.terminal_state,
+            &command.mutations,
+            &command.result_payload,
+        )
+        .await?;
+        terminalize_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            &command.request_digest,
+            command.terminal_state.as_str(),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(completed))
+    }
+
+    pub async fn commit(self) -> Result<(), RepositoryError> {
+        self.transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn rollback(self) -> Result<(), RepositoryError> {
+        self.transaction.rollback().await?;
+        Ok(())
+    }
+}
+
+struct SchedulerStateRecord {
+    version: i64,
+    snapshot: SchedulerStateSnapshot,
+}
+
+#[derive(Debug, Clone)]
+struct LockedOrchestrationJobParents {
+    run: RunRecord,
+    node_id: String,
+    node_version: i64,
+    scope_id: String,
+    scope_version: i64,
+}
+
+async fn load_job_by_text(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    job_id: &str,
+) -> Result<JobRecord, RepositoryError> {
+    let row =
+        sqlx::query("SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2")
+            .bind(tenant_id)
+            .bind(job_id)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::NotFound("job"))?;
+    job_from_row(row)
+}
+
+fn require_orchestration_job(job: &JobRecord) -> Result<(), RepositoryError> {
+    if job.work_class != WorkClass::Orchestration.as_str()
+        || job.owner_kind != ResourceKind::NodeExecution.descriptor().name
+        || job.run_id.is_none()
+        || job.node_id.is_none()
+        || job.owner_id != job.node_id.as_deref().unwrap_or_default()
+    {
+        return Err(RepositoryError::InvalidInput(
+            "Job is not an orchestration Node work item".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn claim_job_mutation_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    fence: &JobFence,
+    receipt_id: &ResourceId,
+    operation: &str,
+    idempotency_key_digest: &Sha256Digest,
+    request_digest: &Sha256Digest,
+    payload: &TypedPayload,
+    expires_at: DateTime<Utc>,
+) -> Result<bool, RepositoryError> {
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.receipts (
+            tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+            dedupe_owner_id, operation, idempotency_key_digest, request_digest, state,
+            payload_schema_version, payload, payload_digest, expires_at
+        ) VALUES ($1, $2, 'job_commit', 'job', $3, $4, $5, $6, $7,
+                  'processing', $8, $9, $10, $11)
+        ON CONFLICT (
+            tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+            operation, idempotency_key_digest
+        ) DO NOTHING
+        RETURNING receipt_id
+        "#,
+    )
+    .bind(&fence.tenant_id)
+    .bind(receipt_id.to_string())
+    .bind(&fence.job_id)
+    .bind(fence.worker_id.to_string())
+    .bind(operation)
+    .bind(idempotency_key_digest.to_string())
+    .bind(request_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(expires_at)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if inserted.is_some() {
+        return Ok(false);
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT receipt_id, request_digest, state, payload_digest
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'job_commit'
+          AND scope_kind = 'job' AND scope_id = $2 AND dedupe_owner_id = $3
+          AND operation = $4 AND idempotency_key_digest = $5
+        FOR UPDATE
+        "#,
+    )
+    .bind(&fence.tenant_id)
+    .bind(&fence.job_id)
+    .bind(fence.worker_id.to_string())
+    .bind(operation)
+    .bind(idempotency_key_digest.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if row.try_get::<String, _>("request_digest")? != request_digest.to_string() {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    if row.try_get::<String, _>("payload_digest")? != payload.digest {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    if row.try_get::<String, _>("state")? != "succeeded" {
+        return Err(RepositoryError::Conflict("Job mutation receipt"));
+    }
+    Ok(true)
+}
+
+async fn terminalize_job_mutation_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    fence: &JobFence,
+    receipt_id: &ResourceId,
+    request_digest: &Sha256Digest,
+    disposition: &str,
+) -> Result<(), RepositoryError> {
+    terminalize_job_mutation_receipt_with_reference(
+        transaction,
+        fence,
+        receipt_id,
+        request_digest,
+        disposition,
+        &fence.job_id,
+    )
+    .await
+}
+
+async fn terminalize_job_mutation_receipt_with_reference(
+    transaction: &mut Transaction<'_, Postgres>,
+    fence: &JobFence,
+    receipt_id: &ResourceId,
+    request_digest: &Sha256Digest,
+    disposition: &str,
+    response_reference_id: &str,
+) -> Result<(), RepositoryError> {
+    let updated = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = $4, response_reference_id = $5,
+            completed_at = clock_timestamp()
+        WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
+          AND state = 'processing'
+        "#,
+    )
+    .bind(&fence.tenant_id)
+    .bind(receipt_id.to_string())
+    .bind(request_digest.to_string())
+    .bind(disposition)
+    .bind(response_reference_id)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if updated != 1 {
+        return Err(RepositoryError::Conflict("Job mutation receipt"));
+    }
+    Ok(())
+}
+
+async fn claim_job_wake_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &WakeOrchestrationJob,
+    payload: &TypedPayload,
+) -> Result<bool, RepositoryError> {
+    let tenant_id = command.tenant_id.to_string();
+    let job_id = command.job_id.to_string();
+    let operation = format!("orchestration.job.wake.{}", command.source.as_str());
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.receipts (
+            tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+            dedupe_owner_id, operation, idempotency_key_digest, request_digest, state,
+            payload_schema_version, payload, payload_digest, expires_at
+        ) VALUES ($1, $2, 'job_commit', 'job', $3, $3, $4, $5, $6,
+                  'processing', $7, $8, $9, $10)
+        ON CONFLICT (
+            tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+            operation, idempotency_key_digest
+        ) DO NOTHING
+        RETURNING receipt_id
+        "#,
+    )
+    .bind(&tenant_id)
+    .bind(command.mutations.receipt_id.to_string())
+    .bind(&job_id)
+    .bind(&operation)
+    .bind(command.idempotency_key_digest.to_string())
+    .bind(command.request_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(command.receipt_expires_at)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if inserted.is_some() {
+        return Ok(false);
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT request_digest, state FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'job_commit'
+          AND scope_kind = 'job' AND scope_id = $2 AND dedupe_owner_id = $2
+          AND operation = $3 AND idempotency_key_digest = $4
+        FOR UPDATE
+        "#,
+    )
+    .bind(&tenant_id)
+    .bind(&job_id)
+    .bind(&operation)
+    .bind(command.idempotency_key_digest.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if row.try_get::<String, _>("request_digest")? != command.request_digest.to_string() {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    if row.try_get::<String, _>("state")? != "succeeded" {
+        return Err(RepositoryError::Conflict("Job wake receipt"));
+    }
+    Ok(true)
+}
+
+async fn terminalize_job_wake_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &WakeOrchestrationJob,
+    disposition: &str,
+) -> Result<(), RepositoryError> {
+    let updated = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = $4, response_reference_id = $5,
+            completed_at = clock_timestamp()
+        WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
+          AND state = 'processing'
+        "#,
+    )
+    .bind(command.tenant_id.to_string())
+    .bind(command.mutations.receipt_id.to_string())
+    .bind(command.request_digest.to_string())
+    .bind(disposition)
+    .bind(command.job_id.to_string())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if updated != 1 {
+        return Err(RepositoryError::Conflict("Job wake receipt"));
+    }
+    Ok(())
+}
+
+async fn lock_terminal_orchestration_parents(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+) -> Result<LockedOrchestrationJobParents, RepositoryError> {
+    let parents = lock_orchestration_job_parents(transaction, job, "running").await?;
+    let other_live_nodes: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*) FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND record_kind = 'node_execution'
+          AND node_id <> $3 AND terminal_at IS NULL
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(&parents.node_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if parents.run.active_work_count != 1
+        || other_live_nodes != 0
+        || parents.run.current.control.cancel_requested_at.is_some()
+        || parents.run.current.control.timeout_requested_at.is_some()
+    {
+        return Err(RepositoryError::Conflict(
+            "terminal orchestration parent closure",
+        ));
+    }
+    Ok(parents)
+}
+
+fn orchestration_node_state_for_job_state(
+    job_state: &str,
+) -> Result<&'static str, RepositoryError> {
+    match job_state {
+        "ready" | "leased" => Ok("ready"),
+        "running" => Ok("running"),
+        "waiting" => Ok("waiting"),
+        "retry_scheduled" => Ok("retry_scheduled"),
+        "cancelling" => Ok("cancelling"),
+        _ => Err(RepositoryError::CorruptRow(
+            "orchestration Job and Node states are incompatible".to_owned(),
+        )),
+    }
+}
+
+async fn lock_running_orchestration_job_parents(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+) -> Result<LockedOrchestrationJobParents, RepositoryError> {
+    let parents = lock_orchestration_job_parents(transaction, job, "running").await?;
+    if parents.run.active_work_count < 1 {
+        return Err(RepositoryError::Conflict("orchestration active work"));
+    }
+    Ok(parents)
+}
+
+async fn lock_waiting_orchestration_job_parents(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+) -> Result<LockedOrchestrationJobParents, RepositoryError> {
+    lock_orchestration_job_parents(transaction, job, "waiting").await
+}
+
+async fn lock_orchestration_job_parents(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+    expected_node_state: &str,
+) -> Result<LockedOrchestrationJobParents, RepositoryError> {
+    lock_orchestration_job_parents_matching(
+        transaction,
+        job,
+        expected_node_state,
+        &[RunState::Running],
+    )
+    .await
+}
+
+async fn lock_orchestration_job_parents_matching(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+    expected_node_state: &str,
+    allowed_run_states: &[RunState],
+) -> Result<LockedOrchestrationJobParents, RepositoryError> {
+    let run_id: ResourceId = job
+        .run_id
+        .as_deref()
+        .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Run".to_owned()))?
+        .parse()
+        .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        })?;
+    let node_id = job
+        .node_id
+        .as_deref()
+        .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Node".to_owned()))?;
+    let tenant_id: ResourceId =
+        job.tenant_id
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    let run = load_run_for_update(transaction, &tenant_id, &run_id).await?;
+    let scope_id: String = sqlx::query_scalar(
+        r#"
+        SELECT scope_id FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(node_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("orchestration Node"))?;
+    if scope_id == node_id {
+        return Err(RepositoryError::CorruptRow(
+            "orchestration Node cannot be its own Scope".to_owned(),
+        ));
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT node_id, scope_id, state, version, record_kind
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id IN ($2, $3)
+        ORDER BY node_id
+        FOR UPDATE
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(node_id)
+    .bind(&scope_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.len() != 2 {
+        return Err(RepositoryError::Conflict(
+            "terminal orchestration parent closure",
+        ));
+    }
+    let mut node = None;
+    let mut scope = None;
+    for row in rows {
+        let locked_id: String = row.try_get("node_id")?;
+        if locked_id == node_id {
+            node = Some(row);
+        } else if locked_id == scope_id {
+            scope = Some(row);
+        } else {
+            return Err(RepositoryError::CorruptRow(
+                "terminal parent lock returned an unexpected Node".to_owned(),
+            ));
+        }
+    }
+    let node = node.ok_or(RepositoryError::NotFound("orchestration Node"))?;
+    let scope = scope.ok_or(RepositoryError::NotFound("orchestration Scope"))?;
+    let run_state = run
+        .state
+        .parse::<RunState>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if run.terminal_at.is_some()
+        || !allowed_run_states.contains(&run_state)
+        || node.try_get::<String, _>("record_kind")? != "node_execution"
+        || node.try_get::<String, _>("scope_id")? != scope_id
+        || node.try_get::<String, _>("state")? != expected_node_state
+        || scope.try_get::<String, _>("record_kind")? != "scope_instance"
+        || scope.try_get::<String, _>("state")? != "open"
+    {
+        return Err(RepositoryError::Conflict("orchestration parent closure"));
+    }
+    Ok(LockedOrchestrationJobParents {
+        run,
+        node_id: node.try_get("node_id")?,
+        node_version: node.try_get("version")?,
+        scope_id: scope.try_get("node_id")?,
+        scope_version: scope.try_get("version")?,
+    })
+}
+
+async fn lock_job_quota_bundle(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+    _settlement_entry_ids: &[ResourceId],
+) -> Result<Vec<QuotaAccountRecord>, RepositoryError> {
+    let (accounts, already_settled) = lock_job_quota_bundle_state(transaction, job).await?;
+    if already_settled {
+        return Err(RepositoryError::Conflict("orchestration quota settlement"));
+    }
+    Ok(accounts)
+}
+
+async fn lock_job_quota_bundle_state(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+) -> Result<(Vec<QuotaAccountRecord>, bool), RepositoryError> {
+    let reservation_id = job.quota_reservation_id.as_deref().ok_or_else(|| {
+        RepositoryError::CorruptRow("leased orchestration Job has no quota reservation".to_owned())
+    })?;
+    let rows = sqlx::query(
+        r#"
+        SELECT account.*,
+               reserve.reserved_amount AS reservation_amount,
+               reserve.used_amount AS reservation_used_amount
+        FROM insight_platform.quota_ledger AS reserve
+        JOIN insight_platform.quota_accounts AS account
+          ON account.tenant_id = reserve.tenant_id
+         AND account.quota_account_id = reserve.quota_account_id
+        WHERE reserve.tenant_id = $1 AND reserve.correlation_id = $2
+          AND reserve.entry_kind = 'reserve'
+        ORDER BY account.tenant_id, account.quota_account_id
+        FOR UPDATE OF account
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(reservation_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.is_empty() || rows.len() > MAX_ORCHESTRATION_QUOTA_LINES {
+        return Err(RepositoryError::CorruptRow(
+            "orchestration quota bundle is empty or unbounded".to_owned(),
+        ));
+    }
+    let already_settled: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM insight_platform.quota_ledger
+            WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'
+        )
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(reservation_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let mut accounts = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.try_get::<i64, _>("reservation_amount")? != 1
+            || row.try_get::<i64, _>("reservation_used_amount")? != 0
+        {
+            return Err(RepositoryError::CorruptRow(
+                "orchestration reservation amount is invalid".to_owned(),
+            ));
+        }
+        let account = quota_account_from_row(row)?;
+        if account.tenant_id != job.tenant_id
+            || account.work_class != WorkClass::Orchestration.as_str()
+            || account.metric != "concurrent_jobs"
+            || account.reserved_value < 1
+        {
+            return Err(RepositoryError::CorruptRow(
+                "orchestration quota account does not match its Job".to_owned(),
+            ));
+        }
+        accounts.push(account);
+    }
+    Ok((accounts, already_settled))
+}
+
+async fn settle_locked_job_quota_bundle(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+    accounts: &[QuotaAccountRecord],
+    settlement_entry_ids: &[ResourceId],
+    request_digest: &Sha256Digest,
+) -> Result<(), RepositoryError> {
+    let reservation_id = job.quota_reservation_id.as_deref().ok_or_else(|| {
+        RepositoryError::CorruptRow("leased orchestration Job has no quota reservation".to_owned())
+    })?;
+    for (account, entry_id) in accounts.iter().zip(settlement_entry_ids) {
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.quota_accounts
+            SET reserved_value = reserved_value - 1, version = version + 1,
+                updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND quota_account_id = $2 AND version = $3
+              AND reserved_value >= 1
+            RETURNING version
+            "#,
+        )
+        .bind(&account.tenant_id)
+        .bind(&account.quota_account_id)
+        .bind(account.version)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("orchestration quota account"))?;
+        let account_version: i64 = row.try_get("version")?;
+        let quota_entry_id = entry_id.to_string();
+        insert_quota_entry(
+            transaction,
+            QuotaEntryInsert {
+                tenant_id: &account.tenant_id,
+                quota_entry_id: &quota_entry_id,
+                quota_account_id: &account.quota_account_id,
+                correlation_id: reservation_id,
+                entry_kind: "settle",
+                reserved_amount: 1,
+                used_amount: 0,
+                account_version,
+                request_digest: request_digest.as_str(),
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn insert_run_output_value(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+    node_id: &str,
+    output: &RunInputValue,
+) -> Result<String, RepositoryError> {
+    let tenant_id: ResourceId =
+        job.tenant_id
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    if let ValueRef::Artifact { artifact } = &output.value {
+        require_ready_run_artifact(transaction, &tenant_id, artifact).await?;
+    }
+    let (inline_value, artifact_id) = match &output.value {
+        ValueRef::Inline { value } => (Some(value), None),
+        ValueRef::Artifact { artifact } => (None, Some(artifact.artifact_id().to_string())),
+    };
+    let run_id = job
+        .run_id
+        .as_deref()
+        .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Run".to_owned()))?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_values (
+            tenant_id, value_id, run_id, node_id, value_kind, classification,
+            schema_digest, content_digest, inline_value, artifact_id
+        ) VALUES ($1, $2, $3, $4, 'run_output', $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(output.value_id.to_string())
+    .bind(run_id)
+    .bind(node_id)
+    .bind(output.classification.as_str())
+    .bind(output.schema_digest.to_string())
+    .bind(output.content_digest.to_string())
+    .bind(inline_value)
+    .bind(artifact_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(output.value_id.to_string())
+}
+
+fn orchestration_job_payload_with_wake(
+    current: &JobRecord,
+    wake_contract: Option<WakeContract>,
+) -> Result<TypedPayload, RepositoryError> {
+    let mut payload: OrchestrationJobPayload =
+        decode_typed_payload(&current.payload, "orchestration Job")?;
+    payload
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    payload.wake_contract = wake_contract;
+    TypedPayload::with_limit(1, &payload, 262_144)
+}
+
+#[derive(Debug, Clone)]
+struct ControllerSourceNode {
+    plan_node_key: PlanNodeKey,
+    node_kind: PlanNodeKind,
+    scope_id: String,
+    version: i64,
+}
+
+#[derive(Debug, Clone)]
+enum ControllerStepShape {
+    Sequential {
+        targets: Vec<PlanNodeKey>,
+    },
+    Fork {
+        legs: Vec<PlanNodeKey>,
+        join: PlanNodeKey,
+        policy: JoinPolicy,
+        quorum: Option<u16>,
+        remainder: Option<JoinRemainderPolicy>,
+    },
+    LoopIteration {
+        body: PlanNodeKey,
+        loop_plan_node_key: PlanNodeKey,
+        iteration: u32,
+    },
+    LoopIterationExit {
+        loop_node_execution_id: ResourceId,
+        loop_plan_node_key: PlanNodeKey,
+        expected_scope_id: ResourceId,
+        iteration: u32,
+    },
+    MapBatch {
+        body: PlanNodeKey,
+        next: PlanNodeKey,
+        failure_policy: MapFailurePolicy,
+        item_count: u32,
+        batch_start: u32,
+        batch_size: u32,
+        root_map_node_execution_id: ResourceId,
+        has_more: bool,
+    },
+    MapItemExit {
+        map_wait_node_execution_id: Option<ResourceId>,
+        map_plan_node_key: PlanNodeKey,
+        next_plan_node_key: PlanNodeKey,
+        failure_policy: MapFailurePolicy,
+        item_count: u32,
+        item_index: u32,
+        root_map_node_execution_id: ResourceId,
+    },
+    ParallelLegExit {
+        join_node_execution_id: ResourceId,
+        join_plan_node_key: PlanNodeKey,
+        expected_scope_ids: Vec<ResourceId>,
+        policy: JoinPolicy,
+        quorum: Option<u16>,
+        remainder: Option<JoinRemainderPolicy>,
+    },
+}
+
+const fn map_policy_requires_admission_barrier(policy: MapFailurePolicy) -> bool {
+    !matches!(policy, MapFailurePolicy::AllSettled)
+}
+
+impl ControllerStepShape {
+    fn activation_targets(&self) -> Result<Vec<PlanNodeKey>, RepositoryError> {
+        match self {
+            Self::Sequential { targets } => Ok(targets.clone()),
+            Self::Fork { legs, .. } => Ok(legs.clone()),
+            Self::LoopIteration { body, .. } => Ok(vec![body.clone()]),
+            Self::MapBatch {
+                body, batch_size, ..
+            } => Ok(vec![
+                body.clone();
+                usize::try_from(*batch_size).map_err(|_| {
+                    RepositoryError::InvalidInput(
+                        "Map batch size exceeds platform representation".to_owned(),
+                    )
+                })?
+            ]),
+            Self::LoopIterationExit { .. }
+            | Self::MapItemExit { .. }
+            | Self::ParallelLegExit { .. } => Ok(Vec::new()),
+        }
+    }
+
+    fn validate_slots(&self, mutations: &ControllerStepMutationIds) -> Result<(), RepositoryError> {
+        match self {
+            Self::Sequential { targets }
+                if targets.len() == mutations.activations.len()
+                    && mutations.pending_nodes.is_empty()
+                    && mutations
+                        .activations
+                        .iter()
+                        .all(|slot| slot.scope.is_none())
+                    && mutations.structural_exit.is_none()
+                    && mutations.pending_wake.is_none()
+                    && mutations.remainder_cancellations.is_empty() =>
+            {
+                Ok(())
+            }
+            Self::Fork { legs, .. }
+                if legs.len() == mutations.activations.len()
+                    && mutations.pending_nodes.len() == 1
+                    && mutations
+                        .activations
+                        .iter()
+                        .all(|slot| slot.scope.is_some())
+                    && mutations.structural_exit.is_none()
+                    && mutations.pending_wake.is_none()
+                    && mutations.remainder_cancellations.is_empty() =>
+            {
+                Ok(())
+            }
+            Self::LoopIteration { .. }
+                if mutations.activations.len() == 1
+                    && mutations.pending_nodes.len() == 1
+                    && mutations.activations[0].scope.is_some()
+                    && mutations.structural_exit.is_none()
+                    && mutations.pending_wake.is_none()
+                    && mutations.remainder_cancellations.is_empty() =>
+            {
+                Ok(())
+            }
+            Self::LoopIterationExit { .. }
+                if mutations.activations.is_empty()
+                    && mutations.pending_nodes.is_empty()
+                    && mutations.structural_exit.is_some()
+                    && mutations.pending_wake.is_some()
+                    && mutations.remainder_cancellations.is_empty() =>
+            {
+                Ok(())
+            }
+            Self::MapBatch {
+                failure_policy,
+                item_count,
+                batch_start,
+                batch_size,
+                has_more,
+                ..
+            } if !mutations.activations.is_empty()
+                && mutations.pending_nodes.len() == 1
+                && mutations
+                    .activations
+                    .iter()
+                    .all(|slot| slot.scope.is_some())
+                && mutations.structural_exit.is_none()
+                && mutations.remainder_cancellations.is_empty()
+                && mutations.pending_wake.is_some()
+                    == (*has_more && !map_policy_requires_admission_barrier(*failure_policy))
+                && u32::try_from(mutations.activations.len()).ok() == Some(*batch_size)
+                && batch_start
+                    .checked_add(*batch_size)
+                    .is_some_and(|end| end <= *item_count) =>
+            {
+                Ok(())
+            }
+            Self::MapItemExit { .. }
+                if mutations.activations.is_empty()
+                    && mutations.pending_nodes.is_empty()
+                    && mutations.structural_exit.is_some()
+                    && mutations.pending_wake.is_some() =>
+            {
+                Ok(())
+            }
+            Self::ParallelLegExit { .. }
+                if mutations.activations.is_empty()
+                    && mutations.pending_nodes.is_empty()
+                    && mutations.structural_exit.is_some()
+                    && mutations.pending_wake.is_some() =>
+            {
+                Ok(())
+            }
+            _ => Err(RepositoryError::InvalidInput(
+                "controller mutation slot shape does not match the deterministic decision"
+                    .to_owned(),
+            )),
+        }
+    }
+}
+
+fn validate_failure_mutation_shape(
+    mutations: &ControllerStepMutationIds,
+    structured_exit: bool,
+    error_route: Option<&ErrorBoundaryRoute>,
+) -> Result<(), RepositoryError> {
+    if error_route.is_some() {
+        let matches = mutations.activations.len() == 1
+            && mutations.activations[0].scope.is_none()
+            && mutations.pending_nodes.is_empty()
+            && mutations.structural_exit.is_none()
+            && mutations.pending_wake.is_none()
+            && mutations.remainder_cancellations.is_empty();
+        return if matches {
+            Ok(())
+        } else {
+            Err(RepositoryError::InvalidInput(
+                "ErrorBoundary failure requires exactly one handler activation".to_owned(),
+            ))
+        };
+    }
+    let common = mutations.activations.is_empty()
+        && mutations.pending_nodes.is_empty()
+        && mutations.structural_exit.is_some();
+    let matches = if structured_exit {
+        common && mutations.pending_wake.is_some()
+    } else {
+        common && mutations.pending_wake.is_none() && mutations.remainder_cancellations.is_empty()
+    };
+    if !matches {
+        return Err(RepositoryError::InvalidInput(
+            "orchestration failure mutation shape does not match its Scope".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn require_exact_runtime_plan(
+    transaction: &mut Transaction<'_, Postgres>,
+    run: &RunRecord,
+    plan: &RuntimePlan,
+    plan_digest: &Sha256Digest,
+) -> Result<(), RepositoryError> {
+    if plan.interface_revision_id != run.bindings.agent_interface.revision_id {
+        return Err(RepositoryError::Conflict(
+            "runtime Plan Agent interface binding",
+        ));
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT payload_schema_version, payload, payload_digest
+        FROM insight_platform.resource_versions
+        WHERE tenant_id = $1 AND resource_version_id = $2
+          AND resource_version_kind = 'agent_plan_revision' AND content_digest = $3
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(run.bindings.plan.revision_id.to_string())
+    .bind(run.bindings.plan.semantic_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("exact Agent Plan revision"))?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let published = decode_published_version_payload(&payload)?;
+    published
+        .validate_for(RegistryResourceKind::Agent, &run.bindings.plan.revision_id)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let ResourceDocument::Agent(agent) = published.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Agent Plan revision contains a non-Agent document".to_owned(),
+        ));
+    };
+    if &agent.typed_plan_digest != plan_digest {
+        return Err(RepositoryError::Conflict("exact typed Plan digest"));
+    }
+    Ok(())
+}
+
+async fn load_controller_source_node(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    plan: &RuntimePlan,
+) -> Result<ControllerSourceNode, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT plan_node_key, node_kind, scope_id, version
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2
+          AND run_id = $3 AND record_kind = 'node_execution' AND state = 'running'
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(&parents.node_id)
+    .bind(&parents.run.run_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("running controller Node"))?;
+    let plan_node_key = PlanNodeKey::new(row.try_get("plan_node_key")?)?;
+    let node_kind = row
+        .try_get::<String, _>("node_kind")?
+        .parse::<PlanNodeKind>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let runtime_node = plan.node(&plan_node_key)?;
+    let job_payload: OrchestrationJobPayload =
+        decode_typed_payload(&job.payload, "orchestration Job")?;
+    job_payload
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if runtime_node.kind() != node_kind
+        || job_payload.bindings_digest != parents.run.bindings.canonical_digest
+        || job_payload.node_execution_id.to_string() != parents.node_id
+        || row.try_get::<String, _>("scope_id")? != parents.scope_id
+    {
+        return Err(RepositoryError::Conflict(
+            "controller Node exact Plan binding",
+        ));
+    }
+    Ok(ControllerSourceNode {
+        plan_node_key,
+        node_kind,
+        scope_id: parents.scope_id.clone(),
+        version: row.try_get("version")?,
+    })
+}
+
+fn controller_failure(code: &'static str) -> Failure {
+    let (platform_code, class) = match code {
+        "budget_exhausted" => (PlatformFailureCode::BudgetExhausted, FailureClass::Quota),
+        "child_failed" | "quorum_unreachable" | "map_item_failed" | "map_error_limit_exceeded" => (
+            PlatformFailureCode::DependencyUnavailable,
+            FailureClass::Dependency,
+        ),
+        _ => (
+            PlatformFailureCode::PlanInvariantFailed,
+            FailureClass::Platform,
+        ),
+    };
+    Failure {
+        code: FailureCode::Platform {
+            code: platform_code,
+        },
+        class,
+        retryability: Retryability::Never,
+        safe_message: None,
+        details_ref: None,
+        source: FailureSource::Plan,
+    }
+}
+
+fn derive_orchestration_failure(
+    cause: &OrchestrationFailureCause,
+    runtime_node: &insight_platform_orchestrator::RuntimeNode,
+) -> Result<(Failure, Option<String>), RepositoryError> {
+    match cause {
+        OrchestrationFailureCause::Committed { failure } => {
+            if matches!(
+                runtime_node,
+                insight_platform_orchestrator::RuntimeNode::Join { .. }
+                    | insight_platform_orchestrator::RuntimeNode::Map { .. }
+                    | insight_platform_orchestrator::RuntimeNode::Loop { .. }
+                    | insight_platform_orchestrator::RuntimeNode::ErrorBoundary { .. }
+            ) {
+                return Err(RepositoryError::InvalidInput(
+                    "controller Node failure must be derived from its exact observation".to_owned(),
+                ));
+            }
+            Ok((failure.clone(), None))
+        }
+        OrchestrationFailureCause::Controller { observation } => {
+            let ControllerDecision::FailNode { code } =
+                decide_controller(runtime_node, observation)?
+            else {
+                return Err(RepositoryError::InvalidInput(
+                    "controller observation does not produce a failed Node".to_owned(),
+                ));
+            };
+            Ok((controller_failure(code), Some(code.to_owned())))
+        }
+    }
+}
+
+async fn require_failure_references(
+    transaction: &mut Transaction<'_, Postgres>,
+    run: &RunRecord,
+    failure: &Failure,
+) -> Result<(), RepositoryError> {
+    failure
+        .validate(1_024)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    if let FailureCode::Declared {
+        interface_revision_id,
+        ..
+    } = &failure.code
+    {
+        let bound = run
+            .bindings
+            .exact_version_refs()
+            .into_iter()
+            .any(|reference| &reference.revision_id == interface_revision_id);
+        if !bound {
+            return Err(RepositoryError::Conflict(
+                "declared Failure interface binding",
+            ));
+        }
+    }
+    if let Some(details) = &failure.details_ref {
+        let tenant_id = run.tenant_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        require_ready_run_artifact(transaction, &tenant_id, details).await?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ErrorBoundaryRoute {
+    boundary_node_id: String,
+    boundary_parent_node_id: Option<String>,
+    target: PlanNodeKey,
+}
+
+fn failure_route_keys(failure: &Failure) -> Vec<&str> {
+    let code = match &failure.code {
+        FailureCode::Platform { code } => code.as_str(),
+        FailureCode::Declared { code, .. } => code.as_str(),
+    };
+    vec![code, failure.class.as_str()]
+}
+
+async fn find_matching_error_boundary(
+    transaction: &mut Transaction<'_, Postgres>,
+    run: &RunRecord,
+    source_node_id: &str,
+    plan: &RuntimePlan,
+    failure: &Failure,
+    maximum_depth: usize,
+) -> Result<Option<ErrorBoundaryRoute>, RepositoryError> {
+    let mut current_id = source_node_id.to_owned();
+    let route_keys = failure_route_keys(failure);
+    for _ in 0..maximum_depth {
+        let row = sqlx::query(
+            r#"
+            SELECT parent_node_id, plan_node_key, node_kind
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'node_execution'
+            "#,
+        )
+        .bind(&run.tenant_id)
+        .bind(&run.run_id)
+        .bind(&current_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("failure ancestor chain"))?;
+        let Some(parent_id) = row.try_get::<Option<String>, _>("parent_node_id")? else {
+            return Ok(None);
+        };
+        let parent = sqlx::query(
+            r#"
+            SELECT parent_node_id, plan_node_key, node_kind
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'node_execution'
+            "#,
+        )
+        .bind(&run.tenant_id)
+        .bind(&run.run_id)
+        .bind(&parent_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("failure ancestor Node"))?;
+        let plan_node_key = PlanNodeKey::new(parent.try_get("plan_node_key")?)?;
+        let runtime_node = plan.node(&plan_node_key)?;
+        if runtime_node.kind().as_str() != parent.try_get::<String, _>("node_kind")? {
+            return Err(RepositoryError::Conflict("failure ancestor Plan binding"));
+        }
+        if let insight_platform_orchestrator::RuntimeNode::ErrorBoundary { handlers, .. } =
+            runtime_node
+        {
+            if let Some(target) = route_keys
+                .iter()
+                .find_map(|key| handlers.get(*key))
+                .cloned()
+            {
+                return Ok(Some(ErrorBoundaryRoute {
+                    boundary_node_id: parent_id,
+                    boundary_parent_node_id: parent.try_get("parent_node_id")?,
+                    target,
+                }));
+            }
+        }
+        current_id = parent_id;
+    }
+    Err(RepositoryError::CorruptRow(
+        "failure ancestor chain exceeds the Plan bound".to_owned(),
+    ))
+}
+
+async fn require_exact_controller_observation(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    source_node: &ControllerSourceNode,
+    runtime_node: &insight_platform_orchestrator::RuntimeNode,
+    observation: &ControllerObservation,
+) -> Result<(), RepositoryError> {
+    if let insight_platform_orchestrator::RuntimeNode::Map {
+        body,
+        next,
+        failure_policy,
+        ..
+    } = runtime_node
+    {
+        let row = sqlx::query(
+            r#"
+            SELECT payload_schema_version, payload, payload_digest
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'node_execution' AND state = 'running'
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(&parents.run.run_id)
+        .bind(&parents.node_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("running Map Node"))?;
+        let payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        match observation {
+            ControllerObservation::Map { item_count } if payload.value.get("wait").is_some() => {
+                let pending: StoredPendingControllerNodePayload =
+                    decode_typed_payload(&payload, "running Map admission Node")?;
+                let StoredControllerWait::MapAdmission {
+                    body_plan_node_key,
+                    failure_policy: stored_policy,
+                    item_count: stored_count,
+                    next_item_index,
+                    next_plan_node_key,
+                } = pending.wait
+                else {
+                    return Err(RepositoryError::Conflict("Map admission phase"));
+                };
+                if pending.plan_node_key != source_node.plan_node_key
+                    || body_plan_node_key != *body
+                    || next_plan_node_key != *next
+                    || stored_policy != *failure_policy
+                    || stored_count != *item_count
+                    || next_item_index >= stored_count
+                    || !pending.expected_scope_ids.is_empty()
+                {
+                    return Err(RepositoryError::Conflict(
+                        "Map admission observation contract",
+                    ));
+                }
+            }
+            ControllerObservation::Map { .. } => {}
+            ControllerObservation::MapSettlement { children } => {
+                let pending: StoredPendingControllerNodePayload =
+                    decode_typed_payload(&payload, "running Map settlement Node")?;
+                let StoredControllerWait::MapSettlement {
+                    failure_policy: stored_policy,
+                    item_count,
+                    admitted_item_count,
+                    next_plan_node_key,
+                } = pending.wait
+                else {
+                    return Err(RepositoryError::Conflict("Map settlement phase"));
+                };
+                let expected_item_count = usize::try_from(admitted_item_count).map_err(|_| {
+                    RepositoryError::InvalidInput(
+                        "Map item count exceeds platform representation".to_owned(),
+                    )
+                })?;
+                if pending.plan_node_key != source_node.plan_node_key
+                    || next_plan_node_key != *next
+                    || stored_policy != *failure_policy
+                    || admitted_item_count == 0
+                    || admitted_item_count > item_count
+                    || !pending.expected_scope_ids.is_empty()
+                    || children.len() != expected_item_count
+                {
+                    return Err(RepositoryError::Conflict(
+                        "Map settlement observation contract",
+                    ));
+                }
+                let root_map_node_id = pending.controller_node_execution_id.to_string();
+                let rows = sqlx::query(
+                    r#"
+                    SELECT state, payload_schema_version, payload, payload_digest
+                    FROM insight_platform.run_nodes
+                    WHERE tenant_id = $1 AND run_id = $2 AND record_kind = 'scope_instance'
+                      AND parent_node_id = $3 AND node_kind = 'map_item'
+                    "#,
+                )
+                .bind(&current_job.tenant_id)
+                .bind(&parents.run.run_id)
+                .bind(&root_map_node_id)
+                .fetch_all(&mut **transaction)
+                .await?;
+                if rows.len() != children.len() {
+                    return Err(RepositoryError::Conflict("Map observed Scope set"));
+                }
+                let mut outcomes = BTreeMap::new();
+                for row in rows {
+                    let scope_payload = payload_from_row(
+                        &row,
+                        "payload_schema_version",
+                        "payload",
+                        "payload_digest",
+                    )?;
+                    let stored: StoredControllerScopePayload =
+                        decode_typed_payload(&scope_payload, "MapItem Scope observation")?;
+                    let StoredControllerScopeDescriptor::MapItem {
+                        failure_policy: item_policy,
+                        item_count: stored_count,
+                        item_index,
+                        map_plan_node_key,
+                        next_plan_node_key: item_next,
+                    } = stored.descriptor
+                    else {
+                        return Err(RepositoryError::Conflict("MapItem Scope descriptor"));
+                    };
+                    if stored.controller_node_execution_id != pending.controller_node_execution_id
+                        || item_policy != *failure_policy
+                        || stored_count != item_count
+                        || map_plan_node_key != source_node.plan_node_key
+                        || item_next != *next
+                        || item_index >= admitted_item_count
+                    {
+                        return Err(RepositoryError::Conflict(
+                            "MapItem Scope observation contract",
+                        ));
+                    }
+                    let outcome = match row
+                        .try_get::<String, _>("state")?
+                        .parse::<ScopeState>()
+                        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?
+                    {
+                        ScopeState::Open => ChildOutcome::Active,
+                        ScopeState::Succeeded => ChildOutcome::Succeeded,
+                        ScopeState::Failed => ChildOutcome::Failed,
+                        ScopeState::Cancelled => ChildOutcome::Cancelled,
+                        ScopeState::Closing => {
+                            return Err(RepositoryError::Conflict("Map observed closing Scope"));
+                        }
+                    };
+                    if outcomes.insert(item_index, outcome).is_some() {
+                        return Err(RepositoryError::Conflict("duplicate Map item index"));
+                    }
+                }
+                let exact = (0..admitted_item_count)
+                    .map(|index| {
+                        outcomes.get(&index).copied().ok_or_else(|| {
+                            RepositoryError::CorruptRow("Map lost an item outcome".to_owned())
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if children != &exact {
+                    return Err(RepositoryError::Conflict("exact Map observation"));
+                }
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+    if matches!(
+        runtime_node,
+        insight_platform_orchestrator::RuntimeNode::Loop { .. }
+    ) {
+        let ControllerObservation::Loop { iteration, .. } = observation else {
+            return Ok(());
+        };
+        let row = sqlx::query(
+            r#"
+            SELECT parent_node_id, payload_schema_version, payload, payload_digest
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'node_execution' AND state = 'running'
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(&parents.run.run_id)
+        .bind(&parents.node_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("running Loop Node"))?;
+        let payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        if payload.value.get("wait").is_some() {
+            let pending: StoredPendingControllerNodePayload =
+                decode_typed_payload(&payload, "running Loop continuation Node")?;
+            let StoredControllerWait::Loop {
+                iteration: stored_iteration,
+            } = pending.wait
+            else {
+                return Err(RepositoryError::Conflict("Loop continuation wait kind"));
+            };
+            let controller_node_id = row
+                .try_get::<Option<String>, _>("parent_node_id")?
+                .ok_or_else(|| {
+                    RepositoryError::CorruptRow(
+                        "Loop continuation has no controller owner".to_owned(),
+                    )
+                })?;
+            if pending.controller_node_execution_id.to_string() != controller_node_id
+                || pending.plan_node_key != source_node.plan_node_key
+                || stored_iteration != *iteration
+                || pending.expected_scope_ids.len() != 1
+            {
+                return Err(RepositoryError::Conflict(
+                    "Loop frozen observation contract",
+                ));
+            }
+        } else if *iteration != 0 {
+            return Err(RepositoryError::Conflict(
+                "initial Loop iteration observation",
+            ));
+        }
+        return Ok(());
+    }
+    let insight_platform_orchestrator::RuntimeNode::Join {
+        policy,
+        quorum,
+        remainder,
+        ..
+    } = runtime_node
+    else {
+        return Ok(());
+    };
+    let row = sqlx::query(
+        r#"
+        SELECT parent_node_id, payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+          AND record_kind = 'node_execution' AND state = 'running'
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(&parents.node_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("running Join Node"))?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let pending: StoredPendingControllerNodePayload =
+        decode_typed_payload(&payload, "running Join Node")?;
+    let StoredControllerWait::Join {
+        policy: stored_policy,
+        quorum: stored_quorum,
+        remainder: stored_remainder,
+    } = pending.wait
+    else {
+        return Err(RepositoryError::Conflict("Join continuation wait kind"));
+    };
+    let unique_scope_ids = pending
+        .expected_scope_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let controller_node_id = row
+        .try_get::<Option<String>, _>("parent_node_id")?
+        .ok_or_else(|| {
+            RepositoryError::CorruptRow("Join Node has no controller owner".to_owned())
+        })?;
+    if pending.controller_node_execution_id.to_string() != controller_node_id
+        || pending.plan_node_key != source_node.plan_node_key
+        || &stored_policy != policy
+        || &stored_quorum != quorum
+        || &stored_remainder != remainder
+        || pending.expected_scope_ids.is_empty()
+        || unique_scope_ids.len() != pending.expected_scope_ids.len()
+    {
+        return Err(RepositoryError::Conflict(
+            "Join frozen observation contract",
+        ));
+    }
+    let expected_ids = pending
+        .expected_scope_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT node_id, parent_node_id, node_kind, state
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2
+          AND node_id = ANY($3::text[]) AND record_kind = 'scope_instance'
+        ORDER BY node_id
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(&expected_ids)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.len() != expected_ids.len() {
+        return Err(RepositoryError::Conflict("Join observed Scope set"));
+    }
+    let mut outcomes = BTreeMap::new();
+    for row in rows {
+        let scope_id: String = row.try_get("node_id")?;
+        if row
+            .try_get::<Option<String>, _>("parent_node_id")?
+            .as_deref()
+            != Some(controller_node_id.as_str())
+            || row.try_get::<String, _>("node_kind")? != "parallel_leg"
+        {
+            return Err(RepositoryError::Conflict("Join observed Scope ownership"));
+        }
+        let outcome = match row
+            .try_get::<String, _>("state")?
+            .parse::<ScopeState>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?
+        {
+            ScopeState::Open => ChildOutcome::Active,
+            ScopeState::Succeeded => ChildOutcome::Succeeded,
+            ScopeState::Failed => ChildOutcome::Failed,
+            ScopeState::Cancelled => ChildOutcome::Cancelled,
+            ScopeState::Closing => {
+                return Err(RepositoryError::Conflict("Join observed closing Scope"));
+            }
+        };
+        outcomes.insert(scope_id, outcome);
+    }
+    let exact = ControllerObservation::Join {
+        children: expected_ids
+            .iter()
+            .map(|scope_id| {
+                outcomes.get(scope_id).copied().ok_or_else(|| {
+                    RepositoryError::CorruptRow("Join lost an observed Scope".to_owned())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    if observation != &exact {
+        return Err(RepositoryError::Conflict("exact Join observation"));
+    }
+    Ok(())
+}
+
+async fn load_parallel_leg_exit(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    source_node: &ControllerSourceNode,
+    target: Option<&PlanNodeKey>,
+) -> Result<Option<ControllerStepShape>, RepositoryError> {
+    let scope_row = sqlx::query(
+        r#"
+        SELECT node_kind, parent_node_id, payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+          AND record_kind = 'scope_instance' AND state = 'open'
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&source_node.scope_id)
+    .bind(&parents.run.run_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("controller source Scope"))?;
+    if scope_row.try_get::<String, _>("node_kind")? != "parallel_leg" {
+        return Ok(None);
+    }
+    let payload = payload_from_row(
+        &scope_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let scope: StoredControllerScopePayload =
+        decode_typed_payload(&payload, "controller ParallelLeg Scope")?;
+    let StoredControllerScopeDescriptor::ParallelLeg {
+        join_plan_node_key, ..
+    } = &scope.descriptor
+    else {
+        return Err(RepositoryError::Conflict("ParallelLeg Scope descriptor"));
+    };
+    if target.is_some_and(|target| target != join_plan_node_key) {
+        return Ok(None);
+    }
+    let controller_node_id = scope.controller_node_execution_id.to_string();
+    if scope_row
+        .try_get::<Option<String>, _>("parent_node_id")?
+        .as_deref()
+        != Some(controller_node_id.as_str())
+    {
+        return Err(RepositoryError::Conflict(
+            "ParallelLeg Scope controller owner",
+        ));
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT node_id, payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND record_kind = 'node_execution'
+          AND parent_node_id = $3 AND plan_node_key = $4
+          AND state IN ('pending', 'ready', 'running', 'succeeded')
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(&controller_node_id)
+    .bind(join_plan_node_key.as_str())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("pending Fork Join Node"))?;
+    let pending_payload =
+        payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let pending: StoredPendingControllerNodePayload =
+        decode_typed_payload(&pending_payload, "pending Fork Join Node")?;
+    let StoredControllerWait::Join {
+        policy,
+        quorum,
+        remainder,
+    } = pending.wait
+    else {
+        return Err(RepositoryError::Conflict("Fork Join wait kind"));
+    };
+    let source_scope_id: ResourceId = source_node.scope_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    if pending.controller_node_execution_id != scope.controller_node_execution_id
+        || pending.plan_node_key != *join_plan_node_key
+        || !pending.expected_scope_ids.contains(&source_scope_id)
+    {
+        return Err(RepositoryError::Conflict("Fork Join structural ownership"));
+    }
+    Ok(Some(ControllerStepShape::ParallelLegExit {
+        join_node_execution_id: row.try_get::<String, _>("node_id")?.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        join_plan_node_key: join_plan_node_key.clone(),
+        expected_scope_ids: pending.expected_scope_ids,
+        policy,
+        quorum,
+        remainder,
+    }))
+}
+
+async fn load_loop_iteration_exit(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    source_node: &ControllerSourceNode,
+    target: &PlanNodeKey,
+) -> Result<Option<ControllerStepShape>, RepositoryError> {
+    let scope_row = sqlx::query(
+        r#"
+        SELECT node_kind, parent_node_id, payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+          AND record_kind = 'scope_instance' AND state = 'open'
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&source_node.scope_id)
+    .bind(&parents.run.run_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("controller source Scope"))?;
+    if scope_row.try_get::<String, _>("node_kind")? != "loop_iteration" {
+        return Ok(None);
+    }
+    let payload = payload_from_row(
+        &scope_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let scope: StoredControllerScopePayload =
+        decode_typed_payload(&payload, "controller LoopIteration Scope")?;
+    let (iteration, loop_plan_node_key) = match &scope.descriptor {
+        StoredControllerScopeDescriptor::LoopIteration {
+            iteration,
+            loop_plan_node_key,
+        } => (*iteration, loop_plan_node_key),
+        StoredControllerScopeDescriptor::ParallelLeg { .. }
+        | StoredControllerScopeDescriptor::MapItem { .. } => {
+            return Err(RepositoryError::Conflict("LoopIteration Scope descriptor"));
+        }
+    };
+    if target != loop_plan_node_key {
+        return Ok(None);
+    }
+    let controller_node_id = scope.controller_node_execution_id.to_string();
+    if scope_row
+        .try_get::<Option<String>, _>("parent_node_id")?
+        .as_deref()
+        != Some(controller_node_id.as_str())
+    {
+        return Err(RepositoryError::Conflict(
+            "LoopIteration Scope controller owner",
+        ));
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT node_id, payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND record_kind = 'node_execution'
+          AND parent_node_id = $3 AND plan_node_key = $4 AND state = 'pending'
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(&controller_node_id)
+    .bind(loop_plan_node_key.as_str())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("pending Loop continuation Node"))?;
+    let pending_payload =
+        payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let pending: StoredPendingControllerNodePayload =
+        decode_typed_payload(&pending_payload, "pending Loop continuation Node")?;
+    let expected_next_iteration = iteration.checked_add(1).ok_or_else(|| {
+        RepositoryError::CorruptRow("Loop iteration counter overflowed".to_owned())
+    })?;
+    if pending.controller_node_execution_id != scope.controller_node_execution_id
+        || pending.plan_node_key != *loop_plan_node_key
+        || pending.expected_scope_ids
+            != vec![source_node.scope_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?]
+        || pending.wait
+            != (StoredControllerWait::Loop {
+                iteration: expected_next_iteration,
+            })
+    {
+        return Err(RepositoryError::Conflict(
+            "Loop continuation structural ownership",
+        ));
+    }
+    Ok(Some(ControllerStepShape::LoopIterationExit {
+        loop_node_execution_id: row.try_get::<String, _>("node_id")?.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        loop_plan_node_key: loop_plan_node_key.clone(),
+        expected_scope_id: source_node.scope_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        iteration,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn load_map_batch_shape(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    source_node: &ControllerSourceNode,
+    body: &PlanNodeKey,
+    next: &PlanNodeKey,
+    failure_policy: MapFailurePolicy,
+    item_count: u32,
+    maximum_batch: usize,
+) -> Result<ControllerStepShape, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+          AND record_kind = 'node_execution' AND state = 'running'
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(&parents.node_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("running Map admission Node"))?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let (root_map_node_execution_id, batch_start) = if payload.value.get("wait").is_some() {
+        let pending: StoredPendingControllerNodePayload =
+            decode_typed_payload(&payload, "running Map admission continuation")?;
+        let StoredControllerWait::MapAdmission {
+            body_plan_node_key,
+            failure_policy: stored_policy,
+            item_count: stored_count,
+            next_item_index,
+            next_plan_node_key,
+        } = pending.wait
+        else {
+            return Err(RepositoryError::Conflict("Map admission wait kind"));
+        };
+        if pending.plan_node_key != source_node.plan_node_key
+            || body_plan_node_key != *body
+            || next_plan_node_key != *next
+            || stored_policy != failure_policy
+            || stored_count != item_count
+            || !pending.expected_scope_ids.is_empty()
+        {
+            return Err(RepositoryError::Conflict("Map admission frozen contract"));
+        }
+        (pending.controller_node_execution_id, next_item_index)
+    } else {
+        (
+            parents.node_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?,
+            0,
+        )
+    };
+    if maximum_batch == 0 || batch_start >= item_count {
+        return Err(RepositoryError::Conflict("Map admission batch cursor"));
+    }
+    let maximum_batch = u32::try_from(maximum_batch)
+        .map_err(|_| RepositoryError::InvalidInput("Map batch limit exceeds u32".to_owned()))?;
+    let remaining = item_count
+        .checked_sub(batch_start)
+        .ok_or(RepositoryError::Conflict("Map admission remaining count"))?;
+    let batch_size = remaining.min(maximum_batch);
+    let batch_end = batch_start
+        .checked_add(batch_size)
+        .ok_or_else(|| RepositoryError::InvalidInput("Map batch cursor overflow".to_owned()))?;
+    Ok(ControllerStepShape::MapBatch {
+        body: body.clone(),
+        next: next.clone(),
+        failure_policy,
+        item_count,
+        batch_start,
+        batch_size,
+        root_map_node_execution_id,
+        has_more: batch_end < item_count,
+    })
+}
+
+async fn load_map_item_exit(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    source_node: &ControllerSourceNode,
+    target: Option<&PlanNodeKey>,
+) -> Result<Option<ControllerStepShape>, RepositoryError> {
+    let scope_row = sqlx::query(
+        r#"
+        SELECT node_kind, parent_node_id, payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+          AND record_kind = 'scope_instance' AND state = 'open'
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&source_node.scope_id)
+    .bind(&parents.run.run_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("controller source Scope"))?;
+    if scope_row.try_get::<String, _>("node_kind")? != "map_item" {
+        return Ok(None);
+    }
+    let payload = payload_from_row(
+        &scope_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let scope: StoredControllerScopePayload =
+        decode_typed_payload(&payload, "controller MapItem Scope")?;
+    let (failure_policy, item_count, item_index, map_plan_node_key, next_plan_node_key) =
+        match &scope.descriptor {
+            StoredControllerScopeDescriptor::MapItem {
+                failure_policy,
+                item_count,
+                item_index,
+                map_plan_node_key,
+                next_plan_node_key,
+            } => (
+                *failure_policy,
+                *item_count,
+                *item_index,
+                map_plan_node_key,
+                next_plan_node_key,
+            ),
+            _ => return Err(RepositoryError::Conflict("MapItem Scope descriptor")),
+        };
+    if target.is_some_and(|target| target != map_plan_node_key) {
+        return Ok(None);
+    }
+    let root_map_node_execution_id = scope.controller_node_execution_id;
+    let root_map_node_id = root_map_node_execution_id.to_string();
+    if scope_row
+        .try_get::<Option<String>, _>("parent_node_id")?
+        .as_deref()
+        != Some(root_map_node_id.as_str())
+    {
+        return Err(RepositoryError::Conflict("MapItem Scope controller owner"));
+    }
+    let candidates = sqlx::query(
+        r#"
+        SELECT node_id, payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND record_kind = 'node_execution'
+          AND parent_node_id = $3 AND plan_node_key = $4 AND state = 'pending'
+        ORDER BY node_id
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(&root_map_node_id)
+    .bind(map_plan_node_key.as_str())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut wait_node = None;
+    for row in candidates {
+        let candidate_payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let pending: StoredPendingControllerNodePayload =
+            decode_typed_payload(&candidate_payload, "pending Map controller Node")?;
+        let frozen_contract_matches = match &pending.wait {
+            StoredControllerWait::MapAdmission {
+                failure_policy: stored_policy,
+                item_count: stored_count,
+                next_item_index,
+                next_plan_node_key: stored_next,
+                ..
+            } => {
+                map_policy_requires_admission_barrier(failure_policy)
+                    && stored_policy == &failure_policy
+                    && stored_count == &item_count
+                    && stored_next == next_plan_node_key
+                    && *next_item_index < item_count
+            }
+            StoredControllerWait::MapSettlement {
+                failure_policy: stored_policy,
+                item_count: stored_count,
+                admitted_item_count,
+                next_plan_node_key: stored_next,
+            } => {
+                stored_policy == &failure_policy
+                    && stored_count == &item_count
+                    && *admitted_item_count == item_count
+                    && stored_next == next_plan_node_key
+            }
+            _ => false,
+        };
+        if pending.controller_node_execution_id != root_map_node_execution_id
+            || pending.plan_node_key != *map_plan_node_key
+            || !pending.expected_scope_ids.is_empty()
+            || !frozen_contract_matches
+            || wait_node.is_some()
+        {
+            return Err(RepositoryError::Conflict("Map wait frozen contract"));
+        }
+        wait_node = Some(row.try_get::<String, _>("node_id")?.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?);
+    }
+    Ok(Some(ControllerStepShape::MapItemExit {
+        map_wait_node_execution_id: wait_node,
+        map_plan_node_key: map_plan_node_key.clone(),
+        next_plan_node_key: next_plan_node_key.clone(),
+        failure_policy,
+        item_count,
+        item_index,
+        root_map_node_execution_id,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn mutate_orchestration_controller_step(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    next_job: &JobProjection,
+    parents: &LockedOrchestrationJobParents,
+    source_node: &ControllerSourceNode,
+    shape: &ControllerStepShape,
+    mutations: &ControllerStepMutationIds,
+    plan: &RuntimePlan,
+    request_digest: &Sha256Digest,
+    database_now: DateTime<Utc>,
+) -> Result<AppliedOrchestrationControllerStep, RepositoryError> {
+    let targets = shape.activation_targets()?;
+    let slots = &mutations.activations;
+    let pending_slots = &mutations.pending_nodes;
+    let result_payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "activated_plan_node_keys": targets,
+            "pending_plan_node_keys": match shape {
+                ControllerStepShape::Sequential { .. } => Vec::<PlanNodeKey>::new(),
+                ControllerStepShape::Fork { join, .. } => vec![join.clone()],
+                ControllerStepShape::LoopIteration {
+                    loop_plan_node_key,
+                    ..
+                }
+                | ControllerStepShape::LoopIterationExit {
+                    loop_plan_node_key,
+                    ..
+                } => vec![loop_plan_node_key.clone()],
+                ControllerStepShape::MapBatch { next, .. }
+                | ControllerStepShape::MapItemExit {
+                    next_plan_node_key: next,
+                    ..
+                } => vec![next.clone()],
+                ControllerStepShape::ParallelLegExit {
+                    join_plan_node_key,
+                    ..
+                } => vec![join_plan_node_key.clone()],
+            },
+            "plan_node_key": source_node.plan_node_key,
+            "source_node_kind": source_node.node_kind,
+        }),
+        65_536,
+    )?;
+    let job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'succeeded', version = $4, result_digest = $5,
+            worker_id = NULL, lease_token_digest = NULL,
+            lease_expires_at = NULL, heartbeat_at = NULL,
+            terminal_at = $6, updated_at = $6
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = 'running'
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&current_job.job_id)
+    .bind(current_job.version)
+    .bind(
+        i64::try_from(next_job.version)
+            .map_err(|_| RepositoryError::InvalidInput("Job version exceeds bigint".to_owned()))?,
+    )
+    .bind(&result_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("controller source Job"))?;
+    let source_job = job_from_row(job)?;
+    let source_node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'succeeded', version = version + 1,
+            terminal_at = $5, updated_at = $5
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = $4
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.node_id)
+    .bind(source_node.version)
+    .bind(NodeExecutionState::Running.as_str())
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("controller source Node"))?;
+
+    let current_payload: OrchestrationJobPayload =
+        decode_typed_payload(&current_job.payload, "orchestration Job")?;
+    let mut activations = Vec::with_capacity(targets.len());
+    let mut created_scopes = Vec::with_capacity(targets.len());
+    for (index, (target, slot)) in targets.iter().zip(slots).enumerate() {
+        let target_node = plan.node(target)?;
+        let target_scope_id = if let Some(scope) = &slot.scope {
+            let (
+                scope_kind,
+                scope_parent_node_id,
+                scope_controller_node_execution_id,
+                logical_key,
+                descriptor,
+            ) = match shape {
+                ControllerStepShape::Fork { join, .. } => (
+                    "parallel_leg",
+                    parents.node_id.clone(),
+                    parents.node_id.parse().map_err(
+                        |failure: insight_platform_contracts::ResourceIdError| {
+                            RepositoryError::CorruptRow(failure.to_string())
+                        },
+                    )?,
+                    format!("scope:{}:parallel_leg:{index}", parents.node_id),
+                    StoredControllerScopeDescriptor::ParallelLeg {
+                        leg_index: u32::try_from(index).map_err(|_| {
+                            RepositoryError::InvalidInput("Fork leg index exceeds u32".to_owned())
+                        })?,
+                        leg_plan_node_key: target.clone(),
+                        join_plan_node_key: join.clone(),
+                    },
+                ),
+                ControllerStepShape::LoopIteration {
+                    loop_plan_node_key,
+                    iteration,
+                    ..
+                } => (
+                    "loop_iteration",
+                    parents.node_id.clone(),
+                    parents.node_id.parse().map_err(
+                        |failure: insight_platform_contracts::ResourceIdError| {
+                            RepositoryError::CorruptRow(failure.to_string())
+                        },
+                    )?,
+                    format!("scope:{}:loop_iteration:{iteration}", parents.node_id),
+                    StoredControllerScopeDescriptor::LoopIteration {
+                        iteration: *iteration,
+                        loop_plan_node_key: loop_plan_node_key.clone(),
+                    },
+                ),
+                ControllerStepShape::MapBatch {
+                    next,
+                    failure_policy,
+                    item_count,
+                    batch_start,
+                    root_map_node_execution_id,
+                    ..
+                } => {
+                    let item_index = batch_start
+                        .checked_add(u32::try_from(index).map_err(|_| {
+                            RepositoryError::InvalidInput("Map batch index exceeds u32".to_owned())
+                        })?)
+                        .ok_or_else(|| {
+                            RepositoryError::InvalidInput("Map item index overflow".to_owned())
+                        })?;
+                    (
+                        "map_item",
+                        root_map_node_execution_id.to_string(),
+                        root_map_node_execution_id.clone(),
+                        format!("scope:{root_map_node_execution_id}:map_item:{item_index}"),
+                        StoredControllerScopeDescriptor::MapItem {
+                            failure_policy: *failure_policy,
+                            item_count: *item_count,
+                            item_index,
+                            map_plan_node_key: source_node.plan_node_key.clone(),
+                            next_plan_node_key: next.clone(),
+                        },
+                    )
+                }
+                _ => {
+                    return Err(RepositoryError::InvalidInput(
+                        "controller activation cannot create this Scope kind".to_owned(),
+                    ));
+                }
+            };
+            let scope_payload = TypedPayload::with_limit(
+                1,
+                &StoredControllerScopePayload {
+                    controller_node_execution_id: scope_controller_node_execution_id,
+                    descriptor,
+                },
+                262_144,
+            )?;
+            sqlx::query(
+                r#"
+                INSERT INTO insight_platform.run_nodes (
+                    tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+                    plan_node_key, activation_ordinal, related_run_id, logical_key,
+                    node_kind, state, payload_schema_version, payload, payload_digest, deadline
+                ) VALUES (
+                    $1, $2, $3, $4, 'scope_instance', $2,
+                    NULL, NULL, NULL, $5, $6, 'open', $7, $8, $9, $10
+                )
+                "#,
+            )
+            .bind(&current_job.tenant_id)
+            .bind(scope.scope_instance_id.to_string())
+            .bind(&parents.run.run_id)
+            .bind(scope_parent_node_id)
+            .bind(logical_key)
+            .bind(scope_kind)
+            .bind(scope_payload.schema_version)
+            .bind(&scope_payload.value)
+            .bind(&scope_payload.digest)
+            .bind(current_job.deadline.min(parents.run.deadline))
+            .execute(&mut **transaction)
+            .await?;
+            created_scopes.push(ControllerScopeRecord {
+                scope_id: scope.scope_instance_id.to_string(),
+                scope_kind: scope_kind.to_owned(),
+                state: ScopeState::Open.as_str().to_owned(),
+                version: 1,
+            });
+            scope.scope_instance_id.to_string()
+        } else {
+            source_node.scope_id.clone()
+        };
+        let activation_ordinal: i32 = sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(max(activation_ordinal), 0) + 1
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2
+              AND record_kind = 'node_execution' AND plan_node_key = $3
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(&parents.run.run_id)
+        .bind(target.as_str())
+        .fetch_one(&mut **transaction)
+        .await?;
+        let node_payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "plan_node_key": target,
+                "plan_source_digest": parents.run.bindings.plan.semantic_digest,
+                "required_control_tokens": [{
+                    "source_node_execution_id": parents.node_id,
+                    "source_port": "success",
+                }],
+            }),
+            262_144,
+        )?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.run_nodes (
+                tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+                plan_node_key, activation_ordinal, related_run_id, logical_key,
+                node_kind, state, enqueue_round,
+                payload_schema_version, payload, payload_digest, deadline
+            ) VALUES (
+                $1, $2, $3, $4, 'node_execution', $5,
+                $6, $7, NULL, $8, $9, 'ready', 0, $10, $11, $12, $13
+            )
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(slot.node_execution_id.to_string())
+        .bind(&parents.run.run_id)
+        .bind(&parents.node_id)
+        .bind(&target_scope_id)
+        .bind(target.as_str())
+        .bind(activation_ordinal)
+        .bind(format!(
+            "controller:{}:{}:{}",
+            parents.node_id,
+            target.as_str(),
+            index
+        ))
+        .bind(target_node.kind().as_str())
+        .bind(node_payload.schema_version)
+        .bind(&node_payload.value)
+        .bind(&node_payload.digest)
+        .bind(current_job.deadline.min(parents.run.deadline))
+        .execute(&mut **transaction)
+        .await?;
+
+        let job_payload = OrchestrationJobPayload {
+            bindings_digest: parents.run.bindings.canonical_digest.clone(),
+            node_execution_id: slot.node_execution_id.clone(),
+            root_scope_id: current_payload.root_scope_id.clone(),
+            retry_backoff_milliseconds: current_payload.retry_backoff_milliseconds,
+            wake_contract: None,
+        };
+        job_payload
+            .validate()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let job_payload = TypedPayload::with_limit(1, &job_payload, 262_144)?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO insight_platform.jobs (
+                tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+                state, attempt_limit, scheduled_at, deadline, priority, request_digest,
+                payload_schema_version, payload, payload_digest
+            ) VALUES (
+                $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+                'ready', $5, $6, $7, $8, $9, $10, $11, $12
+            ) RETURNING *
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(slot.orchestration_job_id.to_string())
+        .bind(slot.node_execution_id.to_string())
+        .bind(&parents.run.run_id)
+        .bind(current_job.attempt_limit)
+        .bind(database_now)
+        .bind(current_job.deadline.min(parents.run.deadline))
+        .bind(scheduler_priority_to_database(current_job.priority))
+        .bind(&job_payload.digest)
+        .bind(job_payload.schema_version)
+        .bind(&job_payload.value)
+        .bind(&job_payload.digest)
+        .fetch_one(&mut **transaction)
+        .await?;
+        activations.push(ControllerActivationRecord {
+            node_id: slot.node_execution_id.to_string(),
+            plan_node_key: target.clone(),
+            node_kind: target_node.kind(),
+            node_version: 1,
+            job: job_from_row(row)?,
+        });
+    }
+
+    let mut pending_nodes = Vec::with_capacity(pending_slots.len());
+    let pending_spec = match shape {
+        ControllerStepShape::Fork {
+            join,
+            policy,
+            quorum,
+            remainder,
+            ..
+        } => Some((
+            join.clone(),
+            parents.node_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?,
+            parents.node_id.clone(),
+            slots
+                .iter()
+                .map(|slot| {
+                    slot.scope
+                        .as_ref()
+                        .map(|scope| scope.scope_instance_id.clone())
+                        .ok_or_else(|| {
+                            RepositoryError::InvalidInput(
+                                "Fork leg is missing its ParallelLeg Scope".to_owned(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            StoredControllerWait::Join {
+                policy: *policy,
+                quorum: *quorum,
+                remainder: *remainder,
+            },
+        )),
+        ControllerStepShape::LoopIteration {
+            loop_plan_node_key,
+            iteration,
+            ..
+        } => Some((
+            loop_plan_node_key.clone(),
+            parents.node_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?,
+            parents.node_id.clone(),
+            vec![slots
+                .first()
+                .and_then(|slot| slot.scope.as_ref())
+                .map(|scope| scope.scope_instance_id.clone())
+                .ok_or_else(|| {
+                    RepositoryError::InvalidInput(
+                        "Loop body is missing its LoopIteration Scope".to_owned(),
+                    )
+                })?],
+            StoredControllerWait::Loop {
+                iteration: iteration.checked_add(1).ok_or_else(|| {
+                    RepositoryError::InvalidInput("Loop iteration overflow".to_owned())
+                })?,
+            },
+        )),
+        ControllerStepShape::MapBatch {
+            body,
+            next,
+            failure_policy,
+            item_count,
+            batch_start,
+            batch_size,
+            root_map_node_execution_id,
+            has_more,
+        } => {
+            let next_item_index = batch_start.checked_add(*batch_size).ok_or_else(|| {
+                RepositoryError::InvalidInput("Map batch cursor overflow".to_owned())
+            })?;
+            let wait = if *has_more {
+                StoredControllerWait::MapAdmission {
+                    body_plan_node_key: body.clone(),
+                    failure_policy: *failure_policy,
+                    item_count: *item_count,
+                    next_item_index,
+                    next_plan_node_key: next.clone(),
+                }
+            } else {
+                StoredControllerWait::MapSettlement {
+                    failure_policy: *failure_policy,
+                    item_count: *item_count,
+                    admitted_item_count: *item_count,
+                    next_plan_node_key: next.clone(),
+                }
+            };
+            Some((
+                source_node.plan_node_key.clone(),
+                root_map_node_execution_id.clone(),
+                root_map_node_execution_id.to_string(),
+                Vec::new(),
+                wait,
+            ))
+        }
+        _ => None,
+    };
+    let mut immediately_woken_nodes = Vec::new();
+    if let Some((
+        pending_plan_node_key,
+        controller_node_execution_id,
+        pending_parent_node_id,
+        expected_scope_ids,
+        wait,
+    )) = pending_spec
+    {
+        let pending_slot = pending_slots.first().ok_or_else(|| {
+            RepositoryError::InvalidInput(
+                "controller is missing its pending continuation slot".to_owned(),
+            )
+        })?;
+        let pending_node = plan.node(&pending_plan_node_key)?;
+        let pending_payload = TypedPayload::with_limit(
+            1,
+            &StoredPendingControllerNodePayload {
+                controller_node_execution_id,
+                expected_scope_ids,
+                plan_node_key: pending_plan_node_key.clone(),
+                wait,
+            },
+            262_144,
+        )?;
+        let activation_ordinal: i32 = sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(max(activation_ordinal), 0) + 1
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2
+              AND record_kind = 'node_execution' AND plan_node_key = $3
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(&parents.run.run_id)
+        .bind(pending_plan_node_key.as_str())
+        .fetch_one(&mut **transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.run_nodes (
+                tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+                plan_node_key, activation_ordinal, related_run_id, logical_key,
+                node_kind, state, payload_schema_version, payload, payload_digest, deadline
+            ) VALUES (
+                $1, $2, $3, $4, 'node_execution', $5,
+                $6, $7, NULL, $8, $9, 'pending', $10, $11, $12, $13
+            )
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(pending_slot.node_execution_id.to_string())
+        .bind(&parents.run.run_id)
+        .bind(&pending_parent_node_id)
+        .bind(&source_node.scope_id)
+        .bind(pending_plan_node_key.as_str())
+        .bind(activation_ordinal)
+        .bind(format!(
+            "controller:{}:pending:{}",
+            parents.node_id,
+            pending_plan_node_key.as_str()
+        ))
+        .bind(pending_node.kind().as_str())
+        .bind(pending_payload.schema_version)
+        .bind(&pending_payload.value)
+        .bind(&pending_payload.digest)
+        .bind(current_job.deadline.min(parents.run.deadline))
+        .execute(&mut **transaction)
+        .await?;
+        pending_nodes.push(ControllerPendingNodeRecord {
+            node_id: pending_slot.node_execution_id.to_string(),
+            plan_node_key: pending_plan_node_key.clone(),
+            node_kind: pending_node.kind(),
+            node_version: 1,
+        });
+        if matches!(
+            shape,
+            ControllerStepShape::MapBatch {
+                failure_policy: MapFailurePolicy::AllSettled,
+                has_more: true,
+                ..
+            }
+        ) {
+            let wake = mutations.pending_wake.as_ref().ok_or_else(|| {
+                RepositoryError::InvalidInput(
+                    "Map admission continuation is missing its wake slot".to_owned(),
+                )
+            })?;
+            let node_version: i64 = sqlx::query_scalar(
+                r#"
+                UPDATE insight_platform.run_nodes
+                SET state = 'ready', version = version + 1, enqueue_round = 0,
+                    updated_at = clock_timestamp()
+                WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+                  AND record_kind = 'node_execution' AND state = 'pending'
+                  AND terminal_at IS NULL
+                RETURNING version
+                "#,
+            )
+            .bind(&current_job.tenant_id)
+            .bind(pending_slot.node_execution_id.to_string())
+            .bind(1_i64)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict("Map admission continuation wake"))?;
+            let job_payload = OrchestrationJobPayload {
+                bindings_digest: parents.run.bindings.canonical_digest.clone(),
+                node_execution_id: pending_slot.node_execution_id.clone(),
+                root_scope_id: current_payload.root_scope_id.clone(),
+                retry_backoff_milliseconds: current_payload.retry_backoff_milliseconds,
+                wake_contract: None,
+            };
+            job_payload
+                .validate()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            let job_payload = TypedPayload::with_limit(1, &job_payload, 262_144)?;
+            let row = sqlx::query(
+                r#"
+                INSERT INTO insight_platform.jobs (
+                    tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+                    state, attempt_limit, scheduled_at, deadline, priority, request_digest,
+                    payload_schema_version, payload, payload_digest
+                ) VALUES (
+                    $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+                    'ready', $5, $6, $7, $8, $9, $10, $11, $12
+                ) RETURNING *
+                "#,
+            )
+            .bind(&current_job.tenant_id)
+            .bind(wake.orchestration_job_id.to_string())
+            .bind(pending_slot.node_execution_id.to_string())
+            .bind(&parents.run.run_id)
+            .bind(current_job.attempt_limit)
+            .bind(database_now)
+            .bind(current_job.deadline.min(parents.run.deadline))
+            .bind(scheduler_priority_to_database(current_job.priority))
+            .bind(wake.request_digest.to_string())
+            .bind(job_payload.schema_version)
+            .bind(&job_payload.value)
+            .bind(&job_payload.digest)
+            .fetch_one(&mut **transaction)
+            .await?;
+            immediately_woken_nodes.push(ControllerActivationRecord {
+                node_id: pending_slot.node_execution_id.to_string(),
+                plan_node_key: pending_plan_node_key,
+                node_kind: pending_node.kind(),
+                node_version,
+                job: job_from_row(row)?,
+            });
+        }
+    }
+
+    let mut structural = match shape {
+        ControllerStepShape::LoopIterationExit { .. } => {
+            settle_loop_iteration_and_wake_continuation(
+                transaction,
+                current_job,
+                parents,
+                shape,
+                mutations,
+                plan,
+                database_now,
+            )
+            .await?
+        }
+        ControllerStepShape::MapItemExit { .. } => {
+            settle_map_item_and_maybe_wake_settlement(
+                transaction,
+                current_job,
+                parents,
+                shape,
+                mutations,
+                plan,
+                ChildOutcome::Succeeded,
+                ScopeState::Succeeded,
+                request_digest,
+                database_now,
+            )
+            .await?
+        }
+        _ => {
+            settle_parallel_leg_and_maybe_wake_join(
+                transaction,
+                current_job,
+                parents,
+                shape,
+                mutations,
+                plan,
+                ChildOutcome::Succeeded,
+                ScopeState::Succeeded,
+                request_digest,
+                database_now,
+            )
+            .await?
+        }
+    };
+    structural.woken_nodes.extend(immediately_woken_nodes);
+    let active_work_decrement = i32::try_from(
+        1_usize
+            .checked_add(structural.cancelled_active_work_count)
+            .ok_or_else(|| {
+                RepositoryError::InvalidInput(
+                    "controller active-work decrement exceeds the platform bound".to_owned(),
+                )
+            })?,
+    )
+    .map_err(|_| {
+        RepositoryError::InvalidInput("controller active-work decrement exceeds integer".to_owned())
+    })?;
+
+    let run = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET version = version + 1, active_work_count = active_work_count - $4,
+            updated_at = $5
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state = 'running' AND active_work_count >= $4 AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&parents.run.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(parents.run.version)
+    .bind(active_work_decrement)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("controller source Run"))?;
+    Ok(AppliedOrchestrationControllerStep {
+        run: run_from_row(run)?,
+        source_node_id: parents.node_id.clone(),
+        source_node_version,
+        source_job,
+        activations,
+        created_scopes,
+        pending_nodes,
+        settled_scopes: structural.settled_scopes,
+        woken_nodes: structural.woken_nodes,
+        cancelled_remainders: structural.cancelled_remainders,
+        settled_quota_account_ids: Vec::new(),
+    })
+}
+
+#[derive(Debug)]
+struct ParallelLegSettlement {
+    settled_scopes: Vec<ControllerScopeRecord>,
+    woken_nodes: Vec<ControllerActivationRecord>,
+    cancelled_remainders: Vec<ControllerCancelledRemainderRecord>,
+    cancelled_active_work_count: usize,
+}
+
+impl ParallelLegSettlement {
+    fn empty() -> Self {
+        Self {
+            settled_scopes: Vec::new(),
+            woken_nodes: Vec::new(),
+            cancelled_remainders: Vec::new(),
+            cancelled_active_work_count: 0,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_loop_iteration_and_wake_continuation(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    shape: &ControllerStepShape,
+    mutations: &ControllerStepMutationIds,
+    plan: &RuntimePlan,
+    database_now: DateTime<Utc>,
+) -> Result<ParallelLegSettlement, RepositoryError> {
+    let ControllerStepShape::LoopIterationExit {
+        loop_node_execution_id,
+        loop_plan_node_key,
+        expected_scope_id,
+        iteration,
+    } = shape
+    else {
+        return Ok(ParallelLegSettlement::empty());
+    };
+    if expected_scope_id.to_string() != parents.scope_id {
+        return Err(RepositoryError::Conflict(
+            "LoopIteration source Scope identity",
+        ));
+    }
+    let structural_exit = mutations.structural_exit.as_ref().ok_or_else(|| {
+        RepositoryError::InvalidInput("Loop exit is missing its Scope event slot".to_owned())
+    })?;
+    let _ = structural_exit;
+    let pending_wake = mutations.pending_wake.as_ref().ok_or_else(|| {
+        RepositoryError::InvalidInput("Loop exit is missing its wake slot".to_owned())
+    })?;
+    let scope_row = sqlx::query(
+        r#"
+        SELECT parent_node_id, node_kind, state, version,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+          AND record_kind = 'scope_instance'
+        FOR UPDATE
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(&parents.scope_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("LoopIteration Scope settlement"))?;
+    if scope_row.try_get::<String, _>("node_kind")? != "loop_iteration"
+        || scope_row.try_get::<String, _>("state")? != ScopeState::Open.as_str()
+        || scope_row.try_get::<i64, _>("version")? != parents.scope_version
+    {
+        return Err(RepositoryError::Conflict(
+            "LoopIteration Scope current state",
+        ));
+    }
+    let scope_payload = payload_from_row(
+        &scope_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let stored_scope: StoredControllerScopePayload =
+        decode_typed_payload(&scope_payload, "LoopIteration Scope")?;
+    let controller_node_id = stored_scope.controller_node_execution_id.to_string();
+    if scope_row
+        .try_get::<Option<String>, _>("parent_node_id")?
+        .as_deref()
+        != Some(controller_node_id.as_str())
+        || stored_scope.descriptor
+            != (StoredControllerScopeDescriptor::LoopIteration {
+                iteration: *iteration,
+                loop_plan_node_key: loop_plan_node_key.clone(),
+            })
+    {
+        return Err(RepositoryError::Conflict(
+            "LoopIteration Scope frozen descriptor",
+        ));
+    }
+    let closing_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'closing', version = version + 1, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'open' AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.scope_id)
+    .bind(parents.scope_version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("LoopIteration Scope closing"))?;
+    let scope_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'succeeded', version = version + 1,
+            terminal_at = $4, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'closing'
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.scope_id)
+    .bind(closing_version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("LoopIteration Scope terminal"))?;
+
+    let loop_node = plan.node(loop_plan_node_key)?;
+    if !matches!(
+        loop_node,
+        insight_platform_orchestrator::RuntimeNode::Loop { .. }
+    ) {
+        return Err(RepositoryError::Conflict("Loop continuation Plan node"));
+    }
+    let pending_row = sqlx::query(
+        r#"
+        SELECT parent_node_id, plan_node_key, node_kind, state, version,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+          AND record_kind = 'node_execution'
+        FOR UPDATE
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(loop_node_execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("pending Loop continuation"))?;
+    if pending_row
+        .try_get::<Option<String>, _>("parent_node_id")?
+        .as_deref()
+        != Some(controller_node_id.as_str())
+        || pending_row.try_get::<String, _>("plan_node_key")? != loop_plan_node_key.as_str()
+        || pending_row.try_get::<String, _>("node_kind")? != PlanNodeKind::Loop.as_str()
+        || pending_row.try_get::<String, _>("state")? != NodeExecutionState::Pending.as_str()
+    {
+        return Err(RepositoryError::Conflict(
+            "pending Loop continuation ownership",
+        ));
+    }
+    let pending_payload = payload_from_row(
+        &pending_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let stored_pending: StoredPendingControllerNodePayload =
+        decode_typed_payload(&pending_payload, "pending Loop continuation")?;
+    let next_iteration = iteration.checked_add(1).ok_or_else(|| {
+        RepositoryError::CorruptRow("Loop iteration counter overflowed".to_owned())
+    })?;
+    if stored_pending.controller_node_execution_id != stored_scope.controller_node_execution_id
+        || stored_pending.plan_node_key != *loop_plan_node_key
+        || stored_pending.expected_scope_ids != vec![expected_scope_id.clone()]
+        || stored_pending.wait
+            != (StoredControllerWait::Loop {
+                iteration: next_iteration,
+            })
+    {
+        return Err(RepositoryError::Conflict(
+            "pending Loop continuation contract",
+        ));
+    }
+    let node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'ready', version = version + 1, enqueue_round = 0,
+            updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'pending'
+          AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(loop_node_execution_id.to_string())
+    .bind(pending_row.try_get::<i64, _>("version")?)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Loop continuation wake"))?;
+    let current_payload: OrchestrationJobPayload =
+        decode_typed_payload(&current_job.payload, "orchestration Job")?;
+    let job_payload = OrchestrationJobPayload {
+        bindings_digest: parents.run.bindings.canonical_digest.clone(),
+        node_execution_id: loop_node_execution_id.clone(),
+        root_scope_id: current_payload.root_scope_id,
+        retry_backoff_milliseconds: current_payload.retry_backoff_milliseconds,
+        wake_contract: None,
+    };
+    job_payload
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let job_payload = TypedPayload::with_limit(1, &job_payload, 262_144)?;
+    let job = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.jobs (
+            tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+            state, attempt_limit, scheduled_at, deadline, priority, request_digest,
+            payload_schema_version, payload, payload_digest
+        ) VALUES (
+            $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+            'ready', $5, $6, $7, $8, $9, $10, $11, $12
+        ) RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(pending_wake.orchestration_job_id.to_string())
+    .bind(loop_node_execution_id.to_string())
+    .bind(&parents.run.run_id)
+    .bind(current_job.attempt_limit)
+    .bind(database_now)
+    .bind(current_job.deadline.min(parents.run.deadline))
+    .bind(scheduler_priority_to_database(current_job.priority))
+    .bind(pending_wake.request_digest.to_string())
+    .bind(job_payload.schema_version)
+    .bind(&job_payload.value)
+    .bind(&job_payload.digest)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(ParallelLegSettlement {
+        settled_scopes: vec![ControllerScopeRecord {
+            scope_id: parents.scope_id.clone(),
+            scope_kind: "loop_iteration".to_owned(),
+            state: ScopeState::Succeeded.as_str().to_owned(),
+            version: scope_version,
+        }],
+        woken_nodes: vec![ControllerActivationRecord {
+            node_id: loop_node_execution_id.to_string(),
+            plan_node_key: loop_plan_node_key.clone(),
+            node_kind: PlanNodeKind::Loop,
+            node_version,
+            job: job_from_row(job)?,
+        }],
+        cancelled_remainders: Vec::new(),
+        cancelled_active_work_count: 0,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_map_item_and_maybe_wake_settlement(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    shape: &ControllerStepShape,
+    mutations: &ControllerStepMutationIds,
+    plan: &RuntimePlan,
+    source_outcome: ChildOutcome,
+    source_scope_state: ScopeState,
+    request_digest: &Sha256Digest,
+    database_now: DateTime<Utc>,
+) -> Result<ParallelLegSettlement, RepositoryError> {
+    if !matches!(
+        (source_outcome, source_scope_state),
+        (ChildOutcome::Succeeded, ScopeState::Succeeded)
+            | (ChildOutcome::Failed, ScopeState::Failed)
+    ) {
+        return Err(RepositoryError::InvalidInput(
+            "MapItem source outcome and Scope state do not match".to_owned(),
+        ));
+    }
+    let ControllerStepShape::MapItemExit {
+        map_wait_node_execution_id,
+        map_plan_node_key,
+        next_plan_node_key,
+        failure_policy,
+        item_count,
+        item_index,
+        root_map_node_execution_id,
+    } = shape
+    else {
+        return Ok(ParallelLegSettlement::empty());
+    };
+    let root_map_node_id = root_map_node_execution_id.to_string();
+    // Every item terminal transaction for a Map generation locks the shared wait Node first.
+    // That gives sibling exits one deterministic lock order (wait -> Scopes) and avoids the
+    // source-Scope/wait-Node inversion that would otherwise deadlock concurrent terminal winners.
+    let wait_state = if let Some(wait_node_execution_id) = map_wait_node_execution_id {
+        let wait_row = sqlx::query(
+            r#"
+            SELECT parent_node_id, plan_node_key, node_kind, state, version,
+                   payload_schema_version, payload, payload_digest
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'node_execution'
+            FOR UPDATE
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(&parents.run.run_id)
+        .bind(wait_node_execution_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("pending Map wait Node"))?;
+        if wait_row
+            .try_get::<Option<String>, _>("parent_node_id")?
+            .as_deref()
+            != Some(root_map_node_id.as_str())
+            || wait_row.try_get::<String, _>("plan_node_key")? != map_plan_node_key.as_str()
+            || wait_row.try_get::<String, _>("node_kind")? != PlanNodeKind::Map.as_str()
+            || wait_row.try_get::<String, _>("state")? != NodeExecutionState::Pending.as_str()
+        {
+            return Err(RepositoryError::Conflict("pending Map wait ownership"));
+        }
+        let wait_payload = payload_from_row(
+            &wait_row,
+            "payload_schema_version",
+            "payload",
+            "payload_digest",
+        )?;
+        let stored_pending: StoredPendingControllerNodePayload =
+            decode_typed_payload(&wait_payload, "pending Map wait Node")?;
+        if stored_pending.controller_node_execution_id != *root_map_node_execution_id
+            || stored_pending.plan_node_key != *map_plan_node_key
+            || !stored_pending.expected_scope_ids.is_empty()
+        {
+            return Err(RepositoryError::Conflict("pending Map wait contract"));
+        }
+        Some((wait_node_execution_id.clone(), wait_row, stored_pending))
+    } else {
+        None
+    };
+    let structural_exit = mutations.structural_exit.as_ref().ok_or_else(|| {
+        RepositoryError::InvalidInput("Map item exit is missing its Scope event slot".to_owned())
+    })?;
+    let _ = structural_exit;
+    let scope_row = sqlx::query(
+        r#"
+        SELECT parent_node_id, node_kind, state, version,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+          AND record_kind = 'scope_instance'
+        FOR UPDATE
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(&parents.scope_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("MapItem Scope settlement"))?;
+    if scope_row.try_get::<String, _>("node_kind")? != "map_item"
+        || scope_row.try_get::<String, _>("state")? != ScopeState::Open.as_str()
+        || scope_row.try_get::<i64, _>("version")? != parents.scope_version
+        || scope_row
+            .try_get::<Option<String>, _>("parent_node_id")?
+            .as_deref()
+            != Some(root_map_node_id.as_str())
+    {
+        return Err(RepositoryError::Conflict("MapItem Scope current state"));
+    }
+    let scope_payload = payload_from_row(
+        &scope_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let stored_scope: StoredControllerScopePayload =
+        decode_typed_payload(&scope_payload, "MapItem Scope")?;
+    if stored_scope.controller_node_execution_id != *root_map_node_execution_id
+        || stored_scope.descriptor
+            != (StoredControllerScopeDescriptor::MapItem {
+                failure_policy: *failure_policy,
+                item_count: *item_count,
+                item_index: *item_index,
+                map_plan_node_key: map_plan_node_key.clone(),
+                next_plan_node_key: next_plan_node_key.clone(),
+            })
+    {
+        return Err(RepositoryError::Conflict("MapItem Scope frozen descriptor"));
+    }
+    let closing_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'closing', version = version + 1, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'open' AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.scope_id)
+    .bind(parents.scope_version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("MapItem Scope closing"))?;
+    let scope_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = $4, version = version + 1,
+            terminal_at = $5, updated_at = $5
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'closing'
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.scope_id)
+    .bind(closing_version)
+    .bind(source_scope_state.as_str())
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("MapItem Scope terminal"))?;
+    let settled_scopes = vec![ControllerScopeRecord {
+        scope_id: parents.scope_id.clone(),
+        scope_kind: "map_item".to_owned(),
+        state: source_scope_state.as_str().to_owned(),
+        version: scope_version,
+    }];
+    let Some((wait_node_execution_id, wait_row, mut stored_pending)) = wait_state else {
+        return Ok(ParallelLegSettlement {
+            settled_scopes,
+            woken_nodes: Vec::new(),
+            cancelled_remainders: Vec::new(),
+            cancelled_active_work_count: 0,
+        });
+    };
+    let map_node = plan.node(map_plan_node_key)?;
+    let insight_platform_orchestrator::RuntimeNode::Map { body, .. } = map_node else {
+        return Err(RepositoryError::Conflict("Map wait Plan node"));
+    };
+    let (admitted_item_count, admission_barrier) = match &stored_pending.wait {
+        StoredControllerWait::MapAdmission {
+            body_plan_node_key,
+            failure_policy: stored_policy,
+            item_count: stored_count,
+            next_item_index,
+            next_plan_node_key: stored_next,
+        } if map_policy_requires_admission_barrier(*failure_policy)
+            && body_plan_node_key == body
+            && stored_policy == failure_policy
+            && stored_count == item_count
+            && stored_next == next_plan_node_key
+            && *next_item_index > 0
+            && *next_item_index < *item_count =>
+        {
+            (*next_item_index, true)
+        }
+        StoredControllerWait::MapSettlement {
+            failure_policy: stored_policy,
+            item_count: stored_count,
+            admitted_item_count,
+            next_plan_node_key: stored_next,
+        } if stored_policy == failure_policy
+            && stored_count == item_count
+            && stored_next == next_plan_node_key
+            && *admitted_item_count > 0
+            && *admitted_item_count <= *item_count =>
+        {
+            (*admitted_item_count, false)
+        }
+        _ => {
+            return Err(RepositoryError::Conflict(
+                "pending Map wait frozen contract",
+            ))
+        }
+    };
+    let rows = sqlx::query(
+        r#"
+        SELECT node_id, state, payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND record_kind = 'scope_instance'
+          AND parent_node_id = $3 AND node_kind = 'map_item'
+        FOR UPDATE
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(&root_map_node_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let expected_item_count = usize::try_from(admitted_item_count).map_err(|_| {
+        RepositoryError::InvalidInput("Map item count exceeds platform representation".to_owned())
+    })?;
+    if rows.len() != expected_item_count {
+        return Err(RepositoryError::Conflict("Map settlement Scope set"));
+    }
+    let mut indexed_outcomes = BTreeMap::new();
+    let mut active_scope_ids = Vec::new();
+    for row in rows {
+        let payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let stored: StoredControllerScopePayload =
+            decode_typed_payload(&payload, "Map settlement Scope")?;
+        let StoredControllerScopeDescriptor::MapItem {
+            failure_policy: stored_policy,
+            item_count: stored_count,
+            item_index: stored_index,
+            map_plan_node_key: stored_map,
+            next_plan_node_key: stored_next,
+        } = stored.descriptor
+        else {
+            return Err(RepositoryError::Conflict("Map settlement Scope kind"));
+        };
+        if stored.controller_node_execution_id != *root_map_node_execution_id
+            || stored_policy != *failure_policy
+            || stored_count != *item_count
+            || stored_map != *map_plan_node_key
+            || stored_next != *next_plan_node_key
+            || stored_index >= admitted_item_count
+        {
+            return Err(RepositoryError::Conflict("Map settlement Scope descriptor"));
+        }
+        let outcome = match row
+            .try_get::<String, _>("state")?
+            .parse::<ScopeState>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?
+        {
+            ScopeState::Open => ChildOutcome::Active,
+            ScopeState::Succeeded => ChildOutcome::Succeeded,
+            ScopeState::Failed => ChildOutcome::Failed,
+            ScopeState::Cancelled => ChildOutcome::Cancelled,
+            ScopeState::Closing => {
+                return Err(RepositoryError::Conflict(
+                    "Map settlement observed closing Scope",
+                ));
+            }
+        };
+        if outcome == ChildOutcome::Active {
+            active_scope_ids.push(row.try_get("node_id")?);
+        }
+        if indexed_outcomes.insert(stored_index, outcome).is_some() {
+            return Err(RepositoryError::Conflict(
+                "duplicate Map settlement item index",
+            ));
+        }
+    }
+    let children = (0..admitted_item_count)
+        .map(|index| {
+            indexed_outcomes.get(&index).copied().ok_or_else(|| {
+                RepositoryError::CorruptRow("Map settlement lost item index".to_owned())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let decision = decide_controller(map_node, &ControllerObservation::MapSettlement { children })?;
+    match decision {
+        ControllerDecision::WaitForChildren => {
+            if !mutations.remainder_cancellations.is_empty() {
+                return Err(RepositoryError::InvalidInput(
+                    "waiting Map cannot accept remainder-cancellation slots".to_owned(),
+                ));
+            }
+            Ok(ParallelLegSettlement {
+                settled_scopes,
+                woken_nodes: Vec::new(),
+                cancelled_remainders: Vec::new(),
+                cancelled_active_work_count: 0,
+            })
+        }
+        decision @ (ControllerDecision::CompleteNode { .. }
+        | ControllerDecision::FailNode { .. }) => {
+            let cancel_active = matches!(decision, ControllerDecision::FailNode { .. })
+                && !active_scope_ids.is_empty();
+            let (cancelled_remainders, cancelled_active_work_count) = if cancel_active {
+                cancel_structured_remainders(
+                    transaction,
+                    current_job,
+                    &parents.run.run_id,
+                    &root_map_node_id,
+                    "map_item",
+                    "map_failure_sibling_cancelled",
+                    &active_scope_ids,
+                    &mutations.remainder_cancellations,
+                    request_digest,
+                    database_now,
+                )
+                .await?
+            } else {
+                if !mutations.remainder_cancellations.is_empty() {
+                    return Err(RepositoryError::InvalidInput(
+                        "Map supplied unexpected remainder-cancellation slots".to_owned(),
+                    ));
+                }
+                (Vec::new(), 0)
+            };
+            let pending_wake = mutations.pending_wake.as_ref().ok_or_else(|| {
+                RepositoryError::InvalidInput("Map wait is missing its wake slot".to_owned())
+            })?;
+            if admission_barrier && matches!(decision, ControllerDecision::FailNode { .. }) {
+                stored_pending.wait = StoredControllerWait::MapSettlement {
+                    failure_policy: *failure_policy,
+                    item_count: *item_count,
+                    admitted_item_count,
+                    next_plan_node_key: next_plan_node_key.clone(),
+                };
+            }
+            let woken_payload = TypedPayload::with_limit(1, &stored_pending, 262_144)?;
+            let node_version: i64 = sqlx::query_scalar(
+                r#"
+                UPDATE insight_platform.run_nodes
+                SET state = 'ready', version = version + 1, enqueue_round = 0,
+                    payload_schema_version = $5, payload = $6, payload_digest = $7,
+                    updated_at = $4
+                WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+                  AND record_kind = 'node_execution' AND state = 'pending'
+                  AND terminal_at IS NULL
+                RETURNING version
+                "#,
+            )
+            .bind(&current_job.tenant_id)
+            .bind(wait_node_execution_id.to_string())
+            .bind(wait_row.try_get::<i64, _>("version")?)
+            .bind(database_now)
+            .bind(woken_payload.schema_version)
+            .bind(&woken_payload.value)
+            .bind(&woken_payload.digest)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict("Map wait wake"))?;
+            let current_payload: OrchestrationJobPayload =
+                decode_typed_payload(&current_job.payload, "orchestration Job")?;
+            let job_payload = OrchestrationJobPayload {
+                bindings_digest: parents.run.bindings.canonical_digest.clone(),
+                node_execution_id: wait_node_execution_id.clone(),
+                root_scope_id: current_payload.root_scope_id,
+                retry_backoff_milliseconds: current_payload.retry_backoff_milliseconds,
+                wake_contract: None,
+            };
+            job_payload
+                .validate()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            let job_payload = TypedPayload::with_limit(1, &job_payload, 262_144)?;
+            let job = sqlx::query(
+                r#"
+                INSERT INTO insight_platform.jobs (
+                    tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+                    state, attempt_limit, scheduled_at, deadline, priority, request_digest,
+                    payload_schema_version, payload, payload_digest
+                ) VALUES (
+                    $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+                    'ready', $5, $6, $7, $8, $9, $10, $11, $12
+                ) RETURNING *
+                "#,
+            )
+            .bind(&current_job.tenant_id)
+            .bind(pending_wake.orchestration_job_id.to_string())
+            .bind(wait_node_execution_id.to_string())
+            .bind(&parents.run.run_id)
+            .bind(current_job.attempt_limit)
+            .bind(database_now)
+            .bind(current_job.deadline.min(parents.run.deadline))
+            .bind(scheduler_priority_to_database(current_job.priority))
+            .bind(pending_wake.request_digest.to_string())
+            .bind(job_payload.schema_version)
+            .bind(&job_payload.value)
+            .bind(&job_payload.digest)
+            .fetch_one(&mut **transaction)
+            .await?;
+            Ok(ParallelLegSettlement {
+                settled_scopes,
+                woken_nodes: vec![ControllerActivationRecord {
+                    node_id: wait_node_execution_id.to_string(),
+                    plan_node_key: map_plan_node_key.clone(),
+                    node_kind: PlanNodeKind::Map,
+                    node_version,
+                    job: job_from_row(job)?,
+                }],
+                cancelled_remainders,
+                cancelled_active_work_count,
+            })
+        }
+        _ => Err(RepositoryError::Conflict("Map settlement decision")),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_parallel_leg_and_maybe_wake_join(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    shape: &ControllerStepShape,
+    mutations: &ControllerStepMutationIds,
+    plan: &RuntimePlan,
+    source_outcome: ChildOutcome,
+    source_scope_state: ScopeState,
+    request_digest: &Sha256Digest,
+    database_now: DateTime<Utc>,
+) -> Result<ParallelLegSettlement, RepositoryError> {
+    if !matches!(
+        (source_outcome, source_scope_state),
+        (ChildOutcome::Succeeded, ScopeState::Succeeded)
+            | (ChildOutcome::Failed, ScopeState::Failed)
+    ) {
+        return Err(RepositoryError::InvalidInput(
+            "ParallelLeg source outcome and Scope state do not match".to_owned(),
+        ));
+    }
+    let ControllerStepShape::ParallelLegExit {
+        join_node_execution_id,
+        join_plan_node_key,
+        expected_scope_ids,
+        policy,
+        quorum,
+        remainder,
+    } = shape
+    else {
+        return Ok(ParallelLegSettlement::empty());
+    };
+    let structural_exit = mutations.structural_exit.as_ref().ok_or_else(|| {
+        RepositoryError::InvalidInput("ParallelLeg exit is missing its mutation slot".to_owned())
+    })?;
+    let _ = structural_exit;
+    let pending_wake = mutations.pending_wake.as_ref().ok_or_else(|| {
+        RepositoryError::InvalidInput("Join wake is missing its mutation slot".to_owned())
+    })?;
+    let expected_ids = expected_scope_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let unique_ids = expected_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if expected_ids.is_empty()
+        || unique_ids.len() != expected_ids.len()
+        || !unique_ids.contains(&parents.scope_id)
+    {
+        return Err(RepositoryError::CorruptRow(
+            "Fork Join expected Scope set is invalid".to_owned(),
+        ));
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT node_id, parent_node_id, node_kind, state, version,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2
+          AND node_id = ANY($3::text[]) AND record_kind = 'scope_instance'
+        ORDER BY node_id
+        FOR UPDATE
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(&expected_ids)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.len() != expected_ids.len() {
+        return Err(RepositoryError::Conflict("Fork Join Scope closure"));
+    }
+    let controller_node_id = rows
+        .first()
+        .and_then(|row| {
+            row.try_get::<Option<String>, _>("parent_node_id")
+                .ok()
+                .flatten()
+        })
+        .ok_or_else(|| {
+            RepositoryError::CorruptRow("ParallelLeg Scope has no controller owner".to_owned())
+        })?;
+    let mut outcomes = BTreeMap::new();
+    let mut active_count = 0_usize;
+    for row in rows {
+        let scope_id: String = row.try_get("node_id")?;
+        let parent_node_id: Option<String> = row.try_get("parent_node_id")?;
+        let state: String = row.try_get("state")?;
+        let version: i64 = row.try_get("version")?;
+        if parent_node_id.as_deref() != Some(controller_node_id.as_str())
+            || row.try_get::<String, _>("node_kind")? != "parallel_leg"
+        {
+            return Err(RepositoryError::Conflict("Fork Join ParallelLeg ownership"));
+        }
+        let payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let stored: StoredControllerScopePayload =
+            decode_typed_payload(&payload, "Fork Join ParallelLeg Scope")?;
+        let StoredControllerScopeDescriptor::ParallelLeg {
+            join_plan_node_key: stored_join,
+            ..
+        } = stored.descriptor
+        else {
+            return Err(RepositoryError::Conflict(
+                "Fork Join ParallelLeg descriptor kind",
+            ));
+        };
+        if stored.controller_node_execution_id.to_string() != controller_node_id
+            || stored_join != *join_plan_node_key
+        {
+            return Err(RepositoryError::Conflict(
+                "Fork Join ParallelLeg descriptor",
+            ));
+        }
+        let outcome = if scope_id == parents.scope_id {
+            if state != ScopeState::Open.as_str() || version != parents.scope_version {
+                return Err(RepositoryError::Conflict(
+                    "current ParallelLeg Scope closure",
+                ));
+            }
+            source_outcome
+        } else {
+            match state
+                .parse::<ScopeState>()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?
+            {
+                ScopeState::Open => {
+                    active_count = active_count.saturating_add(1);
+                    ChildOutcome::Active
+                }
+                ScopeState::Succeeded => ChildOutcome::Succeeded,
+                ScopeState::Failed => ChildOutcome::Failed,
+                ScopeState::Cancelled => ChildOutcome::Cancelled,
+                ScopeState::Closing => {
+                    return Err(RepositoryError::Conflict(
+                        "Fork Join Scope is still closing",
+                    ));
+                }
+            }
+        };
+        outcomes.insert(scope_id, outcome);
+    }
+    if outcomes.len() != expected_ids.len() {
+        return Err(RepositoryError::Conflict("Fork Join Scope closure"));
+    }
+    let active_scope_ids = expected_ids
+        .iter()
+        .filter(|scope_id| outcomes.get(*scope_id) == Some(&ChildOutcome::Active))
+        .cloned()
+        .collect::<Vec<_>>();
+    let closing_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'closing', version = version + 1, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'open' AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.scope_id)
+    .bind(parents.scope_version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("ParallelLeg Scope closing"))?;
+    let scope_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = $4, version = version + 1,
+            terminal_at = $5, updated_at = $5
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'closing'
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.scope_id)
+    .bind(closing_version)
+    .bind(source_scope_state.as_str())
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("ParallelLeg Scope terminal"))?;
+    let settled_scopes = vec![ControllerScopeRecord {
+        scope_id: parents.scope_id.clone(),
+        scope_kind: "parallel_leg".to_owned(),
+        state: source_scope_state.as_str().to_owned(),
+        version: scope_version,
+    }];
+
+    let children = expected_ids
+        .iter()
+        .map(|scope_id| {
+            outcomes.get(scope_id).copied().ok_or_else(|| {
+                RepositoryError::CorruptRow("Fork Join lost a child outcome".to_owned())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let join_node = plan.node(join_plan_node_key)?;
+    let insight_platform_orchestrator::RuntimeNode::Join {
+        policy: plan_policy,
+        quorum: plan_quorum,
+        remainder: plan_remainder,
+        ..
+    } = join_node
+    else {
+        return Err(RepositoryError::Conflict("Fork Join Plan node"));
+    };
+    if plan_policy != policy || plan_quorum != quorum || plan_remainder != remainder {
+        return Err(RepositoryError::Conflict("Fork Join frozen policy"));
+    }
+    let decision = decide_controller(join_node, &ControllerObservation::Join { children })?;
+    let join_row = sqlx::query(
+        r#"
+        SELECT parent_node_id, plan_node_key, node_kind, state, version,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+          AND record_kind = 'node_execution'
+        FOR UPDATE
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(join_node_execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Fork Join pending Node"))?;
+    if join_row
+        .try_get::<Option<String>, _>("parent_node_id")?
+        .as_deref()
+        != Some(controller_node_id.as_str())
+        || join_row.try_get::<String, _>("plan_node_key")? != join_plan_node_key.as_str()
+        || join_row.try_get::<String, _>("node_kind")? != PlanNodeKind::Join.as_str()
+    {
+        return Err(RepositoryError::Conflict("Fork Join pending Node owner"));
+    }
+    let join_payload = payload_from_row(
+        &join_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let pending: StoredPendingControllerNodePayload =
+        decode_typed_payload(&join_payload, "Fork Join pending Node")?;
+    if pending.controller_node_execution_id.to_string() != controller_node_id
+        || pending.plan_node_key != *join_plan_node_key
+        || pending.expected_scope_ids != *expected_scope_ids
+    {
+        return Err(RepositoryError::Conflict("Fork Join pending contract"));
+    }
+    let join_state: String = join_row.try_get("state")?;
+    if join_state != NodeExecutionState::Pending.as_str() {
+        if *policy == JoinPolicy::Quorum
+            && *remainder == Some(JoinRemainderPolicy::Drain)
+            && matches!(join_state.as_str(), "ready" | "running" | "succeeded")
+        {
+            if !mutations.remainder_cancellations.is_empty() {
+                return Err(RepositoryError::InvalidInput(
+                    "Drain Join cannot accept remainder-cancellation slots".to_owned(),
+                ));
+            }
+            return Ok(ParallelLegSettlement {
+                settled_scopes,
+                woken_nodes: Vec::new(),
+                cancelled_remainders: Vec::new(),
+                cancelled_active_work_count: 0,
+            });
+        }
+        return Err(RepositoryError::Conflict("Fork Join pending state"));
+    }
+    match decision {
+        ControllerDecision::WaitForChildren => {
+            if !mutations.remainder_cancellations.is_empty() {
+                return Err(RepositoryError::InvalidInput(
+                    "waiting Join cannot accept remainder-cancellation slots".to_owned(),
+                ));
+            }
+            Ok(ParallelLegSettlement {
+                settled_scopes,
+                woken_nodes: Vec::new(),
+                cancelled_remainders: Vec::new(),
+                cancelled_active_work_count: 0,
+            })
+        }
+        decision @ (ControllerDecision::CompleteNode { .. }
+        | ControllerDecision::FailNode { .. }) => {
+            if matches!(
+                &decision,
+                ControllerDecision::CompleteNode { activate } if activate.len() != 1
+            ) {
+                return Err(RepositoryError::Conflict("Fork Join completion activation"));
+            }
+            let cancel_active = match &decision {
+                ControllerDecision::CompleteNode { .. } => {
+                    active_count > 0 && *remainder == Some(JoinRemainderPolicy::Cancel)
+                }
+                ControllerDecision::FailNode { .. } => active_count > 0,
+                _ => false,
+            };
+            let (cancelled_remainders, cancelled_active_work_count) = if cancel_active {
+                cancel_structured_remainders(
+                    transaction,
+                    current_job,
+                    &parents.run.run_id,
+                    &controller_node_id,
+                    "parallel_leg",
+                    match decision {
+                        ControllerDecision::CompleteNode { .. } => "join_remainder_cancelled",
+                        ControllerDecision::FailNode { .. } => "join_failure_sibling_cancelled",
+                        _ => unreachable!("terminal Join decision was matched above"),
+                    },
+                    &active_scope_ids,
+                    &mutations.remainder_cancellations,
+                    request_digest,
+                    database_now,
+                )
+                .await?
+            } else {
+                if !mutations.remainder_cancellations.is_empty() {
+                    return Err(RepositoryError::InvalidInput(
+                        "controller supplied unexpected remainder-cancellation slots".to_owned(),
+                    ));
+                }
+                (Vec::new(), 0)
+            };
+            let node_version: i64 = sqlx::query_scalar(
+                r#"
+                UPDATE insight_platform.run_nodes
+                SET state = 'ready', version = version + 1, enqueue_round = 0,
+                    updated_at = $4
+                WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+                  AND record_kind = 'node_execution' AND state = 'pending'
+                  AND terminal_at IS NULL
+                RETURNING version
+                "#,
+            )
+            .bind(&current_job.tenant_id)
+            .bind(join_node_execution_id.to_string())
+            .bind(join_row.try_get::<i64, _>("version")?)
+            .bind(database_now)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict("Fork Join wake"))?;
+            let current_payload: OrchestrationJobPayload =
+                decode_typed_payload(&current_job.payload, "orchestration Job")?;
+            let job_payload = OrchestrationJobPayload {
+                bindings_digest: parents.run.bindings.canonical_digest.clone(),
+                node_execution_id: join_node_execution_id.clone(),
+                root_scope_id: current_payload.root_scope_id,
+                retry_backoff_milliseconds: current_payload.retry_backoff_milliseconds,
+                wake_contract: None,
+            };
+            job_payload
+                .validate()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            let job_payload = TypedPayload::with_limit(1, &job_payload, 262_144)?;
+            let job = sqlx::query(
+                r#"
+                INSERT INTO insight_platform.jobs (
+                    tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+                    state, attempt_limit, scheduled_at, deadline, priority, request_digest,
+                    payload_schema_version, payload, payload_digest
+                ) VALUES (
+                    $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+                    'ready', $5, $6, $7, $8, $9, $10, $11, $12
+                ) RETURNING *
+                "#,
+            )
+            .bind(&current_job.tenant_id)
+            .bind(pending_wake.orchestration_job_id.to_string())
+            .bind(join_node_execution_id.to_string())
+            .bind(&parents.run.run_id)
+            .bind(current_job.attempt_limit)
+            .bind(database_now)
+            .bind(current_job.deadline.min(parents.run.deadline))
+            .bind(scheduler_priority_to_database(current_job.priority))
+            .bind(pending_wake.request_digest.to_string())
+            .bind(job_payload.schema_version)
+            .bind(&job_payload.value)
+            .bind(&job_payload.digest)
+            .fetch_one(&mut **transaction)
+            .await?;
+            Ok(ParallelLegSettlement {
+                settled_scopes,
+                woken_nodes: vec![ControllerActivationRecord {
+                    node_id: join_node_execution_id.to_string(),
+                    plan_node_key: join_plan_node_key.clone(),
+                    node_kind: PlanNodeKind::Join,
+                    node_version,
+                    job: job_from_row(job)?,
+                }],
+                cancelled_remainders,
+                cancelled_active_work_count,
+            })
+        }
+        _ => Err(RepositoryError::Conflict("Fork Join controller decision")),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn mutate_failed_orchestration_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    next_job: &JobProjection,
+    parents: &LockedOrchestrationJobParents,
+    source_node: &ControllerSourceNode,
+    structured_exit: Option<&ControllerStepShape>,
+    error_route: Option<&ErrorBoundaryRoute>,
+    mutations: &ControllerStepMutationIds,
+    plan: &RuntimePlan,
+    failure: Failure,
+    controller_code: Option<String>,
+    failure_payload: &TypedPayload,
+    request_digest: &Sha256Digest,
+    database_now: DateTime<Utc>,
+) -> Result<FailedOrchestrationJob, RepositoryError> {
+    let job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'failed', version = $4, result_digest = $5,
+            worker_id = NULL, lease_token_digest = NULL,
+            lease_expires_at = NULL, heartbeat_at = NULL,
+            terminal_at = $6, updated_at = $6
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND state = 'running' AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&current_job.job_id)
+    .bind(current_job.version)
+    .bind(i64::try_from(next_job.version).map_err(|_| {
+        RepositoryError::InvalidInput("failed Job version exceeds bigint".to_owned())
+    })?)
+    .bind(&failure_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("failed orchestration Job"))?;
+    let source_job = job_from_row(job)?;
+    let source_node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'failed', version = version + 1,
+            terminal_at = $4, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'running'
+          AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.node_id)
+    .bind(source_node.version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("failed orchestration Node"))?;
+
+    if let Some(route) = error_route {
+        let slot = mutations.activations.first().ok_or_else(|| {
+            RepositoryError::InvalidInput(
+                "ErrorBoundary failure is missing its handler activation".to_owned(),
+            )
+        })?;
+        let handler = activate_error_boundary_handler(
+            transaction,
+            current_job,
+            parents,
+            route,
+            slot,
+            plan,
+            failure_payload,
+            database_now,
+        )
+        .await?;
+        let run = sqlx::query(
+            r#"
+            UPDATE insight_platform.runs
+            SET version = version + 1, active_work_count = active_work_count - 1,
+                updated_at = $4
+            WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+              AND state = 'running' AND active_work_count > 0
+              AND terminal_at IS NULL
+            RETURNING *
+            "#,
+        )
+        .bind(&parents.run.tenant_id)
+        .bind(&parents.run.run_id)
+        .bind(parents.run.version)
+        .bind(database_now)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("ErrorBoundary Run advance"))?;
+        return Ok(FailedOrchestrationJob {
+            run: run_from_row(run)?,
+            source_node_id: parents.node_id.clone(),
+            source_node_version,
+            source_job,
+            failure,
+            controller_code,
+            handler_activations: vec![handler],
+            settled_scopes: Vec::new(),
+            woken_nodes: Vec::new(),
+            cancelled_remainders: Vec::new(),
+            settled_quota_account_ids: Vec::new(),
+        });
+    }
+
+    let (run, settled_scopes, woken_nodes, cancelled_remainders) =
+        if let Some(shape) = structured_exit {
+            let structural = match shape {
+                ControllerStepShape::ParallelLegExit { .. } => {
+                    settle_parallel_leg_and_maybe_wake_join(
+                        transaction,
+                        current_job,
+                        parents,
+                        shape,
+                        mutations,
+                        plan,
+                        ChildOutcome::Failed,
+                        ScopeState::Failed,
+                        request_digest,
+                        database_now,
+                    )
+                    .await?
+                }
+                ControllerStepShape::MapItemExit { .. } => {
+                    settle_map_item_and_maybe_wake_settlement(
+                        transaction,
+                        current_job,
+                        parents,
+                        shape,
+                        mutations,
+                        plan,
+                        ChildOutcome::Failed,
+                        ScopeState::Failed,
+                        request_digest,
+                        database_now,
+                    )
+                    .await?
+                }
+                _ => {
+                    return Err(RepositoryError::CorruptRow(
+                        "failure selected a non-terminal structured adapter".to_owned(),
+                    ));
+                }
+            };
+            let active_work_decrement = i32::try_from(
+                1_usize
+                    .checked_add(structural.cancelled_active_work_count)
+                    .ok_or_else(|| {
+                        RepositoryError::InvalidInput(
+                            "failed orchestration active-work decrement overflow".to_owned(),
+                        )
+                    })?,
+            )
+            .map_err(|_| {
+                RepositoryError::InvalidInput(
+                    "failed orchestration active-work decrement exceeds integer".to_owned(),
+                )
+            })?;
+            let run = sqlx::query(
+                r#"
+                UPDATE insight_platform.runs
+                SET version = version + 1, active_work_count = active_work_count - $4,
+                    updated_at = $5
+                WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+                  AND state = 'running' AND active_work_count >= $4
+                  AND terminal_at IS NULL
+                RETURNING *
+                "#,
+            )
+            .bind(&parents.run.tenant_id)
+            .bind(&parents.run.run_id)
+            .bind(parents.run.version)
+            .bind(active_work_decrement)
+            .bind(database_now)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict("failed structured Scope Run"))?;
+            (
+                run_from_row(run)?,
+                structural.settled_scopes,
+                structural.woken_nodes,
+                structural.cancelled_remainders,
+            )
+        } else {
+            let job_payload: OrchestrationJobPayload =
+                decode_typed_payload(&current_job.payload, "orchestration Job")?;
+            if job_payload.root_scope_id.to_string() != parents.scope_id {
+                return Err(RepositoryError::InvalidInput(
+                    "nested failure requires a typed Scope propagation adapter".to_owned(),
+                ));
+            }
+            let other_live_nodes: i64 = sqlx::query_scalar(
+                r#"
+                SELECT count(*) FROM insight_platform.run_nodes
+                WHERE tenant_id = $1 AND run_id = $2 AND record_kind = 'node_execution'
+                  AND node_id <> $3 AND terminal_at IS NULL
+                "#,
+            )
+            .bind(&current_job.tenant_id)
+            .bind(&parents.run.run_id)
+            .bind(&parents.node_id)
+            .fetch_one(&mut **transaction)
+            .await?;
+            if other_live_nodes != 0 || parents.run.active_work_count != 1 {
+                return Err(RepositoryError::Conflict(
+                    "failed root orchestration closure",
+                ));
+            }
+            let closing_version: i64 = sqlx::query_scalar(
+                r#"
+                UPDATE insight_platform.run_nodes
+                SET state = 'closing', version = version + 1, updated_at = $4
+                WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+                  AND record_kind = 'scope_instance' AND state = 'open'
+                  AND terminal_at IS NULL
+                RETURNING version
+                "#,
+            )
+            .bind(&current_job.tenant_id)
+            .bind(&parents.scope_id)
+            .bind(parents.scope_version)
+            .bind(database_now)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict("failed root Scope closing"))?;
+            let scope_version: i64 = sqlx::query_scalar(
+                r#"
+                UPDATE insight_platform.run_nodes
+                SET state = 'failed', version = version + 1,
+                    terminal_at = $4, updated_at = $4
+                WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+                  AND record_kind = 'scope_instance' AND state = 'closing'
+                RETURNING version
+                "#,
+            )
+            .bind(&current_job.tenant_id)
+            .bind(&parents.scope_id)
+            .bind(closing_version)
+            .bind(database_now)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict("failed root Scope"))?;
+            let run_id: ResourceId = parents.run.run_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let mut current_snapshot = parents.run.current.clone();
+            current_snapshot.failure = Some(failure.clone());
+            current_snapshot.output_value_id = None;
+            current_snapshot.waiting_reason = None;
+            current_snapshot
+                .validate(&run_id)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+            let current_payload = TypedPayload::from_versioned(1, &current_snapshot, 1_048_576)?;
+            let run = sqlx::query(
+                r#"
+                UPDATE insight_platform.runs
+                SET state = 'failed', version = version + 1, active_work_count = 0,
+                    output_value_id = NULL, current_schema_version = $4,
+                    current_payload = $5, current_payload_digest = $6,
+                    terminal_at = $7, updated_at = $7
+                WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+                  AND state = 'running' AND active_work_count = 1
+                  AND terminal_at IS NULL
+                RETURNING *
+                "#,
+            )
+            .bind(&parents.run.tenant_id)
+            .bind(&parents.run.run_id)
+            .bind(parents.run.version)
+            .bind(current_payload.schema_version)
+            .bind(&current_payload.value)
+            .bind(&current_payload.digest)
+            .bind(database_now)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict("failed root Run"))?;
+            (
+                run_from_row(run)?,
+                vec![ControllerScopeRecord {
+                    scope_id: parents.scope_id.clone(),
+                    scope_kind: "root".to_owned(),
+                    state: ScopeState::Failed.as_str().to_owned(),
+                    version: scope_version,
+                }],
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+    Ok(FailedOrchestrationJob {
+        run,
+        source_node_id: parents.node_id.clone(),
+        source_node_version,
+        source_job,
+        failure,
+        controller_code,
+        handler_activations: Vec::new(),
+        settled_scopes,
+        woken_nodes,
+        cancelled_remainders,
+        settled_quota_account_ids: Vec::new(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn activate_error_boundary_handler(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    route: &ErrorBoundaryRoute,
+    slot: &ControllerActivationSlot,
+    plan: &RuntimePlan,
+    failure_payload: &TypedPayload,
+    database_now: DateTime<Utc>,
+) -> Result<ControllerActivationRecord, RepositoryError> {
+    let target_node = plan.node(&route.target)?;
+    let activation_ordinal: i32 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(max(activation_ordinal), 0) + 1
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2
+          AND record_kind = 'node_execution' AND plan_node_key = $3
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(route.target.as_str())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let node_payload = TypedPayload::with_limit(
+        1,
+        &StoredErrorBoundaryHandlerPayload {
+            error_boundary_node_id: route.boundary_node_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?,
+            failure_digest: failure_payload
+                .digest
+                .parse::<Sha256Digest>()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+            plan_node_key: route.target.clone(),
+            plan_source_digest: parents.run.bindings.plan.semantic_digest.clone(),
+            required_control_tokens: vec![StoredControllerControlToken {
+                source_node_execution_id: parents.node_id.parse().map_err(
+                    |failure: insight_platform_contracts::ResourceIdError| {
+                        RepositoryError::CorruptRow(failure.to_string())
+                    },
+                )?,
+                source_port: StoredControllerPort::Failure,
+            }],
+        },
+        262_144,
+    )?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_nodes (
+            tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+            plan_node_key, activation_ordinal, related_run_id, logical_key,
+            node_kind, state, enqueue_round,
+            payload_schema_version, payload, payload_digest, deadline
+        ) VALUES (
+            $1, $2, $3, $4, 'node_execution', $5,
+            $6, $7, NULL, $8, $9, 'ready', 0, $10, $11, $12, $13
+        )
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(slot.node_execution_id.to_string())
+    .bind(&parents.run.run_id)
+    .bind(&route.boundary_parent_node_id)
+    .bind(&parents.scope_id)
+    .bind(route.target.as_str())
+    .bind(activation_ordinal)
+    .bind(format!(
+        "error-boundary:{}:{}",
+        route.boundary_node_id,
+        route.target.as_str()
+    ))
+    .bind(target_node.kind().as_str())
+    .bind(node_payload.schema_version)
+    .bind(&node_payload.value)
+    .bind(&node_payload.digest)
+    .bind(current_job.deadline.min(parents.run.deadline))
+    .execute(&mut **transaction)
+    .await?;
+    let current_payload: OrchestrationJobPayload =
+        decode_typed_payload(&current_job.payload, "orchestration Job")?;
+    let job_payload = OrchestrationJobPayload {
+        bindings_digest: parents.run.bindings.canonical_digest.clone(),
+        node_execution_id: slot.node_execution_id.clone(),
+        root_scope_id: current_payload.root_scope_id,
+        retry_backoff_milliseconds: current_payload.retry_backoff_milliseconds,
+        wake_contract: None,
+    };
+    job_payload
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let job_payload = TypedPayload::with_limit(1, &job_payload, 262_144)?;
+    let row = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.jobs (
+            tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+            state, attempt_limit, scheduled_at, deadline, priority, request_digest,
+            payload_schema_version, payload, payload_digest
+        ) VALUES (
+            $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+            'ready', $5, $6, $7, $8, $9, $10, $11, $12
+        ) RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(slot.orchestration_job_id.to_string())
+    .bind(slot.node_execution_id.to_string())
+    .bind(&parents.run.run_id)
+    .bind(current_job.attempt_limit)
+    .bind(database_now)
+    .bind(current_job.deadline.min(parents.run.deadline))
+    .bind(scheduler_priority_to_database(current_job.priority))
+    .bind(&job_payload.digest)
+    .bind(job_payload.schema_version)
+    .bind(&job_payload.value)
+    .bind(&job_payload.digest)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(ControllerActivationRecord {
+        node_id: slot.node_execution_id.to_string(),
+        plan_node_key: route.target.clone(),
+        node_kind: target_node.kind(),
+        node_version: 1,
+        job: job_from_row(row)?,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cancel_structured_remainders(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    run_id: &str,
+    controller_node_id: &str,
+    expected_scope_kind: &str,
+    reason_code: &str,
+    active_scope_ids: &[String],
+    slots: &[ControllerRemainderCancellationSlot],
+    request_digest: &Sha256Digest,
+    database_now: DateTime<Utc>,
+) -> Result<(Vec<ControllerCancelledRemainderRecord>, usize), RepositoryError> {
+    let active_set = active_scope_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let slot_set = slots
+        .iter()
+        .map(|slot| slot.expected_scope_id.to_string())
+        .collect::<BTreeSet<_>>();
+    if active_set.is_empty()
+        || active_set.len() != active_scope_ids.len()
+        || slot_set.len() != slots.len()
+        || active_set != slot_set
+    {
+        return Err(RepositoryError::InvalidInput(
+            "remainder-cancellation slots do not match the exact active Scope set".to_owned(),
+        ));
+    }
+    let slots_by_scope = slots
+        .iter()
+        .map(|slot| (slot.expected_scope_id.to_string(), slot))
+        .collect::<BTreeMap<_, _>>();
+    let mut cancelled = Vec::with_capacity(active_scope_ids.len());
+    let mut cancelled_active_work_count = 0_usize;
+    for scope_id in active_scope_ids {
+        let slot = slots_by_scope.get(scope_id).ok_or_else(|| {
+            RepositoryError::CorruptRow("remainder cancellation lost its slot".to_owned())
+        })?;
+        let scope = sqlx::query(
+            r#"
+            SELECT node_kind, state, version, parent_node_id
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'scope_instance'
+            FOR UPDATE
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(run_id)
+        .bind(scope_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("structured remainder Scope"))?;
+        if scope.try_get::<String, _>("node_kind")? != expected_scope_kind
+            || scope.try_get::<String, _>("state")? != ScopeState::Open.as_str()
+            || scope
+                .try_get::<Option<String>, _>("parent_node_id")?
+                .as_deref()
+                != Some(controller_node_id)
+        {
+            return Err(RepositoryError::Conflict(
+                "structured remainder Scope owner",
+            ));
+        }
+        let live_nodes = sqlx::query(
+            r#"
+            SELECT node_id, state, version
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND scope_id = $3
+              AND record_kind = 'node_execution' AND terminal_at IS NULL
+            ORDER BY node_id
+            FOR UPDATE
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(run_id)
+        .bind(scope_id)
+        .fetch_all(&mut **transaction)
+        .await?;
+        if live_nodes.len() != 1 {
+            return Err(RepositoryError::Conflict(
+                "remainder Scope must own one live Node",
+            ));
+        }
+        let node = &live_nodes[0];
+        let node_id: String = node.try_get("node_id")?;
+        let node_state = node
+            .try_get::<String, _>("state")?
+            .parse::<NodeExecutionState>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let job_rows = sqlx::query(
+            r#"
+            SELECT * FROM insight_platform.jobs
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND state IN (
+                  'ready', 'leased', 'running', 'waiting', 'retry_scheduled',
+                  'cancelling'
+              )
+            ORDER BY job_id
+            FOR UPDATE
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(run_id)
+        .bind(&node_id)
+        .fetch_all(&mut **transaction)
+        .await?;
+        if job_rows.len() != 1 {
+            return Err(RepositoryError::Conflict(
+                "remainder Node must own one live Job",
+            ));
+        }
+        let job =
+            job_from_row(job_rows.into_iter().next().ok_or_else(|| {
+                RepositoryError::CorruptRow("remainder Job disappeared".to_owned())
+            })?)?;
+        require_orchestration_job(&job)?;
+        let expected_node_state = orchestration_node_state_for_job_state(&job.state)?;
+        if node_state.as_str() != expected_node_state {
+            return Err(RepositoryError::Conflict("remainder Job and Node state"));
+        }
+        let next_job = decide_job_owner_terminal(&job_projection(&job)?, JobState::Cancelled)?;
+        let mut settled_quota_account_ids = Vec::new();
+        if job.quota_reservation_id.is_some() {
+            let (quota_accounts, already_settled) =
+                lock_job_quota_bundle_state(transaction, &job).await?;
+            if !already_settled {
+                settle_locked_job_quota_bundle(
+                    transaction,
+                    &job,
+                    &quota_accounts,
+                    &slot.quota_entry_ids,
+                    request_digest,
+                )
+                .await?;
+                settled_quota_account_ids = quota_accounts
+                    .iter()
+                    .map(|account| account.quota_account_id.clone())
+                    .collect();
+                cancelled_active_work_count =
+                    cancelled_active_work_count.checked_add(1).ok_or_else(|| {
+                        RepositoryError::InvalidInput(
+                            "remainder active-work count overflow".to_owned(),
+                        )
+                    })?;
+            }
+        }
+        let job_row = sqlx::query(
+            r#"
+            UPDATE insight_platform.jobs
+            SET state = 'cancelled', version = $4, worker_id = NULL,
+                lease_token_digest = NULL, lease_expires_at = NULL,
+                heartbeat_at = NULL, retry_at = NULL,
+                wake_kind = NULL, wake_state = NULL,
+                terminal_at = $5, updated_at = $5
+            WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+              AND state = $6 AND terminal_at IS NULL
+            RETURNING *
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(&job.job_id)
+        .bind(job.version)
+        .bind(i64::try_from(next_job.version).map_err(|_| {
+            RepositoryError::InvalidInput("remainder Job version exceeds bigint".to_owned())
+        })?)
+        .bind(database_now)
+        .bind(&job.state)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("remainder Job cancellation"))?;
+        let cancelled_job = job_from_row(job_row)?;
+
+        let current_node_version: i64 = node.try_get("version")?;
+        let node_cancelling_version = if node_state == NodeExecutionState::Running {
+            Some(
+                sqlx::query_scalar(
+                    r#"
+                    UPDATE insight_platform.run_nodes
+                    SET state = 'cancelling', version = version + 1, updated_at = $4
+                    WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+                      AND record_kind = 'node_execution' AND state = 'running'
+                      AND terminal_at IS NULL
+                    RETURNING version
+                    "#,
+                )
+                .bind(&current_job.tenant_id)
+                .bind(&node_id)
+                .bind(current_node_version)
+                .bind(database_now)
+                .fetch_optional(&mut **transaction)
+                .await?
+                .ok_or(RepositoryError::Conflict("remainder Node cancelling"))?,
+            )
+        } else {
+            None
+        };
+        let terminal_from = if node_cancelling_version.is_some() {
+            NodeExecutionState::Cancelling
+        } else {
+            node_state
+        };
+        if !terminal_from.can_transition_to(NodeExecutionState::Cancelled) {
+            return Err(RepositoryError::Conflict(
+                "remainder Node cancellation transition",
+            ));
+        }
+        let node_version: i64 = sqlx::query_scalar(
+            r#"
+            UPDATE insight_platform.run_nodes
+            SET state = 'cancelled', version = version + 1,
+                terminal_at = $5, updated_at = $5
+            WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+              AND record_kind = 'node_execution' AND state = $4
+              AND terminal_at IS NULL
+            RETURNING version
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(&node_id)
+        .bind(node_cancelling_version.unwrap_or(current_node_version))
+        .bind(terminal_from.as_str())
+        .bind(database_now)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict(
+            "remainder Node terminal cancellation",
+        ))?;
+        let scope_closing_version: i64 = sqlx::query_scalar(
+            r#"
+            UPDATE insight_platform.run_nodes
+            SET state = 'closing', version = version + 1, updated_at = $4
+            WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+              AND record_kind = 'scope_instance' AND state = 'open'
+              AND terminal_at IS NULL
+            RETURNING version
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(scope_id)
+        .bind(scope.try_get::<i64, _>("version")?)
+        .bind(database_now)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("remainder Scope closing"))?;
+        let scope_version: i64 = sqlx::query_scalar(
+            r#"
+            UPDATE insight_platform.run_nodes
+            SET state = 'cancelled', version = version + 1,
+                terminal_at = $4, updated_at = $4
+            WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+              AND record_kind = 'scope_instance' AND state = 'closing'
+            RETURNING version
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(scope_id)
+        .bind(scope_closing_version)
+        .bind(database_now)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict(
+            "remainder Scope terminal cancellation",
+        ))?;
+        cancelled.push(ControllerCancelledRemainderRecord {
+            scope: ControllerScopeRecord {
+                scope_id: scope_id.clone(),
+                scope_kind: expected_scope_kind.to_owned(),
+                state: ScopeState::Cancelled.as_str().to_owned(),
+                version: scope_version,
+            },
+            reason_code: reason_code.to_owned(),
+            node_id,
+            node_version,
+            node_cancelling_version,
+            job: cancelled_job,
+            settled_quota_account_ids,
+        });
+    }
+    Ok((cancelled, cancelled_active_work_count))
+}
+
+async fn mutate_yielded_orchestration_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    next_job: &JobProjection,
+    parents: &LockedOrchestrationJobParents,
+    wake_contract: Option<WakeContract>,
+    database_now: DateTime<Utc>,
+) -> Result<YieldedOrchestrationJob, RepositoryError> {
+    let target_node_state = match next_job.state {
+        JobState::Waiting => NodeExecutionState::Waiting,
+        JobState::RetryScheduled => NodeExecutionState::RetryScheduled,
+        _ => {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration yield decision is not waiting or retry-scheduled".to_owned(),
+            ))
+        }
+    };
+    if !NodeExecutionState::Running.can_transition_to(target_node_state) {
+        return Err(RepositoryError::Conflict(
+            "orchestration Node yield transition",
+        ));
+    }
+    let payload =
+        orchestration_job_payload_with_wake(current_job, wake_contract.as_ref().cloned())?;
+    let (wake_kind, wake_state, wake_generation) = match &wake_contract {
+        Some(wake) => (
+            Some(wake.kind.as_str()),
+            Some("pending"),
+            i64::try_from(wake.generation).map_err(|_| {
+                RepositoryError::InvalidInput("wake generation exceeds bigint".to_owned())
+            })?,
+        ),
+        None => (None, None, 0),
+    };
+    let job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = $4, version = $5, worker_id = NULL, lease_token_digest = NULL,
+            lease_expires_at = NULL, heartbeat_at = NULL, retry_at = $6,
+            wake_kind = $7, wake_state = $8, wake_generation = $9,
+            payload_schema_version = $10, payload = $11, payload_digest = $12,
+            started_at = NULL, updated_at = $13
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = 'running'
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&current_job.job_id)
+    .bind(current_job.version)
+    .bind(next_job.state.as_str())
+    .bind(
+        i64::try_from(next_job.version)
+            .map_err(|_| RepositoryError::InvalidInput("Job version exceeds bigint".to_owned()))?,
+    )
+    .bind(next_job.retry_at)
+    .bind(wake_kind)
+    .bind(wake_state)
+    .bind(wake_generation)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration Job"))?;
+    let job = job_from_row(job)?;
+
+    let node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = $4, version = version + 1, retry_at = $5, updated_at = $6
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'running'
+          AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.node_id)
+    .bind(parents.node_version)
+    .bind(target_node_state.as_str())
+    .bind(next_job.retry_at)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration Node"))?;
+
+    let run = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET version = version + 1, active_work_count = active_work_count - 1,
+            updated_at = $4
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state = 'running' AND active_work_count > 0 AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&parents.run.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(parents.run.version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration Run"))?;
+
+    Ok(YieldedOrchestrationJob {
+        run: run_from_row(run)?,
+        job,
+        node_id: parents.node_id.clone(),
+        node_version,
+        settled_quota_account_ids: Vec::new(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn mutate_deferred_orchestration_task(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    next_job: &JobProjection,
+    parents: &LockedOrchestrationJobParents,
+    command: &DeferOrchestrationToTask,
+    task_payload: &TypedPayload,
+    database_now: DateTime<Utc>,
+) -> Result<DeferredOrchestrationTask, RepositoryError> {
+    if !NodeExecutionState::Running.can_transition_to(NodeExecutionState::Waiting) {
+        return Err(RepositoryError::Conflict(
+            "orchestration Task wait transition",
+        ));
+    }
+    let job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'succeeded', version = $4, result_digest = $5,
+            worker_id = NULL, lease_token_digest = NULL,
+            lease_expires_at = NULL, heartbeat_at = NULL,
+            terminal_at = $6, updated_at = $6
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = 'running'
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&current_job.job_id)
+    .bind(current_job.version)
+    .bind(
+        i64::try_from(next_job.version)
+            .map_err(|_| RepositoryError::InvalidInput("Job version exceeds bigint".to_owned()))?,
+    )
+    .bind(&task_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration Task deferral Job"))?;
+    let job = job_from_row(job)?;
+    let task = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.tasks (
+            tenant_id, task_id, task_kind, owner_kind, owner_id, run_id, node_id,
+            invocation_id, state, generation, version, response_schema_digest,
+            principal_snapshot_schema_version, payload_schema_version, payload, payload_digest,
+            response_value_id, deadline, responded_at
+        ) VALUES (
+            $1, $2, $3, 'node_execution', $4, $5, $4,
+            NULL, 'pending', 1, 1, $6,
+            1, $7, $8, $9, NULL, $10, NULL
+        )
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(command.task_id.to_string())
+    .bind(command.definition.task_kind().as_str())
+    .bind(&parents.node_id)
+    .bind(&parents.run.run_id)
+    .bind(
+        command
+            .response_schema_digest
+            .as_ref()
+            .map(ToString::to_string),
+    )
+    .bind(task_payload.schema_version)
+    .bind(&task_payload.value)
+    .bind(&task_payload.digest)
+    .bind(command.task_deadline)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let task = task_from_row(task)?;
+    let node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'waiting', version = version + 1, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'running'
+          AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.node_id)
+    .bind(parents.node_version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration Task deferral Node",
+    ))?;
+    let mut current_snapshot = parents.run.current.clone();
+    if parents.run.active_work_count == 1 {
+        current_snapshot.waiting_reason = Some(command.definition.task_kind().as_str().to_owned());
+    }
+    let run_id: ResourceId = parents.run.run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    current_snapshot
+        .validate(&run_id)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let current_payload = TypedPayload::from_versioned(1, &current_snapshot, 1_048_576)?;
+    let run = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = CASE WHEN active_work_count = 1 THEN 'waiting' ELSE state END,
+            version = version + 1, active_work_count = active_work_count - 1,
+            current_schema_version = $4, current_payload = $5,
+            current_payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state = 'running' AND active_work_count > 0 AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&parents.run.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(parents.run.version)
+    .bind(current_payload.schema_version)
+    .bind(&current_payload.value)
+    .bind(&current_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration Task deferral Run"))?;
+    Ok(DeferredOrchestrationTask {
+        run: run_from_row(run)?,
+        node_id: parents.node_id.clone(),
+        node_version,
+        job,
+        task,
+        settled_quota_account_ids: Vec::new(),
+    })
+}
+
+fn require_frozen_child_candidate(
+    bindings: &RunBindingsSnapshot,
+    command: &DeferOrchestrationToChildRun,
+) -> Result<(), RepositoryError> {
+    let slot = bindings
+        .slots
+        .iter()
+        .find(|slot| slot.slot_id == command.slot_id)
+        .ok_or(RepositoryError::NotFound("frozen child Agent slot"))?;
+    let FrozenSlotTarget::ChildAgent { candidates, .. } = &slot.target else {
+        return Err(RepositoryError::InvalidInput(
+            "selected slot is not a child Agent slot".to_owned(),
+        ));
+    };
+    if !candidates.contains(&command.selected_child_deployment) {
+        return Err(RepositoryError::Conflict(
+            "selected child Deployment is outside the frozen slot",
+        ));
+    }
+    Ok(())
+}
+
+async fn require_enabled_exact_agent_deployment(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    exact: &ExactDeploymentRef,
+) -> Result<DeploymentRecord, RepositoryError> {
+    let deployment = load_deployment(transaction, tenant_id, &exact.deployment_id).await?;
+    if deployment.bindings.digest != exact.deployment_digest.to_string() {
+        return Err(RepositoryError::Conflict("exact child Agent Deployment"));
+    }
+    let resource_id: ResourceId = deployment.resource_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let resource = load_resource(transaction, tenant_id, &resource_id).await?;
+    if resource.resource_kind != RegistryResourceKind::Agent.as_str()
+        || resource.lifecycle_state != EntityLifecycle::Active.as_str()
+        || resource.gate_state != AdministrativeGate::Enabled.as_str()
+    {
+        return Err(RepositoryError::Conflict("child Agent Deployment gate"));
+    }
+    Ok(deployment)
+}
+
+async fn require_child_input_schema(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    interface: &ExactVersionRef,
+    input_schema_digest: &Sha256Digest,
+) -> Result<(), RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT version.payload_schema_version, version.payload, version.payload_digest
+        FROM insight_platform.resource_versions AS version
+        JOIN insight_platform.resources AS resource
+          ON resource.tenant_id = version.tenant_id
+         AND resource.resource_id = version.resource_id
+        WHERE version.tenant_id = $1 AND version.resource_version_id = $2
+          AND version.resource_version_kind = 'agent_interface_revision'
+          AND version.content_digest = $3
+          AND resource.resource_kind = 'agent'
+          AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(interface.revision_id.to_string())
+    .bind(interface.semantic_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("exact child Agent interface"))?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let published = decode_published_version_payload(&payload)?;
+    let ResourceDocument::Agent(spec) = published.document else {
+        return Err(RepositoryError::CorruptRow(
+            "child Agent interface contains a non-Agent document".to_owned(),
+        ));
+    };
+    if &spec.interface_schema_digest != input_schema_digest {
+        return Err(RepositoryError::InvalidInput(
+            "child input does not match the exact Agent interface schema".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn require_child_input_sources(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    parent_run_id: &ResourceId,
+    source_value_ids: &[ResourceId],
+    child_classification: DataClassification,
+) -> Result<(), RepositoryError> {
+    if source_value_ids.is_empty() {
+        return Ok(());
+    }
+    let source_ids = source_value_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT value_id, classification
+        FROM insight_platform.run_values
+        WHERE tenant_id = $1 AND run_id = $2 AND value_id = ANY($3)
+        ORDER BY value_id
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(parent_run_id.to_string())
+    .bind(&source_ids)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.len() != source_ids.len() {
+        return Err(RepositoryError::NotFound("parent Run input source value"));
+    }
+    let mut joined = DataClassification::Public;
+    for row in rows {
+        let classification = row
+            .try_get::<String, _>("classification")?
+            .parse::<DataClassification>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        joined = joined.join(classification);
+    }
+    if child_classification.rank() < joined.rank() {
+        return Err(RepositoryError::PermissionDenied);
+    }
+    Ok(())
+}
+
+async fn count_run_descendants(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    parent_run_id: &ResourceId,
+) -> Result<u32, RepositoryError> {
+    let count: i64 = sqlx::query_scalar(
+        r#"
+        WITH RECURSIVE descendants(run_id) AS (
+            SELECT run_id
+            FROM insight_platform.runs
+            WHERE tenant_id = $1 AND parent_run_id = $2
+            UNION
+            SELECT child.run_id
+            FROM insight_platform.runs AS child
+            JOIN descendants AS parent ON parent.run_id = child.parent_run_id
+            WHERE child.tenant_id = $1
+        )
+        SELECT count(*) FROM descendants
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(parent_run_id.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    u32::try_from(count)
+        .map_err(|_| RepositoryError::CorruptRow("Run descendant count exceeds u32".to_owned()))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn mutate_deferred_orchestration_child_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    next_parent_job: &JobProjection,
+    parents: &LockedOrchestrationJobParents,
+    locked_root: Option<&RunRecord>,
+    command: &DeferOrchestrationToChildRun,
+    child_bindings: &RunBindingsSnapshot,
+    child_ancestry: &insight_platform_orchestrator::RunAncestrySnapshot,
+    child_link_payload: &ChildRunLinkPayload,
+    database_now: DateTime<Utc>,
+) -> Result<DeferredOrchestrationChildRun, RepositoryError> {
+    if !NodeExecutionState::Running.can_transition_to(NodeExecutionState::Waiting) {
+        return Err(RepositoryError::Conflict(
+            "orchestration child wait transition",
+        ));
+    }
+
+    let parent_job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'succeeded', version = $4, result_digest = $5,
+            worker_id = NULL, lease_token_digest = NULL,
+            lease_expires_at = NULL, heartbeat_at = NULL,
+            terminal_at = $6, updated_at = $6
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = 'running'
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&current_job.job_id)
+    .bind(current_job.version)
+    .bind(
+        i64::try_from(next_parent_job.version)
+            .map_err(|_| RepositoryError::InvalidInput("Job version exceeds bigint".to_owned()))?,
+    )
+    .bind(child_link_payload.input_digest.to_string())
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration child deferral Job",
+    ))?;
+    let parent_job = job_from_row(parent_job)?;
+
+    let child_bindings_payload = TypedPayload::from_versioned(1, child_bindings, 1_048_576)?;
+    let mut child_current = RunCurrentSnapshot::initial(
+        command.child_run_id.clone(),
+        command.selected_child_deployment.deployment_id.clone(),
+        command.input.value_id.clone(),
+    );
+    child_current.ancestry = child_ancestry.clone();
+    child_current
+        .validate(&command.child_run_id)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let child_current_payload = TypedPayload::from_versioned(1, &child_current, 1_048_576)?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.runs (
+            tenant_id, run_id, root_run_id, parent_run_id, parent_node_id,
+            agent_deployment_id, principal_id, state,
+            bindings_schema_version, bindings, bindings_digest,
+            current_schema_version, current_payload, current_payload_digest,
+            depth, deadline
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, 'queued',
+            $8, $9, $10, $11, $12, $13, $14, $15
+        )
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(command.child_run_id.to_string())
+    .bind(child_ancestry.root_run_id.to_string())
+    .bind(&parents.run.run_id)
+    .bind(&parents.node_id)
+    .bind(command.selected_child_deployment.deployment_id.to_string())
+    .bind(parents.run.bindings.principal.principal_id.to_string())
+    .bind(child_bindings_payload.schema_version)
+    .bind(&child_bindings_payload.value)
+    .bind(child_bindings.canonical_digest.to_string())
+    .bind(child_current_payload.schema_version)
+    .bind(&child_current_payload.value)
+    .bind(&child_current_payload.digest)
+    .bind(i32::from(child_ancestry.depth))
+    .bind(command.budget.deadline)
+    .execute(&mut **transaction)
+    .await?;
+
+    let child_scope_payload = TypedPayload::new(
+        1,
+        &serde_json::json!({
+            "root_run_id": child_ancestry.root_run_id,
+            "scope_kind": "root",
+        }),
+    )?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_nodes (
+            tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+            plan_node_key, activation_ordinal, related_run_id, logical_key,
+            node_kind, state, payload_schema_version, payload, payload_digest, deadline
+        ) VALUES (
+            $1, $2, $3, NULL, 'scope_instance', $2,
+            NULL, NULL, NULL, 'scope:root', 'root', 'open', $4, $5, $6, $7
+        )
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(command.child_root_scope_id.to_string())
+    .bind(command.child_run_id.to_string())
+    .bind(child_scope_payload.schema_version)
+    .bind(&child_scope_payload.value)
+    .bind(&child_scope_payload.digest)
+    .bind(command.budget.deadline)
+    .execute(&mut **transaction)
+    .await?;
+
+    let child_node_payload = TypedPayload::new(
+        1,
+        &serde_json::json!({
+            "plan_node_key": command.child_entry_plan_node_key,
+            "required_control_tokens": ["root"],
+        }),
+    )?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_nodes (
+            tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+            plan_node_key, activation_ordinal, related_run_id, logical_key,
+            node_kind, state, enqueue_round,
+            payload_schema_version, payload, payload_digest, deadline
+        ) VALUES (
+            $1, $2, $3, NULL, 'node_execution', $4,
+            $5, 1, NULL, $6, $7, 'ready', 0, $8, $9, $10, $11
+        )
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(command.child_entry_node_execution_id.to_string())
+    .bind(command.child_run_id.to_string())
+    .bind(command.child_root_scope_id.to_string())
+    .bind(command.child_entry_plan_node_key.as_str())
+    .bind(format!(
+        "entry:{}:1",
+        command.child_entry_plan_node_key.as_str()
+    ))
+    .bind(command.child_entry_node_kind.as_str())
+    .bind(child_node_payload.schema_version)
+    .bind(&child_node_payload.value)
+    .bind(&child_node_payload.digest)
+    .bind(command.budget.deadline)
+    .execute(&mut **transaction)
+    .await?;
+
+    let (inline_value, artifact_id) = match &command.input.value {
+        ValueRef::Inline { value } => (Some(value), None),
+        ValueRef::Artifact { artifact } => (None, Some(artifact.artifact_id().to_string())),
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_values (
+            tenant_id, value_id, run_id, node_id, value_kind, classification,
+            schema_digest, content_digest, inline_value, artifact_id
+        ) VALUES ($1, $2, $3, NULL, 'run_input', $4, $5, $6, $7, $8)
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(command.input.value_id.to_string())
+    .bind(command.child_run_id.to_string())
+    .bind(command.input.classification.as_str())
+    .bind(command.input.schema_digest.to_string())
+    .bind(command.input.content_digest.to_string())
+    .bind(inline_value)
+    .bind(artifact_id)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE insight_platform.runs SET input_value_id = $3 WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(&current_job.tenant_id)
+    .bind(command.child_run_id.to_string())
+    .bind(command.input.value_id.to_string())
+    .execute(&mut **transaction)
+    .await?;
+
+    let child_job_payload = TypedPayload::new(
+        1,
+        &OrchestrationJobPayload {
+            bindings_digest: child_bindings.canonical_digest.clone(),
+            node_execution_id: command.child_entry_node_execution_id.clone(),
+            root_scope_id: command.child_root_scope_id.clone(),
+            retry_backoff_milliseconds: command.child_retry_backoff_milliseconds,
+            wake_contract: None,
+        },
+    )?;
+    let child_job = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.jobs (
+            tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+            state, attempt_limit, scheduled_at, deadline, priority, request_digest,
+            payload_schema_version, payload, payload_digest
+        ) VALUES (
+            $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+            'ready', $5, $6, $7, $8, $9, $10, $11, $12
+        )
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(command.child_orchestration_job_id.to_string())
+    .bind(command.child_entry_node_execution_id.to_string())
+    .bind(command.child_run_id.to_string())
+    .bind(i32::from(command.child_attempt_limit))
+    .bind(database_now)
+    .bind(command.budget.deadline)
+    .bind(scheduler_priority_to_database(current_job.priority))
+    .bind(command.request_digest.to_string())
+    .bind(child_job_payload.schema_version)
+    .bind(&child_job_payload.value)
+    .bind(&child_job_payload.digest)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let child_job = job_from_row(child_job)?;
+
+    let stored_link_payload = TypedPayload::with_limit(
+        1,
+        &StoredChildRunLinkPayload {
+            slot_id: command.slot_id.clone(),
+            source_value_ids: command.source_value_ids.clone(),
+            child_root_scope_id: command.child_root_scope_id.clone(),
+            child_entry_node_execution_id: command.child_entry_node_execution_id.clone(),
+            child_orchestration_job_id: command.child_orchestration_job_id.clone(),
+            link: child_link_payload.clone(),
+        },
+        262_144,
+    )?;
+    let child_link = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_nodes (
+            tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+            plan_node_key, activation_ordinal, related_run_id, logical_key,
+            node_kind, state, generation, version,
+            payload_schema_version, payload, payload_digest, deadline
+        ) VALUES (
+            $1, $2, $3, $4, 'child_run_link', $5,
+            NULL, NULL, $6, $7,
+            'child_run', 'running', 1, 1, $8, $9, $10, $11
+        )
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(command.child_link_id.to_string())
+    .bind(&parents.run.run_id)
+    .bind(&parents.node_id)
+    .bind(&parents.scope_id)
+    .bind(command.child_run_id.to_string())
+    .bind(&command.logical_key)
+    .bind(stored_link_payload.schema_version)
+    .bind(&stored_link_payload.value)
+    .bind(&stored_link_payload.digest)
+    .bind(command.budget.deadline)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let child_link = child_run_link_from_row(child_link)?;
+
+    let parent_node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'waiting', version = version + 1, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'running'
+          AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.node_id)
+    .bind(parents.node_version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration child deferral Node",
+    ))?;
+
+    let mut parent_current = parents.run.current.clone();
+    if parents.run.active_work_count == 1 {
+        parent_current.waiting_reason = Some("child_run".to_owned());
+    }
+    let parent_run_id: ResourceId = parents.run.run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    parent_current
+        .validate(&parent_run_id)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let parent_current_payload = TypedPayload::from_versioned(1, &parent_current, 1_048_576)?;
+    let parent_run = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = CASE WHEN active_work_count = 1 THEN 'waiting' ELSE state END,
+            version = version + 1, active_work_count = active_work_count - 1,
+            descendant_count = descendant_count + CASE WHEN root_run_id = run_id THEN 1 ELSE 0 END,
+            current_schema_version = $4, current_payload = $5,
+            current_payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state = 'running' AND active_work_count > 0 AND terminal_at IS NULL
+          AND descendant_count < $8
+        RETURNING *
+        "#,
+    )
+    .bind(&parents.run.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(parents.run.version)
+    .bind(parent_current_payload.schema_version)
+    .bind(&parent_current_payload.value)
+    .bind(&parent_current_payload.digest)
+    .bind(database_now)
+    .bind(i32::try_from(MAX_DESCENDANT_RUNS).expect("descendant hard limit fits integer"))
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration child deferral parent Run",
+    ))?;
+    let parent_run = run_from_row(parent_run)?;
+
+    let root_run = if let Some(root) = locked_root {
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.runs
+            SET descendant_count = descendant_count + 1,
+                version = version + 1, updated_at = $4
+            WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+              AND terminal_at IS NULL AND descendant_count < $5
+            RETURNING *
+            "#,
+        )
+        .bind(&root.tenant_id)
+        .bind(&root.run_id)
+        .bind(root.version)
+        .bind(database_now)
+        .bind(i32::try_from(MAX_DESCENDANT_RUNS).expect("descendant hard limit fits integer"))
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict(
+            "orchestration child deferral root Run",
+        ))?;
+        run_from_row(row)?
+    } else {
+        parent_run.clone()
+    };
+
+    let tenant_id: ResourceId = command.fence.tenant_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let child_run = load_run(transaction, &tenant_id, &command.child_run_id).await?;
+    Ok(DeferredOrchestrationChildRun {
+        root_run,
+        parent_run,
+        parent_node_id: parents.node_id.clone(),
+        parent_node_version,
+        parent_job,
+        child_link,
+        child_run,
+        child_job,
+        settled_quota_account_ids: Vec::new(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn mutate_terminal_child_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    parent_run: &RunRecord,
+    parent_node_version: i64,
+    parent_scope_id: &str,
+    source_job: &JobRecord,
+    child_run: &RunRecord,
+    child_link: &ChildRunLinkRecord,
+    next_link: &ChildRunLinkProjection,
+    slot: &TerminalChildRunSlot,
+    converging: bool,
+    database_now: DateTime<Utc>,
+) -> Result<ResolvedOrchestrationChildRun, RepositoryError> {
+    let link = sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = $4, version = $5, terminal_at = $6, updated_at = $6
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'child_run_link'
+          AND state IN ('running', 'waiting', 'cancelling') AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&child_link.tenant_id)
+    .bind(&child_link.child_link_id)
+    .bind(child_link.version)
+    .bind(next_link.state.as_str())
+    .bind(i64::try_from(next_link.version).map_err(|_| {
+        RepositoryError::InvalidInput("ChildRunLink version exceeds bigint".to_owned())
+    })?)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("terminal ChildRunLink"))?;
+    let link = child_run_link_from_row(link)?;
+
+    let target_state = if converging { "cancelling" } else { "ready" };
+    let next_parent_node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = $4, version = version + 1, updated_at = $5
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'waiting'
+          AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&parent_run.tenant_id)
+    .bind(&child_link.parent_node_execution_id)
+    .bind(parent_node_version)
+    .bind(target_state)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("terminal child parent Node"))?;
+
+    let mut parent_current = parent_run.current.clone();
+    parent_current.waiting_reason = None;
+    let parent_run_id: ResourceId = parent_run.run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    parent_current
+        .validate(&parent_run_id)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let parent_current_payload = TypedPayload::from_versioned(1, &parent_current, 1_048_576)?;
+    let next_parent_state = if converging { "cancelling" } else { "running" };
+    let parent = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = $4, version = version + 1,
+            current_schema_version = $5, current_payload = $6,
+            current_payload_digest = $7, updated_at = $8
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state IN ('running', 'waiting', 'cancelling')
+          AND active_work_count = 0 AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&parent_run.tenant_id)
+    .bind(&parent_run.run_id)
+    .bind(parent_run.version)
+    .bind(next_parent_state)
+    .bind(parent_current_payload.schema_version)
+    .bind(&parent_current_payload.value)
+    .bind(&parent_current_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("terminal child parent Run"))?;
+    let parent = run_from_row(parent)?;
+
+    let source_payload: OrchestrationJobPayload =
+        decode_typed_payload(&source_job.payload, "orchestration Job")?;
+    if source_payload.node_execution_id.to_string() != child_link.parent_node_execution_id
+        || source_payload.root_scope_id.to_string() != parent_scope_id
+    {
+        return Err(RepositoryError::CorruptRow(
+            "terminal child source Job disagrees with its parent Node".to_owned(),
+        ));
+    }
+    let resume_payload = TypedPayload::new(
+        1,
+        &OrchestrationJobPayload {
+            wake_contract: None,
+            ..source_payload
+        },
+    )?;
+    let minimum_deadline = database_now
+        .checked_add_signed(Duration::seconds(1))
+        .ok_or_else(|| RepositoryError::InvalidInput("resume deadline overflowed".to_owned()))?;
+    let resume_deadline = parent.deadline.max(minimum_deadline);
+    let resume_job = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.jobs (
+            tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+            state, attempt_limit, scheduled_at, deadline, priority, request_digest,
+            payload_schema_version, payload, payload_digest
+        ) VALUES (
+            $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+            $5, $6, $7, $8, $9, $10, $11, $12, $13
+        )
+        RETURNING *
+        "#,
+    )
+    .bind(&parent.tenant_id)
+    .bind(slot.resume_job_id.to_string())
+    .bind(&child_link.parent_node_execution_id)
+    .bind(&parent.run_id)
+    .bind(target_state)
+    .bind(source_job.attempt_limit)
+    .bind(database_now)
+    .bind(resume_deadline)
+    .bind(scheduler_priority_to_database(source_job.priority))
+    .bind(slot.resume_request_digest.to_string())
+    .bind(resume_payload.schema_version)
+    .bind(&resume_payload.value)
+    .bind(&resume_payload.digest)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let resume_job = job_from_row(resume_job)?;
+    Ok(ResolvedOrchestrationChildRun {
+        parent_run: parent,
+        parent_node_id: child_link.parent_node_execution_id.clone(),
+        parent_node_version: next_parent_node_version,
+        child_link: link,
+        child_run: child_run.clone(),
+        resume_job,
+    })
+}
+
+async fn append_terminal_child_run_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    resolved: &ResolvedOrchestrationChildRun,
+    slot: &TerminalChildRunSlot,
+    converging: bool,
+) -> Result<(), RepositoryError> {
+    let parent_run_id = resolved.parent_run.run_id.as_str();
+    let payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "child_link_id": resolved.child_link.child_link_id,
+            "child_run_id": resolved.child_run.run_id,
+            "child_run_state": resolved.child_run.state,
+            "parent_converging": converging,
+            "resume_job_id": resolved.resume_job.job_id,
+        }),
+        65_536,
+    )?;
+    append_scheduler_event(
+        transaction,
+        &resolved.child_link.tenant_id,
+        &slot.child_link_event_id,
+        &slot.child_link_outbox_id,
+        "child_run_link",
+        &resolved.child_link.child_link_id,
+        resolved.child_link.version,
+        Some(parent_run_id),
+        "child.completed",
+        &payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &resolved.parent_run.tenant_id,
+        &slot.parent_run_event_id,
+        &slot.parent_run_outbox_id,
+        "run",
+        parent_run_id,
+        resolved.parent_run.version,
+        Some(parent_run_id),
+        if converging {
+            "run.child_cancel_converging"
+        } else {
+            "run.child_resolved"
+        },
+        &payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &resolved.parent_run.tenant_id,
+        &slot.parent_node_event_id,
+        &slot.parent_node_outbox_id,
+        "node_execution",
+        &resolved.parent_node_id,
+        resolved.parent_node_version,
+        Some(parent_run_id),
+        if converging {
+            "node.child_cancel_converging"
+        } else {
+            "node.child_ready"
+        },
+        &payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &resolved.resume_job.tenant_id,
+        &slot.resume_job_event_id,
+        &slot.resume_job_outbox_id,
+        "job",
+        &resolved.resume_job.job_id,
+        resolved.resume_job.version,
+        Some(parent_run_id),
+        if converging {
+            "job.cancelling"
+        } else {
+            "job.ready"
+        },
+        &payload,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn mutate_cancelling_child_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    parent_run: &RunRecord,
+    child_run: &RunRecord,
+    child_link: &ChildRunLinkRecord,
+    next_link: &ChildRunLinkProjection,
+    next_child_control: insight_platform_orchestrator::RunControlSnapshot,
+    database_now: DateTime<Utc>,
+) -> Result<CancellingOrchestrationChildRun, RepositoryError> {
+    let current_child_state = child_run
+        .state
+        .parse::<RunState>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if current_child_state != RunState::Cancelling
+        && !current_child_state.can_transition_to(RunState::Cancelling)
+    {
+        return Err(RepositoryError::Conflict("child Run cancel transition"));
+    }
+    let link = sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'cancelling', version = $4, updated_at = $5
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'child_run_link' AND state IN ('running', 'waiting')
+          AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&child_link.tenant_id)
+    .bind(&child_link.child_link_id)
+    .bind(child_link.version)
+    .bind(i64::try_from(next_link.version).map_err(|_| {
+        RepositoryError::InvalidInput("ChildRunLink version exceeds bigint".to_owned())
+    })?)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("ChildRunLink cancellation"))?;
+    let link = child_run_link_from_row(link)?;
+
+    let mut child_current = child_run.current.clone();
+    child_current.control = next_child_control;
+    let child_run_id: ResourceId = child_run.run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    child_current
+        .validate(&child_run_id)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let child_current_payload = TypedPayload::from_versioned(1, &child_current, 1_048_576)?;
+    let cancel_generation =
+        i64::try_from(child_current.control.cancel_generation).map_err(|_| {
+            RepositoryError::InvalidInput("child cancel generation exceeds bigint".to_owned())
+        })?;
+    let child = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = 'cancelling', version = version + 1,
+            current_schema_version = $4, current_payload = $5,
+            current_payload_digest = $6, cancel_generation = $7,
+            updated_at = $8
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state IN ('queued', 'running', 'waiting', 'cancelling')
+          AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&child_run.tenant_id)
+    .bind(&child_run.run_id)
+    .bind(child_run.version)
+    .bind(child_current_payload.schema_version)
+    .bind(&child_current_payload.value)
+    .bind(&child_current_payload.digest)
+    .bind(cancel_generation)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("child Run cancellation"))?;
+    Ok(CancellingOrchestrationChildRun {
+        parent_run: parent_run.clone(),
+        child_link: link,
+        child_run: run_from_row(child)?,
+    })
+}
+
+async fn append_cancelling_child_run_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    cancelling: &CancellingOrchestrationChildRun,
+    slot: &ChildRunCancellationSlot,
+) -> Result<(), RepositoryError> {
+    let payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "cancel_generation": cancelling.child_run.cancel_generation,
+            "child_link_id": cancelling.child_link.child_link_id,
+            "child_run_id": cancelling.child_run.run_id,
+            "parent_run_id": cancelling.parent_run.run_id,
+        }),
+        65_536,
+    )?;
+    append_scheduler_event(
+        transaction,
+        &cancelling.child_link.tenant_id,
+        &slot.child_link_event_id,
+        &slot.child_link_outbox_id,
+        "child_run_link",
+        &cancelling.child_link.child_link_id,
+        cancelling.child_link.version,
+        Some(&cancelling.parent_run.run_id),
+        "child.cancelling",
+        &payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &cancelling.child_run.tenant_id,
+        &slot.child_run_event_id,
+        &slot.child_run_outbox_id,
+        "run",
+        &cancelling.child_run.run_id,
+        cancelling.child_run.version,
+        Some(&cancelling.child_run.run_id),
+        "run.cancel_requested",
+        &payload,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn insert_task_response_value(
+    transaction: &mut Transaction<'_, Postgres>,
+    task: &TaskRecord,
+    run: &RunRecord,
+    node_id: &str,
+    response: &RunInputValue,
+) -> Result<(), RepositoryError> {
+    let tenant_id: ResourceId = task.tenant_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    if let ValueRef::Artifact { artifact } = &response.value {
+        require_ready_run_artifact(transaction, &tenant_id, artifact).await?;
+    }
+    let (inline_value, artifact_id) = match &response.value {
+        ValueRef::Inline { value } => (Some(value), None),
+        ValueRef::Artifact { artifact } => (None, Some(artifact.artifact_id().to_string())),
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_values (
+            tenant_id, value_id, run_id, node_id, value_kind, classification,
+            schema_digest, content_digest, inline_value, artifact_id
+        ) VALUES ($1, $2, $3, $4, 'task_response', $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(&task.tenant_id)
+    .bind(response.value_id.to_string())
+    .bind(&run.run_id)
+    .bind(node_id)
+    .bind(response.classification.as_str())
+    .bind(response.schema_digest.to_string())
+    .bind(response.content_digest.to_string())
+    .bind(inline_value)
+    .bind(artifact_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn mutate_resolved_orchestration_task(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_task: &TaskRecord,
+    next_task: &TaskProjection,
+    current_run: &RunRecord,
+    current_node_version: i64,
+    source_job: &JobRecord,
+    resume_job_id: &ResourceId,
+    resume_request_digest: &Sha256Digest,
+    database_now: DateTime<Utc>,
+) -> Result<ResolvedOrchestrationTask, RepositoryError> {
+    let task_payload = TypedPayload::with_limit(1, &next_task.payload, 262_144)?;
+    let task = sqlx::query(
+        r#"
+        UPDATE insight_platform.tasks
+        SET state = $4, version = $5, payload_schema_version = $6,
+            payload = $7, payload_digest = $8, response_value_id = $9,
+            responded_at = $10, updated_at = $10
+        WHERE tenant_id = $1 AND task_id = $2 AND version = $3
+          AND generation = $11 AND state = 'pending' AND responded_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&current_task.tenant_id)
+    .bind(&current_task.task_id)
+    .bind(current_task.version)
+    .bind(next_task.state.as_str())
+    .bind(
+        i64::try_from(next_task.version)
+            .map_err(|_| RepositoryError::InvalidInput("Task version exceeds bigint".to_owned()))?,
+    )
+    .bind(task_payload.schema_version)
+    .bind(&task_payload.value)
+    .bind(&task_payload.digest)
+    .bind(
+        next_task
+            .response_value_id
+            .as_ref()
+            .map(ToString::to_string),
+    )
+    .bind(database_now)
+    .bind(current_task.generation)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Task first-winner"))?;
+    let task = task_from_row(task)?;
+    let node_id = current_task
+        .node_id
+        .as_deref()
+        .ok_or_else(|| RepositoryError::CorruptRow("Task has no Node".to_owned()))?;
+    let node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'ready', version = version + 1, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'waiting'
+          AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_task.tenant_id)
+    .bind(node_id)
+    .bind(current_node_version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Task owner Node wake"))?;
+    let mut current_snapshot = current_run.current.clone();
+    current_snapshot.waiting_reason = None;
+    let run_id: ResourceId = current_run.run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    current_snapshot
+        .validate(&run_id)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let current_payload = TypedPayload::from_versioned(1, &current_snapshot, 1_048_576)?;
+    let run = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = CASE WHEN state = 'waiting' THEN 'running' ELSE state END,
+            version = version + 1, current_schema_version = $4,
+            current_payload = $5, current_payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state IN ('waiting', 'running') AND active_work_count = 0
+          AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&current_run.tenant_id)
+    .bind(&current_run.run_id)
+    .bind(current_run.version)
+    .bind(current_payload.schema_version)
+    .bind(&current_payload.value)
+    .bind(&current_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Task owner Run wake"))?;
+    let run = run_from_row(run)?;
+    let job = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.jobs (
+            tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
+            run_id, node_id, state, attempt_limit, scheduled_at, deadline, priority,
+            request_digest, effect_key_digest, payload_schema_version, payload, payload_digest
+        ) VALUES (
+            $1, $2, 'orchestration', 'node_execution', $3, NULL,
+            $4, $3, 'ready', $5, $6, $7, $8,
+            $9, NULL, $10, $11, $12
+        )
+        RETURNING *
+        "#,
+    )
+    .bind(&current_task.tenant_id)
+    .bind(resume_job_id.to_string())
+    .bind(node_id)
+    .bind(&run.run_id)
+    .bind(source_job.attempt_limit)
+    .bind(database_now)
+    .bind(source_job.deadline)
+    .bind(scheduler_priority_to_database(source_job.priority))
+    .bind(resume_request_digest.to_string())
+    .bind(source_job.payload.schema_version)
+    .bind(&source_job.payload.value)
+    .bind(&source_job.payload.digest)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(ResolvedOrchestrationTask {
+        run,
+        node_id: node_id.to_owned(),
+        node_version,
+        task,
+        job: job_from_row(job)?,
+    })
+}
+
+async fn mutate_woken_orchestration_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    next_job: &JobProjection,
+    parents: &LockedOrchestrationJobParents,
+    database_now: DateTime<Utc>,
+) -> Result<WokenOrchestrationJob, RepositoryError> {
+    if next_job.state != JobState::Ready
+        || !NodeExecutionState::Waiting.can_transition_to(NodeExecutionState::Ready)
+    {
+        return Err(RepositoryError::Conflict("orchestration wake transition"));
+    }
+    let payload = orchestration_job_payload_with_wake(current_job, None)?;
+    let job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'ready', version = $4, scheduled_at = $5, retry_at = NULL,
+            wake_kind = NULL, wake_state = NULL, wake_generation = 0,
+            payload_schema_version = $6, payload = $7, payload_digest = $8,
+            updated_at = $5
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND state = 'waiting' AND worker_id IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&current_job.job_id)
+    .bind(current_job.version)
+    .bind(
+        i64::try_from(next_job.version)
+            .map_err(|_| RepositoryError::InvalidInput("Job version exceeds bigint".to_owned()))?,
+    )
+    .bind(database_now)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("waiting orchestration Job"))?;
+    let job = job_from_row(job)?;
+    let node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'ready', version = version + 1, retry_at = NULL,
+            updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'waiting'
+          AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.node_id)
+    .bind(parents.node_version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("waiting orchestration Node"))?;
+    Ok(WokenOrchestrationJob {
+        job,
+        node_id: parents.node_id.clone(),
+        node_version,
+    })
+}
+
+async fn mutate_recovered_orchestration_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    next_job: &JobProjection,
+    parents: &LockedOrchestrationJobParents,
+    database_now: DateTime<Utc>,
+) -> Result<RecoveredOrchestrationJob, RepositoryError> {
+    let (expected_node_state, target_node_state) =
+        match (current_job.state.as_str(), next_job.state) {
+            ("leased", JobState::Ready) => ("ready", NodeExecutionState::Ready),
+            ("running", JobState::RetryScheduled) => {
+                ("running", NodeExecutionState::RetryScheduled)
+            }
+            _ => {
+                return Err(RepositoryError::InvalidInput(
+                    "expired orchestration recovery decision is unsupported".to_owned(),
+                ))
+            }
+        };
+    let job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = $4, version = $5, worker_id = NULL, lease_token_digest = NULL,
+            lease_expires_at = NULL, heartbeat_at = NULL, retry_at = $6,
+            started_at = NULL, updated_at = $7
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND state IN ('leased', 'running')
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&current_job.job_id)
+    .bind(current_job.version)
+    .bind(next_job.state.as_str())
+    .bind(
+        i64::try_from(next_job.version)
+            .map_err(|_| RepositoryError::InvalidInput("Job version exceeds bigint".to_owned()))?,
+    )
+    .bind(next_job.retry_at)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("expired orchestration Job"))?;
+    let job = job_from_row(job)?;
+    let node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = $4, version = version + 1, retry_at = $5, updated_at = $6
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = $7
+          AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.node_id)
+    .bind(parents.node_version)
+    .bind(target_node_state.as_str())
+    .bind(next_job.retry_at)
+    .bind(database_now)
+    .bind(expected_node_state)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("expired orchestration Node"))?;
+    let run = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET version = version + 1, active_work_count = active_work_count - 1,
+            updated_at = $4
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state = 'running' AND active_work_count > 0 AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&parents.run.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(parents.run.version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("expired orchestration Run"))?;
+    Ok(RecoveredOrchestrationJob {
+        run: run_from_row(run)?,
+        job,
+        node_id: parents.node_id.clone(),
+        node_version,
+        settled_quota_account_ids: Vec::new(),
+    })
+}
+
+async fn append_orchestration_yield_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    yielded: &YieldedOrchestrationJob,
+    mutations: &OrchestrationYieldMutationIds,
+    outcome_payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
+    let run_id = yielded.run.run_id.as_str();
+    let suffix = yielded.job.state.as_str();
+    let common = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "job_id": yielded.job.job_id,
+            "lease_generation": yielded.job.lease_epoch,
+            "outcome_digest": outcome_payload.digest,
+            "settled_quota_account_ids": yielded.settled_quota_account_ids,
+        }),
+        65_536,
+    )?;
+    append_scheduler_event(
+        transaction,
+        &yielded.run.tenant_id,
+        &mutations.run_event_id,
+        &mutations.run_outbox_id,
+        "run",
+        run_id,
+        yielded.run.version,
+        Some(run_id),
+        &format!("run.work_{suffix}"),
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &yielded.run.tenant_id,
+        &mutations.node_event_id,
+        &mutations.node_outbox_id,
+        "node_execution",
+        &yielded.node_id,
+        yielded.node_version,
+        Some(run_id),
+        &format!("node.{suffix}"),
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &yielded.run.tenant_id,
+        &mutations.job_event_id,
+        &mutations.job_outbox_id,
+        "job",
+        &yielded.job.job_id,
+        yielded.job.version,
+        Some(run_id),
+        &format!("job.{suffix}"),
+        outcome_payload,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn append_orchestration_controller_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    applied: &AppliedOrchestrationControllerStep,
+    mutations: &ControllerStepMutationIds,
+    plan_digest: &Sha256Digest,
+    decision_payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
+    let run_id = applied.run.run_id.as_str();
+    let common = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "activated_node_ids": applied
+                .activations
+                .iter()
+                .map(|activation| activation.node_id.clone())
+                .collect::<Vec<_>>(),
+            "created_scope_ids": applied
+                .created_scopes
+                .iter()
+                .map(|scope| scope.scope_id.clone())
+                .collect::<Vec<_>>(),
+            "cancelled_remainder_scope_ids": applied
+                .cancelled_remainders
+                .iter()
+                .map(|remainder| remainder.scope.scope_id.clone())
+                .collect::<Vec<_>>(),
+            "pending_node_ids": applied
+                .pending_nodes
+                .iter()
+                .map(|node| node.node_id.clone())
+                .collect::<Vec<_>>(),
+            "plan_digest": plan_digest,
+            "settled_scope_ids": applied
+                .settled_scopes
+                .iter()
+                .map(|scope| scope.scope_id.clone())
+                .collect::<Vec<_>>(),
+            "settled_quota_account_ids": applied.settled_quota_account_ids,
+            "source_job_id": applied.source_job.job_id,
+            "source_node_id": applied.source_node_id,
+            "woken_node_ids": applied
+                .woken_nodes
+                .iter()
+                .map(|node| node.node_id.clone())
+                .collect::<Vec<_>>(),
+        }),
+        65_536,
+    )?;
+    append_scheduler_event(
+        transaction,
+        &applied.run.tenant_id,
+        &mutations.run_event_id,
+        &mutations.run_outbox_id,
+        "run",
+        run_id,
+        applied.run.version,
+        Some(run_id),
+        "run.controller_advanced",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &applied.run.tenant_id,
+        &mutations.node_event_id,
+        &mutations.node_outbox_id,
+        "node_execution",
+        &applied.source_node_id,
+        applied.source_node_version,
+        Some(run_id),
+        "node.controller_completed",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &applied.run.tenant_id,
+        &mutations.job_event_id,
+        &mutations.job_outbox_id,
+        "job",
+        &applied.source_job.job_id,
+        applied.source_job.version,
+        Some(run_id),
+        "job.controller_completed",
+        decision_payload,
+    )
+    .await?;
+    for (activation, slot) in applied.activations.iter().zip(&mutations.activations) {
+        let activation_payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "plan_digest": plan_digest,
+                "plan_node_key": activation.plan_node_key,
+                "source_node_id": applied.source_node_id,
+            }),
+            65_536,
+        )?;
+        if let Some(scope_slot) = &slot.scope {
+            let scope = applied
+                .created_scopes
+                .iter()
+                .find(|scope| scope.scope_id == scope_slot.scope_instance_id.to_string())
+                .ok_or_else(|| {
+                    RepositoryError::CorruptRow(
+                        "controller activation lost its created Scope".to_owned(),
+                    )
+                })?;
+            append_scheduler_event(
+                transaction,
+                &applied.run.tenant_id,
+                &scope_slot.scope_event_id,
+                &scope_slot.scope_outbox_id,
+                "scope_instance",
+                &scope.scope_id,
+                scope.version,
+                Some(run_id),
+                "scope.opened",
+                &activation_payload,
+            )
+            .await?;
+        }
+        append_scheduler_event(
+            transaction,
+            &applied.run.tenant_id,
+            &slot.node_event_id,
+            &slot.node_outbox_id,
+            "node_execution",
+            &activation.node_id,
+            activation.node_version,
+            Some(run_id),
+            "node.control_activated",
+            &activation_payload,
+        )
+        .await?;
+        append_scheduler_event(
+            transaction,
+            &applied.run.tenant_id,
+            &slot.job_event_id,
+            &slot.job_outbox_id,
+            "job",
+            &activation.job.job_id,
+            activation.job.version,
+            Some(run_id),
+            "job.ready",
+            &activation_payload,
+        )
+        .await?;
+    }
+    for (pending, slot) in applied.pending_nodes.iter().zip(&mutations.pending_nodes) {
+        let pending_payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "plan_digest": plan_digest,
+                "plan_node_key": pending.plan_node_key,
+                "source_node_id": applied.source_node_id,
+            }),
+            65_536,
+        )?;
+        append_scheduler_event(
+            transaction,
+            &applied.run.tenant_id,
+            &slot.node_event_id,
+            &slot.node_outbox_id,
+            "node_execution",
+            &pending.node_id,
+            pending.node_version,
+            Some(run_id),
+            "node.control_pending",
+            &pending_payload,
+        )
+        .await?;
+    }
+    if !applied.settled_scopes.is_empty() {
+        let slot = mutations.structural_exit.as_ref().ok_or_else(|| {
+            RepositoryError::CorruptRow(
+                "controller Scope settlement lost its event identities".to_owned(),
+            )
+        })?;
+        if applied.settled_scopes.len() != 1 {
+            return Err(RepositoryError::CorruptRow(
+                "one controller step may settle only its source Scope".to_owned(),
+            ));
+        }
+        let scope = &applied.settled_scopes[0];
+        append_scheduler_event(
+            transaction,
+            &applied.run.tenant_id,
+            &slot.scope_closing_event_id,
+            &slot.scope_closing_outbox_id,
+            "scope_instance",
+            &scope.scope_id,
+            scope.version - 1,
+            Some(run_id),
+            "scope.closing",
+            &common,
+        )
+        .await?;
+        append_scheduler_event(
+            transaction,
+            &applied.run.tenant_id,
+            &slot.scope_terminal_event_id,
+            &slot.scope_terminal_outbox_id,
+            "scope_instance",
+            &scope.scope_id,
+            scope.version,
+            Some(run_id),
+            "scope.succeeded",
+            &common,
+        )
+        .await?;
+    }
+    if applied.cancelled_remainders.len() != mutations.remainder_cancellations.len() {
+        return Err(RepositoryError::CorruptRow(
+            "controller remainder cancellation lost its event slots".to_owned(),
+        ));
+    }
+    for cancellation in &applied.cancelled_remainders {
+        let slot = mutations
+            .remainder_cancellations
+            .iter()
+            .find(|slot| slot.expected_scope_id.to_string() == cancellation.scope.scope_id)
+            .ok_or_else(|| {
+                RepositoryError::CorruptRow(
+                    "controller remainder cancellation lost its exact Scope slot".to_owned(),
+                )
+            })?;
+        let payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "job_id": cancellation.job.job_id,
+                "node_id": cancellation.node_id,
+                "plan_digest": plan_digest,
+                "reason_code": cancellation.reason_code,
+                "scope_id": cancellation.scope.scope_id,
+                "settled_quota_account_ids": cancellation.settled_quota_account_ids,
+                "source_node_id": applied.source_node_id,
+            }),
+            65_536,
+        )?;
+        if let Some(cancelling_version) = cancellation.node_cancelling_version {
+            append_scheduler_event(
+                transaction,
+                &applied.run.tenant_id,
+                &slot.node_cancelling_event_id,
+                &slot.node_cancelling_outbox_id,
+                "node_execution",
+                &cancellation.node_id,
+                cancelling_version,
+                Some(run_id),
+                "node.cancelling",
+                &payload,
+            )
+            .await?;
+        }
+        append_scheduler_event(
+            transaction,
+            &applied.run.tenant_id,
+            &slot.node_terminal_event_id,
+            &slot.node_terminal_outbox_id,
+            "node_execution",
+            &cancellation.node_id,
+            cancellation.node_version,
+            Some(run_id),
+            "node.cancelled",
+            &payload,
+        )
+        .await?;
+        append_scheduler_event(
+            transaction,
+            &applied.run.tenant_id,
+            &slot.scope_closing_event_id,
+            &slot.scope_closing_outbox_id,
+            "scope_instance",
+            &cancellation.scope.scope_id,
+            cancellation.scope.version - 1,
+            Some(run_id),
+            "scope.closing",
+            &payload,
+        )
+        .await?;
+        append_scheduler_event(
+            transaction,
+            &applied.run.tenant_id,
+            &slot.scope_terminal_event_id,
+            &slot.scope_terminal_outbox_id,
+            "scope_instance",
+            &cancellation.scope.scope_id,
+            cancellation.scope.version,
+            Some(run_id),
+            "scope.cancelled",
+            &payload,
+        )
+        .await?;
+        append_scheduler_event(
+            transaction,
+            &applied.run.tenant_id,
+            &slot.job_terminal_event_id,
+            &slot.job_terminal_outbox_id,
+            "job",
+            &cancellation.job.job_id,
+            cancellation.job.version,
+            Some(run_id),
+            "job.cancelled",
+            &payload,
+        )
+        .await?;
+    }
+    if !applied.woken_nodes.is_empty() {
+        let slot = mutations.pending_wake.as_ref().ok_or_else(|| {
+            RepositoryError::CorruptRow("controller Join wake lost its event identities".to_owned())
+        })?;
+        if applied.woken_nodes.len() != 1 {
+            return Err(RepositoryError::CorruptRow(
+                "one controller step may wake only one Join".to_owned(),
+            ));
+        }
+        let woken = &applied.woken_nodes[0];
+        append_scheduler_event(
+            transaction,
+            &applied.run.tenant_id,
+            &slot.node_event_id,
+            &slot.node_outbox_id,
+            "node_execution",
+            &woken.node_id,
+            woken.node_version,
+            Some(run_id),
+            "node.control_ready",
+            &common,
+        )
+        .await?;
+        append_scheduler_event(
+            transaction,
+            &applied.run.tenant_id,
+            &slot.job_event_id,
+            &slot.job_outbox_id,
+            "job",
+            &woken.job.job_id,
+            woken.job.version,
+            Some(run_id),
+            "job.ready",
+            &common,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn append_failed_orchestration_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    failed: &FailedOrchestrationJob,
+    mutations: &ControllerStepMutationIds,
+    plan_digest: &Sha256Digest,
+    failure_payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
+    let run_id = failed.run.run_id.as_str();
+    let common = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "cancelled_remainder_scope_ids": failed
+                .cancelled_remainders
+                .iter()
+                .map(|remainder| remainder.scope.scope_id.clone())
+                .collect::<Vec<_>>(),
+            "controller_code": failed.controller_code,
+            "failure_digest": failure_payload.digest,
+            "handler_node_ids": failed
+                .handler_activations
+                .iter()
+                .map(|activation| activation.node_id.clone())
+                .collect::<Vec<_>>(),
+            "plan_digest": plan_digest,
+            "settled_quota_account_ids": failed.settled_quota_account_ids,
+            "source_job_id": failed.source_job.job_id,
+            "source_node_id": failed.source_node_id,
+            "woken_node_ids": failed
+                .woken_nodes
+                .iter()
+                .map(|node| node.node_id.clone())
+                .collect::<Vec<_>>(),
+        }),
+        65_536,
+    )?;
+    append_scheduler_event(
+        transaction,
+        &failed.run.tenant_id,
+        &mutations.run_event_id,
+        &mutations.run_outbox_id,
+        "run",
+        run_id,
+        failed.run.version,
+        Some(run_id),
+        if failed.run.state == RunState::Failed.as_str() {
+            "run.failed"
+        } else {
+            "run.work_failed"
+        },
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &failed.run.tenant_id,
+        &mutations.node_event_id,
+        &mutations.node_outbox_id,
+        "node_execution",
+        &failed.source_node_id,
+        failed.source_node_version,
+        Some(run_id),
+        "node.failed",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &failed.run.tenant_id,
+        &mutations.job_event_id,
+        &mutations.job_outbox_id,
+        "job",
+        &failed.source_job.job_id,
+        failed.source_job.version,
+        Some(run_id),
+        "job.failed",
+        failure_payload,
+    )
+    .await?;
+    if !failed.handler_activations.is_empty() {
+        if failed.handler_activations.len() != 1
+            || mutations.activations.len() != 1
+            || !failed.settled_scopes.is_empty()
+        {
+            return Err(RepositoryError::CorruptRow(
+                "failed ErrorBoundary handler event shape is invalid".to_owned(),
+            ));
+        }
+        let handler = &failed.handler_activations[0];
+        let slot = &mutations.activations[0];
+        let payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "failure_digest": failure_payload.digest,
+                "plan_digest": plan_digest,
+                "plan_node_key": handler.plan_node_key,
+                "source_node_id": failed.source_node_id,
+            }),
+            65_536,
+        )?;
+        append_scheduler_event(
+            transaction,
+            &failed.run.tenant_id,
+            &slot.node_event_id,
+            &slot.node_outbox_id,
+            "node_execution",
+            &handler.node_id,
+            handler.node_version,
+            Some(run_id),
+            "node.control_activated",
+            &payload,
+        )
+        .await?;
+        append_scheduler_event(
+            transaction,
+            &failed.run.tenant_id,
+            &slot.job_event_id,
+            &slot.job_outbox_id,
+            "job",
+            &handler.job.job_id,
+            handler.job.version,
+            Some(run_id),
+            "job.ready",
+            &payload,
+        )
+        .await?;
+    } else if failed.settled_scopes.len() != 1 {
+        return Err(RepositoryError::CorruptRow(
+            "failed orchestration must settle exactly one source Scope".to_owned(),
+        ));
+    } else {
+        let scope_slot = mutations.structural_exit.as_ref().ok_or_else(|| {
+            RepositoryError::CorruptRow(
+                "failed orchestration lost its Scope event identities".to_owned(),
+            )
+        })?;
+        let scope = &failed.settled_scopes[0];
+        append_scheduler_event(
+            transaction,
+            &failed.run.tenant_id,
+            &scope_slot.scope_closing_event_id,
+            &scope_slot.scope_closing_outbox_id,
+            "scope_instance",
+            &scope.scope_id,
+            scope.version - 1,
+            Some(run_id),
+            "scope.closing",
+            &common,
+        )
+        .await?;
+        append_scheduler_event(
+            transaction,
+            &failed.run.tenant_id,
+            &scope_slot.scope_terminal_event_id,
+            &scope_slot.scope_terminal_outbox_id,
+            "scope_instance",
+            &scope.scope_id,
+            scope.version,
+            Some(run_id),
+            "scope.failed",
+            &common,
+        )
+        .await?;
+    }
+
+    if failed.cancelled_remainders.len() != mutations.remainder_cancellations.len() {
+        return Err(RepositoryError::CorruptRow(
+            "failed orchestration lost remainder-cancellation event slots".to_owned(),
+        ));
+    }
+    for cancellation in &failed.cancelled_remainders {
+        let slot = mutations
+            .remainder_cancellations
+            .iter()
+            .find(|slot| slot.expected_scope_id.to_string() == cancellation.scope.scope_id)
+            .ok_or_else(|| {
+                RepositoryError::CorruptRow(
+                    "failed orchestration lost an exact cancellation Scope slot".to_owned(),
+                )
+            })?;
+        let payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "failure_digest": failure_payload.digest,
+                "job_id": cancellation.job.job_id,
+                "node_id": cancellation.node_id,
+                "plan_digest": plan_digest,
+                "reason_code": cancellation.reason_code,
+                "scope_id": cancellation.scope.scope_id,
+                "settled_quota_account_ids": cancellation.settled_quota_account_ids,
+                "source_node_id": failed.source_node_id,
+            }),
+            65_536,
+        )?;
+        if let Some(cancelling_version) = cancellation.node_cancelling_version {
+            append_scheduler_event(
+                transaction,
+                &failed.run.tenant_id,
+                &slot.node_cancelling_event_id,
+                &slot.node_cancelling_outbox_id,
+                "node_execution",
+                &cancellation.node_id,
+                cancelling_version,
+                Some(run_id),
+                "node.cancelling",
+                &payload,
+            )
+            .await?;
+        }
+        append_scheduler_event(
+            transaction,
+            &failed.run.tenant_id,
+            &slot.node_terminal_event_id,
+            &slot.node_terminal_outbox_id,
+            "node_execution",
+            &cancellation.node_id,
+            cancellation.node_version,
+            Some(run_id),
+            "node.cancelled",
+            &payload,
+        )
+        .await?;
+        append_scheduler_event(
+            transaction,
+            &failed.run.tenant_id,
+            &slot.scope_closing_event_id,
+            &slot.scope_closing_outbox_id,
+            "scope_instance",
+            &cancellation.scope.scope_id,
+            cancellation.scope.version - 1,
+            Some(run_id),
+            "scope.closing",
+            &payload,
+        )
+        .await?;
+        append_scheduler_event(
+            transaction,
+            &failed.run.tenant_id,
+            &slot.scope_terminal_event_id,
+            &slot.scope_terminal_outbox_id,
+            "scope_instance",
+            &cancellation.scope.scope_id,
+            cancellation.scope.version,
+            Some(run_id),
+            "scope.cancelled",
+            &payload,
+        )
+        .await?;
+        append_scheduler_event(
+            transaction,
+            &failed.run.tenant_id,
+            &slot.job_terminal_event_id,
+            &slot.job_terminal_outbox_id,
+            "job",
+            &cancellation.job.job_id,
+            cancellation.job.version,
+            Some(run_id),
+            "job.cancelled",
+            &payload,
+        )
+        .await?;
+    }
+    if !failed.woken_nodes.is_empty() {
+        let slot = mutations.pending_wake.as_ref().ok_or_else(|| {
+            RepositoryError::CorruptRow(
+                "failed orchestration Join wake lost its event identities".to_owned(),
+            )
+        })?;
+        if failed.woken_nodes.len() != 1 {
+            return Err(RepositoryError::CorruptRow(
+                "failed orchestration may wake only one Join".to_owned(),
+            ));
+        }
+        let woken = &failed.woken_nodes[0];
+        append_scheduler_event(
+            transaction,
+            &failed.run.tenant_id,
+            &slot.node_event_id,
+            &slot.node_outbox_id,
+            "node_execution",
+            &woken.node_id,
+            woken.node_version,
+            Some(run_id),
+            "node.control_ready",
+            &common,
+        )
+        .await?;
+        append_scheduler_event(
+            transaction,
+            &failed.run.tenant_id,
+            &slot.job_event_id,
+            &slot.job_outbox_id,
+            "job",
+            &woken.job.job_id,
+            woken.job.version,
+            Some(run_id),
+            "job.ready",
+            &common,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn append_deferred_orchestration_task_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    deferred: &DeferredOrchestrationTask,
+    mutations: &DeferOrchestrationTaskMutationIds,
+    receipt_payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
+    let run_id = deferred.run.run_id.as_str();
+    let common = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "job_id": deferred.job.job_id,
+            "settled_quota_account_ids": deferred.settled_quota_account_ids,
+            "task_id": deferred.task.task_id,
+            "task_kind": deferred.task.task_kind.as_str(),
+        }),
+        65_536,
+    )?;
+    append_scheduler_event(
+        transaction,
+        &deferred.run.tenant_id,
+        &mutations.run_event_id,
+        &mutations.run_outbox_id,
+        "run",
+        run_id,
+        deferred.run.version,
+        Some(run_id),
+        "run.task_waiting",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &deferred.run.tenant_id,
+        &mutations.node_event_id,
+        &mutations.node_outbox_id,
+        "node_execution",
+        &deferred.node_id,
+        deferred.node_version,
+        Some(run_id),
+        "node.task_waiting",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &deferred.run.tenant_id,
+        &mutations.task_event_id,
+        &mutations.task_outbox_id,
+        "interaction",
+        &deferred.task.task_id,
+        deferred.task.version,
+        Some(run_id),
+        "interaction.required",
+        receipt_payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &deferred.run.tenant_id,
+        &mutations.job_event_id,
+        &mutations.job_outbox_id,
+        "job",
+        &deferred.job.job_id,
+        deferred.job.version,
+        Some(run_id),
+        "job.task_deferred",
+        &common,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn append_deferred_orchestration_child_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    deferred: &DeferredOrchestrationChildRun,
+    mutations: &DeferOrchestrationChildMutationIds,
+    receipt_payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
+    let parent_run_id = deferred.parent_run.run_id.as_str();
+    let child_run_id = deferred.child_run.run_id.as_str();
+    let common = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "child_link_id": deferred.child_link.child_link_id,
+            "child_run_id": deferred.child_run.run_id,
+            "parent_job_id": deferred.parent_job.job_id,
+            "parent_node_id": deferred.parent_node_id,
+            "settled_quota_account_ids": deferred.settled_quota_account_ids,
+        }),
+        65_536,
+    )?;
+    if deferred.root_run.run_id != deferred.parent_run.run_id {
+        append_scheduler_event(
+            transaction,
+            &deferred.root_run.tenant_id,
+            &mutations.root_run_event_id,
+            &mutations.root_run_outbox_id,
+            "run",
+            &deferred.root_run.run_id,
+            deferred.root_run.version,
+            Some(&deferred.root_run.run_id),
+            "run.descendant_started",
+            &common,
+        )
+        .await?;
+    }
+    append_scheduler_event(
+        transaction,
+        &deferred.parent_run.tenant_id,
+        &mutations.parent_run_event_id,
+        &mutations.parent_run_outbox_id,
+        "run",
+        parent_run_id,
+        deferred.parent_run.version,
+        Some(parent_run_id),
+        "run.child_waiting",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &deferred.parent_run.tenant_id,
+        &mutations.parent_node_event_id,
+        &mutations.parent_node_outbox_id,
+        "node_execution",
+        &deferred.parent_node_id,
+        deferred.parent_node_version,
+        Some(parent_run_id),
+        "node.child_waiting",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &deferred.parent_run.tenant_id,
+        &mutations.parent_job_event_id,
+        &mutations.parent_job_outbox_id,
+        "job",
+        &deferred.parent_job.job_id,
+        deferred.parent_job.version,
+        Some(parent_run_id),
+        "job.child_deferred",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &deferred.child_link.tenant_id,
+        &mutations.child_link_event_id,
+        &mutations.child_link_outbox_id,
+        "child_run_link",
+        &deferred.child_link.child_link_id,
+        deferred.child_link.version,
+        Some(parent_run_id),
+        "child.started",
+        receipt_payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &deferred.child_run.tenant_id,
+        &mutations.child_run_event_id,
+        &mutations.child_run_outbox_id,
+        "run",
+        child_run_id,
+        deferred.child_run.version,
+        Some(child_run_id),
+        "run.admitted",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &deferred.child_job.tenant_id,
+        &mutations.child_job_event_id,
+        &mutations.child_job_outbox_id,
+        "job",
+        &deferred.child_job.job_id,
+        deferred.child_job.version,
+        Some(child_run_id),
+        "job.ready",
+        &common,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn append_resolved_orchestration_task_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    resolved: &ResolvedOrchestrationTask,
+    command: &ResolveOrchestrationTask,
+) -> Result<(), RepositoryError> {
+    let run_id = resolved.run.run_id.as_str();
+    let payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "response_schema_digest": resolved.task.response_schema_digest,
+            "response_value_id": resolved.task.response_value_id,
+            "resume_job_id": resolved.job.job_id,
+            "state": resolved.task.state.as_str(),
+            "task_id": resolved.task.task_id,
+        }),
+        65_536,
+    )?;
+    append_command_event_version(
+        transaction,
+        &command.audit,
+        "interaction",
+        &resolved.task.task_id,
+        Some(resolved.task.version),
+        &format!("interaction.{}", resolved.task.state.as_str()),
+        &payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &resolved.run.tenant_id,
+        &command.mutations.run_event_id,
+        &command.mutations.run_outbox_id,
+        "run",
+        run_id,
+        resolved.run.version,
+        Some(run_id),
+        "run.task_resolved",
+        &payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &resolved.run.tenant_id,
+        &command.mutations.node_event_id,
+        &command.mutations.node_outbox_id,
+        "node_execution",
+        &resolved.node_id,
+        resolved.node_version,
+        Some(run_id),
+        "node.task_resolved",
+        &payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &resolved.run.tenant_id,
+        &command.mutations.job_event_id,
+        &command.mutations.job_outbox_id,
+        "job",
+        &resolved.job.job_id,
+        resolved.job.version,
+        Some(run_id),
+        "job.ready_after_task",
+        &payload,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn append_expired_orchestration_task_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    resolved: &ResolvedOrchestrationTask,
+    slot: &ExpiredOrchestrationTaskSlot,
+) -> Result<(), RepositoryError> {
+    let run_id = resolved.run.run_id.as_str();
+    let payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "resume_job_id": resolved.job.job_id,
+            "state": resolved.task.state.as_str(),
+            "task_id": resolved.task.task_id,
+        }),
+        65_536,
+    )?;
+    append_scheduler_event(
+        transaction,
+        &resolved.run.tenant_id,
+        &slot.task_event_id,
+        &slot.task_outbox_id,
+        "interaction",
+        &resolved.task.task_id,
+        resolved.task.version,
+        Some(run_id),
+        "interaction.expired",
+        &payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &resolved.run.tenant_id,
+        &slot.run_event_id,
+        &slot.run_outbox_id,
+        "run",
+        run_id,
+        resolved.run.version,
+        Some(run_id),
+        "run.task_expired",
+        &payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &resolved.run.tenant_id,
+        &slot.node_event_id,
+        &slot.node_outbox_id,
+        "node_execution",
+        &resolved.node_id,
+        resolved.node_version,
+        Some(run_id),
+        "node.task_expired",
+        &payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &resolved.run.tenant_id,
+        &slot.job_event_id,
+        &slot.job_outbox_id,
+        "job",
+        &resolved.job.job_id,
+        resolved.job.version,
+        Some(run_id),
+        "job.ready_after_task",
+        &payload,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn append_orchestration_wake_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    woken: &WokenOrchestrationJob,
+    mutations: &OrchestrationWakeMutationIds,
+    payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
+    let run_id =
+        woken.job.run_id.as_deref().ok_or_else(|| {
+            RepositoryError::CorruptRow("orchestration Job has no Run".to_owned())
+        })?;
+    append_scheduler_event(
+        transaction,
+        &woken.job.tenant_id,
+        &mutations.node_event_id,
+        &mutations.node_outbox_id,
+        "node_execution",
+        &woken.node_id,
+        woken.node_version,
+        Some(run_id),
+        "node.woken",
+        payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &woken.job.tenant_id,
+        &mutations.job_event_id,
+        &mutations.job_outbox_id,
+        "job",
+        &woken.job.job_id,
+        woken.job.version,
+        Some(run_id),
+        "job.woken",
+        payload,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn append_orchestration_recovery_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    recovered: &RecoveredOrchestrationJob,
+    slot: &ExpiredOrchestrationRecoverySlot,
+) -> Result<(), RepositoryError> {
+    let run_id = recovered.run.run_id.as_str();
+    let payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "attempt_count": recovered.job.attempt_no,
+            "job_id": recovered.job.job_id,
+            "lease_generation": recovered.job.lease_epoch,
+            "recovered_state": recovered.job.state,
+            "settled_quota_account_ids": recovered.settled_quota_account_ids,
+        }),
+        65_536,
+    )?;
+    append_scheduler_event(
+        transaction,
+        &recovered.run.tenant_id,
+        &slot.run_event_id,
+        &slot.run_outbox_id,
+        "run",
+        run_id,
+        recovered.run.version,
+        Some(run_id),
+        "run.work_recovered",
+        &payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &recovered.run.tenant_id,
+        &slot.node_event_id,
+        &slot.node_outbox_id,
+        "node_execution",
+        &recovered.node_id,
+        recovered.node_version,
+        Some(run_id),
+        "node.lease_lost",
+        &payload,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &recovered.run.tenant_id,
+        &slot.job_event_id,
+        &slot.job_outbox_id,
+        "job",
+        &recovered.job.job_id,
+        recovered.job.version,
+        Some(run_id),
+        "job.lease_lost",
+        &payload,
+    )
+    .await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn mutate_converged_orchestration_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    next_job: &JobProjection,
+    parents: &LockedOrchestrationJobParents,
+    decision: &OrchestrationConvergenceDecision,
+    result_payload: &TypedPayload,
+    database_now: DateTime<Utc>,
+    had_active_permit: bool,
+) -> Result<(CompletedOrchestrationRun, Option<i64>), RepositoryError> {
+    let expected_node_state = orchestration_node_state_for_job_state(&current_job.state)?;
+    let target_scope_state = if decision.run_state == RunState::Cancelled {
+        ScopeState::Cancelled
+    } else {
+        ScopeState::Failed
+    };
+    if !ScopeState::Open.can_transition_to(ScopeState::Closing)
+        || !ScopeState::Closing.can_transition_to(target_scope_state)
+    {
+        return Err(RepositoryError::Conflict(
+            "orchestration convergence Scope transition",
+        ));
+    }
+    let payload = orchestration_job_payload_with_wake(current_job, None)?;
+    let job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = $4, version = $5, result_digest = $6,
+            worker_id = NULL, lease_token_digest = NULL,
+            lease_expires_at = NULL, heartbeat_at = NULL, retry_at = NULL,
+            wake_kind = NULL, wake_state = NULL, wake_generation = 0,
+            payload_schema_version = $7, payload = $8, payload_digest = $9,
+            terminal_at = $10, updated_at = $10
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = $11
+          AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&current_job.job_id)
+    .bind(current_job.version)
+    .bind(next_job.state.as_str())
+    .bind(
+        i64::try_from(next_job.version)
+            .map_err(|_| RepositoryError::InvalidInput("Job version exceeds bigint".to_owned()))?,
+    )
+    .bind(&result_payload.digest)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(database_now)
+    .bind(&current_job.state)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration convergence Job"))?;
+    let job = job_from_row(job)?;
+
+    let (node_version, node_cancelling_version) = if expected_node_state == "running"
+        && decision.node_state == NodeExecutionState::Cancelled
+    {
+        let cancelling_version: i64 = sqlx::query_scalar(
+            r#"
+            UPDATE insight_platform.run_nodes
+            SET state = 'cancelling', version = version + 1, retry_at = NULL,
+                updated_at = $4
+            WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+              AND record_kind = 'node_execution' AND state = 'running'
+              AND terminal_at IS NULL
+            RETURNING version
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(&parents.node_id)
+        .bind(parents.node_version)
+        .bind(database_now)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict(
+            "orchestration convergence Node cancelling",
+        ))?;
+        let terminal_version: i64 = sqlx::query_scalar(
+            r#"
+            UPDATE insight_platform.run_nodes
+            SET state = 'cancelled', version = version + 1,
+                terminal_at = $4, updated_at = $4
+            WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+              AND record_kind = 'node_execution' AND state = 'cancelling'
+              AND terminal_at IS NULL
+            RETURNING version
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(&parents.node_id)
+        .bind(cancelling_version)
+        .bind(database_now)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict(
+            "orchestration convergence Node cancelled",
+        ))?;
+        (terminal_version, Some(cancelling_version))
+    } else {
+        let terminal_version: i64 = sqlx::query_scalar(
+            r#"
+            UPDATE insight_platform.run_nodes
+            SET state = $4, version = version + 1, retry_at = NULL,
+                terminal_at = $5, updated_at = $5
+            WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+              AND record_kind = 'node_execution' AND state = $6 AND terminal_at IS NULL
+            RETURNING version
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(&parents.node_id)
+        .bind(parents.node_version)
+        .bind(decision.node_state.as_str())
+        .bind(database_now)
+        .bind(expected_node_state)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("orchestration convergence Node"))?;
+        (terminal_version, None)
+    };
+
+    let scope_closing_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'closing', version = version + 1, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'open' AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.scope_id)
+    .bind(parents.scope_version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration convergence Scope"))?;
+    let scope_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = $4, version = version + 1, terminal_at = $5, updated_at = $5
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'closing'
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.scope_id)
+    .bind(scope_closing_version)
+    .bind(target_scope_state.as_str())
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration convergence Scope"))?;
+
+    let mut current_snapshot = parents.run.current.clone();
+    current_snapshot.control = decision.control.clone();
+    current_snapshot.output_value_id = None;
+    let run_id: ResourceId = parents.run.run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    current_snapshot
+        .validate(&run_id)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let current_payload = TypedPayload::from_versioned(1, &current_snapshot, 1_048_576)?;
+    let expected_active_work = i32::from(had_active_permit);
+    let run = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = $4, version = version + 1, active_work_count = 0,
+            output_value_id = NULL, current_schema_version = $5, current_payload = $6,
+            current_payload_digest = $7, timeout_generation = $8,
+            terminal_at = $9, updated_at = $9
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND active_work_count = $10 AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&parents.run.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(parents.run.version)
+    .bind(decision.run_state.as_str())
+    .bind(current_payload.schema_version)
+    .bind(&current_payload.value)
+    .bind(&current_payload.digest)
+    .bind(
+        i64::try_from(decision.control.timeout_generation).map_err(|_| {
+            RepositoryError::InvalidInput("timeout generation exceeds bigint".to_owned())
+        })?,
+    )
+    .bind(database_now)
+    .bind(expected_active_work)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration convergence Run"))?;
+    Ok((
+        CompletedOrchestrationRun {
+            run: run_from_row(run)?,
+            job,
+            node_id: parents.node_id.clone(),
+            scope_id: parents.scope_id.clone(),
+            node_version,
+            scope_version,
+            settled_quota_account_ids: Vec::new(),
+        },
+        node_cancelling_version,
+    ))
+}
+
+async fn append_orchestration_convergence_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    completed: &CompletedOrchestrationRun,
+    reason: OrchestrationConvergenceReason,
+    slot: &OrchestrationConvergenceSlot,
+    result_payload: &TypedPayload,
+    node_cancelling_version: Option<i64>,
+) -> Result<(), RepositoryError> {
+    let run_id = completed.run.run_id.as_str();
+    let common = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "job_id": completed.job.job_id,
+            "lease_generation": completed.job.lease_epoch,
+            "reason": reason.as_str(),
+            "result_payload_digest": result_payload.digest,
+            "settled_quota_account_ids": completed.settled_quota_account_ids,
+            "terminal_state": completed.run.state,
+        }),
+        65_536,
+    )?;
+    if let Some(cancelling_version) = node_cancelling_version {
+        append_scheduler_event(
+            transaction,
+            &completed.run.tenant_id,
+            &slot.node_cancelling_event_id,
+            &slot.node_cancelling_outbox_id,
+            "node_execution",
+            &completed.node_id,
+            cancelling_version,
+            Some(run_id),
+            "node.cancelling",
+            &common,
+        )
+        .await?;
+    }
+    append_scheduler_event(
+        transaction,
+        &completed.run.tenant_id,
+        &slot.run_event_id,
+        &slot.run_outbox_id,
+        "run",
+        run_id,
+        completed.run.version,
+        Some(run_id),
+        "run.terminal_converged",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &completed.run.tenant_id,
+        &slot.node_event_id,
+        &slot.node_outbox_id,
+        "node_execution",
+        &completed.node_id,
+        completed.node_version,
+        Some(run_id),
+        "node.terminal_converged",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &completed.run.tenant_id,
+        &slot.scope_closing_event_id,
+        &slot.scope_closing_outbox_id,
+        "scope_instance",
+        &completed.scope_id,
+        completed.scope_version - 1,
+        Some(run_id),
+        "scope.closing",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &completed.run.tenant_id,
+        &slot.scope_terminal_event_id,
+        &slot.scope_terminal_outbox_id,
+        "scope_instance",
+        &completed.scope_id,
+        completed.scope_version,
+        Some(run_id),
+        "scope.terminal_converged",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &completed.run.tenant_id,
+        &slot.job_event_id,
+        &slot.job_outbox_id,
+        "job",
+        &completed.job.job_id,
+        completed.job.version,
+        Some(run_id),
+        "job.terminal_converged",
+        result_payload,
+    )
+    .await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn mutate_terminal_orchestration_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    next_job: &JobProjection,
+    parents: &LockedOrchestrationJobParents,
+    terminal_state: OrchestrationRunTerminalState,
+    result_digest: &Sha256Digest,
+    output_value_id: Option<&str>,
+    terminal_failure: Option<&Failure>,
+    database_now: DateTime<Utc>,
+) -> Result<CompletedOrchestrationRun, RepositoryError> {
+    let run_state = parents
+        .run
+        .state
+        .parse::<RunState>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let target_run_state = terminal_state
+        .as_str()
+        .parse::<RunState>()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let target_node_state = terminal_state
+        .as_str()
+        .parse::<NodeExecutionState>()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let target_scope_state = terminal_state
+        .scope_state()
+        .parse::<ScopeState>()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    if !run_state.can_transition_to(target_run_state)
+        || !NodeExecutionState::Running.can_transition_to(target_node_state)
+        || !ScopeState::Open.can_transition_to(ScopeState::Closing)
+        || !ScopeState::Closing.can_transition_to(target_scope_state)
+    {
+        return Err(RepositoryError::Conflict(
+            "terminal orchestration state transition",
+        ));
+    }
+    let job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = $4, version = $5, result_digest = $6,
+            worker_id = NULL, lease_token_digest = NULL,
+            lease_expires_at = NULL, heartbeat_at = NULL,
+            terminal_at = $7, updated_at = $7
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND state = 'running'
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&current_job.job_id)
+    .bind(current_job.version)
+    .bind(next_job.state.as_str())
+    .bind(
+        i64::try_from(next_job.version)
+            .map_err(|_| RepositoryError::InvalidInput("Job version exceeds bigint".to_owned()))?,
+    )
+    .bind(result_digest.to_string())
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration Job"))?;
+    let job = job_from_row(job)?;
+
+    let node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = $4, version = version + 1, terminal_at = $5, updated_at = $5
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'running'
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.node_id)
+    .bind(parents.node_version)
+    .bind(terminal_state.as_str())
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration Node"))?;
+
+    let scope_closing_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'closing', version = version + 1, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'open'
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.scope_id)
+    .bind(parents.scope_version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration Scope"))?;
+    let scope_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = $4, version = version + 1, terminal_at = $5, updated_at = $5
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'closing'
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.scope_id)
+    .bind(scope_closing_version)
+    .bind(terminal_state.scope_state())
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration Scope"))?;
+
+    let mut current_snapshot = parents.run.current.clone();
+    current_snapshot.output_value_id = output_value_id.map(str::parse).transpose().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::InvalidInput(failure.to_string())
+        },
+    )?;
+    current_snapshot.failure = terminal_failure.cloned();
+    current_snapshot
+        .validate(&parents.run.run_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let current_payload = TypedPayload::from_versioned(1, &current_snapshot, 1_048_576)?;
+    let run = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = $4, version = version + 1, active_work_count = active_work_count - 1,
+            output_value_id = $5, current_schema_version = $6, current_payload = $7,
+            current_payload_digest = $8, terminal_at = $9, updated_at = $9
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND active_work_count = 1 AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&parents.run.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(parents.run.version)
+    .bind(terminal_state.as_str())
+    .bind(output_value_id)
+    .bind(current_payload.schema_version)
+    .bind(&current_payload.value)
+    .bind(&current_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration Run"))?;
+    Ok(CompletedOrchestrationRun {
+        run: run_from_row(run)?,
+        job,
+        node_id: parents.node_id.clone(),
+        scope_id: parents.scope_id.clone(),
+        node_version,
+        scope_version,
+        settled_quota_account_ids: Vec::new(),
+    })
+}
+
+async fn append_orchestration_terminal_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    completed: &CompletedOrchestrationRun,
+    terminal_state: OrchestrationRunTerminalState,
+    mutations: &OrchestrationTerminalMutationIds,
+    result_payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
+    let run_id = completed.run.run_id.as_str();
+    let common = TypedPayload::new(
+        1,
+        &serde_json::json!({
+            "job_id": completed.job.job_id,
+            "lease_generation": completed.job.lease_epoch,
+            "result_payload_digest": result_payload.digest,
+            "settled_quota_account_ids": completed.settled_quota_account_ids,
+            "terminal_state": terminal_state.as_str(),
+        }),
+    )?;
+    append_scheduler_event(
+        transaction,
+        &completed.run.tenant_id,
+        &mutations.run_event_id,
+        &mutations.run_outbox_id,
+        "run",
+        run_id,
+        completed.run.version,
+        Some(run_id),
+        "run.terminal_committed",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &completed.run.tenant_id,
+        &mutations.node_event_id,
+        &mutations.node_outbox_id,
+        "node_execution",
+        &completed.node_id,
+        completed.node_version,
+        Some(run_id),
+        "node.terminal_committed",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &completed.run.tenant_id,
+        &mutations.scope_closing_event_id,
+        &mutations.scope_closing_outbox_id,
+        "scope_instance",
+        &completed.scope_id,
+        completed.scope_version - 1,
+        Some(run_id),
+        "scope.closing",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &completed.run.tenant_id,
+        &mutations.scope_terminal_event_id,
+        &mutations.scope_terminal_outbox_id,
+        "scope_instance",
+        &completed.scope_id,
+        completed.scope_version,
+        Some(run_id),
+        "scope.terminal_committed",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &completed.run.tenant_id,
+        &mutations.job_event_id,
+        &mutations.job_outbox_id,
+        "job",
+        &completed.job.job_id,
+        completed.job.version,
+        Some(run_id),
+        "job.terminal_committed",
+        result_payload,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn load_completed_orchestration_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    job_id: &str,
+) -> Result<CompletedOrchestrationRun, RepositoryError> {
+    let job = load_job_by_text(transaction, tenant_id, job_id).await?;
+    require_orchestration_job(&job)?;
+    if job.terminal_at.is_none() {
+        return Err(RepositoryError::Conflict("orchestration Job terminal"));
+    }
+    let run_id: ResourceId = job
+        .run_id
+        .as_deref()
+        .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Run".to_owned()))?
+        .parse()
+        .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        })?;
+    let node_id = job
+        .node_id
+        .clone()
+        .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Node".to_owned()))?;
+    let tenant: ResourceId =
+        tenant_id
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    let run = load_run(transaction, &tenant, &run_id).await?;
+    let node = sqlx::query(
+        r#"
+        SELECT node.scope_id, node.version AS node_version, scope.version AS scope_version
+        FROM insight_platform.run_nodes AS node
+        JOIN insight_platform.run_nodes AS scope
+          ON scope.tenant_id = node.tenant_id AND scope.node_id = node.scope_id
+        WHERE node.tenant_id = $1 AND node.node_id = $2
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(&node_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let reservation_id = job.quota_reservation_id.as_deref().ok_or_else(|| {
+        RepositoryError::CorruptRow("terminal orchestration Job lost quota evidence".to_owned())
+    })?;
+    let settled_quota_account_ids = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT quota_account_id FROM insight_platform.quota_ledger
+        WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'
+        ORDER BY quota_account_id
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(reservation_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(CompletedOrchestrationRun {
+        run,
+        job,
+        node_id,
+        scope_id: node.try_get("scope_id")?,
+        node_version: node.try_get("node_version")?,
+        scope_version: node.try_get("scope_version")?,
+        settled_quota_account_ids,
+    })
+}
+
+async fn load_yielded_orchestration_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    job_id: &str,
+    expected_state: JobState,
+) -> Result<YieldedOrchestrationJob, RepositoryError> {
+    let job = load_job_by_text(transaction, tenant_id, job_id).await?;
+    require_orchestration_job(&job)?;
+    if job.state != expected_state.as_str() || job.worker_id.is_some() {
+        return Err(RepositoryError::Conflict("orchestration Job yield replay"));
+    }
+    let run_id: ResourceId = job
+        .run_id
+        .as_deref()
+        .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Run".to_owned()))?
+        .parse()
+        .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        })?;
+    let tenant: ResourceId =
+        tenant_id
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    let run = load_run(transaction, &tenant, &run_id).await?;
+    let node_id = job
+        .node_id
+        .clone()
+        .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Node".to_owned()))?;
+    let node_version: i64 = sqlx::query_scalar(
+        "SELECT version FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2 AND state = $3",
+    )
+    .bind(tenant_id)
+    .bind(&node_id)
+    .bind(expected_state.as_str())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration Node yield replay"))?;
+    let reservation_id = job.quota_reservation_id.as_deref().ok_or_else(|| {
+        RepositoryError::CorruptRow("yielded orchestration Job lost quota evidence".to_owned())
+    })?;
+    let settled_quota_account_ids = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT quota_account_id FROM insight_platform.quota_ledger
+        WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'
+        ORDER BY quota_account_id
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(reservation_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if settled_quota_account_ids.is_empty() {
+        return Err(RepositoryError::CorruptRow(
+            "yielded orchestration Job has no quota settlement".to_owned(),
+        ));
+    }
+    Ok(YieldedOrchestrationJob {
+        run,
+        job,
+        node_id,
+        node_version,
+        settled_quota_account_ids,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn load_replayed_error_boundary_handler(
+    transaction: &mut Transaction<'_, Postgres>,
+    run: &RunRecord,
+    source_job: &JobRecord,
+    source_node_id: &str,
+    source_scope_id: &str,
+    route: &ErrorBoundaryRoute,
+    slot: &ControllerActivationSlot,
+    plan: &RuntimePlan,
+    failure_payload: &TypedPayload,
+) -> Result<ControllerActivationRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT parent_node_id, scope_id, plan_node_key, node_kind, state, version,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+          AND record_kind = 'node_execution'
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(&run.run_id)
+    .bind(slot.node_execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "failed ErrorBoundary handler Node replay",
+    ))?;
+    let target = plan.node(&route.target)?;
+    if row.try_get::<Option<String>, _>("parent_node_id")? != route.boundary_parent_node_id
+        || row.try_get::<String, _>("scope_id")? != source_scope_id
+        || row.try_get::<String, _>("plan_node_key")? != route.target.as_str()
+        || row.try_get::<String, _>("node_kind")? != target.kind().as_str()
+    {
+        return Err(RepositoryError::Conflict(
+            "failed ErrorBoundary handler ownership replay",
+        ));
+    }
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let stored: StoredErrorBoundaryHandlerPayload =
+        decode_typed_payload(&payload, "ErrorBoundary handler Node")?;
+    let expected = StoredErrorBoundaryHandlerPayload {
+        error_boundary_node_id: route.boundary_node_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        failure_digest: failure_payload
+            .digest
+            .parse::<Sha256Digest>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+        plan_node_key: route.target.clone(),
+        plan_source_digest: run.bindings.plan.semantic_digest.clone(),
+        required_control_tokens: vec![StoredControllerControlToken {
+            source_node_execution_id: source_node_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?,
+            source_port: StoredControllerPort::Failure,
+        }],
+    };
+    if stored != expected {
+        return Err(RepositoryError::Conflict(
+            "failed ErrorBoundary handler payload replay",
+        ));
+    }
+
+    let handler_node_id = slot.node_execution_id.to_string();
+    let job = load_job_by_text(
+        transaction,
+        &run.tenant_id,
+        &slot.orchestration_job_id.to_string(),
+    )
+    .await?;
+    require_orchestration_job(&job)?;
+    if job.owner_id != handler_node_id
+        || job.node_id.as_deref() != Some(handler_node_id.as_str())
+        || job.run_id.as_deref() != Some(run.run_id.as_str())
+    {
+        return Err(RepositoryError::Conflict(
+            "failed ErrorBoundary handler Job replay",
+        ));
+    }
+    let source_job_payload: OrchestrationJobPayload =
+        decode_typed_payload(&source_job.payload, "failed source orchestration Job")?;
+    let handler_job_payload: OrchestrationJobPayload =
+        decode_typed_payload(&job.payload, "ErrorBoundary handler orchestration Job")?;
+    let expected_job_payload = OrchestrationJobPayload {
+        bindings_digest: run.bindings.canonical_digest.clone(),
+        node_execution_id: slot.node_execution_id.clone(),
+        root_scope_id: source_job_payload.root_scope_id,
+        retry_backoff_milliseconds: source_job_payload.retry_backoff_milliseconds,
+        wake_contract: None,
+    };
+    if handler_job_payload != expected_job_payload || job.request_digest != job.payload.digest {
+        return Err(RepositoryError::Conflict(
+            "failed ErrorBoundary handler Job payload replay",
+        ));
+    }
+    Ok(ControllerActivationRecord {
+        node_id: handler_node_id,
+        plan_node_key: route.target.clone(),
+        node_kind: target.kind(),
+        node_version: row.try_get("version")?,
+        job,
+    })
+}
+
+async fn load_failed_orchestration_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    fence: &JobFence,
+    plan: &RuntimePlan,
+    plan_digest: &Sha256Digest,
+    cause: &OrchestrationFailureCause,
+    mutations: &ControllerStepMutationIds,
+) -> Result<FailedOrchestrationJob, RepositoryError> {
+    let source_job = load_job_by_text(transaction, &fence.tenant_id, &fence.job_id).await?;
+    require_orchestration_job(&source_job)?;
+    if source_job.state != JobState::Failed.as_str() || source_job.terminal_at.is_none() {
+        return Err(RepositoryError::Conflict("failed orchestration Job replay"));
+    }
+    let run_id: ResourceId = source_job
+        .run_id
+        .as_deref()
+        .ok_or_else(|| RepositoryError::CorruptRow("failed Job has no Run".to_owned()))?
+        .parse()
+        .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        })?;
+    let tenant_id: ResourceId = fence.tenant_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let run = load_run(transaction, &tenant_id, &run_id).await?;
+    require_exact_runtime_plan(transaction, &run, plan, plan_digest).await?;
+    let source_node_id = source_job
+        .node_id
+        .clone()
+        .ok_or_else(|| RepositoryError::CorruptRow("failed Job has no Node".to_owned()))?;
+    let source = sqlx::query(
+        r#"
+        SELECT source.plan_node_key, source.node_kind, source.version, source.scope_id,
+               scope.node_kind AS scope_kind, scope.state AS scope_state,
+               scope.version AS scope_version
+        FROM insight_platform.run_nodes AS source
+        JOIN insight_platform.run_nodes AS scope
+          ON scope.tenant_id = source.tenant_id
+         AND scope.run_id = source.run_id
+         AND scope.node_id = source.scope_id
+        WHERE source.tenant_id = $1 AND source.run_id = $2 AND source.node_id = $3
+          AND source.record_kind = 'node_execution' AND source.state = 'failed'
+          AND scope.record_kind = 'scope_instance'
+        "#,
+    )
+    .bind(&fence.tenant_id)
+    .bind(&run.run_id)
+    .bind(&source_node_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "failed orchestration source replay",
+    ))?;
+    let plan_node_key = PlanNodeKey::new(source.try_get("plan_node_key")?)?;
+    let runtime_node = plan.node(&plan_node_key)?;
+    if runtime_node.kind().as_str() != source.try_get::<String, _>("node_kind")? {
+        return Err(RepositoryError::Conflict(
+            "failed orchestration Plan binding replay",
+        ));
+    }
+    let (failure, controller_code) = derive_orchestration_failure(cause, runtime_node)?;
+    let failure_payload = TypedPayload::with_limit(1, &failure, 65_536)?;
+    if source_job.result_digest.as_deref() != Some(failure_payload.digest.as_str()) {
+        return Err(RepositoryError::Conflict(
+            "failed orchestration result replay",
+        ));
+    }
+    let error_route = find_matching_error_boundary(
+        transaction,
+        &run,
+        &source_node_id,
+        plan,
+        &failure,
+        plan.nodes.len(),
+    )
+    .await?;
+    if error_route.is_none()
+        && run.state == RunState::Failed.as_str()
+        && run.current.failure.as_ref() != Some(&failure)
+    {
+        return Err(RepositoryError::Conflict("failed Run snapshot replay"));
+    }
+    let source_scope_kind: String = source.try_get("scope_kind")?;
+    let structured_exit =
+        error_route.is_none() && matches!(source_scope_kind.as_str(), "parallel_leg" | "map_item");
+    validate_failure_mutation_shape(mutations, structured_exit, error_route.as_ref())?;
+    let source_scope_id: String = source.try_get("scope_id")?;
+    let handler_activations = if let Some(route) = &error_route {
+        let slot = mutations.activations.first().ok_or_else(|| {
+            RepositoryError::CorruptRow(
+                "failed ErrorBoundary replay lost its activation slot".to_owned(),
+            )
+        })?;
+        vec![
+            load_replayed_error_boundary_handler(
+                transaction,
+                &run,
+                &source_job,
+                &source_node_id,
+                &source_scope_id,
+                route,
+                slot,
+                plan,
+                &failure_payload,
+            )
+            .await?,
+        ]
+    } else {
+        Vec::new()
+    };
+    let settled_scopes = if error_route.is_some() {
+        Vec::new()
+    } else {
+        let scope_state: String = source.try_get("scope_state")?;
+        if scope_state != ScopeState::Failed.as_str() {
+            return Err(RepositoryError::Conflict(
+                "failed orchestration Scope settlement replay",
+            ));
+        }
+        vec![ControllerScopeRecord {
+            scope_id: source_scope_id,
+            scope_kind: source.try_get("scope_kind")?,
+            state: scope_state,
+            version: source.try_get("scope_version")?,
+        }]
+    };
+
+    let mut cancelled_remainders = Vec::with_capacity(mutations.remainder_cancellations.len());
+    for slot in &mutations.remainder_cancellations {
+        let scope_id = slot.expected_scope_id.to_string();
+        let scope = sqlx::query(
+            r#"
+            SELECT node_kind, state, version
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'scope_instance'
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(&run.run_id)
+        .bind(&scope_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict(
+            "failed cancellation Scope replay",
+        ))?;
+        let cancellation_scope_kind: String = scope.try_get("node_kind")?;
+        if cancellation_scope_kind != source_scope_kind
+            || !matches!(
+                cancellation_scope_kind.as_str(),
+                "parallel_leg" | "map_item"
+            )
+            || scope.try_get::<String, _>("state")? != ScopeState::Cancelled.as_str()
+        {
+            return Err(RepositoryError::Conflict(
+                "failed cancellation Scope terminal replay",
+            ));
+        }
+        let nodes = sqlx::query(
+            r#"
+            SELECT node_id, version
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND scope_id = $3
+              AND record_kind = 'node_execution' AND state = 'cancelled'
+            ORDER BY node_id
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(&run.run_id)
+        .bind(&scope_id)
+        .fetch_all(&mut **transaction)
+        .await?;
+        if nodes.len() != 1 {
+            return Err(RepositoryError::Conflict("failed cancellation Node replay"));
+        }
+        let node = &nodes[0];
+        let node_id: String = node.try_get("node_id")?;
+        let job_rows = sqlx::query(
+            r#"
+            SELECT * FROM insight_platform.jobs
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3 AND state = 'cancelled'
+            ORDER BY job_id
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(&run.run_id)
+        .bind(&node_id)
+        .fetch_all(&mut **transaction)
+        .await?;
+        if job_rows.len() != 1 {
+            return Err(RepositoryError::Conflict("failed cancellation Job replay"));
+        }
+        let job = job_from_row(job_rows.into_iter().next().ok_or_else(|| {
+            RepositoryError::CorruptRow("failed cancellation Job disappeared".to_owned())
+        })?)?;
+        let settled_quota_account_ids = if let Some(reservation_id) = &job.quota_reservation_id {
+            sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT quota_account_id FROM insight_platform.quota_ledger
+                WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'
+                ORDER BY quota_account_id
+                "#,
+            )
+            .bind(&fence.tenant_id)
+            .bind(reservation_id)
+            .fetch_all(&mut **transaction)
+            .await?
+        } else {
+            Vec::new()
+        };
+        let node_cancelling_version = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT aggregate_version FROM insight_platform.events
+            WHERE tenant_id = $1 AND event_id = $2
+              AND aggregate_kind = 'node_execution' AND aggregate_id = $3
+              AND event_type = 'node.cancelling'
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(slot.node_cancelling_event_id.to_string())
+        .bind(&node_id)
+        .fetch_optional(&mut **transaction)
+        .await?;
+        cancelled_remainders.push(ControllerCancelledRemainderRecord {
+            scope: ControllerScopeRecord {
+                scope_id,
+                scope_kind: cancellation_scope_kind.clone(),
+                state: ScopeState::Cancelled.as_str().to_owned(),
+                version: scope.try_get("version")?,
+            },
+            reason_code: if cancellation_scope_kind == "map_item" {
+                "map_failure_sibling_cancelled".to_owned()
+            } else {
+                "join_failure_sibling_cancelled".to_owned()
+            },
+            node_id,
+            node_version: node.try_get("version")?,
+            node_cancelling_version,
+            job,
+            settled_quota_account_ids,
+        });
+    }
+    let mut woken_nodes = Vec::new();
+    if let Some(wake) = &mutations.pending_wake {
+        if let Some(row) =
+            sqlx::query("SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2")
+                .bind(&fence.tenant_id)
+                .bind(wake.orchestration_job_id.to_string())
+                .fetch_optional(&mut **transaction)
+                .await?
+        {
+            let job = job_from_row(row)?;
+            require_orchestration_job(&job)?;
+            if job.run_id.as_deref() != Some(run.run_id.as_str()) {
+                return Err(RepositoryError::Conflict(
+                    "failed orchestration Join Job replay",
+                ));
+            }
+            let node_id = job
+                .node_id
+                .clone()
+                .ok_or_else(|| RepositoryError::CorruptRow("Join Job has no Node".to_owned()))?;
+            let node = sqlx::query(
+                r#"
+                SELECT plan_node_key, node_kind, version
+                FROM insight_platform.run_nodes
+                WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+                  AND record_kind = 'node_execution'
+                "#,
+            )
+            .bind(&fence.tenant_id)
+            .bind(&run.run_id)
+            .bind(&node_id)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict(
+                "failed orchestration Join Node replay",
+            ))?;
+            woken_nodes.push(ControllerActivationRecord {
+                node_id,
+                plan_node_key: PlanNodeKey::new(node.try_get("plan_node_key")?)?,
+                node_kind: node
+                    .try_get::<String, _>("node_kind")?
+                    .parse::<PlanNodeKind>()
+                    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+                node_version: node.try_get("version")?,
+                job,
+            });
+        }
+    }
+    let reservation_id = source_job
+        .quota_reservation_id
+        .as_deref()
+        .ok_or_else(|| RepositoryError::CorruptRow("failed Job lost quota evidence".to_owned()))?;
+    let settled_quota_account_ids = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT quota_account_id FROM insight_platform.quota_ledger
+        WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'
+        ORDER BY quota_account_id
+        "#,
+    )
+    .bind(&fence.tenant_id)
+    .bind(reservation_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if settled_quota_account_ids.is_empty() {
+        return Err(RepositoryError::CorruptRow(
+            "failed Job has no quota settlement".to_owned(),
+        ));
+    }
+    Ok(FailedOrchestrationJob {
+        run,
+        source_node_id,
+        source_node_version: source.try_get("version")?,
+        source_job,
+        failure,
+        controller_code,
+        handler_activations,
+        settled_scopes,
+        woken_nodes,
+        cancelled_remainders,
+        settled_quota_account_ids,
+    })
+}
+
+async fn load_applied_orchestration_controller_step(
+    transaction: &mut Transaction<'_, Postgres>,
+    fence: &JobFence,
+    mutations: &ControllerStepMutationIds,
+) -> Result<AppliedOrchestrationControllerStep, RepositoryError> {
+    let slots = &mutations.activations;
+    let pending_slots = &mutations.pending_nodes;
+    let source_job = load_job_by_text(transaction, &fence.tenant_id, &fence.job_id).await?;
+    require_orchestration_job(&source_job)?;
+    if source_job.state != JobState::Succeeded.as_str() || source_job.terminal_at.is_none() {
+        return Err(RepositoryError::Conflict(
+            "orchestration controller step replay",
+        ));
+    }
+    let run_id: ResourceId = source_job
+        .run_id
+        .as_deref()
+        .ok_or_else(|| RepositoryError::CorruptRow("controller Job has no Run".to_owned()))?
+        .parse()
+        .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        })?;
+    let tenant_id: ResourceId = fence.tenant_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let run = load_run(transaction, &tenant_id, &run_id).await?;
+    let source_node_id = source_job
+        .node_id
+        .clone()
+        .ok_or_else(|| RepositoryError::CorruptRow("controller Job has no Node".to_owned()))?;
+    let source_node_version: i64 = sqlx::query_scalar(
+        r#"
+        SELECT version FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2
+          AND record_kind = 'node_execution' AND state = 'succeeded'
+        "#,
+    )
+    .bind(&fence.tenant_id)
+    .bind(&source_node_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration controller source replay",
+    ))?;
+    let mut activations = Vec::with_capacity(slots.len());
+    let mut created_scopes = Vec::with_capacity(slots.len());
+    for slot in slots {
+        let row = sqlx::query(
+            r#"
+            SELECT plan_node_key, node_kind, version, parent_node_id
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+              AND record_kind = 'node_execution'
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(slot.node_execution_id.to_string())
+        .bind(&run.run_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict(
+            "orchestration controller activation replay",
+        ))?;
+        if row
+            .try_get::<Option<String>, _>("parent_node_id")?
+            .as_deref()
+            != Some(source_node_id.as_str())
+        {
+            return Err(RepositoryError::Conflict(
+                "orchestration controller activation owner replay",
+            ));
+        }
+        let job = load_job_by_text(
+            transaction,
+            &fence.tenant_id,
+            &slot.orchestration_job_id.to_string(),
+        )
+        .await?;
+        if job.owner_id != slot.node_execution_id.to_string()
+            || job.run_id.as_deref() != Some(run.run_id.as_str())
+        {
+            return Err(RepositoryError::Conflict(
+                "orchestration controller activation Job replay",
+            ));
+        }
+        activations.push(ControllerActivationRecord {
+            node_id: slot.node_execution_id.to_string(),
+            plan_node_key: PlanNodeKey::new(row.try_get("plan_node_key")?)?,
+            node_kind: row
+                .try_get::<String, _>("node_kind")?
+                .parse::<PlanNodeKind>()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+            node_version: row.try_get("version")?,
+            job,
+        });
+        if let Some(scope) = &slot.scope {
+            let row = sqlx::query(
+                r#"
+                SELECT node_kind, state, version, parent_node_id,
+                       payload_schema_version, payload, payload_digest
+                FROM insight_platform.run_nodes
+                WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+                  AND record_kind = 'scope_instance'
+                "#,
+            )
+            .bind(&fence.tenant_id)
+            .bind(scope.scope_instance_id.to_string())
+            .bind(&run.run_id)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict(
+                "orchestration controller Scope replay",
+            ))?;
+            let scope_payload =
+                payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+            let stored_scope: StoredControllerScopePayload =
+                decode_typed_payload(&scope_payload, "controller Scope replay")?;
+            let stored_controller_node_id = stored_scope.controller_node_execution_id.to_string();
+            if row
+                .try_get::<Option<String>, _>("parent_node_id")?
+                .as_deref()
+                != Some(stored_controller_node_id.as_str())
+                || (!matches!(
+                    stored_scope.descriptor,
+                    StoredControllerScopeDescriptor::MapItem { .. }
+                ) && stored_controller_node_id != source_node_id)
+            {
+                return Err(RepositoryError::Conflict(
+                    "orchestration controller Scope owner replay",
+                ));
+            }
+            created_scopes.push(ControllerScopeRecord {
+                scope_id: scope.scope_instance_id.to_string(),
+                scope_kind: row.try_get("node_kind")?,
+                state: row.try_get("state")?,
+                version: row.try_get("version")?,
+            });
+        }
+    }
+    let mut pending_nodes = Vec::with_capacity(pending_slots.len());
+    for slot in pending_slots {
+        let row = sqlx::query(
+            r#"
+            SELECT plan_node_key, node_kind, version, parent_node_id,
+                   payload_schema_version, payload, payload_digest
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+              AND record_kind = 'node_execution'
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(slot.node_execution_id.to_string())
+        .bind(&run.run_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict(
+            "orchestration controller pending Node replay",
+        ))?;
+        let pending_payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let stored_pending: StoredPendingControllerNodePayload =
+            decode_typed_payload(&pending_payload, "controller pending Node replay")?;
+        let stored_controller_node_id = stored_pending.controller_node_execution_id.to_string();
+        if row
+            .try_get::<Option<String>, _>("parent_node_id")?
+            .as_deref()
+            != Some(stored_controller_node_id.as_str())
+            || stored_pending.plan_node_key.as_str() != row.try_get::<String, _>("plan_node_key")?
+        {
+            return Err(RepositoryError::Conflict(
+                "orchestration controller pending Node owner replay",
+            ));
+        }
+        pending_nodes.push(ControllerPendingNodeRecord {
+            node_id: slot.node_execution_id.to_string(),
+            plan_node_key: PlanNodeKey::new(row.try_get("plan_node_key")?)?,
+            node_kind: row
+                .try_get::<String, _>("node_kind")?
+                .parse::<PlanNodeKind>()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+            node_version: row.try_get("version")?,
+        });
+    }
+    let mut settled_scopes = Vec::new();
+    if mutations.structural_exit.is_some() {
+        let row = sqlx::query(
+            r#"
+            SELECT scope.node_id, scope.node_kind, scope.state, scope.version
+            FROM insight_platform.run_nodes AS source
+            JOIN insight_platform.run_nodes AS scope
+              ON scope.tenant_id = source.tenant_id
+             AND scope.run_id = source.run_id
+             AND scope.node_id = source.scope_id
+            WHERE source.tenant_id = $1 AND source.run_id = $2 AND source.node_id = $3
+              AND source.record_kind = 'node_execution'
+              AND scope.record_kind = 'scope_instance'
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(&run.run_id)
+        .bind(&source_node_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict(
+            "orchestration controller structural replay",
+        ))?;
+        let state: String = row.try_get("state")?;
+        let scope_kind: String = row.try_get("node_kind")?;
+        if !matches!(
+            scope_kind.as_str(),
+            "parallel_leg" | "loop_iteration" | "map_item"
+        ) || state != ScopeState::Succeeded.as_str()
+        {
+            return Err(RepositoryError::Conflict(
+                "orchestration controller Scope settlement replay",
+            ));
+        }
+        settled_scopes.push(ControllerScopeRecord {
+            scope_id: row.try_get("node_id")?,
+            scope_kind,
+            state,
+            version: row.try_get("version")?,
+        });
+    }
+    let mut cancelled_remainders = Vec::with_capacity(mutations.remainder_cancellations.len());
+    for slot in &mutations.remainder_cancellations {
+        let scope_id = slot.expected_scope_id.to_string();
+        let scope = sqlx::query(
+            r#"
+            SELECT node_kind, state, version
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'scope_instance'
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(&run.run_id)
+        .bind(&scope_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict(
+            "controller remainder Scope replay",
+        ))?;
+        let cancellation_scope_kind: String = scope.try_get("node_kind")?;
+        if !matches!(
+            cancellation_scope_kind.as_str(),
+            "parallel_leg" | "map_item"
+        ) || scope.try_get::<String, _>("state")? != ScopeState::Cancelled.as_str()
+        {
+            return Err(RepositoryError::Conflict(
+                "controller remainder Scope terminal replay",
+            ));
+        }
+        let nodes = sqlx::query(
+            r#"
+            SELECT node_id, version
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND scope_id = $3
+              AND record_kind = 'node_execution' AND state = 'cancelled'
+            ORDER BY node_id
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(&run.run_id)
+        .bind(&scope_id)
+        .fetch_all(&mut **transaction)
+        .await?;
+        if nodes.len() != 1 {
+            return Err(RepositoryError::Conflict(
+                "controller remainder Node replay",
+            ));
+        }
+        let node = &nodes[0];
+        let node_id: String = node.try_get("node_id")?;
+        let job_rows = sqlx::query(
+            r#"
+            SELECT * FROM insight_platform.jobs
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3 AND state = 'cancelled'
+            ORDER BY job_id
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(&run.run_id)
+        .bind(&node_id)
+        .fetch_all(&mut **transaction)
+        .await?;
+        if job_rows.len() != 1 {
+            return Err(RepositoryError::Conflict("controller remainder Job replay"));
+        }
+        let job = job_from_row(job_rows.into_iter().next().ok_or_else(|| {
+            RepositoryError::CorruptRow("controller remainder Job disappeared".to_owned())
+        })?)?;
+        let settled_quota_account_ids = if let Some(reservation_id) = &job.quota_reservation_id {
+            sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT quota_account_id FROM insight_platform.quota_ledger
+                WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'
+                ORDER BY quota_account_id
+                "#,
+            )
+            .bind(&fence.tenant_id)
+            .bind(reservation_id)
+            .fetch_all(&mut **transaction)
+            .await?
+        } else {
+            Vec::new()
+        };
+        let node_cancelling_version = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT aggregate_version FROM insight_platform.events
+            WHERE tenant_id = $1 AND event_id = $2
+              AND aggregate_kind = 'node_execution' AND aggregate_id = $3
+              AND event_type = 'node.cancelling'
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(slot.node_cancelling_event_id.to_string())
+        .bind(&node_id)
+        .fetch_optional(&mut **transaction)
+        .await?;
+        cancelled_remainders.push(ControllerCancelledRemainderRecord {
+            scope: ControllerScopeRecord {
+                scope_id,
+                scope_kind: cancellation_scope_kind.clone(),
+                state: ScopeState::Cancelled.as_str().to_owned(),
+                version: scope.try_get("version")?,
+            },
+            reason_code: if cancellation_scope_kind == "map_item" {
+                "map_failure_sibling_cancelled".to_owned()
+            } else {
+                "join_remainder_cancelled".to_owned()
+            },
+            node_id,
+            node_version: node.try_get("version")?,
+            node_cancelling_version,
+            job,
+            settled_quota_account_ids,
+        });
+    }
+    let mut woken_nodes = Vec::new();
+    if let Some(wake) = &mutations.pending_wake {
+        let row =
+            sqlx::query("SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2")
+                .bind(&fence.tenant_id)
+                .bind(wake.orchestration_job_id.to_string())
+                .fetch_optional(&mut **transaction)
+                .await?;
+        if let Some(row) = row {
+            let job = job_from_row(row)?;
+            require_orchestration_job(&job)?;
+            if job.run_id.as_deref() != Some(run.run_id.as_str()) {
+                return Err(RepositoryError::Conflict(
+                    "orchestration controller Join Job replay",
+                ));
+            }
+            let node_id = job
+                .node_id
+                .clone()
+                .ok_or_else(|| RepositoryError::CorruptRow("Join Job has no Node".to_owned()))?;
+            let node = sqlx::query(
+                r#"
+                SELECT plan_node_key, node_kind, version
+                FROM insight_platform.run_nodes
+                WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+                  AND record_kind = 'node_execution'
+                "#,
+            )
+            .bind(&fence.tenant_id)
+            .bind(&run.run_id)
+            .bind(&node_id)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict(
+                "orchestration controller Join Node replay",
+            ))?;
+            woken_nodes.push(ControllerActivationRecord {
+                node_id,
+                plan_node_key: PlanNodeKey::new(node.try_get("plan_node_key")?)?,
+                node_kind: node
+                    .try_get::<String, _>("node_kind")?
+                    .parse::<PlanNodeKind>()
+                    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+                node_version: node.try_get("version")?,
+                job,
+            });
+        }
+    }
+    let reservation_id = source_job.quota_reservation_id.as_deref().ok_or_else(|| {
+        RepositoryError::CorruptRow("controller Job lost quota evidence".to_owned())
+    })?;
+    let settled_quota_account_ids = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT quota_account_id FROM insight_platform.quota_ledger
+        WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'
+        ORDER BY quota_account_id
+        "#,
+    )
+    .bind(&fence.tenant_id)
+    .bind(reservation_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if settled_quota_account_ids.is_empty() {
+        return Err(RepositoryError::CorruptRow(
+            "controller Job has no quota settlement".to_owned(),
+        ));
+    }
+    Ok(AppliedOrchestrationControllerStep {
+        run,
+        source_node_id,
+        source_node_version,
+        source_job,
+        activations,
+        created_scopes,
+        pending_nodes,
+        settled_scopes,
+        woken_nodes,
+        cancelled_remainders,
+        settled_quota_account_ids,
+    })
+}
+
+async fn load_deferred_orchestration_task(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    job_id: &str,
+    task_id: &str,
+) -> Result<DeferredOrchestrationTask, RepositoryError> {
+    let job = load_job_by_text(transaction, tenant_id, job_id).await?;
+    require_orchestration_job(&job)?;
+    if job.state != JobState::Succeeded.as_str() || job.terminal_at.is_none() {
+        return Err(RepositoryError::Conflict(
+            "orchestration Task deferral replay",
+        ));
+    }
+    let task = load_task_by_text(transaction, tenant_id, task_id).await?;
+    if task.owner_id != job.owner_id || task.run_id != job.run_id || task.node_id != job.node_id {
+        return Err(RepositoryError::Conflict(
+            "orchestration Task deferral replay",
+        ));
+    }
+    let run_id: ResourceId = job
+        .run_id
+        .as_deref()
+        .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Run".to_owned()))?
+        .parse()
+        .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        })?;
+    let tenant: ResourceId =
+        tenant_id
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    let run = load_run(transaction, &tenant, &run_id).await?;
+    let node_id = job
+        .node_id
+        .clone()
+        .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Node".to_owned()))?;
+    let node_version: i64 = sqlx::query_scalar(
+        "SELECT version FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&node_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration Task deferral replay",
+    ))?;
+    let reservation_id = job.quota_reservation_id.as_deref().ok_or_else(|| {
+        RepositoryError::CorruptRow("deferred orchestration Job lost quota evidence".to_owned())
+    })?;
+    let settled_quota_account_ids = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT quota_account_id FROM insight_platform.quota_ledger
+        WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'
+        ORDER BY quota_account_id
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(reservation_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(DeferredOrchestrationTask {
+        run,
+        node_id,
+        node_version,
+        job,
+        task,
+        settled_quota_account_ids,
+    })
+}
+
+async fn load_deferred_orchestration_child_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    parent_job_id: &str,
+    child_link_id: &str,
+) -> Result<DeferredOrchestrationChildRun, RepositoryError> {
+    let parent_job = load_job_by_text(transaction, tenant_id, parent_job_id).await?;
+    require_orchestration_job(&parent_job)?;
+    if parent_job.state != JobState::Succeeded.as_str() || parent_job.terminal_at.is_none() {
+        return Err(RepositoryError::Conflict(
+            "orchestration child deferral replay",
+        ));
+    }
+    let child_link = load_child_run_link_by_id(transaction, tenant_id, child_link_id).await?;
+    if Some(child_link.parent_run_id.as_str()) != parent_job.run_id.as_deref()
+        || Some(child_link.parent_node_execution_id.as_str()) != parent_job.node_id.as_deref()
+        || child_link.payload.parent_attempt_ordinal
+            != u16::try_from(parent_job.attempt_no).map_err(|_| {
+                RepositoryError::CorruptRow("orchestration attempt exceeds u16".to_owned())
+            })?
+    {
+        return Err(RepositoryError::Conflict(
+            "orchestration child deferral replay",
+        ));
+    }
+    let tenant: ResourceId =
+        tenant_id
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    let parent_run_id: ResourceId = child_link.parent_run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let child_run_id: ResourceId = child_link.child_run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let parent_run = load_run(transaction, &tenant, &parent_run_id).await?;
+    let child_run = load_run(transaction, &tenant, &child_run_id).await?;
+    if child_run.parent_run_id.as_deref() != Some(child_link.parent_run_id.as_str())
+        || child_run.parent_node_id.as_deref() != Some(child_link.parent_node_execution_id.as_str())
+        || child_run.current.ancestry.parent_child_link_id.as_ref()
+            != Some(&child_link.child_link_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?)
+    {
+        return Err(RepositoryError::Conflict(
+            "orchestration child relation replay",
+        ));
+    }
+    let root_run_id: ResourceId = child_run.root_run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let root_run = if root_run_id == parent_run_id {
+        parent_run.clone()
+    } else {
+        load_run(transaction, &tenant, &root_run_id).await?
+    };
+    let child_job = load_job(transaction, &tenant, &child_link.child_orchestration_job_id).await?;
+    require_orchestration_job(&child_job)?;
+    if child_job.run_id.as_deref() != Some(child_link.child_run_id.as_str())
+        || child_job.node_id.as_deref()
+            != Some(
+                child_link
+                    .child_entry_node_execution_id
+                    .to_string()
+                    .as_str(),
+            )
+    {
+        return Err(RepositoryError::Conflict("orchestration child Job replay"));
+    }
+    let parent_node_version: i64 = sqlx::query_scalar(
+        "SELECT version FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&child_link.parent_node_execution_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("parent NodeExecution"))?;
+    let reservation_id = parent_job.quota_reservation_id.as_deref().ok_or_else(|| {
+        RepositoryError::CorruptRow("deferred orchestration Job lost quota evidence".to_owned())
+    })?;
+    let settled_quota_account_ids = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT quota_account_id FROM insight_platform.quota_ledger
+        WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'
+        ORDER BY quota_account_id
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(reservation_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if settled_quota_account_ids.is_empty() {
+        return Err(RepositoryError::CorruptRow(
+            "deferred orchestration child has no quota settlement".to_owned(),
+        ));
+    }
+    Ok(DeferredOrchestrationChildRun {
+        root_run,
+        parent_run,
+        parent_node_id: child_link.parent_node_execution_id.clone(),
+        parent_node_version,
+        parent_job,
+        child_link,
+        child_run,
+        child_job,
+        settled_quota_account_ids,
+    })
+}
+
+async fn load_task_source_orchestration_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    node_id: &str,
+) -> Result<JobRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT * FROM insight_platform.jobs
+        WHERE tenant_id = $1 AND work_class = 'orchestration'
+          AND owner_kind = 'node_execution' AND owner_id = $2
+          AND state = 'succeeded' AND terminal_at IS NOT NULL
+        ORDER BY terminal_at DESC, job_id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(node_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("Task source orchestration Job"))?;
+    let job = job_from_row(row)?;
+    require_orchestration_job(&job)?;
+    Ok(job)
+}
+
+async fn load_resolved_orchestration_task(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    task_id: &str,
+    resume_job_id: &str,
+) -> Result<ResolvedOrchestrationTask, RepositoryError> {
+    let task = load_task_by_text(transaction, tenant_id, task_id).await?;
+    if !matches!(task.state, TaskState::Responded | TaskState::Declined)
+        || task.responded_at.is_none()
+    {
+        return Err(RepositoryError::Conflict("Task response replay"));
+    }
+    let job = load_job_by_text(transaction, tenant_id, resume_job_id).await?;
+    require_orchestration_job(&job)?;
+    if job.owner_id != task.owner_id || job.run_id != task.run_id || job.node_id != task.node_id {
+        return Err(RepositoryError::Conflict("Task response replay"));
+    }
+    let run_id: ResourceId = task
+        .run_id
+        .as_deref()
+        .ok_or_else(|| RepositoryError::CorruptRow("Task has no Run".to_owned()))?
+        .parse()
+        .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        })?;
+    let tenant: ResourceId =
+        tenant_id
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    let run = load_run(transaction, &tenant, &run_id).await?;
+    let node_id = task
+        .node_id
+        .clone()
+        .ok_or_else(|| RepositoryError::CorruptRow("Task has no Node".to_owned()))?;
+    let node_version: i64 = sqlx::query_scalar(
+        "SELECT version FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(&node_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Task response replay"))?;
+    Ok(ResolvedOrchestrationTask {
+        run,
+        node_id,
+        node_version,
+        task,
+        job,
+    })
+}
+
+async fn load_woken_orchestration_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    job_id: &str,
+) -> Result<WokenOrchestrationJob, RepositoryError> {
+    let job = load_job_by_text(transaction, tenant_id, job_id).await?;
+    require_orchestration_job(&job)?;
+    if job.state != JobState::Ready.as_str()
+        || job.wake_kind.is_some()
+        || job.wake_state.is_some()
+        || job.wake_generation != 0
+    {
+        return Err(RepositoryError::Conflict("orchestration Job wake replay"));
+    }
+    let node_id = job
+        .node_id
+        .clone()
+        .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Node".to_owned()))?;
+    let node_version: i64 = sqlx::query_scalar(
+        "SELECT version FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2 AND state = 'ready'",
+    )
+    .bind(tenant_id)
+    .bind(&node_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("orchestration Node wake replay"))?;
+    Ok(WokenOrchestrationJob {
+        job,
+        node_id,
+        node_version,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct OrchestrationCandidate {
+    job: JobRecord,
+    run_id: String,
+    run_version: i64,
+    principal_id: String,
+    agent_deployment_id: String,
+    node_id: String,
+    node_version: i64,
+    scope_id: String,
+    scope_version: i64,
+    enqueue_round: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TerminalChildRunCandidate {
+    tenant_id: String,
+    child_link_id: String,
+    parent_run_id: String,
+    child_run_id: String,
+    root_run_id: String,
+}
+
+impl OrchestrationCandidate {
+    fn lock_key(&self) -> (&str, &str, &str, &str) {
+        (
+            self.job.tenant_id.as_str(),
+            self.run_id.as_str(),
+            self.node_id.as_str(),
+            self.job.job_id.as_str(),
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LockedRunParent {
+    tenant_id: String,
+    run_id: String,
+    version: i64,
+}
+
+#[derive(Debug, Clone)]
+struct LockedNodeParent {
+    tenant_id: String,
+    node_id: String,
+    version: i64,
+    state: String,
+    record_kind: String,
+}
+
+struct LockedOrchestrationParents {
+    runs: BTreeMap<String, LockedRunParent>,
+    nodes: BTreeMap<String, LockedNodeParent>,
+}
+
+fn scheduler_priority_from_database(priority: i16) -> Result<SchedulerPriority, RepositoryError> {
+    match priority {
+        -1 => Ok(SchedulerPriority::Low),
+        0 => Ok(SchedulerPriority::Normal),
+        1 => Ok(SchedulerPriority::High),
+        2 => Ok(SchedulerPriority::CriticalControl),
+        _ => Err(RepositoryError::CorruptRow(
+            "Job has an invalid priority".to_owned(),
+        )),
+    }
+}
+
+const fn scheduler_priority_to_database(priority: SchedulerPriority) -> i16 {
+    match priority {
+        SchedulerPriority::Low => -1,
+        SchedulerPriority::Normal => 0,
+        SchedulerPriority::High => 1,
+        SchedulerPriority::CriticalControl => 2,
+    }
+}
+
+async fn load_scheduler_state_for_update(
+    transaction: &mut Transaction<'_, Postgres>,
+    work_class: WorkClass,
+    limits: SchedulerHardLimits,
+) -> Result<SchedulerStateRecord, RepositoryError> {
+    let initial = SchedulerStateSnapshot {
+        work_class,
+        current_round: 0,
+        cursor_tenant_id: None,
+        tenants: Vec::new(),
+    };
+    let payload = TypedPayload::new(1, &initial)?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.scheduler_state (
+            work_class, current_round, cursor_tenant_id,
+            payload_schema_version, payload, payload_digest
+        ) VALUES ($1, 0, NULL, $2, $3, $4)
+        ON CONFLICT (work_class) DO NOTHING
+        "#,
+    )
+    .bind(work_class.as_str())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .execute(&mut **transaction)
+    .await?;
+    let row = sqlx::query(
+        r#"
+        SELECT work_class, version, current_round, cursor_tenant_id,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.scheduler_state
+        WHERE work_class = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(work_class.as_str())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let version: i64 = row.try_get("version")?;
+    let current_round: i64 = row.try_get("current_round")?;
+    let cursor_tenant_id: Option<String> = row.try_get("cursor_tenant_id")?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let snapshot: SchedulerStateSnapshot = decode_typed_payload(&payload, "scheduler state")?;
+    if snapshot.work_class != work_class
+        || u64::try_from(current_round).ok() != Some(snapshot.current_round)
+        || cursor_tenant_id != snapshot.cursor_tenant_id.as_ref().map(ToString::to_string)
+    {
+        return Err(RepositoryError::CorruptRow(
+            "scheduler hot columns disagree with its typed payload".to_owned(),
+        ));
+    }
+    select_weighted_deficit_round_robin(&snapshot, &limits, &[], &[], 1)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    Ok(SchedulerStateRecord { version, snapshot })
+}
+
+async fn persist_scheduler_state(
+    transaction: &mut Transaction<'_, Postgres>,
+    current: &SchedulerStateRecord,
+    next: &SchedulerStateSnapshot,
+) -> Result<(), RepositoryError> {
+    let payload = TypedPayload::new(1, next)?;
+    let updated =
+        sqlx::query(
+            r#"
+        UPDATE insight_platform.scheduler_state
+        SET version = version + 1, current_round = $3, cursor_tenant_id = $4,
+            payload_schema_version = $5, payload = $6, payload_digest = $7,
+            updated_at = clock_timestamp()
+        WHERE work_class = $1 AND version = $2
+        "#,
+        )
+        .bind(next.work_class.as_str())
+        .bind(current.version)
+        .bind(i64::try_from(next.current_round).map_err(|_| {
+            RepositoryError::InvalidInput("scheduler round exceeds bigint".to_owned())
+        })?)
+        .bind(next.cursor_tenant_id.as_ref().map(ToString::to_string))
+        .bind(payload.schema_version)
+        .bind(payload.value)
+        .bind(payload.digest)
+        .execute(&mut **transaction)
+        .await?
+        .rows_affected();
+    if updated != 1 {
+        return Err(RepositoryError::Conflict("scheduler state"));
+    }
+    Ok(())
+}
+
+async fn enumerate_orchestration_candidates(
+    transaction: &mut Transaction<'_, Postgres>,
+    database_now: DateTime<Utc>,
+    cursor_tenant_id: Option<&ResourceId>,
+    limits: SchedulerHardLimits,
+) -> Result<Vec<OrchestrationCandidate>, RepositoryError> {
+    let maximum_rows = i64::from(limits.maximum_tenants)
+        .checked_mul(i64::from(limits.maximum_window_per_tenant))
+        .ok_or_else(|| {
+            RepositoryError::InvalidInput("scheduler candidate bound overflowed".to_owned())
+        })?;
+    let rows = sqlx::query(
+        r#"
+        WITH eligible AS (
+            SELECT job.tenant_id, job.job_id,
+                   row_number() OVER (
+                       PARTITION BY job.tenant_id
+                       ORDER BY job.priority DESC,
+                                COALESCE(job.retry_at, job.scheduled_at),
+                                node.enqueue_round,
+                                job.job_id
+                   ) AS tenant_rank
+            FROM insight_platform.jobs AS job
+            JOIN insight_platform.tenants AS tenant
+              ON tenant.tenant_id = job.tenant_id AND tenant.state = 'active'
+            JOIN insight_platform.runs AS run
+              ON run.tenant_id = job.tenant_id AND run.run_id = job.run_id
+            JOIN insight_platform.run_nodes AS node
+              ON node.tenant_id = job.tenant_id AND node.node_id = job.node_id
+            JOIN insight_platform.run_nodes AS scope
+              ON scope.tenant_id = node.tenant_id AND scope.node_id = node.scope_id
+            WHERE job.work_class = 'orchestration'
+              AND job.owner_kind = 'node_execution' AND job.owner_id = node.node_id
+              AND job.state IN ('ready', 'retry_scheduled')
+              AND job.terminal_at IS NULL AND job.worker_id IS NULL
+              AND job.attempt_no < job.attempt_limit
+              AND job.scheduled_at <= $1 AND (job.retry_at IS NULL OR job.retry_at <= $1)
+              AND job.deadline > $1
+              AND job.priority BETWEEN -1 AND 1
+              AND run.state IN ('queued', 'running') AND run.terminal_at IS NULL
+              AND run.deadline > $1
+              AND run.current_payload #>> '{control,pause_requested}' = 'false'
+              AND run.current_payload #> '{control,cancel_requested_at}' = 'null'::jsonb
+              AND run.current_payload #> '{control,timeout_requested_at}' = 'null'::jsonb
+              AND node.record_kind = 'node_execution' AND node.state = 'ready'
+              AND node.terminal_at IS NULL AND node.deadline > $1
+              AND node.enqueue_round IS NOT NULL
+              AND scope.record_kind = 'scope_instance' AND scope.state = 'open'
+              AND scope.terminal_at IS NULL AND scope.deadline > $1
+              AND tenant.config -> 'scheduling_policy' IS NOT NULL
+        ), bounded_tenants AS (
+            SELECT tenant_id
+            FROM eligible
+            GROUP BY tenant_id
+            ORDER BY CASE
+                         WHEN $2::text IS NULL OR tenant_id > $2::text THEN 0
+                         ELSE 1
+                     END,
+                     tenant_id
+            LIMIT $3
+        )
+        SELECT job.*,
+               run.version AS scheduler_run_version,
+               run.principal_id AS scheduler_principal_id,
+               run.agent_deployment_id AS scheduler_agent_deployment_id,
+               node.version AS scheduler_node_version,
+               node.scope_id AS scheduler_scope_id,
+               node.enqueue_round AS scheduler_enqueue_round,
+               scope.version AS scheduler_scope_version
+        FROM eligible
+        JOIN bounded_tenants USING (tenant_id)
+        JOIN insight_platform.jobs AS job
+          ON job.tenant_id = eligible.tenant_id AND job.job_id = eligible.job_id
+        JOIN insight_platform.runs AS run
+          ON run.tenant_id = job.tenant_id AND run.run_id = job.run_id
+        JOIN insight_platform.run_nodes AS node
+          ON node.tenant_id = job.tenant_id AND node.node_id = job.node_id
+        JOIN insight_platform.run_nodes AS scope
+          ON scope.tenant_id = node.tenant_id AND scope.node_id = node.scope_id
+        WHERE eligible.tenant_rank <= $4
+        ORDER BY job.tenant_id, eligible.tenant_rank, job.job_id
+        LIMIT $5
+        "#,
+    )
+    .bind(database_now)
+    .bind(cursor_tenant_id.map(ToString::to_string))
+    .bind(i64::from(limits.maximum_tenants))
+    .bind(i64::from(limits.maximum_window_per_tenant))
+    .bind(maximum_rows)
+    .fetch_all(&mut **transaction)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            let run_version = row.try_get("scheduler_run_version")?;
+            let principal_id = row.try_get("scheduler_principal_id")?;
+            let agent_deployment_id = row.try_get("scheduler_agent_deployment_id")?;
+            let node_version = row.try_get("scheduler_node_version")?;
+            let scope_id = row.try_get("scheduler_scope_id")?;
+            let scope_version = row.try_get("scheduler_scope_version")?;
+            let enqueue_round: i64 = row.try_get("scheduler_enqueue_round")?;
+            let job = job_from_row(row)?;
+            let run_id = job.run_id.clone().ok_or_else(|| {
+                RepositoryError::CorruptRow("orchestration Job has no Run".to_owned())
+            })?;
+            let node_id = job.node_id.clone().ok_or_else(|| {
+                RepositoryError::CorruptRow("orchestration Job has no Node".to_owned())
+            })?;
+            Ok(OrchestrationCandidate {
+                job,
+                run_id,
+                run_version,
+                principal_id,
+                agent_deployment_id,
+                node_id,
+                node_version,
+                scope_id,
+                scope_version,
+                enqueue_round: u64::try_from(enqueue_round).map_err(|_| {
+                    RepositoryError::CorruptRow("negative Node enqueue round".to_owned())
+                })?,
+            })
+        })
+        .collect()
+}
+
+async fn load_tenant_scheduling_policy(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+) -> Result<TenantSchedulingPolicyBinding, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT tenant_id, state, version, config_schema_version, config,
+               config_digest, created_at, updated_at
+        FROM insight_platform.tenants
+        WHERE tenant_id = $1 AND state = 'active'
+        FOR SHARE
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("active tenant"))?;
+    let tenant = tenant_from_row(row)?;
+    let exact = tenant.config.scheduling_policy.ok_or_else(|| {
+        RepositoryError::InvalidInput("tenant has no Scheduling policy binding".to_owned())
+    })?;
+    let row = sqlx::query(
+        r#"
+        SELECT version.payload_schema_version, version.payload, version.payload_digest
+        FROM insight_platform.resource_versions AS version
+        JOIN insight_platform.resources AS resource
+          ON resource.tenant_id = version.tenant_id
+         AND resource.resource_id = version.resource_id
+        WHERE version.tenant_id = $1 AND version.resource_version_id = $2
+          AND version.resource_version_kind = 'policy_revision'
+          AND version.content_digest = $3
+          AND resource.resource_kind = 'policy'
+          AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
+        FOR SHARE OF version, resource
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(exact.revision_id.to_string())
+    .bind(exact.semantic_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound(
+        "active Scheduling policy version",
+    ))?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let published = decode_published_version_payload(&payload)?;
+    published
+        .validate_for(RegistryResourceKind::Policy, &exact.revision_id)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let ResourceDocument::Policy(policy) = published.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Scheduling ResourceVersion contains the wrong document".to_owned(),
+        ));
+    };
+    if policy.policy_kind != PolicyKind::Scheduling {
+        return Err(RepositoryError::CorruptRow(
+            "tenant Scheduling binding resolves to another PolicyKind".to_owned(),
+        ));
+    }
+    let document = policy.scheduling.ok_or_else(|| {
+        RepositoryError::CorruptRow("Scheduling policy has no closed document".to_owned())
+    })?;
+    let binding = TenantSchedulingPolicyBinding {
+        tenant_id: tenant_id.clone(),
+        policy_version_id: exact.revision_id,
+        policy_version_digest: exact.semantic_digest,
+        rules_digest: policy.rules_digest,
+        weight: document.weight,
+        burst: document.burst,
+        aging_rounds: document.aging_rounds,
+    };
+    binding
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    Ok(binding)
+}
+
+async fn lock_orchestration_quota_accounts(
+    transaction: &mut Transaction<'_, Postgres>,
+    selected: &[(OrchestrationCandidate, &OrchestrationClaimSlot)],
+) -> Result<BTreeMap<String, QuotaAccountRecord>, RepositoryError> {
+    let tenants = selected
+        .iter()
+        .map(|(candidate, _)| candidate.job.tenant_id.clone())
+        .collect::<Vec<_>>();
+    let runs = selected
+        .iter()
+        .map(|(candidate, _)| candidate.run_id.clone())
+        .collect::<Vec<_>>();
+    let principals = selected
+        .iter()
+        .map(|(candidate, _)| candidate.principal_id.clone())
+        .collect::<Vec<_>>();
+    let deployments = selected
+        .iter()
+        .map(|(candidate, _)| candidate.agent_deployment_id.clone())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT *
+        FROM insight_platform.quota_accounts
+        WHERE work_class = 'orchestration' AND metric = 'concurrent_jobs'
+          AND (
+              (scope_kind = 'tenant' AND scope_id = ANY($1))
+              OR (scope_kind = 'run' AND scope_id = ANY($2))
+              OR (scope_kind = 'principal' AND scope_id = ANY($3))
+              OR (scope_kind = 'agent_deployment' AND scope_id = ANY($4))
+          )
+        ORDER BY tenant_id, quota_account_id
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenants)
+    .bind(runs)
+    .bind(principals)
+    .bind(deployments)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut accounts = BTreeMap::new();
+    for row in rows {
+        let account = quota_account_from_row(row)?;
+        if accounts
+            .insert(account.quota_account_id.clone(), account)
+            .is_some()
+        {
+            return Err(RepositoryError::CorruptRow(
+                "quota account lock query returned a duplicate".to_owned(),
+            ));
+        }
+    }
+    Ok(accounts)
+}
+
+fn quota_account_ids_for_candidate(
+    candidate: &OrchestrationCandidate,
+    accounts: &BTreeMap<String, QuotaAccountRecord>,
+) -> Result<Vec<String>, RepositoryError> {
+    let mut relevant = accounts
+        .values()
+        .filter(|account| {
+            account.tenant_id == candidate.job.tenant_id
+                && match account.scope_kind.as_str() {
+                    "tenant" => account.scope_id == candidate.job.tenant_id,
+                    "run" => account.scope_id == candidate.run_id,
+                    "principal" => account.scope_id == candidate.principal_id,
+                    "agent_deployment" => account.scope_id == candidate.agent_deployment_id,
+                    _ => false,
+                }
+        })
+        .map(|account| account.quota_account_id.clone())
+        .collect::<Vec<_>>();
+    relevant.sort();
+    let tenant_lines = relevant
+        .iter()
+        .filter(|account_id| {
+            accounts
+                .get(*account_id)
+                .is_some_and(|account| account.scope_kind == "tenant")
+        })
+        .count();
+    if tenant_lines != 1 || relevant.len() > MAX_ORCHESTRATION_QUOTA_LINES {
+        return Err(RepositoryError::QuotaExceeded);
+    }
+    Ok(relevant)
+}
+
+async fn reserve_orchestration_quota_bundles(
+    transaction: &mut Transaction<'_, Postgres>,
+    selected: &[(OrchestrationCandidate, &OrchestrationClaimSlot)],
+    accounts: &BTreeMap<String, QuotaAccountRecord>,
+    decisions: &BTreeMap<String, JobProjection>,
+) -> Result<BTreeMap<String, Vec<String>>, RepositoryError> {
+    let mut lines_by_job = BTreeMap::new();
+    let mut increments = BTreeMap::<String, i64>::new();
+    for (candidate, _) in selected {
+        let lines = quota_account_ids_for_candidate(candidate, accounts)?;
+        for account_id in &lines {
+            let increment = increments.entry(account_id.clone()).or_default();
+            *increment = increment
+                .checked_add(1)
+                .ok_or_else(|| RepositoryError::QuotaExceeded)?;
+        }
+        lines_by_job.insert(candidate.job.job_id.clone(), lines);
+    }
+    let mut resulting_versions = BTreeMap::new();
+    for (account_id, increment) in &increments {
+        let account = accounts.get(account_id).ok_or_else(|| {
+            RepositoryError::CorruptRow("selected quota account disappeared".to_owned())
+        })?;
+        if account
+            .reserved_value
+            .checked_add(account.used_value)
+            .and_then(|value| value.checked_add(*increment))
+            .is_none_or(|value| value > account.limit_value)
+        {
+            return Err(RepositoryError::QuotaExceeded);
+        }
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.quota_accounts
+            SET reserved_value = reserved_value + $4, version = version + 1,
+                updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND quota_account_id = $2 AND version = $3
+              AND reserved_value + used_value + $4 <= limit_value
+            RETURNING version
+            "#,
+        )
+        .bind(&account.tenant_id)
+        .bind(&account.quota_account_id)
+        .bind(account.version)
+        .bind(*increment)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::QuotaExceeded)?;
+        resulting_versions.insert(account_id.clone(), row.try_get("version")?);
+    }
+    for (candidate, slot) in selected {
+        let lines = lines_by_job.get(&candidate.job.job_id).ok_or_else(|| {
+            RepositoryError::CorruptRow("Job quota bundle was not derived".to_owned())
+        })?;
+        let next = decisions.get(&candidate.job.job_id).ok_or_else(|| {
+            RepositoryError::CorruptRow("Job claim decision was not derived".to_owned())
+        })?;
+        let request = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "job_id": candidate.job.job_id,
+                "lease_generation": next.lease_generation,
+                "quota_account_ids": lines,
+                "quota_reservation_id": slot.quota_reservation_id,
+            }),
+            65_536,
+        )?;
+        let reservation_id = slot.quota_reservation_id.to_string();
+        for (index, account_id) in lines.iter().enumerate() {
+            let account = accounts.get(account_id).ok_or_else(|| {
+                RepositoryError::CorruptRow("Job quota account was not locked".to_owned())
+            })?;
+            let quota_entry_id = slot.quota_entry_ids[index].to_string();
+            insert_quota_entry(
+                transaction,
+                QuotaEntryInsert {
+                    tenant_id: &account.tenant_id,
+                    quota_entry_id: &quota_entry_id,
+                    quota_account_id: account_id,
+                    correlation_id: &reservation_id,
+                    entry_kind: "reserve",
+                    reserved_amount: 1,
+                    used_amount: 0,
+                    account_version: *resulting_versions.get(account_id).ok_or_else(|| {
+                        RepositoryError::CorruptRow(
+                            "quota mutation returned no account version".to_owned(),
+                        )
+                    })?,
+                    request_digest: &request.digest,
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(lines_by_job)
+}
+
+async fn lock_orchestration_parents(
+    transaction: &mut Transaction<'_, Postgres>,
+    selected: &[(OrchestrationCandidate, &OrchestrationClaimSlot)],
+    database_now: DateTime<Utc>,
+) -> Result<LockedOrchestrationParents, RepositoryError> {
+    let run_ids = selected
+        .iter()
+        .map(|(candidate, _)| candidate.run_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT * FROM insight_platform.runs
+        WHERE run_id = ANY($1)
+        ORDER BY tenant_id, run_id
+        FOR UPDATE
+        "#,
+    )
+    .bind(&run_ids)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut runs = BTreeMap::new();
+    for row in rows {
+        let record = run_from_row(row)?;
+        if !matches!(record.state.as_str(), "queued" | "running")
+            || record.deadline <= database_now
+            || record.current.control.pause_requested
+            || record.current.control.cancel_requested_at.is_some()
+            || record.current.control.timeout_requested_at.is_some()
+        {
+            return Err(RepositoryError::Conflict("orchestration Run parent"));
+        }
+        runs.insert(
+            record.run_id.clone(),
+            LockedRunParent {
+                tenant_id: record.tenant_id,
+                run_id: record.run_id,
+                version: record.version,
+            },
+        );
+    }
+    if runs.len() != run_ids.len() {
+        return Err(RepositoryError::Conflict("orchestration Run parent"));
+    }
+
+    let node_ids = selected
+        .iter()
+        .flat_map(|(candidate, _)| [candidate.node_id.clone(), candidate.scope_id.clone()])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT tenant_id, node_id, record_kind, state, version, deadline
+        FROM insight_platform.run_nodes
+        WHERE node_id = ANY($1)
+        ORDER BY tenant_id, node_id
+        FOR UPDATE
+        "#,
+    )
+    .bind(&node_ids)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut nodes = BTreeMap::new();
+    let mut node_deadlines = BTreeMap::new();
+    for row in rows {
+        let node_id: String = row.try_get("node_id")?;
+        node_deadlines.insert(
+            node_id.clone(),
+            row.try_get::<DateTime<Utc>, _>("deadline")?,
+        );
+        nodes.insert(
+            node_id.clone(),
+            LockedNodeParent {
+                tenant_id: row.try_get("tenant_id")?,
+                node_id,
+                version: row.try_get("version")?,
+                state: row.try_get("state")?,
+                record_kind: row.try_get("record_kind")?,
+            },
+        );
+    }
+    if nodes.len() != node_ids.len() {
+        return Err(RepositoryError::Conflict("orchestration Node parent"));
+    }
+    for (candidate, _) in selected {
+        let run = runs
+            .get(&candidate.run_id)
+            .ok_or(RepositoryError::Conflict("orchestration Run parent"))?;
+        let node = nodes
+            .get(&candidate.node_id)
+            .ok_or(RepositoryError::Conflict("orchestration Node parent"))?;
+        let scope = nodes
+            .get(&candidate.scope_id)
+            .ok_or(RepositoryError::Conflict("orchestration Scope parent"))?;
+        if run.tenant_id != candidate.job.tenant_id
+            || run.version != candidate.run_version
+            || node.tenant_id != candidate.job.tenant_id
+            || node.version != candidate.node_version
+            || node.record_kind != "node_execution"
+            || node.state != "ready"
+            || node_deadlines
+                .get(&candidate.node_id)
+                .is_none_or(|deadline| *deadline <= database_now)
+            || scope.tenant_id != candidate.job.tenant_id
+            || scope.version != candidate.scope_version
+            || scope.record_kind != "scope_instance"
+            || scope.state != "open"
+            || node_deadlines
+                .get(&candidate.scope_id)
+                .is_none_or(|deadline| *deadline <= database_now)
+        {
+            return Err(RepositoryError::Conflict("orchestration parent"));
+        }
+    }
+    Ok(LockedOrchestrationParents { runs, nodes })
+}
+
+async fn lock_selected_jobs(
+    transaction: &mut Transaction<'_, Postgres>,
+    selected: &[(OrchestrationCandidate, &OrchestrationClaimSlot)],
+) -> Result<BTreeMap<String, JobRecord>, RepositoryError> {
+    let job_ids = selected
+        .iter()
+        .map(|(candidate, _)| candidate.job.job_id.clone())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT * FROM insight_platform.jobs
+        WHERE job_id = ANY($1)
+        ORDER BY tenant_id, job_id
+        FOR UPDATE
+        "#,
+    )
+    .bind(job_ids)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut jobs = BTreeMap::new();
+    for row in rows {
+        let job = job_from_row(row)?;
+        jobs.insert(job.job_id.clone(), job);
+    }
+    if jobs.len() != selected.len() {
+        return Err(RepositoryError::Conflict("selected orchestration Job"));
+    }
+    Ok(jobs)
+}
+
+async fn mutate_orchestration_parents(
+    transaction: &mut Transaction<'_, Postgres>,
+    selected: &[(OrchestrationCandidate, &OrchestrationClaimSlot)],
+    locked: &LockedOrchestrationParents,
+    database_now: DateTime<Utc>,
+) -> Result<BTreeMap<String, (i64, i64)>, RepositoryError> {
+    let mut claimed_per_run = BTreeMap::<String, i32>::new();
+    for (candidate, _) in selected {
+        let count = claimed_per_run.entry(candidate.run_id.clone()).or_default();
+        *count = count.checked_add(1).ok_or_else(|| {
+            RepositoryError::InvalidInput("Run active work count overflowed".to_owned())
+        })?;
+    }
+    let mut run_versions = BTreeMap::new();
+    for (run_id, increment) in claimed_per_run {
+        let parent = locked
+            .runs
+            .get(&run_id)
+            .ok_or(RepositoryError::Conflict("orchestration Run parent"))?;
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.runs
+            SET state = 'running', active_work_count = active_work_count + $4,
+                version = version + 1, started_at = COALESCE(started_at, $5),
+                updated_at = $5
+            WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+              AND state IN ('queued', 'running') AND terminal_at IS NULL
+            RETURNING version
+            "#,
+        )
+        .bind(&parent.tenant_id)
+        .bind(&parent.run_id)
+        .bind(parent.version)
+        .bind(increment)
+        .bind(database_now)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("orchestration Run parent"))?;
+        run_versions.insert(run_id, row.try_get("version")?);
+    }
+
+    let mut result = BTreeMap::new();
+    for (candidate, _) in selected {
+        let parent = locked
+            .nodes
+            .get(&candidate.node_id)
+            .ok_or(RepositoryError::Conflict("orchestration Node parent"))?;
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.run_nodes
+            SET version = version + 1, updated_at = $5
+            WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+              AND state = $4 AND record_kind = 'node_execution' AND terminal_at IS NULL
+            RETURNING version
+            "#,
+        )
+        .bind(&parent.tenant_id)
+        .bind(&parent.node_id)
+        .bind(parent.version)
+        .bind(&parent.state)
+        .bind(database_now)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("orchestration Node parent"))?;
+        let node_version: i64 = row.try_get("version")?;
+        let run_version = *run_versions
+            .get(&candidate.run_id)
+            .ok_or(RepositoryError::Conflict("orchestration Run parent"))?;
+        result.insert(candidate.job.job_id.clone(), (run_version, node_version));
+    }
+    Ok(result)
+}
+
+async fn mutate_claimed_jobs(
+    transaction: &mut Transaction<'_, Postgres>,
+    selected: &[(OrchestrationCandidate, &OrchestrationClaimSlot)],
+    decisions: &BTreeMap<String, JobProjection>,
+    quota_lines: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<ClaimedOrchestrationJob>, RepositoryError> {
+    let mut claimed = Vec::with_capacity(selected.len());
+    for (candidate, slot) in selected {
+        let next = decisions
+            .get(&candidate.job.job_id)
+            .ok_or_else(|| RepositoryError::CorruptRow("missing Job claim decision".to_owned()))?;
+        let lease = next.lease.as_ref().ok_or_else(|| {
+            RepositoryError::CorruptRow("Job claim decision has no lease".to_owned())
+        })?;
+        let row =
+            sqlx::query(
+                r#"
+            UPDATE insight_platform.jobs
+            SET state = $4, version = $5, attempt_no = $6, lease_epoch = $7,
+                worker_id = $8, lease_token_digest = $9,
+                lease_expires_at = $10, heartbeat_at = $11, retry_at = NULL,
+                quota_reservation_id = $12, updated_at = $11
+            WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+              AND state IN ('ready', 'retry_scheduled') AND worker_id IS NULL
+              AND (
+                  quota_reservation_id IS NULL OR EXISTS (
+                      SELECT 1 FROM insight_platform.quota_ledger AS settled
+                      WHERE settled.tenant_id = jobs.tenant_id
+                        AND settled.correlation_id = jobs.quota_reservation_id
+                        AND settled.entry_kind = 'settle'
+                  )
+              )
+            RETURNING *
+            "#,
+            )
+            .bind(&candidate.job.tenant_id)
+            .bind(&candidate.job.job_id)
+            .bind(candidate.job.version)
+            .bind(next.state.as_str())
+            .bind(i64::try_from(next.version).map_err(|_| {
+                RepositoryError::InvalidInput("Job version exceeds bigint".to_owned())
+            })?)
+            .bind(i32::try_from(next.attempt_count).map_err(|_| {
+                RepositoryError::InvalidInput("Job attempt count exceeds integer".to_owned())
+            })?)
+            .bind(i64::try_from(next.lease_generation).map_err(|_| {
+                RepositoryError::InvalidInput("Job lease generation exceeds bigint".to_owned())
+            })?)
+            .bind(lease.worker_process_generation_id.to_string())
+            .bind(lease.token_digest.to_string())
+            .bind(lease.expires_at)
+            .bind(lease.heartbeat_at)
+            .bind(slot.quota_reservation_id.to_string())
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::Conflict("selected orchestration Job"))?;
+        claimed.push(ClaimedOrchestrationJob {
+            job: job_from_row(row)?,
+            run_version: 0,
+            node_version: 0,
+            quota_reservation_id: slot.quota_reservation_id.to_string(),
+            quota_account_ids: quota_lines.get(&candidate.job.job_id).cloned().ok_or_else(
+                || RepositoryError::CorruptRow("missing Job quota bundle".to_owned()),
+            )?,
+        });
+    }
+    Ok(claimed)
+}
+
+async fn append_orchestration_claim_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    selected: &[(OrchestrationCandidate, &OrchestrationClaimSlot)],
+    claimed: &[ClaimedOrchestrationJob],
+    parent_versions: &BTreeMap<String, (i64, i64)>,
+    quota_lines: &BTreeMap<String, Vec<String>>,
+) -> Result<(), RepositoryError> {
+    let claimed_by_job = claimed
+        .iter()
+        .map(|record| (record.job.job_id.as_str(), &record.job))
+        .collect::<BTreeMap<_, _>>();
+    let mut emitted_runs = BTreeSet::new();
+    for (candidate, slot) in selected {
+        let (run_version, node_version) = parent_versions
+            .get(&candidate.job.job_id)
+            .copied()
+            .ok_or_else(|| RepositoryError::CorruptRow("missing parent version".to_owned()))?;
+        let job = claimed_by_job
+            .get(candidate.job.job_id.as_str())
+            .copied()
+            .ok_or_else(|| RepositoryError::CorruptRow("missing claimed Job".to_owned()))?;
+        if emitted_runs.insert(candidate.run_id.clone()) {
+            let run_job_ids = selected
+                .iter()
+                .filter(|(other, _)| other.run_id == candidate.run_id)
+                .map(|(other, _)| other.job.job_id.as_str())
+                .collect::<Vec<_>>();
+            append_scheduler_event(
+                transaction,
+                &candidate.job.tenant_id,
+                &slot.run_event_id,
+                &slot.run_outbox_id,
+                "run",
+                &candidate.run_id,
+                run_version,
+                Some(&candidate.run_id),
+                "run.work_claimed",
+                &TypedPayload::new(
+                    1,
+                    &serde_json::json!({
+                        "active_work_increment": run_job_ids.len(),
+                        "job_ids": run_job_ids,
+                    }),
+                )?,
+            )
+            .await?;
+        }
+        append_scheduler_event(
+            transaction,
+            &candidate.job.tenant_id,
+            &slot.node_event_id,
+            &slot.node_outbox_id,
+            "node_execution",
+            &candidate.node_id,
+            node_version,
+            Some(&candidate.run_id),
+            "node.work_claimed",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "job_id": job.job_id,
+                    "lease_generation": job.lease_epoch,
+                }),
+            )?,
+        )
+        .await?;
+        append_scheduler_event(
+            transaction,
+            &candidate.job.tenant_id,
+            &slot.job_event_id,
+            &slot.job_outbox_id,
+            "job",
+            &job.job_id,
+            job.version,
+            Some(&candidate.run_id),
+            "job.claimed",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "lease_generation": job.lease_epoch,
+                    "node_version": node_version,
+                    "quota_account_ids": quota_lines.get(&job.job_id),
+                    "quota_reservation_id": slot.quota_reservation_id,
+                    "run_version": run_version,
+                    "worker_process_generation_id": job.worker_id,
+                }),
+            )?,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn append_scheduler_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    event_id: &ResourceId,
+    outbox_id: &ResourceId,
+    aggregate_kind: &str,
+    aggregate_id: &str,
+    aggregate_version: i64,
+    run_id: Option<&str>,
+    event_type: &str,
+    payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.events (
+            tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
+            run_id, event_type, visibility, payload_schema_version, payload, payload_digest
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'internal', $8, $9, $10)
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(event_id.to_string())
+    .bind(aggregate_kind)
+    .bind(aggregate_id)
+    .bind(aggregate_version)
+    .bind(run_id)
+    .bind(event_type)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id)
+        VALUES ($1, $2, $3)
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(outbox_id.to_string())
+    .bind(event_id.to_string())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+pub struct PgRunTransaction {
+    transaction: Transaction<'static, Postgres>,
+}
+
+impl PgRunTransaction {
+    pub async fn admit_run(
+        &mut self,
+        command: AdmitRun,
+    ) -> Result<CommandOutcome<RunRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "run",
+            &command.run_id.to_string(),
+            "run.admit",
+        )
+        .await?
+        {
+            let record =
+                load_run(&mut transaction, &command.audit.tenant_id, &command.run_id).await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        let principal =
+            require_tenant_permission(&mut transaction, &command.audit, Permission::AgentRun)
+                .await?;
+        if command.bindings.principal != principal {
+            return Err(RepositoryError::InvalidInput(
+                "run principal snapshot does not match the authorized binding".to_owned(),
+            ));
+        }
+        validate_run_bindings_exist(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.bindings,
+        )
+        .await?;
+        if let ValueRef::Artifact { artifact } = &command.input.value {
+            require_ready_run_artifact(&mut transaction, &command.audit.tenant_id, artifact)
+                .await?;
+        }
+
+        let bindings = TypedPayload::from_versioned(1, &command.bindings, 1_048_576)?;
+        let current_snapshot = command.initial_current_snapshot();
+        current_snapshot.validate(&command.run_id)?;
+        let current = TypedPayload::from_versioned(1, &current_snapshot, 1_048_576)?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.runs (
+                tenant_id, run_id, root_run_id, parent_run_id, parent_node_id,
+                agent_deployment_id, principal_id, state,
+                bindings_schema_version, bindings, bindings_digest,
+                current_schema_version, current_payload, current_payload_digest,
+                depth, deadline
+            ) VALUES (
+                $1, $2, $2, NULL, NULL, $3, $4, 'queued',
+                $5, $6, $7, $8, $9, $10, 0, $11
+            )
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.run_id.to_string())
+        .bind(command.agent_deployment_id.to_string())
+        .bind(command.audit.principal_id.to_string())
+        .bind(bindings.schema_version)
+        .bind(&bindings.value)
+        .bind(command.bindings.canonical_digest.to_string())
+        .bind(current.schema_version)
+        .bind(&current.value)
+        .bind(&current.digest)
+        .bind(command.deadline)
+        .execute(&mut *transaction)
+        .await?;
+
+        let scope_payload = TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "scope_kind": "root",
+                "root_run_id": command.run_id,
+            }),
+        )?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.run_nodes (
+                tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+                plan_node_key, activation_ordinal, related_run_id, logical_key,
+                node_kind, state, payload_schema_version, payload, payload_digest, deadline
+            ) VALUES (
+                $1, $2, $3, NULL, 'scope_instance', $2,
+                NULL, NULL, NULL, 'scope:root', 'root', 'open', $4, $5, $6, $7
+            )
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.root_scope_id.to_string())
+        .bind(command.run_id.to_string())
+        .bind(scope_payload.schema_version)
+        .bind(&scope_payload.value)
+        .bind(&scope_payload.digest)
+        .bind(command.deadline)
+        .execute(&mut *transaction)
+        .await?;
+
+        let node_payload = TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "plan_node_key": command.entry_plan_node_key,
+                "required_control_tokens": ["root"],
+            }),
+        )?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.run_nodes (
+                tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+                plan_node_key, activation_ordinal, related_run_id, logical_key,
+                node_kind, state, enqueue_round,
+                payload_schema_version, payload, payload_digest, deadline
+            ) VALUES (
+                $1, $2, $3, NULL, 'node_execution', $4,
+                $5, 1, NULL, $6, $7, 'ready', 0, $8, $9, $10, $11
+            )
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.entry_node_execution_id.to_string())
+        .bind(command.run_id.to_string())
+        .bind(command.root_scope_id.to_string())
+        .bind(command.entry_plan_node_key.as_str())
+        .bind(format!("entry:{}:1", command.entry_plan_node_key.as_str()))
+        .bind(command.entry_node_kind.as_str())
+        .bind(node_payload.schema_version)
+        .bind(&node_payload.value)
+        .bind(&node_payload.digest)
+        .bind(command.deadline)
+        .execute(&mut *transaction)
+        .await?;
+
+        let (inline_value, artifact_id) = match &command.input.value {
+            ValueRef::Inline { value } => (Some(value), None),
+            ValueRef::Artifact { artifact } => (None, Some(artifact.artifact_id().to_string())),
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.run_values (
+                tenant_id, value_id, run_id, node_id, value_kind, classification,
+                schema_digest, content_digest, inline_value, artifact_id
+            ) VALUES ($1, $2, $3, NULL, 'run_input', $4, $5, $6, $7, $8)
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.input.value_id.to_string())
+        .bind(command.run_id.to_string())
+        .bind(command.input.classification.as_str())
+        .bind(command.input.schema_digest.to_string())
+        .bind(command.input.content_digest.to_string())
+        .bind(inline_value)
+        .bind(artifact_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE insight_platform.runs SET input_value_id = $3 WHERE tenant_id = $1 AND run_id = $2",
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.run_id.to_string())
+        .bind(command.input.value_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+
+        let job_payload = TypedPayload::new(1, &command.orchestration_job_payload())?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.jobs (
+                tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+                state, attempt_limit, scheduled_at, deadline, priority, request_digest,
+                payload_schema_version, payload, payload_digest
+            ) VALUES (
+                $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+                'ready', $5, clock_timestamp(), $6, 0, $7, $8, $9, $10
+            )
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.orchestration_job_id.to_string())
+        .bind(command.entry_node_execution_id.to_string())
+        .bind(command.run_id.to_string())
+        .bind(i32::from(command.attempt_limit))
+        .bind(command.deadline)
+        .bind(command.audit.request_digest.to_string())
+        .bind(job_payload.schema_version)
+        .bind(&job_payload.value)
+        .bind(&job_payload.digest)
+        .execute(&mut *transaction)
+        .await?;
+
+        let record = load_run(&mut transaction, &command.audit.tenant_id, &command.run_id).await?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "run",
+            &record.run_id,
+            record.version,
+            "run.admitted",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "agent_deployment_id": record.agent_deployment_id,
+                    "bindings_digest": record.bindings.canonical_digest,
+                    "input_value_id": record.input_value_id,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(&mut transaction, &command.audit, &record.run_id, "admitted")
+            .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn set_run_pause(
+        &mut self,
+        command: SetRunPause,
+    ) -> Result<CommandOutcome<RunRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let SetRunPause {
+            audit,
+            run_id,
+            expected_run_version,
+            expected_pause_generation,
+            requested,
+        } = command;
+        self.apply_run_control(
+            audit,
+            run_id,
+            expected_run_version,
+            "run.pause",
+            move |record, _database_now, _principal| {
+                decide_pause(
+                    &record.current.control,
+                    expected_pause_generation,
+                    requested,
+                )
+            },
+        )
+        .await
+    }
+
+    pub async fn request_run_cancel(
+        &mut self,
+        command: RequestRunCancel,
+    ) -> Result<CommandOutcome<RunRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let RequestRunCancel {
+            audit,
+            run_id,
+            expected_run_version,
+            expected_cancel_generation,
+            reason_code,
+        } = command;
+        self.apply_run_control(
+            audit,
+            run_id,
+            expected_run_version,
+            "run.cancel",
+            move |record, database_now, principal| {
+                decide_cancel(
+                    &record.current.control,
+                    expected_cancel_generation,
+                    database_now,
+                    reason_code,
+                    principal.clone(),
+                )
+            },
+        )
+        .await
+    }
+
+    pub async fn observe_run_timeout(
+        &mut self,
+        command: ObserveRunTimeout,
+    ) -> Result<CommandOutcome<RunRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let ObserveRunTimeout {
+            audit,
+            run_id,
+            expected_run_version,
+            expected_timeout_generation,
+        } = command;
+        self.apply_run_control(
+            audit,
+            run_id,
+            expected_run_version,
+            "run.timeout",
+            move |record, database_now, _principal| {
+                decide_timeout(
+                    &record.current.control,
+                    expected_timeout_generation,
+                    database_now,
+                    record.deadline,
+                    record.state.clone(),
+                    u64::try_from(record.version)
+                        .map_err(|_| OrchestratorError::InvalidRunControl)?,
+                )
+            },
+        )
+        .await
+    }
+
+    async fn apply_run_control<F>(
+        &mut self,
+        audit: CommandAudit,
+        run_id: ResourceId,
+        expected_run_version: i64,
+        operation: &'static str,
+        decide: F,
+    ) -> Result<CommandOutcome<RunRecord>, RepositoryError>
+    where
+        F: FnOnce(
+            &RunRecord,
+            DateTime<Utc>,
+            &PrincipalSnapshot,
+        ) -> Result<ControlDecision, OrchestratorError>,
+    {
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &audit,
+            "run",
+            &run_id.to_string(),
+            operation,
+        )
+        .await?
+        {
+            let record = load_run(&mut transaction, &audit.tenant_id, &run_id).await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        let principal =
+            require_tenant_permission(&mut transaction, &audit, Permission::RuntimeControl).await?;
+        let current = load_run_for_update(&mut transaction, &audit.tenant_id, &run_id).await?;
+        if current.version != expected_run_version || current.terminal_at.is_some() {
+            return Err(RepositoryError::Conflict("run"));
+        }
+        let current_state = current
+            .state
+            .parse::<RunState>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        match operation {
+            "run.pause"
+                if !matches!(
+                    current_state,
+                    RunState::Queued | RunState::Running | RunState::Waiting
+                ) =>
+            {
+                return Err(RepositoryError::Conflict("run pause state"));
+            }
+            "run.cancel"
+                if !matches!(
+                    current_state,
+                    RunState::Queued | RunState::Running | RunState::Waiting | RunState::Cancelling
+                ) =>
+            {
+                return Err(RepositoryError::Conflict("run cancel state"));
+            }
+            "run.timeout" if !current_state.can_transition_to(RunState::TimedOut) => {
+                return Err(RepositoryError::Conflict("run timeout state"));
+            }
+            _ => {}
+        }
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let decision = decide(&current, database_now, &principal)?;
+        let (next_control, disposition, event_type, next_state, terminal) = match decision {
+            ControlDecision::Unchanged(snapshot) => (
+                snapshot,
+                "unchanged",
+                format!("{operation}_unchanged"),
+                current.state.clone(),
+                false,
+            ),
+            ControlDecision::Updated(snapshot) => {
+                let (state, terminal, suffix) = match operation {
+                    "run.pause" if snapshot.pause_requested => {
+                        (current.state.clone(), false, "requested")
+                    }
+                    "run.pause" => (current.state.clone(), false, "resumed"),
+                    "run.cancel" => ("cancelling".to_owned(), false, "requested"),
+                    "run.timeout" => (current.state.clone(), false, "observed"),
+                    _ => {
+                        return Err(RepositoryError::InvalidInput(
+                            "unknown run control operation".to_owned(),
+                        ))
+                    }
+                };
+                (
+                    snapshot,
+                    "updated",
+                    format!("{operation}_{suffix}"),
+                    state,
+                    terminal,
+                )
+            }
+        };
+        let mut next_current = current.current.clone();
+        next_current.control = next_control;
+        next_current.validate(&run_id)?;
+        let payload = TypedPayload::from_versioned(1, &next_current, 1_048_576)?;
+        let changed = disposition == "updated";
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.runs
+            SET state = $4, current_schema_version = $5, current_payload = $6,
+                current_payload_digest = $7,
+                pause_generation = $8, cancel_generation = $9, timeout_generation = $10,
+                version = version + CASE WHEN $11 THEN 1 ELSE 0 END,
+                terminal_at = CASE WHEN $12 THEN clock_timestamp() ELSE terminal_at END,
+                updated_at = CASE WHEN $11 THEN clock_timestamp() ELSE updated_at END
+            WHERE tenant_id = $1 AND run_id = $2 AND version = $3 AND terminal_at IS NULL
+            RETURNING *
+            "#,
+        )
+        .bind(audit.tenant_id.to_string())
+        .bind(run_id.to_string())
+        .bind(expected_run_version)
+        .bind(next_state)
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .bind(
+            i64::try_from(next_current.control.pause_generation).map_err(|_| {
+                RepositoryError::InvalidInput("pause generation exceeds bigint".to_owned())
+            })?,
+        )
+        .bind(
+            i64::try_from(next_current.control.cancel_generation).map_err(|_| {
+                RepositoryError::InvalidInput("cancel generation exceeds bigint".to_owned())
+            })?,
+        )
+        .bind(
+            i64::try_from(next_current.control.timeout_generation).map_err(|_| {
+                RepositoryError::InvalidInput("timeout generation exceeds bigint".to_owned())
+            })?,
+        )
+        .bind(changed)
+        .bind(terminal)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("run"))?;
+        let record = run_from_row(row)?;
+        append_command_event_version(
+            &mut transaction,
+            &audit,
+            "run",
+            &record.run_id,
+            changed.then_some(record.version),
+            &event_type,
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "cancel_generation": record.cancel_generation,
+                    "pause_generation": record.pause_generation,
+                    "state": record.state,
+                    "timeout_generation": record.timeout_generation,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(&mut transaction, &audit, &record.run_id, disposition).await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn commit(self) -> Result<(), RepositoryError> {
+        self.transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn rollback(self) -> Result<(), RepositoryError> {
+        self.transaction.rollback().await?;
+        Ok(())
+    }
+}
+
+impl RunTransaction for PgRunTransaction {
+    type Error = RepositoryError;
+    type RunRecord = RunRecord;
+
+    async fn admit_run(
+        &mut self,
+        command: AdmitRun,
+    ) -> Result<CommandOutcome<Self::RunRecord>, Self::Error> {
+        PgRunTransaction::admit_run(self, command).await
+    }
+
+    async fn set_run_pause(
+        &mut self,
+        command: SetRunPause,
+    ) -> Result<CommandOutcome<Self::RunRecord>, Self::Error> {
+        PgRunTransaction::set_run_pause(self, command).await
+    }
+
+    async fn request_run_cancel(
+        &mut self,
+        command: RequestRunCancel,
+    ) -> Result<CommandOutcome<Self::RunRecord>, Self::Error> {
+        PgRunTransaction::request_run_cancel(self, command).await
+    }
+
+    async fn observe_run_timeout(
+        &mut self,
+        command: ObserveRunTimeout,
+    ) -> Result<CommandOutcome<Self::RunRecord>, Self::Error> {
+        PgRunTransaction::observe_run_timeout(self, command).await
+    }
+
+    async fn commit(self) -> Result<(), Self::Error> {
+        PgRunTransaction::commit(self).await
+    }
+
+    async fn rollback(self) -> Result<(), Self::Error> {
+        PgRunTransaction::rollback(self).await
+    }
+}
+
+impl RunStore for PgRepository {
+    type Error = RepositoryError;
+    type Transaction<'a> = PgRunTransaction;
+
+    async fn begin(&self) -> Result<Self::Transaction<'_>, Self::Error> {
+        self.begin_run_transaction().await
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NewTenant {
+    pub tenant_id: String,
+    pub state: String,
+    pub config: TenantConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct BootstrapInstallationOperator {
+    pub principal_id: ResourceId,
+    pub request_id: ResourceId,
+    pub authentication_authority_digest: Sha256Digest,
+    pub subject_digest: Sha256Digest,
+    pub evidence_digest: Sha256Digest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapOutcome {
+    Created,
+    Replayed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TenantRecord {
+    pub tenant_id: String,
+    pub state: String,
+    pub version: i64,
+    pub config: TenantConfig,
+    pub config_digest: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewPrincipal {
+    pub principal_id: ResourceId,
+    pub authentication_authority_digest: Sha256Digest,
+    pub subject_digest: Sha256Digest,
+    pub installation_bindings: PrincipalBindingsPayload,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrincipalRecord {
+    pub principal_id: String,
+    pub state: String,
+    pub authentication_authority_digest: String,
+    pub subject_digest: String,
+    pub version: i64,
+    pub payload: TypedPayload,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewTenantPrincipal {
+    pub tenant_id: ResourceId,
+    pub principal_id: ResourceId,
+    pub principal_kind: PrincipalKind,
+    pub payload: TenantPrincipalPayload,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TenantPrincipalRecord {
+    pub tenant_id: String,
+    pub principal_id: String,
+    pub principal_kind: String,
+    pub state: String,
+    pub generation: i64,
+    pub version: i64,
+    pub permissions: TypedPayload,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewSecretBinding {
+    pub tenant_id: ResourceId,
+    pub secret_binding_id: ResourceId,
+    pub purpose: SecretPurpose,
+    pub provider_id: ResourceId,
+    pub opaque_reference_ciphertext: Vec<u8>,
+    pub key_id: String,
+    pub reference_digest: Sha256Digest,
+    pub payload: SecretBindingPayload,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SecretBindingRecord {
+    pub tenant_id: String,
+    pub secret_binding_id: String,
+    pub purpose: String,
+    pub provider_id: String,
+    pub state: String,
+    pub generation: i64,
+    pub version: i64,
+    pub opaque_reference_ciphertext: Vec<u8>,
+    pub key_id: String,
+    pub reference_digest: String,
+    pub payload: TypedPayload,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// SecretBinding projection safe for management responses and command replay.
+///
+/// It deliberately excludes ciphertext, KMS key identity, and opaque reference digest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SecretBindingMetadataRecord {
+    pub tenant_id: String,
+    pub secret_binding_id: String,
+    pub purpose: String,
+    pub provider_id: String,
+    pub state: String,
+    pub generation: i64,
+    pub version: i64,
+    pub payload: TypedPayload,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunRecord {
+    pub tenant_id: String,
+    pub run_id: String,
+    pub root_run_id: String,
+    pub parent_run_id: Option<String>,
+    pub parent_node_id: Option<String>,
+    pub agent_deployment_id: String,
+    pub principal_id: String,
+    pub state: String,
+    pub version: i64,
+    pub bindings: RunBindingsSnapshot,
+    pub current: RunCurrentSnapshot,
+    pub input_value_id: Option<String>,
+    pub output_value_id: Option<String>,
+    pub depth: i32,
+    pub descendant_count: i32,
+    pub active_work_count: i32,
+    pub pause_generation: i64,
+    pub cancel_generation: i64,
+    pub timeout_generation: i64,
+    pub public_sequence: i64,
+    pub retry_at: Option<DateTime<Utc>>,
+    pub deadline: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub terminal_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourceRecord {
+    pub tenant_id: String,
+    pub resource_id: String,
+    pub resource_kind: String,
+    pub lifecycle_state: String,
+    pub gate_state: String,
+    pub draft_generation: i64,
+    pub active_version_id: Option<String>,
+    pub active_deployment_id: Option<String>,
+    pub version: i64,
+    pub payload: TypedPayload,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourceVersionRecord {
+    pub tenant_id: String,
+    pub resource_version_id: String,
+    pub resource_id: String,
+    pub resource_version_kind: String,
+    pub revision_no: i64,
+    pub content_digest: String,
+    pub artifact_id: Option<String>,
+    pub payload: TypedPayload,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishedResource {
+    pub resource: ResourceRecord,
+    pub versions: Vec<ResourceVersionRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeploymentRecord {
+    pub tenant_id: String,
+    pub deployment_id: String,
+    pub resource_id: String,
+    pub resource_version_id: String,
+    pub environment: String,
+    pub bindings: TypedPayload,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewJob {
+    pub tenant_id: String,
+    pub job_id: String,
+    pub work_class: String,
+    pub owner_kind: String,
+    pub owner_id: String,
+    pub invocation_id: Option<String>,
+    pub run_id: Option<String>,
+    pub node_id: Option<String>,
+    pub attempt_limit: i32,
+    pub scheduled_at: DateTime<Utc>,
+    pub deadline: DateTime<Utc>,
+    pub priority: SchedulerPriority,
+    pub request_digest: String,
+    pub effect_key_digest: Option<String>,
+    pub payload: TypedPayload,
+}
+
+impl NewJob {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        for id in [
+            Some(self.tenant_id.as_str()),
+            Some(self.job_id.as_str()),
+            Some(self.owner_id.as_str()),
+            self.invocation_id.as_deref(),
+            self.run_id.as_deref(),
+            self.node_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            validate_id(id)?;
+        }
+        let work_class = self
+            .work_class
+            .parse::<WorkClass>()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let owner_id = self
+            .owner_id
+            .parse::<ResourceId>()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if self.owner_kind != owner_id.kind().descriptor().name
+            || !is_execution_work_owner_pair(work_class, owner_id.kind())
+        {
+            return Err(RepositoryError::InvalidInput(
+                "work class and typed owner pair are not registered".to_owned(),
+            ));
+        }
+        validate_digest(&self.request_digest)?;
+        if let Some(digest) = &self.effect_key_digest {
+            validate_digest(digest)?;
+        }
+        if self.attempt_limit <= 0 || self.deadline <= self.scheduled_at {
+            return Err(RepositoryError::InvalidInput(
+                "job attempt limit and time range are invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobRecord {
+    pub tenant_id: String,
+    pub job_id: String,
+    pub work_class: String,
+    pub owner_kind: String,
+    pub owner_id: String,
+    pub invocation_id: Option<String>,
+    pub run_id: Option<String>,
+    pub node_id: Option<String>,
+    pub state: String,
+    pub version: i64,
+    pub attempt_no: i32,
+    pub attempt_limit: i32,
+    pub lease_epoch: i64,
+    pub worker_id: Option<String>,
+    pub lease_token_digest: Option<String>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    pub scheduled_at: DateTime<Utc>,
+    pub retry_at: Option<DateTime<Utc>>,
+    pub deadline: DateTime<Utc>,
+    pub priority: SchedulerPriority,
+    pub wake_kind: Option<String>,
+    pub wake_state: Option<String>,
+    pub wake_generation: i64,
+    pub request_digest: String,
+    pub result_digest: Option<String>,
+    pub effect_key_digest: Option<String>,
+    pub quota_reservation_id: Option<String>,
+    pub payload: TypedPayload,
+    pub started_at: Option<DateTime<Utc>>,
+    pub terminal_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+fn validate_claimed_job_payload(job: &JobRecord) -> Result<(), RepositoryError> {
+    let work_class = job
+        .work_class
+        .parse::<WorkClass>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let owner_id = job
+        .owner_id
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    match work_class {
+        WorkClass::RegistryValidation => {
+            let payload: RegistryValidationJobPayload =
+                decode_versioned_payload(&job.payload, "Registry validation Job")?;
+            payload
+                .validate_for_owner(&owner_id)
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))
+        }
+        WorkClass::Artifact => {
+            let payload: ArtifactJobPayload = decode_typed_payload(&job.payload, "Artifact Job")?;
+            payload
+                .validate_for_owner(&owner_id)
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))
+        }
+        WorkClass::Mcp => {
+            let payload: McpJobPayload = decode_typed_payload(&job.payload, "MCP Job")?;
+            payload
+                .validate_for_owner(&owner_id)
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))
+        }
+        WorkClass::Sandbox => {
+            let payload: SandboxJobPayload = decode_versioned_payload(&job.payload, "Sandbox Job")?;
+            let limits = SandboxCommandLimits::from_profile(&checked_in_hard_limit_profile())
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            payload
+                .validate_for(&job_projection(job)?, limits)
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))
+        }
+        WorkClass::Orchestration
+        | WorkClass::Model
+        | WorkClass::CapabilityNative
+        | WorkClass::CapabilityRemote
+        | WorkClass::Context
+        | WorkClass::Interaction
+        | WorkClass::Recovery => Ok(()),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskRecord {
+    pub tenant_id: String,
+    pub task_id: String,
+    pub task_kind: TaskKind,
+    pub owner_kind: String,
+    pub owner_id: String,
+    pub run_id: Option<String>,
+    pub node_id: Option<String>,
+    pub invocation_id: Option<String>,
+    pub state: TaskState,
+    pub generation: i64,
+    pub version: i64,
+    pub response_schema_digest: Option<String>,
+    pub payload: TypedPayload,
+    pub response_value_id: Option<String>,
+    pub deadline: DateTime<Utc>,
+    pub responded_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaimJobs {
+    pub work_class: String,
+    pub worker_id: ResourceId,
+    pub limit: u16,
+    pub lease_milliseconds: i64,
+    pub lease_token_digests: Vec<Sha256Digest>,
+}
+
+pub const MAX_ORCHESTRATION_QUOTA_LINES: usize = 4;
+pub const MAX_CHILD_RUN_DEPTH: u16 = 32;
+pub const MAX_DESCENDANT_RUNS: u32 = 500;
+pub const MAX_CHILD_INPUT_SOURCES: usize = 512;
+
+#[derive(Debug, Clone)]
+pub struct OrchestrationClaimSlot {
+    pub lease_token_digest: Sha256Digest,
+    pub quota_reservation_id: ResourceId,
+    pub quota_entry_ids: Vec<ResourceId>,
+    pub run_event_id: ResourceId,
+    pub run_outbox_id: ResourceId,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+}
+
+impl OrchestrationClaimSlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.quota_reservation_id.kind() != ResourceKind::UsageReservation
+            || self.quota_entry_ids.len() != MAX_ORCHESTRATION_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::QuotaLedgerEntry)
+            || [&self.run_event_id, &self.node_event_id, &self.job_event_id]
+                .into_iter()
+                .any(|id| id.kind() != ResourceKind::Event)
+            || [
+                &self.run_outbox_id,
+                &self.node_outbox_id,
+                &self.job_outbox_id,
+            ]
+            .into_iter()
+            .any(|id| id.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration claim slot identity is invalid".to_owned(),
+            ));
+        }
+        let mut identities = BTreeSet::new();
+        for identity in self.quota_entry_ids.iter().chain([
+            &self.run_event_id,
+            &self.run_outbox_id,
+            &self.node_event_id,
+            &self.node_outbox_id,
+            &self.job_event_id,
+            &self.job_outbox_id,
+        ]) {
+            if !identities.insert(identity.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "orchestration claim slot contains a duplicate identity".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaimOrchestrationJobs {
+    pub worker_id: ResourceId,
+    pub limit: u16,
+    pub lease_milliseconds: i64,
+    pub slots: Vec<OrchestrationClaimSlot>,
+}
+
+impl ClaimOrchestrationJobs {
+    fn validate(&self, limits: SchedulerHardLimits) -> Result<(), RepositoryError> {
+        if self.worker_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.limit == 0
+            || self.limit > limits.maximum_batch
+            || self.lease_milliseconds <= 0
+            || self.lease_milliseconds > MAX_JOB_LEASE_MILLISECONDS
+            || self.slots.len() != usize::from(self.limit)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration claim is outside the platform bound".to_owned(),
+            ));
+        }
+        let mut tokens = BTreeSet::new();
+        let mut reservations = BTreeSet::new();
+        let mut mutation_ids = BTreeSet::new();
+        for slot in &self.slots {
+            slot.validate()?;
+            if !tokens.insert(slot.lease_token_digest.to_string())
+                || !reservations.insert(slot.quota_reservation_id.to_string())
+            {
+                return Err(RepositoryError::InvalidInput(
+                    "claim lease tokens and quota reservations must be unique".to_owned(),
+                ));
+            }
+            for identity in slot.quota_entry_ids.iter().chain([
+                &slot.run_event_id,
+                &slot.run_outbox_id,
+                &slot.node_event_id,
+                &slot.node_outbox_id,
+                &slot.job_event_id,
+                &slot.job_outbox_id,
+            ]) {
+                if !mutation_ids.insert(identity.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "claim mutation identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClaimedOrchestrationJob {
+    pub job: JobRecord,
+    pub run_version: i64,
+    pub node_version: i64,
+    pub quota_reservation_id: String,
+    pub quota_account_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StartOrchestrationJob {
+    pub fence: JobFence,
+    pub receipt_id: ResourceId,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub receipt_expires_at: DateTime<Utc>,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+}
+
+impl StartOrchestrationJob {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        self.fence.validate()?;
+        if self.receipt_id.kind() != ResourceKind::Receipt
+            || self.job_event_id.kind() != ResourceKind::Event
+            || self.job_outbox_id.kind() != ResourceKind::OutboxEvent
+            || self.node_event_id.kind() != ResourceKind::Event
+            || self.node_outbox_id.kind() != ResourceKind::OutboxEvent
+            || self.job_event_id == self.node_event_id
+            || self.job_outbox_id == self.node_outbox_id
+            || self.receipt_expires_at <= Utc::now()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration start audit is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrchestrationYield {
+    Wait { wake_contract: WakeContract },
+    Retry { retry_at: DateTime<Utc> },
+}
+
+impl OrchestrationYield {
+    const fn state(&self) -> JobState {
+        match self {
+            Self::Wait { .. } => JobState::Waiting,
+            Self::Retry { .. } => JobState::RetryScheduled,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OrchestrationYieldMutationIds {
+    pub receipt_id: ResourceId,
+    pub quota_entry_ids: Vec<ResourceId>,
+    pub run_event_id: ResourceId,
+    pub run_outbox_id: ResourceId,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+}
+
+impl OrchestrationYieldMutationIds {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.receipt_id.kind() != ResourceKind::Receipt
+            || self.quota_entry_ids.len() != MAX_ORCHESTRATION_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|identity| identity.kind() != ResourceKind::QuotaLedgerEntry)
+            || [&self.run_event_id, &self.node_event_id, &self.job_event_id]
+                .into_iter()
+                .any(|identity| identity.kind() != ResourceKind::Event)
+            || [
+                &self.run_outbox_id,
+                &self.node_outbox_id,
+                &self.job_outbox_id,
+            ]
+            .into_iter()
+            .any(|identity| identity.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration yield mutation identity is invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for identity in self.quota_entry_ids.iter().chain([
+            &self.receipt_id,
+            &self.run_event_id,
+            &self.run_outbox_id,
+            &self.node_event_id,
+            &self.node_outbox_id,
+            &self.job_event_id,
+            &self.job_outbox_id,
+        ]) {
+            if !unique.insert(identity.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "orchestration yield mutation identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct YieldOrchestrationJob {
+    pub fence: JobFence,
+    pub outcome: OrchestrationYield,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub receipt_expires_at: DateTime<Utc>,
+    pub mutations: OrchestrationYieldMutationIds,
+}
+
+impl YieldOrchestrationJob {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        self.fence.validate()?;
+        self.mutations.validate()?;
+        if self.receipt_expires_at <= Utc::now()
+            || matches!(
+                &self.outcome,
+                OrchestrationYield::Wait { wake_contract }
+                    if wake_contract.generation != u64::try_from(self.fence.lease_epoch)
+                        .unwrap_or_default()
+            )
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration yield command is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct YieldedOrchestrationJob {
+    pub run: RunRecord,
+    pub job: JobRecord,
+    pub node_id: String,
+    pub node_version: i64,
+    pub settled_quota_account_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerActivationSlot {
+    pub node_execution_id: ResourceId,
+    pub orchestration_job_id: ResourceId,
+    pub scope: Option<ControllerScopeSlot>,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+}
+
+impl ControllerActivationSlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.node_execution_id.kind() != ResourceKind::NodeExecution
+            || self.orchestration_job_id.kind() != ResourceKind::Job
+            || [&self.node_event_id, &self.job_event_id]
+                .into_iter()
+                .any(|id| id.kind() != ResourceKind::Event)
+            || [&self.node_outbox_id, &self.job_outbox_id]
+                .into_iter()
+                .any(|id| id.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "controller activation identities are invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for id in [
+            &self.node_execution_id,
+            &self.orchestration_job_id,
+            &self.node_event_id,
+            &self.node_outbox_id,
+            &self.job_event_id,
+            &self.job_outbox_id,
+        ] {
+            if !unique.insert(id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "controller activation identities must be unique".to_owned(),
+                ));
+            }
+        }
+        if let Some(scope) = &self.scope {
+            scope.validate()?;
+            for id in [
+                &scope.scope_instance_id,
+                &scope.scope_event_id,
+                &scope.scope_outbox_id,
+            ] {
+                if !unique.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "controller activation scope identities must be unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerScopeSlot {
+    pub scope_instance_id: ResourceId,
+    pub scope_event_id: ResourceId,
+    pub scope_outbox_id: ResourceId,
+}
+
+impl ControllerScopeSlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.scope_instance_id.kind() != ResourceKind::ScopeInstance
+            || self.scope_event_id.kind() != ResourceKind::Event
+            || self.scope_outbox_id.kind() != ResourceKind::OutboxEvent
+        {
+            return Err(RepositoryError::InvalidInput(
+                "controller Scope identities are invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerPendingNodeSlot {
+    pub node_execution_id: ResourceId,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerStructuralExitSlot {
+    pub scope_closing_event_id: ResourceId,
+    pub scope_closing_outbox_id: ResourceId,
+    pub scope_terminal_event_id: ResourceId,
+    pub scope_terminal_outbox_id: ResourceId,
+}
+
+impl ControllerStructuralExitSlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if [&self.scope_closing_event_id, &self.scope_terminal_event_id]
+            .into_iter()
+            .any(|id| id.kind() != ResourceKind::Event)
+            || [
+                &self.scope_closing_outbox_id,
+                &self.scope_terminal_outbox_id,
+            ]
+            .into_iter()
+            .any(|id| id.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "controller structural-exit identities are invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerPendingWakeSlot {
+    pub orchestration_job_id: ResourceId,
+    pub request_digest: Sha256Digest,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerRemainderCancellationSlot {
+    pub expected_scope_id: ResourceId,
+    pub quota_entry_ids: Vec<ResourceId>,
+    pub node_cancelling_event_id: ResourceId,
+    pub node_cancelling_outbox_id: ResourceId,
+    pub node_terminal_event_id: ResourceId,
+    pub node_terminal_outbox_id: ResourceId,
+    pub scope_closing_event_id: ResourceId,
+    pub scope_closing_outbox_id: ResourceId,
+    pub scope_terminal_event_id: ResourceId,
+    pub scope_terminal_outbox_id: ResourceId,
+    pub job_terminal_event_id: ResourceId,
+    pub job_terminal_outbox_id: ResourceId,
+}
+
+impl ControllerRemainderCancellationSlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.expected_scope_id.kind() != ResourceKind::ScopeInstance
+            || self.quota_entry_ids.len() != MAX_ORCHESTRATION_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::QuotaLedgerEntry)
+            || [
+                &self.node_cancelling_event_id,
+                &self.node_terminal_event_id,
+                &self.scope_closing_event_id,
+                &self.scope_terminal_event_id,
+                &self.job_terminal_event_id,
+            ]
+            .into_iter()
+            .any(|id| id.kind() != ResourceKind::Event)
+            || [
+                &self.node_cancelling_outbox_id,
+                &self.node_terminal_outbox_id,
+                &self.scope_closing_outbox_id,
+                &self.scope_terminal_outbox_id,
+                &self.job_terminal_outbox_id,
+            ]
+            .into_iter()
+            .any(|id| id.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "controller remainder-cancellation identities are invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ControllerPendingWakeSlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.orchestration_job_id.kind() != ResourceKind::Job
+            || [&self.node_event_id, &self.job_event_id]
+                .into_iter()
+                .any(|id| id.kind() != ResourceKind::Event)
+            || [&self.node_outbox_id, &self.job_outbox_id]
+                .into_iter()
+                .any(|id| id.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "controller pending-wake identities are invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ControllerPendingNodeSlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.node_execution_id.kind() != ResourceKind::NodeExecution
+            || self.node_event_id.kind() != ResourceKind::Event
+            || self.node_outbox_id.kind() != ResourceKind::OutboxEvent
+        {
+            return Err(RepositoryError::InvalidInput(
+                "controller pending Node identities are invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerStepMutationIds {
+    pub receipt_id: ResourceId,
+    pub quota_entry_ids: Vec<ResourceId>,
+    pub run_event_id: ResourceId,
+    pub run_outbox_id: ResourceId,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+    pub activations: Vec<ControllerActivationSlot>,
+    pub pending_nodes: Vec<ControllerPendingNodeSlot>,
+    pub structural_exit: Option<ControllerStructuralExitSlot>,
+    pub pending_wake: Option<ControllerPendingWakeSlot>,
+    pub remainder_cancellations: Vec<ControllerRemainderCancellationSlot>,
+}
+
+impl ControllerStepMutationIds {
+    fn validate(&self, plan_limits: PlanLimits) -> Result<(), RepositoryError> {
+        if self.receipt_id.kind() != ResourceKind::Receipt
+            || self.quota_entry_ids.len() != MAX_ORCHESTRATION_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::QuotaLedgerEntry)
+            || self.activations.len() > plan_limits.maximum_fan_out
+            || self.pending_nodes.len() > plan_limits.maximum_fan_out
+            || self.remainder_cancellations.len() > plan_limits.maximum_fan_out
+            || [&self.run_event_id, &self.node_event_id, &self.job_event_id]
+                .into_iter()
+                .any(|id| id.kind() != ResourceKind::Event)
+            || [
+                &self.run_outbox_id,
+                &self.node_outbox_id,
+                &self.job_outbox_id,
+            ]
+            .into_iter()
+            .any(|id| id.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "controller step mutation identities are invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for id in self.quota_entry_ids.iter().chain([
+            &self.receipt_id,
+            &self.run_event_id,
+            &self.run_outbox_id,
+            &self.node_event_id,
+            &self.node_outbox_id,
+            &self.job_event_id,
+            &self.job_outbox_id,
+        ]) {
+            if !unique.insert(id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "controller step mutation identities must be globally unique".to_owned(),
+                ));
+            }
+        }
+        for activation in &self.activations {
+            activation.validate()?;
+            for id in [
+                &activation.node_execution_id,
+                &activation.orchestration_job_id,
+                &activation.node_event_id,
+                &activation.node_outbox_id,
+                &activation.job_event_id,
+                &activation.job_outbox_id,
+            ] {
+                if !unique.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "controller step mutation identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+            if let Some(scope) = &activation.scope {
+                for id in [
+                    &scope.scope_instance_id,
+                    &scope.scope_event_id,
+                    &scope.scope_outbox_id,
+                ] {
+                    if !unique.insert(id.to_string()) {
+                        return Err(RepositoryError::InvalidInput(
+                            "controller step mutation identities must be globally unique"
+                                .to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+        for pending in &self.pending_nodes {
+            pending.validate()?;
+            for id in [
+                &pending.node_execution_id,
+                &pending.node_event_id,
+                &pending.node_outbox_id,
+            ] {
+                if !unique.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "controller step mutation identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        if let Some(exit) = &self.structural_exit {
+            exit.validate()?;
+            for id in [
+                &exit.scope_closing_event_id,
+                &exit.scope_closing_outbox_id,
+                &exit.scope_terminal_event_id,
+                &exit.scope_terminal_outbox_id,
+            ] {
+                if !unique.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "controller step mutation identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        if let Some(wake) = &self.pending_wake {
+            wake.validate()?;
+            for id in [
+                &wake.orchestration_job_id,
+                &wake.node_event_id,
+                &wake.node_outbox_id,
+                &wake.job_event_id,
+                &wake.job_outbox_id,
+            ] {
+                if !unique.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "controller step mutation identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        let mut cancellation_scopes = BTreeSet::new();
+        for cancellation in &self.remainder_cancellations {
+            cancellation.validate()?;
+            if !cancellation_scopes.insert(cancellation.expected_scope_id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "controller remainder-cancellation Scopes must be unique".to_owned(),
+                ));
+            }
+            for id in cancellation.quota_entry_ids.iter().chain([
+                &cancellation.node_cancelling_event_id,
+                &cancellation.node_cancelling_outbox_id,
+                &cancellation.node_terminal_event_id,
+                &cancellation.node_terminal_outbox_id,
+                &cancellation.scope_closing_event_id,
+                &cancellation.scope_closing_outbox_id,
+                &cancellation.scope_terminal_event_id,
+                &cancellation.scope_terminal_outbox_id,
+                &cancellation.job_terminal_event_id,
+                &cancellation.job_terminal_outbox_id,
+            ]) {
+                if !unique.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "controller step mutation identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplyOrchestrationControllerStep {
+    pub fence: JobFence,
+    pub plan: RuntimePlan,
+    pub observation: ControllerObservation,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub receipt_expires_at: DateTime<Utc>,
+    pub mutations: ControllerStepMutationIds,
+}
+
+impl ApplyOrchestrationControllerStep {
+    fn validate(&self, plan_limits: PlanLimits) -> Result<(), RepositoryError> {
+        self.fence.validate()?;
+        self.mutations.validate(plan_limits)?;
+        self.plan
+            .validate(plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if self.receipt_expires_at <= Utc::now() {
+            return Err(RepositoryError::InvalidInput(
+                "controller step receipt deadline is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OrchestrationFailureCause {
+    Committed { failure: Failure },
+    Controller { observation: ControllerObservation },
+}
+
+impl OrchestrationFailureCause {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if let Self::Committed { failure } = self {
+            failure
+                .validate(1_024)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FailOrchestrationJob {
+    pub fence: JobFence,
+    pub plan: RuntimePlan,
+    pub cause: OrchestrationFailureCause,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub receipt_expires_at: DateTime<Utc>,
+    pub mutations: ControllerStepMutationIds,
+}
+
+impl FailOrchestrationJob {
+    fn validate(&self, plan_limits: PlanLimits) -> Result<(), RepositoryError> {
+        self.fence.validate()?;
+        self.cause.validate()?;
+        self.mutations.validate(plan_limits)?;
+        self.plan
+            .validate(plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if self.receipt_expires_at <= Utc::now() {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration failure receipt deadline is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControllerActivationRecord {
+    pub node_id: String,
+    pub plan_node_key: PlanNodeKey,
+    pub node_kind: PlanNodeKind,
+    pub node_version: i64,
+    pub job: JobRecord,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControllerScopeRecord {
+    pub scope_id: String,
+    pub scope_kind: String,
+    pub state: String,
+    pub version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControllerPendingNodeRecord {
+    pub node_id: String,
+    pub plan_node_key: PlanNodeKey,
+    pub node_kind: PlanNodeKind,
+    pub node_version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControllerCancelledRemainderRecord {
+    pub scope: ControllerScopeRecord,
+    pub reason_code: String,
+    pub node_id: String,
+    pub node_version: i64,
+    pub node_cancelling_version: Option<i64>,
+    pub job: JobRecord,
+    pub settled_quota_account_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedOrchestrationControllerStep {
+    pub run: RunRecord,
+    pub source_node_id: String,
+    pub source_node_version: i64,
+    pub source_job: JobRecord,
+    pub activations: Vec<ControllerActivationRecord>,
+    pub created_scopes: Vec<ControllerScopeRecord>,
+    pub pending_nodes: Vec<ControllerPendingNodeRecord>,
+    pub settled_scopes: Vec<ControllerScopeRecord>,
+    pub woken_nodes: Vec<ControllerActivationRecord>,
+    pub cancelled_remainders: Vec<ControllerCancelledRemainderRecord>,
+    pub settled_quota_account_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FailedOrchestrationJob {
+    pub run: RunRecord,
+    pub source_node_id: String,
+    pub source_node_version: i64,
+    pub source_job: JobRecord,
+    pub failure: Failure,
+    pub controller_code: Option<String>,
+    pub handler_activations: Vec<ControllerActivationRecord>,
+    pub settled_scopes: Vec<ControllerScopeRecord>,
+    pub woken_nodes: Vec<ControllerActivationRecord>,
+    pub cancelled_remainders: Vec<ControllerCancelledRemainderRecord>,
+    pub settled_quota_account_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredControllerScopeDescriptor {
+    ParallelLeg {
+        leg_index: u32,
+        leg_plan_node_key: PlanNodeKey,
+        join_plan_node_key: PlanNodeKey,
+    },
+    LoopIteration {
+        iteration: u32,
+        loop_plan_node_key: PlanNodeKey,
+    },
+    MapItem {
+        failure_policy: MapFailurePolicy,
+        item_count: u32,
+        item_index: u32,
+        map_plan_node_key: PlanNodeKey,
+        next_plan_node_key: PlanNodeKey,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredControllerScopePayload {
+    controller_node_execution_id: ResourceId,
+    descriptor: StoredControllerScopeDescriptor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredControllerWait {
+    Join {
+        policy: JoinPolicy,
+        quorum: Option<u16>,
+        remainder: Option<JoinRemainderPolicy>,
+    },
+    Loop {
+        iteration: u32,
+    },
+    MapAdmission {
+        body_plan_node_key: PlanNodeKey,
+        failure_policy: MapFailurePolicy,
+        item_count: u32,
+        next_item_index: u32,
+        next_plan_node_key: PlanNodeKey,
+    },
+    MapSettlement {
+        failure_policy: MapFailurePolicy,
+        item_count: u32,
+        admitted_item_count: u32,
+        next_plan_node_key: PlanNodeKey,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredPendingControllerNodePayload {
+    controller_node_execution_id: ResourceId,
+    expected_scope_ids: Vec<ResourceId>,
+    plan_node_key: PlanNodeKey,
+    wait: StoredControllerWait,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredControllerPort {
+    Failure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredControllerControlToken {
+    source_node_execution_id: ResourceId,
+    source_port: StoredControllerPort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredErrorBoundaryHandlerPayload {
+    error_boundary_node_id: ResourceId,
+    failure_digest: Sha256Digest,
+    plan_node_key: PlanNodeKey,
+    plan_source_digest: Sha256Digest,
+    required_control_tokens: Vec<StoredControllerControlToken>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeferOrchestrationTaskMutationIds {
+    pub receipt_id: ResourceId,
+    pub quota_entry_ids: Vec<ResourceId>,
+    pub run_event_id: ResourceId,
+    pub run_outbox_id: ResourceId,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub task_event_id: ResourceId,
+    pub task_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+}
+
+impl DeferOrchestrationTaskMutationIds {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.receipt_id.kind() != ResourceKind::Receipt
+            || self.quota_entry_ids.len() != MAX_ORCHESTRATION_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::QuotaLedgerEntry)
+            || [
+                &self.run_event_id,
+                &self.node_event_id,
+                &self.task_event_id,
+                &self.job_event_id,
+            ]
+            .into_iter()
+            .any(|id| id.kind() != ResourceKind::Event)
+            || [
+                &self.run_outbox_id,
+                &self.node_outbox_id,
+                &self.task_outbox_id,
+                &self.job_outbox_id,
+            ]
+            .into_iter()
+            .any(|id| id.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration Task deferral identities are invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for id in self.quota_entry_ids.iter().chain([
+            &self.receipt_id,
+            &self.run_event_id,
+            &self.run_outbox_id,
+            &self.node_event_id,
+            &self.node_outbox_id,
+            &self.task_event_id,
+            &self.task_outbox_id,
+            &self.job_event_id,
+            &self.job_outbox_id,
+        ]) {
+            if !unique.insert(id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "orchestration Task deferral identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeferOrchestrationToTask {
+    pub fence: JobFence,
+    pub task_id: ResourceId,
+    pub definition: TaskDefinition,
+    pub response_schema_digest: Option<Sha256Digest>,
+    pub task_deadline: DateTime<Utc>,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub receipt_expires_at: DateTime<Utc>,
+    pub mutations: DeferOrchestrationTaskMutationIds,
+}
+
+impl DeferOrchestrationToTask {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        self.fence.validate()?;
+        self.mutations.validate()?;
+        self.definition
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let kind = self.definition.task_kind();
+        if kind == TaskKind::Approval
+            || self.task_id.kind() != kind.task_id_kind()
+            || self.receipt_expires_at <= Utc::now()
+            || (matches!(kind, TaskKind::InteractionForm | TaskKind::HumanWork)
+                && self.response_schema_digest.is_none())
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration Task deferral is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeferredOrchestrationTask {
+    pub run: RunRecord,
+    pub node_id: String,
+    pub node_version: i64,
+    pub job: JobRecord,
+    pub task: TaskRecord,
+    pub settled_quota_account_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeferOrchestrationChildMutationIds {
+    pub receipt_id: ResourceId,
+    pub quota_entry_ids: Vec<ResourceId>,
+    pub root_run_event_id: ResourceId,
+    pub root_run_outbox_id: ResourceId,
+    pub parent_run_event_id: ResourceId,
+    pub parent_run_outbox_id: ResourceId,
+    pub parent_node_event_id: ResourceId,
+    pub parent_node_outbox_id: ResourceId,
+    pub parent_job_event_id: ResourceId,
+    pub parent_job_outbox_id: ResourceId,
+    pub child_link_event_id: ResourceId,
+    pub child_link_outbox_id: ResourceId,
+    pub child_run_event_id: ResourceId,
+    pub child_run_outbox_id: ResourceId,
+    pub child_job_event_id: ResourceId,
+    pub child_job_outbox_id: ResourceId,
+}
+
+impl DeferOrchestrationChildMutationIds {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        let event_ids = [
+            &self.root_run_event_id,
+            &self.parent_run_event_id,
+            &self.parent_node_event_id,
+            &self.parent_job_event_id,
+            &self.child_link_event_id,
+            &self.child_run_event_id,
+            &self.child_job_event_id,
+        ];
+        let outbox_ids = [
+            &self.root_run_outbox_id,
+            &self.parent_run_outbox_id,
+            &self.parent_node_outbox_id,
+            &self.parent_job_outbox_id,
+            &self.child_link_outbox_id,
+            &self.child_run_outbox_id,
+            &self.child_job_outbox_id,
+        ];
+        if self.receipt_id.kind() != ResourceKind::Receipt
+            || self.quota_entry_ids.len() != MAX_ORCHESTRATION_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::QuotaLedgerEntry)
+            || event_ids.iter().any(|id| id.kind() != ResourceKind::Event)
+            || outbox_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration child deferral identities are invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for id in self
+            .quota_entry_ids
+            .iter()
+            .chain([&self.receipt_id])
+            .chain(event_ids)
+            .chain(outbox_ids)
+        {
+            if !unique.insert(id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "orchestration child deferral identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeferOrchestrationToChildRun {
+    pub fence: JobFence,
+    pub slot_id: String,
+    pub selected_child_deployment: ExactDeploymentRef,
+    pub child_link_id: ResourceId,
+    pub child_run_id: ResourceId,
+    pub child_root_scope_id: ResourceId,
+    pub child_entry_node_execution_id: ResourceId,
+    pub child_orchestration_job_id: ResourceId,
+    pub child_entry_plan_node_key: PlanNodeKey,
+    pub child_entry_node_kind: PlanNodeKind,
+    pub input: RunInputValue,
+    pub source_value_ids: Vec<ResourceId>,
+    pub budget: ChildBudget,
+    pub cancellation_policy: ChildCancellationPolicy,
+    pub logical_key: String,
+    pub child_attempt_limit: u16,
+    pub child_retry_backoff_milliseconds: u64,
+    pub inline_limits: JsonLimits,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub receipt_expires_at: DateTime<Utc>,
+    pub mutations: DeferOrchestrationChildMutationIds,
+}
+
+impl DeferOrchestrationToChildRun {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        self.fence.validate()?;
+        self.mutations.validate()?;
+        self.selected_child_deployment
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        self.input
+            .validate(self.inline_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        self.budget
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let mut source_ids = BTreeSet::new();
+        if self.selected_child_deployment.resource_kind != ResourceKind::AgentDeployment
+            || self.child_link_id.kind() != ResourceKind::ChildRunLink
+            || self.child_run_id.kind() != ResourceKind::Run
+            || self.child_root_scope_id.kind() != ResourceKind::ScopeInstance
+            || self.child_entry_node_execution_id.kind() != ResourceKind::NodeExecution
+            || self.child_orchestration_job_id.kind() != ResourceKind::Job
+            || self.source_value_ids.len() > MAX_CHILD_INPUT_SOURCES
+            || self
+                .source_value_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::RunValue || !source_ids.insert(id.to_string()))
+            || self.slot_id.is_empty()
+            || self.slot_id.len() > 128
+            || self.logical_key.is_empty()
+            || self.logical_key.len() > 255
+            || self.child_attempt_limit == 0
+            || self.child_attempt_limit > 32
+            || self.child_retry_backoff_milliseconds == 0
+            || self.child_retry_backoff_milliseconds > 60_000
+            || self.receipt_expires_at <= Utc::now()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration child deferral is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChildRunLinkRecord {
+    pub tenant_id: String,
+    pub child_link_id: String,
+    pub parent_run_id: String,
+    pub parent_node_execution_id: String,
+    pub child_run_id: String,
+    pub state: ChildLinkState,
+    pub generation: i64,
+    pub version: i64,
+    pub slot_id: String,
+    pub source_value_ids: Vec<ResourceId>,
+    pub child_root_scope_id: ResourceId,
+    pub child_entry_node_execution_id: ResourceId,
+    pub child_orchestration_job_id: ResourceId,
+    pub payload: ChildRunLinkPayload,
+    pub deadline: DateTime<Utc>,
+    pub terminal_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredChildRunLinkPayload {
+    slot_id: String,
+    source_value_ids: Vec<ResourceId>,
+    child_root_scope_id: ResourceId,
+    child_entry_node_execution_id: ResourceId,
+    child_orchestration_job_id: ResourceId,
+    link: ChildRunLinkPayload,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeferredOrchestrationChildRun {
+    pub root_run: RunRecord,
+    pub parent_run: RunRecord,
+    pub parent_node_id: String,
+    pub parent_node_version: i64,
+    pub parent_job: JobRecord,
+    pub child_link: ChildRunLinkRecord,
+    pub child_run: RunRecord,
+    pub child_job: JobRecord,
+    pub settled_quota_account_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TerminalChildRunSlot {
+    pub resume_job_id: ResourceId,
+    pub resume_request_digest: Sha256Digest,
+    pub child_link_event_id: ResourceId,
+    pub child_link_outbox_id: ResourceId,
+    pub parent_run_event_id: ResourceId,
+    pub parent_run_outbox_id: ResourceId,
+    pub parent_node_event_id: ResourceId,
+    pub parent_node_outbox_id: ResourceId,
+    pub resume_job_event_id: ResourceId,
+    pub resume_job_outbox_id: ResourceId,
+}
+
+impl TerminalChildRunSlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        let event_ids = [
+            &self.child_link_event_id,
+            &self.parent_run_event_id,
+            &self.parent_node_event_id,
+            &self.resume_job_event_id,
+        ];
+        let outbox_ids = [
+            &self.child_link_outbox_id,
+            &self.parent_run_outbox_id,
+            &self.parent_node_outbox_id,
+            &self.resume_job_outbox_id,
+        ];
+        if self.resume_job_id.kind() != ResourceKind::Job
+            || event_ids.iter().any(|id| id.kind() != ResourceKind::Event)
+            || outbox_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "terminal child Run slot identities are invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for id in [&self.resume_job_id]
+            .into_iter()
+            .chain(event_ids)
+            .chain(outbox_ids)
+        {
+            if !unique.insert(id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "terminal child Run slot identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DriveTerminalChildRuns {
+    pub limit: u16,
+    pub slots: Vec<TerminalChildRunSlot>,
+}
+
+impl DriveTerminalChildRuns {
+    fn validate(&self, limits: SchedulerHardLimits) -> Result<(), RepositoryError> {
+        if self.limit == 0
+            || self.limit > limits.maximum_batch
+            || self.slots.len() != usize::from(self.limit)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "terminal child Run scan is outside the scheduler bound".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for slot in &self.slots {
+            slot.validate()?;
+            for id in [
+                &slot.resume_job_id,
+                &slot.child_link_event_id,
+                &slot.child_link_outbox_id,
+                &slot.parent_run_event_id,
+                &slot.parent_run_outbox_id,
+                &slot.parent_node_event_id,
+                &slot.parent_node_outbox_id,
+                &slot.resume_job_event_id,
+                &slot.resume_job_outbox_id,
+            ] {
+                if !unique.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "terminal child Run scan identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedOrchestrationChildRun {
+    pub parent_run: RunRecord,
+    pub parent_node_id: String,
+    pub parent_node_version: i64,
+    pub child_link: ChildRunLinkRecord,
+    pub child_run: RunRecord,
+    pub resume_job: JobRecord,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChildRunCancellationSlot {
+    pub child_link_event_id: ResourceId,
+    pub child_link_outbox_id: ResourceId,
+    pub child_run_event_id: ResourceId,
+    pub child_run_outbox_id: ResourceId,
+}
+
+impl ChildRunCancellationSlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.child_link_event_id.kind() != ResourceKind::Event
+            || self.child_link_outbox_id.kind() != ResourceKind::OutboxEvent
+            || self.child_run_event_id.kind() != ResourceKind::Event
+            || self.child_run_outbox_id.kind() != ResourceKind::OutboxEvent
+        {
+            return Err(RepositoryError::InvalidInput(
+                "child Run cancellation identities are invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for id in [
+            &self.child_link_event_id,
+            &self.child_link_outbox_id,
+            &self.child_run_event_id,
+            &self.child_run_outbox_id,
+        ] {
+            if !unique.insert(id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "child Run cancellation identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DriveChildRunCancellations {
+    pub limit: u16,
+    pub slots: Vec<ChildRunCancellationSlot>,
+}
+
+impl DriveChildRunCancellations {
+    fn validate(&self, limits: SchedulerHardLimits) -> Result<(), RepositoryError> {
+        if self.limit == 0
+            || self.limit > limits.maximum_batch
+            || self.slots.len() != usize::from(self.limit)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "child Run cancellation scan is outside the scheduler bound".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for slot in &self.slots {
+            slot.validate()?;
+            for id in [
+                &slot.child_link_event_id,
+                &slot.child_link_outbox_id,
+                &slot.child_run_event_id,
+                &slot.child_run_outbox_id,
+            ] {
+                if !unique.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "child Run cancellation identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CancellingOrchestrationChildRun {
+    pub parent_run: RunRecord,
+    pub child_link: ChildRunLinkRecord,
+    pub child_run: RunRecord,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolveOrchestrationTaskMutationIds {
+    pub run_event_id: ResourceId,
+    pub run_outbox_id: ResourceId,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+}
+
+impl ResolveOrchestrationTaskMutationIds {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if [&self.run_event_id, &self.node_event_id, &self.job_event_id]
+            .into_iter()
+            .any(|id| id.kind() != ResourceKind::Event)
+            || [
+                &self.run_outbox_id,
+                &self.node_outbox_id,
+                &self.job_outbox_id,
+            ]
+            .into_iter()
+            .any(|id| id.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration Task response identities are invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for id in [
+            &self.run_event_id,
+            &self.run_outbox_id,
+            &self.node_event_id,
+            &self.node_outbox_id,
+            &self.job_event_id,
+            &self.job_outbox_id,
+        ] {
+            if !unique.insert(id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "orchestration Task response identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolveOrchestrationTask {
+    pub audit: CommandAudit,
+    pub task_id: ResourceId,
+    pub expected_generation: u64,
+    pub expected_task_version: u64,
+    pub target: TaskState,
+    pub response: Option<RunInputValue>,
+    pub resume_job_id: ResourceId,
+    pub resume_request_digest: Sha256Digest,
+    pub mutations: ResolveOrchestrationTaskMutationIds,
+}
+
+impl ResolveOrchestrationTask {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        self.audit
+            .validate_at(Utc::now())
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        self.mutations.validate()?;
+        if !matches!(self.target, TaskState::Responded | TaskState::Declined)
+            || self.task_id.kind() != ResourceKind::Interaction
+            || self.expected_generation == 0
+            || self.expected_task_version == 0
+            || self.resume_job_id.kind() != ResourceKind::Job
+            || (self.target == TaskState::Responded) != self.response.is_some()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration Task response is invalid".to_owned(),
+            ));
+        }
+        if let Some(response) = &self.response {
+            response
+                .validate(JsonLimits {
+                    max_bytes: 65_536,
+                    max_depth: 32,
+                    max_properties_per_object: 1_024,
+                    max_items_per_array: 4_096,
+                    max_string_bytes: 65_536,
+                })
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedOrchestrationTask {
+    pub run: RunRecord,
+    pub node_id: String,
+    pub node_version: i64,
+    pub task: TaskRecord,
+    pub job: JobRecord,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExpiredOrchestrationTaskSlot {
+    pub resume_job_id: ResourceId,
+    pub resume_request_digest: Sha256Digest,
+    pub task_event_id: ResourceId,
+    pub task_outbox_id: ResourceId,
+    pub run_event_id: ResourceId,
+    pub run_outbox_id: ResourceId,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+}
+
+impl ExpiredOrchestrationTaskSlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.resume_job_id.kind() != ResourceKind::Job
+            || [
+                &self.task_event_id,
+                &self.run_event_id,
+                &self.node_event_id,
+                &self.job_event_id,
+            ]
+            .into_iter()
+            .any(|id| id.kind() != ResourceKind::Event)
+            || [
+                &self.task_outbox_id,
+                &self.run_outbox_id,
+                &self.node_outbox_id,
+                &self.job_outbox_id,
+            ]
+            .into_iter()
+            .any(|id| id.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "expired orchestration Task slot identity is invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for id in [
+            &self.resume_job_id,
+            &self.task_event_id,
+            &self.task_outbox_id,
+            &self.run_event_id,
+            &self.run_outbox_id,
+            &self.node_event_id,
+            &self.node_outbox_id,
+            &self.job_event_id,
+            &self.job_outbox_id,
+        ] {
+            if !unique.insert(id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "expired orchestration Task slot identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SafetyScanShard {
+    pub index: u16,
+    pub count: u16,
+}
+
+impl SafetyScanShard {
+    pub const fn whole() -> Self {
+        Self { index: 0, count: 1 }
+    }
+
+    fn validate(self, maximum_shards: u16) -> Result<(), RepositoryError> {
+        if self.count == 0 || self.count > maximum_shards || self.index >= self.count {
+            return Err(RepositoryError::InvalidInput(
+                "safety scan shard is outside the profile bound".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SafetyScanCursor {
+    pub sort_at: DateTime<Utc>,
+    pub tenant_id: ResourceId,
+    pub item_id: ResourceId,
+}
+
+impl SafetyScanCursor {
+    fn validate(&self, item_kind: ResourceKind) -> Result<(), RepositoryError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant || self.item_id.kind() != item_kind {
+            return Err(RepositoryError::InvalidInput(
+                "safety scan cursor identity kind is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SafetyScanPage<T> {
+    pub records: Vec<T>,
+    pub next_cursor: Option<SafetyScanCursor>,
+    pub exhausted: bool,
+}
+
+impl<T> Deref for SafetyScanPage<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        &self.records
+    }
+}
+
+impl<T> IntoIterator for SafetyScanPage<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.records.into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a SafetyScanPage<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.records.iter()
+    }
+}
+
+pub(crate) fn validate_safety_scan_request(
+    shard: SafetyScanShard,
+    after: Option<&SafetyScanCursor>,
+    cursor_item_kind: ResourceKind,
+    limit: u16,
+    slot_count: usize,
+    maximum_batch: u16,
+    maximum_shards: u16,
+) -> Result<(), RepositoryError> {
+    shard.validate(maximum_shards)?;
+    if let Some(cursor) = after {
+        cursor.validate(cursor_item_kind)?;
+    }
+    if limit == 0 || limit > maximum_batch || slot_count != usize::from(limit) {
+        return Err(RepositoryError::InvalidInput(
+            "safety scan batch is outside the profile bound".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn safety_scan_page<T>(
+    records: Vec<T>,
+    scanned_count: usize,
+    limit: u16,
+    last_cursor: Option<SafetyScanCursor>,
+) -> SafetyScanPage<T> {
+    let exhausted = scanned_count < usize::from(limit);
+    SafetyScanPage {
+        records,
+        next_cursor: (!exhausted).then_some(last_cursor).flatten(),
+        exhausted,
+    }
+}
+
+pub(crate) fn safety_scan_cursor_from_row(
+    row: &PgRow,
+    item_column: &str,
+    item_kind: ResourceKind,
+) -> Result<SafetyScanCursor, RepositoryError> {
+    let cursor = SafetyScanCursor {
+        sort_at: row.try_get("scan_sort_at")?,
+        tenant_id: row.try_get::<String, _>("tenant_id")?.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        item_id: row.try_get::<String, _>(item_column)?.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+    };
+    cursor.validate(item_kind)?;
+    Ok(cursor)
+}
+
+#[derive(Debug, Clone)]
+pub struct DriveExpiredOrchestrationTasks {
+    pub shard: SafetyScanShard,
+    pub after: Option<SafetyScanCursor>,
+    pub limit: u16,
+    pub slots: Vec<ExpiredOrchestrationTaskSlot>,
+}
+
+impl DriveExpiredOrchestrationTasks {
+    fn validate(&self, maximum_batch: u16, maximum_shards: u16) -> Result<(), RepositoryError> {
+        validate_safety_scan_request(
+            self.shard,
+            self.after.as_ref(),
+            ResourceKind::Interaction,
+            self.limit,
+            self.slots.len(),
+            maximum_batch,
+            maximum_shards,
+        )?;
+        let mut identities = BTreeSet::new();
+        for slot in &self.slots {
+            slot.validate()?;
+            for id in [
+                &slot.resume_job_id,
+                &slot.task_event_id,
+                &slot.task_outbox_id,
+                &slot.run_event_id,
+                &slot.run_outbox_id,
+                &slot.node_event_id,
+                &slot.node_outbox_id,
+                &slot.job_event_id,
+                &slot.job_outbox_id,
+            ] {
+                if !identities.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "expired orchestration Task scan identities must be globally unique"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OrchestrationWakeMutationIds {
+    pub receipt_id: ResourceId,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+}
+
+impl OrchestrationWakeMutationIds {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.receipt_id.kind() != ResourceKind::Receipt
+            || [&self.node_event_id, &self.job_event_id]
+                .into_iter()
+                .any(|identity| identity.kind() != ResourceKind::Event)
+            || [&self.node_outbox_id, &self.job_outbox_id]
+                .into_iter()
+                .any(|identity| identity.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration wake mutation identity is invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for identity in [
+            &self.receipt_id,
+            &self.node_event_id,
+            &self.node_outbox_id,
+            &self.job_event_id,
+            &self.job_outbox_id,
+        ] {
+            if !unique.insert(identity.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "orchestration wake mutation identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WakeOrchestrationJob {
+    pub tenant_id: ResourceId,
+    pub job_id: ResourceId,
+    pub expected_job_version: i64,
+    pub expected_wake_generation: u64,
+    pub source: WakeSource,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub receipt_expires_at: DateTime<Utc>,
+    pub mutations: OrchestrationWakeMutationIds,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WokenOrchestrationJob {
+    pub job: JobRecord,
+    pub node_id: String,
+    pub node_version: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DueOrchestrationRetrySlot {
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+}
+
+impl DueOrchestrationRetrySlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if [&self.node_event_id, &self.job_event_id]
+            .into_iter()
+            .any(|identity| identity.kind() != ResourceKind::Event)
+            || [&self.node_outbox_id, &self.job_outbox_id]
+                .into_iter()
+                .any(|identity| identity.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "due retry mutation identity is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DriveDueOrchestrationRetries {
+    pub shard: SafetyScanShard,
+    pub after: Option<SafetyScanCursor>,
+    pub limit: u16,
+    pub slots: Vec<DueOrchestrationRetrySlot>,
+}
+
+impl DriveDueOrchestrationRetries {
+    fn validate(&self, maximum_batch: u16, maximum_shards: u16) -> Result<(), RepositoryError> {
+        validate_safety_scan_request(
+            self.shard,
+            self.after.as_ref(),
+            ResourceKind::Job,
+            self.limit,
+            self.slots.len(),
+            maximum_batch,
+            maximum_shards,
+        )?;
+        let mut unique = BTreeSet::new();
+        for slot in &self.slots {
+            slot.validate()?;
+            for identity in [
+                &slot.node_event_id,
+                &slot.node_outbox_id,
+                &slot.job_event_id,
+                &slot.job_outbox_id,
+            ] {
+                if !unique.insert(identity.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "due retry mutation identities must be unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromotedOrchestrationRetry {
+    pub job: JobRecord,
+    pub node_id: String,
+    pub node_version: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExpiredOrchestrationRecoverySlot {
+    pub quota_entry_ids: Vec<ResourceId>,
+    pub run_event_id: ResourceId,
+    pub run_outbox_id: ResourceId,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+}
+
+impl ExpiredOrchestrationRecoverySlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.quota_entry_ids.len() != MAX_ORCHESTRATION_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|identity| identity.kind() != ResourceKind::QuotaLedgerEntry)
+            || [&self.run_event_id, &self.node_event_id, &self.job_event_id]
+                .into_iter()
+                .any(|identity| identity.kind() != ResourceKind::Event)
+            || [
+                &self.run_outbox_id,
+                &self.node_outbox_id,
+                &self.job_outbox_id,
+            ]
+            .into_iter()
+            .any(|identity| identity.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "expired orchestration recovery identity is invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for identity in self.quota_entry_ids.iter().chain([
+            &self.run_event_id,
+            &self.run_outbox_id,
+            &self.node_event_id,
+            &self.node_outbox_id,
+            &self.job_event_id,
+            &self.job_outbox_id,
+        ]) {
+            if !unique.insert(identity.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "expired recovery mutation identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DriveExpiredOrchestrationJobs {
+    pub shard: SafetyScanShard,
+    pub after: Option<SafetyScanCursor>,
+    pub limit: u16,
+    pub slots: Vec<ExpiredOrchestrationRecoverySlot>,
+}
+
+impl DriveExpiredOrchestrationJobs {
+    fn validate(&self, maximum_batch: u16, maximum_shards: u16) -> Result<(), RepositoryError> {
+        validate_safety_scan_request(
+            self.shard,
+            self.after.as_ref(),
+            ResourceKind::Job,
+            self.limit,
+            self.slots.len(),
+            maximum_batch,
+            maximum_shards,
+        )?;
+        let mut unique = BTreeSet::new();
+        for slot in &self.slots {
+            slot.validate()?;
+            for identity in slot.quota_entry_ids.iter().chain([
+                &slot.run_event_id,
+                &slot.run_outbox_id,
+                &slot.node_event_id,
+                &slot.node_outbox_id,
+                &slot.job_event_id,
+                &slot.job_outbox_id,
+            ]) {
+                if !unique.insert(identity.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "expired recovery identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveredOrchestrationJob {
+    pub run: RunRecord,
+    pub job: JobRecord,
+    pub node_id: String,
+    pub node_version: i64,
+    pub settled_quota_account_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrchestrationConvergenceSlot {
+    pub quota_entry_ids: Vec<ResourceId>,
+    pub run_event_id: ResourceId,
+    pub run_outbox_id: ResourceId,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub node_cancelling_event_id: ResourceId,
+    pub node_cancelling_outbox_id: ResourceId,
+    pub scope_closing_event_id: ResourceId,
+    pub scope_closing_outbox_id: ResourceId,
+    pub scope_terminal_event_id: ResourceId,
+    pub scope_terminal_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+}
+
+impl OrchestrationConvergenceSlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.quota_entry_ids.len() != MAX_ORCHESTRATION_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|identity| identity.kind() != ResourceKind::QuotaLedgerEntry)
+            || [
+                &self.run_event_id,
+                &self.node_event_id,
+                &self.node_cancelling_event_id,
+                &self.scope_closing_event_id,
+                &self.scope_terminal_event_id,
+                &self.job_event_id,
+            ]
+            .into_iter()
+            .any(|identity| identity.kind() != ResourceKind::Event)
+            || [
+                &self.run_outbox_id,
+                &self.node_outbox_id,
+                &self.node_cancelling_outbox_id,
+                &self.scope_closing_outbox_id,
+                &self.scope_terminal_outbox_id,
+                &self.job_outbox_id,
+            ]
+            .into_iter()
+            .any(|identity| identity.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration convergence identity is invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for identity in self.quota_entry_ids.iter().chain([
+            &self.run_event_id,
+            &self.run_outbox_id,
+            &self.node_event_id,
+            &self.node_outbox_id,
+            &self.node_cancelling_event_id,
+            &self.node_cancelling_outbox_id,
+            &self.scope_closing_event_id,
+            &self.scope_closing_outbox_id,
+            &self.scope_terminal_event_id,
+            &self.scope_terminal_outbox_id,
+            &self.job_event_id,
+            &self.job_outbox_id,
+        ]) {
+            if !unique.insert(identity.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "orchestration convergence identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DriveOrchestrationConvergence {
+    pub shard: SafetyScanShard,
+    pub after: Option<SafetyScanCursor>,
+    pub limit: u16,
+    pub slots: Vec<OrchestrationConvergenceSlot>,
+}
+
+impl DriveOrchestrationConvergence {
+    fn validate(&self, maximum_batch: u16, maximum_shards: u16) -> Result<(), RepositoryError> {
+        validate_safety_scan_request(
+            self.shard,
+            self.after.as_ref(),
+            ResourceKind::Job,
+            self.limit,
+            self.slots.len(),
+            maximum_batch,
+            maximum_shards,
+        )?;
+        let mut unique = BTreeSet::new();
+        for slot in &self.slots {
+            slot.validate()?;
+            for identity in slot.quota_entry_ids.iter().chain([
+                &slot.run_event_id,
+                &slot.run_outbox_id,
+                &slot.node_event_id,
+                &slot.node_outbox_id,
+                &slot.node_cancelling_event_id,
+                &slot.node_cancelling_outbox_id,
+                &slot.scope_closing_event_id,
+                &slot.scope_closing_outbox_id,
+                &slot.scope_terminal_event_id,
+                &slot.scope_terminal_outbox_id,
+                &slot.job_event_id,
+                &slot.job_outbox_id,
+            ]) {
+                if !unique.insert(identity.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "orchestration convergence identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConvergedOrchestrationRun {
+    pub reason: OrchestrationConvergenceReason,
+    pub completed: CompletedOrchestrationRun,
+}
+
+impl WakeOrchestrationJob {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        self.mutations.validate()?;
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.job_id.kind() != ResourceKind::Job
+            || self.expected_job_version <= 0
+            || self.expected_wake_generation == 0
+            || self.receipt_expires_at <= Utc::now()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration wake command is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrchestrationRunTerminalState {
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+impl OrchestrationRunTerminalState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+        }
+    }
+
+    const fn job_state(self) -> JobState {
+        match self {
+            Self::Succeeded => JobState::Succeeded,
+            Self::Failed => JobState::Failed,
+            Self::TimedOut => JobState::TimedOut,
+        }
+    }
+
+    const fn scope_state(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed | Self::TimedOut => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OrchestrationTerminalMutationIds {
+    pub receipt_id: ResourceId,
+    pub quota_entry_ids: Vec<ResourceId>,
+    pub run_event_id: ResourceId,
+    pub run_outbox_id: ResourceId,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub scope_closing_event_id: ResourceId,
+    pub scope_closing_outbox_id: ResourceId,
+    pub scope_terminal_event_id: ResourceId,
+    pub scope_terminal_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+}
+
+impl OrchestrationTerminalMutationIds {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.receipt_id.kind() != ResourceKind::Receipt
+            || self.quota_entry_ids.len() != MAX_ORCHESTRATION_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|identity| identity.kind() != ResourceKind::QuotaLedgerEntry)
+            || [
+                &self.run_event_id,
+                &self.node_event_id,
+                &self.scope_closing_event_id,
+                &self.scope_terminal_event_id,
+                &self.job_event_id,
+            ]
+            .into_iter()
+            .any(|identity| identity.kind() != ResourceKind::Event)
+            || [
+                &self.run_outbox_id,
+                &self.node_outbox_id,
+                &self.scope_closing_outbox_id,
+                &self.scope_terminal_outbox_id,
+                &self.job_outbox_id,
+            ]
+            .into_iter()
+            .any(|identity| identity.kind() != ResourceKind::OutboxEvent)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration terminal mutation identity is invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for identity in self.quota_entry_ids.iter().chain([
+            &self.receipt_id,
+            &self.run_event_id,
+            &self.run_outbox_id,
+            &self.node_event_id,
+            &self.node_outbox_id,
+            &self.scope_closing_event_id,
+            &self.scope_closing_outbox_id,
+            &self.scope_terminal_event_id,
+            &self.scope_terminal_outbox_id,
+            &self.job_event_id,
+            &self.job_outbox_id,
+        ]) {
+            if !unique.insert(identity.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "orchestration terminal mutation identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CompleteOrchestrationRun {
+    pub fence: JobFence,
+    pub terminal_state: OrchestrationRunTerminalState,
+    pub result_digest: Sha256Digest,
+    pub result_payload: TypedPayload,
+    pub output: Option<RunInputValue>,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub receipt_expires_at: DateTime<Utc>,
+    pub mutations: OrchestrationTerminalMutationIds,
+}
+
+impl CompleteOrchestrationRun {
+    fn terminal_failure(&self) -> Result<Option<Failure>, RepositoryError> {
+        if self.terminal_state != OrchestrationRunTerminalState::Failed {
+            return Ok(None);
+        }
+        let failure: Failure = decode_typed_payload(&self.result_payload, "Run Failure")?;
+        failure
+            .validate(1_024)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        Ok(Some(failure))
+    }
+
+    fn validate(&self) -> Result<(), RepositoryError> {
+        self.fence.validate()?;
+        self.mutations.validate()?;
+        if self.receipt_expires_at <= Utc::now()
+            || (self.terminal_state == OrchestrationRunTerminalState::Succeeded)
+                != self.output.is_some()
+            || self.result_digest.as_str() != self.result_payload.digest
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration terminal command is invalid".to_owned(),
+            ));
+        }
+        self.terminal_failure()?;
+        if let Some(output) = &self.output {
+            output
+                .validate(JsonLimits {
+                    max_bytes: 65_536,
+                    max_depth: 32,
+                    max_properties_per_object: 1_024,
+                    max_items_per_array: 4_096,
+                    max_string_bytes: 65_536,
+                })
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletedOrchestrationRun {
+    pub run: RunRecord,
+    pub job: JobRecord,
+    pub node_id: String,
+    pub scope_id: String,
+    pub node_version: i64,
+    pub scope_version: i64,
+    pub settled_quota_account_ids: Vec<String>,
+}
+
+impl ClaimJobs {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        let work_class = self
+            .work_class
+            .parse::<WorkClass>()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if work_class == WorkClass::Sandbox {
+            return Err(RepositoryError::InvalidInput(
+                "Sandbox Jobs require the dedicated parent-gated claim path".to_owned(),
+            ));
+        }
+        if self.worker_id.kind() != ResourceKind::WorkerProcessGeneration {
+            return Err(RepositoryError::InvalidInput(
+                "worker ID must identify a WorkerProcessGeneration".to_owned(),
+            ));
+        }
+        let unique_tokens = self
+            .lease_token_digests
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        if self.limit == 0
+            || self.limit > 256
+            || self.lease_milliseconds <= 0
+            || self.lease_milliseconds > MAX_JOB_LEASE_MILLISECONDS
+            || self.lease_token_digests.len() != usize::from(self.limit)
+            || unique_tokens.len() != self.lease_token_digests.len()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "claim limit or lease is outside the platform bound".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct JobFence {
+    pub tenant_id: String,
+    pub job_id: String,
+    pub worker_id: ResourceId,
+    pub lease_epoch: i64,
+    pub expected_job_version: i64,
+    pub lease_token_digest: Sha256Digest,
+}
+
+impl JobFence {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        validate_id(&self.tenant_id)?;
+        validate_id(&self.job_id)?;
+        if self.worker_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.lease_epoch <= 0
+            || self.expected_job_version <= 0
+        {
+            return Err(RepositoryError::InvalidInput(
+                "job fence is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HeartbeatJob {
+    pub fence: JobFence,
+    pub lease_milliseconds: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobTerminalState {
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+impl JobTerminalState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+        }
+    }
+
+    pub const fn job_state(self) -> JobState {
+        match self {
+            Self::Succeeded => JobState::Succeeded,
+            Self::Failed => JobState::Failed,
+            Self::Cancelled => JobState::Cancelled,
+            Self::TimedOut => JobState::TimedOut,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitJob {
+    pub fence: JobFence,
+    pub terminal_state: JobTerminalState,
+    pub result_digest: String,
+    pub result_payload: TypedPayload,
+    pub receipt_id: String,
+    pub idempotency_key_digest: String,
+    pub request_digest: String,
+    pub receipt_payload: TypedPayload,
+    pub receipt_expires_at: DateTime<Utc>,
+    pub event_id: String,
+    pub event_type: String,
+    pub event_payload: TypedPayload,
+    pub outbox_id: String,
+}
+
+impl CommitJob {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        self.fence.validate()?;
+        for id in [&self.receipt_id, &self.event_id, &self.outbox_id] {
+            validate_id(id)?;
+        }
+        validate_digest(&self.result_digest)?;
+        validate_digest(&self.idempotency_key_digest)?;
+        validate_digest(&self.request_digest)?;
+        validate_event_type(&self.event_type)?;
+        if self.receipt_expires_at <= Utc::now() {
+            return Err(RepositoryError::InvalidInput(
+                "receipt expiry must be in the future".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum JobCommitOutcome {
+    Committed(Box<JobRecord>),
+    Replayed { disposition: Option<String> },
+}
+
+#[derive(Debug, Clone)]
+pub struct NewQuotaAccount {
+    pub tenant_id: String,
+    pub quota_account_id: String,
+    pub scope_kind: String,
+    pub scope_id: String,
+    pub work_class: String,
+    pub metric: String,
+    pub limit_value: i64,
+    pub payload: TypedPayload,
+}
+
+impl NewQuotaAccount {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        for id in [&self.tenant_id, &self.quota_account_id, &self.scope_id] {
+            validate_id(id)?;
+        }
+        validate_code("quota scope kind", &self.scope_kind)?;
+        validate_code("quota work class", &self.work_class)?;
+        validate_event_type(&self.metric)?;
+        if self.limit_value < 0 {
+            return Err(RepositoryError::InvalidInput(
+                "quota limit cannot be negative".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaAccountRecord {
+    pub tenant_id: String,
+    pub quota_account_id: String,
+    pub scope_kind: String,
+    pub scope_id: String,
+    pub work_class: String,
+    pub metric: String,
+    pub limit_value: i64,
+    pub reserved_value: i64,
+    pub used_value: i64,
+    pub version: i64,
+    pub payload: TypedPayload,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReserveQuota {
+    pub tenant_id: String,
+    pub quota_account_id: String,
+    pub quota_entry_id: String,
+    pub correlation_id: String,
+    pub amount: i64,
+    pub request_digest: String,
+}
+
+impl ReserveQuota {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        validate_quota_mutation(
+            &self.tenant_id,
+            &self.quota_account_id,
+            &self.quota_entry_id,
+            &self.correlation_id,
+            self.amount,
+            &self.request_digest,
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SettleQuota {
+    pub tenant_id: String,
+    pub quota_account_id: String,
+    pub quota_entry_id: String,
+    pub correlation_id: String,
+    pub used_amount: i64,
+    pub request_digest: String,
+}
+
+impl SettleQuota {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        validate_quota_mutation(
+            &self.tenant_id,
+            &self.quota_account_id,
+            &self.quota_entry_id,
+            &self.correlation_id,
+            self.used_amount,
+            &self.request_digest,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum QuotaMutationOutcome {
+    Applied(QuotaAccountRecord),
+    Replayed(QuotaAccountRecord),
+}
+
+pub(crate) async fn claim_command_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    scope_kind: &str,
+    scope_id: &str,
+    operation: &str,
+) -> Result<bool, RepositoryError> {
+    let payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "operation": operation,
+            "principal_id": audit.principal_id,
+            "scope_id": scope_id,
+            "scope_kind": scope_kind,
+        }),
+        65_536,
+    )?;
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.receipts (
+            tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+            dedupe_owner_id, operation, idempotency_key_digest, request_digest,
+            state, payload_schema_version, payload, payload_digest, expires_at
+        ) VALUES ($1, $2, 'command', $3, $4, $5, $6, $7, $8,
+                  'processing', $9, $10, $11, $12)
+        ON CONFLICT (
+            tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+            operation, idempotency_key_digest
+        ) DO NOTHING
+        RETURNING receipt_id
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(scope_kind)
+    .bind(scope_id)
+    .bind(audit.principal_id.to_string())
+    .bind(operation)
+    .bind(audit.idempotency_key_digest.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(audit.receipt_expires_at)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if inserted.is_some() {
+        return Ok(false);
+    }
+
+    let existing = sqlx::query(
+        r#"
+        SELECT request_digest, state
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'command'
+          AND scope_kind = $2 AND scope_id = $3 AND dedupe_owner_id = $4
+          AND operation = $5 AND idempotency_key_digest = $6
+        FOR UPDATE
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(scope_kind)
+    .bind(scope_id)
+    .bind(audit.principal_id.to_string())
+    .bind(operation)
+    .bind(audit.idempotency_key_digest.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let request_digest: String = existing.try_get("request_digest")?;
+    if request_digest != audit.request_digest.to_string() {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    let state: String = existing.try_get("state")?;
+    if state != "succeeded" {
+        return Err(RepositoryError::Conflict("command receipt"));
+    }
+    Ok(true)
+}
+
+pub(crate) async fn terminalize_command_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    response_reference_id: &str,
+    disposition: &str,
+) -> Result<(), RepositoryError> {
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = $4, response_reference_id = $5,
+            completed_at = clock_timestamp()
+        WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
+          AND state = 'processing'
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(disposition)
+    .bind(response_reference_id)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict("command receipt"));
+    }
+    Ok(())
+}
+
+pub(crate) async fn append_command_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    aggregate_kind: &str,
+    aggregate_id: &str,
+    aggregate_version: i64,
+    event_type: &str,
+    payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
+    append_command_event_version(
+        transaction,
+        audit,
+        aggregate_kind,
+        aggregate_id,
+        Some(aggregate_version),
+        event_type,
+        payload,
+    )
+    .await
+}
+
+async fn append_command_event_version(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    aggregate_kind: &str,
+    aggregate_id: &str,
+    aggregate_version: Option<i64>,
+    event_type: &str,
+    payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.events (
+            tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
+            event_type, visibility, payload_schema_version, payload, payload_digest
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'internal', $7, $8, $9)
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.event_id.to_string())
+    .bind(aggregate_kind)
+    .bind(aggregate_id)
+    .bind(aggregate_version)
+    .bind(event_type)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id)
+        VALUES ($1, $2, $3)
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.outbox_id.to_string())
+    .bind(audit.event_id.to_string())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn load_tenant(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+) -> Result<TenantRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT tenant_id, state, version, config_schema_version, config,
+               config_digest, created_at, updated_at
+        FROM insight_platform.tenants
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("tenant"))?;
+    tenant_from_row(row)
+}
+
+async fn load_tenant_for_update(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+) -> Result<TenantRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT tenant_id, state, version, config_schema_version, config,
+               config_digest, created_at, updated_at
+        FROM insight_platform.tenants
+        WHERE tenant_id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("tenant"))?;
+    tenant_from_row(row)
+}
+
+pub(crate) fn decode_published_version_payload(
+    payload: &TypedPayload,
+) -> Result<PublishedVersionPayload, RepositoryError> {
+    let mut value = payload.value.clone();
+    let Value::Object(object) = &mut value else {
+        return Err(RepositoryError::CorruptRow(
+            "published ResourceVersion payload is not an object".to_owned(),
+        ));
+    };
+    object.remove("schema_version");
+    serde_json::from_value(value)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))
+}
+
+pub(crate) fn decode_typed_payload<T: DeserializeOwned>(
+    payload: &TypedPayload,
+    kind: &str,
+) -> Result<T, RepositoryError> {
+    let mut value = payload.value.clone();
+    let Value::Object(object) = &mut value else {
+        return Err(RepositoryError::CorruptRow(format!(
+            "{kind} payload is not an object"
+        )));
+    };
+    object.remove("schema_version");
+    serde_json::from_value(value)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))
+}
+
+pub(crate) fn decode_versioned_payload<T: DeserializeOwned>(
+    payload: &TypedPayload,
+    kind: &str,
+) -> Result<T, RepositoryError> {
+    serde_json::from_value(payload.value.clone())
+        .map_err(|failure| RepositoryError::CorruptRow(format!("{kind}: {failure}")))
+}
+
+pub(crate) async fn require_tenant_permission(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    permission: Permission,
+) -> Result<PrincipalSnapshot, RepositoryError> {
+    let snapshot = load_current_principal_snapshot(transaction, audit).await?;
+    if !snapshot.permissions.contains(permission) {
+        return Err(RepositoryError::PermissionDenied);
+    }
+    Ok(snapshot)
+}
+
+async fn load_current_principal_snapshot(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+) -> Result<PrincipalSnapshot, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT principal.version AS principal_version,
+               binding.generation AS binding_generation,
+               binding.version AS binding_version,
+               binding.permissions_schema_version,
+               binding.permissions,
+               binding.permissions_digest
+        FROM insight_platform.tenant_principals AS binding
+        JOIN insight_platform.principals AS principal
+          ON principal.principal_id = binding.principal_id
+        WHERE binding.tenant_id = $1 AND binding.principal_id = $2
+          AND binding.principal_kind = $3
+          AND binding.state = 'active' AND principal.state = 'active'
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.principal_id.to_string())
+    .bind(audit.principal_kind.as_str())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = row else {
+        return Err(RepositoryError::PermissionDenied);
+    };
+    let permissions_payload = payload_from_row(
+        &row,
+        "permissions_schema_version",
+        "permissions",
+        "permissions_digest",
+    )?;
+    let permissions: TenantPrincipalPayload =
+        decode_typed_payload(&permissions_payload, "tenant principal permissions")?;
+    let snapshot = PrincipalSnapshot::build(
+        audit.tenant_id.clone(),
+        audit.principal_id.clone(),
+        audit.principal_kind,
+        permissions.permissions,
+        u64::try_from(row.try_get::<i64, _>("principal_version")?)
+            .map_err(|_| RepositoryError::CorruptRow("negative principal version".to_owned()))?,
+        u64::try_from(row.try_get::<i64, _>("binding_generation")?)
+            .map_err(|_| RepositoryError::CorruptRow("negative binding generation".to_owned()))?,
+        u64::try_from(row.try_get::<i64, _>("binding_version")?)
+            .map_err(|_| RepositoryError::CorruptRow("negative binding version".to_owned()))?,
+    )
+    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if snapshot.permissions_digest.as_str() != permissions_payload.digest {
+        return Err(RepositoryError::CorruptRow(
+            "tenant principal permissions digest is inconsistent".to_owned(),
+        ));
+    }
+    Ok(snapshot)
+}
+
+async fn require_ready_authoring_artifact(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    package: &AuthoringPackage,
+) -> Result<(), RepositoryError> {
+    let artifact = &package.artifact;
+    let matched: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM insight_platform.artifacts AS artifact
+            JOIN insight_platform.artifact_blobs AS blob
+              ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+            WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
+              AND artifact.state = 'ready' AND artifact.terminal_at IS NULL
+              AND blob.state = 'verified' AND blob.deleted_at IS NULL
+              AND blob.content_digest = $3 AND blob.size_bytes = $4
+              AND artifact.verified_media_type = $5 AND artifact.classification = $6
+        )
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(artifact.artifact_id().to_string())
+    .bind(artifact.content_digest().to_string())
+    .bind(i64::try_from(artifact.byte_length()).map_err(|_| {
+        RepositoryError::InvalidInput("artifact byte length exceeds PostgreSQL bigint".to_owned())
+    })?)
+    .bind(artifact.media_type())
+    .bind(artifact.classification().as_str())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !matched {
+        return Err(RepositoryError::NotFound("ready authoring artifact"));
+    }
+    Ok(())
+}
+
+fn write_permission(kind: RegistryResourceKind) -> Permission {
+    match kind {
+        RegistryResourceKind::Agent => Permission::AgentWrite,
+        RegistryResourceKind::Skill => Permission::SkillWrite,
+        RegistryResourceKind::CapabilityInterface
+        | RegistryResourceKind::CapabilityImplementation => Permission::CapabilityWrite,
+        RegistryResourceKind::ContextSourceInterface
+        | RegistryResourceKind::ContextSourceImplementation
+        | RegistryResourceKind::ContextDataset => Permission::ContextWrite,
+        RegistryResourceKind::McpServer => Permission::McpWrite,
+        RegistryResourceKind::ModelProvider | RegistryResourceKind::ModelProfile => {
+            Permission::ModelWrite
+        }
+        RegistryResourceKind::Policy => Permission::PolicyWrite,
+        RegistryResourceKind::SandboxRuntime
+        | RegistryResourceKind::SandboxPackage
+        | RegistryResourceKind::SandboxProfile => Permission::SandboxWrite,
+    }
+}
+
+fn publish_permission(kind: RegistryResourceKind) -> Permission {
+    match kind {
+        RegistryResourceKind::Agent => Permission::AgentPublish,
+        RegistryResourceKind::Skill => Permission::SkillPublish,
+        RegistryResourceKind::CapabilityInterface
+        | RegistryResourceKind::CapabilityImplementation => Permission::CapabilityPublish,
+        RegistryResourceKind::ContextSourceInterface
+        | RegistryResourceKind::ContextSourceImplementation
+        | RegistryResourceKind::ContextDataset => Permission::ContextPublish,
+        RegistryResourceKind::McpServer => Permission::McpPublish,
+        RegistryResourceKind::ModelProvider | RegistryResourceKind::ModelProfile => {
+            Permission::ModelPublish
+        }
+        RegistryResourceKind::Policy => Permission::PolicyPublish,
+        RegistryResourceKind::SandboxRuntime
+        | RegistryResourceKind::SandboxPackage
+        | RegistryResourceKind::SandboxProfile => Permission::SandboxPublish,
+    }
+}
+
+fn deploy_permission(kind: RegistryResourceKind) -> Permission {
+    match kind {
+        RegistryResourceKind::Agent => Permission::AgentDeploy,
+        RegistryResourceKind::CapabilityImplementation => Permission::CapabilityDeploy,
+        RegistryResourceKind::ContextSourceImplementation => Permission::ContextDeploy,
+        RegistryResourceKind::McpServer => Permission::McpDeploy,
+        RegistryResourceKind::ModelProvider | RegistryResourceKind::ModelProfile => {
+            Permission::ModelDeploy
+        }
+        _ => write_permission(kind),
+    }
+}
+
+fn activate_permission(kind: RegistryResourceKind) -> Permission {
+    match kind {
+        RegistryResourceKind::Agent => Permission::AgentActivate,
+        RegistryResourceKind::Skill => Permission::SkillActivate,
+        RegistryResourceKind::CapabilityInterface
+        | RegistryResourceKind::CapabilityImplementation => Permission::CapabilityActivate,
+        RegistryResourceKind::ContextSourceInterface
+        | RegistryResourceKind::ContextSourceImplementation
+        | RegistryResourceKind::ContextDataset => Permission::ContextActivate,
+        RegistryResourceKind::McpServer => Permission::McpActivate,
+        RegistryResourceKind::ModelProvider | RegistryResourceKind::ModelProfile => {
+            Permission::ModelActivate
+        }
+        RegistryResourceKind::Policy => Permission::PolicyActivate,
+        RegistryResourceKind::SandboxRuntime
+        | RegistryResourceKind::SandboxPackage
+        | RegistryResourceKind::SandboxProfile => Permission::SandboxActivate,
+    }
+}
+
+fn decode_resource_draft(payload: &TypedPayload) -> Result<ResourceDraftPayload, RepositoryError> {
+    let mut value = payload.value.clone();
+    let object = value.as_object_mut().ok_or_else(|| {
+        RepositoryError::CorruptRow("resource payload is not an object".to_owned())
+    })?;
+    object.remove("schema_version");
+    let draft: ResourceDraftPayload = serde_json::from_value(value)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    draft
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    Ok(draft)
+}
+
+fn tenant_principal_scope_kind(kind: PrincipalKind) -> String {
+    format!("tenant_principal_{}", kind.as_str())
+}
+
+async fn load_tenant_principal(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    principal_id: &ResourceId,
+    principal_kind: PrincipalKind,
+) -> Result<TenantPrincipalRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT tenant_id, principal_id, principal_kind, state, generation, version,
+               permissions_schema_version, permissions, permissions_digest,
+               created_at, updated_at
+        FROM insight_platform.tenant_principals
+        WHERE tenant_id = $1 AND principal_id = $2 AND principal_kind = $3
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(principal_id.to_string())
+    .bind(principal_kind.as_str())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("tenant principal"))?;
+    tenant_principal_from_row(row)
+}
+
+async fn classify_tenant_principal_cas(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    principal_id: &ResourceId,
+    principal_kind: PrincipalKind,
+) -> Result<RepositoryError, RepositoryError> {
+    let exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM insight_platform.tenant_principals
+            WHERE tenant_id = $1 AND principal_id = $2 AND principal_kind = $3
+        )
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(principal_id.to_string())
+    .bind(principal_kind.as_str())
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(if exists {
+        RepositoryError::Conflict("tenant principal")
+    } else {
+        RepositoryError::NotFound("tenant principal")
+    })
+}
+
+pub(crate) async fn load_secret_binding_metadata(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    secret_binding_id: &ResourceId,
+) -> Result<SecretBindingMetadataRecord, RepositoryError> {
+    load_secret_binding_metadata_with_lock(transaction, tenant_id, secret_binding_id, false).await
+}
+
+async fn load_secret_binding_metadata_for_update(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    secret_binding_id: &ResourceId,
+) -> Result<SecretBindingMetadataRecord, RepositoryError> {
+    load_secret_binding_metadata_with_lock(transaction, tenant_id, secret_binding_id, true).await
+}
+
+async fn load_secret_binding_resolution_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    secret_binding_id: &ResourceId,
+) -> Result<SecretBindingResolutionRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT tenant_id, secret_binding_id, purpose, provider, state, generation,
+               opaque_reference_ciphertext, key_id, reference_digest,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.secret_bindings
+        WHERE tenant_id = $1 AND secret_binding_id = $2
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(secret_binding_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("secret binding"))?;
+    secret_binding_resolution_from_row(row)
+}
+
+fn validate_registered_prepared_binding(
+    current: &SecretBindingResolutionRecord,
+    command: &RegisterPreparedSecretBinding,
+) -> Result<(), RepositoryError> {
+    let expected_policy = insight_platform_contracts::SecretResolutionPolicy::Pinned {
+        opaque_version_identity_digest: command.opaque_version_identity_digest.clone(),
+    };
+    if current.tenant_id != command.audit.tenant_id
+        || current.secret_binding_id != command.secret_binding_id
+        || current.purpose != command.purpose
+        || current.provider_id != command.provider_id
+        || current.state != insight_platform_contracts::SecretBindingState::Active
+        || current.generation != 1
+        || current.reference_digest != command.reference_digest
+        || current.payload.provider_id != command.provider_id
+        || current.payload.resolution_policy != expected_policy
+    {
+        return Err(RepositoryError::Conflict("prepared secret binding"));
+    }
+    Ok(())
+}
+
+async fn load_secret_binding_metadata_with_lock(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    secret_binding_id: &ResourceId,
+    for_update: bool,
+) -> Result<SecretBindingMetadataRecord, RepositoryError> {
+    let query = if for_update {
+        r#"
+        SELECT tenant_id, secret_binding_id, purpose, provider, state, generation, version,
+               payload_schema_version, payload, payload_digest, created_at, updated_at, revoked_at
+        FROM insight_platform.secret_bindings
+        WHERE tenant_id = $1 AND secret_binding_id = $2
+        FOR UPDATE
+        "#
+    } else {
+        r#"
+        SELECT tenant_id, secret_binding_id, purpose, provider, state, generation, version,
+               payload_schema_version, payload, payload_digest, created_at, updated_at, revoked_at
+        FROM insight_platform.secret_bindings
+        WHERE tenant_id = $1 AND secret_binding_id = $2
+        "#
+    };
+    let row = sqlx::query(query)
+        .bind(tenant_id.to_string())
+        .bind(secret_binding_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("secret binding"))?;
+    secret_binding_metadata_from_row(row)
+}
+
+async fn classify_secret_binding_cas(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    secret_binding_id: &ResourceId,
+) -> Result<RepositoryError, RepositoryError> {
+    let exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM insight_platform.secret_bindings
+            WHERE tenant_id = $1 AND secret_binding_id = $2
+        )
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(secret_binding_id.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(if exists {
+        RepositoryError::Conflict("secret binding")
+    } else {
+        RepositoryError::NotFound("secret binding")
+    })
+}
+
+async fn append_secret_binding_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    record: &SecretBindingMetadataRecord,
+    event_type: &str,
+    provider_evidence_digest: Option<&Sha256Digest>,
+) -> Result<(), RepositoryError> {
+    append_command_event(
+        transaction,
+        audit,
+        "secret_binding",
+        &record.secret_binding_id,
+        record.version,
+        event_type,
+        &TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "generation": record.generation,
+                "provider_evidence_digest": provider_evidence_digest,
+                "provider_id": record.provider_id,
+                "purpose": record.purpose,
+                "resolution_policy_digest": record.payload.digest,
+                "state": record.state,
+            }),
+        )?,
+    )
+    .await
+}
+
+async fn validate_run_bindings_exist(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    snapshot: &RunBindingsSnapshot,
+) -> Result<(), RepositoryError> {
+    snapshot
+        .validate()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    for slot in &snapshot.slots {
+        let FrozenSlotTarget::Context { binding } = &slot.target else {
+            continue;
+        };
+        if binding.owner_agent_deployment_id != snapshot.agent.deployment_id {
+            return Err(RepositoryError::InvalidInput(
+                "Run Context binding owner differs from Agent Deployment".to_owned(),
+            ));
+        }
+        if let insight_platform_contracts::ContextConsistencyPolicy::PinAtRunAdmission {
+            dataset_id,
+        } = &binding.consistency
+        {
+            let view = snapshot
+                .context_dataset_views
+                .iter()
+                .find(|view| view.context_binding_id == binding.context_binding_id)
+                .ok_or_else(|| {
+                    RepositoryError::InvalidInput(
+                        "Run Context binding lacks its admission-time Dataset view".to_owned(),
+                    )
+                })?;
+            let active_matches: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM insight_platform.resources AS resource
+                    JOIN insight_platform.resource_versions AS version
+                      ON version.tenant_id = resource.tenant_id
+                     AND version.resource_id = resource.resource_id
+                     AND version.resource_version_id = resource.active_version_id
+                    WHERE resource.tenant_id = $1
+                      AND resource.resource_id = $2
+                      AND resource.resource_kind = 'context_dataset'
+                      AND resource.lifecycle_state = 'active'
+                      AND resource.gate_state = 'enabled'
+                      AND version.resource_version_id = $3
+                      AND version.resource_version_kind = 'dataset_generation'
+                      AND version.content_digest = $4
+                )
+                "#,
+            )
+            .bind(tenant_id.to_string())
+            .bind(dataset_id.to_string())
+            .bind(view.generation.generation_id.to_string())
+            .bind(view.generation.generation_digest.to_string())
+            .fetch_one(&mut **transaction)
+            .await?;
+            if !active_matches {
+                return Err(RepositoryError::Conflict(
+                    "Context Dataset active head at Run admission",
+                ));
+            }
+        }
+    }
+    validate_exact_version_refs_exist(transaction, tenant_id, &snapshot.exact_version_refs())
+        .await?;
+    validate_exact_dataset_generation_refs_exist(
+        transaction,
+        tenant_id,
+        &snapshot.exact_dataset_generation_refs(),
+    )
+    .await?;
+
+    let mut pending = snapshot
+        .exact_deployment_refs()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut visited = BTreeSet::new();
+    while let Some(reference) = pending.pop() {
+        if !visited.insert(reference.deployment_id.to_string()) {
+            continue;
+        }
+        if visited.len() > MAX_RESOURCE_DEPENDENCIES {
+            return Err(RepositoryError::InvalidInput(
+                "run deployment closure exceeds its hard bound".to_owned(),
+            ));
+        }
+        let owner_kind = deployment_owner_kind(reference.resource_kind).ok_or_else(|| {
+            RepositoryError::InvalidInput(
+                "run binding has an unsupported deployment kind".to_owned(),
+            )
+        })?;
+        let row = sqlx::query(
+            r#"
+            SELECT deployment.tenant_id, deployment.deployment_id, deployment.resource_id,
+                   deployment.resource_version_id, deployment.environment,
+                   deployment.bindings_digest, deployment.payload_schema_version,
+                   deployment.bindings, deployment.created_by, deployment.created_at,
+                   resource.active_deployment_id
+            FROM insight_platform.deployments AS deployment
+            JOIN insight_platform.resources AS resource
+              ON resource.tenant_id = deployment.tenant_id
+             AND resource.resource_id = deployment.resource_id
+            WHERE deployment.tenant_id = $1 AND deployment.deployment_id = $2
+              AND deployment.bindings_digest = $3 AND resource.resource_kind = $4
+              AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(reference.deployment_id.to_string())
+        .bind(reference.deployment_digest.to_string())
+        .bind(owner_kind.as_str())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("bindable deployment"))?;
+        let active_deployment_id: Option<String> = row.try_get("active_deployment_id")?;
+        let deployment = deployment_from_row(row)?;
+        if reference == snapshot.agent
+            && active_deployment_id.as_deref() != Some(reference.deployment_id.to_string().as_str())
+        {
+            return Err(RepositoryError::NotFound("active agent deployment"));
+        }
+
+        let closure = decode_deployment_closure(&deployment.bindings)?;
+        if closure.resource_kind() != owner_kind {
+            return Err(RepositoryError::CorruptRow(
+                "deployment closure kind does not match its owner".to_owned(),
+            ));
+        }
+        validate_deployment_closure_exists(transaction, tenant_id, &closure).await?;
+        pending.extend(closure.exact_deployment_refs().into_iter().cloned());
+    }
+    Ok(())
+}
+
+pub(crate) async fn require_ready_run_artifact(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    artifact: &ArtifactRef,
+) -> Result<(), RepositoryError> {
+    let byte_length = i64::try_from(artifact.byte_length()).map_err(|_| {
+        RepositoryError::InvalidInput("artifact byte length exceeds bigint".to_owned())
+    })?;
+    let matched: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM insight_platform.artifacts AS artifact
+            JOIN insight_platform.artifact_blobs AS blob
+              ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+            WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
+              AND artifact.state = 'ready' AND artifact.terminal_at IS NULL
+              AND blob.state = 'verified' AND blob.deleted_at IS NULL
+              AND blob.content_digest = $3 AND blob.size_bytes = $4
+              AND artifact.verified_media_type = $5 AND artifact.classification = $6
+        )
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(artifact.artifact_id().to_string())
+    .bind(artifact.content_digest().to_string())
+    .bind(byte_length)
+    .bind(artifact.media_type())
+    .bind(artifact.classification().as_str())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !matched {
+        return Err(RepositoryError::NotFound("ready run input artifact"));
+    }
+    Ok(())
+}
+
+fn deployment_owner_kind(kind: ResourceKind) -> Option<RegistryResourceKind> {
+    RegistryResourceKind::ALL
+        .iter()
+        .copied()
+        .find(|candidate| candidate.deployment_kind() == Some(kind))
+}
+
+pub(crate) fn decode_deployment_closure(
+    payload: &TypedPayload,
+) -> Result<DeploymentClosure, RepositoryError> {
+    let mut value = payload.value.clone();
+    let object = value.as_object_mut().ok_or_else(|| {
+        RepositoryError::CorruptRow("deployment bindings are not an object".to_owned())
+    })?;
+    object.remove("schema_version");
+    let closure: DeploymentClosure = serde_json::from_value(value)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    closure
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    Ok(closure)
+}
+
+async fn load_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    run_id: &ResourceId,
+) -> Result<RunRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT *
+        FROM insight_platform.runs
+        WHERE tenant_id = $1 AND run_id = $2
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(run_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("run"))?;
+    run_from_row(row)
+}
+
+pub(crate) async fn load_run_for_update(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    run_id: &ResourceId,
+) -> Result<RunRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT *
+        FROM insight_platform.runs
+        WHERE tenant_id = $1 AND run_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(run_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("run"))?;
+    run_from_row(row)
+}
+
+pub(crate) async fn load_resource(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    resource_id: &ResourceId,
+) -> Result<ResourceRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+               draft_generation, active_version_id, active_deployment_id, version,
+               payload_schema_version, payload, payload_digest, created_at, updated_at
+        FROM insight_platform.resources
+        WHERE tenant_id = $1 AND resource_id = $2
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(resource_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("resource"))?;
+    resource_from_row(row)
+}
+
+pub(crate) async fn load_resource_for_update(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    resource_id: &ResourceId,
+) -> Result<ResourceRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+               draft_generation, active_version_id, active_deployment_id, version,
+               payload_schema_version, payload, payload_digest, created_at, updated_at
+        FROM insight_platform.resources
+        WHERE tenant_id = $1 AND resource_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(resource_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("resource"))?;
+    resource_from_row(row)
+}
+
+pub(crate) async fn load_deployment(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    deployment_id: &ResourceId,
+) -> Result<DeploymentRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT tenant_id, deployment_id, resource_id, resource_version_id, environment,
+               bindings_digest, payload_schema_version, bindings, created_by, created_at
+        FROM insight_platform.deployments
+        WHERE tenant_id = $1 AND deployment_id = $2
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(deployment_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("deployment"))?;
+    deployment_from_row(row)
+}
+
+async fn load_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    job_id: &ResourceId,
+) -> Result<JobRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT * FROM insight_platform.jobs
+        WHERE tenant_id = $1 AND job_id = $2
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(job_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("job"))?;
+    job_from_row(row)
+}
+
+pub(crate) async fn load_job_for_update_by_text(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    job_id: &str,
+) -> Result<JobRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT * FROM insight_platform.jobs
+        WHERE tenant_id = $1 AND job_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(job_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("job"))?;
+    job_from_row(row)
+}
+
+async fn load_task_by_text(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    task_id: &str,
+) -> Result<TaskRecord, RepositoryError> {
+    let row =
+        sqlx::query("SELECT * FROM insight_platform.tasks WHERE tenant_id = $1 AND task_id = $2")
+            .bind(tenant_id)
+            .bind(task_id)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::NotFound("task"))?;
+    task_from_row(row)
+}
+
+pub(crate) async fn load_task_for_update(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    task_id: &ResourceId,
+) -> Result<TaskRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT * FROM insight_platform.tasks
+        WHERE tenant_id = $1 AND task_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(task_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("task"))?;
+    task_from_row(row)
+}
+
+async fn load_child_run_link_by_logical_key(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    parent_run_id: &str,
+    logical_key: &str,
+) -> Result<Option<ChildRunLinkRecord>, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT * FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND logical_key = $3
+          AND record_kind = 'child_run_link'
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(parent_run_id)
+    .bind(logical_key)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    row.map(child_run_link_from_row).transpose()
+}
+
+async fn load_child_run_link_by_id(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    child_link_id: &str,
+) -> Result<ChildRunLinkRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT * FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2 AND record_kind = 'child_run_link'
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(child_link_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("ChildRunLink"))?;
+    child_run_link_from_row(row)
+}
+
+async fn load_child_run_link_for_update(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    child_link_id: &str,
+) -> Result<ChildRunLinkRecord, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT * FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2 AND record_kind = 'child_run_link'
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(child_link_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("ChildRunLink"))?;
+    child_run_link_from_row(row)
+}
+
+async fn lock_waiting_child_parent_node(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    parent_run_id: &str,
+    parent_node_id: &str,
+) -> Result<(i64, String), RepositoryError> {
+    let scope_id: String = sqlx::query_scalar(
+        r#"
+        SELECT scope_id FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(parent_run_id)
+    .bind(parent_node_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("parent NodeExecution"))?;
+    let rows = sqlx::query(
+        r#"
+        SELECT node_id, record_kind, state, version
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id IN ($3, $4)
+        ORDER BY node_id
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(parent_run_id)
+    .bind(parent_node_id)
+    .bind(&scope_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.len() != 2 {
+        return Err(RepositoryError::Conflict("terminal child parent closure"));
+    }
+    let mut node_version = None;
+    let mut scope_valid = false;
+    for row in rows {
+        let node_id: String = row.try_get("node_id")?;
+        let record_kind: String = row.try_get("record_kind")?;
+        let state: String = row.try_get("state")?;
+        if node_id == parent_node_id {
+            if record_kind != "node_execution" || state != "waiting" {
+                return Err(RepositoryError::Conflict("terminal child parent Node"));
+            }
+            node_version = Some(row.try_get("version")?);
+        } else if node_id == scope_id {
+            scope_valid = record_kind == "scope_instance" && state == "open";
+        }
+    }
+    if !scope_valid {
+        return Err(RepositoryError::Conflict("terminal child parent Scope"));
+    }
+    Ok((
+        node_version.ok_or(RepositoryError::Conflict("terminal child parent Node"))?,
+        scope_id,
+    ))
+}
+
+fn require_same_child_run_request(
+    existing: &ChildRunLinkRecord,
+    parent_job: &JobRecord,
+    command: &DeferOrchestrationToChildRun,
+) -> Result<(), RepositoryError> {
+    let parent_attempt_ordinal = u16::try_from(parent_job.attempt_no)
+        .map_err(|_| RepositoryError::CorruptRow("orchestration attempt exceeds u16".to_owned()))?;
+    let expected = ChildRunLinkPayload {
+        parent_attempt_ordinal,
+        child_agent_deployment: command.selected_child_deployment.clone(),
+        input_digest: command.input.content_digest.clone(),
+        cancellation_policy: command.cancellation_policy,
+        budget: command.budget.clone(),
+    };
+    if existing.parent_node_execution_id != parent_job.node_id.as_deref().unwrap_or_default()
+        || existing.slot_id != command.slot_id
+        || existing.source_value_ids != command.source_value_ids
+        || existing.payload != expected
+    {
+        return Err(RepositoryError::Conflict("orchestration child logical key"));
+    }
+    Ok(())
+}
+
+fn domain_job_fence(fence: &JobFence) -> Result<DomainJobFence, RepositoryError> {
+    Ok(DomainJobFence {
+        expected_version: u64::try_from(fence.expected_job_version)
+            .map_err(|_| RepositoryError::InvalidInput("negative Job fence version".to_owned()))?,
+        worker_process_generation_id: fence.worker_id.clone(),
+        lease_generation: u64::try_from(fence.lease_epoch).map_err(|_| {
+            RepositoryError::InvalidInput("negative Job fence generation".to_owned())
+        })?,
+        token_digest: fence.lease_token_digest.clone(),
+    })
+}
+
+async fn load_published_resource(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    resource_id: &ResourceId,
+    expected: &[NewPublishedVersion],
+) -> Result<PublishedResource, RepositoryError> {
+    let resource = load_resource(transaction, tenant_id, resource_id).await?;
+    let mut versions = Vec::with_capacity(expected.len());
+    for version in expected {
+        let row = sqlx::query(
+            r#"
+            SELECT tenant_id, resource_version_id, resource_id, resource_version_kind,
+                   revision_no, content_digest, artifact_id, payload_schema_version,
+                   payload, payload_digest, created_by, created_at
+            FROM insight_platform.resource_versions
+            WHERE tenant_id = $1 AND resource_id = $2 AND resource_version_id = $3
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(resource_id.to_string())
+        .bind(version.resource_version_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("resource version"))?;
+        versions.push(resource_version_from_row(row)?);
+    }
+    Ok(PublishedResource { resource, versions })
+}
+
+fn validate_publish_batch(
+    kind: RegistryResourceKind,
+    versions: &[NewPublishedVersion],
+) -> Result<(), RepositoryError> {
+    let mut kinds = BTreeSet::new();
+    let mut ordinals = BTreeSet::new();
+    for version in versions {
+        if !kind.allows_version_kind(version.resource_version_id.kind())
+            || !kinds.insert(version.resource_version_id.kind())
+        {
+            return Err(RepositoryError::InvalidInput(
+                "publish batch contains a duplicate or incompatible version kind".to_owned(),
+            ));
+        }
+        ordinals.insert(version.revision_no);
+    }
+    let valid = if kind == RegistryResourceKind::Agent {
+        versions.len() == 2
+            && kinds.contains(&ResourceKind::AgentInterfaceRevision)
+            && kinds.contains(&ResourceKind::AgentPlanRevision)
+            && ordinals.len() == 1
+    } else {
+        versions.len() == 1
+    };
+    if !valid {
+        return Err(RepositoryError::InvalidInput(
+            "publish batch does not match the resource version matrix".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn validate_deployment_closure_exists(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    closure: &DeploymentClosure,
+) -> Result<(), RepositoryError> {
+    let version_refs = closure.exact_version_refs();
+    validate_exact_version_refs_exist(transaction, tenant_id, &version_refs).await?;
+    validate_exact_dataset_generation_refs_exist(
+        transaction,
+        tenant_id,
+        &closure.exact_dataset_generation_refs(),
+    )
+    .await?;
+    match closure {
+        DeploymentClosure::CapabilityInterface(capability) => {
+            let implementation =
+                crate::invocation_repository::load_enabled_exact_published_version(
+                    transaction,
+                    tenant_id,
+                    &capability.implementation,
+                    RegistryResourceKind::CapabilityImplementation,
+                )
+                .await?;
+            let ResourceDocument::CapabilityImplementation(implementation) =
+                implementation.document
+            else {
+                return Err(RepositoryError::CorruptRow(
+                    "Capability Implementation revision contains the wrong document".to_owned(),
+                ));
+            };
+            if implementation.interface_revision != capability.interface
+                || implementation.backend_kind != capability.backend.kind()
+                || capability
+                    .backend
+                    .validate_for(&implementation.backend_contract)
+                    .is_err()
+            {
+                return Err(RepositoryError::Conflict(
+                    "Capability Deployment implementation closure",
+                ));
+            }
+            validate_secret_binding_purposes(
+                &capability.secret_bindings,
+                &implementation.credential_requirements,
+            )?;
+            require_ready_run_artifact(transaction, tenant_id, &capability.conformance_evidence)
+                .await?;
+        }
+        DeploymentClosure::ContextSourceInterface(context) => {
+            let implementation =
+                crate::invocation_repository::load_enabled_exact_published_version(
+                    transaction,
+                    tenant_id,
+                    &context.implementation,
+                    RegistryResourceKind::ContextSourceImplementation,
+                )
+                .await?;
+            let ResourceDocument::ContextSourceImplementation(implementation) =
+                implementation.document
+            else {
+                return Err(RepositoryError::CorruptRow(
+                    "Context Implementation revision contains the wrong document".to_owned(),
+                ));
+            };
+            if implementation.interface_revision != context.interface
+                || implementation.backend_kind != context.backend.kind()
+                || implementation
+                    .contract
+                    .validate_binding(&context.backend)
+                    .is_err()
+            {
+                return Err(RepositoryError::Conflict(
+                    "Context Deployment implementation closure",
+                ));
+            }
+            validate_secret_binding_purposes(
+                &context.secret_bindings,
+                &implementation.contract.credential_requirements,
+            )?;
+            require_ready_run_artifact(transaction, tenant_id, &context.conformance_evidence)
+                .await?;
+        }
+        DeploymentClosure::McpServer(mcp) => {
+            let server = crate::invocation_repository::load_enabled_exact_published_version(
+                transaction,
+                tenant_id,
+                &mcp.server_revision,
+                RegistryResourceKind::McpServer,
+            )
+            .await?;
+            let ResourceDocument::McpServer(server) = server.document else {
+                return Err(RepositoryError::CorruptRow(
+                    "MCP Server revision contains the wrong document".to_owned(),
+                ));
+            };
+            if server.transport != mcp.transport.kind()
+                || server.protocol_policy != mcp.protocol_policy
+                || server.authorization_credential_purpose.is_some() != mcp.auth_policy.is_some()
+            {
+                return Err(RepositoryError::Conflict("MCP Deployment Server closure"));
+            }
+            let protocol = crate::invocation_repository::load_enabled_exact_published_version(
+                transaction,
+                tenant_id,
+                &mcp.protocol_policy,
+                RegistryResourceKind::Policy,
+            )
+            .await?;
+            let ResourceDocument::Policy(protocol) = protocol.document else {
+                return Err(RepositoryError::CorruptRow(
+                    "MCP Protocol Policy revision contains the wrong document".to_owned(),
+                ));
+            };
+            if protocol.policy_kind != PolicyKind::Protocol || protocol.mcp_protocol.is_none() {
+                return Err(RepositoryError::Conflict(
+                    "MCP Deployment Protocol Policy closure",
+                ));
+            }
+            if let Some(auth_policy) = &mcp.auth_policy {
+                let auth = crate::invocation_repository::load_enabled_exact_published_version(
+                    transaction,
+                    tenant_id,
+                    auth_policy,
+                    RegistryResourceKind::Policy,
+                )
+                .await?;
+                let ResourceDocument::Policy(auth) = auth.document else {
+                    return Err(RepositoryError::CorruptRow(
+                        "MCP Auth Profile revision contains the wrong document".to_owned(),
+                    ));
+                };
+                let profile = auth.mcp_auth.as_ref().ok_or(RepositoryError::Conflict(
+                    "MCP Deployment Auth Profile document",
+                ))?;
+                if auth.policy_kind != PolicyKind::McpAuth
+                    || profile.resource_indicator.endpoint_identity_digest
+                        != mcp.server_identity_digest
+                    || profile
+                        .client_credential_purpose
+                        .as_ref()
+                        .is_some_and(|purpose| {
+                            !server.deployment_credential_requirements.contains(purpose)
+                        })
+                    || server
+                        .authorization_credential_purpose
+                        .as_ref()
+                        .is_some_and(|purpose| {
+                            profile.client_credential_purpose.as_ref() == Some(purpose)
+                        })
+                {
+                    return Err(RepositoryError::Conflict(
+                        "MCP Deployment Auth Profile closure",
+                    ));
+                }
+            }
+            validate_secret_binding_purposes(
+                &mcp.secret_bindings,
+                &server.deployment_credential_requirements,
+            )?;
+            require_ready_run_artifact(transaction, tenant_id, &mcp.conformance_evidence).await?;
+        }
+        DeploymentClosure::ModelProvider(model_provider) => {
+            let provider = crate::invocation_repository::load_enabled_exact_published_version(
+                transaction,
+                tenant_id,
+                &model_provider.provider_revision,
+                RegistryResourceKind::ModelProvider,
+            )
+            .await?;
+            let ResourceDocument::ModelProvider(provider) = provider.document else {
+                return Err(RepositoryError::CorruptRow(
+                    "Model Provider revision contains the wrong document".to_owned(),
+                ));
+            };
+            if provider.protocol_policy != model_provider.protocol_policy {
+                return Err(RepositoryError::Conflict(
+                    "Model Provider Deployment protocol closure",
+                ));
+            }
+            validate_secret_binding_purposes(
+                &model_provider.secret_bindings,
+                &provider.credential_requirements,
+            )?;
+            require_ready_run_artifact(
+                transaction,
+                tenant_id,
+                &model_provider.conformance_evidence,
+            )
+            .await?;
+        }
+        DeploymentClosure::ModelProfile(model_profile) => {
+            let profile = crate::invocation_repository::load_enabled_exact_published_version(
+                transaction,
+                tenant_id,
+                &model_profile.profile_revision,
+                RegistryResourceKind::ModelProfile,
+            )
+            .await?;
+            let ResourceDocument::ModelProfile(profile) = profile.document else {
+                return Err(RepositoryError::CorruptRow(
+                    "Model Profile revision contains the wrong document".to_owned(),
+                ));
+            };
+            let provider_deployment = load_deployment(
+                transaction,
+                tenant_id,
+                &model_profile.provider_deployment.deployment_id,
+            )
+            .await?;
+            if provider_deployment.bindings.digest
+                != model_profile
+                    .provider_deployment
+                    .deployment_digest
+                    .to_string()
+            {
+                return Err(RepositoryError::Conflict(
+                    "Model Profile exact Provider Deployment",
+                ));
+            }
+            let provider_closure = match decode_deployment_closure(&provider_deployment.bindings)? {
+                DeploymentClosure::ModelProvider(closure) => closure,
+                _ => {
+                    return Err(RepositoryError::Conflict(
+                        "Model Profile Provider Deployment closure",
+                    ));
+                }
+            };
+            if profile.provider_revision != provider_closure.provider_revision
+                || model_profile.generation_defaults.schema_digest
+                    != profile.parameter_schema_digest
+            {
+                return Err(RepositoryError::Conflict(
+                    "Model Profile Deployment binding closure",
+                ));
+            }
+        }
+        DeploymentClosure::Agent(_) => {}
+    }
+    for reference in closure.exact_deployment_refs() {
+        let matched: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM insight_platform.deployments AS deployment
+                JOIN insight_platform.resources AS resource
+                  ON resource.tenant_id = deployment.tenant_id
+                 AND resource.resource_id = deployment.resource_id
+                WHERE deployment.tenant_id = $1
+                  AND deployment.deployment_id = $2
+                  AND deployment.bindings_digest = $3
+                  AND resource.lifecycle_state = 'active'
+                  AND resource.gate_state = 'enabled'
+            )
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(reference.deployment_id.to_string())
+        .bind(reference.deployment_digest.to_string())
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !matched {
+            return Err(RepositoryError::NotFound("deployment closure binding"));
+        }
+    }
+    validate_active_secret_bindings(transaction, tenant_id, closure.secret_bindings()).await?;
+    Ok(())
+}
+
+fn validate_secret_binding_purposes(
+    secret_bindings: &[ExactSecretBindingRef],
+    required_purposes: &[SecretPurpose],
+) -> Result<(), RepositoryError> {
+    let mut actual_purposes = secret_bindings
+        .iter()
+        .map(|binding| binding.purpose.clone())
+        .collect::<Vec<_>>();
+    actual_purposes.sort();
+    if actual_purposes != required_purposes
+        || actual_purposes.windows(2).any(|pair| pair[0] == pair[1])
+    {
+        return Err(RepositoryError::Conflict(
+            "Deployment credential requirements",
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_active_secret_bindings(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    secret_bindings: &[ExactSecretBindingRef],
+) -> Result<(), RepositoryError> {
+    for reference in secret_bindings {
+        let record =
+            load_secret_binding_metadata(transaction, tenant_id, &reference.secret_binding_id)
+                .await?;
+        let payload: SecretBindingPayload = decode_typed_payload(&record.payload, "SecretBinding")?;
+        if record.payload.schema_version != 1
+            || record.state != "active"
+            || record.secret_binding_id != reference.secret_binding_id.to_string()
+            || record.provider_id != reference.provider_id.to_string()
+            || record.purpose != reference.purpose.as_str()
+            || payload.provider_id != reference.provider_id
+        {
+            return Err(RepositoryError::Conflict(
+                "Deployment active SecretBinding reference",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn validate_exact_secret_bindings_at_creation(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    secret_bindings: &[ExactSecretBindingRef],
+) -> Result<(), RepositoryError> {
+    for reference in secret_bindings {
+        let record =
+            load_secret_binding_metadata(transaction, tenant_id, &reference.secret_binding_id)
+                .await?;
+        let payload: SecretBindingPayload = decode_typed_payload(&record.payload, "SecretBinding")?;
+        if record.payload.schema_version != 1
+            || record.state != "active"
+            || record.secret_binding_id != reference.secret_binding_id.to_string()
+            || u64::try_from(record.generation).ok() != Some(reference.binding_generation)
+            || record.provider_id != reference.provider_id.to_string()
+            || record.purpose != reference.purpose.as_str()
+            || payload.provider_id != reference.provider_id
+            || payload.resolution_policy != reference.resolution_policy
+        {
+            return Err(RepositoryError::Conflict("exact SecretBinding reference"));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_exact_version_refs_exist(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    references: &[&ExactVersionRef],
+) -> Result<(), RepositoryError> {
+    for reference in references {
+        let matched: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM insight_platform.resource_versions AS version
+                JOIN insight_platform.resources AS resource
+                  ON resource.tenant_id = version.tenant_id
+                 AND resource.resource_id = version.resource_id
+                WHERE version.tenant_id = $1 AND version.resource_version_id = $2
+                  AND version.content_digest = $3 AND version.resource_version_kind = $4
+                  AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
+            )
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(reference.revision_id.to_string())
+        .bind(reference.semantic_digest.to_string())
+        .bind(reference.resource_kind.descriptor().name)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !matched {
+            return Err(RepositoryError::NotFound("exact version binding"));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_exact_dataset_generation_refs_exist(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    references: &[&ExactDatasetGenerationRef],
+) -> Result<(), RepositoryError> {
+    for reference in references {
+        let matched: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM insight_platform.resource_versions AS version
+                JOIN insight_platform.resources AS resource
+                  ON resource.tenant_id = version.tenant_id
+                 AND resource.resource_id = version.resource_id
+                WHERE version.tenant_id = $1
+                  AND version.resource_id = $2
+                  AND version.resource_version_id = $3
+                  AND version.content_digest = $4
+                  AND version.resource_version_kind = 'dataset_generation'
+                  AND resource.resource_kind = 'context_dataset'
+                  AND resource.lifecycle_state = 'active'
+                  AND resource.gate_state = 'enabled'
+            )
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(reference.dataset_id.to_string())
+        .bind(reference.generation_id.to_string())
+        .bind(reference.generation_digest.to_string())
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !matched {
+            return Err(RepositoryError::NotFound(
+                "exact Context Dataset Generation binding",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn resolve_activation_target(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    resource_id: &ResourceId,
+    kind: RegistryResourceKind,
+    target: &ActiveTarget,
+) -> Result<(Option<String>, Option<String>), RepositoryError> {
+    match target {
+        ActiveTarget::Version { version } => {
+            version
+                .validate()
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+            if kind.activation_target() != insight_platform_contracts::ActivationTargetKind::Version
+                || !kind.allows_version_kind(version.resource_kind)
+            {
+                return Err(RepositoryError::InvalidInput(
+                    "resource does not activate a version target".to_owned(),
+                ));
+            }
+            let matched: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1 FROM insight_platform.resource_versions
+                    WHERE tenant_id = $1 AND resource_id = $2 AND resource_version_id = $3
+                      AND content_digest = $4
+                )
+                "#,
+            )
+            .bind(tenant_id.to_string())
+            .bind(resource_id.to_string())
+            .bind(version.revision_id.to_string())
+            .bind(version.semantic_digest.to_string())
+            .fetch_one(&mut **transaction)
+            .await?;
+            if !matched {
+                return Err(RepositoryError::NotFound("activation target"));
+            }
+            Ok((Some(version.revision_id.to_string()), None))
+        }
+        ActiveTarget::Deployment { deployment } => {
+            deployment
+                .validate()
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+            if kind.activation_target()
+                != insight_platform_contracts::ActivationTargetKind::Deployment
+                || kind.deployment_kind() != Some(deployment.resource_kind)
+            {
+                return Err(RepositoryError::InvalidInput(
+                    "resource does not activate a deployment target".to_owned(),
+                ));
+            }
+            let matched: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1 FROM insight_platform.deployments
+                    WHERE tenant_id = $1 AND resource_id = $2 AND deployment_id = $3
+                      AND bindings_digest = $4
+                )
+                "#,
+            )
+            .bind(tenant_id.to_string())
+            .bind(resource_id.to_string())
+            .bind(deployment.deployment_id.to_string())
+            .bind(deployment.deployment_digest.to_string())
+            .fetch_one(&mut **transaction)
+            .await?;
+            if !matched {
+                return Err(RepositoryError::NotFound("activation target"));
+            }
+            Ok((None, Some(deployment.deployment_id.to_string())))
+        }
+    }
+}
+
+fn tenant_from_row(row: PgRow) -> Result<TenantRecord, RepositoryError> {
+    let payload = payload_from_row(&row, "config_schema_version", "config", "config_digest")?;
+    let mut value = payload.value.clone();
+    let Value::Object(object) = &mut value else {
+        return Err(RepositoryError::CorruptRow(
+            "tenant config is not an object".to_owned(),
+        ));
+    };
+    object.remove("schema_version");
+    let config: TenantConfig = serde_json::from_value(value)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    config
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    Ok(TenantRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        state: row.try_get("state")?,
+        version: row.try_get("version")?,
+        config,
+        config_digest: payload.digest,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn principal_from_row(row: PgRow) -> Result<PrincipalRecord, RepositoryError> {
+    Ok(PrincipalRecord {
+        principal_id: row.try_get("principal_id")?,
+        state: row.try_get("state")?,
+        authentication_authority_digest: row.try_get("authentication_authority_digest")?,
+        subject_digest: row.try_get("subject_digest")?,
+        version: row.try_get("version")?,
+        payload: payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn tenant_principal_from_row(row: PgRow) -> Result<TenantPrincipalRecord, RepositoryError> {
+    Ok(TenantPrincipalRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        principal_id: row.try_get("principal_id")?,
+        principal_kind: row.try_get("principal_kind")?,
+        state: row.try_get("state")?,
+        generation: row.try_get("generation")?,
+        version: row.try_get("version")?,
+        permissions: payload_from_row(
+            &row,
+            "permissions_schema_version",
+            "permissions",
+            "permissions_digest",
+        )?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn secret_binding_from_row(row: PgRow) -> Result<SecretBindingRecord, RepositoryError> {
+    Ok(SecretBindingRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        secret_binding_id: row.try_get("secret_binding_id")?,
+        purpose: row.try_get("purpose")?,
+        provider_id: row.try_get("provider")?,
+        state: row.try_get("state")?,
+        generation: row.try_get("generation")?,
+        version: row.try_get("version")?,
+        opaque_reference_ciphertext: row.try_get("opaque_reference_ciphertext")?,
+        key_id: row.try_get("key_id")?,
+        reference_digest: row.try_get("reference_digest")?,
+        payload: payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        revoked_at: row.try_get("revoked_at")?,
+    })
+}
+
+fn secret_binding_metadata_from_row(
+    row: PgRow,
+) -> Result<SecretBindingMetadataRecord, RepositoryError> {
+    Ok(SecretBindingMetadataRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        secret_binding_id: row.try_get("secret_binding_id")?,
+        purpose: row.try_get("purpose")?,
+        provider_id: row.try_get("provider")?,
+        state: row.try_get("state")?,
+        generation: row.try_get("generation")?,
+        version: row.try_get("version")?,
+        payload: payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        revoked_at: row.try_get("revoked_at")?,
+    })
+}
+
+fn secret_binding_resolution_from_row(
+    row: PgRow,
+) -> Result<SecretBindingResolutionRecord, RepositoryError> {
+    let payload_record =
+        payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    if payload_record.schema_version != 1 {
+        return Err(RepositoryError::CorruptRow(
+            "SecretBinding resolution payload schema is unsupported".to_owned(),
+        ));
+    }
+    let record = SecretBindingResolutionRecord {
+        tenant_id: row
+            .try_get::<String, _>("tenant_id")?
+            .parse()
+            .map_err(|failure| {
+                RepositoryError::CorruptRow(format!("SecretBinding tenant: {failure}"))
+            })?,
+        secret_binding_id: row
+            .try_get::<String, _>("secret_binding_id")?
+            .parse()
+            .map_err(|failure| {
+                RepositoryError::CorruptRow(format!("SecretBinding ID: {failure}"))
+            })?,
+        purpose: row
+            .try_get::<String, _>("purpose")?
+            .parse()
+            .map_err(|failure| {
+                RepositoryError::CorruptRow(format!("SecretBinding purpose: {failure}"))
+            })?,
+        provider_id: row
+            .try_get::<String, _>("provider")?
+            .parse()
+            .map_err(|failure| {
+                RepositoryError::CorruptRow(format!("SecretBinding provider: {failure}"))
+            })?,
+        state: row
+            .try_get::<String, _>("state")?
+            .parse()
+            .map_err(|failure| {
+                RepositoryError::CorruptRow(format!("SecretBinding state: {failure}"))
+            })?,
+        generation: u64::try_from(row.try_get::<i64, _>("generation")?).map_err(|_| {
+            RepositoryError::CorruptRow("SecretBinding generation is invalid".to_owned())
+        })?,
+        encrypted_reference: EncryptedOpaqueReference::new(
+            row.try_get("opaque_reference_ciphertext")?,
+        )
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+        key_id: row.try_get("key_id")?,
+        reference_digest: row
+            .try_get::<String, _>("reference_digest")?
+            .parse()
+            .map_err(|failure| {
+                RepositoryError::CorruptRow(format!("SecretBinding reference digest: {failure}"))
+            })?,
+        payload: decode_typed_payload(&payload_record, "SecretBinding resolution")?,
+    };
+    record.validate().map_err(|failure| {
+        RepositoryError::CorruptRow(format!("SecretBinding resolution: {failure:?}"))
+    })?;
+    Ok(record)
+}
+
+fn resource_from_row(row: PgRow) -> Result<ResourceRecord, RepositoryError> {
+    Ok(ResourceRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        resource_id: row.try_get("resource_id")?,
+        resource_kind: row.try_get("resource_kind")?,
+        lifecycle_state: row.try_get("lifecycle_state")?,
+        gate_state: row.try_get("gate_state")?,
+        draft_generation: row.try_get("draft_generation")?,
+        active_version_id: row.try_get("active_version_id")?,
+        active_deployment_id: row.try_get("active_deployment_id")?,
+        version: row.try_get("version")?,
+        payload: payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn resource_version_from_row(row: PgRow) -> Result<ResourceVersionRecord, RepositoryError> {
+    Ok(ResourceVersionRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        resource_version_id: row.try_get("resource_version_id")?,
+        resource_id: row.try_get("resource_id")?,
+        resource_version_kind: row.try_get("resource_version_kind")?,
+        revision_no: row.try_get("revision_no")?,
+        content_digest: row.try_get("content_digest")?,
+        artifact_id: row.try_get("artifact_id")?,
+        payload: payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?,
+        created_by: row.try_get("created_by")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn deployment_from_row(row: PgRow) -> Result<DeploymentRecord, RepositoryError> {
+    Ok(DeploymentRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        deployment_id: row.try_get("deployment_id")?,
+        resource_id: row.try_get("resource_id")?,
+        resource_version_id: row.try_get("resource_version_id")?,
+        environment: row.try_get("environment")?,
+        bindings: payload_from_row(
+            &row,
+            "payload_schema_version",
+            "bindings",
+            "bindings_digest",
+        )?,
+        created_by: row.try_get("created_by")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn run_from_row(row: PgRow) -> Result<RunRecord, RepositoryError> {
+    let run_id_text: String = row.try_get("run_id")?;
+    let run_id: ResourceId =
+        run_id_text
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    if run_id.kind() != ResourceKind::Run {
+        return Err(RepositoryError::CorruptRow(
+            "run_id has the wrong nominal kind".to_owned(),
+        ));
+    }
+
+    let bindings_schema_version: i32 = row.try_get("bindings_schema_version")?;
+    let bindings_value: Value = row.try_get("bindings")?;
+    let bindings_digest: String = row.try_get("bindings_digest")?;
+    if bindings_schema_version != 1
+        || bindings_value.get("schema_version").and_then(Value::as_i64) != Some(1)
+    {
+        return Err(RepositoryError::CorruptRow(
+            "run bindings schema version does not match".to_owned(),
+        ));
+    }
+    let bindings_bytes = serde_jcs::to_vec(&bindings_value)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if bindings_bytes.len() > DEFAULT_PAYLOAD_LIMIT {
+        return Err(RepositoryError::CorruptRow(
+            "run bindings exceed their hard bound".to_owned(),
+        ));
+    }
+    let bindings: RunBindingsSnapshot = serde_json::from_value(bindings_value)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    bindings
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if bindings.canonical_digest.to_string() != bindings_digest {
+        return Err(RepositoryError::CorruptRow(
+            "run bindings canonical digest does not match".to_owned(),
+        ));
+    }
+
+    let current_payload = payload_from_row(
+        &row,
+        "current_schema_version",
+        "current_payload",
+        "current_payload_digest",
+    )?;
+    let current: RunCurrentSnapshot = serde_json::from_value(current_payload.value)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    current
+        .validate(&run_id)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+
+    let agent_deployment_id: String = row.try_get("agent_deployment_id")?;
+    let input_value_id: Option<String> = row.try_get("input_value_id")?;
+    let output_value_id: Option<String> = row.try_get("output_value_id")?;
+    let root_run_id: String = row.try_get("root_run_id")?;
+    let parent_run_id: Option<String> = row.try_get("parent_run_id")?;
+    let parent_node_id: Option<String> = row.try_get("parent_node_id")?;
+    let depth: i32 = row.try_get("depth")?;
+    let pause_generation: i64 = row.try_get("pause_generation")?;
+    let cancel_generation: i64 = row.try_get("cancel_generation")?;
+    let timeout_generation: i64 = row.try_get("timeout_generation")?;
+    let state: String = row.try_get("state")?;
+    state
+        .parse::<RunState>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if agent_deployment_id != bindings.agent.deployment_id.to_string()
+        || input_value_id.as_deref() != Some(current.input_value_id.to_string().as_str())
+        || output_value_id != current.output_value_id.as_ref().map(ToString::to_string)
+        || root_run_id != current.ancestry.root_run_id.to_string()
+        || parent_run_id
+            != current
+                .ancestry
+                .parent_run_id
+                .as_ref()
+                .map(ToString::to_string)
+        || parent_node_id
+            != current
+                .ancestry
+                .parent_node_execution_id
+                .as_ref()
+                .map(ToString::to_string)
+        || depth != i32::from(current.ancestry.depth)
+        || u64::try_from(pause_generation).ok() != Some(current.control.pause_generation)
+        || u64::try_from(cancel_generation).ok() != Some(current.control.cancel_generation)
+        || u64::try_from(timeout_generation).ok() != Some(current.control.timeout_generation)
+    {
+        return Err(RepositoryError::CorruptRow(
+            "run hot columns disagree with the typed current snapshot".to_owned(),
+        ));
+    }
+
+    Ok(RunRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        run_id: run_id_text,
+        root_run_id,
+        parent_run_id,
+        parent_node_id,
+        agent_deployment_id,
+        principal_id: row.try_get("principal_id")?,
+        state,
+        version: row.try_get("version")?,
+        bindings,
+        current,
+        input_value_id,
+        output_value_id,
+        depth,
+        descendant_count: row.try_get("descendant_count")?,
+        active_work_count: row.try_get("active_work_count")?,
+        pause_generation,
+        cancel_generation,
+        timeout_generation,
+        public_sequence: row.try_get("public_sequence")?,
+        retry_at: row.try_get("retry_at")?,
+        deadline: row.try_get("deadline")?,
+        started_at: row.try_get("started_at")?,
+        terminal_at: row.try_get("terminal_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+pub(crate) fn job_from_row(row: PgRow) -> Result<JobRecord, RepositoryError> {
+    let work_class: String = row.try_get("work_class")?;
+    let work_class_value = work_class
+        .parse::<WorkClass>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let owner_kind: String = row.try_get("owner_kind")?;
+    let owner_id: String = row.try_get("owner_id")?;
+    let typed_owner = owner_id
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let state: String = row.try_get("state")?;
+    state
+        .parse::<JobState>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if owner_kind != typed_owner.kind().descriptor().name
+        || !is_execution_work_owner_pair(work_class_value, typed_owner.kind())
+    {
+        return Err(RepositoryError::CorruptRow(
+            "Job work class and typed owner pair are not registered".to_owned(),
+        ));
+    }
+    Ok(JobRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        job_id: row.try_get("job_id")?,
+        work_class,
+        owner_kind,
+        owner_id,
+        invocation_id: row.try_get("invocation_id")?,
+        run_id: row.try_get("run_id")?,
+        node_id: row.try_get("node_id")?,
+        state,
+        version: row.try_get("version")?,
+        attempt_no: row.try_get("attempt_no")?,
+        attempt_limit: row.try_get("attempt_limit")?,
+        lease_epoch: row.try_get("lease_epoch")?,
+        worker_id: row.try_get("worker_id")?,
+        lease_token_digest: row.try_get("lease_token_digest")?,
+        lease_expires_at: row.try_get("lease_expires_at")?,
+        heartbeat_at: row.try_get("heartbeat_at")?,
+        scheduled_at: row.try_get("scheduled_at")?,
+        retry_at: row.try_get("retry_at")?,
+        deadline: row.try_get("deadline")?,
+        priority: scheduler_priority_from_database(row.try_get("priority")?)?,
+        wake_kind: row.try_get("wake_kind")?,
+        wake_state: row.try_get("wake_state")?,
+        wake_generation: row.try_get("wake_generation")?,
+        request_digest: row.try_get("request_digest")?,
+        result_digest: row.try_get("result_digest")?,
+        effect_key_digest: row.try_get("effect_key_digest")?,
+        quota_reservation_id: row.try_get("quota_reservation_id")?,
+        payload: payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?,
+        started_at: row.try_get("started_at")?,
+        terminal_at: row.try_get("terminal_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn child_run_link_from_row(row: PgRow) -> Result<ChildRunLinkRecord, RepositoryError> {
+    let tenant_id: String = row.try_get("tenant_id")?;
+    let child_link_id: String = row.try_get("node_id")?;
+    let parent_run_id: String = row.try_get("run_id")?;
+    let parent_node_execution_id: String = row
+        .try_get::<Option<String>, _>("parent_node_id")?
+        .ok_or_else(|| RepositoryError::CorruptRow("ChildRunLink has no parent Node".to_owned()))?;
+    let child_run_id: String = row
+        .try_get::<Option<String>, _>("related_run_id")?
+        .ok_or_else(|| RepositoryError::CorruptRow("ChildRunLink has no child Run".to_owned()))?;
+    if row.try_get::<String, _>("record_kind")? != "child_run_link"
+        || row.try_get::<String, _>("node_kind")? != "child_run"
+    {
+        return Err(RepositoryError::CorruptRow(
+            "ChildRunLink row has an invalid kind".to_owned(),
+        ));
+    }
+    let stored: StoredChildRunLinkPayload = decode_typed_payload(
+        &payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?,
+        "ChildRunLink",
+    )?;
+    if stored.slot_id.is_empty()
+        || stored.slot_id.len() > 128
+        || stored.source_value_ids.len() > MAX_CHILD_INPUT_SOURCES
+        || stored
+            .source_value_ids
+            .iter()
+            .any(|id| id.kind() != ResourceKind::RunValue)
+        || stored.child_root_scope_id.kind() != ResourceKind::ScopeInstance
+        || stored.child_entry_node_execution_id.kind() != ResourceKind::NodeExecution
+        || stored.child_orchestration_job_id.kind() != ResourceKind::Job
+    {
+        return Err(RepositoryError::CorruptRow(
+            "ChildRunLink stored request evidence is invalid".to_owned(),
+        ));
+    }
+    let state = row
+        .try_get::<String, _>("state")?
+        .parse::<ChildLinkState>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let generation: i64 = row.try_get("generation")?;
+    let version: i64 = row.try_get("version")?;
+    let deadline: DateTime<Utc> = row.try_get("deadline")?;
+    let terminal_at: Option<DateTime<Utc>> = row.try_get("terminal_at")?;
+    let projection = ChildRunLinkProjection {
+        tenant_id: tenant_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        child_link_id: child_link_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        parent_run_id: parent_run_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        parent_node_execution_id: parent_node_execution_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        child_run_id: child_run_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        state,
+        generation: u64::try_from(generation).map_err(|_| {
+            RepositoryError::CorruptRow("negative ChildRunLink generation".to_owned())
+        })?,
+        version: u64::try_from(version)
+            .map_err(|_| RepositoryError::CorruptRow("negative ChildRunLink version".to_owned()))?,
+        payload: stored.link.clone(),
+        deadline,
+        terminal_at,
+    };
+    projection
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    Ok(ChildRunLinkRecord {
+        tenant_id,
+        child_link_id,
+        parent_run_id,
+        parent_node_execution_id,
+        child_run_id,
+        state,
+        generation,
+        version,
+        slot_id: stored.slot_id,
+        source_value_ids: stored.source_value_ids,
+        child_root_scope_id: stored.child_root_scope_id,
+        child_entry_node_execution_id: stored.child_entry_node_execution_id,
+        child_orchestration_job_id: stored.child_orchestration_job_id,
+        payload: stored.link,
+        deadline,
+        terminal_at,
+    })
+}
+
+fn child_link_projection(
+    record: &ChildRunLinkRecord,
+) -> Result<ChildRunLinkProjection, RepositoryError> {
+    let projection = ChildRunLinkProjection {
+        tenant_id: record.tenant_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        child_link_id: record.child_link_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        parent_run_id: record.parent_run_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        parent_node_execution_id: record.parent_node_execution_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        child_run_id: record.child_run_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        state: record.state,
+        generation: u64::try_from(record.generation).map_err(|_| {
+            RepositoryError::CorruptRow("negative ChildRunLink generation".to_owned())
+        })?,
+        version: u64::try_from(record.version)
+            .map_err(|_| RepositoryError::CorruptRow("negative ChildRunLink version".to_owned()))?,
+        payload: record.payload.clone(),
+        deadline: record.deadline,
+        terminal_at: record.terminal_at,
+    };
+    projection
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    Ok(projection)
+}
+
+fn task_from_row(row: PgRow) -> Result<TaskRecord, RepositoryError> {
+    let task_kind = row
+        .try_get::<String, _>("task_kind")?
+        .parse::<TaskKind>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let state = row
+        .try_get::<String, _>("state")?
+        .parse::<TaskState>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let task_id: String = row.try_get("task_id")?;
+    let typed_task_id = task_id
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let principal_snapshot_schema_version: i32 =
+        row.try_get("principal_snapshot_schema_version")?;
+    if typed_task_id.kind() != task_kind.task_id_kind() || principal_snapshot_schema_version != 1 {
+        return Err(RepositoryError::CorruptRow(
+            "Task identity or PrincipalSnapshot schema version is invalid".to_owned(),
+        ));
+    }
+    let record = TaskRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        task_id,
+        task_kind,
+        owner_kind: row.try_get("owner_kind")?,
+        owner_id: row.try_get("owner_id")?,
+        run_id: row.try_get("run_id")?,
+        node_id: row.try_get("node_id")?,
+        invocation_id: row.try_get("invocation_id")?,
+        state,
+        generation: row.try_get("generation")?,
+        version: row.try_get("version")?,
+        response_schema_digest: row.try_get("response_schema_digest")?,
+        payload: payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?,
+        response_value_id: row.try_get("response_value_id")?,
+        deadline: row.try_get("deadline")?,
+        responded_at: row.try_get("responded_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    };
+    task_projection(&record)?;
+    Ok(record)
+}
+
+pub(crate) fn task_projection(record: &TaskRecord) -> Result<TaskProjection, RepositoryError> {
+    let payload: TaskPayload = decode_typed_payload(&record.payload, "Task")?;
+    let projection = TaskProjection {
+        tenant_id: record.tenant_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        task_id: record.task_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        kind: record.task_kind,
+        state: record.state,
+        generation: u64::try_from(record.generation)
+            .map_err(|_| RepositoryError::CorruptRow("negative Task generation".to_owned()))?,
+        version: u64::try_from(record.version)
+            .map_err(|_| RepositoryError::CorruptRow("negative Task version".to_owned()))?,
+        response_schema_digest: record
+            .response_schema_digest
+            .as_deref()
+            .map(str::parse::<Sha256Digest>)
+            .transpose()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+        payload,
+        response_value_id: record
+            .response_value_id
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?,
+        deadline: record.deadline,
+        resolved_at: record.responded_at,
+    };
+    projection
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    Ok(projection)
+}
+
+pub(crate) fn job_projection(record: &JobRecord) -> Result<JobProjection, RepositoryError> {
+    let tenant_id = record
+        .tenant_id
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let job_id = record
+        .job_id
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let work_class = record
+        .work_class
+        .parse::<WorkClass>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let owner_id = record
+        .owner_id
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let state = record
+        .state
+        .parse::<JobState>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let wake = match work_class {
+        WorkClass::Orchestration => {
+            let payload: OrchestrationJobPayload =
+                decode_typed_payload(&record.payload, "orchestration Job")?;
+            payload
+                .validate()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            if payload.node_execution_id != owner_id {
+                return Err(RepositoryError::CorruptRow(
+                    "orchestration Job payload owner does not match the Job owner".to_owned(),
+                ));
+            }
+            payload.wake_contract
+        }
+        WorkClass::CapabilityNative | WorkClass::CapabilityRemote => {
+            let payload: CapabilityJobPayload =
+                decode_versioned_payload(&record.payload, "Capability Job")?;
+            if payload.binding.invocation_id != owner_id {
+                return Err(RepositoryError::CorruptRow(
+                    "Capability Job payload owner does not match the Job owner".to_owned(),
+                ));
+            }
+            payload.wake_contract
+        }
+        WorkClass::Context => {
+            let payload: ContextJobPayload =
+                decode_versioned_payload(&record.payload, "Context Job")?;
+            if payload.binding.context_query_id != owner_id {
+                return Err(RepositoryError::CorruptRow(
+                    "Context Job payload owner does not match the Job owner".to_owned(),
+                ));
+            }
+            payload.wake_contract
+        }
+        _ => None,
+    };
+    match (&wake, &record.wake_kind, &record.wake_state) {
+        (None, None, None) if record.wake_generation == 0 => {}
+        (Some(wake), Some(kind), Some(state))
+            if kind == wake.kind.as_str()
+                && state == "pending"
+                && u64::try_from(record.wake_generation).ok() == Some(wake.generation) => {}
+        _ => {
+            return Err(RepositoryError::CorruptRow(
+                "Job wake columns and closed payload disagree".to_owned(),
+            ))
+        }
+    }
+    let lease = match (
+        &record.worker_id,
+        &record.lease_token_digest,
+        record.heartbeat_at,
+        record.lease_expires_at,
+    ) {
+        (Some(worker_id), Some(token_digest), Some(heartbeat_at), Some(expires_at)) => {
+            Some(JobLease {
+                worker_process_generation_id: worker_id.parse().map_err(
+                    |failure: insight_platform_contracts::ResourceIdError| {
+                        RepositoryError::CorruptRow(failure.to_string())
+                    },
+                )?,
+                lease_generation: u64::try_from(record.lease_epoch).map_err(|_| {
+                    RepositoryError::CorruptRow("negative Job lease generation".to_owned())
+                })?,
+                token_digest: token_digest
+                    .parse::<Sha256Digest>()
+                    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+                heartbeat_at,
+                expires_at,
+            })
+        }
+        (None, None, None, None) => None,
+        _ => {
+            return Err(RepositoryError::CorruptRow(
+                "Job lease columns are incomplete".to_owned(),
+            ))
+        }
+    };
+    let projection = JobProjection {
+        tenant_id,
+        job_id,
+        work_class,
+        owner: JobOwnerRef {
+            owner_id: owner_id.clone(),
+            owner_kind: owner_id.kind(),
+        },
+        state,
+        version: u64::try_from(record.version)
+            .map_err(|_| RepositoryError::CorruptRow("negative Job version".to_owned()))?,
+        attempt_count: u32::try_from(record.attempt_no)
+            .map_err(|_| RepositoryError::CorruptRow("negative Job attempt count".to_owned()))?,
+        attempt_limit: u32::try_from(record.attempt_limit)
+            .map_err(|_| RepositoryError::CorruptRow("negative Job attempt limit".to_owned()))?,
+        lease_generation: u64::try_from(record.lease_epoch)
+            .map_err(|_| RepositoryError::CorruptRow("negative Job lease generation".to_owned()))?,
+        lease,
+        scheduled_at: record.scheduled_at,
+        retry_at: record.retry_at,
+        wake,
+        deadline: record.deadline,
+    };
+    projection
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    Ok(projection)
+}
+
+fn quota_account_from_row(row: PgRow) -> Result<QuotaAccountRecord, RepositoryError> {
+    Ok(QuotaAccountRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        quota_account_id: row.try_get("quota_account_id")?,
+        scope_kind: row.try_get("scope_kind")?,
+        scope_id: row.try_get("scope_id")?,
+        work_class: row.try_get("work_class")?,
+        metric: row.try_get("metric")?,
+        limit_value: row.try_get("limit_value")?,
+        reserved_value: row.try_get("reserved_value")?,
+        used_value: row.try_get("used_value")?,
+        version: row.try_get("version")?,
+        payload: payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+pub(crate) fn payload_from_row(
+    row: &PgRow,
+    schema_column: &str,
+    value_column: &str,
+    digest_column: &str,
+) -> Result<TypedPayload, RepositoryError> {
+    let schema_version: i32 = row.try_get(schema_column)?;
+    let value: Value = row.try_get(value_column)?;
+    let digest: String = row.try_get(digest_column)?;
+    let canonical = serde_jcs::to_vec(&value)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if sha256(&canonical) != digest {
+        return Err(RepositoryError::CorruptRow(format!(
+            "{value_column} digest does not match"
+        )));
+    }
+    if value.get("schema_version").and_then(Value::as_i64) != Some(i64::from(schema_version)) {
+        return Err(RepositoryError::CorruptRow(format!(
+            "{value_column} schema version does not match"
+        )));
+    }
+    Ok(TypedPayload {
+        schema_version,
+        value,
+        digest,
+    })
+}
+
+async fn existing_quota_entry(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    quota_account_id: &str,
+    correlation_id: &str,
+    entry_kind: &str,
+    request_digest: &str,
+) -> Result<Option<QuotaAccountRecord>, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT request_digest
+        FROM insight_platform.quota_ledger
+        WHERE tenant_id = $1 AND quota_account_id = $2
+          AND correlation_id = $3 AND entry_kind = $4
+        FOR SHARE
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(quota_account_id)
+    .bind(correlation_id)
+    .bind(entry_kind)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let actual_digest: String = row.try_get("request_digest")?;
+    if actual_digest != request_digest {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    let account = sqlx::query(
+        "SELECT * FROM insight_platform.quota_accounts WHERE tenant_id = $1 AND quota_account_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(quota_account_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(Some(quota_account_from_row(account)?))
+}
+
+struct QuotaEntryInsert<'a> {
+    tenant_id: &'a str,
+    quota_entry_id: &'a str,
+    quota_account_id: &'a str,
+    correlation_id: &'a str,
+    entry_kind: &'a str,
+    reserved_amount: i64,
+    used_amount: i64,
+    account_version: i64,
+    request_digest: &'a str,
+}
+
+async fn insert_quota_entry(
+    transaction: &mut Transaction<'_, Postgres>,
+    entry: QuotaEntryInsert<'_>,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.quota_ledger (
+            tenant_id, quota_entry_id, quota_account_id, correlation_id,
+            entry_kind, reserved_amount, used_amount, account_version, request_digest
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(entry.tenant_id)
+    .bind(entry.quota_entry_id)
+    .bind(entry.quota_account_id)
+    .bind(entry.correlation_id)
+    .bind(entry.entry_kind)
+    .bind(entry.reserved_amount)
+    .bind(entry.used_amount)
+    .bind(entry.account_version)
+    .bind(entry.request_digest)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+fn validate_quota_mutation(
+    tenant_id: &str,
+    quota_account_id: &str,
+    quota_entry_id: &str,
+    correlation_id: &str,
+    amount: i64,
+    request_digest: &str,
+) -> Result<(), RepositoryError> {
+    for id in [tenant_id, quota_account_id, quota_entry_id, correlation_id] {
+        validate_id(id)?;
+    }
+    validate_digest(request_digest)?;
+    if amount <= 0 {
+        return Err(RepositoryError::InvalidInput(
+            "quota mutation amount must be positive".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_id(value: &str) -> Result<(), RepositoryError> {
+    let Some((prefix, raw_uuid)) = value.split_once('_') else {
+        return Err(RepositoryError::InvalidInput(format!(
+            "{value:?} is not a platform id"
+        )));
+    };
+    if prefix.len() < 2
+        || prefix.len() > 8
+        || !prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    {
+        return Err(RepositoryError::InvalidInput(format!(
+            "{value:?} has an invalid platform id prefix"
+        )));
+    }
+    let uuid = Uuid::parse_str(raw_uuid)
+        .map_err(|_| RepositoryError::InvalidInput(format!("{value:?} has an invalid UUID")))?;
+    if uuid.get_version() != Some(Version::SortRand)
+        || uuid.get_variant() != Variant::RFC4122
+        || format!("{prefix}_{}", uuid.hyphenated()) != value
+    {
+        return Err(RepositoryError::InvalidInput(format!(
+            "{value:?} is not a canonical UUIDv7 platform id"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_digest(value: &str) -> Result<(), RepositoryError> {
+    let valid = value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if valid {
+        Ok(())
+    } else {
+        Err(RepositoryError::InvalidInput(format!(
+            "{value:?} is not a sha256 digest"
+        )))
+    }
+}
+
+fn validate_code(label: &str, value: &str) -> Result<(), RepositoryError> {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return Err(RepositoryError::InvalidInput(format!("{label} is empty")));
+    };
+    if !first.is_ascii_lowercase()
+        || value.len() > 128
+        || !bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(RepositoryError::InvalidInput(format!(
+            "{label} is not a stable code"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_event_type(value: &str) -> Result<(), RepositoryError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value.starts_with(|character: char| character.is_ascii_lowercase())
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.')
+        })
+    {
+        return Err(RepositoryError::InvalidInput(format!(
+            "{value:?} is not a stable event code"
+        )));
+    }
+    Ok(())
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    format!("sha256:{encoded}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct ExamplePayload<'a> {
+        kind: &'a str,
+        value: u32,
+    }
+
+    #[test]
+    fn typed_payload_is_closed_by_version_and_digest() {
+        let payload = TypedPayload::new(
+            2,
+            &ExamplePayload {
+                kind: "example",
+                value: 7,
+            },
+        )
+        .unwrap();
+        assert_eq!(payload.value["schema_version"], 2);
+        assert!(payload.digest.starts_with("sha256:"));
+        assert_eq!(payload.digest.len(), 71);
+    }
+
+    #[test]
+    fn typed_payload_rejects_non_object_and_oversize() {
+        assert!(TypedPayload::new(1, &vec![1, 2, 3]).is_err());
+        assert!(TypedPayload::with_limit(1, &serde_json::json!({"large": "abcd"}), 4).is_err());
+    }
+
+    #[test]
+    fn sandbox_claim_rejects_arbitrary_json_in_the_shared_job_payload() {
+        let now = Utc::now();
+        let job = JobRecord {
+            tenant_id: "ten_0198f1c3-8f49-7c3e-b1f3-773c28367b90".to_owned(),
+            job_id: "job_0198f1c3-8f49-7c3e-b1f3-773c28367b91".to_owned(),
+            work_class: "sandbox".to_owned(),
+            owner_kind: "sandbox_job".to_owned(),
+            owner_id: "sjob_0198f1c3-8f49-7c3e-b1f3-773c28367b92".to_owned(),
+            invocation_id: Some("inv_0198f1c3-8f49-7c3e-b1f3-773c28367b93".to_owned()),
+            run_id: None,
+            node_id: None,
+            state: "ready".to_owned(),
+            version: 1,
+            attempt_no: 0,
+            attempt_limit: 1,
+            lease_epoch: 0,
+            worker_id: None,
+            lease_token_digest: None,
+            lease_expires_at: None,
+            heartbeat_at: None,
+            scheduled_at: now,
+            retry_at: None,
+            deadline: now + Duration::minutes(1),
+            priority: SchedulerPriority::Normal,
+            wake_kind: None,
+            wake_state: None,
+            wake_generation: 0,
+            request_digest: format!("sha256:{}", "a".repeat(64)),
+            result_digest: None,
+            effect_key_digest: None,
+            quota_reservation_id: None,
+            payload: TypedPayload::new(1, &serde_json::json!({"arbitrary": true})).unwrap(),
+            started_at: None,
+            terminal_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        assert!(matches!(
+            validate_claimed_job_payload(&job),
+            Err(RepositoryError::CorruptRow(_))
+        ));
+        let generic_claim = ClaimJobs {
+            work_class: WorkClass::Sandbox.as_str().to_owned(),
+            worker_id: "wrk_0198f1c3-8f49-7c3e-b1f3-773c28367b94".parse().unwrap(),
+            limit: 1,
+            lease_milliseconds: 1_000,
+            lease_token_digests: vec![format!("sha256:{}", "b".repeat(64)).parse().unwrap()],
+        };
+        assert!(matches!(
+            generic_claim.validate(),
+            Err(RepositoryError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn identifiers_and_digests_fail_closed() {
+        assert!(validate_id("job_018f22bb-3c21-7c65-b5f8-67e2452f8a9b").is_ok());
+        assert!(validate_id("job_not-a-uuid").is_err());
+        assert!(validate_digest(&format!("sha256:{}", "a".repeat(64))).is_ok());
+        assert!(validate_digest("sha256:xyz").is_err());
+    }
+
+    #[test]
+    fn only_stopping_map_policies_require_a_batch_admission_barrier() {
+        assert!(!map_policy_requires_admission_barrier(
+            MapFailurePolicy::AllSettled
+        ));
+        assert!(map_policy_requires_admission_barrier(
+            MapFailurePolicy::FailFast
+        ));
+        assert!(map_policy_requires_admission_barrier(
+            MapFailurePolicy::BoundedErrorCount {
+                maximum_failures: 1,
+            }
+        ));
+    }
+}

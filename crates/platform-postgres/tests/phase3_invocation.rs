@@ -1,0 +1,2512 @@
+use chrono::{DateTime, Duration, Utc};
+use insight_platform_capability_adapters::{
+    CapabilityAdapterFailure, CapabilityAdapterRequest, CapabilityAdapterResponse,
+    CapabilityAdapterWorker, CapabilityDispatcher, CapabilityTransportCancelOutcome,
+    CapabilityTransportCancelRequest, InstalledNativeAdapter, InstalledNativeRegistry,
+    NativeCapabilityAdapter,
+};
+use insight_platform_contracts::{
+    canonical_digest, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
+    AuthoringPackage, CapabilityArtifactContract, CapabilityArtifactDirection,
+    CapabilityArtifactPort, CapabilityBackendBinding, CapabilityBackendContract,
+    CapabilityBackendFeatures, CapabilityBackendKind, CapabilityBackendLimits,
+    CapabilityCancellationKind, CapabilityDataFlowPolicy, CapabilityDeploymentClosure,
+    CapabilityIdempotencyKind, CapabilityImplementationResourceSpec, CapabilityInterfaceLimits,
+    CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
+    CapabilityProgressMode, ClosedJsonSchema, CommandAudit, CommandOutcome, DataClassification,
+    DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactVersionRef,
+    FrozenSlotBinding, FrozenSlotTarget, InteractionKind, NativeCapabilityContract, Permission,
+    PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind,
+    PrincipalSnapshot, PublishedVersionPayload, QuotaDimension, RegistryResourceKind,
+    ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot, Sha256Digest, TenantConfig,
+    TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
+};
+use insight_platform_invocations::{
+    AdmitCapabilityInvocation, BackendInputRequest, CapabilityApprovalDecision,
+    CapabilityClaimSlot, CapabilityControlKind, CapabilityInputResponse,
+    CapabilityInvocationRecord, CapabilityOutputValue, CapabilityProgress, CapabilitySignalAudit,
+    CapabilityUncertainty, CapabilityWorkerAudit, ClaimCapabilityJobs, CommitCapabilityOutcome,
+    ControlCapabilityInvocation, DispatchOutcome, EncryptedRemoteState,
+    InvocationApprovalRequirement, InvocationOrigin, InvocationPolicyDecision,
+    InvocationPolicyDecisionBundle, InvocationPolicyDisposition, InvocationTransaction,
+    PrepareCapabilityDispatch, ReconciliationResolution, RecordCapabilityProgress, RemoteWait,
+    ResolveCapabilityApproval, ResolveCapabilityInput, ResolveCapabilityReconciliation,
+    WakeCapabilityInvocation,
+};
+use insight_platform_jobs::{JobFence, WakeSource};
+use insight_platform_orchestrator::RunCurrentSnapshot;
+use insight_platform_postgres::{
+    capability_execution_repository::{
+        ClaimedCapabilityExecution, ControlledCapabilityExecution, PreparedCapabilityExecution,
+    },
+    repository::JobRecord,
+};
+use insight_platform_postgres::{
+    repository::{
+        NewPrincipal, NewQuotaAccount, NewTenant, NewTenantPrincipal, PgRepository,
+        RepositoryError, TypedPayload,
+    },
+    verify_schema,
+};
+use serde_json::json;
+use sqlx::{postgres::PgPoolOptions, PgPool};
+use std::sync::Arc;
+
+#[derive(Clone)]
+struct CompletingNativeAdapter {
+    descriptor: InstalledNativeAdapter,
+    response: CapabilityAdapterResponse,
+}
+
+#[async_trait::async_trait]
+impl NativeCapabilityAdapter for CompletingNativeAdapter {
+    fn descriptor(&self) -> InstalledNativeAdapter {
+        self.descriptor.clone()
+    }
+
+    async fn invoke(
+        &self,
+        _request: &CapabilityAdapterRequest,
+    ) -> Result<CapabilityAdapterResponse, CapabilityAdapterFailure> {
+        Ok(self.response.clone())
+    }
+
+    async fn cancel(
+        &self,
+        _request: CapabilityTransportCancelRequest,
+    ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
+        Ok(CapabilityTransportCancelOutcome::Accepted)
+    }
+}
+
+fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
+    format!(
+        "{}_0198f1c8-32e4-75e1-a9e8-d95ca0f4{suffix:04x}",
+        kind.descriptor().prefix
+    )
+    .parse()
+    .unwrap()
+}
+
+fn digest(character: char) -> Sha256Digest {
+    format!("sha256:{}", character.to_string().repeat(64))
+        .parse()
+        .unwrap()
+}
+
+fn capability_input_schema() -> ClosedJsonSchema {
+    ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "amount": {
+                "description": "Bounded fixture amount.",
+                "x-platform-classification": "internal",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000
+            }
+        },
+        "required": ["amount"],
+        "additionalProperties": false
+    }))
+    .unwrap()
+}
+
+fn capability_output_schema() -> ClosedJsonSchema {
+    ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "accepted": {
+                "description": "Whether the fixture accepted the request.",
+                "x-platform-classification": "internal",
+                "type": "boolean"
+            },
+            "result": {
+                "description": "Bounded fixture result.",
+                "x-platform-classification": "internal",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "x-platform-max-bytes": 1024
+            },
+            "race": {
+                "description": "Bounded race winner.",
+                "x-platform-classification": "internal",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "x-platform-max-bytes": 1024
+            }
+        },
+        "required": [],
+        "additionalProperties": false
+    }))
+    .unwrap()
+}
+
+fn capability_error_schema() -> ClosedJsonSchema {
+    ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "error": {
+                "description": "Bounded declared error.",
+                "x-platform-classification": "internal",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "x-platform-max-bytes": 1024
+            }
+        },
+        "required": ["error"],
+        "additionalProperties": false
+    }))
+    .unwrap()
+}
+
+fn capability_artifacts() -> CapabilityArtifactContract {
+    CapabilityArtifactContract {
+        ports: vec![CapabilityArtifactPort {
+            name: "input".to_owned(),
+            direction: CapabilityArtifactDirection::Input,
+            media_types: vec!["application/json".to_owned()],
+            maximum_count: 1,
+            maximum_single_bytes: 1_073_741_824,
+            maximum_total_bytes: 1_073_741_824,
+            maximum_classification: DataClassification::Restricted,
+        }],
+    }
+}
+
+fn capability_data_policy(policy: &ExactVersionRef) -> CapabilityDataFlowPolicy {
+    CapabilityDataFlowPolicy {
+        maximum_input_classification: DataClassification::Restricted,
+        maximum_output_classification: DataClassification::Restricted,
+        allowed_regions: vec!["global".parse::<DataRegion>().unwrap()],
+        declassification_policy: Some(policy.clone()),
+    }
+}
+
+fn audit(
+    tenant_id: &ResourceId,
+    principal_id: &ResourceId,
+    principal_kind: PrincipalKind,
+    base: u16,
+    idempotency: char,
+    request: char,
+) -> CommandAudit {
+    CommandAudit {
+        tenant_id: tenant_id.clone(),
+        principal_id: principal_id.clone(),
+        principal_kind,
+        receipt_id: id(ResourceKind::Receipt, base),
+        event_id: id(ResourceKind::Event, base + 1),
+        outbox_id: id(ResourceKind::OutboxEvent, base + 2),
+        idempotency_key_digest: digest(idempotency),
+        request_digest: digest(request),
+        receipt_expires_at: Utc::now() + Duration::hours(2),
+    }
+}
+
+fn allowed_policy(policy: &ExactVersionRef) -> InvocationPolicyDecisionBundle {
+    InvocationPolicyDecisionBundle::build(
+        vec![InvocationPolicyDecision {
+            policy: policy.clone(),
+            disposition: InvocationPolicyDisposition::Allowed,
+            evidence_digest: digest('8'),
+        }],
+        None,
+    )
+    .unwrap()
+}
+
+fn approval_policy(policy: &ExactVersionRef) -> InvocationPolicyDecisionBundle {
+    InvocationPolicyDecisionBundle::build(
+        vec![InvocationPolicyDecision {
+            policy: policy.clone(),
+            disposition: InvocationPolicyDisposition::ApprovalRequired,
+            evidence_digest: digest('9'),
+        }],
+        Some(InvocationApprovalRequirement {
+            policy_revision: policy.clone(),
+            eligible_principal_rule_digest: digest('a'),
+            safe_prompt_key: "approve_capability_write".to_owned(),
+        }),
+    )
+    .unwrap()
+}
+
+async fn execute_admit(
+    repository: &PgRepository,
+    command: AdmitCapabilityInvocation,
+) -> Result<CommandOutcome<CapabilityInvocationRecord>, RepositoryError> {
+    let mut transaction = repository.begin_invocation_transaction().await?;
+    match transaction.admit_capability_invocation(command).await {
+        Ok(outcome) => {
+            transaction.commit().await?;
+            Ok(outcome)
+        }
+        Err(failure) => {
+            transaction.rollback().await?;
+            Err(failure)
+        }
+    }
+}
+
+async fn execute_approval(
+    repository: &PgRepository,
+    command: ResolveCapabilityApproval,
+) -> Result<CommandOutcome<CapabilityInvocationRecord>, RepositoryError> {
+    let mut transaction = repository.begin_invocation_transaction().await?;
+    match transaction.resolve_capability_approval(command).await {
+        Ok(outcome) => {
+            transaction.commit().await?;
+            Ok(outcome)
+        }
+        Err(failure) => {
+            transaction.rollback().await?;
+            Err(failure)
+        }
+    }
+}
+
+fn worker_audit(
+    tenant_id: &ResourceId,
+    worker_id: &ResourceId,
+    base: u16,
+    idempotency: char,
+    request: char,
+) -> CapabilityWorkerAudit {
+    CapabilityWorkerAudit {
+        tenant_id: tenant_id.clone(),
+        worker_process_generation_id: worker_id.clone(),
+        receipt_id: id(ResourceKind::Receipt, base),
+        event_id: id(ResourceKind::Event, base + 1),
+        outbox_id: id(ResourceKind::OutboxEvent, base + 2),
+        idempotency_key_digest: digest(idempotency),
+        request_digest: digest(request),
+        receipt_expires_at: Utc::now() + Duration::hours(2),
+    }
+}
+
+async fn execute_prepare(
+    repository: &PgRepository,
+    command: PrepareCapabilityDispatch,
+) -> Result<
+    CommandOutcome<
+        insight_platform_postgres::capability_execution_repository::PreparedCapabilityExecution,
+    >,
+    RepositoryError,
+> {
+    let mut transaction = repository.begin_invocation_transaction().await?;
+    match transaction.prepare_capability_dispatch(command).await {
+        Ok(outcome) => {
+            transaction.commit().await?;
+            Ok(outcome)
+        }
+        Err(failure) => {
+            transaction.rollback().await?;
+            Err(failure)
+        }
+    }
+}
+
+async fn execute_outcome(
+    repository: &PgRepository,
+    command: CommitCapabilityOutcome,
+) -> Result<
+    CommandOutcome<
+        insight_platform_postgres::capability_execution_repository::PreparedCapabilityExecution,
+    >,
+    RepositoryError,
+> {
+    let mut transaction = repository.begin_invocation_transaction().await?;
+    match transaction.commit_capability_outcome(command).await {
+        Ok(outcome) => {
+            transaction.commit().await?;
+            Ok(outcome)
+        }
+        Err(failure) => {
+            transaction.rollback().await?;
+            Err(failure)
+        }
+    }
+}
+
+async fn execute_wake(
+    repository: &PgRepository,
+    command: WakeCapabilityInvocation,
+) -> Result<CommandOutcome<PreparedCapabilityExecution>, RepositoryError> {
+    let mut transaction = repository.begin_invocation_transaction().await?;
+    match transaction.wake_capability_invocation(command).await {
+        Ok(outcome) => {
+            transaction.commit().await?;
+            Ok(outcome)
+        }
+        Err(failure) => {
+            transaction.rollback().await?;
+            Err(failure)
+        }
+    }
+}
+
+async fn execute_input(
+    repository: &PgRepository,
+    command: ResolveCapabilityInput,
+) -> Result<CommandOutcome<PreparedCapabilityExecution>, RepositoryError> {
+    let mut transaction = repository.begin_invocation_transaction().await?;
+    match transaction.resolve_capability_input(command).await {
+        Ok(outcome) => {
+            transaction.commit().await?;
+            Ok(outcome)
+        }
+        Err(failure) => {
+            transaction.rollback().await?;
+            Err(failure)
+        }
+    }
+}
+
+async fn execute_progress(
+    repository: &PgRepository,
+    command: RecordCapabilityProgress,
+) -> Result<CommandOutcome<JobRecord>, RepositoryError> {
+    let mut transaction = repository.begin_invocation_transaction().await?;
+    match transaction.record_capability_progress(command).await {
+        Ok(outcome) => {
+            transaction.commit().await?;
+            Ok(outcome)
+        }
+        Err(failure) => {
+            transaction.rollback().await?;
+            Err(failure)
+        }
+    }
+}
+
+async fn execute_control(
+    repository: &PgRepository,
+    command: ControlCapabilityInvocation,
+) -> Result<CommandOutcome<ControlledCapabilityExecution>, RepositoryError> {
+    let mut transaction = repository.begin_invocation_transaction().await?;
+    match transaction.control_capability_invocation(command).await {
+        Ok(outcome) => {
+            transaction.commit().await?;
+            Ok(outcome)
+        }
+        Err(failure) => {
+            transaction.rollback().await?;
+            Err(failure)
+        }
+    }
+}
+
+async fn execute_reconciliation(
+    repository: &PgRepository,
+    command: ResolveCapabilityReconciliation,
+) -> Result<CommandOutcome<PreparedCapabilityExecution>, RepositoryError> {
+    let mut transaction = repository.begin_invocation_transaction().await?;
+    match transaction.resolve_capability_reconciliation(command).await {
+        Ok(outcome) => {
+            transaction.commit().await?;
+            Ok(outcome)
+        }
+        Err(failure) => {
+            transaction.rollback().await?;
+            Err(failure)
+        }
+    }
+}
+
+fn signal_audit(
+    tenant_id: &ResourceId,
+    base: u16,
+    idempotency: char,
+    request: char,
+) -> CapabilitySignalAudit {
+    CapabilitySignalAudit {
+        tenant_id: tenant_id.clone(),
+        receipt_id: id(ResourceKind::Receipt, base),
+        event_id: id(ResourceKind::Event, base + 1),
+        outbox_id: id(ResourceKind::OutboxEvent, base + 2),
+        idempotency_key_digest: digest(idempotency),
+        request_digest: digest(request),
+        receipt_expires_at: Utc::now() + Duration::hours(2),
+    }
+}
+
+#[derive(Debug)]
+struct ClaimEvidence {
+    claimed: ClaimedCapabilityExecution,
+    worker_id: ResourceId,
+    lease_token: Sha256Digest,
+}
+
+fn native_cancel_worker(
+    repository: &PgRepository,
+    claim: &ClaimEvidence,
+) -> CapabilityAdapterWorker<PgRepository> {
+    let native_contract = match &claim
+        .claimed
+        .execution_contract
+        .implementation
+        .backend_contract
+    {
+        CapabilityBackendContract::Native(contract) => contract,
+        _ => panic!("fixture cancellation did not resolve its Native contract"),
+    };
+    let mut registry = InstalledNativeRegistry::default();
+    registry
+        .install(Arc::new(CompletingNativeAdapter {
+            descriptor: InstalledNativeAdapter {
+                adapter_id: native_contract.adapter_id.clone(),
+                adapter_version: native_contract.adapter_version.clone(),
+                module_digest: native_contract.module_digest.clone(),
+                entrypoint_id: native_contract.entrypoint_id.clone(),
+            },
+            // Cancellation never invokes this response path.
+            response: CapabilityAdapterResponse {
+                outcome: DispatchOutcome::Uncertain(CapabilityUncertainty {
+                    observation_digest: digest('1'),
+                    policy_path_digest: digest('2'),
+                    external_identity_digest: digest('3'),
+                    manual: true,
+                }),
+            },
+        }))
+        .unwrap();
+    CapabilityAdapterWorker::new(
+        Arc::new(CapabilityDispatcher::new(registry)),
+        repository.clone(),
+    )
+}
+
+impl ClaimEvidence {
+    fn fence(&self) -> JobFence {
+        JobFence {
+            expected_version: u64::try_from(self.claimed.job.version).unwrap(),
+            worker_process_generation_id: self.worker_id.clone(),
+            lease_generation: u64::try_from(self.claimed.job.lease_epoch).unwrap(),
+            token_digest: self.lease_token.clone(),
+        }
+    }
+}
+
+async fn claim_one(repository: &PgRepository, tenant_id: &ResourceId, base: u16) -> ClaimEvidence {
+    let worker_id = id(ResourceKind::WorkerProcessGeneration, base);
+    let lease_token = digest(char::from_digit(u32::from(base % 10), 10).unwrap_or('0'));
+    let mut claims = repository
+        .claim_capability_jobs(ClaimCapabilityJobs {
+            work_class: WorkClass::CapabilityNative,
+            worker_process_generation_id: worker_id.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            slots: vec![CapabilityClaimSlot {
+                lease_token_digest: lease_token.clone(),
+                quota_reservation_id: id(ResourceKind::UsageReservation, base + 1),
+                quota_entry_ids: vec![
+                    id(ResourceKind::QuotaLedgerEntry, base + 2),
+                    id(ResourceKind::QuotaLedgerEntry, base + 3),
+                ],
+                event_id: id(ResourceKind::Event, base + 4),
+                outbox_id: id(ResourceKind::OutboxEvent, base + 5),
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        claims.len(),
+        1,
+        "expected exactly one claim for {tenant_id}"
+    );
+    ClaimEvidence {
+        claimed: claims.pop().unwrap(),
+        worker_id,
+        lease_token,
+    }
+}
+
+async fn admit_prepare_and_claim(
+    repository: &PgRepository,
+    fixture: &Fixture,
+    node_id: &ResourceId,
+    base: u16,
+) -> (CapabilityInvocationRecord, ResourceId, ClaimEvidence) {
+    let admission = command_for_node(fixture, node_id, base);
+    let admitted = match execute_admit(repository, admission).await.unwrap() {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh capability admission replayed"),
+    };
+    assert_eq!(admitted.payload.admission.attempt_limit, 1);
+    let job_id = id(ResourceKind::Job, base + 0x10);
+    let prepared = match execute_prepare(
+        repository,
+        PrepareCapabilityDispatch {
+            audit: audit(
+                &fixture.tenant_id,
+                &fixture.principal_id,
+                PrincipalKind::AgentRunner,
+                base + 0x11,
+                '1',
+                '2',
+            ),
+            invocation_id: admitted.invocation_id.clone(),
+            expected_invocation_version: admitted.version,
+            job_id: job_id.clone(),
+            scheduled_at: Utc::now() - Duration::seconds(1),
+        },
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh capability prepare replayed"),
+    };
+    let claim = claim_one(repository, &fixture.tenant_id, base + 0x20).await;
+    assert_eq!(
+        claim.claimed.invocation.invocation_id,
+        admitted.invocation_id
+    );
+    assert_eq!(claim.claimed.job.job_id, job_id.to_string());
+    assert_eq!(claim.claimed.job.attempt_no, 1);
+    (prepared.invocation, job_id, claim)
+}
+
+struct Fixture {
+    tenant_id: ResourceId,
+    other_tenant_id: ResourceId,
+    principal_id: ResourceId,
+    denied_principal_id: ResourceId,
+    other_principal_id: ResourceId,
+    run_id: ResourceId,
+    ready_node_id: ResourceId,
+    approval_node_id: ResourceId,
+    deferred_node_id: ResourceId,
+    uncertain_node_id: ResourceId,
+    cancel_node_id: ResourceId,
+    cancel_worker_node_id: ResourceId,
+    inline_value_id: ResourceId,
+    artifact_value_id: ResourceId,
+    artifact_id: ResourceId,
+    capability_deployment: ExactDeploymentRef,
+    output_schema_digest: Sha256Digest,
+    policy: ExactVersionRef,
+}
+
+#[test]
+fn capability_admission_is_exact_atomic_replayable_and_approval_first_winner() {
+    std::thread::Builder::new()
+        .name("phase3-invocation-fixture".to_owned())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(run_capability_phase3_fixture());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn run_capability_phase3_fixture() {
+    let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
+        eprintln!("PLATFORM_TEST_DATABASE_URL is unset; real PostgreSQL fixture skipped");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(16)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    verify_schema(&pool).await.unwrap();
+    let repository = PgRepository::new(pool.clone());
+    let fixture = seed_fixture(&pool, &repository).await;
+
+    let denied = AdmitCapabilityInvocation {
+        audit: audit(
+            &fixture.tenant_id,
+            &fixture.denied_principal_id,
+            PrincipalKind::AgentRunner,
+            0x100,
+            '1',
+            '1',
+        ),
+        invocation_id: id(ResourceKind::CapabilityInvocation, 0x110),
+        run_id: fixture.run_id.clone(),
+        node_execution_id: fixture.ready_node_id.clone(),
+        expected_run_version: 1,
+        expected_node_version: 1,
+        slot_id: "writer".to_owned(),
+        input_value_id: fixture.inline_value_id.clone(),
+        input_artifact_link_id: None,
+        origin: InvocationOrigin::PlanNode {
+            node_execution_id: fixture.ready_node_id.clone(),
+        },
+        selected_candidate_ordinal: 0,
+        selector_input_digest: digest('2'),
+        policy_decisions: allowed_policy(&fixture.policy),
+        approval_task_id: None,
+        requested_attempt_limit: 3,
+        requested_retry_backoff_milliseconds: 100,
+        mcp_runtime: None,
+    };
+    match execute_admit(&repository, denied).await {
+        Err(RepositoryError::PermissionDenied) => {}
+        other => panic!("denied admission returned {other:?}"),
+    }
+
+    let cross_tenant = AdmitCapabilityInvocation {
+        audit: audit(
+            &fixture.other_tenant_id,
+            &fixture.other_principal_id,
+            PrincipalKind::AgentRunner,
+            0x120,
+            '2',
+            '2',
+        ),
+        invocation_id: id(ResourceKind::CapabilityInvocation, 0x130),
+        run_id: fixture.run_id.clone(),
+        node_execution_id: fixture.ready_node_id.clone(),
+        expected_run_version: 1,
+        expected_node_version: 1,
+        slot_id: "writer".to_owned(),
+        input_value_id: fixture.inline_value_id.clone(),
+        input_artifact_link_id: None,
+        origin: InvocationOrigin::PlanNode {
+            node_execution_id: fixture.ready_node_id.clone(),
+        },
+        selected_candidate_ordinal: 0,
+        selector_input_digest: digest('3'),
+        policy_decisions: allowed_policy(&fixture.policy),
+        approval_task_id: None,
+        requested_attempt_limit: 3,
+        requested_retry_backoff_milliseconds: 100,
+        mcp_runtime: None,
+    };
+    assert!(matches!(
+        execute_admit(&repository, cross_tenant).await,
+        Err(RepositoryError::NotFound("run"))
+    ));
+
+    let mut invalid_candidate = command_for_inline(&fixture, 0x140);
+    invalid_candidate.selected_candidate_ordinal = 1;
+    assert!(matches!(
+        execute_admit(&repository, invalid_candidate).await,
+        Err(RepositoryError::InvalidInput(_))
+    ));
+
+    let inline = command_for_inline(&fixture, 0x150);
+    let applied = match execute_admit(&repository, inline.clone()).await.unwrap() {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("first inline admission replayed"),
+    };
+    assert_eq!(
+        applied.state,
+        insight_platform_contracts::InvocationState::Ready
+    );
+    assert_eq!(applied.payload.admission.attempt_limit, 1);
+    assert_eq!(
+        applied.payload.admission.deployment,
+        fixture.capability_deployment
+    );
+    assert_eq!(
+        applied.payload.admission.input.value_id,
+        fixture.inline_value_id
+    );
+    assert!(matches!(
+        execute_admit(&repository, inline.clone()).await.unwrap(),
+        CommandOutcome::Replayed(record) if record == applied
+    ));
+    let mut conflict = inline;
+    conflict.audit.request_digest = digest('f');
+    assert!(matches!(
+        execute_admit(&repository, conflict).await,
+        Err(RepositoryError::IdempotencyConflict)
+    ));
+
+    let capability_job_id = id(ResourceKind::Job, 0x300);
+    let quota_reservation_id = id(ResourceKind::UsageReservation, 0x305);
+    let prepared = match execute_prepare(
+        &repository,
+        PrepareCapabilityDispatch {
+            audit: audit(
+                &fixture.tenant_id,
+                &fixture.principal_id,
+                PrincipalKind::AgentRunner,
+                0x301,
+                '1',
+                '2',
+            ),
+            invocation_id: applied.invocation_id.clone(),
+            expected_invocation_version: applied.version,
+            job_id: capability_job_id.clone(),
+            scheduled_at: Utc::now() - Duration::seconds(1),
+        },
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("first Capability dispatch prepare replayed"),
+    };
+    assert_eq!(prepared.invocation.version, applied.version + 1);
+    assert_eq!(prepared.job.state, "ready");
+    let worker_id = id(ResourceKind::WorkerProcessGeneration, 0x304);
+    let lease_token = digest('3');
+    let claim_slot = CapabilityClaimSlot {
+        lease_token_digest: lease_token.clone(),
+        quota_reservation_id: quota_reservation_id.clone(),
+        quota_entry_ids: vec![
+            id(ResourceKind::QuotaLedgerEntry, 0x306),
+            id(ResourceKind::QuotaLedgerEntry, 0x307),
+        ],
+        event_id: id(ResourceKind::Event, 0x308),
+        outbox_id: id(ResourceKind::OutboxEvent, 0x309),
+    };
+    let mut claims = repository
+        .claim_capability_jobs(ClaimCapabilityJobs {
+            work_class: WorkClass::CapabilityNative,
+            worker_process_generation_id: worker_id.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            slots: vec![claim_slot],
+        })
+        .await
+        .unwrap();
+    assert_eq!(claims.len(), 1);
+    let claimed = claims.pop().unwrap();
+    assert_eq!(claimed.invocation.invocation_id, applied.invocation_id);
+    assert_eq!(claimed.job.state, "running");
+    assert_eq!(
+        claimed.job.quota_reservation_id,
+        Some(quota_reservation_id.to_string())
+    );
+    let output_json = json!({"accepted": true});
+    let output_digest: Sha256Digest = canonical_digest(&output_json).unwrap().parse().unwrap();
+    assert_eq!(claimed.fence.worker_process_generation_id, worker_id);
+    assert_eq!(claimed.fence.token_digest, lease_token);
+    let response = CapabilityAdapterResponse {
+        outcome: DispatchOutcome::Completed(CapabilityOutputValue {
+            value_id: id(ResourceKind::RunValue, 0x315),
+            classification: DataClassification::Internal,
+            schema_digest: fixture.output_schema_digest.clone(),
+            content_digest: output_digest,
+            value: ValueRef::Inline { value: output_json },
+            artifact_link_id: None,
+            validation_evidence_digest: digest('6'),
+        }),
+    };
+    let completion_audit = worker_audit(&fixture.tenant_id, &worker_id, 0x310, '4', '5');
+    assert!(matches!(
+        claimed.adapter_job(
+            digest('6'),
+            completion_audit.clone(),
+            claimed.quota_reservation_entry_ids.clone(),
+            None,
+        ),
+        Err(RepositoryError::InvalidInput(_))
+    ));
+    let worker_command = claimed
+        .adapter_job(
+            digest('6'),
+            completion_audit.clone(),
+            vec![
+                id(ResourceKind::QuotaLedgerEntry, 0x313),
+                id(ResourceKind::QuotaLedgerEntry, 0x314),
+            ],
+            None,
+        )
+        .unwrap();
+    assert_eq!(worker_command.execution.physical_attempt, 1);
+    assert_eq!(worker_command.execution.attempt_limit, 1);
+    assert_eq!(
+        worker_command.execution.admission_digest,
+        claimed.invocation.payload.admission.canonical_digest
+    );
+    let backend_contract = &claimed.execution_contract.implementation.backend_contract;
+    let CapabilityBackendContract::Native(native_contract) = backend_contract else {
+        panic!("fixture claim did not resolve its Native contract");
+    };
+    let mut registry = InstalledNativeRegistry::default();
+    registry
+        .install(Arc::new(CompletingNativeAdapter {
+            descriptor: InstalledNativeAdapter {
+                adapter_id: native_contract.adapter_id.clone(),
+                adapter_version: native_contract.adapter_version.clone(),
+                module_digest: native_contract.module_digest.clone(),
+                entrypoint_id: native_contract.entrypoint_id.clone(),
+            },
+            response: response.clone(),
+        }))
+        .unwrap();
+    let worker = CapabilityAdapterWorker::new(
+        Arc::new(CapabilityDispatcher::new(registry)),
+        repository.clone(),
+    );
+    let replay_outcome = CommitCapabilityOutcome {
+        audit: completion_audit,
+        invocation_id: worker_command.execution.invocation_id.clone(),
+        job_id: worker_command.execution.job_id.clone(),
+        expected_invocation_version: worker_command.expected_invocation_version,
+        fence: worker_command.fence.clone(),
+        quota_entry_ids: worker_command.quota_entry_ids.clone(),
+        outcome: response.outcome,
+    };
+    let completed = match worker.execute(worker_command).await.unwrap() {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("first Capability outcome replayed"),
+    };
+    assert_eq!(
+        completed.invocation.state,
+        insight_platform_contracts::InvocationState::Succeeded
+    );
+    assert_eq!(completed.job.state, "succeeded");
+    assert!(completed.job.quota_reservation_id.is_none());
+    assert!(matches!(
+        execute_outcome(&repository, replay_outcome).await.unwrap(),
+        CommandOutcome::Replayed(record) if record == completed
+    ));
+    let quota_totals: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT count(*), COALESCE(sum(reserved_value), 0)::bigint,
+               (SELECT count(*) FROM insight_platform.quota_ledger
+                 WHERE tenant_id = $1)
+        FROM insight_platform.quota_accounts WHERE tenant_id = $1
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(quota_totals, (2, 0, 4));
+
+    let approval = command_for_artifact(&fixture, 0x180);
+    let awaiting = match execute_admit(&repository, approval.clone()).await.unwrap() {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("first approval admission replayed"),
+    };
+    assert_eq!(
+        awaiting.state,
+        insight_platform_contracts::InvocationState::AwaitingApproval
+    );
+    assert_eq!(
+        awaiting.payload.admission.input_artifact_link_id,
+        approval.input_artifact_link_id
+    );
+    assert!(matches!(
+        execute_admit(&repository, approval.clone()).await.unwrap(),
+        CommandOutcome::Replayed(record) if record == awaiting
+    ));
+
+    let mut wrong_rule = approval_resolution(&fixture, &approval, 0x1a0, true);
+    wrong_rule.eligible_principal_rule_digest = digest('b');
+    assert!(matches!(
+        execute_approval(&repository, wrong_rule).await,
+        Err(RepositoryError::Conflict(
+            "Capability approval Task binding"
+        ))
+    ));
+
+    let approve = approval_resolution(&fixture, &approval, 0x1b0, true);
+    let reject = approval_resolution(&fixture, &approval, 0x1c0, false);
+    let (approve_result, reject_result) = tokio::join!(
+        execute_approval(&repository, approve.clone()),
+        execute_approval(&repository, reject.clone()),
+    );
+    let (winner, winner_command) = match (approve_result, reject_result) {
+        (Ok(CommandOutcome::Applied(record)), Err(RepositoryError::Conflict(_))) => {
+            (record, approve)
+        }
+        (Err(RepositoryError::Conflict(_)), Ok(CommandOutcome::Applied(record))) => {
+            (record, reject)
+        }
+        other => panic!("approval race did not have one winner: {other:?}"),
+    };
+    assert!(matches!(
+        execute_approval(&repository, winner_command).await.unwrap(),
+        CommandOutcome::Replayed(record) if record == winner
+    ));
+    assert!(matches!(
+        winner.state,
+        insight_platform_contracts::InvocationState::Ready
+            | insight_platform_contracts::InvocationState::Failed
+    ));
+
+    let counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+          (SELECT count(*) FROM insight_platform.invocations
+             WHERE tenant_id = $1 AND invocation_kind = 'capability'),
+          (SELECT count(*) FROM insight_platform.tasks
+             WHERE tenant_id = $1 AND task_kind = 'approval'),
+          (SELECT count(*) FROM insight_platform.artifact_links
+             WHERE tenant_id = $1 AND owner_kind = 'capability_invocation'
+               AND target_artifact_id = $2 AND state = 'active'),
+          (SELECT count(*) FROM insight_platform.receipts
+             WHERE tenant_id = $1 AND scope_kind = 'capability_invocation'
+               AND state = 'succeeded'),
+          (SELECT count(*) FROM insight_platform.events
+             WHERE tenant_id = $1 AND aggregate_kind = 'capability_invocation'),
+          (SELECT count(*) FROM insight_platform.outbox_events WHERE tenant_id = $1)
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.artifact_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, (2, 1, 1, 4, 6, 6));
+    let orphan_negative_receipts: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*) FROM insight_platform.receipts
+        WHERE receipt_id IN ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(id(ResourceKind::Receipt, 0x100).to_string())
+    .bind(id(ResourceKind::Receipt, 0x120).to_string())
+    .bind(id(ResourceKind::Receipt, 0x140).to_string())
+    .bind(id(ResourceKind::Receipt, 0x1a0).to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(orphan_negative_receipts, 0);
+
+    // A non-idempotent dispatch may defer and request input after its only physical attempt has
+    // started. Callback/input continuation must rotate the lease fence without consuming attempt 2.
+    let (_, deferred_job_id, first_claim) =
+        admit_prepare_and_claim(&repository, &fixture, &fixture.deferred_node_id, 0x400).await;
+    let original_expiry = first_claim.claimed.job.lease_expires_at;
+    let original_heartbeat = first_claim.claimed.job.heartbeat_at;
+    let progress_job = match execute_progress(
+        &repository,
+        RecordCapabilityProgress {
+            audit: worker_audit(&fixture.tenant_id, &first_claim.worker_id, 0x450, '1', '2'),
+            invocation_id: first_claim.claimed.invocation.invocation_id.clone(),
+            job_id: deferred_job_id.clone(),
+            expected_invocation_version: first_claim.claimed.invocation.version,
+            fence: first_claim.fence(),
+            progress: CapabilityProgress {
+                sequence: 1,
+                stage_key: "remote_started".to_owned(),
+                schema_digest: digest('8'),
+                payload_digest: digest('3'),
+                payload_bytes: 32,
+            },
+        },
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(job) => job,
+        CommandOutcome::Replayed(_) => panic!("fresh progress replayed"),
+    };
+    assert_eq!(progress_job.lease_expires_at, original_expiry);
+    assert_eq!(progress_job.heartbeat_at, original_heartbeat);
+    let stale_progress_receipt = id(ResourceKind::Receipt, 0x460);
+    let mut stale_progress_fence = first_claim.fence();
+    stale_progress_fence.expected_version = u64::try_from(progress_job.version).unwrap();
+    stale_progress_fence.token_digest = digest('f');
+    assert!(execute_progress(
+        &repository,
+        RecordCapabilityProgress {
+            audit: worker_audit(&fixture.tenant_id, &first_claim.worker_id, 0x460, '4', '5',),
+            invocation_id: first_claim.claimed.invocation.invocation_id.clone(),
+            job_id: deferred_job_id.clone(),
+            expected_invocation_version: first_claim.claimed.invocation.version,
+            fence: stale_progress_fence,
+            progress: CapabilityProgress {
+                sequence: 2,
+                stage_key: "stale".to_owned(),
+                schema_digest: digest('8'),
+                payload_digest: digest('6'),
+                payload_bytes: 16,
+            },
+        },
+    )
+    .await
+    .is_err());
+    let stale_progress_receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND receipt_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(stale_progress_receipt.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stale_progress_receipts, 0);
+
+    let remote_state = EncryptedRemoteState {
+        scheme: "aes256_gcm_v1".to_owned(),
+        key_id: "remote-state-key-1".to_owned(),
+        key_reference_digest: digest('7'),
+        ciphertext: "ZW5jcnlwdGVkLXJlbW90ZS1zdGF0ZQ==".to_owned(),
+        plaintext_digest: digest('8'),
+    };
+    let callback_binding_digest = digest('9');
+    let next_poll_at = Utc::now() + Duration::seconds(1);
+    let deferred_fence = JobFence {
+        expected_version: u64::try_from(progress_job.version).unwrap(),
+        ..first_claim.fence()
+    };
+    let deferred = match execute_outcome(
+        &repository,
+        CommitCapabilityOutcome {
+            audit: worker_audit(&fixture.tenant_id, &first_claim.worker_id, 0x470, '7', '8'),
+            invocation_id: first_claim.claimed.invocation.invocation_id.clone(),
+            job_id: deferred_job_id.clone(),
+            expected_invocation_version: first_claim.claimed.invocation.version,
+            fence: deferred_fence,
+            quota_entry_ids: vec![
+                id(ResourceKind::QuotaLedgerEntry, 0x473),
+                id(ResourceKind::QuotaLedgerEntry, 0x474),
+            ],
+            outcome: DispatchOutcome::Deferred(RemoteWait {
+                encrypted_state: remote_state.clone(),
+                external_identity_digest: digest('a'),
+                accepted_sources: vec![WakeSource::Callback, WakeSource::Poll],
+                next_poll_at: Some(next_poll_at),
+                callback_binding_digest: Some(callback_binding_digest.clone()),
+            }),
+        },
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh deferred outcome replayed"),
+    };
+    assert_eq!(
+        deferred.invocation.state,
+        insight_platform_contracts::InvocationState::Deferred
+    );
+    assert_eq!(deferred.job.state, "waiting");
+    assert!(deferred.job.quota_reservation_id.is_none());
+    let deferred_generation = u64::try_from(deferred.job.lease_epoch).unwrap();
+
+    let stale_callback_event = id(ResourceKind::Event, 0x481);
+    let stale_callback_outbox = id(ResourceKind::OutboxEvent, 0x482);
+    let stale_callback = match execute_wake(
+        &repository,
+        WakeCapabilityInvocation {
+            audit: signal_audit(&fixture.tenant_id, 0x480, '9', 'a'),
+            invocation_id: deferred.invocation.invocation_id.clone(),
+            job_id: deferred_job_id.clone(),
+            expected_generation: deferred_generation,
+            source: WakeSource::Callback,
+            callback_binding_digest: Some(digest('b')),
+        },
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh stale callback replayed"),
+    };
+    assert_eq!(stale_callback.invocation, deferred.invocation);
+    let stale_callback_durable_rows: i64 = sqlx::query_scalar(
+        r#"
+        SELECT (SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND event_id = $2)
+             + (SELECT count(*) FROM insight_platform.outbox_events WHERE tenant_id = $1 AND outbox_id = $3)
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(stale_callback_event.to_string())
+    .bind(stale_callback_outbox.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stale_callback_durable_rows, 0);
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    let callback_command = WakeCapabilityInvocation {
+        audit: signal_audit(&fixture.tenant_id, 0x490, 'c', 'd'),
+        invocation_id: deferred.invocation.invocation_id.clone(),
+        job_id: deferred_job_id.clone(),
+        expected_generation: deferred_generation,
+        source: WakeSource::Callback,
+        callback_binding_digest: Some(callback_binding_digest),
+    };
+    let poll_command = WakeCapabilityInvocation {
+        audit: signal_audit(&fixture.tenant_id, 0x498, 'e', 'f'),
+        invocation_id: deferred.invocation.invocation_id.clone(),
+        job_id: deferred_job_id.clone(),
+        expected_generation: deferred_generation,
+        source: WakeSource::Poll,
+        callback_binding_digest: None,
+    };
+    let callback_future = Box::pin(execute_wake(&repository, callback_command));
+    let poll_future = Box::pin(execute_wake(&repository, poll_command));
+    let (callback_result, poll_result) = tokio::join!(callback_future, poll_future);
+    let callback_record = match callback_result.unwrap() {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh callback replayed"),
+    };
+    let poll_record = match poll_result.unwrap() {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh poll replayed"),
+    };
+    assert_eq!(callback_record.invocation, poll_record.invocation);
+    assert_eq!(callback_record.job, poll_record.job);
+    let wake_winner_rows: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+          (SELECT count(*) FROM insight_platform.events
+             WHERE tenant_id = $1 AND event_id IN ($2, $3)),
+          (SELECT count(*) FROM insight_platform.outbox_events
+             WHERE tenant_id = $1 AND outbox_id IN ($4, $5))
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(id(ResourceKind::Event, 0x491).to_string())
+    .bind(id(ResourceKind::Event, 0x499).to_string())
+    .bind(id(ResourceKind::OutboxEvent, 0x492).to_string())
+    .bind(id(ResourceKind::OutboxEvent, 0x49a).to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(wake_winner_rows, (1, 1));
+    let woken = callback_record;
+    assert_eq!(woken.job.state, "ready");
+    let second_claim = claim_one(&repository, &fixture.tenant_id, 0x4a0).await;
+    assert_eq!(second_claim.claimed.job.job_id, deferred_job_id.to_string());
+    assert_eq!(second_claim.claimed.job.attempt_no, 1);
+    assert!(second_claim.claimed.job.lease_epoch > deferred.job.lease_epoch);
+    let resumed_execution = second_claim.claimed.adapter_execution(digest('6')).unwrap();
+    let resumed_continuation = resumed_execution
+        .continuation
+        .expect("the claimed Job must recover its encrypted remote continuation");
+    assert_eq!(resumed_continuation.encrypted_remote_state, remote_state);
+    assert_eq!(
+        resumed_continuation.external_identity_digest,
+        Some(digest('a'))
+    );
+    assert!(resumed_continuation.resume_input.is_none());
+    assert!(resumed_continuation.poll_count <= 1);
+    let persisted_remote_payload: String = sqlx::query_scalar(
+        "SELECT payload::text FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(deferred_job_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!persisted_remote_payload.contains("encrypted-remote-state"));
+    let persisted_resume_flag: bool = sqlx::query_scalar(
+        "SELECT (payload->>'resume_same_attempt')::boolean FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(deferred_job_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!persisted_resume_flag);
+
+    let input_task_id = id(ResourceKind::Interaction, 0x4c0);
+    let response_schema =
+        insight_platform_contracts::InteractionSchemaDocument::build(serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "approved": {"type": "boolean"}
+            },
+            "required": ["approved"],
+            "additionalProperties": false
+        }))
+        .unwrap();
+    let input_schema_digest = response_schema.canonical_digest.clone();
+    let eligible_rule_digest = digest('d');
+    let input_required = match execute_outcome(
+        &repository,
+        CommitCapabilityOutcome {
+            audit: worker_audit(&fixture.tenant_id, &second_claim.worker_id, 0x4b0, 'e', 'f'),
+            invocation_id: second_claim.claimed.invocation.invocation_id.clone(),
+            job_id: deferred_job_id.clone(),
+            expected_invocation_version: second_claim.claimed.invocation.version,
+            fence: second_claim.fence(),
+            quota_entry_ids: vec![
+                id(ResourceKind::QuotaLedgerEntry, 0x4b3),
+                id(ResourceKind::QuotaLedgerEntry, 0x4b4),
+            ],
+            outcome: DispatchOutcome::InputRequired(BackendInputRequest {
+                input_task_id: input_task_id.clone(),
+                interaction_kind: InteractionKind::Form,
+                safe_prompt_key: "confirm_remote_write".to_owned(),
+                response_schema,
+                response_schema_digest: input_schema_digest.clone(),
+                eligible_principal_rule_digest: eligible_rule_digest.clone(),
+                exact_eligible_principal_id: None,
+                opaque_state_digest: remote_state.plaintext_digest.clone(),
+                encrypted_state: remote_state.clone(),
+                external_identity_digest: digest('a'),
+                deadline: Utc::now() + Duration::minutes(10),
+            }),
+        },
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh input-required outcome replayed"),
+    };
+    assert_eq!(
+        input_required.invocation.state,
+        insight_platform_contracts::InvocationState::AwaitingInput
+    );
+    assert_eq!(input_required.job.state, "waiting");
+    let input_generation = u64::try_from(input_required.job.lease_epoch).unwrap();
+    let response_json = json!({"confirmed": true});
+    let response_digest: Sha256Digest = canonical_digest(&response_json).unwrap().parse().unwrap();
+    let mut wrong_input = ResolveCapabilityInput {
+        audit: audit(
+            &fixture.tenant_id,
+            &fixture.principal_id,
+            PrincipalKind::AgentRunner,
+            0x4d0,
+            '1',
+            '2',
+        ),
+        invocation_id: input_required.invocation.invocation_id.clone(),
+        job_id: deferred_job_id.clone(),
+        input_task_id: input_task_id.clone(),
+        expected_invocation_version: input_required.invocation.version,
+        expected_job_version: u64::try_from(input_required.job.version).unwrap(),
+        expected_wake_generation: input_generation,
+        expected_task_generation: 1,
+        expected_task_version: 1,
+        eligible_principal_rule_digest: digest('f'),
+        action: insight_platform_invocations::CapabilityInputAction::Accept,
+        response: Some(CapabilityInputResponse {
+            value_id: id(ResourceKind::RunValue, 0x4d5),
+            classification: DataClassification::Internal,
+            schema_digest: input_schema_digest.clone(),
+            content_digest: response_digest.clone(),
+            value: ValueRef::Inline {
+                value: response_json.clone(),
+            },
+            artifact_link_id: None,
+        }),
+    };
+    assert!(execute_input(&repository, wrong_input.clone())
+        .await
+        .is_err());
+    let wrong_input_receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND receipt_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(wrong_input.audit.receipt_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(wrong_input_receipts, 0);
+    wrong_input.audit = audit(
+        &fixture.tenant_id,
+        &fixture.principal_id,
+        PrincipalKind::AgentRunner,
+        0x4e0,
+        '3',
+        '4',
+    );
+    wrong_input.eligible_principal_rule_digest = eligible_rule_digest;
+    wrong_input.response.as_mut().unwrap().value_id = id(ResourceKind::RunValue, 0x4e5);
+    let input_resolved = match execute_input(&repository, wrong_input).await.unwrap() {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh input response replayed"),
+    };
+    assert_eq!(input_resolved.job.state, "ready");
+    let third_claim = claim_one(&repository, &fixture.tenant_id, 0x4f0).await;
+    assert_eq!(third_claim.claimed.job.job_id, deferred_job_id.to_string());
+    assert_eq!(third_claim.claimed.job.attempt_no, 1);
+    assert!(third_claim.claimed.job.lease_epoch > second_claim.claimed.job.lease_epoch);
+    let input_resume_execution = third_claim.claimed.adapter_execution(digest('6')).unwrap();
+    let input_resume = input_resume_execution
+        .continuation
+        .expect("the claimed Job must recover encrypted state and the winning input RunValue");
+    assert_eq!(input_resume.encrypted_remote_state, remote_state);
+    assert_eq!(input_resume.external_identity_digest, Some(digest('a')));
+    assert_eq!(
+        input_resume.resume_input_action,
+        Some(insight_platform_invocations::CapabilityInputAction::Accept)
+    );
+    let resume_input = input_resume.resume_input.unwrap();
+    assert_eq!(
+        resume_input.exact.value_id,
+        id(ResourceKind::RunValue, 0x4e5)
+    );
+    assert_eq!(
+        resume_input.material,
+        insight_platform_invocations::CapabilityExecutionInputMaterial::Inline {
+            value: response_json.clone(),
+        }
+    );
+    let final_json = json!({"result": "continued"});
+    let final_digest: Sha256Digest = canonical_digest(&final_json).unwrap().parse().unwrap();
+    let continued_completion = match execute_outcome(
+        &repository,
+        CommitCapabilityOutcome {
+            audit: worker_audit(&fixture.tenant_id, &third_claim.worker_id, 0x500, '5', '6'),
+            invocation_id: third_claim.claimed.invocation.invocation_id.clone(),
+            job_id: deferred_job_id.clone(),
+            expected_invocation_version: third_claim.claimed.invocation.version,
+            fence: third_claim.fence(),
+            quota_entry_ids: vec![
+                id(ResourceKind::QuotaLedgerEntry, 0x503),
+                id(ResourceKind::QuotaLedgerEntry, 0x504),
+            ],
+            outcome: DispatchOutcome::Completed(CapabilityOutputValue {
+                value_id: id(ResourceKind::RunValue, 0x505),
+                classification: DataClassification::Internal,
+                schema_digest: fixture.output_schema_digest.clone(),
+                content_digest: final_digest,
+                value: ValueRef::Inline { value: final_json },
+                artifact_link_id: None,
+                validation_evidence_digest: digest('7'),
+            }),
+        },
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh continued completion replayed"),
+    };
+    assert_eq!(
+        continued_completion.invocation.state,
+        insight_platform_contracts::InvocationState::Succeeded
+    );
+    assert_eq!(continued_completion.job.attempt_no, 1);
+
+    // Uncertain non-idempotent effects release execution quota and require an authorized manual
+    // disposition; they are never silently retried.
+    let (_, uncertain_job_id, uncertain_claim) =
+        admit_prepare_and_claim(&repository, &fixture, &fixture.uncertain_node_id, 0x600).await;
+    let uncertain = match execute_outcome(
+        &repository,
+        CommitCapabilityOutcome {
+            audit: worker_audit(
+                &fixture.tenant_id,
+                &uncertain_claim.worker_id,
+                0x650,
+                '8',
+                '9',
+            ),
+            invocation_id: uncertain_claim.claimed.invocation.invocation_id.clone(),
+            job_id: uncertain_job_id.clone(),
+            expected_invocation_version: uncertain_claim.claimed.invocation.version,
+            fence: uncertain_claim.fence(),
+            quota_entry_ids: vec![
+                id(ResourceKind::QuotaLedgerEntry, 0x653),
+                id(ResourceKind::QuotaLedgerEntry, 0x654),
+            ],
+            outcome: DispatchOutcome::Uncertain(CapabilityUncertainty {
+                observation_digest: digest('a'),
+                policy_path_digest: digest('b'),
+                external_identity_digest: digest('c'),
+                manual: true,
+            }),
+        },
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh uncertainty replayed"),
+    };
+    assert_eq!(
+        uncertain.invocation.state,
+        insight_platform_contracts::InvocationState::ReconciliationRequired
+    );
+    assert!(uncertain.job.quota_reservation_id.is_none());
+    let reconciled = match execute_reconciliation(
+        &repository,
+        ResolveCapabilityReconciliation {
+            audit: audit(
+                &fixture.tenant_id,
+                &fixture.principal_id,
+                PrincipalKind::AgentRunner,
+                0x660,
+                'd',
+                'e',
+            ),
+            invocation_id: uncertain.invocation.invocation_id.clone(),
+            expected_invocation_version: uncertain.invocation.version,
+            expected_job_version: u64::try_from(uncertain.job.version).unwrap(),
+            resolution: ReconciliationResolution::Cancelled,
+        },
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh reconciliation replayed"),
+    };
+    assert_eq!(
+        reconciled.invocation.state,
+        insight_platform_contracts::InvocationState::Cancelled
+    );
+
+    // A durable control winner rotates only the optimistic Job version and the original physical
+    // execution then submits the exact cancellation observation through the PostgreSQL authority.
+    let (_, _, cancel_worker_claim) =
+        admit_prepare_and_claim(&repository, &fixture, &fixture.cancel_worker_node_id, 0x800).await;
+    let controlled = match execute_control(
+        &repository,
+        ControlCapabilityInvocation {
+            audit: audit(
+                &fixture.tenant_id,
+                &fixture.principal_id,
+                PrincipalKind::AgentRunner,
+                0x850,
+                '2',
+                '3',
+            ),
+            invocation_id: cancel_worker_claim.claimed.invocation.invocation_id.clone(),
+            expected_invocation_version: cancel_worker_claim.claimed.invocation.version,
+            quota_entry_ids: vec![],
+            kind: CapabilityControlKind::Cancel,
+        },
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh deterministic cancellation replayed"),
+    };
+    assert!(matches!(
+        controlled.cancel_adapter_job(
+            &cancel_worker_claim.claimed,
+            digest('6'),
+            worker_audit(
+                &fixture.tenant_id,
+                &cancel_worker_claim.worker_id,
+                0x860,
+                '4',
+                '5',
+            ),
+            cancel_worker_claim
+                .claimed
+                .quota_reservation_entry_ids
+                .clone(),
+            Utc::now() + Duration::seconds(1),
+        ),
+        Err(RepositoryError::InvalidInput(_))
+    ));
+    let cancel_worker_command = controlled
+        .cancel_adapter_job(
+            &cancel_worker_claim.claimed,
+            digest('6'),
+            worker_audit(
+                &fixture.tenant_id,
+                &cancel_worker_claim.worker_id,
+                0x870,
+                '6',
+                '7',
+            ),
+            vec![
+                id(ResourceKind::QuotaLedgerEntry, 0x873),
+                id(ResourceKind::QuotaLedgerEntry, 0x874),
+            ],
+            Utc::now() + Duration::seconds(1),
+        )
+        .unwrap();
+    assert_eq!(
+        cancel_worker_command.fence.expected_version,
+        cancel_worker_claim.fence().expected_version + 1
+    );
+    assert_eq!(
+        cancel_worker_command.fence.worker_process_generation_id,
+        cancel_worker_claim.worker_id
+    );
+    assert_eq!(
+        cancel_worker_command.fence.token_digest,
+        cancel_worker_claim.lease_token
+    );
+    let cancelled = match native_cancel_worker(&repository, &cancel_worker_claim)
+        .cancel(cancel_worker_command)
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh deterministic cancellation outcome replayed"),
+    };
+    assert_eq!(
+        cancelled.invocation.state,
+        insight_platform_contracts::InvocationState::ReconciliationRequired
+    );
+    assert!(cancelled.job.quota_reservation_id.is_none());
+
+    // Completion and runtime cancellation lock the same current facts. Exactly one transition
+    // wins; a cancelling winner is then closed by the same fenced backend cancellation path.
+    let (_, cancel_job_id, cancel_claim) =
+        admit_prepare_and_claim(&repository, &fixture, &fixture.cancel_node_id, 0x700).await;
+    let cancel_command = ControlCapabilityInvocation {
+        audit: audit(
+            &fixture.tenant_id,
+            &fixture.principal_id,
+            PrincipalKind::AgentRunner,
+            0x750,
+            'f',
+            '1',
+        ),
+        invocation_id: cancel_claim.claimed.invocation.invocation_id.clone(),
+        expected_invocation_version: cancel_claim.claimed.invocation.version,
+        quota_entry_ids: vec![],
+        kind: CapabilityControlKind::Cancel,
+    };
+    let race_json = json!({"race": "completed"});
+    let race_digest: Sha256Digest = canonical_digest(&race_json).unwrap().parse().unwrap();
+    let complete_command = CommitCapabilityOutcome {
+        audit: worker_audit(&fixture.tenant_id, &cancel_claim.worker_id, 0x760, '2', '3'),
+        invocation_id: cancel_claim.claimed.invocation.invocation_id.clone(),
+        job_id: cancel_job_id.clone(),
+        expected_invocation_version: cancel_claim.claimed.invocation.version,
+        fence: cancel_claim.fence(),
+        quota_entry_ids: vec![
+            id(ResourceKind::QuotaLedgerEntry, 0x763),
+            id(ResourceKind::QuotaLedgerEntry, 0x764),
+        ],
+        outcome: DispatchOutcome::Completed(CapabilityOutputValue {
+            value_id: id(ResourceKind::RunValue, 0x765),
+            classification: DataClassification::Internal,
+            schema_digest: fixture.output_schema_digest.clone(),
+            content_digest: race_digest,
+            value: ValueRef::Inline { value: race_json },
+            artifact_link_id: None,
+            validation_evidence_digest: digest('4'),
+        }),
+    };
+    let (cancel_result, complete_result) = tokio::join!(
+        execute_control(&repository, cancel_command),
+        execute_outcome(&repository, complete_command),
+    );
+    match (cancel_result, complete_result) {
+        (Ok(CommandOutcome::Applied(controlled)), Err(_)) => {
+            assert_eq!(
+                controlled.invocation.state,
+                insight_platform_contracts::InvocationState::Cancelling
+            );
+            let cancel_worker_command = controlled
+                .cancel_adapter_job(
+                    &cancel_claim.claimed,
+                    digest('6'),
+                    worker_audit(&fixture.tenant_id, &cancel_claim.worker_id, 0x780, '5', '6'),
+                    vec![
+                        id(ResourceKind::QuotaLedgerEntry, 0x783),
+                        id(ResourceKind::QuotaLedgerEntry, 0x784),
+                    ],
+                    Utc::now() + Duration::seconds(1),
+                )
+                .unwrap();
+            assert!(
+                cancel_worker_command.fence.expected_version
+                    > cancel_claim.fence().expected_version
+            );
+            assert_eq!(
+                cancel_worker_command.fence.worker_process_generation_id,
+                cancel_claim.worker_id
+            );
+            let cancelled = match native_cancel_worker(&repository, &cancel_claim)
+                .cancel(cancel_worker_command)
+                .await
+                .unwrap()
+            {
+                CommandOutcome::Applied(record) => record,
+                CommandOutcome::Replayed(_) => panic!("fresh cancellation outcome replayed"),
+            };
+            assert_eq!(
+                cancelled.invocation.state,
+                insight_platform_contracts::InvocationState::ReconciliationRequired
+            );
+        }
+        (Err(_), Ok(CommandOutcome::Applied(completed))) => {
+            assert_eq!(
+                completed.invocation.state,
+                insight_platform_contracts::InvocationState::Succeeded
+            );
+        }
+        other => panic!("cancel/completed race did not have one winner: {other:?}"),
+    }
+
+    let final_quota_totals: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT count(*), COALESCE(sum(reserved_value), 0)::bigint,
+               (SELECT count(*) FROM insight_platform.quota_ledger WHERE tenant_id = $1)
+        FROM insight_platform.quota_accounts WHERE tenant_id = $1
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // The deterministic cancellation path contributes one two-line reservation and one two-line
+    // terminal settlement in addition to the original fixture's twenty-four ledger facts.
+    assert_eq!(final_quota_totals, (2, 0, 28));
+}
+
+fn command_for_inline(fixture: &Fixture, base: u16) -> AdmitCapabilityInvocation {
+    AdmitCapabilityInvocation {
+        audit: audit(
+            &fixture.tenant_id,
+            &fixture.principal_id,
+            PrincipalKind::AgentRunner,
+            base,
+            'c',
+            'd',
+        ),
+        invocation_id: id(ResourceKind::CapabilityInvocation, base + 3),
+        run_id: fixture.run_id.clone(),
+        node_execution_id: fixture.ready_node_id.clone(),
+        expected_run_version: 1,
+        expected_node_version: 1,
+        slot_id: "writer".to_owned(),
+        input_value_id: fixture.inline_value_id.clone(),
+        input_artifact_link_id: None,
+        origin: InvocationOrigin::PlanNode {
+            node_execution_id: fixture.ready_node_id.clone(),
+        },
+        selected_candidate_ordinal: 0,
+        selector_input_digest: digest('e'),
+        policy_decisions: allowed_policy(&fixture.policy),
+        approval_task_id: None,
+        requested_attempt_limit: 3,
+        requested_retry_backoff_milliseconds: 100,
+        mcp_runtime: None,
+    }
+}
+
+fn command_for_node(
+    fixture: &Fixture,
+    node_execution_id: &ResourceId,
+    base: u16,
+) -> AdmitCapabilityInvocation {
+    let mut command = command_for_inline(fixture, base);
+    command.node_execution_id = node_execution_id.clone();
+    command.origin = InvocationOrigin::PlanNode {
+        node_execution_id: node_execution_id.clone(),
+    };
+    command
+}
+
+fn command_for_artifact(fixture: &Fixture, base: u16) -> AdmitCapabilityInvocation {
+    AdmitCapabilityInvocation {
+        audit: audit(
+            &fixture.tenant_id,
+            &fixture.principal_id,
+            PrincipalKind::AgentRunner,
+            base,
+            'd',
+            'e',
+        ),
+        invocation_id: id(ResourceKind::CapabilityInvocation, base + 3),
+        run_id: fixture.run_id.clone(),
+        node_execution_id: fixture.approval_node_id.clone(),
+        expected_run_version: 1,
+        expected_node_version: 1,
+        slot_id: "writer".to_owned(),
+        input_value_id: fixture.artifact_value_id.clone(),
+        input_artifact_link_id: Some(id(ResourceKind::ArtifactLink, base + 4)),
+        origin: InvocationOrigin::PlanNode {
+            node_execution_id: fixture.approval_node_id.clone(),
+        },
+        selected_candidate_ordinal: 0,
+        selector_input_digest: digest('f'),
+        policy_decisions: approval_policy(&fixture.policy),
+        approval_task_id: Some(id(ResourceKind::ApprovalTask, base + 5)),
+        requested_attempt_limit: 3,
+        requested_retry_backoff_milliseconds: 100,
+        mcp_runtime: None,
+    }
+}
+
+fn approval_resolution(
+    fixture: &Fixture,
+    admission: &AdmitCapabilityInvocation,
+    base: u16,
+    approve: bool,
+) -> ResolveCapabilityApproval {
+    ResolveCapabilityApproval {
+        audit: audit(
+            &fixture.tenant_id,
+            &fixture.principal_id,
+            PrincipalKind::AgentRunner,
+            base,
+            if approve { '4' } else { '5' },
+            if approve { '6' } else { '7' },
+        ),
+        invocation_id: admission.invocation_id.clone(),
+        approval_task_id: admission.approval_task_id.clone().unwrap(),
+        expected_invocation_version: 1,
+        expected_task_generation: 1,
+        expected_task_version: 1,
+        eligible_principal_rule_digest: digest('a'),
+        decision: if approve {
+            CapabilityApprovalDecision::Approve
+        } else {
+            CapabilityApprovalDecision::Reject
+        },
+    }
+}
+
+async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
+    let tenant_id = id(ResourceKind::Tenant, 1);
+    let other_tenant_id = id(ResourceKind::Tenant, 2);
+    let principal_id = id(ResourceKind::Principal, 3);
+    let denied_principal_id = id(ResourceKind::Principal, 4);
+    let other_principal_id = id(ResourceKind::Principal, 5);
+    for tenant in [&tenant_id, &other_tenant_id] {
+        repository
+            .create_tenant(NewTenant {
+                tenant_id: tenant.to_string(),
+                state: "active".to_owned(),
+                config: TenantConfig {
+                    scheduling_policy: None,
+                },
+            })
+            .await
+            .unwrap();
+    }
+    for (principal, character) in [
+        (&principal_id, '1'),
+        (&denied_principal_id, '2'),
+        (&other_principal_id, '3'),
+    ] {
+        repository
+            .create_principal(NewPrincipal {
+                principal_id: principal.clone(),
+                authentication_authority_digest: digest(character),
+                subject_digest: digest(char::from_u32(character as u32 + 3).unwrap()),
+                installation_bindings: PrincipalBindingsPayload {
+                    installation_bindings: vec![],
+                },
+            })
+            .await
+            .unwrap();
+    }
+    let permissions = PermissionSet::new(vec![
+        Permission::ApprovalRespond,
+        Permission::CapabilityInvoke,
+        Permission::InteractionRespond,
+        Permission::RuntimeControl,
+    ])
+    .unwrap();
+    repository
+        .bind_tenant_principal(NewTenantPrincipal {
+            tenant_id: tenant_id.clone(),
+            principal_id: principal_id.clone(),
+            principal_kind: PrincipalKind::AgentRunner,
+            payload: TenantPrincipalPayload {
+                permissions: permissions.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    repository
+        .bind_tenant_principal(NewTenantPrincipal {
+            tenant_id: tenant_id.clone(),
+            principal_id: denied_principal_id.clone(),
+            principal_kind: PrincipalKind::AgentRunner,
+            payload: TenantPrincipalPayload {
+                permissions: PermissionSet::new(vec![Permission::CapabilityRead]).unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+    repository
+        .bind_tenant_principal(NewTenantPrincipal {
+            tenant_id: other_tenant_id.clone(),
+            principal_id: other_principal_id.clone(),
+            principal_kind: PrincipalKind::AgentRunner,
+            payload: TenantPrincipalPayload { permissions },
+        })
+        .await
+        .unwrap();
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT statement_timestamp()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+
+    let policy_resource = id(ResourceKind::Policy, 0x10);
+    let policy_revision = id(ResourceKind::PolicyRevision, 0x11);
+    let agent_resource = id(ResourceKind::Agent, 0x12);
+    let agent_interface = id(ResourceKind::AgentInterfaceRevision, 0x13);
+    let agent_plan = id(ResourceKind::AgentPlanRevision, 0x14);
+    let agent_deployment = id(ResourceKind::AgentDeployment, 0x15);
+    let capability_resource = id(ResourceKind::CapabilityInterface, 0x16);
+    let capability_interface = id(ResourceKind::CapabilityInterfaceRevision, 0x17);
+    let implementation_resource = id(ResourceKind::CapabilityImplementation, 0x18);
+    let implementation_revision = id(ResourceKind::CapabilityImplementationRevision, 0x19);
+    let capability_deployment_id = id(ResourceKind::CapabilityDeployment, 0x1a);
+    for (resource_id, kind) in [
+        (&policy_resource, RegistryResourceKind::Policy),
+        (&agent_resource, RegistryResourceKind::Agent),
+        (
+            &capability_resource,
+            RegistryResourceKind::CapabilityInterface,
+        ),
+        (
+            &implementation_resource,
+            RegistryResourceKind::CapabilityImplementation,
+        ),
+    ] {
+        insert_resource(pool, &tenant_id, resource_id, kind, &principal_id).await;
+    }
+
+    let package = AuthoringPackage {
+        artifact: ArtifactRef::new(
+            id(ResourceKind::Artifact, 0x20),
+            digest('0'),
+            2,
+            "application/json",
+            DataClassification::Internal,
+            Some("fixture.json".to_owned()),
+        )
+        .unwrap(),
+        manifest_digest: digest('1'),
+    };
+    let validation = ValidationSummary {
+        validator_digest: digest('2'),
+        validated_draft_digest: digest('3'),
+        dependency_closure_digest: digest('4'),
+        security_evidence_digest: digest('5'),
+        warnings: vec![],
+    };
+    let policy_exact = ExactVersionRef::new(policy_revision.clone(), digest('6')).unwrap();
+    insert_version(
+        pool,
+        &tenant_id,
+        &policy_resource,
+        &policy_exact,
+        1,
+        &principal_id,
+        PublishedVersionPayload {
+            document: ResourceDocument::Policy(PolicyResourceSpec {
+                authoring_package: package.clone(),
+                contract_digest: digest('7'),
+                dependency_versions: vec![],
+                policy_versions: vec![],
+                policy_kind: PolicyKind::Retry,
+                rules_digest: digest('8'),
+                scheduling: None,
+                retention: None,
+                mcp_protocol: None,
+                mcp_auth: None,
+                sandbox_isolation: None,
+                sandbox_resource: None,
+                sandbox_network: None,
+                sandbox_artifact_io: None,
+                sandbox_secret_resolution: None,
+            }),
+            validation: validation.clone(),
+        },
+    )
+    .await;
+    seed_ready_artifact(
+        pool,
+        &tenant_id,
+        &principal_id,
+        &policy_revision,
+        package.artifact.artifact_id(),
+        &id(ResourceKind::InternalBlob, 0x21),
+        &id(ResourceKind::EncryptionDomain, 0x22),
+        now,
+    )
+    .await;
+    let agent_interface_exact = ExactVersionRef::new(agent_interface.clone(), digest('9')).unwrap();
+    let agent_plan_exact = ExactVersionRef::new(agent_plan.clone(), digest('a')).unwrap();
+    let agent_document = ResourceDocument::Agent(AgentResourceSpec {
+        authoring_package: package.clone(),
+        contract_digest: digest('b'),
+        dependency_versions: vec![],
+        policy_versions: vec![policy_exact.clone()],
+        interface_schema_digest: digest('c'),
+        typed_plan_digest: digest('d'),
+    });
+    for (exact, revision) in [(&agent_interface_exact, 1), (&agent_plan_exact, 2)] {
+        insert_version(
+            pool,
+            &tenant_id,
+            &agent_resource,
+            exact,
+            revision,
+            &principal_id,
+            PublishedVersionPayload {
+                document: agent_document.clone(),
+                validation: validation.clone(),
+            },
+        )
+        .await;
+    }
+    let interface_exact = ExactVersionRef::new(capability_interface.clone(), digest('e')).unwrap();
+    let input_schema = capability_input_schema();
+    let input_schema_digest = input_schema.canonical_digest.clone();
+    let output_schema = capability_output_schema();
+    let output_schema_digest = output_schema.canonical_digest.clone();
+    insert_version(
+        pool,
+        &tenant_id,
+        &capability_resource,
+        &interface_exact,
+        1,
+        &principal_id,
+        PublishedVersionPayload {
+            document: ResourceDocument::CapabilityInterface(CapabilityInterfaceResourceSpec {
+                authoring_package: package.clone(),
+                contract_digest: digest('1'),
+                dependency_versions: vec![],
+                policy_versions: vec![policy_exact.clone()],
+                qualified_name: "fixture.writer".parse().unwrap(),
+                input_schema,
+                output_schema,
+                error_schema: capability_error_schema(),
+                artifacts: capability_artifacts(),
+                data_policy: capability_data_policy(&policy_exact),
+                execution_limits: CapabilityInterfaceLimits {
+                    maximum_input_bytes: 1_048_576,
+                    maximum_output_bytes: 1_048_576,
+                    maximum_artifacts: 1,
+                    maximum_execution_milliseconds: 60_000,
+                },
+                effect: Effect::NonIdempotentWrite,
+                idempotency: CapabilityIdempotencyKind::None,
+                cancellation: CapabilityCancellationKind::BestEffort,
+                progress: CapabilityProgressContract {
+                    mode: CapabilityProgressMode::Events,
+                    schema_digest: Some(digest('8')),
+                    max_events: 16,
+                    max_bytes_per_event: 4_096,
+                    minimum_interval_milliseconds: 1,
+                    durability: CapabilityProgressDurability::CoarseDurable,
+                },
+            }),
+            validation: validation.clone(),
+        },
+    )
+    .await;
+    let implementation_exact =
+        ExactVersionRef::new(implementation_revision.clone(), digest('4')).unwrap();
+    let native_contract = CapabilityBackendContract::Native(NativeCapabilityContract {
+        adapter_id: "builtin.fixture".to_owned(),
+        adapter_version: "1.0.0".to_owned(),
+        module_digest: digest('7'),
+        entrypoint_id: "fixture.invoke".to_owned(),
+        worker_protocol_version: WORKER_PROTOCOL_VERSION,
+    });
+    let native_contract_digest = native_contract.canonical_digest().unwrap();
+    insert_version(
+        pool,
+        &tenant_id,
+        &implementation_resource,
+        &implementation_exact,
+        1,
+        &principal_id,
+        PublishedVersionPayload {
+            document: ResourceDocument::CapabilityImplementation(
+                CapabilityImplementationResourceSpec {
+                    authoring_package: package.clone(),
+                    contract_digest: digest('5'),
+                    dependency_versions: vec![],
+                    policy_versions: vec![policy_exact.clone()],
+                    interface_revision: interface_exact.clone(),
+                    backend_kind: CapabilityBackendKind::Native,
+                    backend_contract: native_contract,
+                    backend_contract_digest: native_contract_digest,
+                    credential_requirements: vec![],
+                    backend_limits: CapabilityBackendLimits {
+                        maximum_request_bytes: 1_048_576,
+                        maximum_response_bytes: 1_048_576,
+                        maximum_diagnostic_bytes: 65_536,
+                        connect_timeout_milliseconds: 100,
+                        first_byte_timeout_milliseconds: 500,
+                        idle_timeout_milliseconds: 1_000,
+                        total_timeout_milliseconds: 5_000,
+                    },
+                    features: CapabilityBackendFeatures {
+                        deferred: true,
+                        input_required: true,
+                        callback: true,
+                        poll: true,
+                        progress: true,
+                        cancellation: true,
+                        max_remote_state_bytes: 16_384,
+                        max_poll_count: 16,
+                    },
+                },
+            ),
+            validation,
+        },
+    )
+    .await;
+    let capability_closure = CapabilityDeploymentClosure {
+        implementation: implementation_exact,
+        interface: interface_exact,
+        backend: CapabilityBackendBinding::Native {
+            worker_manifest_digest: digest('6'),
+            adapter_module_digest: digest('7'),
+        },
+        secret_bindings: vec![],
+        policies: vec![policy_exact.clone()],
+        conformance_evidence: package.artifact,
+    };
+    let capability_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::CapabilityInterface(capability_closure),
+    )
+    .unwrap();
+    insert_deployment(
+        pool,
+        &tenant_id,
+        &capability_deployment_id,
+        &capability_resource,
+        &capability_interface,
+        &principal_id,
+        &capability_payload,
+    )
+    .await;
+    let capability_deployment = ExactDeploymentRef::new(
+        capability_deployment_id,
+        capability_payload.digest.parse().unwrap(),
+    )
+    .unwrap();
+    for (account_id, scope_kind, scope_id, metric) in [
+        (
+            id(ResourceKind::QuotaAccount, 0x1b),
+            "tenant",
+            tenant_id.clone(),
+            QuotaDimension::WorkClassConcurrentOperations,
+        ),
+        (
+            id(ResourceKind::QuotaAccount, 0x1c),
+            "capability_deployment",
+            capability_deployment.deployment_id.clone(),
+            QuotaDimension::CapabilityConcurrentInvocations,
+        ),
+    ] {
+        repository
+            .create_quota_account(NewQuotaAccount {
+                tenant_id: tenant_id.to_string(),
+                quota_account_id: account_id.to_string(),
+                scope_kind: scope_kind.to_owned(),
+                scope_id: scope_id.to_string(),
+                work_class: WorkClass::CapabilityNative.as_str().to_owned(),
+                metric: metric.as_str().to_owned(),
+                limit_value: 8,
+                payload: TypedPayload::new(1, &json!({"fixture": "capability"})).unwrap(),
+            })
+            .await
+            .unwrap();
+    }
+    let agent_closure = AgentDeploymentClosure {
+        interface: agent_interface_exact,
+        plan: agent_plan_exact,
+        slots: vec![FrozenSlotBinding {
+            slot_id: "writer".to_owned(),
+            requirement_digest: digest('8'),
+            target: FrozenSlotTarget::Capability {
+                candidates: vec![capability_deployment.clone()],
+                selection_policy: policy_exact.clone(),
+                tool_alias: Some("write".to_owned()),
+            },
+            binding_digest: digest('9'),
+        }],
+        policies: vec![policy_exact.clone()],
+        execution_profile: policy_exact.clone(),
+    };
+    let agent_payload =
+        TypedPayload::new(1, &DeploymentClosure::Agent(agent_closure.clone())).unwrap();
+    insert_deployment(
+        pool,
+        &tenant_id,
+        &agent_deployment,
+        &agent_resource,
+        &agent_plan,
+        &principal_id,
+        &agent_payload,
+    )
+    .await;
+    let principal_snapshot = PrincipalSnapshot::build(
+        tenant_id.clone(),
+        principal_id.clone(),
+        PrincipalKind::AgentRunner,
+        PermissionSet::new(vec![
+            Permission::ApprovalRespond,
+            Permission::CapabilityInvoke,
+            Permission::InteractionRespond,
+            Permission::RuntimeControl,
+        ])
+        .unwrap(),
+        1,
+        1,
+        1,
+    )
+    .unwrap();
+    let run_bindings = RunBindingsSnapshot::build(
+        ExactDeploymentRef::new(
+            agent_deployment.clone(),
+            agent_payload.digest.parse().unwrap(),
+        )
+        .unwrap(),
+        principal_snapshot,
+        &agent_closure,
+    )
+    .unwrap();
+    let run_id = id(ResourceKind::Run, 0x30);
+    let scope_id = id(ResourceKind::ScopeInstance, 0x31);
+    let ready_node_id = id(ResourceKind::NodeExecution, 0x32);
+    let approval_node_id = id(ResourceKind::NodeExecution, 0x33);
+    let deferred_node_id = id(ResourceKind::NodeExecution, 0x3a);
+    let uncertain_node_id = id(ResourceKind::NodeExecution, 0x3b);
+    let cancel_node_id = id(ResourceKind::NodeExecution, 0x3c);
+    let cancel_worker_node_id = id(ResourceKind::NodeExecution, 0x3d);
+    let inline_value_id = id(ResourceKind::RunValue, 0x34);
+    let artifact_value_id = id(ResourceKind::RunValue, 0x35);
+    let artifact_id = id(ResourceKind::Artifact, 0x36);
+    let current = RunCurrentSnapshot::initial(
+        run_id.clone(),
+        agent_deployment.clone(),
+        inline_value_id.clone(),
+    );
+    let bindings_payload = TypedPayload::from_versioned(1, &run_bindings, 1_048_576).unwrap();
+    let current_payload = TypedPayload::from_versioned(1, &current, 1_048_576).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.runs (
+            tenant_id, run_id, root_run_id, agent_deployment_id, principal_id,
+            state, version, bindings_schema_version, bindings, bindings_digest,
+            current_schema_version, current_payload, current_payload_digest,
+            deadline, started_at, created_at, updated_at
+        ) VALUES (
+            $1, $2, $2, $3, $4, 'running', 1, $5, $6, $7,
+            $8, $9, $10, $11, $12, $12, $12
+        )
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(run_id.to_string())
+    .bind(agent_deployment.to_string())
+    .bind(principal_id.to_string())
+    .bind(bindings_payload.schema_version)
+    .bind(&bindings_payload.value)
+    .bind(run_bindings.canonical_digest.to_string())
+    .bind(current_payload.schema_version)
+    .bind(&current_payload.value)
+    .bind(&current_payload.digest)
+    .bind(now + Duration::hours(1))
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    let node_payload = TypedPayload::new(1, &json!({"fixture": "capability"})).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_nodes (
+            tenant_id, node_id, run_id, record_kind, scope_id, logical_key,
+            node_kind, state, generation, version, payload_schema_version,
+            payload, payload_digest, deadline, started_at, created_at, updated_at
+        ) VALUES (
+            $1, $2, $3, 'scope_instance', $2, 'root', 'root', 'open', 1, 1,
+            $4, $5, $6, $7, $8, $8, $8
+        )
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(scope_id.to_string())
+    .bind(run_id.to_string())
+    .bind(node_payload.schema_version)
+    .bind(&node_payload.value)
+    .bind(&node_payload.digest)
+    .bind(now + Duration::hours(1))
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    for (node_id, logical_key, ordinal) in [
+        (&ready_node_id, "capability-ready", 1_i32),
+        (&approval_node_id, "capability-approval", 2_i32),
+        (&deferred_node_id, "capability-deferred", 3_i32),
+        (&uncertain_node_id, "capability-uncertain", 4_i32),
+        (&cancel_node_id, "capability-cancel", 5_i32),
+        (&cancel_worker_node_id, "capability-cancel-worker", 6_i32),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.run_nodes (
+                tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+                plan_node_key, activation_ordinal, logical_key, node_kind, state,
+                generation, version, payload_schema_version, payload, payload_digest,
+                deadline, started_at, created_at, updated_at
+            ) VALUES (
+                $1, $2, $3, $4, 'node_execution', $4,
+                $5, $6, $5, 'capability_call', 'running',
+                1, 1, $7, $8, $9, $10, $11, $11, $11
+            )
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(node_id.to_string())
+        .bind(run_id.to_string())
+        .bind(scope_id.to_string())
+        .bind(logical_key)
+        .bind(ordinal)
+        .bind(node_payload.schema_version)
+        .bind(&node_payload.value)
+        .bind(&node_payload.digest)
+        .bind(now + Duration::hours(1))
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    let inline_value = json!({"amount": 7});
+    let inline_digest: Sha256Digest = canonical_digest(&inline_value).unwrap().parse().unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_values (
+            tenant_id, value_id, run_id, value_kind, classification,
+            schema_digest, content_digest, inline_value
+        ) VALUES ($1, $2, $3, 'capability_input', 'internal', $4, $5, $6)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(inline_value_id.to_string())
+    .bind(run_id.to_string())
+    .bind(input_schema_digest.to_string())
+    .bind(inline_digest.to_string())
+    .bind(inline_value)
+    .execute(pool)
+    .await
+    .unwrap();
+    seed_ready_artifact(
+        pool,
+        &tenant_id,
+        &principal_id,
+        &policy_revision,
+        &artifact_id,
+        &id(ResourceKind::InternalBlob, 0x37),
+        &id(ResourceKind::EncryptionDomain, 0x38),
+        now,
+    )
+    .await;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_values (
+            tenant_id, value_id, run_id, value_kind, classification,
+            schema_digest, content_digest, artifact_id
+        ) VALUES ($1, $2, $3, 'capability_input', 'internal', $4, $5, $6)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(artifact_value_id.to_string())
+    .bind(run_id.to_string())
+    .bind(input_schema_digest.to_string())
+    .bind(digest('0').to_string())
+    .bind(artifact_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.runs SET input_value_id = $3 WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(tenant_id.to_string())
+    .bind(run_id.to_string())
+    .bind(inline_value_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+
+    Fixture {
+        tenant_id,
+        other_tenant_id,
+        principal_id,
+        denied_principal_id,
+        other_principal_id,
+        run_id,
+        ready_node_id,
+        approval_node_id,
+        deferred_node_id,
+        uncertain_node_id,
+        cancel_node_id,
+        cancel_worker_node_id,
+        inline_value_id,
+        artifact_value_id,
+        artifact_id,
+        capability_deployment,
+        output_schema_digest,
+        policy: policy_exact,
+    }
+}
+
+async fn insert_resource(
+    pool: &PgPool,
+    tenant_id: &ResourceId,
+    resource_id: &ResourceId,
+    kind: RegistryResourceKind,
+    principal_id: &ResourceId,
+) {
+    let payload = TypedPayload::new(1, &json!({"created_by": principal_id})).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.resources (
+            tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+            draft_generation, version, payload_schema_version, payload, payload_digest
+        ) VALUES ($1, $2, $3, $4, $5, 1, 1, $6, $7, $8)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(resource_id.to_string())
+    .bind(kind.as_str())
+    .bind(EntityLifecycle::Active.as_str())
+    .bind(AdministrativeGate::Enabled.as_str())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_version(
+    pool: &PgPool,
+    tenant_id: &ResourceId,
+    resource_id: &ResourceId,
+    exact: &ExactVersionRef,
+    revision_no: i64,
+    principal_id: &ResourceId,
+    published: PublishedVersionPayload,
+) {
+    published
+        .validate_for(
+            match resource_id.kind() {
+                ResourceKind::Policy => RegistryResourceKind::Policy,
+                ResourceKind::Agent => RegistryResourceKind::Agent,
+                ResourceKind::CapabilityInterface => RegistryResourceKind::CapabilityInterface,
+                ResourceKind::CapabilityImplementation => {
+                    RegistryResourceKind::CapabilityImplementation
+                }
+                _ => panic!("unexpected fixture Resource kind"),
+            },
+            &exact.revision_id,
+        )
+        .unwrap();
+    let payload = TypedPayload::new(1, &published).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.resource_versions (
+            tenant_id, resource_version_id, resource_id, resource_version_kind,
+            revision_no, content_digest, payload_schema_version, payload,
+            payload_digest, created_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(exact.revision_id.to_string())
+    .bind(resource_id.to_string())
+    .bind(exact.resource_kind.descriptor().name)
+    .bind(revision_no)
+    .bind(exact.semantic_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(principal_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_deployment(
+    pool: &PgPool,
+    tenant_id: &ResourceId,
+    deployment_id: &ResourceId,
+    resource_id: &ResourceId,
+    version_id: &ResourceId,
+    principal_id: &ResourceId,
+    payload: &TypedPayload,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.deployments (
+            tenant_id, deployment_id, resource_id, resource_version_id,
+            environment, bindings_digest, payload_schema_version, bindings, created_by
+        ) VALUES ($1, $2, $3, $4, 'test', $5, $6, $7, $8)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(deployment_id.to_string())
+    .bind(resource_id.to_string())
+    .bind(version_id.to_string())
+    .bind(&payload.digest)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(principal_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_ready_artifact(
+    pool: &PgPool,
+    tenant_id: &ResourceId,
+    principal_id: &ResourceId,
+    retention_policy_revision_id: &ResourceId,
+    artifact_id: &ResourceId,
+    blob_id: &ResourceId,
+    encryption_domain_id: &ResourceId,
+    now: DateTime<Utc>,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifact_blobs (
+            tenant_id, blob_id, backend, storage_binding_digest, security_domain_digest,
+            object_reference_ciphertext, object_generation, key_id, encryption_domain_id,
+            content_digest, size_bytes, state, version, verified_at, created_at, updated_at
+        ) VALUES (
+            $1, $2, 's3', $3, $4, $5, 'version-1', 'key-1', $6,
+            $7, 2, 'verified', 1, $8, $8, $8
+        )
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(blob_id.to_string())
+    .bind(digest('b').to_string())
+    .bind(digest('c').to_string())
+    .bind(vec![1_u8, 2, 3])
+    .bind(encryption_domain_id.to_string())
+    .bind(digest('0').to_string())
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    let metadata = TypedPayload::new(1, &json!({"display_name": "capability-input.json"})).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifacts (
+            tenant_id, artifact_id, blob_id, purpose, classification,
+            expected_size_bytes, expected_digest, declared_media_type,
+            verified_media_type, state, version, metadata_schema_version,
+            metadata, metadata_digest, retention_policy_revision_id, retain_until,
+            created_by, created_at, updated_at
+        ) VALUES (
+            $1, $2, $3, 'capability_input', 'internal',
+            2, $4, 'application/json', 'application/json', 'ready', 1,
+            $5, $6, $7, $8, $9, $10, $11, $11
+        )
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(artifact_id.to_string())
+    .bind(blob_id.to_string())
+    .bind(digest('0').to_string())
+    .bind(metadata.schema_version)
+    .bind(&metadata.value)
+    .bind(&metadata.digest)
+    .bind(retention_policy_revision_id.to_string())
+    .bind(now + Duration::days(2))
+    .bind(principal_id.to_string())
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+}

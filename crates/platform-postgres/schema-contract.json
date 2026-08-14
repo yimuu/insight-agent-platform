@@ -1,0 +1,52 @@
+{
+  "architecture": {
+    "adr": "docs/adr/0001-platform-v2-postgres-baseline.md",
+    "business_state_triggers": false,
+    "compatibility_schema": false,
+    "current_state_is_not_reconstructed_from_events": true,
+    "event_payload_is_not_duplicated_in_outbox": true
+  },
+  "contract": "insight.platform/v1/postgres-baseline",
+  "functions": [
+    "is_bounded_object(jsonb, integer)",
+    "is_platform_id(text)",
+    "is_sha256(text)"
+  ],
+  "migration_set_digest": "sha256:895ce4b3f4d3bdfd4d0dd9c5b3d9ce48d403f174e8a8d0b7e33e01dc168bd6e7",
+  "migrations": [
+    {
+      "checksum": "sha256:024266792f605f30b5a6b8c3afe22444adf00d745518f9c15eddcbc9fd7c95c4",
+      "name": "platform_baseline",
+      "version": 1
+    }
+  ],
+  "postgres_major": 16,
+  "schema": "insight_platform",
+  "schema_contract_version": 6,
+  "table_count": 23,
+  "tables": [
+    "artifact_blobs",
+    "artifact_links",
+    "artifacts",
+    "deployments",
+    "events",
+    "invocations",
+    "jobs",
+    "outbox_events",
+    "principals",
+    "quota_accounts",
+    "quota_ledger",
+    "receipts",
+    "resource_versions",
+    "resources",
+    "run_nodes",
+    "run_values",
+    "runs",
+    "scheduler_state",
+    "schema_migrations",
+    "secret_bindings",
+    "tasks",
+    "tenant_principals",
+    "tenants"
+  ]
+}
